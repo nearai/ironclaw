@@ -22,14 +22,27 @@ pub(crate) trait BudgetStrategy: Send + Sync {
 #[allow(dead_code)]
 fn assert_budget_strategy_object_safe(_: &dyn BudgetStrategy) {}
 
-/// Reference baseline `BudgetStrategy`: 32-iteration cap with no wall-clock
-/// limit.
+/// Default iteration ceiling: a runaway backstop, not an operational budget.
 ///
-/// The 32-iteration ceiling is the first safety net. Loop families that need
-/// shorter or longer budgets construct this struct directly.
+/// Real turns must never hit this. Operational bounds are intended to come
+/// from the resource budget system (cost governor), but that system is not
+/// yet enforced (`ResourceBudgetPolicy.max_model_calls` and the wall-clock
+/// cap are defined, not applied); until it is, this backstop and the
+/// stop-condition strategy (stuck-loop detection) are the only live
+/// ceilings. Long agentic coding turns legitimately run hundreds of model
+/// calls — a small cap here fails the turn closed mid-work and discards
+/// everything the model already did.
+pub const DEFAULT_ITERATION_BACKSTOP: u32 = 1_024;
+
+/// Reference baseline `BudgetStrategy`: runaway-backstop iteration cap with
+/// no wall-clock limit.
+///
+/// Loop families that need shorter or longer budgets construct this struct
+/// directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DefaultBudgetStrategy {
-    /// Hard ceiling on iteration count. Default `32`.
+    /// Hard ceiling on iteration count. Default
+    /// [`DEFAULT_ITERATION_BACKSTOP`].
     pub iteration_limit: u32,
     /// Optional wall-clock cap. Default `None` (no limit).
     pub wall_clock_limit: Option<Duration>,
@@ -38,7 +51,7 @@ pub struct DefaultBudgetStrategy {
 impl Default for DefaultBudgetStrategy {
     fn default() -> Self {
         Self {
-            iteration_limit: 32,
+            iteration_limit: DEFAULT_ITERATION_BACKSTOP,
             wall_clock_limit: None,
         }
     }
@@ -85,16 +98,20 @@ mod tests {
                 strategy.iteration_limit(&state),
                 strategy.wall_clock_limit(&state)
             ),
-            (32, None)
+            (DEFAULT_ITERATION_BACKSTOP, None)
         );
     }
 
     #[test]
-    fn default_budget_strategy_returns_32_iterations_no_wall_clock() {
+    fn default_budget_strategy_is_a_runaway_backstop_with_no_wall_clock() {
         let strategy = DefaultBudgetStrategy::default();
         let state = LoopExecutionState::initial_for_run(&test_run_context());
 
-        assert_eq!(strategy.iteration_limit(&state), 32);
+        // The default cap is a runaway backstop, not an operational per-turn
+        // budget: real work must never hit it (operational limits come from
+        // the resource governor and stop conditions).
+        assert_eq!(strategy.iteration_limit(&state), DEFAULT_ITERATION_BACKSTOP);
+        assert!(strategy.iteration_limit(&state) >= 1_024);
         assert_eq!(strategy.wall_clock_limit(&state), None);
     }
 

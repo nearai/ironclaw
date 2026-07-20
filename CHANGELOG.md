@@ -7,10 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(reborn)* automations and `trigger_list` now surface why a scheduled trigger is currently held (approval/auth/in-progress) and how many scheduled occurrences elapsed while held ([#5886](https://github.com/nearai/ironclaw/issues/5886)).
+- *(reborn)* `ironclaw-reborn service install`/`start`/`stop`/`restart`/`status`/`uninstall` manage the standalone Reborn binary as an OS-native service (launchd user agent on macOS, systemd user unit on Linux), with a webui-token-file fallback for `serve` and atomic install with rollback on failure.
+
+### Fixed
+
+- *(webui-v2)* report settings imports with no supported entries as failures instead of showing a false success message ([#6179](https://github.com/nearai/ironclaw/issues/6179)).
+- *(filesystem)* make libSQL descendant listings seek through the path index instead of scanning the full root-filesystem table, preventing extension-readiness fan-out from stalling unrelated WebUI requests.
+- *(webui-v2)* expose per-user secret provisioning in Admin user details with write-only values, handle-only listings, and confirmed deletion ([#6118](https://github.com/nearai/ironclaw/issues/6118)).
+- *(webui-v2)* render the Extensions Registry as soon as catalog data arrives instead of holding the skeleton screen for slower installed-extension enrichment ([#6052](https://github.com/nearai/ironclaw/issues/6052)).
+- *(webui-v2)* submit the latest composer value when Enter follows input before React rerenders, avoiding intermittently dropped follow-up messages ([#6044](https://github.com/nearai/ironclaw/issues/6044)).
+- *(reborn)* recover the filesystem resource governor after transient libSQL writer contention without bypassing durable accounting, reject stale authority writes during recovery, and distinguish accounting outages from provider budget failures.
+- *(reborn)* `builtin.result_read` input errors now carry a structured, model-visible `CapabilityInputIssue` (field path, issue code, expected/received) with model-controlled echoes secret-redacted, and truncated previews of top-level JSON-array results report the array's `item_count` — persisted end-to-end through the observation validator ([#6059](https://github.com/nearai/ironclaw/pull/6059)).
+- *(reborn)* ride out transient model-provider outages with cancellation-aware availability retries, fail fast when no provider is configured, and preserve actionable shell/coding failure reasons for the model ([#5959](https://github.com/nearai/ironclaw/pull/5959)).
+- *(slack)* resolve known DM conversation IDs through an exact Slack lookup before encoding mentions, avoiding wrong-target posts when conversation lists are long or display names are ambiguous.
+- *(reborn)* add an explicit tenant extension-ownership migration that assigns every installed extension to every existing user, and clean up the departing user's external connection and personal credentials without tearing down the package for remaining users.
+- *(reborn)* make extension-scoped OAuth and explicit extension removal restart-safe and fenced: malformed callbacks now terminalize durable flows, status reads are observational with an explicit reconciliation command, multi-credential activation waits without revoking completed credentials, Slack cleanup fences ingress before fallible identity deletion, and uninstall cleanup obligations survive catalog/package loss.
+- *(reborn)* allow `builtin.time` parse, convert, format, and diff operations to consume JSON numbers or numeric strings containing Unix seconds, integral Unix milliseconds, and fractional Slack timestamps in addition to ISO 8601 strings.
+
 ### Changed
 
+- *(reborn)* move product-neutral channel delivery into `ironclaw_channel_delivery` and make the Telegram host own its concrete state, setup-revision workflow, and trigger-delivery behavior while composition remains mount/registration-only ([#6159](https://github.com/nearai/ironclaw/pull/6159)).
+- *(webui-v2)* serve the Reborn WebUI from root-level browser routes, with temporary `/v2` compatibility redirects that preserve deep links and login query parameters; `/api/webchat/v2/*` remains unchanged ([#6142](https://github.com/nearai/ironclaw/issues/6142)).
+- *(reborn)* raise the default agent-loop runaway backstop from 256 to 1,024 iterations and the subagent ceiling from 16 to 256 ([#5959](https://github.com/nearai/ironclaw/pull/5959)).
 - *(reborn-cli)* document the standalone `config init` atomic-write dependency on `tempfile` and call out the default runner cadence change to 5s heartbeats / 200ms polling (down from 10s / 2s).
 - *(reborn)* expose runtime poll settings and document the standalone turn-runner cadence change for callers using `TurnRunnerSettings::default()`.
+- *(channels)* v1 Slack DM policy now defaults to `allowlist` (previously `pairing`); existing installs still configured with `dm_policy=pairing` fall through to `allowlist` as Slack relay pairing is retired ([#5604](https://github.com/nearai/ironclaw/pull/5604)).
+- *(reborn-cli)* **Breaking:** `ironclaw-reborn serve` now rejects the legacy `[slack]` config fields (`installation_id`, `team_id`, `api_app_id`, `slack_user_id`, `user_id`, `shared_subject_user_id`, `signing_secret_env`, `bot_token_env`, `channel_routes`). Slack bot credentials and routing are configured from the WebUI channel setup page; per-user identity comes only from Slack OAuth. `[slack].enabled` / `IRONCLAW_REBORN_SLACK_ENABLED` still gate whether the channel mounts ([#5604](https://github.com/nearai/ironclaw/pull/5604)).
+
+### CI / Release
+
+- *(release)* compile the canonical Reborn `ironclaw` binary across the seven supported OS/CPU targets as a tag-driven preflight while temporarily skipping the legacy cargo-dist, WASM, GitHub Release, registry-update, announcement, and Docker jobs; manual and hourly Docker workflow entry points remain available ([#6160](https://github.com/nearai/ironclaw/issues/6160)).
+
+### Removed
+
+- *(channels)* remove the v1 `pairing_approve` builtin tool and the generic `channel_connection_resume` machinery as part of retiring Slack relay pairing; existing Slack pairing users reconnect via OAuth (Telegram/WASM self-service pairing via the pairing endpoints is unaffected) ([#5604](https://github.com/nearai/ironclaw/pull/5604)).
 
 ## [0.29.1](https://github.com/nearai/ironclaw/compare/ironclaw-v0.29.0...ironclaw-v0.29.1) - 2026-06-04
 

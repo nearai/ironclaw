@@ -72,6 +72,13 @@ EMULATE_GITHUB_READY_TOKEN = EMULATE_GITHUB_BEARER
 EMULATE_STARTUP_ATTEMPTS = 120
 EMULATE_STARTUP_POLL_SECONDS = 0.5
 
+# test-tools/*.zip are git-ignored build artifacts (test-tools/README.md);
+# rebuild whenever a tool's manifest/schema/prompt/wasm-src changes so an
+# uploaded fixture always matches checked-in source.
+TEST_TOOLS_DIR = ROOT / "test-tools"
+BUILD_TEST_TOOLS_SCRIPT = ROOT / "scripts" / "build-test-tools.sh"
+TEST_TOOL_NAMES = ("ascii-renderer", "hacker-news", "market-data")
+
 
 def _latest_mtime(path: Path) -> float:
     """Return the newest mtime under a file or directory."""
@@ -198,6 +205,55 @@ def _emulate_unavailable(reason: str) -> None:
     if os.environ.get("CI") == "true":
         pytest.fail(reason)
     pytest.skip(reason)
+
+
+def _wasip2_target_missing() -> bool:
+    try:
+        installed = subprocess.run(
+            ["rustup", "target", "list", "--installed"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=15,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return True
+    return "wasm32-wasip2" not in installed.split()
+
+
+def _test_tool_zip_stale(tool: str) -> bool:
+    zip_path = TEST_TOOLS_DIR / f"{tool}.zip"
+    if not zip_path.exists():
+        return True
+    # wasm-src/target/ is a build cache, not a source input; _latest_mtime
+    # already skips directories literally named "target".
+    return _latest_mtime(TEST_TOOLS_DIR / tool) > zip_path.stat().st_mtime
+
+
+@pytest.fixture(scope="session")
+def test_tool_zips() -> dict[str, Path]:
+    """Build (or reuse) the test-tools/*.zip fixture bundles.
+
+    Mirrors the `ironclaw_binary` staleness pattern: rebuild only the tools
+    whose manifest/schema/prompt/wasm-src changed since their zip was last
+    built, via `scripts/build-test-tools.sh`.
+    """
+    stale = [tool for tool in TEST_TOOL_NAMES if _test_tool_zip_stale(tool)]
+    if stale:
+        if _wasip2_target_missing():
+            _emulate_unavailable(
+                "wasm32-wasip2 target not installed "
+                "(run: rustup target add wasm32-wasip2) "
+                f"-- required to build test-tools/: {', '.join(stale)}"
+            )
+        print(f"Building test-tools/ fixtures (stale: {', '.join(stale)})...")
+        subprocess.run(
+            ["bash", str(BUILD_TEST_TOOLS_SCRIPT), *stale],
+            cwd=ROOT,
+            check=True,
+            timeout=300,
+        )
+    return {tool: TEST_TOOLS_DIR / f"{tool}.zip" for tool in TEST_TOOL_NAMES}
 
 
 def _forward_coverage_env(env: dict[str, str]) -> None:
@@ -335,11 +391,17 @@ class ManagedIronclawServer:
 def ironclaw_binary():
     """Ensure ironclaw binary is built. Returns the binary path."""
     target_dir = _cargo_target_dir()
-    binary = target_dir / "debug" / "ironclaw"
+    binary = target_dir / "debug" / "ironclaw-legacy"
     if _binary_needs_rebuild(binary):
         print("Building ironclaw (this may take a while)...")
         subprocess.run(
-            ["cargo", "build", "--no-default-features", "--features", "libsql"],
+            [
+                "cargo", "build",
+                "-p", "ironclaw",
+                "--bin", "ironclaw-legacy",
+                "--no-default-features",
+                "--features", "libsql",
+            ],
             cwd=ROOT,
             check=True,
             timeout=600,
@@ -355,20 +417,20 @@ def ironclaw_binary():
 def ironclaw_reborn_binary():
     """Ensure the `ironclaw-reborn` binary is built with the WebChat v2 surface.
 
-    Distinct from `ironclaw_binary` (the legacy `ironclaw` web channel): the
-    Reborn WebUI v2 SPA and `serve` subcommand are gated behind the
-    `webui-v2-beta` Cargo feature, which transitively enables `libsql`. Returns
-    the binary path. Used by the Reborn WebUI v2 smoke scenario.
+    Distinct from `ironclaw_binary` (the legacy `ironclaw` web channel): this is
+    the Reborn CLI, whose WebUI v2 SPA and `serve` subcommand are compiled
+    unconditionally. Returns the binary path. Used by the Reborn WebUI v2 smoke
+    scenario.
     """
     target_dir = _cargo_target_dir()
-    binary = target_dir / "debug" / "ironclaw-reborn"
+    binary = target_dir / "debug" / "ironclaw"
     if _binary_needs_rebuild(binary):
-        print("Building ironclaw-reborn (webui-v2-beta; this may take a while)...")
+        print("Building ironclaw-reborn (this may take a while)...")
         subprocess.run(
             [
                 "cargo", "build",
                 "-p", "ironclaw_reborn_cli",
-                "--features", "webui-v2-beta",
+                "--bin", "ironclaw",
             ],
             cwd=ROOT,
             check=True,
@@ -383,15 +445,15 @@ def ironclaw_reborn_binary():
 
 @pytest.fixture(scope="session")
 def ironclaw_reborn_openai_compat_binary():
-    """Ensure `ironclaw-reborn` is built with the OpenAI-compatible routes.
+    """Ensure `ironclaw-reborn` is built for the OpenAI-compatible scenarios.
 
-    `openai-compat-beta` is a strict superset of `webui-v2-beta`, but it is not
-    enabled by the generic Reborn WebUI fixture. Keep this separate so the
-    OpenAI-compatible E2E explicitly proves the route-bearing binary.
+    The OpenAI-compatible routes are compiled unconditionally, so this builds
+    the same binary as the generic Reborn WebUI fixture. It is kept separate so
+    the OpenAI-compatible E2E owns its own build/staleness stamp.
     """
     target_dir = _cargo_target_dir()
-    binary = target_dir / "debug" / "ironclaw-reborn"
-    stamp = target_dir / "debug" / ".ironclaw-reborn-openai-compat-beta.stamp"
+    binary = target_dir / "debug" / "ironclaw"
+    stamp = target_dir / "debug" / ".ironclaw-reborn-openai-compat.stamp"
     input_mtime = max(
         _latest_mtime(ROOT / "Cargo.toml"),
         _latest_mtime(ROOT / "Cargo.lock"),
@@ -406,12 +468,12 @@ def ironclaw_reborn_openai_compat_binary():
         or not stamp.exists()
         or stamp.stat().st_mtime < input_mtime
     ):
-        print("Building ironclaw-reborn (openai-compat-beta; this may take a while)...")
+        print("Building ironclaw-reborn (OpenAI-compatible E2E; this may take a while)...")
         subprocess.run(
             [
                 "cargo", "build",
                 "-p", "ironclaw_reborn_cli",
-                "--features", "openai-compat-beta",
+                "--bin", "ironclaw",
             ],
             cwd=ROOT,
             check=True,
@@ -951,6 +1013,42 @@ async def hosted_github_emulate_server(
             "GITHUB_OAUTH_CLIENT_SECRET": "hosted-github-client-secret",
         },
         extra_result={"emulate_github_url": emulate_github_server["url"]},
+    ):
+        yield server
+
+
+@pytest.fixture(scope="session")
+async def hosted_provider_emulate_server(
+    ironclaw_binary,
+    mock_llm_server,
+    emulate_google_server,
+    emulate_github_server,
+    emulate_slack_server,
+    wasm_tools_dir,
+):
+    """Start hosted mode with Google, GitHub, and Slack routed to Emulate."""
+    rewrite_map = {
+        "gmail.googleapis.com": emulate_google_server["url"],
+        "www.googleapis.com": emulate_google_server["url"],
+        "api.github.com": emulate_github_server["url"],
+        "slack.com": emulate_slack_server["url"],
+    }
+    async for server in _run_hosted_oauth_refresh_server(
+        ironclaw_binary,
+        mock_llm_server,
+        wasm_tools_dir,
+        extra_env={
+            "IRONCLAW_TEST_HTTP_REWRITE_MAP": json.dumps(rewrite_map),
+            "GITHUB_OAUTH_CLIENT_ID": "hosted-github-client-id",
+            "GITHUB_OAUTH_CLIENT_SECRET": "hosted-github-client-secret",
+            "SLACK_OAUTH_CLIENT_ID": "hosted-slack-client-id",
+            "SLACK_OAUTH_CLIENT_SECRET": "hosted-slack-client-secret",
+        },
+        extra_result={
+            "emulate_google_url": emulate_google_server["url"],
+            "emulate_github_url": emulate_github_server["url"],
+            "emulate_slack_url": emulate_slack_server["url"],
+        },
     ):
         yield server
 

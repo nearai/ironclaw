@@ -58,7 +58,7 @@
   "config": {
     "signing_secret_name": "slack_signing_secret",
     "owner_id": null,
-    "dm_policy": "pairing",
+    "dm_policy": "allowlist",
     "allow_from": []
   }
 }

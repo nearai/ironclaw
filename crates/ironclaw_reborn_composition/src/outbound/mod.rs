@@ -12,7 +12,7 @@ pub(crate) use outbound_delivery_capability_surface::{
     set_outbound_delivery_target_for_model,
 };
 pub(crate) use outbound_preferences::{
-    MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetEntry,
-    OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome,
-    OutboundDeliveryTargetRegistry, RebornOutboundPreferencesFacade,
+    MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetProvider,
+    OutboundDeliveryTargetRegistrationOutcome, OutboundDeliveryTargetRegistry,
+    RebornOutboundPreferencesFacade,
 };

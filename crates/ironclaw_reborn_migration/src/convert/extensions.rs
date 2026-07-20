@@ -2,14 +2,17 @@
 //! (v1 `wasm_tools` / `wasm_channels` / `tool_capabilities` → Reborn
 //! `ExtensionInstallation`).
 //!
-//! Each installed v1 WASM tool/channel becomes a Reborn `ExtensionInstallation`
-//! with a synthesized `InstalledLocal` manifest that declares the
+//! Installed v1 WASM tools/channels are accumulated by validated
+//! `ExtensionId`, then each group becomes one canonical Reborn
+//! `ExtensionInstallation` with `installation_id == extension_id`. The
+//! synthesized `InstalledLocal` manifest declares the
 //! `ironclaw.capability_provider/v1` host API plus one placeholder,
 //! approval-gated capability (a non-first-party manifest must declare a host API
 //! or capability, and rejects top-level `[[capabilities]]`). Activation maps
-//! from the v1 `status` column; a tool's `tool_capabilities.allowed_secrets`
-//! become `ExtensionCredentialBinding`s pointing at the migrated secrets. The
-//! store itself is built by composition's `migration-support` seam
+//! from the v1 `status` column, failing closed when grouped source states
+//! disagree; a tool's `tool_capabilities.allowed_secrets` become merged
+//! `ExtensionCredentialBinding`s pointing at the migrated secrets. The store
+//! itself is built by composition's `migration-support` seam
 //! (`RebornTarget::extension_store`).
 //!
 //! Losses recorded (per installation): the manifest is a placeholder — the v1
@@ -19,16 +22,18 @@
 //! channel→secret join; the secret *values* still migrate via the secrets
 //! converter).
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ironclaw::channels::wasm::{StoredWasmChannel, WasmChannelStore};
 use ironclaw::tools::wasm::{StoredWasmTool, ToolStatus, WasmToolStore};
 use ironclaw_extensions::{
     ExtensionActivationState, ExtensionCredentialBinding, ExtensionCredentialHandle,
-    ExtensionInstallation, ExtensionInstallationId, ExtensionManifestRecord, ExtensionManifestRef,
-    HostApiContractRegistry, MANIFEST_SCHEMA_VERSION, ManifestSource,
+    ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
+    ExtensionManifestRecord, ExtensionManifestRef, HostApiContractRegistry, InstallationOwner,
+    MANIFEST_SCHEMA_VERSION, ManifestSource, canonicalize_installation_rows,
 };
-use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle};
+use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle, UserId};
 use ironclaw_host_runtime::{default_host_api_contract_registry, default_host_port_catalog};
 
 use crate::error::MigrationError;
@@ -55,6 +60,7 @@ pub(crate) async fn run(
 
     let tool_store = build_tool_store(src);
     let channel_store = build_channel_store(src);
+    let mut candidates_by_extension: BTreeMap<ExtensionId, Vec<InstallCandidate>> = BTreeMap::new();
 
     // Installed tools/channels are keyed by user_id; enumerate from both tables.
     let mut users: std::collections::BTreeSet<String> =
@@ -73,12 +79,9 @@ pub(crate) async fn run(
                 })?;
             for tool in tools {
                 let bindings = tool_credential_bindings(store.as_ref(), &tool, report).await?;
-                convert_installation(
-                    tgt,
-                    options,
+                collect_installation(
                     report,
-                    &catalog,
-                    &registry,
+                    &mut candidates_by_extension,
                     InstallInput {
                         owner: &user,
                         raw_name: &tool.name,
@@ -88,8 +91,7 @@ pub(crate) async fn run(
                         updated_at: tool.updated_at,
                         bindings,
                     },
-                )
-                .await?;
+                );
             }
         }
 
@@ -102,15 +104,11 @@ pub(crate) async fn run(
                     reason: e.to_string(),
                 })?;
             for channel in channels {
-                convert_installation(
-                    tgt,
-                    options,
+                collect_installation(
                     report,
-                    &catalog,
-                    &registry,
+                    &mut candidates_by_extension,
                     channel_input(&user, &channel),
-                )
-                .await?;
+                );
                 report.record_loss(
                     Domain::Extension,
                     format!("channel:{}", channel.name),
@@ -124,18 +122,31 @@ pub(crate) async fn run(
             }
         }
     }
+
+    for candidates in candidates_by_extension.into_values() {
+        write_canonical_installation(tgt, options, report, &catalog, &registry, candidates).await?;
+    }
     Ok(())
 }
 
 struct InstallInput<'a> {
-    /// v1 owner user id. Folded into the synthesized `ExtensionInstallationId`
-    /// so two users with a same-named install do not collide (the store is keyed
-    /// by installation id, so a bare name would let the second overwrite the
-    /// first with no loss recorded).
+    /// v1 owner user id. Candidates are merged into one private installation
+    /// membership set after the source id has been validated.
     owner: &'a str,
     raw_name: &'a str,
     version: &'a str,
     description: &'a str,
+    active: bool,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    bindings: Vec<ExtensionCredentialBinding>,
+}
+
+struct InstallCandidate {
+    extension_id: ExtensionId,
+    owner: UserId,
+    raw_name: String,
+    version: String,
+    description: String,
     active: bool,
     updated_at: chrono::DateTime<chrono::Utc>,
     bindings: Vec<ExtensionCredentialBinding>,
@@ -153,16 +164,12 @@ fn channel_input<'a>(owner: &'a str, channel: &'a StoredWasmChannel) -> InstallI
     }
 }
 
-#[allow(clippy::too_many_arguments)] // arch-exempt: too_many_args, migration converter threads scope + catalog + registry + input, plan v1-migration
-async fn convert_installation(
-    tgt: &RebornTarget,
-    options: &MigrationOptions,
+fn collect_installation(
     report: &mut MigrationReport,
-    catalog: &HostPortCatalog,
-    registry: &HostApiContractRegistry,
+    candidates_by_extension: &mut BTreeMap<ExtensionId, Vec<InstallCandidate>>,
     input: InstallInput<'_>,
-) -> Result<(), MigrationError> {
-    let source_id = format!("extension:{}", input.raw_name);
+) {
+    let source_id = format!("extension:{}:{}", input.owner, input.raw_name);
     let ext_id_str = sanitize_extension_id(input.raw_name);
     let extension_id = match ExtensionId::new(&ext_id_str) {
         Ok(id) => id,
@@ -174,7 +181,7 @@ async fn convert_installation(
                 LossReason::Unparseable,
                 format!("could not derive a valid Reborn extension id: {e}"),
             );
-            return Ok(());
+            return;
         }
     };
 
@@ -192,11 +199,73 @@ async fn convert_installation(
             .to_string(),
     );
 
+    // v1 installs were per-user; carry each validated owner into the eventual
+    // canonical private membership set under the #5459 P1 ownership model.
+    let owner = match UserId::new(input.owner) {
+        Ok(user_id) => user_id,
+        Err(e) => {
+            report.record_loss(
+                Domain::Extension,
+                &source_id,
+                "owner",
+                LossReason::Unparseable,
+                format!("invalid owner user id: {e}"),
+            );
+            return;
+        }
+    };
+    candidates_by_extension
+        .entry(extension_id.clone())
+        .or_default()
+        .push(InstallCandidate {
+            extension_id,
+            owner,
+            raw_name: input.raw_name.to_string(),
+            version: input.version.to_string(),
+            description: input.description.to_string(),
+            active: input.active,
+            updated_at: input.updated_at,
+            bindings: input.bindings,
+        });
+}
+
+// arch-exempt: too_many_args, migration converter scope + catalog + registry + group, plan #5459
+#[allow(clippy::too_many_arguments)]
+async fn write_canonical_installation(
+    tgt: &RebornTarget,
+    options: &MigrationOptions,
+    report: &mut MigrationReport,
+    catalog: &HostPortCatalog,
+    registry: &HostApiContractRegistry,
+    candidates: Vec<InstallCandidate>,
+) -> Result<(), MigrationError> {
+    let Some((first, rest)) = candidates.split_first() else {
+        return Ok(());
+    };
+    let source_id = format!("extension:{}", first.extension_id);
+
+    if rest.iter().any(|candidate| {
+        candidate.raw_name != first.raw_name
+            || candidate.version != first.version
+            || candidate.description != first.description
+    }) {
+        report.record_loss(
+            Domain::Extension,
+            &source_id,
+            "canonicalization",
+            LossReason::Unparseable,
+            "source names or manifest metadata sanitize to the same ExtensionId but disagree; \
+             the group was skipped and no partial canonical installation was written"
+                .to_string(),
+        );
+        return Ok(());
+    }
+
     let manifest_toml = build_manifest_toml(
-        &ext_id_str,
-        input.raw_name,
-        input.version,
-        input.description,
+        first.extension_id.as_str(),
+        &first.raw_name,
+        &first.version,
+        &first.description,
     );
     let manifest = match ExtensionManifestRecord::from_toml_with_contracts(
         manifest_toml,
@@ -218,47 +287,84 @@ async fn convert_installation(
         }
     };
 
-    let activation = if input.active {
-        ExtensionActivationState::Enabled
-    } else {
-        ExtensionActivationState::Disabled
-    };
-    // Installation id is scoped by owner so per-user installs of the same tool
-    // name each get a distinct record instead of silently overwriting.
-    let installation_id_str = sanitize_extension_id(&format!("{}-{}", input.owner, input.raw_name));
-    let installation_id = match ExtensionInstallationId::new(&installation_id_str) {
-        Ok(id) => id,
-        Err(e) => {
-            report.record_loss(
-                Domain::Extension,
-                &source_id,
-                "installation_id",
-                LossReason::Unparseable,
-                format!("invalid installation id: {e}"),
-            );
-            return Ok(());
-        }
-    };
-    let manifest_ref = ExtensionManifestRef::new(extension_id.clone(), None);
-    let installation = match ExtensionInstallation::new(
-        installation_id,
-        extension_id,
-        activation,
-        manifest_ref,
-        input.bindings,
-        input.updated_at,
-    ) {
-        Ok(installation) => installation,
-        Err(e) => {
+    // Build one typed row per source install, then let the generic extension
+    // reducer own canonical ids, ownership, activation, credentials, and
+    // timestamps. The source-derived id exists only as a deterministic health
+    // tie-break; the reducer replaces it with `extension_id`.
+    let installations = candidates
+        .into_iter()
+        .map(|candidate| {
+            let installation_id = ExtensionInstallationId::new(format!(
+                "{}:{}",
+                candidate.extension_id.as_str(),
+                candidate.owner.as_str()
+            ))?;
+            ExtensionInstallation::new(
+                installation_id,
+                candidate.extension_id.clone(),
+                if candidate.active {
+                    ExtensionActivationState::Enabled
+                } else {
+                    ExtensionActivationState::Disabled
+                },
+                ExtensionManifestRef::new(candidate.extension_id.clone(), None),
+                candidate.bindings,
+                candidate.updated_at,
+                InstallationOwner::user(candidate.owner),
+            )
+        })
+        .collect::<Result<Vec<_>, ExtensionInstallationError>>();
+    let installations = match installations {
+        Ok(installations) => installations,
+        Err(error) => {
             report.record_loss(
                 Domain::Extension,
                 &source_id,
                 "installation",
                 LossReason::Unparseable,
-                format!("could not build installation: {e}"),
+                format!(
+                    "could not build source installation rows: {error}; the group was skipped and no partial canonical installation was written"
+                ),
             );
             return Ok(());
         }
+    };
+    let mut canonical = match canonicalize_installation_rows(installations) {
+        Ok(canonical) => canonical,
+        Err(ExtensionInstallationError::ConflictingCredentialBinding { handle, .. }) => {
+            report.record_loss(
+                Domain::Extension,
+                &source_id,
+                "credential_bindings",
+                LossReason::Unparseable,
+                format!(
+                    "credential handle '{handle}' maps to conflicting secret handles; the group was skipped and no partial canonical installation was written"
+                ),
+            );
+            return Ok(());
+        }
+        Err(error) => {
+            report.record_loss(
+                Domain::Extension,
+                &source_id,
+                "canonicalization",
+                LossReason::Unparseable,
+                format!(
+                    "could not reduce source installation rows: {error}; the group was skipped and no partial canonical installation was written"
+                ),
+            );
+            return Ok(());
+        }
+    };
+    let Some(installation) = canonical.pop() else {
+        report.record_loss(
+            Domain::Extension,
+            &source_id,
+            "canonicalization",
+            LossReason::Unparseable,
+            "no canonical installation row was produced; the group was skipped and no partial canonical installation was written".to_string(),
+        );
+        return Ok(());
     };
 
     if !options.dry_run {
@@ -302,14 +408,14 @@ async fn tool_credential_bindings(
          installation field"
             .to_string(),
     );
-    let mut bindings = Vec::new();
+    let mut bindings_by_handle = BTreeMap::new();
     for secret_name in capabilities.allowed_secrets {
         match (
             ExtensionCredentialHandle::new(secret_name.clone()),
             SecretHandle::new(&secret_name),
         ) {
             (Ok(handle), Ok(secret_handle)) => {
-                bindings.push(ExtensionCredentialBinding::new(handle, secret_handle));
+                bindings_by_handle.entry(handle).or_insert(secret_handle);
             }
             // An unconvertible secret name is recorded, not dropped silently.
             _ => report.record_loss(
@@ -321,7 +427,10 @@ async fn tool_credential_bindings(
             ),
         }
     }
-    Ok(bindings)
+    Ok(bindings_by_handle
+        .into_iter()
+        .map(|(handle, secret_handle)| ExtensionCredentialBinding::new(handle, secret_handle))
+        .collect())
 }
 
 fn build_tool_store(src: &V1Source) -> Option<Arc<dyn WasmToolStore>> {

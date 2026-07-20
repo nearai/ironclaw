@@ -37,8 +37,9 @@ SecretLeaseStatus
 SecretLease
 SecretStoreError
 SecretStore
-InMemorySecretStore
-FilesystemSecretStore      // durable when backed by libSQL/Postgres RootFilesystem
+FilesystemSecretStore      // durable when backed by libSQL/Postgres RootFilesystem;
+                           // FilesystemSecretStore::ephemeral() is the volatile
+                           // InMemoryBackend construction (§4.3 — replaced InMemorySecretStore)
 CredentialAccountStore
 CredentialSessionStore
 InMemoryCredentialBroker

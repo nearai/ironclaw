@@ -1,3 +1,4 @@
+// arch-exempt: large_file, filesystem thread contract suite decomposition, plan #5662
 //! Contract tests for [`FilesystemSessionThreadService`].
 //!
 //! Drives the production filesystem-backed store over an
@@ -11,20 +12,20 @@ use std::{
     collections::HashMap,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{
-    BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError,
-    FilesystemOperation, Filter, InMemoryBackend, LocalFilesystem, Page, RecordVersion,
-    RootFilesystem, ScopedFilesystem, StorageTxn, TxnCapability, VersionedEntry,
+    BackendCapabilities, CasExpectation, DirEntry, DiskFilesystem, Entry, FileStat,
+    FilesystemError, FilesystemOperation, Filter, InMemoryBackend, Page, RecordVersion,
+    RootFilesystem, ScopedFilesystem, SeqNo, StorageTxn, TxnCapability, VersionedEntry,
 };
 use ironclaw_host_api::{
     AgentId, CapabilityId, HostPath, InvocationId, MountAlias, MountGrant, MountPermissions,
-    MountView, ProjectId, TenantId, ThreadId, UserId, VirtualPath,
+    MountView, ProjectId, ScopedPath, TenantId, ThreadId, UserId, VirtualPath,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AppendAssistantDraftRequest,
@@ -34,9 +35,10 @@ use ironclaw_threads::{
     CapabilityDisplayPreviewStatus, CreateSummaryArtifactRequest, EnsureThreadRequest,
     FilesystemSessionThreadService, FinalizedAssistantMessageByRunRequest,
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
-    MessageStatus, RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
-    SessionThreadService, SummaryKind, SummaryModelContextPolicy, ThreadHistoryRequest,
-    ThreadScope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    MessageStatus, PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService, SummaryKind,
+    SummaryModelContextPolicy, ThreadHistoryRequest, ThreadScope, ToolResultSafeSummary,
+    UpdateAssistantDraftRequest,
 };
 use tokio::sync::{Barrier, Mutex, OwnedMutexGuard};
 
@@ -98,6 +100,569 @@ async fn filesystem_delete_thread_removes_owned_thread_and_hides_missing_or_wron
         .await
         .expect_err("missing delete should be non-enumerating");
     assert_unknown_thread(missing_error, &missing);
+}
+
+#[tokio::test]
+async fn filesystem_tool_result_records_survive_restart_and_enforce_scope() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-tool-results", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let owner_scope = scope("fs-tool-results");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: owner_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-tool-results").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let content = br#"{\"message\":\"persisted tool output\"}"#.to_vec();
+    service
+        .put_tool_result_record(PutToolResultRecordRequest {
+            scope: owner_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            result_ref: "result:fs-tool-result".to_string(),
+            content: content.clone(),
+        })
+        .await
+        .expect("durable result write succeeds");
+
+    let reopened = FilesystemSessionThreadService::new(scoped_threads_fs_at(
+        backend,
+        "tenant-tool-results",
+        "alice",
+    ));
+    let chunk = reopened
+        .read_tool_result_record(ReadToolResultRecordRequest {
+            scope: owner_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            result_ref: "result:fs-tool-result".to_string(),
+            offset: 0,
+            max_bytes: 10,
+        })
+        .await
+        .expect("reopened read succeeds")
+        .expect("durable record exists");
+    assert_eq!(chunk.content, content[..10]);
+    assert_eq!(chunk.next_offset, Some(10));
+
+    let unicode_ref = "result:fs-unicode-tool-result".to_string();
+    reopened
+        .put_tool_result_record(PutToolResultRecordRequest {
+            scope: owner_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            result_ref: unicode_ref.clone(),
+            content: "abcédef".as_bytes().to_vec(),
+        })
+        .await
+        .expect("unicode durable result write succeeds");
+    let unicode_chunk = reopened
+        .read_tool_result_record(ReadToolResultRecordRequest {
+            scope: owner_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            result_ref: unicode_ref,
+            offset: 0,
+            max_bytes: 4,
+        })
+        .await
+        .expect("unicode durable read succeeds")
+        .expect("unicode durable record exists");
+    assert_eq!(std::str::from_utf8(&unicode_chunk.content).unwrap(), "abc");
+    assert_eq!(unicode_chunk.next_offset, Some(3));
+
+    let wrong_scope_error = reopened
+        .read_tool_result_record(ReadToolResultRecordRequest {
+            scope: scope("fs-tool-results-wrong"),
+            thread_id: thread.thread_id,
+            result_ref: "result:fs-tool-result".to_string(),
+            offset: 0,
+            max_bytes: 8,
+        })
+        .await
+        .expect_err("wrong scope must not expose durable result records");
+    assert_unknown_thread(
+        wrong_scope_error,
+        &ThreadId::new("thread-fs-tool-results").unwrap(),
+    );
+}
+
+#[tokio::test]
+async fn filesystem_concurrent_duplicate_tool_result_writes_converge() {
+    let backend = Arc::new(ConcurrentToolResultWriteBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-tool-result-race", "alice");
+    let service = Arc::new(FilesystemSessionThreadService::new(scoped));
+    let scope = scope("fs-tool-result-race");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-tool-result-race").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let result_ref = "result:fs-concurrent-tool-result".to_string();
+    let content = b"concurrent durable tool output".to_vec();
+
+    let left = {
+        let service = Arc::clone(&service);
+        let scope = scope.clone();
+        let thread_id = thread.thread_id.clone();
+        let result_ref = result_ref.clone();
+        let content = content.clone();
+        async move {
+            service
+                .put_tool_result_record(PutToolResultRecordRequest {
+                    scope,
+                    thread_id,
+                    result_ref,
+                    content,
+                })
+                .await
+        }
+    };
+    let right = {
+        let service = Arc::clone(&service);
+        let scope = scope.clone();
+        let thread_id = thread.thread_id.clone();
+        let result_ref = result_ref.clone();
+        let content = content.clone();
+        async move {
+            service
+                .put_tool_result_record(PutToolResultRecordRequest {
+                    scope,
+                    thread_id,
+                    result_ref,
+                    content,
+                })
+                .await
+        }
+    };
+
+    let (left, right) = tokio::join!(left, right);
+    left.expect("first concurrent duplicate write converges");
+    right.expect("second concurrent duplicate write converges after CAS retry");
+
+    let stored = service
+        .read_tool_result_record(ReadToolResultRecordRequest {
+            scope,
+            thread_id: thread.thread_id,
+            result_ref,
+            offset: 0,
+            max_bytes: 128,
+        })
+        .await
+        .expect("converged record is readable")
+        .expect("converged record exists");
+    assert_eq!(stored.content, content);
+    assert!(stored.next_offset.is_none());
+}
+
+#[tokio::test]
+async fn filesystem_redaction_retains_durable_tool_result_record() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-tool-redaction", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("fs-tool-redaction");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-tool-redaction").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let result_ref = "result:fs-redacted-tool".to_string();
+    let result = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-fs-tool-redaction".into(),
+            result_ref: result_ref.clone(),
+            safe_summary: ToolResultSafeSummary::new("safe tool result").unwrap(),
+            provider_call: None,
+            model_observation: None,
+        })
+        .await
+        .unwrap();
+    service
+        .put_tool_result_record(PutToolResultRecordRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            result_ref: result_ref.clone(),
+            content: br#"{\"secret\":\"raw tool output\"}"#.to_vec(),
+        })
+        .await
+        .unwrap();
+
+    service
+        .redact_message(RedactMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            message_id: result.message_id,
+            redaction_ref: "redaction/audit/fs-tool".into(),
+        })
+        .await
+        .expect("redaction succeeds");
+
+    assert!(
+        service
+            .read_tool_result_record(ReadToolResultRecordRequest {
+                scope,
+                thread_id: thread.thread_id,
+                result_ref,
+                offset: 0,
+                max_bytes: 128,
+            })
+            .await
+            .expect("redaction keeps the thread readable")
+            .is_some(),
+        "redaction retains the durable raw result for audit and recovery"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_delete_thread_invalidates_thread_index_cache() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-delete-cache", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let request_scope = scope("delete-cache");
+    let keep = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-delete-cache-keep").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let delete = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-delete-cache-remove").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let warmed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: request_scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(warmed.threads.len(), 2);
+
+    service
+        .delete_thread(&request_scope, &delete.thread_id)
+        .await
+        .expect("delete succeeds");
+
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: request_scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids: Vec<&ThreadId> = listed
+        .threads
+        .iter()
+        .map(|record| &record.thread_id)
+        .collect();
+    assert!(ids.contains(&&keep.thread_id));
+    assert!(!ids.contains(&&delete.thread_id));
+}
+
+#[tokio::test]
+async fn filesystem_first_context_window_uses_one_shot_accepted_message_cache() {
+    let backend = Arc::new(QueryCountingBackend::new());
+    let scoped = scoped_threads_fs_at(
+        Arc::clone(&backend),
+        "tenant-first-context-window-cache",
+        "alice",
+    );
+    let service = FilesystemSessionThreadService::new(scoped);
+    let request_scope = scope("first-context-window-cache");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-first-context-window-cache").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: request_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: Some("binding-first-context-window-cache".into()),
+            reply_target_binding_id: None,
+            external_event_id: Some("event-first-context-window-cache".into()),
+            content: MessageContent::text("first prompt should be hot"),
+        })
+        .await
+        .unwrap();
+    assert_eq!(accepted.sequence, 1);
+
+    service
+        .mark_message_submitted(
+            &request_scope,
+            &thread.thread_id,
+            accepted.message_id,
+            "turn-first-context-window-cache".into(),
+            "run-first-context-window-cache".into(),
+        )
+        .await
+        .unwrap();
+    let query_count_after_submit = backend.query_count();
+    let get_count_after_submit = backend.get_count();
+
+    let first_window = service
+        .load_context_window(LoadContextWindowRequest {
+            scope: request_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            max_messages: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(first_window.messages.len(), 1);
+    assert_eq!(
+        first_window.messages[0].content,
+        "first prompt should be hot"
+    );
+    assert_eq!(
+        backend.query_count(),
+        query_count_after_submit,
+        "the immediate first-turn context load should consume the submitted message cache"
+    );
+    assert_eq!(
+        backend.get_count(),
+        get_count_after_submit,
+        "the immediate first-turn context load should not re-read the thread record"
+    );
+
+    let second_window = service
+        .load_context_window(LoadContextWindowRequest {
+            scope: request_scope,
+            thread_id: thread.thread_id,
+            max_messages: 16,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(second_window.messages.len(), 1);
+    assert!(
+        backend.query_count() > query_count_after_submit,
+        "the submitted-message context cache must be one-shot, not a transcript source of truth"
+    );
+    assert!(
+        backend.get_count() > get_count_after_submit,
+        "the submitted-message context cache must be one-shot, not a thread existence shortcut"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_delete_thread_retry_cleans_stale_thread_index_row() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-delete-stale-index", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let request_scope = scope("delete-stale-index");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-delete-stale-index").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("stale title".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let warmed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: request_scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(warmed.threads.len(), 1);
+
+    scoped
+        .delete(
+            &request_scope.to_resource_scope(),
+            &thread_root_path_for_test(&request_scope, thread.thread_id.as_str()),
+        )
+        .await
+        .expect("test setup removes source thread root but leaves derived index row");
+    service.clear_thread_index_cache_for_scope(&request_scope);
+
+    let retry_error = service
+        .delete_thread(&request_scope, &thread.thread_id)
+        .await
+        .expect_err("retry after partial delete should still report unknown source");
+    assert_unknown_thread(retry_error, &thread.thread_id);
+
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: request_scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        listed
+            .threads
+            .iter()
+            .all(|record| record.thread_id != thread.thread_id),
+        "retry cleanup must remove stale derived index metadata from listings"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_list_threads_skips_stale_thread_index_after_partial_delete() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-list-stale-index", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let request_scope = scope("list-stale-index");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-list-stale-index").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("stale title".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: request_scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .expect("warm list creates thread index row");
+
+    scoped
+        .delete(
+            &request_scope.to_resource_scope(),
+            &thread_root_path_for_test(&request_scope, thread.thread_id.as_str()),
+        )
+        .await
+        .expect("test setup removes source thread root but leaves derived index row");
+    service.clear_thread_index_cache_for_scope(&request_scope);
+
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: request_scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        listed
+            .threads
+            .iter()
+            .all(|record| record.thread_id != thread.thread_id),
+        "list_threads_for_scope must not expose an index row whose source thread root is gone"
+    );
+    assert!(
+        scoped
+            .get(
+                &request_scope.to_resource_scope(),
+                &thread_index_record_path_for_test(&request_scope, thread.thread_id.as_str()),
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "stale index row should be removed during list cleanup"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_read_thread_ignores_stale_thread_index_generation() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-read-stale-index", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let request_scope = scope("read-stale-index");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-read-stale-index").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let source_updated_at = thread.updated_at;
+
+    let index_path = thread_index_record_path_for_test(&request_scope, thread.thread_id.as_str());
+    let mut stale_index: serde_json::Value = serde_json::from_slice(
+        &scoped
+            .get(&request_scope.to_resource_scope(), &index_path)
+            .await
+            .unwrap()
+            .expect("ensure_thread writes derived index row")
+            .entry
+            .body,
+    )
+    .unwrap();
+    stale_index["created_at"] = serde_json::json!("2000-01-01T00:00:00Z");
+    stale_index["updated_at"] = serde_json::json!("2099-01-01T00:00:00Z");
+    stale_index["title"] = serde_json::json!("stale derived title");
+    stale_index["flags"]["title_present"] = serde_json::json!(true);
+    scoped
+        .put(
+            &request_scope.to_resource_scope(),
+            &index_path,
+            Entry::bytes(serde_json::to_vec_pretty(&stale_index).unwrap()),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("test setup writes stale derived index row");
+
+    let read = service
+        .read_thread(ThreadHistoryRequest {
+            scope: request_scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        read.title, None,
+        "read_thread must not overlay title from a stale index generation"
+    );
+    assert_eq!(
+        read.updated_at, source_updated_at,
+        "read_thread must not overlay updated_at from a stale index generation"
+    );
 }
 
 #[tokio::test]
@@ -205,6 +770,86 @@ async fn filesystem_finalized_assistant_lookup_by_run_uses_persisted_message() {
     assert_eq!(finalized.message_id, draft.message_id);
     assert_eq!(finalized.status, MessageStatus::Finalized);
     assert_eq!(finalized.content.as_deref(), Some("final"));
+}
+
+#[tokio::test]
+async fn filesystem_list_thread_history_returns_durable_message_timestamps() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-message-timestamps", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("message-timestamps");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-message-timestamps").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let before_user = Utc::now();
+    let accepted = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("hello"),
+        })
+        .await
+        .unwrap();
+    let after_user = Utc::now();
+
+    let draft = service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-message-timestamps".into(),
+            content: MessageContent::text("working"),
+        })
+        .await
+        .unwrap();
+    let draft_created_at = draft.created_at.expect("draft has created_at");
+    assert_eq!(draft.updated_at, Some(draft_created_at));
+
+    let finalized = service
+        .finalize_assistant_message(
+            &scope,
+            &thread.thread_id,
+            draft.message_id,
+            MessageContent::text("done"),
+        )
+        .await
+        .unwrap();
+    let final_updated_at = finalized.updated_at.expect("finalized has updated_at");
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    let user = history
+        .messages
+        .iter()
+        .find(|message| message.message_id == accepted.message_id)
+        .expect("user message is in history");
+    let user_created_at = user.created_at.expect("user message has created_at");
+    assert!(user_created_at >= before_user && user_created_at <= after_user);
+    assert_eq!(user.updated_at, Some(user_created_at));
+
+    let assistant = history
+        .messages
+        .iter()
+        .find(|message| message.message_id == draft.message_id)
+        .expect("assistant message is in history");
+    assert_eq!(assistant.created_at, Some(draft_created_at));
+    assert_eq!(assistant.updated_at, Some(final_updated_at));
 }
 
 #[tokio::test]
@@ -1451,6 +2096,327 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
     assert_eq!(ids_b, ["t-b-001"]);
 }
 
+#[tokio::test]
+async fn filesystem_list_threads_bootstraps_missing_thread_index_rows() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-index-bootstrap", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("index-bootstrap");
+
+    for id in ["legacy-001", "legacy-002"] {
+        service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(ThreadId::new(id).unwrap()),
+                created_by_actor_id: "actor-a".into(),
+                title: Some(id.into()),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    for id in ["legacy-001", "legacy-002"] {
+        scoped
+            .delete(
+                &scope.to_resource_scope(),
+                &thread_index_record_path_for_test(&scope, id),
+            )
+            .await
+            .expect("test setup removes derived index row");
+    }
+    service.clear_thread_index_cache_for_scope(&scope);
+
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids: Vec<&str> = listed
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(ids, ["legacy-002", "legacy-001"]);
+
+    service.clear_thread_index_cache_for_scope(&scope);
+    let listed_again = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids_again: Vec<&str> = listed_again
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(
+        ids_again,
+        ["legacy-002", "legacy-001"],
+        "first list should rebuild durable derived index rows"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_list_threads_merges_partial_thread_index_with_source_rows() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-index-partial", "alice");
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("index-partial");
+
+    for id in ["legacy-indexed", "legacy-missing"] {
+        service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(ThreadId::new(id).unwrap()),
+                created_by_actor_id: "actor-a".into(),
+                title: Some(id.into()),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    scoped
+        .delete(
+            &scope.to_resource_scope(),
+            &thread_index_record_path_for_test(&scope, "legacy-missing"),
+        )
+        .await
+        .expect("test setup removes one derived index row");
+    service.clear_thread_index_cache_for_scope(&scope);
+
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids: Vec<&str> = listed
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert!(ids.contains(&"legacy-indexed"));
+    assert!(ids.contains(&"legacy-missing"));
+}
+
+#[tokio::test]
+async fn filesystem_list_threads_does_not_treat_partial_source_cache_as_complete() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped_a = scoped_threads_fs_at(Arc::clone(&backend), "tenant-index-cache", "alice");
+    let scoped_b = scoped_threads_fs_at(backend, "tenant-index-cache", "alice");
+    let service_a = FilesystemSessionThreadService::new(scoped_a);
+    let service_b = FilesystemSessionThreadService::new(scoped_b);
+    let scope = scope("index-cache");
+
+    service_a
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("cached-source-a").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("cached source a".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service_b
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("cached-source-b").unwrap()),
+            created_by_actor_id: "actor-b".into(),
+            title: Some("cached source b".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let listed = service_a
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids: Vec<&str> = listed
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+
+    assert!(ids.contains(&"cached-source-a"));
+    assert!(
+        ids.contains(&"cached-source-b"),
+        "a single-row source cache from this process must not hide durable rows written by another service instance"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_list_threads_retries_bootstrap_after_source_read_error() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(FailOnceThreadRecordReadBackend::new("legacy-flaky-read"));
+    let scoped = scoped_threads_fs_at(
+        Arc::clone(&backend),
+        "tenant-index-bootstrap-retry",
+        "alice",
+    );
+    let service = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let scope = scope("index-bootstrap-retry");
+
+    for id in ["legacy-indexed", "legacy-flaky-read"] {
+        service
+            .ensure_thread(EnsureThreadRequest {
+                scope: scope.clone(),
+                thread_id: Some(ThreadId::new(id).unwrap()),
+                created_by_actor_id: "actor-a".into(),
+                title: Some(id.into()),
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    scoped
+        .delete(
+            &scope.to_resource_scope(),
+            &thread_index_record_path_for_test(&scope, "legacy-flaky-read"),
+        )
+        .await
+        .expect("test setup removes one derived index row");
+    backend.fail_next_thread_record_read();
+    service.clear_thread_index_cache_for_scope(&scope);
+
+    let first = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let first_ids: Vec<&str> = first
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert!(first_ids.contains(&"legacy-indexed"));
+    assert!(!first_ids.contains(&"legacy-flaky-read"));
+
+    service.clear_thread_index_cache_for_scope(&scope);
+    let second = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let second_ids: Vec<&str> = second
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert!(
+        second_ids.contains(&"legacy-flaky-read"),
+        "a partial bootstrap read failure must not mark the scope complete"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_list_threads_bootstrap_preserves_fresher_existing_index_activity() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-index-bootstrap-fresh", "alice");
+    let writer = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let request_scope = scope("index-bootstrap-fresh");
+
+    let older = writer
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-bootstrap-older").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("older".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    wait_until_after(older.updated_at.expect("older thread has activity stamp")).await;
+    let newer = writer
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-bootstrap-newer").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("newer".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    wait_until_after(newer.updated_at.expect("newer thread has activity stamp")).await;
+
+    writer
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: request_scope.clone(),
+            thread_id: older.thread_id.clone(),
+            turn_run_id: "run-bootstrap-fresh".into(),
+            content: MessageContent::text("fresh activity"),
+        })
+        .await
+        .unwrap();
+
+    let cold_bootstrap = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let listed = cold_bootstrap
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: request_scope.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids: Vec<&str> = listed
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(ids, ["thread-bootstrap-older", "thread-bootstrap-newer"]);
+
+    let cold_after_bootstrap = FilesystemSessionThreadService::new(Arc::clone(&scoped));
+    let listed_again = cold_after_bootstrap
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope: request_scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+    let ids_again: Vec<&str> = listed_again
+        .threads
+        .iter()
+        .map(|record| record.thread_id.as_str())
+        .collect();
+    assert_eq!(
+        ids_again,
+        ["thread-bootstrap-older", "thread-bootstrap-newer"],
+        "bootstrap must not overwrite a fresher derived index row with stale thread.json activity"
+    );
+}
+
 /// Regression: the "Recent" list must order by last interaction, not by
 /// creation time or thread id. Appending a message to the *older* thread
 /// has to bump it ahead of a more recently *created* one. Before this
@@ -2034,7 +3000,7 @@ async fn legacy_deferred_busy_message_round_trips_through_filesystem_store() {
 /// byte-only/`Unsupported` fail-closed branch for thread creation was
 /// unpinned.
 ///
-/// `LocalFilesystem` is the canonical byte-only `RootFilesystem`: its
+/// `DiskFilesystem` is the canonical byte-only `RootFilesystem`: its
 /// `put` impl rejects entries with `kind.is_some()`, which `cas_update`
 /// surfaces as `CasUnsupported`. This mirrors
 /// `filesystem_approval_store_fails_closed_on_byte_only_backend` in
@@ -2042,7 +3008,7 @@ async fn legacy_deferred_busy_message_round_trips_through_filesystem_store() {
 #[tokio::test]
 async fn filesystem_session_thread_ensure_thread_fails_closed_on_byte_only_backend() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let mut local_fs = LocalFilesystem::new();
+    let mut local_fs = DiskFilesystem::new();
     local_fs
         .mount_local(
             VirtualPath::new("/tenants").expect("virtual root"),
@@ -2064,7 +3030,7 @@ async fn filesystem_session_thread_ensure_thread_fails_closed_on_byte_only_backe
         .expect_err("ensure_thread must fail closed on a byte-only backend");
     assert!(
         matches!(&err, SessionThreadError::Backend(msg) if msg.contains("compare-and-swap")),
-        "expected Backend(CasUnsupported) from byte-only LocalFilesystem but got {err:?}",
+        "expected Backend(CasUnsupported) from byte-only DiskFilesystem but got {err:?}",
     );
 }
 
@@ -2076,6 +3042,42 @@ fn scope(label: &str) -> ThreadScope {
         owner_user_id: Some(UserId::new(format!("user-{label}")).unwrap()),
         mission_id: None,
     }
+}
+
+fn thread_index_record_path_for_test(scope: &ThreadScope, thread_id: &str) -> ScopedPath {
+    ScopedPath::new(format!(
+        "/threads/agents/{}/projects/{}/owners/{}/thread_index/{thread_id}.json",
+        scope.agent_id.as_str(),
+        scope
+            .project_id
+            .as_ref()
+            .expect("test scope has project")
+            .as_str(),
+        scope
+            .owner_user_id
+            .as_ref()
+            .expect("test scope has owner")
+            .as_str()
+    ))
+    .unwrap()
+}
+
+fn thread_root_path_for_test(scope: &ThreadScope, thread_id: &str) -> ScopedPath {
+    ScopedPath::new(format!(
+        "/threads/agents/{}/projects/{}/owners/{}/threads/{thread_id}",
+        scope.agent_id.as_str(),
+        scope
+            .project_id
+            .as_ref()
+            .expect("test scope has project")
+            .as_str(),
+        scope
+            .owner_user_id
+            .as_ref()
+            .expect("test scope has owner")
+            .as_str()
+    ))
+    .unwrap()
 }
 
 fn assert_unknown_thread(error: SessionThreadError, thread_id: &ThreadId) {
@@ -2155,11 +3157,80 @@ impl LookupIndexReadFailureBackend {
     }
 }
 
+struct QueryCountingBackend {
+    inner: InMemoryBackend,
+    query_count: AtomicUsize,
+    get_count: AtomicUsize,
+}
+
+impl QueryCountingBackend {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryBackend::new(),
+            query_count: AtomicUsize::new(0),
+            get_count: AtomicUsize::new(0),
+        }
+    }
+
+    fn query_count(&self) -> usize {
+        self.query_count.load(Ordering::SeqCst)
+    }
+
+    fn get_count(&self) -> usize {
+        self.get_count.load(Ordering::SeqCst)
+    }
+}
+
+struct FailOnceThreadRecordReadBackend {
+    inner: InMemoryBackend,
+    thread_id: String,
+    fail_next_read: AtomicBool,
+}
+
+impl FailOnceThreadRecordReadBackend {
+    fn new(thread_id: &str) -> Self {
+        Self {
+            inner: InMemoryBackend::new(),
+            thread_id: thread_id.to_string(),
+            fail_next_read: AtomicBool::new(false),
+        }
+    }
+
+    fn fail_next_thread_record_read(&self) {
+        self.fail_next_read.store(true, Ordering::SeqCst);
+    }
+
+    fn is_target_thread_record_path(&self, path: &VirtualPath) -> bool {
+        path.as_str()
+            .contains(&format!("/threads/{}/thread.json", self.thread_id))
+    }
+}
+
 struct TransactionalRaceBackend {
     inner: Arc<InMemoryBackend>,
     txn_lock: Arc<Mutex<()>>,
     idempotency_get_barrier: Arc<Barrier>,
     idempotency_get_count: AtomicUsize,
+}
+
+struct ConcurrentToolResultWriteBackend {
+    inner: InMemoryBackend,
+    tool_result_get_barrier: Barrier,
+    tool_result_get_count: AtomicUsize,
+}
+
+impl ConcurrentToolResultWriteBackend {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryBackend::new(),
+            tool_result_get_barrier: Barrier::new(2),
+            tool_result_get_count: AtomicUsize::new(0),
+        }
+    }
+
+    fn is_tool_result_record_path(path: &VirtualPath) -> bool {
+        path.as_str().contains("/tool_results/")
+    }
 }
 
 impl TransactionalRaceBackend {
@@ -2333,6 +3404,107 @@ impl RootFilesystem for LookupIndexReadFailureBackend {
 }
 
 #[async_trait]
+impl RootFilesystem for QueryCountingBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.get_count.fetch_add(1, Ordering::SeqCst);
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.query_count.fetch_add(1, Ordering::SeqCst);
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
+        self.inner.begin(path).await
+    }
+
+    async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        self.inner.reserve_sequence(path).await
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for FailOnceThreadRecordReadBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        if self.is_target_thread_record_path(path)
+            && self.fail_next_read.swap(false, Ordering::SeqCst)
+        {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ReadFile,
+                reason: "thread record reads disabled once by contract test".to_string(),
+            });
+        }
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+}
+
+#[async_trait]
 impl RootFilesystem for TransactionalRaceBackend {
     fn capabilities(&self) -> BackendCapabilities {
         self.inner.capabilities().with_txn(TxnCapability::MultiKey)
@@ -2387,6 +3559,54 @@ impl RootFilesystem for TransactionalRaceBackend {
             _guard: guard,
             staged_puts: HashMap::new(),
         }))
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for ConcurrentToolResultWriteBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        if Self::is_tool_result_record_path(path)
+            && self.tool_result_get_count.fetch_add(1, Ordering::SeqCst) < 2
+        {
+            let result = self.inner.get(path).await?;
+            self.tool_result_get_barrier.wait().await;
+            return Ok(result);
+        }
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
     }
 }
 
@@ -2856,4 +4076,127 @@ async fn filesystem_summary_spanning_interior_draft_is_not_applied() {
     );
     assert_eq!(context.messages[0].content, "first");
     assert_eq!(context.messages[1].content, "third");
+}
+
+// Backend that fails only the summary-artifact write, so all prior reads in
+// `create_summary_artifact` succeed and only the final CAS `put` errors —
+// the shape `persist_summary` (ironclaw_loop_host::compaction_task) hits
+// in production (#5838).
+struct SummaryWriteFailureBackend {
+    inner: InMemoryBackend,
+}
+
+impl SummaryWriteFailureBackend {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryBackend::new(),
+        }
+    }
+
+    fn is_summary_path(path: &VirtualPath) -> bool {
+        path.as_str().contains("/summaries/")
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for SummaryWriteFailureBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        if Self::is_summary_path(path) {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::WriteFile,
+                reason: "synthetic summary artifact write failure (contract test)".to_string(),
+            });
+        }
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+}
+
+#[tokio::test]
+async fn create_summary_artifact_surfaces_backend_error_on_storage_write_failure() {
+    // Regression for #5838: the backend cause must survive to the caller
+    // instead of being collapsed away before it reaches `persist_summary`.
+    let backend = Arc::new(SummaryWriteFailureBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-summary-write-fail", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("fs-summary-write-fail");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-summary-write-fail").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("large tool-heavy turn content"),
+        })
+        .await
+        .unwrap();
+
+    let err = service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 1,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("compacted summary body"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await
+        .expect_err("summary artifact write must surface the backend failure, not succeed");
+
+    match &err {
+        SessionThreadError::Backend(reason) => {
+            assert!(
+                reason.contains("synthetic summary artifact write failure"),
+                "expected the real backend cause to survive to the caller, got: {reason}"
+            );
+        }
+        other => panic!("expected SessionThreadError::Backend, got: {other:?}"),
+    }
 }

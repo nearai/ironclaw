@@ -1,10 +1,9 @@
 mod support;
 
-use support::legacy_capability_fixture_to_v2;
+use support::{RecordingExecutor, legacy_capability_fixture_to_v2};
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use async_trait::async_trait;
 use ironclaw_dispatcher::*;
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_extensions::*;
@@ -17,7 +16,7 @@ use ironclaw_host_api::{
     *,
 };
 use ironclaw_resources::*;
-use serde_json::{Value, json};
+use serde_json::json;
 
 #[tokio::test]
 async fn runtime_dispatcher_routes_already_authorized_request_through_public_trait_object() {
@@ -25,10 +24,8 @@ async fn runtime_dispatcher_routes_already_authorized_request_through_public_tra
     let filesystem = Arc::new(mounted_empty_extension_root());
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let events = InMemoryEventSink::new();
-    let adapter = Arc::new(RecordingAdapter::new(
-        RuntimeKind::Wasm,
-        json!({"reply": "from adapter"}),
-    ));
+    let executor =
+        RecordingExecutor::new().static_output(RuntimeKind::Wasm, json!({"reply": "from adapter"}));
     let scope = sample_scope();
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
     let mounts = MountView::new(vec![MountGrant::new(
@@ -41,11 +38,9 @@ async fn runtime_dispatcher_routes_already_authorized_request_through_public_tra
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                max_output_bytes: Some(10_000),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_concurrency_slots(1)
+                .set_max_output_bytes(10_000),
         )
         .unwrap();
 
@@ -53,20 +48,22 @@ async fn runtime_dispatcher_routes_already_authorized_request_through_public_tra
         Arc::clone(&registry),
         Arc::clone(&filesystem),
         Arc::clone(&governor),
+        executor.clone(),
     )
-    .with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::clone(&adapter))
     .with_event_sink_arc(Arc::new(events.clone()));
     let dispatch_port: &dyn CapabilityDispatcher = &dispatcher;
+    let authenticated_actor_user_id =
+        UserId::new("slack-alice").expect("valid authenticated actor user id");
 
     let result = dispatch_port
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: scope.clone(),
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
-            },
+            authenticated_actor_user_id: Some(authenticated_actor_user_id.clone()),
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_output_bytes(10_000),
             mounts: Some(mounts.clone()),
             resource_reservation: None,
             input: json!({"message": "hello through public seam"}),
@@ -82,7 +79,7 @@ async fn runtime_dispatcher_routes_already_authorized_request_through_public_tra
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert!(governor.usage_for(&account).output_bytes > 0);
 
-    let requests = adapter.requests();
+    let requests = executor.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].provider, ExtensionId::new("echo").unwrap());
     assert_eq!(
@@ -90,8 +87,13 @@ async fn runtime_dispatcher_routes_already_authorized_request_through_public_tra
         CapabilityId::new("echo.say").unwrap()
     );
     assert_eq!(requests[0].runtime, RuntimeKind::Wasm);
+    assert_eq!(requests[0].lane, RuntimeLane::Wasm);
     assert_eq!(requests[0].network_mode, NetworkMode::Deny);
     assert_eq!(requests[0].scope, scope);
+    assert_eq!(
+        requests[0].authenticated_actor_user_id,
+        Some(authenticated_actor_user_id)
+    );
     assert_eq!(requests[0].mounts, Some(mounts));
     assert_eq!(
         requests[0].input,
@@ -116,18 +118,17 @@ async fn runtime_dispatcher_forwards_configured_runtime_policy_to_adapter() {
     let registry = Arc::new(registry_with_package(WASM_MANIFEST));
     let filesystem = Arc::new(mounted_empty_extension_root());
     let governor = Arc::new(InMemoryResourceGovernor::new());
-    let adapter = Arc::new(RecordingAdapter::new(
-        RuntimeKind::Wasm,
-        json!({"reply": "from adapter"}),
-    ));
-    let dispatcher = RuntimeDispatcher::from_arcs(registry, filesystem, governor)
-        .with_runtime_policy(local_dev_policy())
-        .with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::clone(&adapter));
+    let executor =
+        RecordingExecutor::new().static_output(RuntimeKind::Wasm, json!({"reply": "from adapter"}));
+    let dispatcher = RuntimeDispatcher::from_arcs(registry, filesystem, governor, executor.clone())
+        .with_runtime_policy(local_dev_policy());
 
     dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: sample_scope(),
+            authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default(),
             mounts: None,
             resource_reservation: None,
@@ -136,7 +137,7 @@ async fn runtime_dispatcher_forwards_configured_runtime_policy_to_adapter() {
         .await
         .unwrap();
 
-    let requests = adapter.requests();
+    let requests = executor.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].network_mode, NetworkMode::DirectLogged);
 }
@@ -150,19 +151,24 @@ async fn runtime_dispatcher_fails_closed_for_missing_backend_before_reservation_
     let scope = sample_scope();
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
 
-    let dispatcher = RuntimeDispatcher::from_arcs(registry, filesystem, Arc::clone(&governor))
-        .with_event_sink_arc(Arc::new(events.clone()));
+    let dispatcher = RuntimeDispatcher::from_arcs(
+        registry,
+        filesystem,
+        Arc::clone(&governor),
+        RecordingExecutor::new(),
+    )
+    .with_event_sink_arc(Arc::new(events.clone()));
     let dispatch_port: &dyn CapabilityDispatcher = &dispatcher;
 
     let err = dispatch_port
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("script.echo").unwrap(),
             scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                ..ResourceEstimate::default()
-            },
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_process_count(1),
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "blocked"}),
@@ -206,101 +212,6 @@ async fn registry_rejects_descriptor_package_runtime_mismatch_before_dispatcher_
     ));
 }
 
-#[derive(Clone)]
-struct RecordingAdapter {
-    runtime: RuntimeKind,
-    output: Value,
-    requests: Arc<Mutex<Vec<RecordedAdapterRequest>>>,
-}
-
-impl RecordingAdapter {
-    fn new(runtime: RuntimeKind, output: Value) -> Self {
-        Self {
-            runtime,
-            output,
-            requests: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-
-    fn requests(&self) -> Vec<RecordedAdapterRequest> {
-        self.requests.lock().unwrap().clone()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct RecordedAdapterRequest {
-    provider: ExtensionId,
-    capability_id: CapabilityId,
-    runtime: RuntimeKind,
-    network_mode: NetworkMode,
-    scope: ResourceScope,
-    mounts: Option<MountView>,
-    input: Value,
-}
-
-#[async_trait]
-impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingAdapter {
-    async fn dispatch_json(
-        &self,
-        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
-    ) -> Result<RuntimeAdapterResult, DispatchError> {
-        self.requests.lock().unwrap().push(RecordedAdapterRequest {
-            provider: request.package.id.clone(),
-            capability_id: request.capability_id.clone(),
-            runtime: request.descriptor.runtime,
-            network_mode: request.runtime_policy.network_mode,
-            scope: request.scope.clone(),
-            mounts: request.mounts.clone(),
-            input: request.input.clone(),
-        });
-
-        let output_bytes = serde_json::to_vec(&self.output).unwrap().len() as u64;
-        let usage = ResourceUsage {
-            output_bytes,
-            process_count: u32::from(matches!(
-                self.runtime,
-                RuntimeKind::Script | RuntimeKind::Mcp
-            )),
-            ..ResourceUsage::default()
-        };
-        let reservation = request
-            .governor
-            .reserve(request.scope, request.estimate)
-            .map_err(|_| {
-                dispatch_error_for_runtime(self.runtime, RuntimeDispatchErrorKind::Resource)
-            })?;
-        let receipt = request
-            .governor
-            .reconcile(reservation.id, usage.clone())
-            .map_err(|_| {
-                dispatch_error_for_runtime(self.runtime, RuntimeDispatchErrorKind::Resource)
-            })?;
-
-        Ok(RuntimeAdapterResult {
-            output: self.output.clone(),
-            display_preview: None,
-            usage,
-            receipt,
-            output_bytes,
-        })
-    }
-}
-
-fn dispatch_error_for_runtime(
-    runtime: RuntimeKind,
-    kind: RuntimeDispatchErrorKind,
-) -> DispatchError {
-    match runtime {
-        RuntimeKind::Wasm => DispatchError::Wasm { kind },
-        RuntimeKind::Script => DispatchError::Script { kind },
-        RuntimeKind::Mcp => DispatchError::Mcp { kind },
-        RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::UnsupportedRuntime {
-            capability: CapabilityId::new("system.unsupported").unwrap(),
-            runtime,
-        },
-    }
-}
-
 fn registry_with_package(manifest: &str) -> ExtensionRegistry {
     let mut registry = ExtensionRegistry::new();
     registry.insert(package_from_manifest(manifest)).unwrap();
@@ -323,9 +234,9 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
     .unwrap()
 }
 
-fn mounted_empty_extension_root() -> LocalFilesystem {
+fn mounted_empty_extension_root() -> DiskFilesystem {
     let storage = tempfile::tempdir().unwrap().keep();
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage),

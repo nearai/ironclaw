@@ -59,6 +59,14 @@ impl RebornIntegrationGroup {
         Self::builder().extension_lifecycle().await
     }
 
+    /// Group with the two-capability visibility-probe fixture published into
+    /// the active registry and BOTH capabilities granted, so tests can pin
+    /// that only the manifest `visibility` value keeps the `host_internal`
+    /// sibling off the model surface.
+    pub async fn extension_visibility_probe() -> HarnessResult<Self> {
+        Self::builder().extension_visibility_probe().await
+    }
+
     /// Group whose GitHub extension's credential account resolves to
     /// `AuthRequired`, so a scripted `github.*` tool call raises a real
     /// `TurnStatus::BlockedAuth` gate (E-AUTHGATE seam). Drive with
@@ -111,6 +119,14 @@ impl RebornIntegrationGroup {
     /// through the real capability path instead of raising approval gates.
     pub async fn triggers() -> HarnessResult<Self> {
         Self::builder().triggers().await
+    }
+
+    /// Trigger verbs plus `builtin.write_file` on one runtime (#5886
+    /// blocked-trigger visibility). Auto-approve is ON so the verbs dispatch
+    /// gate-free; a scenario gates the write via
+    /// `set_ask_each_time_override_for_test`.
+    pub async fn triggers_with_gated_write() -> HarnessResult<Self> {
+        Self::builder().triggers_with_gated_write().await
     }
 
     /// Group whose ONLY capability is `builtin.skill_activate` (E-SKILL seam).
@@ -241,9 +257,52 @@ impl RebornIntegrationGroupBuilder {
     }
 
     /// Build an extension-lifecycle group. See [`RebornIntegrationGroup::extension_lifecycle`].
-    pub async fn extension_lifecycle(self) -> HarnessResult<RebornIntegrationGroup> {
+    pub async fn extension_lifecycle(mut self) -> HarnessResult<RebornIntegrationGroup> {
+        let base = self.build_base().await?;
+        // Lifecycle ownership is caller-derived. Align the shared capability
+        // harness with the group's canonical binding subject so install and
+        // remove execute under the same user scope as the turn.
+        let host_runtime = build_group_capability_with_base(
+            super::super::harness::profiles::extension::extension_lifecycle_tools_profile()?,
+            &base,
+        )
+        .await?;
+        // C-SLACK-LIFECYCLE (issue #6105): wire the REAL Slack channel-connection
+        // facade over this harness's own `RebornServices`, mirroring the
+        // production `build_webui_services_with_slack_host_beta_mounts` slot
+        // fill — so `builtin.extension_remove("slack")` runs the real
+        // personal-connection cleanup instead of failing closed on an unset
+        // facade slot. Identities come from the group's single-source dispatch
+        // scope so the facade's tenant check matches dispatch-time callers.
+        let scope = &base.product_harness.scope;
+        let slack =
+            ironclaw_reborn_composition::test_support::build_slack_channel_connection_for_test(
+                host_runtime
+                    .reborn_services_for_test()
+                    .ok_or("extension_lifecycle harness is missing its RebornServices bundle")?,
+                ironclaw_reborn_composition::test_support::SlackChannelConnectionTestConfig {
+                    tenant_id: scope.tenant_id.as_str().to_string(),
+                    host_user_id: scope.user_id.as_str().to_string(),
+                    agent_id: scope
+                        .agent_id
+                        .as_ref()
+                        .map(|agent| agent.as_str().to_string())
+                        .ok_or("group product scope is missing an agent id")?,
+                    installation_id: "itest-slack-install".to_string(),
+                    team_id: "T-ITEST".to_string(),
+                    api_app_id: "A-ITEST".to_string(),
+                },
+            )?;
+        self.slack_channel_connection = Some(Arc::new(slack));
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.into_group(base, capability).await
+    }
+
+    /// Build a visibility-probe group. See
+    /// [`RebornIntegrationGroup::extension_visibility_probe`].
+    pub async fn extension_visibility_probe(self) -> HarnessResult<RebornIntegrationGroup> {
         let host_runtime =
-            super::super::harness::profiles::extension::extension_lifecycle_tools().await?;
+            super::super::harness::profiles::extension::extension_visibility_probe_tools().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
     }
@@ -331,6 +390,15 @@ impl RebornIntegrationGroupBuilder {
     pub async fn triggers(self) -> HarnessResult<RebornIntegrationGroup> {
         let host_runtime =
             super::super::harness::profiles::trigger::trigger_management_tools().await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.build_with_capability(capability).await
+    }
+
+    /// Build a triggers-plus-gated-write group. See
+    /// [`RebornIntegrationGroup::triggers_with_gated_write`].
+    pub async fn triggers_with_gated_write(self) -> HarnessResult<RebornIntegrationGroup> {
+        let host_runtime =
+            super::super::harness::profiles::trigger::trigger_management_with_gated_write().await?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.build_with_capability(capability).await
     }

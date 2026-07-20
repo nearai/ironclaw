@@ -1,4 +1,5 @@
 mod analysis;
+mod api_capacity;
 mod capture;
 mod child_io;
 mod compare;
@@ -11,6 +12,7 @@ mod ramp;
 mod redaction;
 mod report;
 mod resource_ops;
+mod secret_ops;
 mod suite;
 mod summary;
 mod sweep;
@@ -24,6 +26,7 @@ use std::{
     any::Any,
     collections::BTreeMap,
     io::ErrorKind,
+    net::SocketAddr,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Arc, mpsc},
@@ -35,12 +38,14 @@ use std::{
 #[cfg(feature = "postgres")]
 use crate::redaction::redact_postgres_url;
 use crate::{
+    api_capacity::ApiCapacitySummary,
     capture::CapturedRun,
     child_io::{join_child_stderr_reader, spawn_child_stderr_reader},
     db_probe::DbProbeSummary,
     process_metrics::{ProcessMetrics, ProcessMetricsSampler},
     progress::{ProgressCounters, spawn_progress_reporter, stop_progress_reporter},
     redaction::redact_libsql_path,
+    secret_ops::{build_secret_consume_workload, run_secret_consume_tasks},
     summary::{
         FailureCause, FailureCauseSummary, LatencySummary, latency_summary,
         summarize_failure_causes, summarize_user_turn_operation_attribution,
@@ -57,9 +62,7 @@ use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, TenantId, VirtualPath,
 };
-use ironclaw_resources::{
-    FilesystemResourceGovernorStore, PersistentResourceGovernor, ResourceAccount, ResourceGovernor,
-};
+use ironclaw_resources::{FilesystemResourceGovernor, ResourceAccount, ResourceGovernor};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Parser)]
@@ -146,10 +149,34 @@ pub(crate) struct Args {
     pub(crate) scenario: Scenario,
 
     /// Turn-state store backend for user-turn scenarios. `filesystem` = durable
-    /// per-user state.json (CAS, current production path); `memory` = one shared
-    /// in-process authority (runtime-wedge prototype). No effect on non-turn scenarios.
+    /// per-user state.json (CAS, current production path);
+    /// `filesystem-row` = durable typed append-log deltas with a hot
+    /// in-process row cache; `memory` = one shared in-process authority
+    /// (runtime-wedge prototype). No effect on non-turn scenarios.
     #[arg(long, value_enum, default_value_t = TurnStateBackend::Filesystem)]
     pub(crate) turn_state_backend: TurnStateBackend,
+
+    /// Durable-commit policy for the row-store backends (`filesystem-row`,
+    /// `row-memory`). `write-through` (default) awaits every delta's durable ack;
+    /// `write-behind` returns non-critical transitions (Queued/Running) before
+    /// their ack while keeping gate-park + terminal transitions synchronously
+    /// durable — the `inmemory-turn-state` production profile's policy. No effect
+    /// on the `filesystem`/`memory` backends.
+    #[arg(long, value_enum, default_value_t = TurnStateDurability::WriteThrough)]
+    pub(crate) turn_state_durability: TurnStateDurability,
+
+    /// Override max retained terminal run records in the turn-state store.
+    /// Useful for measuring filesystem snapshot growth sensitivity.
+    #[arg(long)]
+    pub(crate) turn_state_max_terminal_records: Option<usize>,
+
+    /// Override max retained lifecycle events in the turn-state store.
+    #[arg(long)]
+    pub(crate) turn_state_max_events: Option<usize>,
+
+    /// Override max retained idempotency records per operation family.
+    #[arg(long)]
+    pub(crate) turn_state_max_idempotency_records: Option<usize>,
 
     /// Shared run id. Defaults to a fresh UUID.
     #[arg(long)]
@@ -166,6 +193,110 @@ pub(crate) struct Args {
     /// Postgres pool size per process.
     #[arg(long, default_value_t = 4)]
     pub(crate) postgres_pool_size: usize,
+
+    /// Base URL for API-level scenarios, for example https://host or http://127.0.0.1:8080.
+    #[arg(long)]
+    pub(crate) api_base_url: Option<String>,
+
+    /// JSONL file of API test users. Each line may contain user_id and bearer_token.
+    #[arg(long)]
+    pub(crate) api_users_jsonl: Option<PathBuf>,
+
+    /// Bearer token used for every generated API test user when --api-users-jsonl is omitted.
+    #[arg(long)]
+    pub(crate) api_bearer_token: Option<String>,
+
+    /// Operator/admin bearer token used to provision API test users via WebUI admin CRUD.
+    #[arg(long)]
+    pub(crate) api_admin_bearer_token: Option<String>,
+
+    /// Admin principals used to fan out API test-user provisioning. 1 uses the supplied admin token directly.
+    #[arg(long, default_value_t = 1)]
+    pub(crate) api_admin_provisioners: usize,
+
+    /// Aggregate read pressure per virtual user for api-user-capacity.
+    #[arg(long, default_value_t = 0.0)]
+    pub(crate) api_read_qps_per_user: f64,
+
+    /// Read worker count for api-user-capacity. 0 auto-scales from --users.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) api_read_workers: usize,
+
+    /// Read endpoint mix for api-user-capacity, e.g. list_threads=50,timeline=45,session=5.
+    #[arg(long, default_value_t = api_capacity::default_read_mix())]
+    pub(crate) api_read_mix: String,
+
+    /// Page size for API list/timeline reads.
+    #[arg(long, default_value_t = 50)]
+    pub(crate) api_page_size: u32,
+
+    /// Per-user delay after each completed full flow.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) api_message_interval_ms: u64,
+
+    /// Wait until the assistant message is visible in the timeline before completing a full flow.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub(crate) api_wait_for_assistant: bool,
+
+    /// Full-flow timeout while waiting for assistant visibility.
+    #[arg(long, default_value_t = 30_000)]
+    pub(crate) api_terminal_timeout_ms: u64,
+
+    /// Timeline polling interval while waiting for assistant visibility.
+    #[arg(long, default_value_t = 250)]
+    pub(crate) api_poll_interval_ms: u64,
+
+    /// Per-request timeout for API calls.
+    #[arg(long, default_value_t = 10_000)]
+    pub(crate) api_request_timeout_ms: u64,
+
+    /// Concurrent setup creates for API scenario user threads.
+    #[arg(long, default_value_t = 16)]
+    pub(crate) api_setup_concurrency: usize,
+
+    /// Background long-running API users to run alongside foreground api-user-capacity sends.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) api_background_users: usize,
+
+    /// Max concurrently active background API users. 0 auto-scales from --api-background-users.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) api_background_concurrency: usize,
+
+    /// Full-flow operations per background API user.
+    #[arg(long, default_value_t = 1)]
+    pub(crate) api_background_operations: usize,
+
+    /// Delay after launching background users before foreground sends start.
+    #[arg(long, default_value_t = 250)]
+    pub(crate) api_background_start_delay_ms: u64,
+
+    /// Optional bind address for the built-in OpenAI-compatible mock LLM sidecar.
+    #[arg(long)]
+    pub(crate) mock_llm_bind: Option<SocketAddr>,
+
+    /// Model name returned by the built-in mock LLM.
+    #[arg(long, default_value = "stress-mock")]
+    pub(crate) mock_llm_model: String,
+
+    /// Base latency added by the built-in mock LLM.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) mock_llm_latency_ms: u64,
+
+    /// Latency for mock LLM requests tagged as API background load. 0 uses --mock-llm-latency-ms.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) mock_llm_background_latency_ms: u64,
+
+    /// Deterministic jitter ceiling added by the built-in mock LLM.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) mock_llm_jitter_ms: u64,
+
+    /// Assistant content bytes returned by the built-in mock LLM.
+    #[arg(long, default_value_t = 128)]
+    pub(crate) mock_llm_output_bytes: usize,
+
+    /// Deterministic failure rate for the built-in mock LLM, from 0.0 to 1.0.
+    #[arg(long, default_value_t = 0.0)]
+    pub(crate) mock_llm_failure_rate: f64,
 
     /// Emit live progress to stderr every N seconds. Set to 0 to disable.
     #[arg(long, default_value_t = 1)]
@@ -315,6 +446,14 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 20)]
     pub(crate) context_max_messages: usize,
 
+    /// Threads to seed under one scope for the thread-list read workload.
+    #[arg(long, default_value_t = 1000)]
+    pub(crate) thread_list_threads: usize,
+
+    /// Page size used while walking the thread-list workload.
+    #[arg(long, default_value_t = 50)]
+    pub(crate) thread_list_page_size: usize,
+
     /// Sequential chat turns written per context-growth operation.
     #[arg(long, default_value_t = 4)]
     pub(crate) context_growth_turns_per_operation: usize,
@@ -396,6 +535,20 @@ impl Args {
         }
     }
 
+    pub(crate) fn turn_state_store_limits(&self) -> ironclaw_turns::InMemoryTurnStateStoreLimits {
+        let defaults = ironclaw_turns::InMemoryTurnStateStoreLimits::default();
+        ironclaw_turns::InMemoryTurnStateStoreLimits {
+            max_events: self.turn_state_max_events.unwrap_or(defaults.max_events),
+            max_terminal_records: self
+                .turn_state_max_terminal_records
+                .unwrap_or(defaults.max_terminal_records),
+            max_idempotency_records: self
+                .turn_state_max_idempotency_records
+                .unwrap_or(defaults.max_idempotency_records),
+            ..defaults
+        }
+    }
+
     pub(crate) fn warmup_args(&self) -> Option<Self> {
         if self.warmup_seconds == 0 {
             return None;
@@ -468,6 +621,14 @@ pub(crate) enum TurnStateBackend {
     /// read-modify-write). The current production path; livelocks under
     /// concurrent same-user writers.
     Filesystem,
+    /// Durable typed append-log deltas with one hot in-process store per
+    /// tenant/user. Candidate filesystem fix for the blob growth curve.
+    FilesystemRow,
+    /// The row store over an in-memory `RootFilesystem` backend — the proposed
+    /// replacement for the direct `InMemoryTurnStateStore` authority in the
+    /// `inmemory-turn-state` profile. Measures the row-store mechanism's
+    /// overhead with the durable backend cost removed.
+    RowMemory,
     /// One shared in-process `InMemoryTurnStateStore` authority — coordination
     /// in memory, no per-step CAS. Prototype for the runtime-wedge fix.
     Memory,
@@ -483,6 +644,8 @@ impl TurnStateBackend {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Filesystem => "filesystem",
+            Self::FilesystemRow => "filesystem-row",
+            Self::RowMemory => "row-memory",
             Self::Memory => "memory",
             Self::MemoryPersistOnBlock => "memory-persist-on-block",
         }
@@ -492,6 +655,36 @@ impl TurnStateBackend {
     /// authority.
     pub(crate) fn persists_on_block(self) -> bool {
         matches!(self, Self::MemoryPersistOnBlock)
+    }
+}
+
+/// Durable-commit policy for the row-store turn-state backends. Mirrors
+/// `ironclaw_turns::TurnStateDurabilityPolicy` as a `ValueEnum` for the CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum TurnStateDurability {
+    /// Await every delta's durable ack (current default; byte-for-byte the
+    /// pre-#6263-Step-3 behavior).
+    WriteThrough,
+    /// Non-critical transitions return before their durable ack; gate-park and
+    /// terminal transitions stay synchronously durable. The `inmemory-turn-state`
+    /// production profile's policy.
+    WriteBehind,
+}
+
+impl TurnStateDurability {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::WriteThrough => "write-through",
+            Self::WriteBehind => "write-behind",
+        }
+    }
+
+    pub(crate) fn to_policy(self) -> ironclaw_turns::TurnStateDurabilityPolicy {
+        match self {
+            Self::WriteThrough => ironclaw_turns::TurnStateDurabilityPolicy::WriteThrough,
+            Self::WriteBehind => ironclaw_turns::TurnStateDurabilityPolicy::WriteBehind,
+        }
     }
 }
 
@@ -581,9 +774,13 @@ pub(crate) enum Scenario {
     ReserveRelease,
     ReserveReconcile,
     ChatTurn,
+    TurnLifecycleChurn,
+    ThreadList,
     MixedUserSession,
     ContextGrowth,
     ToolSession,
+    ApiUserCapacity,
+    SecretConsume,
     CpuBurn,
     MemoryChurn,
 }
@@ -594,9 +791,13 @@ impl Scenario {
             Self::ReserveRelease => "reserve-release",
             Self::ReserveReconcile => "reserve-reconcile",
             Self::ChatTurn => "chat-turn",
+            Self::TurnLifecycleChurn => "turn-lifecycle-churn",
+            Self::ThreadList => "thread-list",
             Self::MixedUserSession => "mixed-user-session",
             Self::ContextGrowth => "context-growth",
             Self::ToolSession => "tool-session",
+            Self::ApiUserCapacity => "api-user-capacity",
+            Self::SecretConsume => "secret-consume",
             Self::CpuBurn => "cpu-burn",
             Self::MemoryChurn => "memory-churn",
         }
@@ -609,13 +810,46 @@ impl Scenario {
     pub(crate) fn is_user_turn(self) -> bool {
         matches!(
             self,
-            Self::ChatTurn | Self::MixedUserSession | Self::ContextGrowth | Self::ToolSession
+            Self::ChatTurn
+                | Self::TurnLifecycleChurn
+                | Self::ThreadList
+                | Self::MixedUserSession
+                | Self::ContextGrowth
+                | Self::ToolSession
         )
+    }
+
+    pub(crate) fn is_api_capacity(self) -> bool {
+        matches!(self, Self::ApiUserCapacity)
+    }
+
+    pub(crate) fn is_secret_control_plane(self) -> bool {
+        matches!(self, Self::SecretConsume)
     }
 
     pub(crate) fn is_process_local(self) -> bool {
         matches!(self, Self::CpuBurn | Self::MemoryChurn)
     }
+
+    fn prewarm_target(self) -> PrewarmTarget {
+        if self.is_process_local() {
+            PrewarmTarget::None
+        } else if self.is_resource_governor() {
+            PrewarmTarget::ResourceGovernor
+        } else if self.is_secret_control_plane() {
+            PrewarmTarget::SecretControlPlane
+        } else {
+            PrewarmTarget::UserTurn
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrewarmTarget {
+    None,
+    ResourceGovernor,
+    SecretControlPlane,
+    UserTurn,
 }
 
 struct BackendHandle {
@@ -650,6 +884,10 @@ struct RunSummary {
     active_thread_count: usize,
     threads_per_owner: usize,
     turn_state_backend: TurnStateBackend,
+    turn_state_durability: TurnStateDurability,
+    turn_state_max_terminal_records: Option<usize>,
+    turn_state_max_events: Option<usize>,
+    turn_state_max_idempotency_records: Option<usize>,
     gate_blocked_every: usize,
     tenants: usize,
     prefill_threads: usize,
@@ -666,6 +904,8 @@ struct RunSummary {
     user_message_bytes: usize,
     assistant_message_bytes: usize,
     context_max_messages: usize,
+    thread_list_threads: usize,
+    thread_list_page_size: usize,
     context_growth_turns_per_operation: usize,
     tool_calls_per_turn: usize,
     tool_latency_ms: u64,
@@ -686,6 +926,8 @@ struct RunSummary {
     operation_attribution: Option<UserTurnOperationAttributionSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stage_latency: Option<UserTurnStageLatencySummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    api_capacity: Option<ApiCapacitySummary>,
     errors: BTreeMap<String, u64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     failure_causes: BTreeMap<String, FailureCauseSummary>,
@@ -698,6 +940,7 @@ struct SummaryInput {
     process: ProcessMetrics,
     db_probe: Option<DbProbeSummary>,
     prefill: Option<user_turn::PrefillSummary>,
+    api_capacity: Option<ApiCapacitySummary>,
 }
 
 #[tokio::main]
@@ -719,6 +962,7 @@ async fn run() -> Result<(), String> {
     args.run_id = Some(run_id.clone());
     let generated_libsql_path = if args.child_index.is_none()
         && matches!(args.backend, Backend::Libsql)
+        && !args.scenario.is_api_capacity()
         && args.libsql_path.is_none()
     {
         let path = default_libsql_path();
@@ -910,6 +1154,49 @@ fn validate_args(args: &Args) -> Result<(), String> {
     if args.postgres_pool_size == 0 {
         return Err("--postgres-pool-size must be greater than 0".to_string());
     }
+    if args.scenario.is_api_capacity() {
+        if args.api_base_url.is_none() {
+            return Err("--api-base-url is required for --scenario api-user-capacity".to_string());
+        }
+        if args.processes > 1 {
+            return Err("--scenario api-user-capacity requires --processes 1".to_string());
+        }
+    } else if args.api_admin_bearer_token.is_some() {
+        return Err(
+            "--api-admin-bearer-token is only valid for --scenario api-user-capacity".to_string(),
+        );
+    }
+    if args.api_read_qps_per_user < 0.0 {
+        return Err("--api-read-qps-per-user must be greater than or equal to 0".to_string());
+    }
+    if args.api_page_size == 0 {
+        return Err("--api-page-size must be greater than 0".to_string());
+    }
+    if args.api_terminal_timeout_ms == 0 {
+        return Err("--api-terminal-timeout-ms must be greater than 0".to_string());
+    }
+    if args.api_poll_interval_ms == 0 {
+        return Err("--api-poll-interval-ms must be greater than 0".to_string());
+    }
+    if args.api_request_timeout_ms == 0 {
+        return Err("--api-request-timeout-ms must be greater than 0".to_string());
+    }
+    if args.api_setup_concurrency == 0 {
+        return Err("--api-setup-concurrency must be greater than 0".to_string());
+    }
+    if args.api_admin_provisioners == 0 {
+        return Err("--api-admin-provisioners must be greater than 0".to_string());
+    }
+    if args.api_background_users > 0 && args.api_background_operations == 0 {
+        return Err(
+            "--api-background-operations must be greater than 0 when background users are enabled"
+                .to_string(),
+        );
+    }
+    api_capacity::validate_read_mix(&args.api_read_mix)?;
+    if !(0.0..=1.0).contains(&args.mock_llm_failure_rate) {
+        return Err("--mock-llm-failure-rate must be between 0.0 and 1.0".to_string());
+    }
     if matches!(args.model_latency_source, ModelLatencySource::Provider) {
         if !matches!(args.scenario, Scenario::MixedUserSession) {
             return Err(
@@ -1098,6 +1385,12 @@ fn validate_args(args: &Args) -> Result<(), String> {
     if args.context_max_messages == 0 {
         return Err("--context-max-messages must be greater than 0".to_string());
     }
+    if args.thread_list_threads == 0 {
+        return Err("--thread-list-threads must be greater than 0".to_string());
+    }
+    if args.thread_list_page_size == 0 || args.thread_list_page_size > 200 {
+        return Err("--thread-list-page-size must be between 1 and 200".to_string());
+    }
     if args.context_growth_turns_per_operation == 0 {
         return Err("--context-growth-turns-per-operation must be greater than 0".to_string());
     }
@@ -1164,21 +1457,40 @@ async fn prewarm(args: &Args, run_id: &str) -> Result<(), String> {
         args.scenario.as_str(),
         run_id
     );
-    if args.scenario.is_resource_governor() {
-        let backend = build_backend(args, run_id).await?;
-        let account =
-            ResourceAccount::tenant(TenantId::new("stress-prewarm").map_err(display_err)?);
-        backend
-            .governor
-            .account_snapshot(&account)
-            .map_err(|error| format!("prewarm failed: {error:?}"))?;
-    } else {
-        let workload = build_user_turn_workload(args, run_id).await?;
-        eprintln!(
-            "{} prewarmed target={}",
-            log_prefix(args),
-            workload.target()
-        );
+    match args.scenario.prewarm_target() {
+        PrewarmTarget::None => {
+            eprintln!(
+                "{} prewarm skipped for process-local scenario",
+                log_prefix(args)
+            );
+        }
+        PrewarmTarget::ResourceGovernor => {
+            let backend = build_backend(args, run_id).await?;
+            let account =
+                ResourceAccount::tenant(TenantId::new("stress-prewarm").map_err(display_err)?);
+            backend
+                .governor
+                .account_snapshot(&account)
+                .map_err(|error| format!("prewarm failed: {error:?}"))?;
+        }
+        PrewarmTarget::SecretControlPlane => {
+            let workload = Arc::new(build_secret_consume_workload(args, run_id).await?);
+            let identities = Arc::new(SyntheticIds::new(args)?);
+            secret_ops::prefill_secrets(Arc::clone(&workload), args, identities).await?;
+            eprintln!(
+                "{} prewarmed target={}",
+                log_prefix(args),
+                workload.target()
+            );
+        }
+        PrewarmTarget::UserTurn => {
+            let workload = build_user_turn_workload(args, run_id).await?;
+            eprintln!(
+                "{} prewarmed target={}",
+                log_prefix(args),
+                workload.target()
+            );
+        }
     }
     Ok(())
 }
@@ -1226,6 +1538,10 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
             .arg(args.prefill_concurrency.to_string())
             .arg("--scenario")
             .arg(args.scenario.as_str())
+            .arg("--turn-state-backend")
+            .arg(args.turn_state_backend.as_str())
+            .arg("--turn-state-durability")
+            .arg(args.turn_state_durability.as_str())
             .arg("--postgres-pool-size")
             .arg(args.postgres_pool_size.to_string())
             .arg("--progress-interval-seconds")
@@ -1252,6 +1568,10 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
             .arg(args.assistant_message_bytes.to_string())
             .arg("--context-max-messages")
             .arg(args.context_max_messages.to_string())
+            .arg("--thread-list-threads")
+            .arg(args.thread_list_threads.to_string())
+            .arg("--thread-list-page-size")
+            .arg(args.thread_list_page_size.to_string())
             .arg("--context-growth-turns-per-operation")
             .arg(args.context_growth_turns_per_operation.to_string())
             .arg("--tool-calls-per-turn")
@@ -1283,6 +1603,21 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
         }
         if args.span_log_failures {
             command.arg("--span-log-failures");
+        }
+        if let Some(max_terminal_records) = args.turn_state_max_terminal_records {
+            command
+                .arg("--turn-state-max-terminal-records")
+                .arg(max_terminal_records.to_string());
+        }
+        if let Some(max_events) = args.turn_state_max_events {
+            command
+                .arg("--turn-state-max-events")
+                .arg(max_events.to_string());
+        }
+        if let Some(max_idempotency_records) = args.turn_state_max_idempotency_records {
+            command
+                .arg("--turn-state-max-idempotency-records")
+                .arg(max_idempotency_records.to_string());
         }
         if let Some(path) = &args.trace_jsonl {
             command
@@ -1365,10 +1700,16 @@ async fn run_in_process(args: &Args, run_id: &str) -> Result<RunSummary, String>
     if args.scenario.is_process_local() {
         return run_process_pressure_in_process(args, run_id, operation_target).await;
     }
+    if args.scenario.is_api_capacity() {
+        return run_api_capacity_in_process(args, run_id, operation_target).await;
+    }
     let identities = Arc::new(SyntheticIds::new(args)?);
 
     if args.scenario.is_resource_governor() {
         return run_resource_governor_in_process(args, run_id, operation_target, identities).await;
+    }
+    if args.scenario.is_secret_control_plane() {
+        return run_secret_consume_in_process(args, run_id, operation_target, identities).await;
     }
 
     run_user_turn_in_process(args, run_id, operation_target, identities).await
@@ -1432,6 +1773,81 @@ async fn run_process_pressure_in_process(
             process,
             db_probe: None,
             prefill: None,
+            api_capacity: None,
+        },
+    );
+    eprintln!(
+        "{} finished attempted={} succeeded={} failed={} duration_ms={} throughput_ops_sec={:.1}",
+        log_prefix(args),
+        summary.attempted,
+        summary.succeeded,
+        summary.failed,
+        summary.duration_ms,
+        summary.throughput_ops_sec
+    );
+    Ok(summary)
+}
+
+async fn run_api_capacity_in_process(
+    args: &Args,
+    run_id: &str,
+    operation_target: OperationTarget,
+) -> Result<RunSummary, String> {
+    let target = args
+        .api_base_url
+        .clone()
+        .unwrap_or_else(|| "api://unconfigured".to_string());
+    let progress_total = match operation_target {
+        OperationTarget::Fixed { .. } => Some(args.users.saturating_mul(args.operations)),
+        OperationTarget::Duration { .. } => None,
+    };
+    let workload_label = match operation_target {
+        OperationTarget::Fixed { .. } => {
+            format!(
+                "total_operations={}",
+                args.users.saturating_mul(args.operations)
+            )
+        }
+        OperationTarget::Duration { .. } => operation_target.label(),
+    };
+    eprintln!(
+        "{} running target={} virtual_users={} operations_per_user={} {} warmup_seconds={} read_qps_per_user={:.2} progress_interval_seconds={}",
+        log_prefix(args),
+        target,
+        args.users,
+        args.operations,
+        workload_label,
+        args.warmup_seconds,
+        args.api_read_qps_per_user,
+        args.progress_interval_seconds
+    );
+    let progress = Arc::new(ProgressCounters::new(args.trace_jsonl.is_some()));
+    let progress_reporter = spawn_progress_reporter(
+        log_prefix(args),
+        args.backend.as_str(),
+        args.scenario.as_str(),
+        args.progress_interval_seconds,
+        progress_total,
+        Arc::clone(&progress),
+    );
+    let trace_reporter = trace::spawn_trace_reporter(args, &target, Arc::clone(&progress));
+    let metrics = ProcessMetricsSampler::start(Duration::from_millis(100));
+    let api_run = api_capacity::run(args, run_id, progress).await;
+    trace::stop_trace_reporter(trace_reporter);
+    stop_progress_reporter(progress_reporter);
+    let api_run = api_run?;
+    let process = metrics.finish();
+    let summary = summarize(
+        args,
+        run_id,
+        SummaryInput {
+            target: api_run.target,
+            elapsed: api_run.elapsed,
+            samples: api_run.samples,
+            process,
+            db_probe: None,
+            prefill: None,
+            api_capacity: Some(api_run.summary),
         },
     );
     eprintln!(
@@ -1521,6 +1937,7 @@ async fn run_resource_governor_in_process(
             process,
             db_probe: Some(db_probe),
             prefill: None,
+            api_capacity: None,
         },
     );
     eprintln!(
@@ -1554,9 +1971,12 @@ async fn run_user_turn_in_process(
         args.tenants,
         args.progress_interval_seconds
     );
-    let prefill =
+    let prefill = if matches!(args.scenario, Scenario::ThreadList) {
+        user_turn::prefill_thread_list(Arc::clone(&workload), args, Arc::clone(&identities)).await?
+    } else {
         user_turn::prefill_user_turn_history(Arc::clone(&workload), args, Arc::clone(&identities))
-            .await?;
+            .await?
+    };
     if let Some(warmup_args) = args.warmup_args() {
         eprintln!(
             "{} warming up target={} duration_seconds={}",
@@ -1585,6 +2005,71 @@ async fn run_user_turn_in_process(
             process,
             db_probe: Some(db_probe),
             prefill,
+            api_capacity: None,
+        },
+    );
+    eprintln!(
+        "{} finished attempted={} succeeded={} failed={} duration_ms={} throughput_ops_sec={:.1}",
+        log_prefix(args),
+        summary.attempted,
+        summary.succeeded,
+        summary.failed,
+        summary.duration_ms,
+        summary.throughput_ops_sec
+    );
+    Ok(summary)
+}
+
+async fn run_secret_consume_in_process(
+    args: &Args,
+    run_id: &str,
+    operation_target: OperationTarget,
+    identities: Arc<SyntheticIds>,
+) -> Result<RunSummary, String> {
+    let workload = Arc::new(build_secret_consume_workload(args, run_id).await?);
+    eprintln!(
+        "{} running target={} concurrency={} operations_per_task={} {} warmup_seconds={} users={} tenants={} progress_interval_seconds={}",
+        log_prefix(args),
+        workload.target(),
+        args.concurrency,
+        args.operations,
+        operation_target.label(),
+        args.warmup_seconds,
+        args.users,
+        args.tenants,
+        args.progress_interval_seconds
+    );
+    secret_ops::prefill_secrets(Arc::clone(&workload), args, Arc::clone(&identities)).await?;
+    if let Some(warmup_args) = args.warmup_args() {
+        eprintln!(
+            "{} warming up target={} duration_seconds={}",
+            log_prefix(args),
+            workload.target(),
+            warmup_args.duration_seconds
+        );
+        let _ =
+            run_secret_consume_tasks(Arc::clone(&workload), &warmup_args, Arc::clone(&identities))
+                .await?;
+    }
+    let metrics = ProcessMetricsSampler::start(Duration::from_millis(100));
+    let db_probe_before = db_probe::capture(args).await;
+    let started = Instant::now();
+    let target = workload.target().to_string();
+    let samples = run_secret_consume_tasks(workload, args, identities).await?;
+    let elapsed = started.elapsed();
+    let process = metrics.finish();
+    let db_probe = db_probe::summarize(db_probe_before, db_probe::capture(args).await);
+    let summary = summarize(
+        args,
+        run_id,
+        SummaryInput {
+            target,
+            elapsed,
+            samples,
+            process,
+            db_probe: Some(db_probe),
+            prefill: None,
+            api_capacity: None,
         },
     );
     eprintln!(
@@ -1718,11 +2203,19 @@ fn run_one_operation(
         Scenario::ReserveReconcile => governor
             .reserve(scope, estimate)
             .and_then(|reservation| governor.reconcile(reservation.id, usage).map(|_| ())),
-        Scenario::ChatTurn | Scenario::ContextGrowth | Scenario::ToolSession => {
+        Scenario::ChatTurn
+        | Scenario::TurnLifecycleChurn
+        | Scenario::ThreadList
+        | Scenario::ContextGrowth
+        | Scenario::ToolSession
+        | Scenario::SecretConsume => {
             unreachable!("user-turn scenarios use the async user-turn workload")
         }
         Scenario::MixedUserSession => {
             unreachable!("mixed-user-session uses the async user-turn workload")
+        }
+        Scenario::ApiUserCapacity => {
+            unreachable!("api-user-capacity uses the async API workload")
         }
         Scenario::CpuBurn | Scenario::MemoryChurn => {
             unreachable!("process-only scenarios use the local pressure workload")
@@ -1779,6 +2272,10 @@ fn summarize(args: &Args, run_id: &str, input: SummaryInput) -> RunSummary {
         active_thread_count: args.active_thread_count,
         threads_per_owner: args.threads_per_owner,
         turn_state_backend: args.turn_state_backend,
+        turn_state_durability: args.turn_state_durability,
+        turn_state_max_terminal_records: args.turn_state_max_terminal_records,
+        turn_state_max_events: args.turn_state_max_events,
+        turn_state_max_idempotency_records: args.turn_state_max_idempotency_records,
         gate_blocked_every: args.gate_blocked_every,
         tenants: args.tenants,
         prefill_threads: args.prefill_threads,
@@ -1795,6 +2292,8 @@ fn summarize(args: &Args, run_id: &str, input: SummaryInput) -> RunSummary {
         user_message_bytes: args.user_message_bytes,
         assistant_message_bytes: args.assistant_message_bytes,
         context_max_messages: args.context_max_messages,
+        thread_list_threads: args.thread_list_threads,
+        thread_list_page_size: args.thread_list_page_size,
         context_growth_turns_per_operation: args.context_growth_turns_per_operation,
         tool_calls_per_turn: args.tool_calls_per_turn,
         tool_latency_ms: args.tool_latency_ms,
@@ -1811,6 +2310,7 @@ fn summarize(args: &Args, run_id: &str, input: SummaryInput) -> RunSummary {
         prefill: input.prefill,
         operation_attribution: summarize_user_turn_operation_attribution(&input.samples),
         stage_latency: summarize_user_turn_stages(&input.samples),
+        api_capacity: input.api_capacity,
         errors,
         failure_causes: summarize_failure_causes(&input.samples),
     }
@@ -1873,7 +2373,7 @@ async fn build_libsql_backend(_args: &Args, _run_id: &str) -> Result<BackendHand
 
 #[cfg(feature = "postgres")]
 async fn build_postgres_backend(args: &Args, run_id: &str) -> Result<BackendHandle, String> {
-    let (filesystem, target) = build_postgres_root(args).await?;
+    let (filesystem, _pool, target) = build_postgres_root_and_pool(args).await?;
     Ok(BackendHandle {
         governor: governor_from_root(filesystem, run_id)?,
         target,
@@ -1881,9 +2381,16 @@ async fn build_postgres_backend(args: &Args, run_id: &str) -> Result<BackendHand
 }
 
 #[cfg(feature = "postgres")]
-pub(crate) async fn build_postgres_root(
+pub(crate) async fn build_postgres_root_and_pool(
     args: &Args,
-) -> Result<(Arc<ironclaw_filesystem::PostgresRootFilesystem>, String), String> {
+) -> Result<
+    (
+        Arc<ironclaw_filesystem::PostgresRootFilesystem>,
+        deadpool_postgres::Pool,
+        String,
+    ),
+    String,
+> {
     use ironclaw_filesystem::PostgresRootFilesystem;
 
     let url = resolve_postgres_url(args)?;
@@ -1895,9 +2402,9 @@ pub(crate) async fn build_postgres_root(
         .max_size(args.postgres_pool_size)
         .build()
         .map_err(display_err)?;
-    let filesystem = Arc::new(PostgresRootFilesystem::new(pool));
+    let filesystem = Arc::new(PostgresRootFilesystem::new(pool.clone()));
     filesystem.run_migrations().await.map_err(display_err)?;
-    Ok((filesystem, redact_postgres_url(&url)))
+    Ok((filesystem, pool, redact_postgres_url(&url)))
 }
 
 #[cfg(not(feature = "postgres"))]
@@ -1914,10 +2421,7 @@ where
 {
     let view = resource_mount_view(run_id)?;
     let scoped = Arc::new(ScopedFilesystem::with_fixed_view(root, view));
-    let store = FilesystemResourceGovernorStore::new(scoped);
-    Ok(Arc::new(
-        PersistentResourceGovernor::new(store).with_unlimited_fast_path(),
-    ))
+    Ok(Arc::new(FilesystemResourceGovernor::new(scoped)))
 }
 
 fn resource_mount_view(run_id: &str) -> Result<MountView, String> {

@@ -1,5 +1,4 @@
 use ironclaw_product_adapters::{ProductAdapterError, ProductWorkflowRejectionKind};
-#[cfg(feature = "openai-compat-beta")]
 use ironclaw_product_adapters::{ProductRejection, ProductRejectionKind};
 use serde::{Deserialize, Serialize};
 
@@ -233,7 +232,6 @@ impl From<OpenAiCompatRefError> for OpenAiCompatHttpError {
 /// `param` carries the surface-specific field name for `BindingRequired` and
 /// `InvalidRequest` rejections. Chat passes `Some("messages")`; Responses
 /// passes `Some("input")`.
-#[cfg(feature = "openai-compat-beta")]
 pub(crate) fn product_rejection_to_openai_error(
     rejection: &ProductRejection,
     param: Option<&str>,
@@ -278,7 +276,6 @@ pub(crate) fn product_rejection_to_openai_error(
     }
 }
 
-#[cfg(feature = "openai-compat-beta")]
 impl axum::response::IntoResponse for OpenAiCompatHttpError {
     fn into_response(self) -> axum::response::Response {
         use axum::Json;
@@ -455,7 +452,7 @@ fn contains_no_exposure_sentinel(value: &str) -> bool {
         .any(|sentinel| value.contains(sentinel))
 }
 
-#[cfg(all(test, feature = "openai-compat-beta"))]
+#[cfg(test)]
 mod tests {
     use ironclaw_product_adapters::{ProductRejection, ProductRejectionKind};
 

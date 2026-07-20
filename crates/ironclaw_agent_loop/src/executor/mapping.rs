@@ -1,16 +1,17 @@
+use ironclaw_host_api::{Resolution, ToolVerdict};
 use ironclaw_turns::{
-    LoopBlockedKind, LoopFailureKind,
+    LoopBlockedKind, LoopFailureKind, SanitizedFailure,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, CapabilityFailureKind,
-        CapabilityOutcome, LoopCheckpointKind, LoopGateKind,
+        LoopCheckpointKind, LoopGateKind,
     },
 };
 
 use crate::{
     state::CheckpointKind,
     strategies::{
-        BatchPolicy, CapabilityErrorClass, GateKind, ModelErrorClass, ModelPreference,
-        RetryAlteration, SanitizedStrategySummary,
+        BatchPolicy, CapabilityErrorClass, GateKind, ModelErrorClass, ModelErrorSummary,
+        ModelPreference, RetryAlteration, SanitizedStrategySummary,
     },
 };
 
@@ -52,29 +53,24 @@ pub(super) fn batch_policy_kind(policy: BatchPolicy) -> BatchPolicyKind {
     }
 }
 
-pub(super) fn capability_batch_counts(outcomes: &[CapabilityOutcome]) -> (u32, u32, u32, u32) {
+pub(super) fn capability_batch_counts(resolutions: &[Resolution]) -> (u32, u32, u32, u32) {
     let mut result_count = 0;
     let mut denied_count = 0;
     let mut gated_count = 0;
     let mut failed_count = 0;
-    for outcome in outcomes {
-        match outcome {
-            CapabilityOutcome::Completed(_) | CapabilityOutcome::SpawnedChildRun { .. } => {
-                result_count += 1
-            }
-            CapabilityOutcome::Denied(_) => denied_count += 1,
-            CapabilityOutcome::ApprovalRequired { .. }
-            | CapabilityOutcome::AuthRequired { .. }
-            | CapabilityOutcome::ResourceBlocked { .. }
-            // ExternalToolPending: the run parks waiting for the client to submit
-            // tool output — a non-completing, non-failing, non-denied gate.
-            | CapabilityOutcome::ExternalToolPending { .. }
-            | CapabilityOutcome::AwaitDependentRun { .. }
-            // SpawnedProcess: treated as gated — it is a non-completing, non-failing, non-denied
-            // outcome that defers completion to a background process. Grouped with gated to avoid
-            // treating it as completed or failed in batch accounting.
-            | CapabilityOutcome::SpawnedProcess(_) => gated_count += 1,
-            CapabilityOutcome::Failed(_) => failed_count += 1,
+    for resolution in resolutions {
+        // Exhaustive over `Resolution`, no wildcard (§11.9). `Done` splits on its
+        // verdict: `Success`/`ChildSpawned` are results, a `RecoverableFailure` is
+        // a model-visible failure. `Denied` is denied; every `Blocked` gate and
+        // every `Suspended` (process/dependent-run/external-tool) is gated — a
+        // non-completing, non-failing, non-denied outcome that defers completion.
+        match resolution {
+            Resolution::Done(outcome) => match &outcome.verdict {
+                ToolVerdict::Success | ToolVerdict::ChildSpawned { .. } => result_count += 1,
+                ToolVerdict::RecoverableFailure { .. } => failed_count += 1,
+            },
+            Resolution::Denied(_) => denied_count += 1,
+            Resolution::Blocked(_) | Resolution::Suspended(_) => gated_count += 1,
         }
     }
     (result_count, denied_count, gated_count, failed_count)
@@ -95,8 +91,12 @@ pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelError
     match error.kind {
         AgentLoopHostErrorKind::Unavailable => Some(ModelErrorClass::Unavailable),
         AgentLoopHostErrorKind::Internal => Some(ModelErrorClass::Internal),
+        AgentLoopHostErrorKind::InvalidOutput => Some(ModelErrorClass::InvalidOutput),
         AgentLoopHostErrorKind::BudgetExceeded => Some(ModelErrorClass::ContextOverflow),
-        AgentLoopHostErrorKind::BudgetAccountingFailed => Some(ModelErrorClass::Unavailable),
+        // Accounting storage failed before the host could establish a
+        // trustworthy budget outcome. Preserve the typed host error instead
+        // of retrying it as a provider availability failure.
+        AgentLoopHostErrorKind::BudgetAccountingFailed => None,
         // Budget approval requirement is a gate, not a transient model
         // error — pass it through unclassified so the loop's gate handling
         // path takes over rather than the recovery strategy.
@@ -130,7 +130,7 @@ pub(super) fn capability_host_error(error: AgentLoopHostError) -> AgentLoopExecu
 
 pub(super) fn capability_error_class(kind: &CapabilityFailureKind) -> CapabilityErrorClass {
     // Runtime capability failures are first dispositioned in
-    // `ironclaw_host_runtime` and adapted by `ironclaw_loop_support`.
+    // `ironclaw_host_runtime` and adapted by `ironclaw_loop_host`.
     // Keep this recovery class mapping aligned with that adapter: retryable
     // runtime kinds must arrive here as Transient/Unavailable/Internal,
     // model-visible kinds as OperationFailed/InputInvalid/PolicyDenied, and
@@ -147,19 +147,26 @@ pub(super) fn capability_error_class(kind: &CapabilityFailureKind) -> Capability
         | CapabilityFailureKind::OperationFailed
         | CapabilityFailureKind::OutputTooLarge
         | CapabilityFailureKind::Process
-        | CapabilityFailureKind::Resource => CapabilityErrorClass::OperationFailed,
+        | CapabilityFailureKind::Resource
+        // Dispatcher/InvalidOutput/Unknown are dispositioned as model-visible
+        // (run-continuing) by the host_runtime layer
+        // (`capability_failure_disposition`). Map them to OperationFailed so the
+        // recovery strategy turns them into a model-visible ToolErrorResult
+        // instead of aborting the run — e.g. the model calling a nonexistent
+        // tool (UnknownCapability/UnknownProvider -> InvalidOutput) becomes a
+        // recoverable tool error the model can correct.
+        | CapabilityFailureKind::Dispatcher
+        | CapabilityFailureKind::InvalidOutput
+        | CapabilityFailureKind::Unknown(_) => CapabilityErrorClass::OperationFailed,
         CapabilityFailureKind::Authorization
         | CapabilityFailureKind::GateDeclined
         | CapabilityFailureKind::PolicyDenied => CapabilityErrorClass::PolicyDenied,
         CapabilityFailureKind::Internal => CapabilityErrorClass::Internal,
-        CapabilityFailureKind::Dispatcher => CapabilityErrorClass::Permanent,
-        CapabilityFailureKind::Cancelled => CapabilityErrorClass::Permanent,
-        CapabilityFailureKind::InvalidOutput
-        | CapabilityFailureKind::Permanent
-        | CapabilityFailureKind::Unknown(_) => CapabilityErrorClass::Permanent,
-        // CapabilityFailureKind is #[non_exhaustive]; treat unrecognised future variants as
-        // permanent failures so callers do not retry indefinitely on unknown error kinds.
-        &_ => CapabilityErrorClass::Permanent,
+        // Cancelled is intercepted upstream as cancellation; Permanent is an
+        // explicit non-retryable signal. Both stay terminal.
+        CapabilityFailureKind::Cancelled | CapabilityFailureKind::Permanent => {
+            CapabilityErrorClass::Permanent
+        }
     }
 }
 
@@ -169,8 +176,68 @@ pub(super) fn capability_failure_kind(kind: &CapabilityFailureKind) -> LoopFailu
         CapabilityFailureKind::Authorization
         | CapabilityFailureKind::GateDeclined
         | CapabilityFailureKind::PolicyDenied => LoopFailureKind::PolicyDenied,
-        _ => LoopFailureKind::CapabilityProtocolError,
+        // Every remaining kind maps to the protocol-error failure. Enumerated
+        // explicitly (no wildcard) so a new `CapabilityFailureKind` variant must
+        // be classified here deliberately rather than silently inheriting this
+        // terminal fate — `CapabilityFailureKind` is no longer `#[non_exhaustive]`.
+        CapabilityFailureKind::Backend
+        | CapabilityFailureKind::Cancelled
+        | CapabilityFailureKind::Dispatcher
+        | CapabilityFailureKind::InvalidOutput
+        | CapabilityFailureKind::MissingRuntime
+        | CapabilityFailureKind::Network
+        | CapabilityFailureKind::OperationFailed
+        | CapabilityFailureKind::OutputTooLarge
+        | CapabilityFailureKind::Process
+        | CapabilityFailureKind::Resource
+        | CapabilityFailureKind::Transient
+        | CapabilityFailureKind::Unavailable
+        | CapabilityFailureKind::Internal
+        | CapabilityFailureKind::Permanent
+        | CapabilityFailureKind::Unknown(_) => LoopFailureKind::CapabilityProtocolError,
     }
+}
+
+pub(super) fn capability_error_failure_category(
+    class: CapabilityErrorClass,
+) -> Result<SanitizedFailure, AgentLoopExecutorError> {
+    sanitized_failure_category(match class {
+        CapabilityErrorClass::Transient => "capability_transient",
+        CapabilityErrorClass::Permanent => "capability_permanent",
+        CapabilityErrorClass::InputInvalid => "capability_input_invalid",
+        CapabilityErrorClass::OperationFailed => "capability_operation_failed",
+        CapabilityErrorClass::PolicyDenied => "capability_policy_denied",
+        CapabilityErrorClass::Unavailable => "capability_unavailable",
+        CapabilityErrorClass::Internal => "capability_internal",
+    })
+}
+
+pub(super) fn model_error_failure_category(
+    class: ModelErrorClass,
+) -> Result<SanitizedFailure, AgentLoopExecutorError> {
+    sanitized_failure_category(match class {
+        ModelErrorClass::Transient => "model_transient",
+        ModelErrorClass::ContextOverflow => "model_context_overflow",
+        ModelErrorClass::ContentFiltered => "model_content_filtered",
+        ModelErrorClass::InvalidOutput => "model_invalid_output",
+        ModelErrorClass::Unavailable => "model_unavailable",
+        ModelErrorClass::Internal => "model_internal",
+    })
+}
+
+pub(super) fn model_error_failure_summary(
+    summary: &ModelErrorSummary,
+) -> Result<SanitizedFailure, AgentLoopExecutorError> {
+    Ok(model_error_failure_category(summary.class)?
+        .with_detail(summary.safe_summary.as_str().to_string()))
+}
+
+fn sanitized_failure_category(
+    category: &'static str,
+) -> Result<SanitizedFailure, AgentLoopExecutorError> {
+    SanitizedFailure::new(category).map_err(|_| AgentLoopExecutorError::PlannerContract {
+        detail: "static failure category was invalid",
+    })
 }
 
 pub(super) fn sanitized_strategy_summary(
@@ -217,6 +284,95 @@ mod tests {
         assert_eq!(
             capability_failure_kind(&CapabilityFailureKind::PolicyDenied),
             LoopFailureKind::PolicyDenied
+        );
+    }
+
+    /// Classification lock for `capability_error_class`: every
+    /// `CapabilityFailureKind` variant maps to a deliberate recovery class.
+    ///
+    /// This complements the compile-time guarantee (the match is exhaustive with
+    /// no `_ =>` wildcard, since `CapabilityFailureKind` is no longer
+    /// `#[non_exhaustive]`, so a *new* variant fails to compile until classified)
+    /// by also catching a silent *re-bucketing* of an *existing* variant — e.g.
+    /// moving a recoverable kind into the run-aborting `Permanent` class, or vice
+    /// versa. Only the genuinely-terminal kinds (`Cancelled` and `Permanent`)
+    /// may map to `Permanent`; runtime-dispositioned tool failures such as
+    /// `Dispatcher`, `InvalidOutput`, and the open-set `Unknown` stay
+    /// model-visible. See
+    /// `docs/plans/2026-06-28-reborn-error-recoverability-audit.md` §6.1.
+    #[test]
+    fn every_capability_failure_kind_has_a_deliberate_recovery_class() {
+        use CapabilityErrorClass as C;
+        use CapabilityFailureKind as K;
+
+        let unknown = K::unknown("some_future_kind").expect("valid unknown kind");
+        let cases: &[(K, C)] = &[
+            (K::Network, C::Transient),
+            (K::Transient, C::Transient),
+            (K::Backend, C::Unavailable),
+            (K::Unavailable, C::Unavailable),
+            (K::InvalidInput, C::InputInvalid),
+            (K::MissingRuntime, C::OperationFailed),
+            (K::OperationFailed, C::OperationFailed),
+            (K::OutputTooLarge, C::OperationFailed),
+            (K::Process, C::OperationFailed),
+            (K::Resource, C::OperationFailed),
+            (K::Authorization, C::PolicyDenied),
+            (K::GateDeclined, C::PolicyDenied),
+            (K::PolicyDenied, C::PolicyDenied),
+            (K::Internal, C::Internal),
+            (K::Dispatcher, C::OperationFailed),
+            (K::Cancelled, C::Permanent),
+            (K::InvalidOutput, C::OperationFailed),
+            (K::Permanent, C::Permanent),
+            (unknown.clone(), C::OperationFailed),
+        ];
+
+        for (kind, expected) in cases {
+            assert_eq!(
+                capability_error_class(kind),
+                *expected,
+                "recovery class for {kind:?} changed — re-confirm it is deliberate \
+                 and does not silently abort a recoverable failure"
+            );
+        }
+
+        // Only these kinds may abort the run.
+        for (kind, class) in cases {
+            if *class == C::Permanent {
+                assert!(
+                    matches!(kind, K::Cancelled | K::Permanent),
+                    "{kind:?} maps to the run-aborting Permanent class but is not a \
+                     recognized terminal kind — a recoverable failure must not abort"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_capability_failures_remain_permanent() {
+        // Cancelled is intercepted upstream as cancellation; Permanent is an
+        // explicit non-retryable signal. Both must stay terminal.
+        assert_eq!(
+            capability_error_class(&CapabilityFailureKind::Cancelled),
+            CapabilityErrorClass::Permanent
+        );
+        assert_eq!(
+            capability_error_class(&CapabilityFailureKind::Permanent),
+            CapabilityErrorClass::Permanent
+        );
+    }
+
+    #[test]
+    fn invalid_model_output_is_distinct_from_unavailable() {
+        let error = AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidOutput,
+            "model output was structurally invalid",
+        );
+
+        assert_eq!(
+            model_error_class(&error),
+            Some(ModelErrorClass::InvalidOutput)
         );
     }
 }

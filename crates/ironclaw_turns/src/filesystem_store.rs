@@ -51,29 +51,32 @@ use crate::{
     AllowAllTurnAdmissionLimitProvider, CancelRunRequest, CancelRunResponse, EventCursor,
     GetLoopCheckpointRequest, GetRunStateRequest, InMemoryTurnStateStore,
     InMemoryTurnStateStoreLimits, LoopCheckpointRecord, LoopCheckpointStore,
-    PutLoopCheckpointRequest, ResumeTurnRequest, ResumeTurnResponse, RunProfileResolver,
-    SpawnTreeReservation, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse,
-    TurnAdmissionLimitProvider, TurnAdmissionPolicy, TurnError, TurnEventPage,
-    TurnEventProjectionSource, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord, TurnRunState,
-    TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
+    PutLoopCheckpointRequest, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest,
+    RetryTurnResponse, RunProfileResolver, SpawnTreeReservation, SubmitChildRunRequest,
+    SubmitTurnRequest, SubmitTurnResponse, TurnAdmissionLimitProvider, TurnAdmissionPolicy,
+    TurnError, TurnEventPage, TurnEventProjectionSource, TurnPersistenceSnapshot, TurnRunId,
+    TurnRunRecord, TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
     events::project_turn_events,
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
-        ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
-        RecoverExpiredLeasesResponse, RelinquishRunRequest, TurnRunTransitionPort,
-        TurnRunnerOutcome,
+        ClaimRunRequest, ClaimRunsRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest,
+        HeartbeatRequest, RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest,
+        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, RelinquishRunRequest,
+        TurnRunTransitionPort, TurnRunnerOutcome,
     },
 };
 
 mod io;
 mod profile_resolver;
 mod projection;
+mod row_store;
 mod runner_lease;
 
 use io::{deserialize_snapshot, fs_error, snapshot_entry, snapshot_path};
 use profile_resolver::PreResolvedRunProfileResolver;
 use runner_lease::{RunnerLeaseMemory, RunnerLeaseOverlay, RunnerLeaseRecord, RunnerLeaseStore};
+
+pub use row_store::{FilesystemTurnStateRowStore, TurnStateDurabilityPolicy};
 
 #[cfg(test)]
 mod tests;
@@ -501,25 +504,28 @@ where
                     let (outcome, store) = apply_fut.await;
                     let new_snapshot = store.persistence_snapshot();
 
-                    match outcome {
-                        Err(e) => Err(e),
-                        Ok(value) => {
-                            // Inert transition: the closure left the overlaid
-                            // snapshot unchanged, so there is nothing to persist.
-                            // Signal no-op so `cas_update` skips the write
-                            // entirely (no version bump).
-                            if new_snapshot == baseline {
-                                return Ok(CasApply::no_op(
-                                    new_snapshot.clone(),
-                                    (value, new_snapshot),
-                                ));
-                            }
-                            // Thread the new snapshot back alongside the
-                            // caller's outcome so the outer scope can populate
-                            // the cache.
-                            Ok(CasApply::new(new_snapshot.clone(), (value, new_snapshot)))
-                        }
+                    let outcome = match outcome {
+                        Ok(value) => Ok(value),
+                        Err(error) if new_snapshot != baseline => Err(error),
+                        Err(error) => return Err(error),
+                    };
+
+                    // Inert transition: the closure left the overlaid
+                    // snapshot unchanged, so there is nothing to persist.
+                    // Signal no-op so `cas_update` skips the write entirely
+                    // (no version bump).
+                    if new_snapshot == baseline {
+                        return Ok(CasApply::no_op(
+                            new_snapshot.clone(),
+                            (outcome, new_snapshot),
+                        ));
                     }
+                    // Thread the new snapshot back alongside the caller's
+                    // outcome so the outer scope can populate the cache. Some
+                    // failed operations still intentionally mutate durable
+                    // audit state, such as retry ThreadBusy idempotency
+                    // records.
+                    Ok(CasApply::new(new_snapshot.clone(), (outcome, new_snapshot)))
                 }
             },
         );
@@ -532,19 +538,21 @@ where
         // `with_apply_timeout`.  The outer `tokio::time::timeout` here enforces
         // the per-call deadline; `cas_update`'s inner timeout is an additional
         // guard inside the helper itself.
-        let result: Result<(T, TurnPersistenceSnapshot), CasUpdateError<TurnError>> =
-            match tokio::time::timeout(self.apply_timeout, cas_future).await {
-                Ok(result) => result,
-                Err(_) => {
-                    self.clear_snapshot_cache();
-                    return Err(TurnError::Unavailable {
-                        reason: "turn state filesystem apply timed out".to_string(),
-                    });
-                }
-            };
+        let result: Result<
+            (Result<T, TurnError>, TurnPersistenceSnapshot),
+            CasUpdateError<TurnError>,
+        > = match tokio::time::timeout(self.apply_timeout, cas_future).await {
+            Ok(result) => result,
+            Err(_) => {
+                self.clear_snapshot_cache();
+                return Err(TurnError::Unavailable {
+                    reason: "turn state filesystem apply timed out".to_string(),
+                });
+            }
+        };
 
         match result {
-            Ok((value, written_snapshot)) => {
+            Ok((outcome, written_snapshot)) => {
                 // Successful write or explicit no-op (CasApply::no_op). Populate
                 // the snapshot cache with the resulting snapshot so the next read
                 // can skip a backend roundtrip. For a true write we cache the
@@ -553,7 +561,7 @@ where
                 // absent record. We store `None` for the version; reads don't use
                 // the version and writes always re-read fresh.
                 self.store_snapshot_cache((written_snapshot, None));
-                Ok(value)
+                outcome
             }
             Err(e) => {
                 self.clear_snapshot_cache();
@@ -623,6 +631,76 @@ where
     }
 }
 
+/// Concrete filesystem turn-state store selected by composition.
+///
+/// Keeping this as a concrete enum, rather than a bundle of trait objects,
+/// lets production wiring retain component type checks while allowing
+/// filesystem-backed deployments to choose the row/append layout explicitly
+/// while retaining the blob layout for compatibility tests and rollback seams.
+pub enum FilesystemTurnStateStoreKind<F>
+where
+    F: RootFilesystem,
+{
+    // arch-exempt: large_file, boxed enum variant clippy fix in existing store facade, plan #5662
+    Blob(Box<FilesystemTurnStateStore<F>>),
+    Row(Box<FilesystemTurnStateRowStore<F>>),
+}
+
+impl<F> FilesystemTurnStateStoreKind<F>
+where
+    F: RootFilesystem,
+{
+    pub fn blob(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
+        Self::Blob(Box::new(FilesystemTurnStateStore::new(filesystem)))
+    }
+
+    pub fn row(filesystem: Arc<ScopedFilesystem<F>>) -> Self
+    where
+        F: 'static,
+    {
+        Self::Row(Box::new(FilesystemTurnStateRowStore::new(filesystem)))
+    }
+
+    pub fn with_limits(self, limits: InMemoryTurnStateStoreLimits) -> Self {
+        match self {
+            Self::Blob(store) => Self::Blob(Box::new((*store).with_limits(limits))),
+            Self::Row(store) => Self::Row(Box::new((*store).with_limits(limits))),
+        }
+    }
+
+    /// Select the durable-commit mode. Forwards to the row store's
+    /// [`with_durability_policy`](FilesystemTurnStateRowStore::with_durability_policy);
+    /// the blob layout is `WriteThrough`-only (it persists every transition
+    /// synchronously via whole-snapshot CAS and buffers nothing), so the policy
+    /// is a no-op there and the store is returned unchanged.
+    pub fn with_durability_policy(self, durability_policy: TurnStateDurabilityPolicy) -> Self {
+        match self {
+            Self::Blob(store) => Self::Blob(store),
+            Self::Row(store) => {
+                Self::Row(Box::new((*store).with_durability_policy(durability_policy)))
+            }
+        }
+    }
+
+    /// Flush any pending `WriteBehind` durable tail so a planned shutdown leaves
+    /// nothing un-durable. Forwards to the row store's
+    /// [`drain`](FilesystemTurnStateRowStore::drain); the blob layout buffers
+    /// nothing (`WriteThrough`-only), so draining it is a no-op.
+    pub async fn drain(&self) -> Result<(), TurnError> {
+        match self {
+            Self::Blob(_) => Ok(()),
+            Self::Row(store) => store.drain().await,
+        }
+    }
+
+    pub async fn persistence_snapshot(&self) -> Result<TurnPersistenceSnapshot, TurnError> {
+        match self {
+            Self::Blob(store) => store.persistence_snapshot().await,
+            Self::Row(store) => store.persistence_snapshot().await,
+        }
+    }
+}
+
 /// Map a [`CasUpdateError`] into a [`TurnError`].
 fn map_cas_error(error: CasUpdateError<TurnError>) -> TurnError {
     match error {
@@ -637,6 +715,353 @@ fn map_cas_error(error: CasUpdateError<TurnError>) -> TurnError {
             reason: "turn state filesystem backend must support versioned CAS".to_string(),
         },
         CasUpdateError::Backend(fs) => fs_error(fs),
+    }
+}
+
+#[async_trait]
+impl<F> TurnStateStore for FilesystemTurnStateStoreKind<F>
+where
+    F: RootFilesystem,
+{
+    async fn submit_turn(
+        &self,
+        request: SubmitTurnRequest,
+        admission_policy: &dyn TurnAdmissionPolicy,
+        run_profile_resolver: &dyn RunProfileResolver,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        match self {
+            Self::Blob(store) => {
+                store
+                    .submit_turn(request, admission_policy, run_profile_resolver)
+                    .await
+            }
+            Self::Row(store) => {
+                store
+                    .submit_turn(request, admission_policy, run_profile_resolver)
+                    .await
+            }
+        }
+    }
+
+    async fn resume_turn(
+        &self,
+        request: ResumeTurnRequest,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        match self {
+            Self::Blob(store) => store.resume_turn(request).await,
+            Self::Row(store) => store.resume_turn(request).await,
+        }
+    }
+
+    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
+        match self {
+            Self::Blob(store) => store.retry_turn(request).await,
+            Self::Row(store) => store.retry_turn(request).await,
+        }
+    }
+
+    async fn request_cancel(
+        &self,
+        request: CancelRunRequest,
+    ) -> Result<CancelRunResponse, TurnError> {
+        match self {
+            Self::Blob(store) => store.request_cancel(request).await,
+            Self::Row(store) => store.request_cancel(request).await,
+        }
+    }
+
+    async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        match self {
+            Self::Blob(store) => store.get_run_state(request).await,
+            Self::Row(store) => store.get_run_state(request).await,
+        }
+    }
+
+    async fn get_run_state_for_cancellation(
+        &self,
+        request: GetRunStateRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        match self {
+            Self::Blob(store) => store.get_run_state_for_cancellation(request).await,
+            Self::Row(store) => store.get_run_state_for_cancellation(request).await,
+        }
+    }
+}
+
+#[async_trait]
+impl<F> TurnSpawnTreeStateStore for FilesystemTurnStateStoreKind<F>
+where
+    F: RootFilesystem,
+{
+    async fn submit_child_turn(
+        &self,
+        request: SubmitChildRunRequest,
+        admission_policy: &dyn TurnAdmissionPolicy,
+        run_profile_resolver: &dyn RunProfileResolver,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        match self {
+            Self::Blob(store) => {
+                store
+                    .submit_child_turn(request, admission_policy, run_profile_resolver)
+                    .await
+            }
+            Self::Row(store) => {
+                store
+                    .submit_child_turn(request, admission_policy, run_profile_resolver)
+                    .await
+            }
+        }
+    }
+
+    async fn children_of(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<Vec<TurnRunRecord>, TurnError> {
+        match self {
+            Self::Blob(store) => store.children_of(scope, run_id).await,
+            Self::Row(store) => store.children_of(scope, run_id).await,
+        }
+    }
+
+    async fn get_run_record(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<Option<TurnRunRecord>, TurnError> {
+        match self {
+            Self::Blob(store) => store.get_run_record(scope, run_id).await,
+            Self::Row(store) => store.get_run_record(scope, run_id).await,
+        }
+    }
+
+    async fn reserve_tree_descendants(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        delta: u32,
+        cap: u32,
+    ) -> Result<SpawnTreeReservation, TurnError> {
+        match self {
+            Self::Blob(store) => {
+                store
+                    .reserve_tree_descendants(scope, root_run_id, delta, cap)
+                    .await
+            }
+            Self::Row(store) => {
+                store
+                    .reserve_tree_descendants(scope, root_run_id, delta, cap)
+                    .await
+            }
+        }
+    }
+
+    async fn release_tree_descendants(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        delta: u32,
+        idempotency_key: TurnRunId,
+    ) -> Result<(), TurnError> {
+        match self {
+            Self::Blob(store) => {
+                store
+                    .release_tree_descendants(scope, root_run_id, delta, idempotency_key)
+                    .await
+            }
+            Self::Row(store) => {
+                store
+                    .release_tree_descendants(scope, root_run_id, delta, idempotency_key)
+                    .await
+            }
+        }
+    }
+
+    async fn prune_released_child(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        child_run_id: TurnRunId,
+    ) -> Result<(), TurnError> {
+        match self {
+            Self::Blob(store) => {
+                store
+                    .prune_released_child(scope, root_run_id, child_run_id)
+                    .await
+            }
+            Self::Row(store) => {
+                store
+                    .prune_released_child(scope, root_run_id, child_run_id)
+                    .await
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl<F> TurnEventProjectionSource for FilesystemTurnStateStoreKind<F>
+where
+    F: RootFilesystem,
+{
+    async fn read_turn_events_after(
+        &self,
+        scope: &TurnScope,
+        owner_user_id: Option<&UserId>,
+        after: Option<EventCursor>,
+        limit: usize,
+    ) -> Result<TurnEventPage, TurnError> {
+        match self {
+            Self::Blob(store) => {
+                store
+                    .read_turn_events_after(scope, owner_user_id, after, limit)
+                    .await
+            }
+            Self::Row(store) => {
+                store
+                    .read_turn_events_after(scope, owner_user_id, after, limit)
+                    .await
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl<F> LoopCheckpointStore for FilesystemTurnStateStoreKind<F>
+where
+    F: RootFilesystem,
+{
+    async fn put_loop_checkpoint(
+        &self,
+        request: PutLoopCheckpointRequest,
+    ) -> Result<LoopCheckpointRecord, TurnError> {
+        match self {
+            Self::Blob(store) => store.put_loop_checkpoint(request).await,
+            Self::Row(store) => store.put_loop_checkpoint(request).await,
+        }
+    }
+
+    async fn get_loop_checkpoint(
+        &self,
+        request: GetLoopCheckpointRequest,
+    ) -> Result<Option<LoopCheckpointRecord>, TurnError> {
+        match self {
+            Self::Blob(store) => store.get_loop_checkpoint(request).await,
+            Self::Row(store) => store.get_loop_checkpoint(request).await,
+        }
+    }
+}
+
+#[async_trait]
+impl<F> TurnRunTransitionPort for FilesystemTurnStateStoreKind<F>
+where
+    F: RootFilesystem,
+{
+    async fn claim_next_run(
+        &self,
+        request: ClaimRunRequest,
+    ) -> Result<Option<ClaimedTurnRun>, TurnError> {
+        match self {
+            Self::Blob(store) => store.claim_next_run(request).await,
+            Self::Row(store) => store.claim_next_run(request).await,
+        }
+    }
+
+    async fn claim_next_runs(
+        &self,
+        request: ClaimRunsRequest,
+    ) -> Result<Vec<ClaimedTurnRun>, TurnError> {
+        match self {
+            Self::Blob(store) => store.claim_next_runs(request).await,
+            Self::Row(store) => store.claim_next_runs(request).await,
+        }
+    }
+
+    async fn heartbeat(&self, request: HeartbeatRequest) -> Result<EventCursor, TurnError> {
+        match self {
+            Self::Blob(store) => store.heartbeat(request).await,
+            Self::Row(store) => store.heartbeat(request).await,
+        }
+    }
+
+    async fn recover_expired_leases(
+        &self,
+        request: RecoverExpiredLeasesRequest,
+    ) -> Result<RecoverExpiredLeasesResponse, TurnError> {
+        match self {
+            Self::Blob(store) => store.recover_expired_leases(request).await,
+            Self::Row(store) => store.recover_expired_leases(request).await,
+        }
+    }
+
+    async fn record_model_route_snapshot(
+        &self,
+        request: RecordModelRouteSnapshotRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        match self {
+            Self::Blob(store) => store.record_model_route_snapshot(request).await,
+            Self::Row(store) => store.record_model_route_snapshot(request).await,
+        }
+    }
+
+    async fn block_run(&self, request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
+        match self {
+            Self::Blob(store) => store.block_run(request).await,
+            Self::Row(store) => store.block_run(request).await,
+        }
+    }
+
+    async fn complete_run(&self, request: CompleteRunRequest) -> Result<TurnRunState, TurnError> {
+        match self {
+            Self::Blob(store) => store.complete_run(request).await,
+            Self::Row(store) => store.complete_run(request).await,
+        }
+    }
+
+    async fn cancel_run(
+        &self,
+        request: CancelRunCompletionRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        match self {
+            Self::Blob(store) => store.cancel_run(request).await,
+            Self::Row(store) => store.cancel_run(request).await,
+        }
+    }
+
+    async fn fail_run(&self, request: FailRunRequest) -> Result<TurnRunState, TurnError> {
+        match self {
+            Self::Blob(store) => store.fail_run(request).await,
+            Self::Row(store) => store.fail_run(request).await,
+        }
+    }
+
+    async fn record_runner_failure(
+        &self,
+        request: RecordRunnerFailureRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        match self {
+            Self::Blob(store) => store.record_runner_failure(request).await,
+            Self::Row(store) => store.record_runner_failure(request).await,
+        }
+    }
+
+    async fn relinquish_run(
+        &self,
+        request: RelinquishRunRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        match self {
+            Self::Blob(store) => store.relinquish_run(request).await,
+            Self::Row(store) => store.relinquish_run(request).await,
+        }
+    }
+
+    async fn apply_validated_loop_exit(
+        &self,
+        request: ApplyValidatedLoopExitRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        match self {
+            Self::Blob(store) => store.apply_validated_loop_exit(request).await,
+            Self::Row(store) => store.apply_validated_loop_exit(request).await,
+        }
     }
 }
 
@@ -695,6 +1120,18 @@ where
             Some(&request.scope),
             Some(&request.run_id),
         ))
+        .await
+    }
+
+    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
+        self.apply(RunnerLeaseOverlay::None, |store| {
+            let request = request.clone();
+            async move {
+                // WS-3 implements failed-run retry semantics and idempotency.
+                let outcome = store.retry_turn(request).await;
+                (outcome, store)
+            }
+        })
         .await
     }
 
@@ -835,15 +1272,36 @@ where
         scope: &TurnScope,
         root_run_id: TurnRunId,
         delta: u32,
+        idempotency_key: TurnRunId,
     ) -> Result<(), TurnError> {
         self.apply(RunnerLeaseOverlay::None, |store| async move {
             let outcome = store
-                .release_tree_descendants(scope, root_run_id, delta)
+                .release_tree_descendants(scope, root_run_id, delta, idempotency_key)
                 .await;
             (outcome, store)
         })
         .instrument(turn_state_write_span(
             "release_tree_descendants",
+            Some(scope),
+            Some(&root_run_id),
+        ))
+        .await
+    }
+
+    async fn prune_released_child(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        child_run_id: TurnRunId,
+    ) -> Result<(), TurnError> {
+        self.apply(RunnerLeaseOverlay::None, |store| async move {
+            let outcome = store
+                .prune_released_child(scope, root_run_id, child_run_id)
+                .await;
+            (outcome, store)
+        })
+        .instrument(turn_state_write_span(
+            "prune_released_child",
             Some(scope),
             Some(&root_run_id),
         ))
@@ -944,6 +1402,38 @@ where
         .await
     }
 
+    async fn claim_next_runs(
+        &self,
+        request: ClaimRunsRequest,
+    ) -> Result<Vec<ClaimedTurnRun>, TurnError> {
+        let span = turn_state_write_span("claim_next_runs", request.scope_filter.as_ref(), None);
+        async move {
+            let claimed = self
+                .apply(RunnerLeaseOverlay::None, |store| {
+                    let request = request.clone();
+                    async move {
+                        let outcome = store.claim_next_runs(request).await;
+                        (outcome, store)
+                    }
+                })
+                .await?;
+            for run in &claimed {
+                if let Err(error) = self
+                    .seed_runner_lease_from_snapshot_inner(run.state.run_id)
+                    .await
+                {
+                    for claimed_run in &claimed {
+                        self.compensate_failed_claim(claimed_run).await;
+                    }
+                    return Err(error);
+                }
+            }
+            Ok(claimed)
+        }
+        .instrument(span)
+        .await
+    }
+
     async fn heartbeat(&self, request: HeartbeatRequest) -> Result<EventCursor, TurnError> {
         self.heartbeat_runner_lease(request).await
     }
@@ -975,6 +1465,18 @@ where
             self.clear_snapshot_cache();
         }
         result
+    }
+
+    async fn latest_resumable_checkpoint(
+        &self,
+        scope: &TurnScope,
+        turn_id: crate::TurnId,
+        run_id: TurnRunId,
+    ) -> Result<Option<crate::TurnCheckpointId>, TurnError> {
+        let (snapshot, _) = self.read_snapshot().await?;
+        self.build_in_memory_store(snapshot)?
+            .latest_resumable_checkpoint(scope, turn_id, run_id)
+            .await
     }
 
     async fn record_model_route_snapshot(

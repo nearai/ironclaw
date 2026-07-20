@@ -1,6 +1,6 @@
 //! Memory prompt context service port for the agent loop host.
 //!
-//! This module defines the [`MemoryPromptContextService`] trait — the loop-support
+//! This module defines the [`MemoryPromptContextService`] trait — the loop-host
 //! port that produces memory snippets for [`LoopContextBundle::memory_snippets`]
 //! from a tenant/user/agent/project-scoped memory search.
 //!

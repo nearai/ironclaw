@@ -10,7 +10,7 @@
 //! - The framework owns the contract, but Reborn host composition is now wired:
 //!   `HookedLoopCapabilityPort`, `HookedLoopPromptPort`, and the other
 //!   middleware in [`middleware`] wrap the corresponding Reborn loop ports and
-//!   are installed by `ironclaw_reborn`'s loop driver host.
+//!   are installed by `ironclaw_runner`'s loop driver host.
 
 pub mod dispatch;
 pub mod error;

@@ -131,16 +131,22 @@ fn terminate_service_command(child: &mut std::process::Child) {
         });
         if let Err(error) = terminate_process_group_with_kill_command(pgid) {
             tracing::debug!(%error, "service manager command process group kill failed");
-            let _ = child.kill();
+            if let Err(kill_error) = child.kill() {
+                tracing::debug!(error = ?kill_error, "best-effort service child kill failed");
+            }
         }
     }
 
     #[cfg(not(unix))]
     {
-        let _ = child.kill();
+        if let Err(kill_error) = child.kill() {
+            tracing::debug!(error = ?kill_error, "best-effort service child kill failed");
+        }
     }
 
-    let _ = child.wait();
+    if let Err(error) = child.wait() {
+        tracing::debug!(?error, "best-effort service child wait failed");
+    }
 }
 
 #[cfg(unix)]
@@ -172,8 +178,12 @@ fn terminate_process_group_with_kill_command(pgid: libc::pid_t) -> std::io::Resu
             };
         }
         if started.elapsed() >= Duration::from_secs(1) {
-            let _ = kill.kill();
-            let _ = kill.wait();
+            if let Err(error) = kill.kill() {
+                tracing::debug!(?error, "best-effort kill-command kill failed");
+            }
+            if let Err(error) = kill.wait() {
+                tracing::debug!(?error, "best-effort kill-command wait failed");
+            }
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "/bin/kill did not finish within timeout",
@@ -482,12 +492,17 @@ impl RebornLocalServiceLifecycle {
             );
         }
         if self.platform == ServicePlatform::Linux {
-            // silent-ok: best-effort post-install reload, operator can manually retry.
-            let _ = self.runner.run("systemctl", &["--user", "daemon-reload"]);
-            // silent-ok: best-effort post-install enable, unit has already been written.
-            let _ = self
+            // Best-effort post-install reload, operator can manually retry.
+            if let Err(error) = self.runner.run("systemctl", &["--user", "daemon-reload"]) {
+                tracing::debug!(?error, "best-effort post-install daemon-reload failed");
+            }
+            // Best-effort post-install enable, unit has already been written.
+            if let Err(error) = self
                 .runner
-                .run("systemctl", &["--user", "enable", SYSTEMD_UNIT]);
+                .run("systemctl", &["--user", "enable", SYSTEMD_UNIT])
+            {
+                tracing::debug!(?error, "best-effort post-install unit enable failed");
+            }
         }
         RebornServiceLifecycleResponse {
             action,
@@ -501,8 +516,10 @@ impl RebornLocalServiceLifecycle {
         let action = RebornServiceLifecycleAction::Start;
         match self.platform {
             ServicePlatform::Linux => {
-                // silent-ok: best-effort reload before start, failure does not block start attempt.
-                let _ = self.runner.run("systemctl", &["--user", "daemon-reload"]);
+                // Best-effort reload before start, failure does not block start attempt.
+                if let Err(error) = self.runner.run("systemctl", &["--user", "daemon-reload"]) {
+                    tracing::debug!(?error, "best-effort pre-start daemon-reload failed");
+                }
                 self.run_checked(
                     action,
                     "systemctl",
@@ -517,8 +534,10 @@ impl RebornLocalServiceLifecycle {
                     Err(response) => return response,
                 };
                 let path = path.to_string_lossy().to_string();
-                // silent-ok: launchctl reports failure when the agent is already loaded.
-                let _ = self.runner.run("launchctl", &["load", "-w", &path]);
+                // Best-effort load; launchctl reports failure when the agent is already loaded.
+                if let Err(error) = self.runner.run("launchctl", &["load", "-w", &path]) {
+                    tracing::debug!(?error, "best-effort launchctl load failed");
+                }
                 self.run_checked(
                     action,
                     "launchctl",

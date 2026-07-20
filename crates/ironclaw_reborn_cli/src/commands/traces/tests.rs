@@ -29,16 +29,22 @@ fn parse_cli<const N: usize>(args: [&'static str; N]) -> Cli {
     parse_cli_result(args).expect("CLI args should parse")
 }
 
-/// Tests that touch the shared global `policy_path()` must serialize their
-/// access — without this, concurrent `truncate + write_all` cycles in
-/// `write_policy` interleave and leave the file with mixed-length bytes,
-/// which `read_policy` then refuses to parse.
+/// Tests that touch the shared global `policy_path()` must serialize both
+/// policy access and process-environment reads. `policy_path()` resolves
+/// `HOME` on each call, while service tests temporarily replace `HOME`; without
+/// the canonical env lock a policy write can switch roots mid-operation and
+/// target a temp directory that has already been removed.
 static GLOBAL_POLICY_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn lock_global_policy_for_test() -> std::sync::MutexGuard<'static, ()> {
-    GLOBAL_POLICY_TEST_MUTEX
+fn lock_global_policy_for_test() -> (
+    std::sync::MutexGuard<'static, ()>,
+    std::sync::MutexGuard<'static, ()>,
+) {
+    let env = crate::runtime::test_env::lock_runtime_env();
+    let policy = GLOBAL_POLICY_TEST_MUTEX
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    (env, policy)
 }
 
 struct TracePolicyFileRestore {
@@ -90,11 +96,9 @@ fn redaction_summary_handles_empty_and_counts() {
 }
 
 fn trace_queue_policy_fixture() -> StandingTraceContributionPolicy {
-    StandingTraceContributionPolicy {
-        enabled: true,
-        ingestion_endpoint: Some("https://trace.example/internal/v1/traces".to_string()),
-        ..StandingTraceContributionPolicy::default()
-    }
+    StandingTraceContributionPolicy::default()
+        .set_enabled(true)
+        .set_ingestion_endpoint("https://trace.example/internal/v1/traces")
 }
 
 fn trace_queue_envelope_fixture(
@@ -234,7 +238,7 @@ fn cli_enqueue_accepts_policy_matching_envelope_capture() {
 
 #[test]
 fn list_submissions_summary_flag_parses_through_cli() {
-    let cli = parse_cli(["ironclaw-reborn", "traces", "list-submissions", "--summary"]);
+    let cli = parse_cli(["ironclaw", "traces", "list-submissions", "--summary"]);
 
     let TracesSubcommand::ListSubmissions { json, summary } = unwrap_traces_command(cli) else {
         panic!("expected traces list-submissions command");
@@ -247,7 +251,7 @@ fn list_submissions_summary_flag_parses_through_cli() {
 #[test]
 fn credit_notice_flags_parse_through_cli() {
     let cli = parse_cli([
-        "ironclaw-reborn",
+        "ironclaw",
         "traces",
         "credit",
         "--notice",
@@ -275,7 +279,7 @@ fn credit_notice_flags_parse_through_cli() {
 
 #[test]
 fn credit_notice_action_flags_parse_through_cli() {
-    let ack_cli = parse_cli(["ironclaw-reborn", "traces", "credit", "--notice", "--ack"]);
+    let ack_cli = parse_cli(["ironclaw", "traces", "credit", "--notice", "--ack"]);
     let TracesSubcommand::Credit {
         notice: ack_notice,
         ack,
@@ -290,7 +294,7 @@ fn credit_notice_action_flags_parse_through_cli() {
     assert_eq!(snooze_hours, None);
 
     let snooze_cli = parse_cli([
-        "ironclaw-reborn",
+        "ironclaw",
         "traces",
         "credit",
         "--notice",
@@ -314,7 +318,7 @@ fn credit_notice_action_flags_parse_through_cli() {
 #[test]
 fn queue_status_flags_parse_through_cli() {
     let cli = parse_cli([
-        "ironclaw-reborn",
+        "ironclaw",
         "traces",
         "queue-status",
         "--json",
@@ -333,7 +337,7 @@ fn queue_status_flags_parse_through_cli() {
 #[test]
 fn opt_in_upload_claim_issuer_flags_parse_through_cli() {
     let cli = parse_cli([
-        "ironclaw-reborn",
+        "ironclaw",
         "traces",
         "opt-in",
         "--endpoint",
@@ -382,7 +386,7 @@ fn opt_in_upload_claim_issuer_flags_parse_through_cli() {
 #[test]
 fn opt_in_invite_code_flag_parses_through_cli() {
     let cli = parse_cli([
-        "ironclaw-reborn",
+        "ironclaw",
         "traces",
         "opt-in",
         "--endpoint",
@@ -409,7 +413,7 @@ fn opt_in_invite_code_flag_parses_through_cli() {
 #[test]
 fn opt_in_invite_code_defaults_to_none_when_absent() {
     let cli = parse_cli([
-        "ironclaw-reborn",
+        "ironclaw",
         "traces",
         "opt-in",
         "--endpoint",
@@ -430,7 +434,7 @@ fn opt_in_invite_code_defaults_to_none_when_absent() {
 #[test]
 fn profile_token_flags_parse_through_cli() {
     let cli = parse_cli([
-        "ironclaw-reborn",
+        "ironclaw",
         "traces",
         "profile",
         "token",
@@ -453,7 +457,7 @@ fn profile_token_flags_parse_through_cli() {
 #[test]
 fn profile_set_flags_parse_through_cli() {
     let cli = parse_cli([
-        "ironclaw-reborn",
+        "ironclaw",
         "traces",
         "profile",
         "set",
@@ -484,7 +488,7 @@ fn profile_set_flags_parse_through_cli() {
 
 #[test]
 fn profile_set_requires_handle_flag() {
-    let error = parse_cli_result(["ironclaw-reborn", "traces", "profile", "set"])
+    let error = parse_cli_result(["ironclaw", "traces", "profile", "set"])
         .expect_err("profile set without --handle must fail to parse");
     assert_eq!(
         error.kind(),
@@ -495,7 +499,7 @@ fn profile_set_requires_handle_flag() {
 #[test]
 fn profile_withdraw_flags_parse_through_cli() {
     let cli = parse_cli([
-        "ironclaw-reborn",
+        "ironclaw",
         "traces",
         "profile",
         "withdraw",
@@ -516,7 +520,7 @@ fn profile_withdraw_flags_parse_through_cli() {
 #[test]
 fn opt_in_user_scope_flag_parses_through_cli() {
     let cli = parse_cli([
-        "ironclaw-reborn",
+        "ironclaw",
         "traces",
         "opt-in",
         "--endpoint",
@@ -792,13 +796,11 @@ fn queue_status_diagnostics_reports_invite_code_configured() {
     );
 
     // Configured: non-empty invite code => true.
-    let configured_policy = StandingTraceContributionPolicy {
-        enabled: true,
-        ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-        bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
-        upload_token_invite_code: Some("INV-PILOT-001".to_string()),
-        ..Default::default()
-    };
+    let configured_policy = StandingTraceContributionPolicy::default()
+        .set_enabled(true)
+        .set_ingestion_endpoint("https://trace.example.com/v1/traces")
+        .set_bearer_token_env("TRACE_COMMONS_TEST_TOKEN")
+        .set_upload_token_invite_code("INV-PILOT-001");
     ironclaw_reborn_traces::contribution::write_trace_policy_for_scope(
         Some(&runtime_scope),
         &configured_policy,
@@ -814,13 +816,11 @@ fn queue_status_diagnostics_reports_invite_code_configured() {
 
     // Whitespace-only invite code => false (matches show_policy_status's
     // trimmed-emptiness contract).
-    let whitespace_policy = StandingTraceContributionPolicy {
-        enabled: true,
-        ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-        bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
-        upload_token_invite_code: Some("   ".to_string()),
-        ..Default::default()
-    };
+    let whitespace_policy = StandingTraceContributionPolicy::default()
+        .set_enabled(true)
+        .set_ingestion_endpoint("https://trace.example.com/v1/traces")
+        .set_bearer_token_env("TRACE_COMMONS_TEST_TOKEN")
+        .set_upload_token_invite_code("   ");
     ironclaw_reborn_traces::contribution::write_trace_policy_for_scope(
         Some(&runtime_scope),
         &whitespace_policy,
@@ -834,13 +834,10 @@ fn queue_status_diagnostics_reports_invite_code_configured() {
     );
 
     // None => false.
-    let none_policy = StandingTraceContributionPolicy {
-        enabled: true,
-        ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
-        bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
-        upload_token_invite_code: None,
-        ..Default::default()
-    };
+    let none_policy = StandingTraceContributionPolicy::default()
+        .set_enabled(true)
+        .set_ingestion_endpoint("https://trace.example.com/v1/traces")
+        .set_bearer_token_env("TRACE_COMMONS_TEST_TOKEN");
     ironclaw_reborn_traces::contribution::write_trace_policy_for_scope(
         Some(&runtime_scope),
         &none_policy,
@@ -851,5 +848,46 @@ fn queue_status_diagnostics_reports_invite_code_configured() {
     assert!(
         !diagnostics.upload_token_invite_code_configured,
         "absent invite code must report configured=false"
+    );
+}
+
+#[test]
+fn enroll_instance_parses_invite_and_consent_flags() {
+    let cli = parse_cli([
+        "ironclaw",
+        "traces",
+        "enroll-instance",
+        "--invite",
+        "https://commons.example#INVADMIN1",
+        "--include-message-text",
+        "--json",
+    ]);
+
+    let TracesSubcommand::EnrollInstance {
+        invite,
+        include_message_text,
+        include_tool_payloads,
+        json,
+    } = unwrap_traces_command(cli)
+    else {
+        panic!("expected traces enroll-instance command");
+    };
+
+    assert_eq!(invite, "https://commons.example#INVADMIN1");
+    assert!(include_message_text);
+    assert!(
+        !include_tool_payloads,
+        "tool payloads must default to excluded"
+    );
+    assert!(json);
+}
+
+#[test]
+fn enroll_instance_requires_invite() {
+    let error = parse_cli_result(["ironclaw", "traces", "enroll-instance"])
+        .expect_err("--invite must be required");
+    assert_eq!(
+        error.kind(),
+        clap::error::ErrorKind::MissingRequiredArgument
     );
 }

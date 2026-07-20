@@ -122,7 +122,7 @@ async def reborn_responses_server(
             "MOCK_LLM_API_KEY": "mock-api-key",
             "NO_PROXY": "127.0.0.1,localhost,::1",
             "no_proxy": "127.0.0.1,localhost,::1",
-            "RUST_LOG": "ironclaw=warn,ironclaw_reborn=warn",
+            "RUST_LOG": "ironclaw=warn,ironclaw_runner=warn",
             "RUST_BACKTRACE": "1",
         }
         _forward_coverage_env(env)

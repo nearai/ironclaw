@@ -1,0 +1,11 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Slack get_user_info",
+  "description": "Get information about a Slack user.",
+  "type": "object",
+  "required": ["user_id"],
+  "properties": {
+    "user_id": { "type": "string", "description": "User ID (e.g. U1234567890)." }
+  },
+  "additionalProperties": false
+}

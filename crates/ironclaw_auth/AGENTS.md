@@ -9,12 +9,13 @@
 ## What This Crate Owns
 
 - Product-facing Reborn auth setup contracts: auth flows, secure manual-token interactions, credential accounts, recovery/account-selection projections, provider exchange/refresh, continuations, and cleanup.
+- Temporary v1 loopback OAuth callback transport in `loopback_oauth`, re-exported through `oauth`, folded from `ironclaw_oauth` in W2.1 and deleted with v1.
 - Fake in-memory services for contract tests and downstream caller tests.
 - Redacted DTOs safe for WebUI, CLI, chat, API, and projection rendering.
 
 ## Do Not Move In Here
 
-- V1 route handlers, V1 pending maps, V1 extension manager authority, or V1 `SecretsStore` access.
+- New V1 route handlers, V1 pending maps, V1 extension manager authority, or V1 `SecretsStore` access. The existing `loopback_oauth` transport is legacy-only and must not gain Reborn consumers.
 - Durable encrypted secret storage, secret leases, raw HTTP clients, runtime credential injection, extension lifecycle mutation, or turn replay/resume.
 - Raw OAuth codes, PKCE verifiers, access tokens, refresh tokens, backend provider bodies, host paths, or raw secret values in serializable records, errors, logs, docs, or projections. Tests may use sentinel values only to prove redaction.
 

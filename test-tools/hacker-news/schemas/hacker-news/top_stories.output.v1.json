@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "hacker-news.top_stories output",
+  "type": "object",
+  "properties": {
+    "stories": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "rank": { "type": "integer" },
+          "title": { "type": "string" },
+          "url": { "type": "string" },
+          "score": { "type": "integer" },
+          "by": { "type": "string" },
+          "comments": { "type": "integer" }
+        },
+        "required": ["rank", "title", "url", "score", "by", "comments"],
+        "additionalProperties": false
+      }
+    },
+    "as_of": { "type": "string" },
+    "data_source": { "type": "string" }
+  },
+  "required": ["stories", "as_of", "data_source"],
+  "additionalProperties": false
+}

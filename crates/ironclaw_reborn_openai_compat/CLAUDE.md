@@ -7,7 +7,7 @@ Reborn-native OpenAI-compatible API contract surface for #3283 / #4442 /
 This crate is a product/API route surface, not a host runtime:
 
 - It may define DTOs, route descriptors, sanitized error envelopes, and
-  feature-gated axum route fragments for host composition.
+  axum route fragments for host composition.
 - It must not bind sockets, call `axum::serve`, read v1 gateway state, or proxy
   directly to `ironclaw_llm`.
 - Host composition owns listener binding, bearer/session auth, CORS/origin,
@@ -33,15 +33,14 @@ The `refs` module owns the OpenAI-compatible identity contract:
 - Mappings start as pending and are later bound to internal product-action /
   turn-run / projection refs by ProductWorkflow wiring slices.
 - The side-effect-free `OpenAiCompatRefStore` port and ref vocabulary are the
-  default surface. The durable `FilesystemOpenAiCompatRefStore` adapter (folded
-  in from the former `ironclaw_reborn_openai_compat_storage` crate) lives behind
-  the `storage`/`libsql`/`postgres` features, so contract-only consumers pull no
-  `ironclaw_filesystem` dependency.
+  default surface. The durable `FilesystemOpenAiCompatRefStore` adapter lives
+  behind the `storage`/`libsql`/`postgres` features, so contract-only consumers
+  pull no `ironclaw_filesystem` dependency.
 
 ## Chat Completions Workflow
 
-With `openai-compat-beta`, the default router remains fail-closed unless host
-composition injects `OpenAiCompatRouterState::with_chat_completions(...)`.
+The default router remains fail-closed unless host composition injects
+`OpenAiCompatRouterState::with_chat_completions(...)`.
 `ironclaw_reborn_composition::build_openai_compat_route_mount` performs that
 host wiring for `ironclaw-reborn serve` by mounting the router inside the
 protected Reborn route stack. The injected `OpenAiChatCompletionsWorkflow`
@@ -96,8 +95,7 @@ configured models for OpenAI-compatible clients (model pickers, etc.).
   composition wiring.
 - `ironclaw_reborn_composition::build_openai_compat_route_mount` wires a catalog
   backed by the operator `LlmConfigService` snapshot (the same configured-model
-  source the operator WebUI uses), but only under the `root-llm-provider`
-  feature; otherwise the route stays fail-closed.
+  source the operator WebUI uses).
 - The crate maps catalog entries into the OpenAI list envelope
   (`{ object: "list", data: [{ id, object: "model", created, owned_by }] }`);
   it does not reach into `ironclaw_llm` or the runtime directly.
@@ -109,7 +107,7 @@ Violations return a sanitized `400` naming the `model` param.
 
 ## Responses Workflow
 
-With `openai-compat-beta`, host composition may also inject
+Host composition may also inject
 `OpenAiCompatRouterState::with_responses(...)` for the non-streaming Responses
 slice:
 

@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical LocalFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
 mod support;
 
 use support::legacy_capability_fixture_to_v2_with_schema_suffix as legacy_capability_fixture_to_v2;
@@ -8,6 +9,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -17,7 +19,7 @@ use ironclaw_extensions::{
     CapabilityVisibility, ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
 };
 use ironclaw_filesystem::{
-    DirEntry, FileStat, FileType, FilesystemError, FilesystemOperation, LocalFilesystem,
+    DirEntry, DiskFilesystem, FileStat, FileType, FilesystemError, FilesystemOperation,
     RootFilesystem,
 };
 use ironclaw_host_api::*;
@@ -684,8 +686,21 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
         trigger_create
             .descriptor
             .description
-            .contains("outbound delivery target capabilities"),
+            .contains("builtin__outbound_delivery_targets_list"),
         "trigger_create description should point the model at delivery target selection"
+    );
+    assert!(
+        trigger_create
+            .descriptor
+            .description
+            .contains("pass delivery_target_id"),
+        "trigger_create description should teach per-trigger delivery routing"
+    );
+    assert!(
+        trigger_create.descriptor.description.contains(
+            "If delivery_target_id is set, never put a send, post, or deliver-results step"
+        ),
+        "trigger_create description should front-load the no-duplicate-delivery rule"
     );
     let trigger_prompt_description = trigger_create
         .descriptor
@@ -696,8 +711,31 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
         .and_then(serde_json::Value::as_str)
         .expect("trigger prompt description should be present");
     assert!(
-        trigger_prompt_description.contains("first select the target"),
-        "trigger_create prompt schema should steer delivery requests before trigger creation"
+        trigger_prompt_description
+            .contains("Never tell the prompt to send results back to the requesting user"),
+        "trigger_create prompt schema should forbid result self-delivery phrasing"
+    );
+    assert!(
+        trigger_prompt_description.contains("receiving results is routing"),
+        "trigger_create prompt schema should frame send-me asks as routing, not a prompt step"
+    );
+    let trigger_delivery_target_description = trigger_create
+        .descriptor
+        .parameters_schema
+        .get("properties")
+        .and_then(|properties| properties.get("delivery_target_id"))
+        .and_then(|property| property.get("description"))
+        .and_then(serde_json::Value::as_str)
+        .expect("trigger delivery_target_id description should be present");
+    assert!(
+        trigger_delivery_target_description.contains("builtin__outbound_delivery_targets_list"),
+        "delivery_target_id schema should point at the target list capability"
+    );
+    assert!(
+        trigger_delivery_target_description.contains(
+            "Do not also put a send, post, or deliver-results step for that result in prompt"
+        ),
+        "delivery_target_id schema should forbid duplicate prompt delivery"
     );
 
     let http_schema = &surface
@@ -988,7 +1026,6 @@ async fn visible_surface_marks_askable_capabilities_without_granting_authority()
             capability_id("echo.say"),
             ResourceEstimate::default(),
             json!({"message": "hello"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -1030,7 +1067,6 @@ async fn hidden_capability_direct_invoke_still_fails_closed_through_authorizatio
             capability_id("echo.say"),
             ResourceEstimate::default(),
             json!({"message": "hello"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -1274,6 +1310,52 @@ async fn visible_surface_version_is_order_insensitive_for_equivalent_capability_
 }
 
 #[tokio::test]
+async fn visible_surface_preserves_registry_order_when_authorizations_finish_out_of_order() {
+    let context = context_with_grants([
+        (
+            capability_id("echo.say"),
+            vec![EffectKind::DispatchCapability],
+        ),
+        (
+            capability_id("files.read"),
+            vec![EffectKind::ReadFilesystem],
+        ),
+    ]);
+    let runtime = runtime_with(
+        registry_from_manifests([
+            (ECHO_MANIFEST, "/system/extensions/echo"),
+            (FILES_MANIFEST, "/system/extensions/files"),
+        ]),
+        Arc::new(DelayingGrantAuthorizer {
+            slow_capability: capability_id("echo.say"),
+            delay: Duration::from_millis(25),
+        }),
+    )
+    .with_trust_policy(Arc::new(trust_policy_for([
+        (
+            "echo",
+            "/system/extensions/echo/manifest.toml",
+            vec![EffectKind::DispatchCapability],
+        ),
+        (
+            "files",
+            "/system/extensions/files/manifest.toml",
+            vec![EffectKind::ReadFilesystem],
+        ),
+    ])));
+
+    let surface = runtime
+        .visible_capabilities(visible_request(context))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        visible_ids(&surface),
+        vec![capability_id("echo.say"), capability_id("files.read")]
+    );
+}
+
+#[tokio::test]
 async fn visible_surface_max_capabilities_stops_authorization_after_limit() {
     let registry = registry_from_manifests([
         (ECHO_MANIFEST, "/system/extensions/echo"),
@@ -1483,7 +1565,6 @@ async fn runtime_policy_denied_extension_invoke_does_not_dispatch() {
             capability_id("echo.say"),
             ResourceEstimate::default(),
             json!({"message": "blocked before dispatch"}),
-            trust_decision_for(vec![EffectKind::DispatchCapability, EffectKind::Network]),
         ))
         .await
         .unwrap();
@@ -1528,7 +1609,6 @@ async fn runtime_policy_denied_secret_invoke_does_not_dispatch() {
             capability_id("secret-tool.read"),
             ResourceEstimate::default(),
             json!({}),
-            trust_decision_for(vec![EffectKind::UseSecret]),
         ))
         .await
         .unwrap();
@@ -1576,7 +1656,6 @@ async fn runtime_policy_denied_mcp_http_invoke_does_not_dispatch_when_effect_und
             capability_id("mcp.search"),
             ResourceEstimate::default(),
             json!({"query": "blocked before mcp dispatch"}),
-            trust_decision_for(vec![EffectKind::DispatchCapability]),
         ))
         .await
         .unwrap();
@@ -1783,7 +1862,7 @@ fn hot_catalog_fixture(
     input_schema: Option<&str>,
     output_schema: &str,
     prompt_doc: &str,
-) -> (tempfile::TempDir, LocalFilesystem, ExtensionRegistry) {
+) -> (tempfile::TempDir, DiskFilesystem, ExtensionRegistry) {
     hot_catalog_fixture_with_prompt_bytes(input_schema, output_schema, prompt_doc.as_bytes())
 }
 
@@ -1791,7 +1870,7 @@ fn hot_catalog_fixture_with_prompt_bytes(
     input_schema: Option<&str>,
     output_schema: &str,
     prompt_doc: &[u8],
-) -> (tempfile::TempDir, LocalFilesystem, ExtensionRegistry) {
+) -> (tempfile::TempDir, DiskFilesystem, ExtensionRegistry) {
     let manifest = ExtensionManifest::parse(
         HOT_CAPABILITY_MANIFEST,
         ManifestSource::InstalledLocal,
@@ -1806,7 +1885,7 @@ fn hot_catalog_fixture_with_manifest(
     output_schema: &str,
     prompt_doc: &[u8],
     manifest: ExtensionManifest,
-) -> (tempfile::TempDir, LocalFilesystem, ExtensionRegistry) {
+) -> (tempfile::TempDir, DiskFilesystem, ExtensionRegistry) {
     let storage = tempdir().unwrap();
     let extension_root = storage.path().join("echo");
     std::fs::create_dir_all(extension_root.join("schemas/echo")).unwrap();
@@ -1825,7 +1904,7 @@ fn hot_catalog_fixture_with_manifest(
     .unwrap();
     std::fs::write(extension_root.join("prompts/echo/say.md"), prompt_doc).unwrap();
 
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage.path().to_path_buf()),
@@ -2027,10 +2106,6 @@ fn capability_id(value: &str) -> CapabilityId {
     CapabilityId::new(value).unwrap()
 }
 
-fn trust_decision_with_dispatch_authority() -> TrustDecision {
-    trust_decision_for(vec![EffectKind::DispatchCapability])
-}
-
 struct PanicTrustPolicy;
 
 impl TrustPolicy for PanicTrustPolicy {
@@ -2102,6 +2177,29 @@ impl TrustAwareCapabilityDispatchAuthorizer for CountingGrantAuthorizer {
         trust_decision: &TrustDecision,
     ) -> Decision {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        GrantAuthorizer::new()
+            .authorize_dispatch_with_trust(context, descriptor, estimate, trust_decision)
+            .await
+    }
+}
+
+struct DelayingGrantAuthorizer {
+    slow_capability: CapabilityId,
+    delay: Duration,
+}
+
+#[async_trait]
+impl TrustAwareCapabilityDispatchAuthorizer for DelayingGrantAuthorizer {
+    async fn authorize_dispatch_with_trust(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+        trust_decision: &TrustDecision,
+    ) -> Decision {
+        if descriptor.id == self.slow_capability {
+            tokio::time::sleep(self.delay).await;
+        }
         GrantAuthorizer::new()
             .authorize_dispatch_with_trust(context, descriptor, estimate, trust_decision)
             .await

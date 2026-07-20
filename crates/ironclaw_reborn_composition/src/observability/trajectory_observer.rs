@@ -12,10 +12,10 @@
 //! # Facade ownership
 //!
 //! [`RebornTrajectoryObserver`] is a composition-owned trait. The capability
-//! port that drives the input hook lives in `ironclaw_loop_support` and speaks
-//! its own [`ironclaw_loop_support::CapabilityTrajectoryObserver`]; rather than
+//! port that drives the input hook lives in `ironclaw_loop_host` and speaks
+//! its own [`ironclaw_loop_host::CapabilityTrajectoryObserver`]; rather than
 //! re-export that substrate trait (which would commit this facade to a
-//! loop-support contract — see `CLAUDE.md`: "expose facade-shaped handles only;
+//! loop-host contract — see `CLAUDE.md`: "expose facade-shaped handles only;
 //! keep lower substrate handles private"), we define our own trait and adapt it
 //! to the substrate one in [`as_capability_observer`]. Loop-support contract
 //! changes therefore stay internal to the adapter instead of breaking the
@@ -38,13 +38,13 @@
 //! Callbacks fire inline on the per-capability hot path and are best-effort:
 //! implementations must never block and must not rely on being called (a
 //! panicking observer is caught and dropped at the call site — see
-//! `HostRuntimeLoopCapabilityPort` / `LocalDevCapabilityIo`). An observer that
+//! `HostRuntimeLoopCapabilityPort` / `StagedCapabilityIo`). An observer that
 //! needs to do I/O or contend on a lock must hand the event to its own
 //! non-blocking queue and return immediately.
 
 use std::sync::Arc;
 
-use ironclaw_loop_support::CapabilityTrajectoryObserver;
+use ironclaw_loop_host::CapabilityTrajectoryObserver;
 
 /// Receives each capability (tool) call's resolved input and result during a
 /// reborn run. See the [module docs](self) for the data-exposure and threading
@@ -201,10 +201,10 @@ impl RebornTrajectoryObserver for SafePreviewTrajectoryObserver {
 }
 
 /// Adapts a composition-owned [`RebornTrajectoryObserver`] to the substrate
-/// [`CapabilityTrajectoryObserver`] the loop-support capability port consumes,
-/// so the facade trait never appears in this crate's loop-support boundary. The
+/// [`CapabilityTrajectoryObserver`] the loop-host capability port consumes,
+/// so the facade trait never appears in this crate's loop-host boundary. The
 /// substrate trait is input-only; the composition observer's result half is
-/// driven separately by `LocalDevCapabilityIo`.
+/// driven separately by `StagedCapabilityIo`.
 #[derive(Debug)]
 struct CapabilityTrajectoryObserverAdapter {
     inner: Arc<dyn RebornTrajectoryObserver>,
@@ -222,9 +222,9 @@ impl CapabilityTrajectoryObserver for CapabilityTrajectoryObserverAdapter {
     }
 }
 
-/// Adapt a composition observer to the substrate observer the loop-support
+/// Adapt a composition observer to the substrate observer the loop-host
 /// capability port (the input hook) drives. The result hook lives on
-/// `LocalDevCapabilityIo`, which calls the composition trait directly.
+/// `StagedCapabilityIo`, which calls the composition trait directly.
 pub(crate) fn as_capability_observer(
     observer: Arc<dyn RebornTrajectoryObserver>,
 ) -> Arc<dyn CapabilityTrajectoryObserver> {

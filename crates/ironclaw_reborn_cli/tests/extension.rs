@@ -1,7 +1,7 @@
 use std::{fs, path::Path, process::Command};
 
 fn reborn_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_ironclaw-reborn")
+    env!("CARGO_BIN_EXE_ironclaw")
 }
 
 #[test]
@@ -56,6 +56,7 @@ fn extension_install_json_uses_reborn_home_without_v1_state() {
         .arg("zztest-mcp")
         .arg("--json")
         .env_clear()
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("IRONCLAW_BASE_DIR", &v1_base_dir)
         .output()
@@ -100,6 +101,7 @@ fn extension_search_human_output_escapes_control_characters() {
         .arg("search")
         .arg("zztest-evil")
         .env_clear()
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .output()
         .expect("ironclaw-reborn extension search should run");
@@ -147,6 +149,7 @@ fn run_extension_json(reborn_home: &Path, args: &[&str]) -> serde_json::Value {
         .arg("extension")
         .args(args)
         .env_clear()
+        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
         .env("IRONCLAW_REBORN_HOME", reborn_home)
         .output()
         .expect("ironclaw-reborn extension command should run");
@@ -181,6 +184,9 @@ fn write_extension_fixture_with_metadata(
     fs::create_dir_all(&extension_root).expect("fixture extension dir");
     let name = toml_basic_string_value(name);
     let description = toml_basic_string_value(description);
+    // Filesystem-discovered manifests validate as `InstalledLocal` (#5499),
+    // which forbids the legacy top-level `[[capabilities]]` shape — the
+    // fixture uses the installed-legal `capability_provider` host_api form.
     fs::write(
         extension_root.join("manifest.toml"),
         format!(
@@ -197,7 +203,13 @@ transport = "stdio"
 command = "zztest-mcp-server"
 args = ["--stdio"]
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "{extension_id}.search_issues"
 description = "Search GitHub issues"
 effects = ["network", "dispatch_capability"]

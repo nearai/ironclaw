@@ -890,6 +890,49 @@ async fn update_skill_rejects_invalid_missing_oversized_and_name_change() {
     .await;
 }
 
+#[tokio::test]
+async fn skill_management_root_filesystem_delete_if_version_delegates_to_inner_backend() {
+    // Review fix (PR #5749, round 3): SkillManagementRootFilesystem forwards
+    // `capabilities()` to the inner backend verbatim, so a CAS-capable inner
+    // backend must actually serve `delete_if_version` through the wrapper
+    // rather than falling through to the RootFilesystem trait default
+    // `Unsupported`.
+    use ironclaw_filesystem::{CasExpectation, Entry};
+
+    let inner: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::default());
+    let wrapper = SkillManagementRootFilesystem {
+        inner: Arc::clone(&inner),
+    };
+    let path = VirtualPath::new("/system/skills/example/SKILL.md").unwrap();
+
+    // SkillManagementRootFilesystem only exposes the byte-oriented surface
+    // (no `put` override), so seed the entry through the inner backend
+    // directly — this test's job is to prove `delete_if_version` reaches
+    // that same inner backend's CAS logic through the wrapper.
+    let version = inner
+        .put(
+            &path,
+            Entry::bytes(b"---\nname: example\n---\nbody".to_vec()),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+    // Wrong version is rejected with VersionMismatch, proving the call
+    // actually reached the inner backend's CAS logic rather than a stub or
+    // an Unsupported fallthrough.
+    let other_version = version.next();
+    let err = wrapper
+        .delete_if_version(&path, other_version)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, FilesystemError::VersionMismatch { .. }));
+
+    // Correct version deletes.
+    wrapper.delete_if_version(&path, version).await.unwrap();
+    assert!(inner.get(&path).await.unwrap().is_none());
+}
+
 async fn write_file(root: &InMemoryBackend, path: &str, body: String) {
     root.write_file(&VirtualPath::new(path).unwrap(), body.as_bytes())
         .await

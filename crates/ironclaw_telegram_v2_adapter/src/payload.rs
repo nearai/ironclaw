@@ -525,6 +525,21 @@ fn build_payload(
         .or_else(|| message.caption.clone())
         .unwrap_or_default();
     text = strip_leading_mention(text, policy);
+    // In-chat gate commands (`approve`/`deny`/`auth deny <gate_ref>`) — the
+    // channel-neutral grammar shared with Slack. The busy/prompt copy the
+    // shared delivery driver posts to this chat advertises these commands,
+    // so they must resolve gates here instead of bouncing off a busy thread
+    // as plain user messages (Ben's 2026-07-17 phantom-affordance loop).
+    if let Some(resolution) = ironclaw_product_adapters::parse_interaction_resolution_text(
+        ironclaw_product_adapters::strip_wrapping_inline_code(&text),
+        trigger,
+    )
+    .map_err(|err| PayloadParseError::InvalidExternalRef {
+        kind: "interaction_resolution_payload",
+        reason: err.to_string(),
+    })? {
+        return Ok(resolution);
+    }
     let attachments = collect_attachments(&message)?;
     let user_message = UserMessagePayload::new(text, attachments, trigger).map_err(|err| {
         PayloadParseError::InvalidExternalRef {
@@ -1422,5 +1437,84 @@ mod tests {
         let err = parse_telegram_update(payload, &evidence(), &install_id(), &policy())
             .expect_err("malformed");
         assert!(matches!(err, PayloadParseError::InvalidJson { .. }));
+    }
+
+    /// Ben's regression (2026-07-17): the shared busy-on-auth hint tells the
+    /// user to reply `auth deny gate:<ref>` in this chat, but Telegram's
+    /// parse treated that reply as a plain `UserMessage` — it bounced off
+    /// the busy thread with the same hint, forever. The advertised
+    /// interaction grammar (shared with Slack via
+    /// `ironclaw_product_adapters::interaction_commands`) must parse here.
+    #[test]
+    fn dm_auth_deny_command_parses_to_auth_resolution_not_user_message() {
+        let payload = br#"{
+            "update_id": 300,
+            "message": {
+                "message_id": 30,
+                "date": 1700000000,
+                "from": {"id": 777, "is_bot": false, "first_name": "Alice", "username": "alice"},
+                "chat": {"id": 777, "type": "private"},
+                "text": "auth deny gate:auth-abc123"
+            }
+        }"#;
+        let parsed =
+            parse_telegram_update(payload, &evidence(), &install_id(), &policy()).expect("parses");
+        match parsed.payload {
+            ironclaw_product_adapters::ProductInboundPayload::AuthResolution(resolution) => {
+                assert_eq!(resolution.auth_request_ref, "gate:auth-abc123");
+            }
+            other => panic!("expected AuthResolution, got {other:?}"),
+        }
+    }
+
+    /// The hint renders the command in backticks; Telegram clients copy them.
+    #[test]
+    fn dm_backticked_approve_command_parses_to_approval_resolution() {
+        let payload = br#"{
+            "update_id": 301,
+            "message": {
+                "message_id": 31,
+                "date": 1700000000,
+                "from": {"id": 777, "is_bot": false, "first_name": "Alice", "username": "alice"},
+                "chat": {"id": 777, "type": "private"},
+                "text": "`approve gate:approval-9`"
+            }
+        }"#;
+        let parsed =
+            parse_telegram_update(payload, &evidence(), &install_id(), &policy()).expect("parses");
+        assert!(
+            matches!(
+                parsed.payload,
+                ironclaw_product_adapters::ProductInboundPayload::ApprovalResolution(_)
+            ),
+            "got {:?}",
+            parsed.payload
+        );
+    }
+
+    /// Guard: ordinary conversation that merely starts with a verb-like word
+    /// still routes as a user message.
+    #[test]
+    fn dm_ordinary_text_still_routes_as_user_message() {
+        let payload = br#"{
+            "update_id": 302,
+            "message": {
+                "message_id": 32,
+                "date": 1700000000,
+                "from": {"id": 777, "is_bot": false, "first_name": "Alice", "username": "alice"},
+                "chat": {"id": 777, "type": "private"},
+                "text": "hello there, what can you do?"
+            }
+        }"#;
+        let parsed =
+            parse_telegram_update(payload, &evidence(), &install_id(), &policy()).expect("parses");
+        assert!(
+            matches!(
+                parsed.payload,
+                ironclaw_product_adapters::ProductInboundPayload::UserMessage(_)
+            ),
+            "got {:?}",
+            parsed.payload
+        );
     }
 }

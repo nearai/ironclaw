@@ -1,6 +1,6 @@
 //! C-DENYEDGE (row 4): a scheduled-trigger fire must not be able to create (or
 //! remove/pause/resume) triggers of its own — int-tier twin of the
-//! `ironclaw_reborn::runtime` unit coverage for issue #5505
+//! `ironclaw_runner::runtime` unit coverage for issue #5505
 //! (`SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS`, PR #5515).
 //!
 //! Drives a triggered-origin run (`submit_triggered_turn_scripted`) that scripts
@@ -10,7 +10,7 @@
 //! (`trigger_list` stays visible).
 //!
 //! Traced, not assumed: denial happens at the model-gateway seam
-//! (`ironclaw_reborn::model_gateway`'s `validate_provider_tool_call`, via
+//! (`ironclaw_runner::model_gateway`'s `validate_provider_tool_call`, via
 //! `CapabilitySurfaceDenyFilter`), BEFORE a `CapabilityCallCandidate` is ever
 //! constructed — so `CapabilityStage` never runs and nothing is appended via
 //! `append_tool_result_reference` (confirmed empirically: persisted history is

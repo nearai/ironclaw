@@ -500,10 +500,7 @@ struct AlwaysConflictProfileBackend;
 #[async_trait]
 impl MemoryBackend for MockSearchBackend {
     fn capabilities(&self) -> MemoryBackendCapabilities {
-        MemoryBackendCapabilities {
-            full_text_search: true,
-            ..MemoryBackendCapabilities::default()
-        }
+        MemoryBackendCapabilities::default().set_full_text_search(true)
     }
 
     async fn search(
@@ -525,10 +522,7 @@ impl MemoryBackend for MockSearchBackend {
 #[async_trait]
 impl MemoryBackend for AlwaysConflictProfileBackend {
     fn capabilities(&self) -> MemoryBackendCapabilities {
-        MemoryBackendCapabilities {
-            file_documents: true,
-            ..MemoryBackendCapabilities::default()
-        }
+        MemoryBackendCapabilities::default().set_file_documents(true)
     }
 
     async fn read_document(

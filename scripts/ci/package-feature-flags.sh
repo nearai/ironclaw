@@ -40,9 +40,6 @@ fallback_feature_flags() {
 }
 
 case "${package}" in
-  ironclaw_reborn_cli)
-    printf '%s\n' "--features webui-v2-beta,slack-v2-host-beta"
-    ;;
   ironclaw_product_adapters)
     printf '%s\n' "--features test-support,host-auth-mint"
     ;;
@@ -55,10 +52,10 @@ case "${package}" in
     # memory-mem0 turns on the (off-by-default) mem0 third-party memory provider
     # so its factory + swap tests run here; the feature-off build stays covered by
     # the `--no-default-features` composition run in test.yml.
-    printf '%s\n' "--features test-support,webui-v2-beta,slack-v2-host-beta,libsql,memory-mem0"
+    printf '%s\n' "--features test-support,libsql,memory-mem0"
     ;;
-  ironclaw_reborn)
-    printf '%s\n' "--features root-llm-provider,libsql-secrets,libsql-restart-tests,webui-user-store"
+  ironclaw_runner)
+    printf '%s\n' "--features libsql-secrets,libsql-restart-tests,webui-user-store"
     ;;
   ironclaw_reborn_event_store)
     printf '%s\n' "--features libsql"
@@ -66,14 +63,14 @@ case "${package}" in
   ironclaw_hooks)
     # The durable libSQL/Postgres backends + parity matrix folded into this
     # crate are exercised by the dedicated hooks-parity job in
-    # platform-and-compat.yml (postgres,libsql,integration,contract-tests).
+    # platform-and-compat.yml (postgres,libsql,integration,test-support).
     # Keep this reborn-closure job light — the framework's own unit tests only —
     # so it does not pull the heavy libSQL/Postgres driver deps that the default
     # fallback would otherwise add now that the crate declares a `libsql` feature.
-    printf '%s\n' "--features contract-tests"
+    printf '%s\n' "--features test-support"
     ;;
-  ironclaw_reborn_webui_ingress)
-    printf '%s\n' "--features dev-in-memory-session"
+  ironclaw_webui)
+    printf '%s\n' "--features test-support"
     ;;
   ironclaw_host_runtime)
     # Integration tests (tests/) link the lib as a normal dependency, so
@@ -82,21 +79,21 @@ case "${package}" in
     # DB paths without a Postgres server (which the crate-tests job has none of).
     printf '%s\n' "--features test-support,libsql"
     ;;
-  ironclaw_webui_v2)
-    printf '%s\n' "--features webui-v2-beta"
-    ;;
   ironclaw_reborn_openai_compat)
-    # `libsql` compiles + runs the durable ref-store contract folded in from the
-    # former ironclaw_reborn_openai_compat_storage crate (enables `storage`).
+    # `libsql` exercises the durable ref-store contract folded in from the
+    # former ironclaw_reborn_openai_compat_storage crate. The route/workflow/
+    # streaming suites are unconditional.
     printf '%s\n' "--features libsql"
     ;;
   ironclaw_architecture | \
+  ironclaw_channel_delivery | \
   ironclaw_product_adapter_registry | \
   ironclaw_product_context | \
   ironclaw_reborn_config | \
   ironclaw_reborn_identity | \
   ironclaw_reborn_traces | \
   ironclaw_slack_v2_adapter | \
+  ironclaw_telegram_extension | \
   ironclaw_telegram_v2_adapter | \
   ironclaw_wasm_product_adapters)
     # Already on the allowlist with no feature flags; keep them flag-free now

@@ -94,13 +94,255 @@ async fn webui_event_stream_drains_live_reasoning_projection_from_update_source(
     }));
 }
 
+#[tokio::test]
+async fn webui_event_stream_drains_live_assistant_text_projection_from_update_source() {
+    let fixture = live_projection_fixture("webui-text");
+    let user_id = fixture.user_id.clone();
+    let thread_id = fixture.thread_id.clone();
+    let scope = fixture.scope.clone();
+    let run_id = TurnRunId::new();
+    let secret_like_token = "sk-proj-abcdefghijklmnopqrstuvwxyz123456";
+
+    for safe_text in [
+        "partial answer".to_string(),
+        format!("partial answer with {secret_like_token}"),
+    ] {
+        fixture
+            .sink
+            .publish_loop_milestone(LoopHostMilestone {
+                scope: scope.clone(),
+                actor: None,
+                turn_id: TurnId::new(),
+                run_id,
+                loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+                kind: LoopHostMilestoneKind::ModelTextDelta { safe_text },
+            })
+            .await
+            .unwrap();
+    }
+    fixture
+        .sink
+        .publish_loop_milestone(LoopHostMilestone {
+            scope: scope.clone(),
+            actor: None,
+            turn_id: TurnId::new(),
+            run_id,
+            loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+            kind: LoopHostMilestoneKind::CapabilityInvoked {
+                activity_id: CapabilityActivityId::new(),
+                capability_id: CapabilityId::new("builtin.test").unwrap(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let events = fixture
+        .services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+    let expected_id = format!("text:{run_id}");
+    let text_bodies = events
+        .iter()
+        .filter_map(|event| match event.payload() {
+            ProductOutboundPayload::ProjectionUpdate { state }
+                if state.thread_id == thread_id.to_string() =>
+            {
+                state.items.iter().find_map(|item| match item {
+                    ProductProjectionItem::Text {
+                        id,
+                        run_id: observed_run_id,
+                        body,
+                    } if id == &expected_id && *observed_run_id == Some(run_id) => {
+                        Some(body.clone())
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        text_bodies,
+        vec![
+            "partial answer".to_string(),
+            "partial answer with [redacted]".to_string()
+        ],
+        "assistant text should drain as incremental updates to one stable text item"
+    );
+    let wire = serde_json::to_string(&events).unwrap();
+    assert!(!wire.contains(secret_like_token));
+}
+
+#[tokio::test]
+async fn live_assistant_text_coalescer_flushes_latest_update_on_timer() {
+    let fixture = live_projection_fixture("webui-text-timer");
+    let scope = fixture.scope.clone();
+    let run_id = TurnRunId::new();
+    let mut subscription = fixture
+        .services
+        .webui_event_stream()
+        .subscribe(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(fixture.user_id.clone()),
+            scope: scope.clone(),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+    let milestone = |safe_text| LoopHostMilestone {
+        scope: scope.clone(),
+        actor: None,
+        turn_id: TurnId::new(),
+        run_id,
+        loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+        kind: LoopHostMilestoneKind::ModelTextDelta { safe_text },
+    };
+
+    fixture
+        .sink
+        .publish_loop_milestone(milestone("first".to_string()))
+        .await
+        .unwrap();
+    fixture
+        .sink
+        .publish_loop_milestone(milestone("latest".to_string()))
+        .await
+        .unwrap();
+
+    let mut text_bodies = Vec::new();
+    for _ in 0..2 {
+        let envelope = tokio::time::timeout(std::time::Duration::from_secs(1), subscription.next())
+            .await
+            .expect("coalesced live projection event")
+            .expect("live projection subscription remains open")
+            .expect("live projection event remains valid");
+        let ProductOutboundPayload::ProjectionUpdate { state } = envelope.payload() else {
+            continue;
+        };
+        text_bodies.extend(state.items.iter().filter_map(|item| match item {
+            ProductProjectionItem::Text {
+                run_id: observed_run_id,
+                body,
+                ..
+            } if *observed_run_id == Some(run_id) => Some(body.clone()),
+            _ => None,
+        }));
+    }
+
+    assert_eq!(text_bodies, vec!["first", "latest"]);
+}
+
+#[tokio::test]
+async fn live_assistant_text_burst_stays_subscribed_and_flushes_before_tool_activity() {
+    let fixture = live_projection_fixture("webui-text-burst");
+    let scope = fixture.scope.clone();
+    let run_id = TurnRunId::new();
+    let capability_id = CapabilityId::new("builtin.http").unwrap();
+    let activity_id = CapabilityActivityId::new();
+    let mut subscription = fixture
+        .services
+        .webui_event_stream()
+        .subscribe(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(fixture.user_id.clone()),
+            scope: scope.clone(),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    let milestone = |kind| LoopHostMilestone {
+        scope: scope.clone(),
+        actor: None,
+        turn_id: TurnId::new(),
+        run_id,
+        loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+        kind,
+    };
+
+    for index in 0..64 {
+        fixture
+            .sink
+            .publish_loop_milestone(milestone(LoopHostMilestoneKind::ModelTextDelta {
+                safe_text: format!("partial answer {index}"),
+            }))
+            .await
+            .unwrap();
+    }
+    fixture
+        .sink
+        .publish_loop_milestone(milestone(LoopHostMilestoneKind::CapabilityInvoked {
+            activity_id,
+            capability_id: capability_id.clone(),
+        }))
+        .await
+        .unwrap();
+
+    let mut text_bodies = Vec::new();
+    let mut saw_tool = false;
+    let mut latest_text_preceded_tool = false;
+    for _ in 0..8 {
+        let envelope = tokio::time::timeout(std::time::Duration::from_secs(1), subscription.next())
+            .await
+            .expect("live projection event")
+            .expect("live projection subscription remains open")
+            .expect("live projection event remains valid");
+
+        let ProductOutboundPayload::ProjectionUpdate { state } = envelope.payload() else {
+            continue;
+        };
+        for item in &state.items {
+            match item {
+                ProductProjectionItem::Text {
+                    run_id: observed_run_id,
+                    body,
+                    ..
+                } if *observed_run_id == Some(run_id) => text_bodies.push(body.clone()),
+                ProductProjectionItem::CapabilityActivity(activity)
+                    if activity.invocation_id == InvocationId::from_uuid(activity_id.as_uuid()) =>
+                {
+                    latest_text_preceded_tool =
+                        text_bodies.last().map(String::as_str) == Some("partial answer 63");
+                    saw_tool = true;
+                }
+                _ => {}
+            }
+        }
+        if saw_tool {
+            break;
+        }
+    }
+
+    assert!(
+        saw_tool,
+        "the text burst must not terminate the live subscription"
+    );
+    assert!(
+        latest_text_preceded_tool,
+        "releasing the state lock must not reorder the latest text after tool activity"
+    );
+    assert_eq!(
+        text_bodies.last().map(String::as_str),
+        Some("partial answer 63"),
+        "the tool boundary must flush the latest cumulative assistant text"
+    );
+    assert!(
+        text_bodies.len() <= 3,
+        "the 64-update burst should be coalesced before delivery: {text_bodies:#?}"
+    );
+}
+
 // The post-run skill-learning notifier publishes a learned-skill bubble
 // through a `LiveProjectionPublisher` that shares the runtime's live update
 // source. This guards that such a bubble actually drains to the WebUI
 // projection stream as a `SkillActivation` item (regression: the live
 // `SkillActivation` envelope was silently dropped before reaching the SSE
 // drain, so users never saw "learned a skill" feedback).
-#[cfg(feature = "root-llm-provider")]
 #[tokio::test]
 async fn webui_event_stream_drains_skill_learned_projection_from_update_source() {
     let fixture = live_projection_fixture("webui-skill-learned");
@@ -153,7 +395,6 @@ async fn webui_event_stream_drains_skill_learned_projection_from_update_source()
 // only on a fresh `after_cursor: None` subscription. The earlier
 // `*_from_update_source` test (publish-then-fresh-drain) passed while real
 // users still saw nothing, because it never exercised the resume path.
-#[cfg(feature = "root-llm-provider")]
 #[tokio::test]
 async fn skill_learned_bubble_delivers_when_sse_resumes_from_advanced_durable_cursor() {
     let tenant_id = TenantId::new("skill-resume-tenant").unwrap();

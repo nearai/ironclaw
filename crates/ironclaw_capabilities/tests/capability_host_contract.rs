@@ -81,10 +81,7 @@ async fn capability_host_authorized_dispatch_uses_neutral_dispatch_port() {
         .invoke_json(CapabilityInvocationRequest {
             context,
             capability_id: capability_id(),
-            estimate: ResourceEstimate {
-                output_bytes: Some(4096),
-                ..ResourceEstimate::default()
-            },
+            estimate: ResourceEstimate::default().set_output_bytes(4096),
             input: json!({"message": "authorized"}),
             trust_decision: trust_decision(),
         })

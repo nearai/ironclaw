@@ -6,8 +6,6 @@
 //! caller path (auth layer + body limit + rate limit + handler +
 //! `RebornProductAuthServices`) is exercised, not just the facade helpers.
 
-#![cfg(feature = "webui-v2-beta")]
-
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -26,19 +24,19 @@ use ironclaw_product_workflow::{
     RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornGetRunStateRequest,
     RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
+    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesApi, RebornServicesError,
     RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
     RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
     RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
     RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    rejecting_reborn_services_error,
+    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest, rejecting_reborn_services_error,
 };
 use ironclaw_reborn_composition::{
-    RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness,
-    RebornWebuiBundle, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app,
+    RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness, RebornWebuiBundle,
 };
+use ironclaw_webui::{WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -131,6 +129,14 @@ impl RebornServicesApi for UnusedServices {
         _caller: WebUiAuthenticatedCaller,
         _request: WebUiCancelRunRequest,
     ) -> Result<RebornCancelRunResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn retry_run(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: WebUiRetryRunRequest,
+    ) -> Result<RebornRetryRunResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
 

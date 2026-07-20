@@ -9,33 +9,33 @@ use ironclaw_product_workflow::{
     ProductWorkflowError,
 };
 
-use crate::local_dev_capability_policy::{
-    LocalDevApprovalPolicyAction, LocalDevCapabilityPolicy, LocalDevCapabilityPolicyError,
-    local_dev_one_shot_lease_approval,
+use crate::builtin_capability_policy::{
+    BuiltinApprovalPolicyAction, BuiltinCapabilityPolicy, BuiltinCapabilityPolicyError,
+    builtin_one_shot_lease_approval,
 };
 use crate::outbound::OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID;
 
-use super::local_dev::extension_surface::LocalDevExtensionSurfaceSource;
+use super::local_dev::extension_surface::ExtensionCapabilitySurfaceSource;
 
-pub(super) struct LocalDevApprovalLeaseTermsProvider {
-    policy: Arc<LocalDevCapabilityPolicy>,
+pub(super) struct PolicyApprovalLeaseTermsProvider {
+    policy: Arc<BuiltinCapabilityPolicy>,
     registry: Arc<ExtensionRegistry>,
     workspace_mounts: MountView,
     skill_mounts: MountView,
     memory_mounts: MountView,
     system_extensions_lifecycle_mounts: MountView,
-    extension_surface_source: LocalDevExtensionSurfaceSource,
+    extension_surface_source: ExtensionCapabilitySurfaceSource,
 }
 
-impl LocalDevApprovalLeaseTermsProvider {
+impl PolicyApprovalLeaseTermsProvider {
     pub(super) fn new(
-        policy: Arc<LocalDevCapabilityPolicy>,
+        policy: Arc<BuiltinCapabilityPolicy>,
         registry: Arc<ExtensionRegistry>,
         workspace_mounts: MountView,
         skill_mounts: MountView,
         memory_mounts: MountView,
         system_extensions_lifecycle_mounts: MountView,
-        extension_surface_source: LocalDevExtensionSurfaceSource,
+        extension_surface_source: ExtensionCapabilitySurfaceSource,
     ) -> Self {
         Self {
             policy,
@@ -51,7 +51,7 @@ impl LocalDevApprovalLeaseTermsProvider {
     async fn extension_lease_terms_for(
         &self,
         gate: &ApprovalGateRecord,
-        action: LocalDevApprovalPolicyAction<'_>,
+        action: BuiltinApprovalPolicyAction<'_>,
     ) -> Result<LeaseApproval, ProductWorkflowError> {
         self.extension_lease_terms_for_active_capability(gate, action)
             .await?
@@ -61,7 +61,7 @@ impl LocalDevApprovalLeaseTermsProvider {
     async fn extension_lease_terms_for_active_capability(
         &self,
         gate: &ApprovalGateRecord,
-        action: LocalDevApprovalPolicyAction<'_>,
+        action: BuiltinApprovalPolicyAction<'_>,
     ) -> Result<Option<LeaseApproval>, ProductWorkflowError> {
         let capability = action.capability();
         let Principal::Extension(extension_id) = &gate.request().requested_by else {
@@ -75,8 +75,12 @@ impl LocalDevApprovalLeaseTermsProvider {
                 tracing::error!(%error, "local-dev extension approval lease terms are unavailable");
                 lease_terms_unavailable()
             })?;
+        // Lease terms resolve for the user whose run raised the gate; the
+        // owner filter in `grants` then behaves exactly like dispatch did
+        // (#5459 P1): their own private capability resolves, anyone else's
+        // yields no grant and the lease stays unavailable.
         let Some(grant) = surface
-            .grants(extension_id)
+            .grants(extension_id, &gate.resource_scope().user_id)
             .into_iter()
             .find(|grant| grant.capability == *capability)
         else {
@@ -94,12 +98,12 @@ impl LocalDevApprovalLeaseTermsProvider {
             );
             return Err(lease_terms_unavailable());
         }
-        Ok(Some(local_dev_one_shot_lease_approval(grant.constraints)))
+        Ok(Some(builtin_one_shot_lease_approval(grant.constraints)))
     }
 
     async fn active_extension_persistent_approval_allowed(
         &self,
-        action: LocalDevApprovalPolicyAction<'_>,
+        action: BuiltinApprovalPolicyAction<'_>,
     ) -> Result<bool, ProductWorkflowError> {
         let surface = self
             .extension_surface_source
@@ -126,12 +130,12 @@ impl LocalDevApprovalLeaseTermsProvider {
 }
 
 #[async_trait]
-impl ApprovalLeaseTermsProvider for LocalDevApprovalLeaseTermsProvider {
+impl ApprovalLeaseTermsProvider for PolicyApprovalLeaseTermsProvider {
     async fn lease_terms_for(
         &self,
         gate: &ApprovalGateRecord,
     ) -> Result<ironclaw_approvals::LeaseApproval, ProductWorkflowError> {
-        let action = LocalDevApprovalPolicyAction::from_host_action(gate.request().action.as_ref())
+        let action = BuiltinApprovalPolicyAction::from_host_action(gate.request().action.as_ref())
             .ok_or(ProductWorkflowError::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::UnsupportedAction,
             })?;
@@ -150,7 +154,7 @@ impl ApprovalLeaseTermsProvider for LocalDevApprovalLeaseTermsProvider {
             &self.system_extensions_lifecycle_mounts,
         ) {
             Ok(approval) => Ok(approval),
-            Err(LocalDevCapabilityPolicyError::MissingGrant { .. }) => {
+            Err(BuiltinCapabilityPolicyError::MissingGrant { .. }) => {
                 self.extension_lease_terms_for(gate, action).await
             }
             Err(error) => {
@@ -164,7 +168,7 @@ impl ApprovalLeaseTermsProvider for LocalDevApprovalLeaseTermsProvider {
         &self,
         gate: &ApprovalGateRecord,
     ) -> Result<(), ProductWorkflowError> {
-        let action = LocalDevApprovalPolicyAction::from_host_action(gate.request().action.as_ref())
+        let action = BuiltinApprovalPolicyAction::from_host_action(gate.request().action.as_ref())
             .ok_or(ProductWorkflowError::ApprovalInteractionRejected {
                 kind: ApprovalInteractionRejectionKind::UnsupportedAction,
             })?;
@@ -185,7 +189,7 @@ impl ApprovalLeaseTermsProvider for LocalDevApprovalLeaseTermsProvider {
                 &self.system_extensions_lifecycle_mounts,
             ) {
                 Ok(_) => return Ok(()),
-                Err(LocalDevCapabilityPolicyError::MissingGrant { .. }) => {}
+                Err(BuiltinCapabilityPolicyError::MissingGrant { .. }) => {}
                 Err(error) => {
                     tracing::error!(
                         %error,
@@ -226,12 +230,10 @@ mod tests {
     use ironclaw_product_workflow::approval_gate_ref;
     use ironclaw_turns::{GateRef, TurnRunId};
 
-    use crate::{
-        extension_lifecycle::ActiveExtensionCapability,
-        local_dev_capability_policy::local_dev_capability_policy,
-        runtime::local_dev::extension_surface::{
-            LocalDevExtensionSurface, LocalDevExtensionSurfaceSource,
-        },
+    use crate::builtin_capability_policy::builtin_capability_policy;
+    use crate::extension_host::extension_lifecycle::ActiveExtensionCapability;
+    use crate::runtime::local_dev::extension_surface::{
+        ExtensionCapabilitySurface, ExtensionCapabilitySurfaceSource,
     };
 
     use super::*;
@@ -241,17 +243,19 @@ mod tests {
         let capability = CapabilityId::new("gmail.send_message").expect("capability id");
         let provider = ExtensionId::new("gmail").expect("provider id");
         let caller = ExtensionId::new("caller").expect("caller id");
-        let source = LocalDevExtensionSurfaceSource::from_surface(
-            LocalDevExtensionSurface::from_active_capabilities(vec![ActiveExtensionCapability {
+        let source = ExtensionCapabilitySurfaceSource::from_surface(
+            ExtensionCapabilitySurface::from_active_capabilities(vec![ActiveExtensionCapability {
                 id: capability.clone(),
                 provider,
                 effects: vec![EffectKind::Network, EffectKind::UseSecret],
                 default_permission: PermissionMode::Allow,
                 runtime_credentials: Vec::new(),
+                network_targets: Vec::new(),
+                owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );
-        let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
-            Arc::new(local_dev_capability_policy().expect("policy parses")),
+        let terms_provider = PolicyApprovalLeaseTermsProvider::new(
+            Arc::new(builtin_capability_policy().expect("policy parses")),
             Arc::new(ExtensionRegistry::new()),
             MountView::default(),
             MountView::default(),
@@ -293,8 +297,8 @@ mod tests {
         let provider = ExtensionId::new("gmail").expect("provider id");
         let caller = ExtensionId::new("caller").expect("caller id");
         let secret = SecretHandle::new("gmail_token").expect("secret handle");
-        let source = LocalDevExtensionSurfaceSource::from_surface(
-            LocalDevExtensionSurface::from_active_capabilities(vec![ActiveExtensionCapability {
+        let source = ExtensionCapabilitySurfaceSource::from_surface(
+            ExtensionCapabilitySurface::from_active_capabilities(vec![ActiveExtensionCapability {
                 id: capability.clone(),
                 provider,
                 effects: vec![
@@ -318,10 +322,12 @@ mod tests {
                     },
                     required: true,
                 }],
+                network_targets: Vec::new(),
+                owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );
-        let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
-            Arc::new(local_dev_capability_policy().expect("policy parses")),
+        let terms_provider = PolicyApprovalLeaseTermsProvider::new(
+            Arc::new(builtin_capability_policy().expect("policy parses")),
             Arc::new(ExtensionRegistry::new()),
             MountView::default(),
             MountView::default(),
@@ -362,17 +368,19 @@ mod tests {
         let capability = CapabilityId::new("gmail.send_message").expect("capability id");
         let provider = ExtensionId::new("gmail").expect("provider id");
         let caller = ExtensionId::new("caller").expect("caller id");
-        let source = LocalDevExtensionSurfaceSource::from_surface(
-            LocalDevExtensionSurface::from_active_capabilities(vec![ActiveExtensionCapability {
+        let source = ExtensionCapabilitySurfaceSource::from_surface(
+            ExtensionCapabilitySurface::from_active_capabilities(vec![ActiveExtensionCapability {
                 id: capability.clone(),
                 provider,
                 effects: vec![EffectKind::Network],
                 default_permission: PermissionMode::Allow,
                 runtime_credentials: Vec::new(),
+                network_targets: Vec::new(),
+                owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );
-        let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
-            Arc::new(local_dev_capability_policy().expect("policy parses")),
+        let terms_provider = PolicyApprovalLeaseTermsProvider::new(
+            Arc::new(builtin_capability_policy().expect("policy parses")),
             Arc::new(ExtensionRegistry::new()),
             MountView::default(),
             MountView::default(),
@@ -400,17 +408,19 @@ mod tests {
         let capability = CapabilityId::new("gmail.send_message").expect("capability id");
         let provider = ExtensionId::new("gmail").expect("provider id");
         let caller = ExtensionId::new("caller").expect("caller id");
-        let source = LocalDevExtensionSurfaceSource::from_surface(
-            LocalDevExtensionSurface::from_active_capabilities(vec![ActiveExtensionCapability {
+        let source = ExtensionCapabilitySurfaceSource::from_surface(
+            ExtensionCapabilitySurface::from_active_capabilities(vec![ActiveExtensionCapability {
                 id: capability.clone(),
                 provider,
                 effects: vec![EffectKind::Network],
                 default_permission: PermissionMode::Ask,
                 runtime_credentials: Vec::new(),
+                network_targets: Vec::new(),
+                owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );
-        let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
-            Arc::new(local_dev_capability_policy().expect("policy parses")),
+        let terms_provider = PolicyApprovalLeaseTermsProvider::new(
+            Arc::new(builtin_capability_policy().expect("policy parses")),
             Arc::new(ExtensionRegistry::new()),
             MountView::default(),
             MountView::default(),
@@ -438,14 +448,14 @@ mod tests {
         let capability =
             CapabilityId::new(OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID).expect("capability id");
         let caller = ExtensionId::new("loop-driver").expect("caller id");
-        let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
-            Arc::new(local_dev_capability_policy().expect("policy parses")),
+        let terms_provider = PolicyApprovalLeaseTermsProvider::new(
+            Arc::new(builtin_capability_policy().expect("policy parses")),
             Arc::new(ExtensionRegistry::new()),
             MountView::default(),
             MountView::default(),
             MountView::default(),
             MountView::default(),
-            LocalDevExtensionSurfaceSource::default(),
+            ExtensionCapabilitySurfaceSource::default(),
         );
         let gate = approval_gate_record(
             ApprovalRequestId::new(),
@@ -467,17 +477,19 @@ mod tests {
         let capability = CapabilityId::new("gmail.send_message").expect("capability id");
         let provider = ExtensionId::new("gmail").expect("provider id");
         let caller = ExtensionId::new("caller").expect("caller id");
-        let source = LocalDevExtensionSurfaceSource::from_surface(
-            LocalDevExtensionSurface::from_active_capabilities(vec![ActiveExtensionCapability {
+        let source = ExtensionCapabilitySurfaceSource::from_surface(
+            ExtensionCapabilitySurface::from_active_capabilities(vec![ActiveExtensionCapability {
                 id: capability.clone(),
                 provider,
                 effects: vec![EffectKind::Network],
                 default_permission: PermissionMode::Deny,
                 runtime_credentials: Vec::new(),
+                network_targets: Vec::new(),
+                owner: ironclaw_extensions::InstallationOwner::Tenant,
             }]),
         );
-        let terms_provider = LocalDevApprovalLeaseTermsProvider::new(
-            Arc::new(local_dev_capability_policy().expect("policy parses")),
+        let terms_provider = PolicyApprovalLeaseTermsProvider::new(
+            Arc::new(builtin_capability_policy().expect("policy parses")),
             Arc::new(ExtensionRegistry::new()),
             MountView::default(),
             MountView::default(),

@@ -23,12 +23,10 @@ use async_trait::async_trait;
 use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_reborn_composition::{
     ExternalSubjectId, LocalTriggerAccessRole, LocalTriggerAccessSeed, LocalTriggerAccessSource,
-    LocalTriggerAccessStore, ProviderKind, RebornIdentityResolver, ResolveExternalIdentity,
-    SurfaceKind,
+    LocalTriggerAccessStore, ProviderKind, RebornIdentityError, RebornIdentityResolver,
+    ResolveExternalIdentity, SurfaceKind,
 };
-use ironclaw_reborn_webui_ingress::{
-    OAuthProviderName, OAuthUserProfile, UserDirectory, UserDirectoryError,
-};
+use ironclaw_webui::{OAuthProviderName, OAuthUserProfile, UserDirectory, UserDirectoryError};
 
 /// Admission + persistence adapter implementing the ingress
 /// [`UserDirectory`] seam.
@@ -193,7 +191,14 @@ impl UserDirectory for WebuiUserDirectory {
                 display_name: profile.display_name.clone(),
             })
             .await
-            .map_err(|err| UserDirectoryError::Backend(err.to_string()))?;
+            .map_err(|err| match err {
+                // A suspended account resolved its identity but must not mint a
+                // session: fail closed with a 403 (login refused), never a 503.
+                // The admin who suspended them sees the account stay locked out
+                // even across a fresh SSO attempt.
+                RebornIdentityError::UserSuspended(_) => UserDirectoryError::Unknown,
+                other => UserDirectoryError::Backend(other.to_string()),
+            })?;
         if let Some(local_trigger_access) = &self.local_trigger_access {
             local_trigger_access.seed_for_user(&user_id).await?;
         }

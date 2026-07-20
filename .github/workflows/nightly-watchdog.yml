@@ -1,0 +1,95 @@
+name: Nightly Watchdog
+
+# Single alerting path for the scheduled nightlies (Nightly Deep CI, Reborn
+# Playwright, IronClaw Stress): checks each workflow's latest scheduled run
+# and posts failures to Slack. Watching from OUTSIDE the runs
+# is deliberate — an in-run alert job dies with its own run on a
+# startup_failure (zero jobs execute; Nightly Deep CI was dark from its
+# creation 2026-05-06 through 2026-07-08 exactly this way) and can never see
+# "the cron didn't fire at all".
+#
+# A workflow alarms when its latest scheduled run is missing, older than 26
+# hours (cron never fired), or concluded anything but success. Failures post
+# to the Slack channel behind secrets.SLACK_WEBHOOK_URL (the same webhook the
+# live-canary report uses) and turn this watchdog's matrix job red, so the
+# watchdog's own run history doubles as the failure record. Successes post
+# nothing.
+
+on:
+  schedule:
+    - cron: "0 8 * * *" # after the 03:00-04:00 UTC nightly batch settles
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  check-nightly:
+    name: Check ${{ matrix.workflow }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        workflow:
+          - Nightly Deep CI
+          - Reborn Playwright
+          - IronClaw Stress
+    steps:
+      - name: Check latest scheduled run and post failures to Slack
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          WATCHED_WORKFLOW: ${{ matrix.workflow }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          MAX_AGE_SECONDS: "93600" # 26h — one cron period plus slack
+        run: |
+          run_json="$(gh run list \
+            --repo "$REPO" \
+            --workflow "$WATCHED_WORKFLOW" \
+            --event schedule \
+            --limit 1 \
+            --json databaseId,conclusion,createdAt,url)"
+          echo "Latest scheduled run: ${run_json}"
+
+          run_id="$(printf '%s' "$run_json" | jq -r '.[0].databaseId // empty')"
+          conclusion="$(printf '%s' "$run_json" | jq -r '.[0].conclusion // "missing"')"
+          created_at="$(printf '%s' "$run_json" | jq -r '.[0].createdAt // empty')"
+          run_url="$(printf '%s' "$run_json" | jq -r '.[0].url // empty')"
+
+          detail=""
+          if [ -n "$created_at" ] && [ "$conclusion" = "success" ]; then
+            age_seconds=$(( $(date -u +%s) - $(date -u -d "$created_at" +%s) ))
+            if [ "$age_seconds" -lt "$MAX_AGE_SECONDS" ]; then
+              echo "${WATCHED_WORKFLOW}: latest scheduled run succeeded — nothing to report."
+              exit 0
+            fi
+            detail="last successful run is $(( age_seconds / 3600 ))h old — the cron has not fired since (workflow disabled or renamed?)"
+          elif [ "$conclusion" = "startup_failure" ]; then
+            detail="startup failure: zero jobs ran (workflow-validation error — open the run page for the error banner)"
+          elif [ "$conclusion" = "missing" ]; then
+            detail="no scheduled run found at all"
+          else
+            failed_jobs=""
+            if [ -n "$run_id" ]; then
+              failed_jobs="$(gh api "repos/${REPO}/actions/runs/${run_id}/jobs?per_page=100" \
+                --jq '[.jobs[] | select(.conclusion == "failure") | .name] | .[0:10] | join(", ")' 2>/dev/null || true)"
+            fi
+            detail="concluded ${conclusion}${failed_jobs:+ — failed jobs: ${failed_jobs}}"
+          fi
+
+          text="❌ *${WATCHED_WORKFLOW}* nightly: ${detail}${run_url:+ — <${run_url}|run>}"
+          echo "$text"
+
+          if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
+            payload="$(jq -n --arg text "$text" '{text: $text}')"
+            curl -fsS -X POST -H 'Content-type: application/json' \
+              --data "$payload" "$SLACK_WEBHOOK_URL" > /dev/null \
+              || echo "Warning: Slack delivery failed" >&2
+          else
+            echo "SLACK_WEBHOOK_URL secret is not set — failure was NOT posted to Slack." >&2
+          fi
+
+          # Red matrix job = the durable failure record now that there is no
+          # issue trail.
+          exit 1

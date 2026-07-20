@@ -170,7 +170,7 @@ The invariant lives as a doc comment directly on `deliver_triggered_run`
 
 This change touches ONLY `crates/ironclaw_reborn_composition/src/slack_delivery.rs`
 (+ its tests) and this plan doc. No edits to `ironclaw_turns/src/status.rs`,
-`ironclaw_reborn/src/runtime.rs`, `turn_scheduler.rs`, or any config — those are
+`ironclaw_runner/src/runtime.rs`, `turn_scheduler.rs`, or any config — those are
 owned by sibling tracks.
 
 ## Out of scope / follow-ups

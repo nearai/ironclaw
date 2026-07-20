@@ -1,15 +1,15 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     future::Future,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
 
 use chrono::Utc;
-use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     CapabilityId, HostApiError, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
     ResourceReservation, ResourceReservationId, ResourceScope, ThreadId, VirtualPath,
@@ -24,15 +24,17 @@ use ironclaw_threads::{
     AppendCapabilityDisplayPreviewRequest, AppendFinalizedAssistantMessageRequest,
     AppendToolResultReferenceRequest, CapabilityDisplayPreviewEnvelope,
     CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus, EnsureThreadRequest,
-    FilesystemSessionThreadService, LoadContextWindowRequest, MessageContent, SessionThreadError,
-    SessionThreadService, ToolResultSafeSummary, UpdateAssistantDraftRequest,
+    FilesystemSessionThreadService, ListThreadsForScopeRequest, LoadContextWindowRequest,
+    MessageContent, SessionThreadError, SessionThreadService, ToolResultSafeSummary,
+    UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, BlockedReason, DefaultTurnCoordinator, FilesystemTurnStateBlockPersistence,
-    FilesystemTurnStateStore, GateRef, IdempotencyKey, InMemoryTurnStateStore,
-    LoopCheckpointStateRef, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId,
-    TurnCoordinator, TurnError, TurnErrorCategory, TurnLeaseToken, TurnRunnerId, TurnStateStore,
+    FilesystemTurnStateRowStore, FilesystemTurnStateStore, GateRef, IdempotencyKey,
+    InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, LoopCheckpointStateRef,
+    ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest, SourceBindingRef,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnCoordinator, TurnError,
+    TurnErrorCategory, TurnLeaseToken, TurnRunnerId, TurnStateDurabilityPolicy, TurnStateStore,
     runner::{
         BlockRunRequest, ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, TurnRunTransitionPort,
     },
@@ -58,6 +60,7 @@ use crate::{
 /// workload submit/claim/complete against either without per-method dispatch.
 pub(crate) trait StressTurnStore: TurnStateStore + TurnRunTransitionPort {}
 impl<F: RootFilesystem + 'static> StressTurnStore for FilesystemTurnStateStore<F> {}
+impl<F: RootFilesystem + 'static> StressTurnStore for FilesystemTurnStateRowStore<F> {}
 impl StressTurnStore for InMemoryTurnStateStore {}
 
 pub(crate) struct UserTurnServices<F>
@@ -71,10 +74,22 @@ where
     run_id: String,
     target: String,
     turn_state_backend: TurnStateBackend,
+    turn_state_limits: InMemoryTurnStateStoreLimits,
+    /// Durable-commit policy applied to the row-store backends (`filesystem-row`,
+    /// `row-memory`). Ignored by the blob/memory backends.
+    turn_state_durability: TurnStateDurabilityPolicy,
     /// Single shared in-process turn-state authority, used when
     /// `turn_state_backend == Memory`. Shared across all workers (one process)
     /// to faithfully model the production single-process design.
     memory_turn_store: Arc<InMemoryTurnStateStore>,
+    /// Shared row-store authorities keyed by tenant/user mount. This preserves
+    /// durable filesystem writes while avoiding a full row-set reload for every
+    /// measured operation in the same process.
+    row_turn_stores: Mutex<RowTurnStoreCache>,
+    /// Shared in-memory `RootFilesystem` backing the `RowMemory` variant's row
+    /// stores — one in-process backend for the whole run, so the row store's
+    /// journal/delta mechanism is measured without durable-backend cost.
+    memory_root: Arc<InMemoryBackend>,
 }
 
 pub(crate) enum UserTurnWorkload {
@@ -97,7 +112,12 @@ pub(crate) struct UserTurnStageLatencySummary {
     pub(crate) submit_turn: StageLatencySummary,
     pub(crate) mark_submitted: StageLatencySummary,
     pub(crate) mark_rejected_busy: StageLatencySummary,
+    pub(crate) list_threads_cold: StageLatencySummary,
+    pub(crate) list_threads_warm: StageLatencySummary,
     pub(crate) claim_run: StageLatencySummary,
+    pub(crate) block_run: StageLatencySummary,
+    pub(crate) resume_turn: StageLatencySummary,
+    pub(crate) reclaim_run: StageLatencySummary,
     pub(crate) append_assistant: StageLatencySummary,
     pub(crate) finalize_assistant: StageLatencySummary,
     pub(crate) complete_run: StageLatencySummary,
@@ -146,7 +166,12 @@ pub(crate) struct UserTurnStageDurations {
     pub(crate) submit_turn: Option<Duration>,
     pub(crate) mark_submitted: Option<Duration>,
     pub(crate) mark_rejected_busy: Option<Duration>,
+    pub(crate) list_threads_cold: Option<Duration>,
+    pub(crate) list_threads_warm: Option<Duration>,
     pub(crate) claim_run: Option<Duration>,
+    pub(crate) block_run: Option<Duration>,
+    pub(crate) resume_turn: Option<Duration>,
+    pub(crate) reclaim_run: Option<Duration>,
     pub(crate) append_assistant: Option<Duration>,
     pub(crate) finalize_assistant: Option<Duration>,
     pub(crate) complete_run: Option<Duration>,
@@ -191,13 +216,17 @@ async fn build_libsql_user_turn_workload(
     run_id: &str,
 ) -> Result<UserTurnWorkload, String> {
     let (filesystem, target) = crate::build_libsql_root(args).await?;
+    let governor = crate::governor_from_root(Arc::clone(&filesystem), run_id)?;
     let model_latency = build_model_latency_driver(args).await?;
     Ok(UserTurnWorkload::Libsql(user_turn_services_from_root(
         filesystem,
+        governor,
         run_id,
         target,
         model_latency,
         args.turn_state_backend,
+        args.turn_state_store_limits(),
+        args.turn_state_durability.to_policy(),
     )?))
 }
 
@@ -214,14 +243,18 @@ async fn build_postgres_user_turn_workload(
     args: &Args,
     run_id: &str,
 ) -> Result<UserTurnWorkload, String> {
-    let (filesystem, target) = crate::build_postgres_root(args).await?;
+    let (filesystem, _pool, target) = crate::build_postgres_root_and_pool(args).await?;
+    let governor = crate::governor_from_root(Arc::clone(&filesystem), run_id)?;
     let model_latency = build_model_latency_driver(args).await?;
     Ok(UserTurnWorkload::Postgres(user_turn_services_from_root(
         filesystem,
+        governor,
         run_id,
         target,
         model_latency,
         args.turn_state_backend,
+        args.turn_state_store_limits(),
+        args.turn_state_durability.to_policy(),
     )?))
 }
 
@@ -415,6 +448,89 @@ pub(crate) async fn prefill_user_turn_history(
     Ok(Some(summary))
 }
 
+pub(crate) async fn prefill_thread_list(
+    workload: Arc<UserTurnWorkload>,
+    args: &Args,
+    identities: Arc<SyntheticIds>,
+) -> Result<Option<PrefillSummary>, String> {
+    if !matches!(args.scenario, Scenario::ThreadList) {
+        return Ok(None);
+    }
+
+    eprintln!(
+        "{} thread-list prefill starting target={} threads={} concurrency={}",
+        crate::log_prefix(args),
+        workload.target(),
+        args.thread_list_threads,
+        args.prefill_concurrency
+    );
+
+    let started = Instant::now();
+    let semaphore = Arc::new(Semaphore::new(args.prefill_concurrency));
+    let mut handles = Vec::with_capacity(args.thread_list_threads);
+    for thread_index in 0..args.thread_list_threads {
+        let permit = Arc::clone(&semaphore)
+            .acquire_owned()
+            .await
+            .map_err(|_| "thread-list prefill semaphore closed".to_string())?;
+        let workload = Arc::clone(&workload);
+        let identities = Arc::clone(&identities);
+        let args = args.clone();
+        handles.push((
+            thread_index,
+            tokio::spawn(async move {
+                let _permit = permit;
+                workload
+                    .prefill_thread_list_thread(&args, &identities, thread_index)
+                    .await
+            }),
+        ));
+    }
+
+    let mut samples = Vec::with_capacity(args.thread_list_threads);
+    let mut first_error = None;
+    for (thread_index, handle) in handles {
+        match handle.await {
+            Ok(sample) => samples.push(sample),
+            Err(error) => {
+                first_error.get_or_insert_with(|| {
+                    if error.is_panic() {
+                        eprintln!("thread-list prefill thread {thread_index} panicked: {error:?}");
+                        format!("thread-list prefill thread {thread_index} panicked")
+                    } else {
+                        eprintln!("thread-list prefill thread {thread_index} cancelled: {error:?}");
+                        format!("thread-list prefill thread {thread_index} cancelled")
+                    }
+                });
+            }
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+
+    let summary = summarize_thread_list_prefill(args, started.elapsed(), &samples);
+    eprintln!(
+        "{} thread-list prefill finished attempted={} succeeded={} failed={} duration_ms={} throughput_ops_sec={:.1}",
+        crate::log_prefix(args),
+        summary.attempted,
+        summary.succeeded,
+        summary.failed,
+        summary.duration_ms,
+        summary.throughput_ops_sec
+    );
+    if summary.failed > 0 {
+        return Err(format!(
+            "thread-list prefill failed attempted={} failed={} errors={}",
+            summary.attempted,
+            summary.failed,
+            format_prefill_errors(&summary.errors)
+        ));
+    }
+
+    Ok(Some(summary))
+}
+
 fn should_run_operation(
     operation_target: OperationTarget,
     started: Instant,
@@ -458,6 +574,17 @@ fn summarize_prefill(args: &Args, elapsed: Duration, samples: &[Sample]) -> Pref
         latency: latency_summary(&latencies),
         errors,
     }
+}
+
+fn summarize_thread_list_prefill(
+    args: &Args,
+    elapsed: Duration,
+    samples: &[Sample],
+) -> PrefillSummary {
+    let mut summary = summarize_prefill(args, elapsed, samples);
+    summary.threads = args.thread_list_threads;
+    summary.turns_per_thread = 0;
+    summary
 }
 
 fn format_prefill_errors(errors: &BTreeMap<String, u64>) -> String {
@@ -523,6 +650,28 @@ impl UserTurnWorkload {
             Self::Postgres(services) => {
                 services
                     .prefill_turn(args, identities, thread_index, turn_index)
+                    .await
+            }
+        }
+    }
+
+    async fn prefill_thread_list_thread(
+        &self,
+        args: &Args,
+        identities: &SyntheticIds,
+        thread_index: usize,
+    ) -> Sample {
+        match self {
+            #[cfg(feature = "libsql")]
+            Self::Libsql(services) => {
+                services
+                    .prefill_thread_list_thread(args, identities, thread_index)
+                    .await
+            }
+            #[cfg(feature = "postgres")]
+            Self::Postgres(services) => {
+                services
+                    .prefill_thread_list_thread(args, identities, thread_index)
                     .await
             }
         }
@@ -627,6 +776,7 @@ where
                 reply_target_binding_ref: ReplyTargetBindingRef::new(reply_target)
                     .map_err(|error| OperationFailure::invalid_request("prefill_submit", error))?,
                 requested_run_profile: None,
+                requested_model: None,
                 idempotency_key: IdempotencyKey::new(format!(
                     "ironclaw-stress-prefill:{operation_ref}"
                 ))
@@ -686,6 +836,54 @@ where
         .await
     }
 
+    async fn prefill_thread_list_thread(
+        &self,
+        args: &Args,
+        identities: &SyntheticIds,
+        thread_index: usize,
+    ) -> Sample {
+        let mut stages = UserTurnStageDurations::default();
+        let started = Instant::now();
+        let outcome = self
+            .prefill_thread_list_thread_inner(args, identities, thread_index, &mut stages)
+            .await;
+        let latency = started.elapsed();
+        let failure = outcome.err().map(|failure| failure.cause);
+        let error = failure.as_ref().map(|cause| cause.bucket.clone());
+        Sample {
+            latency,
+            error,
+            failure,
+            stages: Some(stages),
+        }
+    }
+
+    async fn prefill_thread_list_thread_inner(
+        &self,
+        _args: &Args,
+        identities: &SyntheticIds,
+        thread_index: usize,
+        stages: &mut UserTurnStageDurations,
+    ) -> Result<(), OperationFailure> {
+        let context = identities
+            .user_turn_context_for_user_index(0)
+            .map_err(|error| OperationFailure::invalid_request("thread_list_context", error))?;
+        let thread_id = thread_list_thread_id(thread_index)?;
+        time_stage(
+            &mut stages.ensure_thread,
+            self.thread_service.ensure_thread(EnsureThreadRequest {
+                scope: context.thread_scope,
+                thread_id: Some(thread_id),
+                created_by_actor_id: context.user_id.as_str().to_string(),
+                title: Some(format!("Thread list seed {thread_index:06}")),
+                metadata_json: None,
+            }),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| thread_failure("thread_list_prefill_ensure_thread", error))
+    }
+
     async fn run_operation(
         &self,
         args: &Args,
@@ -730,10 +928,83 @@ where
         let context = identities
             .user_turn_context(args, worker_index, operation_index)
             .map_err(|error| OperationFailure::invalid_request("build_context", error))?;
+
+        if matches!(args.scenario, Scenario::ThreadList) {
+            return self
+                .run_thread_list_operation(args, identities, stages)
+                .await;
+        }
+
         let turn_store = self.turn_store_for_context(&context)?;
         let turn_coordinator = DefaultTurnCoordinator::new(Arc::clone(&turn_store));
         let source_binding = "ironclaw-stress-webchat";
         let reply_target = "ironclaw-stress-reply";
+
+        if matches!(args.scenario, Scenario::TurnLifecycleChurn) {
+            let operation_ref = turn_operation_ref(args, worker_index, operation_index, 0, 1);
+            let SubmitTurnResponse::Accepted { run_id, .. } = time_stage(
+                &mut stages.submit_turn,
+                turn_coordinator.submit_turn(SubmitTurnRequest {
+                    scope: context.turn_scope.clone(),
+                    actor: TurnActor::new(context.user_id.clone()),
+                    accepted_message_ref: AcceptedMessageRef::new(format!(
+                        "message:{operation_ref}"
+                    ))
+                    .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
+                    source_binding_ref: SourceBindingRef::new(source_binding)
+                        .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
+                    reply_target_binding_ref: ReplyTargetBindingRef::new(reply_target)
+                        .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
+                    requested_run_profile: None,
+                    requested_model: None,
+                    idempotency_key: IdempotencyKey::new(format!(
+                        "ironclaw-stress:{operation_ref}"
+                    ))
+                    .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
+                    received_at: Utc::now(),
+                    requested_run_id: None,
+                    parent_run_id: None,
+                    subagent_depth: 0,
+                    spawn_tree_root_run_id: None,
+                    product_context: None,
+                }),
+            )
+            .await
+            .map_err(|error| turn_failure("submit_turn", error))?;
+
+            let runner_id = TurnRunnerId::new();
+            let lease_token = TurnLeaseToken::new();
+            time_stage(
+                &mut stages.claim_run,
+                turn_store.claim_next_run(ClaimRunRequest {
+                    runner_id,
+                    lease_token,
+                    scope_filter: Some(context.turn_scope.clone()),
+                }),
+            )
+            .await
+            .map_err(|error| turn_failure("claim_run", error))?
+            .ok_or_else(|| {
+                OperationFailure::new(
+                    "turn_claim_miss",
+                    "claim_run",
+                    "submitted run was not claimable",
+                )
+            })?;
+
+            time_stage(
+                &mut stages.complete_run,
+                turn_store.complete_run(CompleteRunRequest {
+                    run_id,
+                    runner_id,
+                    lease_token,
+                }),
+            )
+            .await
+            .map_err(|error| turn_failure("complete_run", error))?;
+
+            return Ok(());
+        }
 
         let thread = time_stage(
             &mut stages.ensure_thread,
@@ -802,6 +1073,7 @@ where
                     reply_target_binding_ref: ReplyTargetBindingRef::new(reply_target)
                         .map_err(|error| OperationFailure::invalid_request("submit_turn", error))?,
                     requested_run_profile: None,
+                    requested_model: None,
                     idempotency_key: IdempotencyKey::new(format!(
                         "ironclaw-stress:{operation_ref}"
                     ))
@@ -883,13 +1155,19 @@ where
                 // `gate_blocked_every`, so parity alone would only ever pick one
                 // gate kind for even intervals.
                 let use_auth_gate = (operation_index / args.gate_blocked_every) % 2 == 1;
-                self.gate_block_and_resume(&context, &turn_store, claimed, use_auth_gate)
+                self.gate_block_and_resume(&context, &turn_store, claimed, use_auth_gate, stages)
                     .await?
             } else {
                 claimed
             };
 
             if matches!(args.scenario, Scenario::MixedUserSession) {
+                stage_trace(
+                    worker_index,
+                    operation_index,
+                    &operation_ref,
+                    "load_context:start",
+                );
                 time_stage(
                     &mut stages.load_context,
                     self.thread_service
@@ -901,7 +1179,19 @@ where
                 )
                 .await
                 .map_err(|error| thread_failure("load_context", error))?;
+                stage_trace(
+                    worker_index,
+                    operation_index,
+                    &operation_ref,
+                    "load_context:done",
+                );
 
+                stage_trace(
+                    worker_index,
+                    operation_index,
+                    &operation_ref,
+                    "resource_reserve:start",
+                );
                 let reservation = time_stage(
                     &mut stages.resource_reserve,
                     reserve_resources(
@@ -910,14 +1200,38 @@ where
                     ),
                 )
                 .await?;
+                stage_trace(
+                    worker_index,
+                    operation_index,
+                    &operation_ref,
+                    "resource_reserve:done",
+                );
 
                 let execution = async {
+                    stage_trace(
+                        worker_index,
+                        operation_index,
+                        &operation_ref,
+                        "model_wait:start",
+                    );
                     time_stage(
                         &mut stages.model_wait,
                         self.model_latency.run(args, worker_index, operation_index),
                     )
                     .await?;
+                    stage_trace(
+                        worker_index,
+                        operation_index,
+                        &operation_ref,
+                        "model_wait:done",
+                    );
 
+                    stage_trace(
+                        worker_index,
+                        operation_index,
+                        &operation_ref,
+                        "write_assistant:start",
+                    );
                     self.write_assistant_turn(
                         &context,
                         &thread.thread_id,
@@ -927,6 +1241,12 @@ where
                         stages,
                     )
                     .await?;
+                    stage_trace(
+                        worker_index,
+                        operation_index,
+                        &operation_ref,
+                        "write_assistant:done",
+                    );
 
                     Ok::<(), OperationFailure>(())
                 }
@@ -941,11 +1261,23 @@ where
                     return Err(error);
                 }
 
+                stage_trace(
+                    worker_index,
+                    operation_index,
+                    &operation_ref,
+                    "resource_reconcile:start",
+                );
                 time_stage(
                     &mut stages.resource_reconcile,
                     reconcile_resources(Arc::clone(&self.governor), reservation.id),
                 )
                 .await?;
+                stage_trace(
+                    worker_index,
+                    operation_index,
+                    &operation_ref,
+                    "resource_reconcile:done",
+                );
             } else if matches!(args.scenario, Scenario::ToolSession) {
                 time_stage(
                     &mut stages.load_context,
@@ -1023,6 +1355,87 @@ where
         }
 
         Ok(())
+    }
+
+    async fn run_thread_list_operation(
+        &self,
+        args: &Args,
+        identities: &SyntheticIds,
+        stages: &mut UserTurnStageDurations,
+    ) -> Result<(), OperationFailure> {
+        let context = identities
+            .user_turn_context_for_user_index(0)
+            .map_err(|error| OperationFailure::invalid_request("thread_list_context", error))?;
+        self.thread_service
+            .clear_thread_index_cache_for_scope(&context.thread_scope);
+
+        let cold_count = time_stage(
+            &mut stages.list_threads_cold,
+            self.list_thread_pages(&context.thread_scope, args.thread_list_page_size),
+        )
+        .await?;
+        if cold_count != args.thread_list_threads {
+            return Err(OperationFailure::new(
+                "thread_list_count_mismatch",
+                "list_threads_cold",
+                format!(
+                    "expected {} seeded threads, listed {cold_count}",
+                    args.thread_list_threads
+                ),
+            ));
+        }
+
+        let warm_count = time_stage(
+            &mut stages.list_threads_warm,
+            self.list_thread_pages(&context.thread_scope, args.thread_list_page_size),
+        )
+        .await?;
+        if warm_count != args.thread_list_threads {
+            return Err(OperationFailure::new(
+                "thread_list_count_mismatch",
+                "list_threads_warm",
+                format!(
+                    "expected {} seeded threads, listed {warm_count}",
+                    args.thread_list_threads
+                ),
+            ));
+        }
+
+        Ok(())
+    }
+
+    async fn list_thread_pages(
+        &self,
+        scope: &ironclaw_threads::ThreadScope,
+        page_size: usize,
+    ) -> Result<usize, OperationFailure> {
+        let mut cursor = None;
+        let mut listed = 0_usize;
+        let mut pages = 0_usize;
+        loop {
+            let response = self
+                .thread_service
+                .list_threads_for_scope(ListThreadsForScopeRequest {
+                    scope: scope.clone(),
+                    limit: Some(page_size as u32),
+                    cursor,
+                })
+                .await
+                .map_err(|error| thread_failure("list_threads", error))?;
+            listed = listed.saturating_add(response.threads.len());
+            pages = pages.saturating_add(1);
+            cursor = response.next_cursor;
+            if cursor.is_none() {
+                return Ok(listed);
+            }
+            if pages > 10_000 {
+                return Err(OperationFailure::new(
+                    "thread_list_cursor_loop",
+                    "list_threads",
+                    "thread list pagination exceeded 10000 pages",
+                ));
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1202,6 +1615,7 @@ where
         turn_store: &Arc<dyn StressTurnStore>,
         claimed: ClaimedTurnRun,
         use_auth_gate: bool,
+        stages: &mut UserTurnStageDurations,
     ) -> Result<ClaimedTurnRun, OperationFailure> {
         let run_id = claimed.state.run_id;
         let is_auth = use_auth_gate;
@@ -1219,25 +1633,28 @@ where
                 gate_ref: gate_ref.clone(),
             }
         };
-        turn_store
-            .block_run(BlockRunRequest {
+        time_stage(
+            &mut stages.block_run,
+            turn_store.block_run(BlockRunRequest {
                 run_id,
                 runner_id: claimed.runner_id,
                 lease_token: claimed.lease_token,
                 checkpoint_id: TurnCheckpointId::new(),
                 state_ref,
                 reason,
-            })
-            .await
-            .map_err(|error| turn_failure("block_run", error))?;
+            }),
+        )
+        .await
+        .map_err(|error| turn_failure("block_run", error))?;
 
         let precondition = if is_auth {
             ResumeTurnPrecondition::BlockedAuthGate
         } else {
             ResumeTurnPrecondition::BlockedApprovalGate
         };
-        turn_store
-            .resume_turn(ResumeTurnRequest {
+        time_stage(
+            &mut stages.resume_turn,
+            turn_store.resume_turn(ResumeTurnRequest {
                 scope: context.turn_scope.clone(),
                 actor: TurnActor::new(context.user_id.clone()),
                 run_id,
@@ -1252,27 +1669,30 @@ where
                     .map_err(|error| OperationFailure::invalid_request("resume_turn", error))?,
                 precondition,
                 resume_disposition: None,
-            })
-            .await
-            .map_err(|error| turn_failure("resume_turn", error))?;
+            }),
+        )
+        .await
+        .map_err(|error| turn_failure("resume_turn", error))?;
 
         // Resume returns the run to Queued — re-claim it so the normal
         // completion path owns finishing it.
-        turn_store
-            .claim_next_run(ClaimRunRequest {
+        time_stage(
+            &mut stages.reclaim_run,
+            turn_store.claim_next_run(ClaimRunRequest {
                 runner_id: TurnRunnerId::new(),
                 lease_token: TurnLeaseToken::new(),
                 scope_filter: Some(context.turn_scope.clone()),
-            })
-            .await
-            .map_err(|error| turn_failure("reclaim_run", error))?
-            .ok_or_else(|| {
-                OperationFailure::new(
-                    "turn_claim_miss",
-                    "reclaim_run",
-                    "resumed run was not claimable",
-                )
-            })
+            }),
+        )
+        .await
+        .map_err(|error| turn_failure("reclaim_run", error))?
+        .ok_or_else(|| {
+            OperationFailure::new(
+                "turn_claim_miss",
+                "reclaim_run",
+                "resumed run was not claimable",
+            )
+        })
     }
 
     fn turn_store_for_context(
@@ -1288,6 +1708,38 @@ where
             TurnStateBackend::Memory | TurnStateBackend::MemoryPersistOnBlock => {
                 Ok(Arc::clone(&self.memory_turn_store) as Arc<dyn StressTurnStore>)
             }
+            TurnStateBackend::FilesystemRow => {
+                let resource_scope = context.turn_scope.to_resource_scope();
+                self.cached_row_store(&resource_scope, |view| {
+                    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+                        Arc::clone(&self.root),
+                        view,
+                    ));
+                    Arc::new(
+                        FilesystemTurnStateRowStore::new(scoped)
+                            .with_limits(self.turn_state_limits)
+                            .with_durability_policy(self.turn_state_durability),
+                    )
+                })
+            }
+            // Same row-store mechanism, but over the shared in-process
+            // in-memory backend — models replacing the direct in-memory
+            // authority in the `inmemory-turn-state` profile with the row
+            // store (journal/delta semantics, no durable-backend cost).
+            TurnStateBackend::RowMemory => {
+                let resource_scope = context.turn_scope.to_resource_scope();
+                self.cached_row_store(&resource_scope, |view| {
+                    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+                        Arc::clone(&self.memory_root),
+                        view,
+                    ));
+                    Arc::new(
+                        FilesystemTurnStateRowStore::new(scoped)
+                            .with_limits(self.turn_state_limits)
+                            .with_durability_policy(self.turn_state_durability),
+                    )
+                })
+            }
             // Durable path: a per-context store whose `/turns/state.json`
             // resolves per (tenant, agent, project, user), so all of a user's
             // concurrent turns contend on one document via CAS.
@@ -1299,24 +1751,72 @@ where
                     Arc::clone(&self.root),
                     view,
                 ));
-                Ok(Arc::new(FilesystemTurnStateStore::new(scoped)) as Arc<dyn StressTurnStore>)
+                Ok(Arc::new(
+                    FilesystemTurnStateStore::new(scoped).with_limits(self.turn_state_limits),
+                ) as Arc<dyn StressTurnStore>)
             }
         }
     }
+
+    /// Look up (or build and cache) the shared per-tenant/user row store for
+    /// `resource_scope`. Both row-store variants share this cache — only one
+    /// backend is active per process, so keys never mix roots.
+    fn cached_row_store(
+        &self,
+        resource_scope: &ResourceScope,
+        build: impl FnOnce(MountView) -> Arc<dyn StressTurnStore>,
+    ) -> Result<Arc<dyn StressTurnStore>, OperationFailure> {
+        let key = row_turn_store_key(resource_scope);
+        // Fast path: a shared read of the cache under the lock. The lock is NOT
+        // held across `build` — in a throughput benchmark, serializing every
+        // thread's store construction behind one mutex would distort the very
+        // latency evidence this harness measures.
+        if let Some(store) = self.lock_row_stores()?.get(&key).cloned() {
+            return Ok(store);
+        }
+
+        // Build outside the lock. A concurrent thread may build the same key in
+        // parallel; that is a bounded, one-time waste (a cache miss races), not
+        // a correctness issue — the insert below dedups to a single shared store.
+        let view = user_turn_mount_view(&self.run_id, resource_scope)
+            .map_err(|error| OperationFailure::invalid_request("turn_store", error))?;
+        let built = build(view);
+
+        let mut stores = self.lock_row_stores()?;
+        // Re-check under the lock: if another thread inserted first, adopt theirs
+        // and drop ours so every caller for this key shares one store.
+        Ok(Arc::clone(stores.entry(key).or_insert(built)))
+    }
+
+    fn lock_row_stores(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, RowTurnStoreCache>, OperationFailure> {
+        self.row_turn_stores.lock().map_err(|_| {
+            OperationFailure::new(
+                "turn_store_lock_poisoned",
+                "turn_store",
+                "row turn-store cache lock poisoned",
+            )
+        })
+    }
 }
 
+// arch-exempt: too_many_args, stress-harness workload constructor; turn-state axes (backend/limits/durability) would group into a TurnStateWorkloadConfig, plan #6263
+#[allow(clippy::too_many_arguments)]
 fn user_turn_services_from_root<F>(
     root: Arc<F>,
+    governor: Arc<dyn ResourceGovernor>,
     run_id: &str,
     target: String,
     model_latency: Arc<ModelLatencyDriver>,
     turn_state_backend: TurnStateBackend,
+    turn_state_limits: InMemoryTurnStateStoreLimits,
+    turn_state_durability: TurnStateDurabilityPolicy,
 ) -> Result<UserTurnServices<F>, String>
 where
     F: RootFilesystem + 'static,
 {
     let run_id = run_id.to_string();
-    let governor = crate::governor_from_root(Arc::clone(&root), &run_id)?;
     let scoped = Arc::new(ScopedFilesystem::new(Arc::clone(&root), {
         let run_id = run_id.clone();
         move |scope| user_turn_mount_view(&run_id, scope)
@@ -1329,6 +1829,8 @@ where
         run_id,
         target,
         turn_state_backend,
+        turn_state_limits,
+        turn_state_durability,
         // Constructed once and shared across every worker (the workload is held
         // behind one Arc), so the Memory backend exercises a single shared
         // authority exactly as the single-process runtime would. When the
@@ -1337,7 +1839,7 @@ where
         // shipped config (the sink stays idle on this never-blocking workload,
         // so what it measures is the extra probe cost per terminal transition).
         memory_turn_store: Arc::new({
-            let store = InMemoryTurnStateStore::default();
+            let store = InMemoryTurnStateStore::with_limits(turn_state_limits);
             if turn_state_backend.persists_on_block() {
                 let sink = Arc::new(FilesystemTurnStateBlockPersistence::new(Arc::clone(
                     &scoped,
@@ -1347,7 +1849,15 @@ where
                 store
             }
         }),
+        row_turn_stores: Mutex::new(HashMap::new()),
+        memory_root: Arc::new(InMemoryBackend::new()),
     })
+}
+
+fn row_turn_store_key(scope: &ResourceScope) -> String {
+    let tenant = scope.tenant_id.as_str();
+    let user = scope.user_id.as_str();
+    format!("{}:{tenant}:{}:{user}", tenant.len(), user.len())
 }
 
 fn user_turn_mount_view(run_id: &str, scope: &ResourceScope) -> Result<MountView, HostApiError> {
@@ -1393,33 +1903,61 @@ async fn time_stage<T>(slot: &mut Option<Duration>, future: impl Future<Output =
     output
 }
 
+fn stage_trace(worker_index: usize, operation_index: usize, operation_ref: &str, stage: &str) {
+    if std::env::var_os("IRONCLAW_STRESS_STAGE_TRACE").is_some() {
+        eprintln!(
+            "[ironclaw-stress-stage] worker={worker_index} op={operation_index} ref={operation_ref} {stage}"
+        );
+    }
+}
+
 async fn reserve_resources(
     governor: Arc<dyn ResourceGovernor>,
     scope: ResourceScope,
 ) -> Result<ResourceReservation, OperationFailure> {
-    governor
-        .reserve(scope, resource_ops::estimate())
-        .map_err(|error| resource_failure("resource_reserve", error))
+    run_resource_governor_blocking("resource_reserve", move || {
+        governor.reserve(scope, resource_ops::estimate())
+    })
+    .await
 }
 
 async fn reconcile_resources(
     governor: Arc<dyn ResourceGovernor>,
     reservation_id: ResourceReservationId,
 ) -> Result<(), OperationFailure> {
-    governor
-        .reconcile(reservation_id, resource_ops::usage())
-        .map(|_| ())
-        .map_err(|error| resource_failure("resource_reconcile", error))
+    run_resource_governor_blocking("resource_reconcile", move || {
+        governor.reconcile(reservation_id, resource_ops::usage())
+    })
+    .await
+    .map(|_| ())
 }
 
 async fn release_resources(
     governor: Arc<dyn ResourceGovernor>,
     reservation_id: ResourceReservationId,
 ) -> Result<(), OperationFailure> {
-    governor
-        .release(reservation_id)
+    run_resource_governor_blocking("resource_release", move || governor.release(reservation_id))
+        .await
         .map(|_| ())
-        .map_err(|error| resource_failure("resource_release", error))
+}
+
+async fn run_resource_governor_blocking<T>(
+    stage: &'static str,
+    call: impl FnOnce() -> Result<T, ResourceError> + Send + 'static,
+) -> Result<T, OperationFailure>
+where
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(call)
+        .await
+        .map_err(|error| {
+            OperationFailure::new(
+                "resource_governor_join",
+                stage,
+                format!("resource governor blocking task failed: {error}"),
+            )
+        })?
+        .map_err(|error| resource_failure(stage, error))
 }
 
 async fn synthetic_model_wait(args: &Args, worker_index: usize, operation_index: usize) {
@@ -1697,6 +2235,11 @@ fn stress_payload(mut base: String, minimum_bytes: usize) -> String {
     base
 }
 
+fn thread_list_thread_id(thread_index: usize) -> Result<ThreadId, OperationFailure> {
+    ThreadId::new(format!("thread-list-{thread_index:06}"))
+        .map_err(|error| OperationFailure::invalid_request("thread_list_thread_id", error))
+}
+
 fn operation_ref(args: &Args, worker_index: usize, operation_index: usize) -> String {
     let phase = if args.warmup_phase { ":warmup" } else { "" };
     format!(
@@ -1767,7 +2310,12 @@ fn stage_latencies_us(stages: &UserTurnStageDurations) -> serde_json::Value {
     insert_stage_latency(&mut output, "submit_turn", stages.submit_turn);
     insert_stage_latency(&mut output, "mark_submitted", stages.mark_submitted);
     insert_stage_latency(&mut output, "mark_rejected_busy", stages.mark_rejected_busy);
+    insert_stage_latency(&mut output, "list_threads_cold", stages.list_threads_cold);
+    insert_stage_latency(&mut output, "list_threads_warm", stages.list_threads_warm);
     insert_stage_latency(&mut output, "claim_run", stages.claim_run);
+    insert_stage_latency(&mut output, "block_run", stages.block_run);
+    insert_stage_latency(&mut output, "resume_turn", stages.resume_turn);
+    insert_stage_latency(&mut output, "reclaim_run", stages.reclaim_run);
     insert_stage_latency(&mut output, "append_assistant", stages.append_assistant);
     insert_stage_latency(&mut output, "finalize_assistant", stages.finalize_assistant);
     insert_stage_latency(&mut output, "complete_run", stages.complete_run);
@@ -1869,6 +2417,7 @@ fn thread_failure(stage: impl Into<String>, error: SessionThreadError) -> Operat
         SessionThreadError::Serialization(_) | SessionThreadError::Deserialization(_) => {
             "thread_serialization"
         }
+        SessionThreadError::InvalidMessageTimestamp { .. } => "thread_timestamp_invalid",
         SessionThreadError::Backend(_) => "thread_backend",
     };
     OperationFailure::new(bucket, stage, error)
@@ -1893,3 +2442,5 @@ fn resource_failure(stage: &'static str, error: ResourceError) -> OperationFailu
         cause: resource_ops::failure_for_stage(stage, error),
     }
 }
+/// Per-tenant/user row turn-store cache, keyed by scope.
+type RowTurnStoreCache = HashMap<String, Arc<dyn StressTurnStore>>;

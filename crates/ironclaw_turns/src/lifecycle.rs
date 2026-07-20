@@ -9,16 +9,18 @@ use tracing::debug;
 
 use crate::{
     CancelRunRequest, CancelRunResponse, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse,
-    RunProfileResolver, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse,
-    TurnAdmissionPolicy, TurnCommittedEventObserver, TurnError, TurnEventKind, TurnEventSink,
-    TurnLifecycleEvent, TurnRunId, TurnRunRecord, TurnRunState, TurnSpawnTreeStateStore,
+    RetryTurnRequest, RetryTurnResponse, RunProfileResolver, SubmitChildRunRequest,
+    SubmitTurnRequest, SubmitTurnResponse, TurnAdmissionPolicy, TurnCheckpointId,
+    TurnCommittedEventObserver, TurnError, TurnEventKind, TurnEventSink, TurnId,
+    TurnLifecycleEvent, TurnRunId, TurnRunRecord, TurnRunState, TurnScope, TurnSpawnTreeStateStore,
     TurnStateStore, TurnStatus,
     events::{EventCursor, lifecycle_owner_user_id},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
-        ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
-        RecoverExpiredLeasesResponse, RelinquishRunRequest, TurnRunTransitionPort,
+        ClaimRunRequest, ClaimRunsRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest,
+        HeartbeatRequest, RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest,
+        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, RelinquishRunRequest,
+        TurnRunTransitionPort,
     },
     store::SpawnTreeReservation,
 };
@@ -32,7 +34,7 @@ const MAX_DELIVERED_EVENT_CURSORS: usize = 4096;
 /// mutation.
 ///
 /// Two publication paths preserve the `TurnCommittedEventObserver` split:
-/// coordinator-origin operations (submit, resume, request_cancel, submit_child)
+/// coordinator-origin operations (submit, resume, retry, request_cancel, submit_child)
 /// emit only a lifecycle event and call `observe_committed_event`, while
 /// runner-origin transitions (claim, block, complete, fail, cancel, recovery,
 /// validated-loop-exit) carry the committed `TurnRunState` and call
@@ -364,6 +366,8 @@ fn submit_event(request: &SubmitTurnRequest, response: &SubmitTurnResponse) -> T
         kind: TurnEventKind::Submitted,
         blocked_gate: None,
         sanitized_reason: None,
+        retryable: None,
+        detail: None,
     }
 }
 
@@ -387,6 +391,8 @@ fn child_submit_event(
         kind: TurnEventKind::Submitted,
         blocked_gate: None,
         sanitized_reason: None,
+        retryable: None,
+        detail: None,
     }
 }
 
@@ -401,6 +407,24 @@ fn resume_event(request: &ResumeTurnRequest, response: &ResumeTurnResponse) -> T
         kind: TurnEventKind::Resumed,
         blocked_gate: None,
         sanitized_reason: None,
+        retryable: None,
+        detail: None,
+    }
+}
+
+fn retry_event(request: &RetryTurnRequest, response: &RetryTurnResponse) -> TurnLifecycleEvent {
+    TurnLifecycleEvent {
+        cursor: response.event_cursor,
+        scope: request.scope.clone(),
+        occurred_at: Some(Utc::now()),
+        owner_user_id: lifecycle_owner_user_id(&request.scope, Some(&request.actor.user_id)),
+        run_id: response.run_id,
+        status: response.status,
+        kind: TurnEventKind::Resumed,
+        blocked_gate: None,
+        sanitized_reason: None,
+        retryable: None,
+        detail: None,
     }
 }
 
@@ -429,6 +453,8 @@ fn cancel_event(
         kind,
         blocked_gate: None,
         sanitized_reason: Some(request.reason.category().to_string()),
+        retryable: None,
+        detail: None,
     })
 }
 
@@ -490,6 +516,14 @@ where
         Ok(response)
     }
 
+    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
+        let event_request = request.clone();
+        let response = self.inner.retry_turn(request).await?;
+        self.publish_event_once_deferred(retry_event(&event_request, &response))
+            .await?;
+        Ok(response)
+    }
+
     async fn request_cancel(
         &self,
         request: CancelRunRequest,
@@ -504,6 +538,13 @@ where
 
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
         self.inner.get_run_state(request).await
+    }
+
+    async fn get_run_state_for_cancellation(
+        &self,
+        request: GetRunStateRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.inner.get_run_state_for_cancellation(request).await
     }
 }
 
@@ -561,9 +602,21 @@ where
         scope: &crate::TurnScope,
         root_run_id: TurnRunId,
         delta: u32,
+        idempotency_key: TurnRunId,
     ) -> Result<(), TurnError> {
         self.inner
-            .release_tree_descendants(scope, root_run_id, delta)
+            .release_tree_descendants(scope, root_run_id, delta, idempotency_key)
+            .await
+    }
+
+    async fn prune_released_child(
+        &self,
+        scope: &crate::TurnScope,
+        root_run_id: TurnRunId,
+        child_run_id: TurnRunId,
+    ) -> Result<(), TurnError> {
+        self.inner
+            .prune_released_child(scope, root_run_id, child_run_id)
             .await
     }
 }
@@ -590,6 +643,27 @@ where
         Ok(claimed)
     }
 
+    async fn claim_next_runs(
+        &self,
+        request: ClaimRunsRequest,
+    ) -> Result<Vec<ClaimedTurnRun>, TurnError> {
+        let claimed = self.inner.claim_next_runs(request).await?;
+        for claimed_run in &claimed {
+            let event = TurnLifecycleEvent::from_run_state(
+                &claimed_run.state,
+                TurnEventKind::RunnerClaimed,
+                None,
+            );
+            self.publish_state_once_best_effort(
+                claimed_run.state.clone(),
+                event,
+                "committed claim",
+            )
+            .await;
+        }
+        Ok(claimed)
+    }
+
     async fn heartbeat(&self, request: HeartbeatRequest) -> Result<EventCursor, TurnError> {
         self.inner.heartbeat(request).await
     }
@@ -609,6 +683,17 @@ where
                 .await;
         }
         Ok(response)
+    }
+
+    async fn latest_resumable_checkpoint(
+        &self,
+        scope: &TurnScope,
+        turn_id: TurnId,
+        run_id: TurnRunId,
+    ) -> Result<Option<TurnCheckpointId>, TurnError> {
+        self.inner
+            .latest_resumable_checkpoint(scope, turn_id, run_id)
+            .await
     }
 
     async fn record_model_route_snapshot(

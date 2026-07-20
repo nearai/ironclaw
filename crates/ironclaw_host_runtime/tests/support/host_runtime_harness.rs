@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+// arch-exempt: large_file, mechanical lease-store test repoint to FilesystemCapabilityLeaseStore<InMemoryBackend> helper (arch-simplification §4.3), no new test logic, plan #6168
 
 use super::legacy_capability_fixture_to_v2;
 use std::{
@@ -13,7 +14,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_approvals::LeaseApproval;
 use ironclaw_authorization::{
-    GrantAuthorizer, InMemoryCapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
+    FilesystemCapabilityLeaseStore, GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer,
+    in_memory_backed_capability_lease_store,
 };
 use ironclaw_capabilities::{
     CapabilityHost, CapabilityObligationHandler, CapabilityObligationPhase,
@@ -24,11 +26,12 @@ use ironclaw_events::{
     InMemoryEventSink, ReadScope,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_filesystem::InMemoryBackend;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::ScopedFilesystem;
-use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
+use ironclaw_filesystem::{DiskFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, BuiltinObligationServices, CapabilitySurfaceVersion,
@@ -43,24 +46,24 @@ use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
 use ironclaw_processes::{
-    BackgroundFailureStage, BackgroundProcessManager, InMemoryProcessResultStore,
-    InMemoryProcessStore, ProcessError, ProcessExecutionRequest, ProcessExecutionResult,
-    ProcessExecutor, ProcessResultRecord, ProcessResultStore, ProcessServices, ProcessStart,
-    ProcessStatus, ProcessStore,
+    BackgroundFailureStage, BackgroundProcessManager, FilesystemProcessResultStore,
+    FilesystemProcessStore, ProcessError, ProcessExecutionRequest, ProcessExecutionResult,
+    ProcessExecutor, ProcessResultRecord, ProcessResultStore, ProcessStart, ProcessStatus,
+    ProcessStore,
 };
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits,
 };
 use ironclaw_run_state::{
-    ApprovalRecord, ApprovalRequestStore, InMemoryApprovalRequestStore, InMemoryRunStateStore,
-    RunRecord, RunStart, RunStateApprovalStore, RunStateError, RunStateStore, RunStatus,
+    ApprovalRecord, ApprovalRequestStore, RunRecord, RunStart, RunStateApprovalStore,
+    RunStateError, RunStateStore, RunStatus,
 };
 use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptExecutionRequest,
     ScriptExecutionResult, ScriptExecutor, ScriptRuntime, ScriptRuntimeConfig,
 };
 use ironclaw_secrets::{
-    InMemorySecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
+    FilesystemSecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
     SecretStoreError,
 };
 use ironclaw_trust::{
@@ -153,7 +156,6 @@ pub(crate) async fn assert_services_use_combined_store_for_atomic_approval_block
             script_capability_id(),
             ResourceEstimate::default(),
             json!({"message": message}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -214,15 +216,17 @@ pub(crate) fn assert_completed_outcome(
 }
 
 pub(crate) type InMemoryHostRuntimeServices = HostRuntimeServices<
-    LocalFilesystem,
+    DiskFilesystem,
     InMemoryResourceGovernor,
-    InMemoryProcessStore,
-    InMemoryProcessResultStore,
+    FilesystemProcessStore<InMemoryBackend>,
+    FilesystemProcessResultStore<InMemoryBackend>,
 >;
 
 pub(crate) struct InMemoryRecordingCombinedRunStateApprovalStore {
-    pub(crate) runs: InMemoryRunStateStore,
-    pub(crate) approvals: InMemoryApprovalRequestStore,
+    pub(crate) runs:
+        ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>,
+    pub(crate) approvals:
+        ironclaw_run_state::FilesystemApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>,
     pub(crate) combined_calls: AtomicUsize,
     pub(crate) separate_save_calls: AtomicUsize,
 }
@@ -230,8 +234,8 @@ pub(crate) struct InMemoryRecordingCombinedRunStateApprovalStore {
 impl InMemoryRecordingCombinedRunStateApprovalStore {
     pub(crate) fn new() -> Self {
         Self {
-            runs: InMemoryRunStateStore::new(),
-            approvals: InMemoryApprovalRequestStore::new(),
+            runs: ironclaw_run_state::in_memory_backed_run_state_store(),
+            approvals: ironclaw_run_state::in_memory_backed_approval_request_store(),
             combined_calls: AtomicUsize::new(0),
             separate_save_calls: AtomicUsize::new(0),
         }
@@ -376,9 +380,12 @@ impl RunStateApprovalStore for InMemoryRecordingCombinedRunStateApprovalStore {
 
 pub(crate) struct ApprovalResumeFixture {
     pub(crate) services: InMemoryHostRuntimeServices,
-    pub(crate) run_state: Arc<InMemoryRunStateStore>,
-    pub(crate) approval_requests: Arc<InMemoryApprovalRequestStore>,
-    pub(crate) capability_leases: Arc<InMemoryCapabilityLeaseStore>,
+    pub(crate) run_state:
+        Arc<ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    pub(crate) approval_requests: Arc<
+        ironclaw_run_state::FilesystemApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>,
+    >,
+    pub(crate) capability_leases: Arc<FilesystemCapabilityLeaseStore<InMemoryBackend>>,
     pub(crate) events: InMemoryEventSink,
 }
 
@@ -390,16 +397,16 @@ pub(crate) fn approval_resume_fixture_with_manifest(
     manifest: &str,
     trust_effects: Vec<EffectKind>,
 ) -> ApprovalResumeFixture {
-    let run_state = Arc::new(InMemoryRunStateStore::new());
-    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
-    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
+    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
+    let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let events = InMemoryEventSink::new();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(manifest)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -429,10 +436,10 @@ pub(crate) fn resume_runtime_with_empty_registry(
 ) -> DefaultHostRuntime {
     HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -455,10 +462,10 @@ pub(crate) fn resume_runtime_with_policy(
 ) -> DefaultHostRuntime {
     HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_NETWORK_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
@@ -506,7 +513,6 @@ pub(crate) async fn block_for_approval(
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -1044,7 +1050,7 @@ pub(crate) async fn spawn_obligation_fixture(
         reservation_id,
         secret_handle,
         executor,
-        Arc::new(InMemoryProcessResultStore::new()),
+        Arc::new(ironclaw_processes::in_memory_backed_process_result_store()),
     )
     .await
 }
@@ -1062,7 +1068,7 @@ where
         reservation_id,
         secret_handle,
         executor,
-        Arc::new(InMemoryProcessStore::new()),
+        Arc::new(ironclaw_processes::in_memory_backed_process_store()),
         result_store,
     )
     .await
@@ -1082,7 +1088,7 @@ where
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
     let dispatcher = Arc::new(NoopDispatcher);
     let governor = Arc::new(InMemoryResourceGovernor::new());
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let obligation_services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
         secret_store.clone(),
@@ -1092,11 +1098,9 @@ where
     let scope = sample_scope(invocation_id);
     let context =
         execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone());
-    let estimate = ResourceEstimate {
-        process_count: Some(1),
-        concurrency_slots: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default()
+        .set_process_count(1)
+        .set_concurrency_slots(1);
     secret_store
         .put(
             scope.clone(),
@@ -1133,9 +1137,12 @@ where
                 };
                 let cleanup_process_store = Arc::clone(&cleanup_process_store);
                 tokio::spawn(async move {
-                    let _ = cleanup_process_store
+                    if let Err(error) = cleanup_process_store
                         .cleanup_process_obligations(&failure.scope, failure.process_id, reconcile)
-                        .await;
+                        .await
+                    {
+                        tracing::debug!(?error, "best-effort process obligation cleanup failed");
+                    }
                 });
             }),
     );
@@ -1278,7 +1285,7 @@ impl ProcessResultStore for FailingProcessResultStore {
 }
 
 pub(crate) struct FailingTerminalProcessStore {
-    pub(crate) inner: InMemoryProcessStore,
+    pub(crate) inner: FilesystemProcessStore<InMemoryBackend>,
     pub(crate) fail_complete: bool,
     pub(crate) fail_fail: bool,
     pub(crate) attempts: std::sync::Mutex<Vec<&'static str>>,
@@ -1287,7 +1294,7 @@ pub(crate) struct FailingTerminalProcessStore {
 impl FailingTerminalProcessStore {
     pub(crate) fn fail_complete() -> Self {
         Self {
-            inner: InMemoryProcessStore::new(),
+            inner: ironclaw_processes::in_memory_backed_process_store(),
             fail_complete: true,
             fail_fail: false,
             attempts: std::sync::Mutex::new(Vec::new()),
@@ -1296,7 +1303,7 @@ impl FailingTerminalProcessStore {
 
     pub(crate) fn fail_fail() -> Self {
         Self {
-            inner: InMemoryProcessStore::new(),
+            inner: ironclaw_processes::in_memory_backed_process_store(),
             fail_complete: false,
             fail_fail: true,
             attempts: std::sync::Mutex::new(Vec::new()),
@@ -1511,7 +1518,12 @@ pub(crate) async fn wait_for_sandbox_process_result(
             && let Some(result) = result_store.get(scope, process_id).await.unwrap()
         {
             assert_eq!(result.status, ProcessStatus::Completed);
-            assert_eq!(result.output, Some(json!({"executor": "process_sandbox"})));
+            // Filesystem result store externalizes output behind `output_ref`;
+            // read the bytes through the store, not the inline record field (§4.3).
+            assert_eq!(
+                result_store.output(scope, process_id).await.unwrap(),
+                Some(json!({"executor": "process_sandbox"}))
+            );
             return;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -1696,12 +1708,14 @@ pub(crate) fn execution_context_without_grants() -> ExecutionContext {
 
 pub(crate) fn execution_context_without_grants_for_scope(scope: ResourceScope) -> ExecutionContext {
     let context = ExecutionContext {
+        run_id: None,
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
         parent_process_id: None,
         tenant_id: scope.tenant_id.clone(),
         user_id: scope.user_id.clone(),
+        authenticated_actor_user_id: None,
         agent_id: scope.agent_id.clone(),
         project_id: scope.project_id.clone(),
         mission_id: scope.mission_id.clone(),
@@ -1747,12 +1761,14 @@ pub(crate) fn execution_context_with_effect_grants_for_scope(
     allowed_effects: Vec<EffectKind>,
 ) -> ExecutionContext {
     let context = ExecutionContext {
+        run_id: None,
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
         parent_process_id: None,
         tenant_id: scope.tenant_id.clone(),
         user_id: scope.user_id.clone(),
+        authenticated_actor_user_id: None,
         agent_id: scope.agent_id.clone(),
         project_id: scope.project_id.clone(),
         mission_id: scope.mission_id.clone(),
@@ -1888,10 +1904,10 @@ pub(crate) fn assert_local_only_runtime_policy_rejected(
 ) {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_runtime_policy(runtime_policy);
@@ -1953,6 +1969,7 @@ pub(crate) fn process_start(
         parent_process_id: None,
         invocation_id,
         scope,
+        authenticated_actor_user_id: None,
         extension_id: script_extension_id(),
         capability_id: script_capability_id(),
         runtime: RuntimeKind::Script,
@@ -1971,6 +1988,7 @@ pub(crate) fn process_sandbox_start(process_id: ProcessId, scope: ResourceScope)
         parent_process_id: None,
         invocation_id,
         scope,
+        authenticated_actor_user_id: None,
         extension_id: ExtensionId::new("system.process_sandbox").unwrap(),
         capability_id: process_sandbox_capability_id(),
         runtime: RuntimeKind::System,
@@ -1994,16 +2012,13 @@ pub(crate) fn process_sandbox_runtime_request_for_scope(
         process_sandbox_capability_id(),
         process_sandbox_estimate(),
         process_sandbox_input(),
-        process_sandbox_trust_decision(),
     )
 }
 
 pub(crate) fn process_sandbox_estimate() -> ResourceEstimate {
-    ResourceEstimate {
-        process_count: Some(1),
-        concurrency_slots: Some(1),
-        ..ResourceEstimate::default()
-    }
+    ResourceEstimate::default()
+        .set_process_count(1)
+        .set_concurrency_slots(1)
 }
 
 pub(crate) fn process_sandbox_input() -> serde_json::Value {
@@ -2075,7 +2090,7 @@ pub(crate) async fn wasm_runtime_for_component(
         filesystem,
         Arc::clone(&governor),
         authorizer,
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_runtime_http_egress(Arc::clone(&http))
@@ -2115,7 +2130,7 @@ pub(crate) async fn wasm_runtime_for_component_with_slow_zero_body_http(
         filesystem,
         Arc::clone(&governor),
         authorizer,
-        ProcessServices::in_memory(),
+        ironclaw_processes::in_memory_backed_process_services(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_runtime_http_egress(Arc::clone(&http))
@@ -2134,7 +2149,7 @@ pub(crate) async fn filesystem_with_wasm_component(
     extension_id: &str,
     module_path: &str,
     wasm_bytes: &[u8],
-) -> LocalFilesystem {
+) -> DiskFilesystem {
     let fs = mounted_empty_extension_root();
     let path =
         VirtualPath::new(format!("/system/extensions/{extension_id}/{module_path}")).unwrap();
@@ -2142,9 +2157,9 @@ pub(crate) async fn filesystem_with_wasm_component(
     fs
 }
 
-pub(crate) fn mounted_empty_extension_root() -> LocalFilesystem {
+pub(crate) fn mounted_empty_extension_root() -> DiskFilesystem {
     let storage = tempfile::tempdir().unwrap().keep();
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage),
@@ -2158,12 +2173,10 @@ pub(crate) fn governor_with_default_limit(account: ResourceAccount) -> InMemoryR
     governor
         .set_limit(
             account,
-            ResourceLimits {
-                max_concurrency_slots: Some(10),
-                max_network_egress_bytes: Some(10_000),
-                max_output_bytes: Some(100_000),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_concurrency_slots(10)
+                .set_max_network_egress_bytes(10_000)
+                .set_max_output_bytes(100_000),
         )
         .unwrap();
     governor
@@ -2183,22 +2196,14 @@ pub(crate) fn wasm_runtime_request_for_scope(
     input: serde_json::Value,
 ) -> RuntimeCapabilityRequest {
     let context = execution_context_with_dispatch_grant_for_scope(capability_id.clone(), scope);
-    RuntimeCapabilityRequest::new(
-        context,
-        capability_id,
-        wasm_http_estimate(),
-        input,
-        trust_decision_with_dispatch_authority(),
-    )
+    RuntimeCapabilityRequest::new(context, capability_id, wasm_http_estimate(), input)
 }
 
 pub(crate) fn wasm_http_estimate() -> ResourceEstimate {
-    ResourceEstimate {
-        concurrency_slots: Some(1),
-        network_egress_bytes: Some(10),
-        output_bytes: Some(10_000),
-        ..ResourceEstimate::default()
-    }
+    ResourceEstimate::default()
+        .set_concurrency_slots(1)
+        .set_network_egress_bytes(10)
+        .set_output_bytes(10_000)
 }
 
 pub(crate) fn sample_account() -> ResourceAccount {
@@ -2265,6 +2270,7 @@ pub(crate) fn http_without_body_then_operation_failed_wat() -> String {
 #[cfg(feature = "libsql")]
 pub(crate) fn submit_turn_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest {
     SubmitTurnRequest {
+        requested_model: None,
         scope: TurnScope::new(
             TenantId::new("tenant1").unwrap(),
             Some(AgentId::new("agent1").unwrap()),

@@ -11,8 +11,8 @@ use std::{collections::HashMap, fmt, sync::Arc};
 use async_trait::async_trait;
 use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, CapabilityId, DispatchFailureDetail, DispatchInputIssue,
-    MountView, ResourceEstimate, ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement,
-    RuntimeDispatchErrorKind, SecretHandle,
+    MountView, ResourceEstimate, ResourceScope, ResourceUsage, RunId,
+    RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, SecretHandle, UserId,
 };
 use serde_json::Value;
 
@@ -28,6 +28,11 @@ use crate::InvocationServices;
 pub struct FirstPartyCapabilityRequest {
     pub capability_id: CapabilityId,
     pub scope: ResourceScope,
+    pub authenticated_actor_user_id: Option<UserId>,
+    /// Loop turn-run identity forwarded from the dispatch chain. `None` for
+    /// non-loop callers. Handlers that enforce within-run continuity (e.g.
+    /// coding read-before-edit) key state on it.
+    pub run_id: Option<RunId>,
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
     pub services: InvocationServices,
@@ -40,6 +45,11 @@ impl fmt::Debug for FirstPartyCapabilityRequest {
             .debug_struct("FirstPartyCapabilityRequest")
             .field("capability_id", &self.capability_id)
             .field("scope", &self.scope)
+            .field(
+                "authenticated_actor_user_id",
+                &self.authenticated_actor_user_id,
+            )
+            .field("run_id", &self.run_id)
             .field("estimate", &self.estimate)
             .field("mounts", &self.mounts)
             .field("services", &self.services)
@@ -52,6 +62,8 @@ impl PartialEq for FirstPartyCapabilityRequest {
     fn eq(&self, other: &Self) -> bool {
         self.capability_id == other.capability_id
             && self.scope == other.scope
+            && self.authenticated_actor_user_id == other.authenticated_actor_user_id
+            && self.run_id == other.run_id
             && self.estimate == other.estimate
             && self.mounts == other.mounts
             && self.input == other.input
@@ -70,16 +82,20 @@ impl FirstPartyCapabilityRequest {
         Self {
             capability_id,
             scope,
+            authenticated_actor_user_id: None,
+            run_id: None,
             estimate: ResourceEstimate::default(),
             mounts: None,
             services: InvocationServices {
                 filesystem: Arc::new(ironclaw_filesystem::InMemoryBackend::new()),
                 runtime_http_egress,
                 tool_call_http_egress: None,
-                process: Arc::new(crate::LocalHostProcessPort::new()),
+                runtime_secret_material_stager: None,
+                process: Arc::new(crate::HostProcessPort::new()),
                 secret_store: None,
                 audit_sink: None,
                 unsafe_raw_diagnostics_allowed: false,
+                post_edit_check: None,
             },
             input,
         }
@@ -171,6 +187,31 @@ impl FirstPartyCapabilityError {
             kind: RuntimeDispatchErrorKind::InputEncode,
             safe_summary: Some(safe_summary.into()),
             detail: Some(Box::new(DispatchFailureDetail::InvalidInput { issues })),
+            usage: None,
+        }
+    }
+
+    /// Construct a dispatch failure carrying free-text remediation on the
+    /// model-visible diagnostic detail channel rather than `safe_summary`.
+    ///
+    /// Use this when the guidance text itself would fail the strict
+    /// `safe_summary` validator (e.g. it names a `config set` key containing
+    /// the substring "secret", or a URL) — the diagnostic channel scrubs
+    /// secret *values*, not vocabulary, so remediation text naming a config
+    /// key or a console URL survives intact. `safe_summary` may still be set
+    /// to a short validator-safe headline; the full guidance always rides in
+    /// `diagnostic_text`.
+    pub fn dispatch_with_diagnostic(
+        kind: RuntimeDispatchErrorKind,
+        safe_summary: Option<String>,
+        diagnostic_text: impl Into<String>,
+    ) -> Self {
+        Self::Dispatch {
+            kind,
+            safe_summary,
+            detail: Some(Box::new(DispatchFailureDetail::Diagnostic {
+                text: diagnostic_text.into(),
+            })),
             usage: None,
         }
     }
@@ -388,10 +429,7 @@ mod tests {
     #[test]
     fn first_party_capability_error_with_usage_preserves_required_secrets() {
         let handle = SecretHandle::new("google-access-token").unwrap();
-        let usage = ResourceUsage {
-            network_egress_bytes: 42,
-            ..ResourceUsage::default()
-        };
+        let usage = ResourceUsage::default().set_network_egress_bytes(42);
         let error = FirstPartyCapabilityError::auth_required_with(vec![handle.clone()])
             .with_usage(usage.clone());
 
@@ -416,14 +454,34 @@ mod tests {
     #[test]
     fn first_party_capability_error_with_usage_on_dispatch_variant() {
         use ironclaw_host_api::RuntimeDispatchErrorKind;
-        let error = FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend).with_usage(
-            ResourceUsage {
-                network_egress_bytes: 10,
-                ..ResourceUsage::default()
-            },
-        );
+        let error = FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
+            .with_usage(ResourceUsage::default().set_network_egress_bytes(10));
         assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::Backend));
         assert_eq!(error.required_secrets(), None);
         assert!(!error.is_auth_required());
+    }
+
+    #[test]
+    fn dispatch_with_diagnostic_carries_free_text_detail_and_optional_safe_summary() {
+        use ironclaw_host_api::RuntimeDispatchErrorKind;
+        let error = FirstPartyCapabilityError::dispatch_with_diagnostic(
+            RuntimeDispatchErrorKind::OperationFailed,
+            None,
+            "config set google.client_secret <value>".to_string(),
+        );
+        assert_eq!(
+            error.kind(),
+            Some(RuntimeDispatchErrorKind::OperationFailed)
+        );
+        assert_eq!(error.safe_summary(), None);
+        let FirstPartyCapabilityError::Dispatch { detail, .. } = &error else {
+            panic!("expected Dispatch variant");
+        };
+        let ironclaw_host_api::DispatchFailureDetail::Diagnostic { text } =
+            detail.as_deref().expect("diagnostic detail must be set")
+        else {
+            panic!("expected Diagnostic detail");
+        };
+        assert!(text.contains("client_secret"));
     }
 }

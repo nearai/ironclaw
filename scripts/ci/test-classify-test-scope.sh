@@ -81,6 +81,30 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
+  "reborn channel host support crate" \
+  "crates/ironclaw_channel_host/src/lib.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "reborn channel delivery support crate" \
+  "crates/ironclaw_channel_delivery/src/lib.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "reborn telegram extension crate" \
+  "crates/ironclaw_telegram_extension/src/telegram_pairing.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
   "reborn support crate" \
   "crates/ironclaw_outbound/src/lib.rs" \
   "docs_only=false
@@ -188,6 +212,30 @@ has_legacy_tests=true
 has_reborn_tests=true"
 
 assert_scope \
+  "Reborn Responses E2E manifest checker" \
+  "scripts/ci/check-reborn-responses-e2e-manifest.py" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "Reborn Responses E2E manifest" \
+  "tests/e2e/reborn_responses_e2e_tests.txt" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "Reborn coverage manifest" \
+  "tests/e2e/reborn_coverage_tests.txt" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
   "shared reborn tests workflow" \
   ".github/workflows/reborn-tests.yml" \
   "docs_only=false
@@ -219,7 +267,7 @@ has_reborn_tests=false"
 
 assert_scope \
   "nested markdown is not docs only" \
-  "crates/ironclaw_reborn/CLAUDE.md" \
+  "crates/ironclaw_runner/CLAUDE.md" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
@@ -283,6 +331,14 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
+  "reborn coverage regression suite, sourced sibling (R-section split)" \
+  "scripts/ci/test-reborn-coverage-ratchet-cases.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
   "test suite boundaries checker script" \
   "scripts/ci/check-test-suite-boundaries.sh" \
   "docs_only=false
@@ -296,4 +352,12 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
+has_reborn_tests=true"
+
+assert_scope \
+  "shared coverage lcov lib is reborn-scoped (gemini: PR #5718 comment)" \
+  "scripts/ci/lib/reborn_coverage_lcov.py" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
 has_reborn_tests=true"

@@ -74,9 +74,26 @@ pub fn validate_callback_claim(
     if crate::is_terminal_status(record.status) {
         return match record.status {
             AuthFlowStatus::Completed => Ok(()),
+            AuthFlowStatus::Failed
+                if record.credential_secret_fingerprint.is_some()
+                    && matches!(
+                        record.continuation,
+                        crate::AuthContinuationRef::LifecycleActivation { .. }
+                    ) =>
+            {
+                Ok(())
+            }
             AuthFlowStatus::Canceled => Err(AuthProductError::Canceled),
             _ => Err(AuthProductError::FlowAlreadyTerminal),
         };
+    }
+    if record.status == AuthFlowStatus::Completing
+        && matches!(
+            record.continuation,
+            crate::AuthContinuationRef::LifecycleActivation { .. }
+        )
+    {
+        return Ok(());
     }
     expire_if_needed(record, now)?;
     if record.status != AuthFlowStatus::AwaitingUser {
@@ -195,6 +212,7 @@ pub fn update_account_from_exchange(
     account.access_secret = Some(exchange.access_secret.clone());
     account.refresh_secret = exchange.refresh_secret.clone();
     account.scopes = exchange.scopes.clone();
+    account.provider_identity = exchange.provider_identity.clone();
     account.updated_at = now;
 }
 
@@ -210,6 +228,7 @@ pub fn update_account_from_request(
     account.access_secret = request.access_secret;
     account.refresh_secret = request.refresh_secret;
     account.scopes = request.scopes;
+    account.provider_identity = None;
     account.updated_at = now;
     Ok(account.clone())
 }
@@ -538,7 +557,8 @@ mod tests {
     use super::*;
     use crate::{
         AuthProviderId, CredentialAccountId, CredentialAccountLabel, CredentialAccountStatus,
-        OAuthAuthorizationCode, OAuthProviderExchange, PkceVerifierSecret, ProviderScope,
+        OAuthAuthorizationCode, OAuthProviderExchange, OAuthProviderIdentity, PkceVerifierSecret,
+        ProviderScope,
     };
     use chrono::Utc;
     use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
@@ -565,6 +585,7 @@ mod tests {
                 ProviderScope::new("repo").unwrap(),
                 ProviderScope::new("admin:org").unwrap(),
             ],
+            provider_identity: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -583,6 +604,7 @@ mod tests {
             refresh_secret: Some(SecretHandle::new("new-refresh").unwrap()),
             scopes: vec![ProviderScope::new("repo").unwrap()],
             account_id: None,
+            provider_identity: None,
         };
 
         update_account_from_exchange(&mut account, &exchange, Utc::now());
@@ -595,5 +617,50 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["repo"]
         );
+    }
+
+    #[test]
+    fn update_account_from_request_clears_provider_identity() {
+        let scope = crate::AuthProductScope::new(
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap(),
+            crate::AuthSurface::Api,
+        );
+        let mut account = CredentialAccount {
+            id: CredentialAccountId::new(),
+            scope: scope.clone(),
+            provider: AuthProviderId::new("github").unwrap(),
+            label: CredentialAccountLabel::new("github").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("old-access").unwrap()),
+            refresh_secret: None,
+            scopes: vec![ProviderScope::new("repo").unwrap()],
+            provider_identity: Some(
+                OAuthProviderIdentity::new("user-123", None, None, None)
+                    .expect("valid provider identity"),
+            ),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let request = NewCredentialAccount {
+            scope,
+            provider: AuthProviderId::new("github").unwrap(),
+            label: CredentialAccountLabel::new("github manual").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("manual-access").unwrap()),
+            refresh_secret: None,
+            scopes: vec![ProviderScope::new("read:user").unwrap()],
+        };
+
+        update_account_from_request(&mut account, request, Utc::now())
+            .expect("manual account update succeeds");
+
+        assert!(account.provider_identity.is_none());
     }
 }

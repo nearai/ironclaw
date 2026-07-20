@@ -47,8 +47,22 @@ fn validate_scope_id(kind: &'static str, value: &str) -> Result<(), HostApiError
             "NUL/control characters are not allowed",
         ));
     }
+    if value.starts_with(RESERVED_SENTINEL_PREFIX) {
+        return Err(HostApiError::invalid_id(
+            kind,
+            value,
+            "the `__ironclaw_` prefix is reserved for host sentinel identities",
+        ));
+    }
     Ok(())
 }
+
+/// Scope-id namespace reserved for host-minted sentinel identities (e.g.
+/// [`crate::TENANT_SHARED_MANAGED_USER_ID`]). Rejected by [`validate_scope_id`]
+/// so no caller-supplied identifier — env bearer, SSO directory, OIDC claims,
+/// request payloads — can ever collide with a sentinel; sentinels are minted
+/// exclusively via `from_trusted`.
+const RESERVED_SENTINEL_PREFIX: &str = "__ironclaw_";
 
 fn is_name_char(byte: u8) -> bool {
     byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-'
@@ -206,6 +220,84 @@ string_id!(
     validate_name_segment
 );
 string_id!(SystemServiceId, "system_service", validate_name_segment);
+// Slice-C kernel vocabulary (arch-simplification §3/§5.2.1): the two non-loop
+// origins of a capability invocation. Modeled as validated string newtypes
+// (not enums) because the product/routine sets are still evolving (§5.8); they
+// may harden into enums once those sets stabilize. `RoutineId` names the
+// routine/heartbeat/schedule an `Automation` invocation belongs to; `ProductKind`
+// names the product surface a direct-user `Product` invocation entered through.
+string_id!(ProductKind, "product", validate_name_segment);
+string_id!(RoutineId, "routine", validate_name_segment);
+// Slice-C kernel vocabulary (arch-simplification §3): an opaque correlation
+// handle to a durably-stored host-error record. The recoverability *class* rides
+// the `HostFailure` variant (transient/permanent/uncertain); the raw cause stays
+// host-owned and is retrieved only through this ref — the "sanitized category
+// plus opaque invocation ID for correlation" contract (error-handling.md).
+// Deliberately a UUID id, NOT a validated string: `HostFailure` serializes and
+// Displays this value across the sanitized error boundary, so construction must
+// be structurally incapable of smuggling raw backend/error text (an existing
+// invocation/correlation id is carried via `ErrRef::from_uuid(id.as_uuid())`).
+uuid_id!(ErrRef);
+// Slice-C kernel vocabulary (arch-simplification §3/§5.3): opaque handles into
+// durably-stored control-plane records. Each names a record the kernel produced;
+// the model-visible content (what the approver sees, the deny reason, the process
+// summary) is rendered FROM the referenced record through the gate/rendering
+// contract (§5.2.9), never carried inline on the ref. UUID ids for the same
+// structural reason as `ErrRef`: they ride serialized `Blocked`/`Suspension`/
+// verdict values across sanitized boundaries, so free text must be
+// unrepresentable — a kernel record id travels via `from_uuid`/`new`, never as
+// a caller-composed string.
+uuid_id!(GateRef);
+
+impl GateRef {
+    /// The canonical [`GateRef`] under which an approval gate's
+    /// [`GateRecord`](crate::GateRecord) is persisted and later resolved.
+    ///
+    /// Derived from the approval request's uuid so the host persist side
+    /// (`ironclaw_capabilities` authorize, the local-dev synthetic approval
+    /// producer, and any future host-side gate rendering per §5.2.9) and the
+    /// product read model derive the SAME record key from the one shared
+    /// [`ApprovalRequestId`]. The two must never diverge or a persisted gate is
+    /// unfindable (§5.3 Stage 0 flip prep).
+    ///
+    /// This is the typed GateRecord key — a uuid, per this ref family's
+    /// no-caller-composed-string contract above — and is deliberately distinct
+    /// from the loop-facing `gate:approval-{id}` routing ref
+    /// (`ironclaw_turns::GateRef`), which stays string-encoded so the
+    /// `is_approval_gate_ref` prefix predicate keeps routing approvals vs auth.
+    pub fn for_approval_request(approval_request_id: ApprovalRequestId) -> Self {
+        Self::from_uuid(approval_request_id.as_uuid())
+    }
+
+    /// The canonical [`GateRecord`](crate::GateRecord) key for an **auth** gate,
+    /// derived from the runtime auth gate id so the loop-host persist seam and the
+    /// runner's blocked-exit render-from-record read derive the SAME key from the
+    /// one shared gate id (§5.2.9 / §5.3 Stage 2 — the auth analogue of
+    /// [`GateRef::for_approval_request`]).
+    ///
+    /// Unlike approval (whose id is already a typed [`ApprovalRequestId`] uuid),
+    /// an auth gate id is an arbitrary runtime string — the production mint is
+    /// `auth-{sha256hex}` (`stable_auth_gate_id`), NOT a uuid — so this derives a
+    /// STABLE name-based (v5) uuid from the id rather than parsing it. Name-based
+    /// (not v4/random, not time-based), so it is deterministic: the same gate id
+    /// always yields the same key, and both the loop-host save and the runner
+    /// read produce the identical `GateRecord::Auth` key. Infallible.
+    pub fn for_auth_gate(gate_id: &str) -> Self {
+        Self::from_uuid(Uuid::new_v5(&AUTH_GATE_NAMESPACE, gate_id.as_bytes()))
+    }
+}
+
+/// Fixed namespace uuid for [`GateRef::for_auth_gate`]'s name-based (v5)
+/// derivation. A stable, arbitrary constant scoped to the auth-gate-record key
+/// derivation — never reuse it for another name-based id family.
+const AUTH_GATE_NAMESPACE: Uuid = Uuid::from_u128(0x6c9f_2a1e_7b3d_4c5a_9e8f_1d2c_3b4a_5e6f);
+
+uuid_id!(ProcessRef);
+uuid_id!(DenyRef);
+// Handle to the durably-stored full capability output. The full bytes stay
+// host-owned and are retrieved only through this ref (§3); model-visible metadata
+// rides `OutcomeRefs`/`SafeSummary` alongside it. UUID id like its siblings.
+uuid_id!(ResultRef);
 
 /// Provider-facing tool/function name.
 ///
@@ -357,3 +449,58 @@ uuid_id!(ResourceReservationId);
 uuid_id!(ApprovalRequestId);
 uuid_id!(AuditEventId);
 uuid_id!(CorrelationId);
+// Prompt-visible run identity: identifies the loop turn-run an invocation
+// belongs to. Stamped host-side by loop orchestration (never caller-supplied
+// over untrusted input); `None` for non-loop callers. See
+// `ExecutionContext::run_id`.
+uuid_id!(RunId);
+// Slice-C kernel vocabulary (arch-simplification §3): the idempotency identity
+// of one capability invocation. Minted host-side once per logical invocation and
+// carried across retries — a resolved `ActivityId` replays its recorded outcome
+// rather than re-running the side effect (§11.3, at-most-once). This is what
+// §1.1's "dead-future `idempotency_key`" becomes: unified into the invocation
+// identity rather than deleted.
+uuid_id!(ActivityId);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn approval_gate_record_ref_is_the_request_uuid_and_round_trips() {
+        // The canonical GateRecord key is the approval request's uuid, so the
+        // host persist side and the product read model derive an identical key
+        // from the one shared `ApprovalRequestId` (§5.3 Stage 0).
+        let request_id = ApprovalRequestId::new();
+        let gate_ref = GateRef::for_approval_request(request_id);
+        assert_eq!(gate_ref.as_uuid(), request_id.as_uuid());
+        // A second derivation from the same id yields the same key (stable, not
+        // freshly random like `GateRef::new()`).
+        assert_eq!(gate_ref, GateRef::for_approval_request(request_id));
+        // Distinct requests never collide.
+        let other = ApprovalRequestId::new();
+        assert_ne!(gate_ref, GateRef::for_approval_request(other));
+    }
+
+    #[test]
+    fn auth_gate_record_ref_is_deterministic_name_based_and_collision_free() {
+        // The auth gate id is an arbitrary runtime string (`auth-{sha256hex}`,
+        // NOT a uuid), so the key is a STABLE name-based (v5) uuid derivation:
+        // the loop-host save and the runner's render-from-record read derive an
+        // identical key from the same gate id (§5.2.9 / §5.3 Stage 2).
+        let gate_id = "auth-3b1f8c2d4e5a6b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e";
+        let key = GateRef::for_auth_gate(gate_id);
+        // Deterministic: the same id always yields the same key (not random like
+        // `GateRef::new()`).
+        assert_eq!(key, GateRef::for_auth_gate(gate_id));
+        // Distinct gate ids never collide.
+        assert_ne!(key, GateRef::for_auth_gate("auth-deadbeef"));
+        // A non-uuid id is accepted (infallible) and still deterministic — the
+        // bug this fixes was `Uuid::parse_str` rejecting the hash-shaped id.
+        let non_uuid = "auth-not-a-uuid-at-all";
+        assert_eq!(
+            GateRef::for_auth_gate(non_uuid),
+            GateRef::for_auth_gate(non_uuid)
+        );
+    }
+}

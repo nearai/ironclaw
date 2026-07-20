@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ironclaw_host_api::CapabilityId;
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
 };
@@ -19,10 +19,8 @@ use ironclaw_turns::{
 
 use crate::RebornCompositionProfile;
 use crate::input::RebornBuildInput;
-use crate::outbound::{
-    OutboundDeliveryTargetEntry, OutboundDeliveryTargetProvider,
-    OutboundDeliveryTargetRegistrationOutcome,
-};
+use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
+use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 
 use super::build_reborn_runtime;

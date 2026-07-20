@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use ironclaw_wasm_sandbox_core::{
+use ironclaw_wasm::wasm_sandbox_core::{
     MinimalWasiCtxView, MinimalWasiView, SandboxStoreCore, SandboxStoreData, WasmResourceLimiter,
 };
 

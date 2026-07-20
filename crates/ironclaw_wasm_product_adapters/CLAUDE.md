@@ -1,6 +1,6 @@
 # ironclaw_wasm_product_adapters guardrails
 
-Owns the thin WASM ProductAdapter host-glue boundary for IronClaw Reborn.
+Owns the thin product-layer WASM ProductAdapter host-glue boundary for IronClaw Reborn.
 
 - Keep this crate focused on adapter-specific host control-plane glue: protocol-auth verification, adapter manifest egress preflight, and the WIT shape for ProductAdapter components.
 - Do not own product workflow, canonical user/thread binding, turn coordination, outbound projection cursors, delivery-status persistence, runtime dispatch, process spawning, authorization/approval policy, or app startup wiring.

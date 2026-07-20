@@ -17,6 +17,12 @@ pub enum LlmConfigError {
     InvalidValue { key: String, message: String },
 }
 
+/// Provider id used by placeholder providers that exist only because no real
+/// LLM has been configured yet. Errors carrying this provider id are a
+/// configuration fault, not an availability fault — retrying cannot succeed,
+/// so error mapping must fail fast instead of riding an availability backoff.
+pub const UNCONFIGURED_PROVIDER_ID: &str = "unconfigured";
+
 /// LLM provider errors.
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {

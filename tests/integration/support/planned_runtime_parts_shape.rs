@@ -11,13 +11,13 @@
 //!
 //! Zero production-crate changes: `DefaultPlannedRuntimeParts` is already
 //! `pub` with `pub` fields and no `#[non_exhaustive]`
-//! (`crates/ironclaw_reborn/src/runtime.rs:260-326`), so this file only reads
+//! (`crates/ironclaw_runner/src/runtime.rs:260-326`), so this file only reads
 //! it from test-tree code.
 
-use ironclaw_loop_support::HostManagedModelGateway;
-use ironclaw_reborn::runtime::DefaultPlannedRuntimeParts;
+use ironclaw_loop_host::HostManagedModelGateway;
+use ironclaw_runner::runtime::DefaultPlannedRuntimeParts;
 
-/// Some/None shape of `DefaultPlannedRuntimeParts`'s 13 `Option`-typed
+/// Some/None shape of `DefaultPlannedRuntimeParts`'s 14 `Option`-typed
 /// fields. Field VALUES are out of scope by design (see
 /// `tests/integration/wiring_parity.rs`'s module doc) — only whether each
 /// optional wiring seam is populated.
@@ -27,6 +27,7 @@ pub struct DefaultPlannedRuntimePartsShape {
     pub cancellation_factory: bool,
     pub skill_context_source: bool,
     pub attachment_read_port: bool,
+    pub gate_record_store: bool,
     pub input_queue: bool,
     pub model_policy_guard: bool,
     pub model_budget_accountant: bool,
@@ -63,7 +64,9 @@ where
         capability_surface_resolver: _,
         capability_result_writer: _,
         subagent_goal_store: _,
-        subagent_gate_store: _,
+        subagent_await_edge_writer: _,
+        subagent_await_edge_settler: _,
+        subagent_await_edge_evidence: _,
         subagent_definition_resolver: _,
         subagent_spawn_input_codec: _,
         subagent_spawn_limits: _,
@@ -73,6 +76,7 @@ where
         cancellation_factory,
         skill_context_source,
         attachment_read_port,
+        gate_record_store,
         input_queue,
         identity_context_source: _,
         user_profile_source: _,
@@ -90,6 +94,7 @@ where
         cancellation_factory: cancellation_factory.is_some(),
         skill_context_source: skill_context_source.is_some(),
         attachment_read_port: attachment_read_port.is_some(),
+        gate_record_store: gate_record_store.is_some(),
         input_queue: input_queue.is_some(),
         model_policy_guard: model_policy_guard.is_some(),
         model_budget_accountant: model_budget_accountant.is_some(),

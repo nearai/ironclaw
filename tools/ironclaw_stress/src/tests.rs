@@ -149,6 +149,36 @@ fn chat_turn_rejects_multi_process_runs() {
 }
 
 #[test]
+fn prewarm_dispatches_secret_and_process_local_scenarios() {
+    assert_eq!(
+        Scenario::SecretConsume.prewarm_target(),
+        PrewarmTarget::SecretControlPlane
+    );
+    assert_eq!(Scenario::CpuBurn.prewarm_target(), PrewarmTarget::None);
+    assert_eq!(Scenario::MemoryChurn.prewarm_target(), PrewarmTarget::None);
+    assert_eq!(
+        Scenario::ReserveRelease.prewarm_target(),
+        PrewarmTarget::ResourceGovernor
+    );
+    assert_eq!(Scenario::ChatTurn.prewarm_target(), PrewarmTarget::UserTurn);
+}
+
+#[test]
+fn turn_lifecycle_churn_is_a_user_turn_scenario() {
+    let mut args = test_args();
+    args.scenario = Scenario::TurnLifecycleChurn;
+    args.users = args.concurrency;
+    args.processes = 1;
+
+    validate_args(&args).expect("turn lifecycle churn should use user-turn validation");
+    assert_eq!(args.scenario.as_str(), "turn-lifecycle-churn");
+
+    args.processes = 2;
+    let error = validate_args(&args).expect_err("turn lifecycle churn is single-process only");
+    assert!(error.contains("--scenario turn-lifecycle-churn requires --processes 1"));
+}
+
+#[test]
 fn mixed_user_session_rejects_multi_process_runs() {
     let mut args = test_args();
     args.scenario = Scenario::MixedUserSession;
@@ -755,6 +785,9 @@ fn operation_attribution_groups_user_turn_stage_durations() {
             accept_inbound: Some(Duration::from_micros(2)),
             submit_turn: Some(Duration::from_micros(3)),
             claim_run: Some(Duration::from_micros(4)),
+            block_run: Some(Duration::from_micros(17)),
+            resume_turn: Some(Duration::from_micros(18)),
+            reclaim_run: Some(Duration::from_micros(19)),
             complete_run: Some(Duration::from_micros(5)),
             load_context: Some(Duration::from_micros(6)),
             resource_reserve: Some(Duration::from_micros(7)),
@@ -776,7 +809,7 @@ fn operation_attribution_groups_user_turn_stage_durations() {
 
     assert_eq!(attribution.thread_store_writes.count, 1);
     assert_eq!(attribution.thread_store_writes.latency.p95_us, 73);
-    assert_eq!(attribution.turn_store.latency.p95_us, 12);
+    assert_eq!(attribution.turn_store.latency.p95_us, 66);
     assert_eq!(attribution.context_reads.latency.p95_us, 6);
     assert_eq!(attribution.resource_governor.latency.p95_us, 24);
     assert_eq!(attribution.synthetic_wait.latency.p95_us, 21);
@@ -865,6 +898,24 @@ fn bottleneck_report_identifies_failure_stage_and_db_growth() {
     assert!(rendered.contains("model_tool_wait"));
     assert!(rendered.contains("model_wait"));
     assert!(rendered.contains("libsql_growth"));
+}
+
+#[test]
+fn bottleneck_report_includes_thread_list_stage_latency() {
+    let args = test_args();
+    let mut summary = run_summary_with_bottlenecks();
+    let stages = summary
+        .stage_latency
+        .as_mut()
+        .expect("test summary has stage latency");
+    stages.list_threads_cold = stage(1, 2_000_000);
+    stages.model_wait = stage(1, 1_000);
+    let captured = capture::CapturedRun::Single(Box::new(summary));
+
+    let rendered = analysis::render_bottleneck_report(&args, "run", &captured);
+
+    assert!(rendered.contains("list_threads_cold"));
+    assert!(rendered.contains("larger --thread-list-threads"));
 }
 
 #[test]
@@ -1062,6 +1113,10 @@ fn run_summary_with_bottlenecks() -> RunSummary {
         active_thread_count: 1,
         threads_per_owner: 1,
         turn_state_backend: TurnStateBackend::Filesystem,
+        turn_state_durability: TurnStateDurability::WriteThrough,
+        turn_state_max_terminal_records: None,
+        turn_state_max_events: None,
+        turn_state_max_idempotency_records: None,
         gate_blocked_every: 0,
         tenants: 1,
         prefill_threads: 1,
@@ -1078,6 +1133,8 @@ fn run_summary_with_bottlenecks() -> RunSummary {
         user_message_bytes: 0,
         assistant_message_bytes: 0,
         context_max_messages: 20,
+        thread_list_threads: 1000,
+        thread_list_page_size: 50,
         context_growth_turns_per_operation: 4,
         tool_calls_per_turn: 2,
         tool_latency_ms: 0,
@@ -1105,7 +1162,12 @@ fn run_summary_with_bottlenecks() -> RunSummary {
             submit_turn: stage(1, 2_000),
             mark_submitted: empty_stage(),
             mark_rejected_busy: empty_stage(),
+            list_threads_cold: empty_stage(),
+            list_threads_warm: empty_stage(),
             claim_run: empty_stage(),
+            block_run: empty_stage(),
+            resume_turn: empty_stage(),
+            reclaim_run: empty_stage(),
             append_assistant: empty_stage(),
             finalize_assistant: empty_stage(),
             complete_run: empty_stage(),
@@ -1119,6 +1181,7 @@ fn run_summary_with_bottlenecks() -> RunSummary {
             resource_reconcile: empty_stage(),
             resource_release: empty_stage(),
         }),
+        api_capacity: None,
         errors,
         failure_causes,
     }
@@ -1138,6 +1201,10 @@ fn test_args() -> Args {
         active_thread_count: 0,
         threads_per_owner: 1,
         turn_state_backend: TurnStateBackend::Filesystem,
+        turn_state_durability: TurnStateDurability::WriteThrough,
+        turn_state_max_terminal_records: None,
+        turn_state_max_events: None,
+        turn_state_max_idempotency_records: None,
         gate_blocked_every: 0,
         tenants: 2,
         prefill_threads: 0,
@@ -1148,6 +1215,32 @@ fn test_args() -> Args {
         libsql_path: None,
         postgres_url: None,
         postgres_pool_size: 4,
+        api_base_url: None,
+        api_users_jsonl: None,
+        api_bearer_token: None,
+        api_admin_bearer_token: None,
+        api_admin_provisioners: 1,
+        api_read_qps_per_user: 0.0,
+        api_read_workers: 0,
+        api_read_mix: crate::api_capacity::default_read_mix(),
+        api_page_size: 50,
+        api_message_interval_ms: 0,
+        api_wait_for_assistant: true,
+        api_terminal_timeout_ms: 30_000,
+        api_poll_interval_ms: 250,
+        api_request_timeout_ms: 10_000,
+        api_setup_concurrency: 16,
+        api_background_users: 0,
+        api_background_concurrency: 0,
+        api_background_operations: 1,
+        api_background_start_delay_ms: 250,
+        mock_llm_bind: None,
+        mock_llm_model: "stress-mock".to_string(),
+        mock_llm_latency_ms: 0,
+        mock_llm_background_latency_ms: 0,
+        mock_llm_jitter_ms: 0,
+        mock_llm_output_bytes: 128,
+        mock_llm_failure_rate: 0.0,
         progress_interval_seconds: 0,
         human_read: false,
         bottleneck_report: false,
@@ -1185,6 +1278,8 @@ fn test_args() -> Args {
         user_message_bytes: 0,
         assistant_message_bytes: 0,
         context_max_messages: 20,
+        thread_list_threads: 1000,
+        thread_list_page_size: 50,
         context_growth_turns_per_operation: 4,
         tool_calls_per_turn: 2,
         tool_latency_ms: 0,

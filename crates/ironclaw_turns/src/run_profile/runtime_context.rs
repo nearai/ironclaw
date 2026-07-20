@@ -219,25 +219,29 @@ impl LoopRuntimeContext {
                 DeliveryTargetState::Unknown => "Outbound delivery target: unknown.".to_string(),
                 DeliveryTargetState::NoneSet if comm.delivery_tools_visible => {
                     "Outbound delivery target: none set. To deliver routine or trigger results \
-                     to a channel, call builtin__outbound_delivery_targets_list, then \
-                     builtin__outbound_delivery_target_set, before creating the routine or trigger."
+                     to a channel, call builtin__outbound_delivery_targets_list, then pass \
+                     delivery_target_id to builtin__trigger_create (routes that trigger only) or \
+                     set the user-wide default with builtin__outbound_delivery_target_set."
                         .to_string()
                 }
                 DeliveryTargetState::NoneSet => "Outbound delivery target: none set.".to_string(),
                 DeliveryTargetState::SetUnresolved if comm.delivery_tools_visible => {
                     "Outbound delivery target: configured (details unavailable here; call \
-                     builtin__outbound_delivery_targets_list to inspect) \u{2014} applies to all \
-                     routine and trigger results for this user (single preference, not per-trigger)."
+                     builtin__outbound_delivery_targets_list to inspect) \u{2014} the default for \
+                     this user's replies and trigger results; a trigger's own delivery_target_id \
+                     overrides it for that trigger."
                         .to_string()
                 }
                 DeliveryTargetState::SetUnresolved => {
-                    "Outbound delivery target: configured \u{2014} applies to all routine and \
-                     trigger results for this user (single preference, not per-trigger)."
+                    "Outbound delivery target: configured \u{2014} the default for this user's \
+                     replies and trigger results; a trigger's own delivery_target_id overrides it \
+                     for that trigger."
                         .to_string()
                 }
                 DeliveryTargetState::Set(summary) => format!(
-                    "Outbound delivery target: {} ({}) \u{2014} applies to all routine and \
-                     trigger results for this user (single preference, not per-trigger).",
+                    "Outbound delivery target: {} ({}) \u{2014} the default for this user's \
+                     replies and trigger results; a trigger's own delivery_target_id overrides it \
+                     for that trigger.",
                     model_safe_label(&summary.display_name, "a configured target"),
                     model_safe_label(&summary.channel, "channel")
                 ),
@@ -261,14 +265,17 @@ impl LoopRuntimeContext {
                 {
                     if comm.delivery_tools_visible {
                         parts.push(
-                            "Warning: no delivery target is set \u{2014} this run's result will not be \
-                             delivered. Set one with builtin__outbound_delivery_target_set."
+                            "Warning: no default delivery target is set \u{2014} unless this \
+                             trigger carries its own delivery_target_id, this run's result will \
+                             not be delivered. Set a default with \
+                             builtin__outbound_delivery_target_set."
                                 .to_string(),
                         );
                     } else {
                         parts.push(
-                            "Warning: no delivery target is set \u{2014} this run's result will not be \
-                             delivered."
+                            "Warning: no default delivery target is set \u{2014} unless this \
+                             trigger carries its own delivery_target_id, this run's result will \
+                             not be delivered."
                                 .to_string(),
                         );
                     }
@@ -317,10 +324,20 @@ fn render_origin_line(ctx: &ProductTurnContext) -> String {
                 .map(|a| model_safe_label(a.as_str(), "a connected product"))
                 .unwrap_or_else(|| "unknown".to_string());
             format!(
-                "Run origin: inbound message via {adapter_str}; replies post back to that conversation.",
+                "Run origin: inbound message via {adapter_str}; replies post back to that \
+                 conversation automatically \u{2014} do not also send your reply with messaging \
+                 capabilities.",
             )
         }
-        TurnOriginKind::ScheduledTrigger => "Run origin: scheduled trigger fire.".to_string(),
+        TurnOriginKind::ScheduledTrigger => {
+            "Run origin: scheduled trigger fire. The final reply is delivered automatically to \
+             the outbound delivery target \u{2014} never re-send this run's result to the \
+             requesting user with messaging capabilities; use them only when the task itself is \
+             to message someone else. If a task step sends the run's result to the trigger \
+             creator's own conversation (their DM with you, or wherever they asked to receive \
+             results), it is already covered by that automatic delivery \u{2014} skip the send."
+                .to_string()
+        }
     }
 }
 
@@ -786,7 +803,7 @@ mod tests {
             "a stored target must never render as none set: {text}"
         );
         assert!(
-            text.contains("single preference, not per-trigger"),
+            text.contains("a trigger's own delivery_target_id overrides it"),
             "{text}"
         );
     }
@@ -805,7 +822,7 @@ mod tests {
         };
         let text = ctx.render_model_content();
         assert!(
-            text.contains("Outbound delivery target: configured \u{2014} applies to all"),
+            text.contains("Outbound delivery target: configured \u{2014} the default for"),
             "{text}"
         );
         assert!(
@@ -835,7 +852,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("single preference, not per-trigger"),
+            text.contains("a trigger's own delivery_target_id overrides it"),
             "{text}"
         );
     }
@@ -980,7 +997,8 @@ mod tests {
         let text = ctx.render_model_content();
         assert!(
             text.contains(
-                "Run origin: inbound message via slack; replies post back to that conversation."
+                "Run origin: inbound message via slack; replies post back to that conversation \
+                 automatically \u{2014} do not also send your reply with messaging capabilities."
             ),
             "{text}"
         );
@@ -1048,6 +1066,34 @@ mod tests {
             text.contains("Run origin: scheduled trigger fire."),
             "{text}"
         );
+        // Duplicate-delivery contract: the origin line must tell the model the
+        // host delivers the final reply, so it never re-sends the result itself
+        // (bot-identity delivery + user-identity tool send = two messages) —
+        // while still allowing messaging capabilities when messaging a third
+        // party IS the task ("send Firat a joke every morning").
+        assert!(
+            text.contains("delivered automatically to the outbound delivery target"),
+            "scheduled-trigger origin line must state host-owned final-reply delivery: {text}"
+        );
+        assert!(
+            text.contains("never re-send this run's result to the requesting user"),
+            "scheduled-trigger origin line must forbid model-side re-delivery to the requester: {text}"
+        );
+        assert!(
+            text.contains("only when the task itself is to message someone else"),
+            "scheduled-trigger origin line must keep messaging-as-task automations working: {text}"
+        );
+        // Laundering guard: creation can pin the requester's own DM into the
+        // task prompt as if it were a third-party recipient; the fire must
+        // treat a send-result-to-creator step as covered by host delivery.
+        assert!(
+            text.contains("already covered by that automatic delivery"),
+            "scheduled-trigger origin line must mark send-to-creator steps as covered: {text}"
+        );
+        assert!(
+            text.contains("skip the send"),
+            "scheduled-trigger origin line must instruct skipping laundered self-sends: {text}"
+        );
     }
 
     #[test]
@@ -1075,7 +1121,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("Warning: no delivery target is set"),
+            text.contains("Warning: no default delivery target is set"),
             "{text}"
         );
         assert!(
@@ -1109,7 +1155,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("Warning: no delivery target is set"),
+            text.contains("Warning: no default delivery target is set"),
             "warning must appear even when delivery_tools_visible is false: {text}"
         );
         assert!(
@@ -1140,7 +1186,7 @@ mod tests {
         };
         let text = ctx.render_model_content();
         assert!(
-            !text.contains("Warning: no delivery target is set"),
+            !text.contains("Warning: no default delivery target is set"),
             "warning must not fire for WebUi: {text}"
         );
     }

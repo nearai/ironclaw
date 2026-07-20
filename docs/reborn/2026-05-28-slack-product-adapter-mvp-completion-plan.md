@@ -82,7 +82,7 @@ Some dependencies have already landed and should be treated as foundations, not 
 ### Out of scope for #3857 MVP
 
 - Slack OAuth install flow. The issue explicitly uses preconfigured credentials for the MVP.
-- Full Slack v1 parity: self-service pairing/code approval, broadcast lifecycle, file ingestion, search, rich home views, admin flows, or legacy Slack channel reuse.
+- Full Slack v1 parity: legacy self-service account approval, broadcast lifecycle, file ingestion, search, rich home views, admin flows, or legacy Slack channel reuse.
 - v1 `Channel` integration, old Slack config/startup wiring, or direct use of runtime internals.
 - Slack-local approval stores, direct `TurnCoordinator::resume_turn`, or any custom run authority in the Slack adapter.
 - A Slack-specific LLM tool for proactive messages. Proactive delivery should use shared outbound/product capability abstractions.

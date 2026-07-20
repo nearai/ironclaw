@@ -7,6 +7,7 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -15,8 +16,8 @@ use rust_decimal::Decimal;
 
 use crate::error::LlmError;
 use crate::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, CompletionStreamSink, LlmProvider, ModelMetadata,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 
 /// Upper bound for provider-suggested `Retry-After` delays.
@@ -206,6 +207,98 @@ impl RetryProvider {
             reason: "retry loop exited unexpectedly".to_string(),
         }))
     }
+
+    async fn streaming_retry_loop<T, F, Fut>(
+        &self,
+        sink: Arc<dyn CompletionStreamSink>,
+        mut op: F,
+        label: &str,
+    ) -> Result<T, LlmError>
+    where
+        F: FnMut(Arc<dyn CompletionStreamSink>) -> Fut,
+        Fut: Future<Output = Result<T, LlmError>>,
+    {
+        let mut last_error: Option<LlmError> = None;
+
+        for attempt in 0..=self.config.max_retries {
+            let attempt_sink = Arc::new(StreamingAttemptSink::new(Arc::clone(&sink)));
+            match op(attempt_sink.clone()).await {
+                Ok(resp) => return Ok(resp),
+                Err(err) => {
+                    if attempt_sink.emitted_text() {
+                        tracing::warn!(
+                            provider = %self.inner.model_name(),
+                            attempt = attempt + 1,
+                            error = %err,
+                            "Streaming provider failed after emitting text; not retrying{label}"
+                        );
+                        return Err(err);
+                    }
+
+                    if !is_retryable(&err) || attempt == self.config.max_retries {
+                        return Err(err);
+                    }
+
+                    let delay = match &err {
+                        LlmError::RateLimited {
+                            retry_after: Some(duration),
+                            ..
+                        }
+                        | LlmError::BadGateway {
+                            retry_after: Some(duration),
+                            ..
+                        } => *duration,
+                        _ => retry_backoff_delay(attempt),
+                    };
+
+                    tracing::warn!(
+                        provider = %self.inner.model_name(),
+                        attempt = attempt + 1,
+                        max_retries = self.config.max_retries,
+                        delay_ms = delay.as_millis() as u64,
+                        error = %err,
+                        "Retrying after transient error{label}"
+                    );
+
+                    last_error = Some(err);
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| LlmError::RequestFailed {
+            provider: self.inner.model_name().to_string(),
+            reason: "streaming retry loop exited unexpectedly".to_string(),
+        }))
+    }
+}
+
+struct StreamingAttemptSink {
+    inner: Arc<dyn CompletionStreamSink>,
+    emitted_text: AtomicBool,
+}
+
+impl StreamingAttemptSink {
+    fn new(inner: Arc<dyn CompletionStreamSink>) -> Self {
+        Self {
+            inner,
+            emitted_text: AtomicBool::new(false),
+        }
+    }
+
+    fn emitted_text(&self) -> bool {
+        self.emitted_text.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl CompletionStreamSink for StreamingAttemptSink {
+    async fn text_delta(&self, delta: String) {
+        if !delta.is_empty() {
+            self.emitted_text.store(true, Ordering::SeqCst);
+        }
+        self.inner.text_delta(delta).await;
+    }
 }
 
 #[async_trait]
@@ -238,6 +331,23 @@ impl LlmProvider for RetryProvider {
         .await
     }
 
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        let inner = &self.inner;
+        self.streaming_retry_loop(
+            sink,
+            |attempt_sink| {
+                let req = request.clone();
+                async move { inner.complete_streaming(req, attempt_sink).await }
+            },
+            " (streaming)",
+        )
+        .await
+    }
+
     async fn complete_with_tools(
         &self,
         request: ToolCompletionRequest,
@@ -249,6 +359,23 @@ impl LlmProvider for RetryProvider {
                 async move { inner.complete_with_tools(req).await }
             },
             " (tools)",
+        )
+        .await
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        let inner = &self.inner;
+        self.streaming_retry_loop(
+            sink,
+            |attempt_sink| {
+                let req = request.clone();
+                async move { inner.complete_with_tools_streaming(req, attempt_sink).await }
+            },
+            " (tools streaming)",
         )
         .await
     }
@@ -283,6 +410,8 @@ mod tests {
     use super::*;
 
     use crate::testing::StubLlm;
+    use std::sync::atomic::AtomicUsize;
+    use tokio::sync::mpsc;
 
     fn make_request() -> CompletionRequest {
         CompletionRequest::new(vec![crate::ChatMessage::user("hello")])
@@ -294,6 +423,136 @@ mod tests {
 
     fn fast_config(max_retries: u32) -> RetryConfig {
         RetryConfig { max_retries }
+    }
+
+    struct RecordingCompletionStreamSink {
+        sender: mpsc::UnboundedSender<String>,
+    }
+
+    #[async_trait]
+    impl CompletionStreamSink for RecordingCompletionStreamSink {
+        async fn text_delta(&self, delta: String) {
+            let _ = self.sender.send(delta);
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum StreamingRetryScript {
+        FailOnceBeforeTextThenSucceed,
+        FailAfterText,
+    }
+
+    struct StreamingRetryLlm {
+        calls: AtomicUsize,
+        script: StreamingRetryScript,
+    }
+
+    impl StreamingRetryLlm {
+        fn new(script: StreamingRetryScript) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                script,
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+
+        fn retryable_error() -> LlmError {
+            LlmError::RateLimited {
+                provider: "streaming-retry".to_string(),
+                retry_after: Some(Duration::ZERO),
+            }
+        }
+
+        async fn stream_or_fail(
+            &self,
+            sink: Arc<dyn CompletionStreamSink>,
+        ) -> Result<(), LlmError> {
+            let attempt = self.calls.fetch_add(1, Ordering::SeqCst);
+            match self.script {
+                StreamingRetryScript::FailOnceBeforeTextThenSucceed if attempt == 0 => {
+                    Err(Self::retryable_error())
+                }
+                StreamingRetryScript::FailAfterText => {
+                    sink.text_delta("partial".to_string()).await;
+                    Err(Self::retryable_error())
+                }
+                StreamingRetryScript::FailOnceBeforeTextThenSucceed => {
+                    sink.text_delta("Hel".to_string()).await;
+                    sink.text_delta("lo".to_string()).await;
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for StreamingRetryLlm {
+        fn model_name(&self) -> &str {
+            "streaming-retry"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                provider: "streaming-retry".to_string(),
+                reason: "non-streaming path should not be used".to_string(),
+            })
+        }
+
+        async fn complete_streaming(
+            &self,
+            _request: CompletionRequest,
+            sink: Arc<dyn CompletionStreamSink>,
+        ) -> Result<CompletionResponse, LlmError> {
+            self.stream_or_fail(sink).await?;
+            Ok(CompletionResponse {
+                content: "Hello".to_string(),
+                finish_reason: crate::provider::FinishReason::Stop,
+                input_tokens: 1,
+                output_tokens: 2,
+                reasoning: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                provider: "streaming-retry".to_string(),
+                reason: "non-streaming tool path should not be used".to_string(),
+            })
+        }
+
+        async fn complete_with_tools_streaming(
+            &self,
+            _request: ToolCompletionRequest,
+            sink: Arc<dyn CompletionStreamSink>,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            self.stream_or_fail(sink).await?;
+            Ok(ToolCompletionResponse {
+                content: Some("Hello".to_string()),
+                tool_calls: Vec::new(),
+                finish_reason: crate::provider::FinishReason::Stop,
+                input_tokens: 1,
+                output_tokens: 2,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                reasoning: None,
+                reasoning_details: None,
+            })
+        }
     }
 
     // -- Backoff delay tests --
@@ -496,6 +755,44 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, LlmError::ContextLengthExceeded { .. }));
         assert_eq!(stub.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_streaming_retries_before_text_then_forwards_deltas() {
+        let inner = Arc::new(StreamingRetryLlm::new(
+            StreamingRetryScript::FailOnceBeforeTextThenSucceed,
+        ));
+        let retry = RetryProvider::new(inner.clone(), fast_config(1));
+        let (delta_tx, mut delta_rx) = mpsc::unbounded_channel();
+        let sink = Arc::new(RecordingCompletionStreamSink { sender: delta_tx });
+
+        let response = retry
+            .complete_with_tools_streaming(make_tool_request(), sink)
+            .await
+            .expect("streaming tool response");
+
+        assert_eq!(inner.calls(), 2);
+        assert_eq!(delta_rx.recv().await.as_deref(), Some("Hel"));
+        assert_eq!(delta_rx.recv().await.as_deref(), Some("lo"));
+        assert_eq!(response.content.as_deref(), Some("Hello"));
+    }
+
+    #[tokio::test]
+    async fn complete_streaming_does_not_retry_after_partial_text() {
+        let inner = Arc::new(StreamingRetryLlm::new(StreamingRetryScript::FailAfterText));
+        let retry = RetryProvider::new(inner.clone(), fast_config(3));
+        let (delta_tx, mut delta_rx) = mpsc::unbounded_channel();
+        let sink = Arc::new(RecordingCompletionStreamSink { sender: delta_tx });
+
+        let err = retry
+            .complete_streaming(make_request(), sink)
+            .await
+            .expect_err("partial stream failure should surface");
+
+        assert!(matches!(err, LlmError::RateLimited { .. }));
+        assert_eq!(inner.calls(), 1);
+        assert_eq!(delta_rx.recv().await.as_deref(), Some("partial"));
+        assert!(delta_rx.try_recv().is_err());
     }
 
     #[tokio::test]

@@ -9,9 +9,9 @@ use ironclaw_host_api::{
     VirtualPath,
 };
 use ironclaw_turns::{
-    CheckpointSchemaId, FilesystemTurnStateStore, GetLoopCheckpointRequest,
-    InMemoryLoopCheckpointStore, InMemoryTurnStateStore, LoopCheckpointStateRef,
-    LoopCheckpointStore, PutLoopCheckpointRequest, RunProfileVersion, TurnId, TurnRunId, TurnScope,
+    CheckpointSchemaId, FilesystemTurnStateRowStore, FilesystemTurnStateStore,
+    GetLoopCheckpointRequest, InMemoryTurnStateStore, LoopCheckpointStateRef, LoopCheckpointStore,
+    PutLoopCheckpointRequest, RunProfileVersion, TurnId, TurnRunId, TurnScope,
     run_profile::LoopCheckpointKind,
 };
 
@@ -99,13 +99,6 @@ async fn assert_loop_checkpoint_store_cross_scope_and_run_miss(
 }
 
 #[tokio::test]
-async fn inmemory_standalone_loop_checkpoint_roundtrip() {
-    let store = InMemoryLoopCheckpointStore::default();
-    assert_loop_checkpoint_store_roundtrip(&store).await;
-    assert_loop_checkpoint_store_cross_scope_and_run_miss(&store).await;
-}
-
-#[tokio::test]
 async fn inmemory_turn_state_loop_checkpoint_roundtrip_and_snapshot() {
     let store = InMemoryTurnStateStore::default();
     assert_loop_checkpoint_store_roundtrip(&store).await;
@@ -166,6 +159,10 @@ where
     Arc::new(ScopedFilesystem::with_fixed_view(Arc::new(root), mounts))
 }
 
+fn snapshot_virtual_path() -> VirtualPath {
+    VirtualPath::new("/engine/tenants/test-tenant/users/test-user/turns/state.json").unwrap()
+}
+
 #[tokio::test]
 async fn filesystem_turn_state_loop_checkpoint_roundtrip_and_snapshot() {
     let backend = Arc::new(engine_filesystem());
@@ -188,6 +185,30 @@ async fn filesystem_turn_state_loop_checkpoint_roundtrip_and_snapshot() {
     // rehydrate the same loop-checkpoint set without any backend-specific
     // migration step.
     let reopened = FilesystemTurnStateStore::new(scoped);
+    let reopened_snapshot = reopened.persistence_snapshot().await.unwrap();
+    assert_eq!(reopened_snapshot.loop_checkpoints.len(), 2);
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_row_store_loop_checkpoint_roundtrip_and_snapshot() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    assert_loop_checkpoint_store_roundtrip(&store).await;
+    assert_loop_checkpoint_store_cross_scope_and_run_miss(&store).await;
+
+    let snapshot = store.persistence_snapshot().await.unwrap();
+    assert_eq!(snapshot.loop_checkpoints.len(), 2);
+    assert!(
+        backend
+            .get(&snapshot_virtual_path())
+            .await
+            .unwrap()
+            .is_none(),
+        "row store loop checkpoints must not write the blob-shaped state.json snapshot"
+    );
+
+    let reopened = FilesystemTurnStateRowStore::new(scoped);
     let reopened_snapshot = reopened.persistence_snapshot().await.unwrap();
     assert_eq!(reopened_snapshot.loop_checkpoints.len(), 2);
 }

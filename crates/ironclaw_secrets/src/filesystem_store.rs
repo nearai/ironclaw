@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical LocalFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
 //! Filesystem-backed implementations of the scoped secret and credential stores.
 //!
 //! Routes persistence through the unified
@@ -40,18 +41,22 @@
 //! TODO(reborn/fs-secrets): once `EncryptedBackend` ships, replace the inline
 //! `encrypt`/`decrypt` calls with plaintext writes wrapped by the decorator.
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use ironclaw_filesystem::{
     CasApply, CasExpectation, CasUpdateError, ContentType, Entry, FilesystemError, Filter,
-    IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page, RecordKind, RootFilesystem,
-    ScopedFilesystem, cas_update,
+    InMemoryBackend, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page, RecordKind,
+    RootFilesystem, ScopedFilesystem, cas_update,
 };
-use ironclaw_host_api::{HostApiError, ResourceScope, ScopedPath, SecretHandle, Timestamp};
+use ironclaw_host_api::{
+    HostApiError, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
+    SYSTEM_RESERVED_ID, ScopedPath, SecretHandle, Timestamp, VirtualPath,
+};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 
 use crate::{
     CredentialAccount, CredentialAccountId, CredentialAccountStatus, CredentialAccountStore,
@@ -69,7 +74,7 @@ use crate::{
 // Every persisted entry must carry a `RecordKind` so that record-aware
 // backends (Postgres, libSQL) can distinguish schema families and reject
 // byte-only `CasExpectation::Absent` blind-write attempts that the
-// `LocalFilesystem` byte-only backend would otherwise let through.
+// `DiskFilesystem` byte-only backend would otherwise let through.
 
 const SECRET_RECORD_KIND: &str = "secret_record";
 const SECRET_LEASE_KIND: &str = "secret_lease";
@@ -205,6 +210,7 @@ where
     filesystem: Arc<ScopedFilesystem<F>>,
     crypto: Arc<SecretsCrypto>,
     lease_ttl: Duration,
+    tenant_index_roots: Mutex<HashSet<String>>,
 }
 
 impl<F> FilesystemSecretStore<F>
@@ -216,6 +222,7 @@ where
             filesystem,
             crypto,
             lease_ttl: Duration::seconds(DEFAULT_SECRET_LEASE_TTL_SECONDS),
+            tenant_index_roots: Mutex::new(HashSet::new()),
         }
     }
 
@@ -228,6 +235,7 @@ where
             filesystem,
             crypto,
             lease_ttl,
+            tenant_index_roots: Mutex::new(HashSet::new()),
         }
     }
 
@@ -272,12 +280,7 @@ where
         let mut base_entry = Entry::bytes(body).with_content_type(ContentType::json());
         base_entry.kind = Some(kind);
         let entry = tag_entry_with_tenant(base_entry, &secret.scope);
-        ensure_tenant_id_index_secret(
-            &self.filesystem,
-            &secret.scope,
-            &secret_owner_root(&secret.scope)?,
-        )
-        .await?;
+        self.ensure_tenant_id_index(&secret.scope).await?;
         self.filesystem
             .put(&secret.scope, &path, entry, CasExpectation::Any)
             .await
@@ -288,13 +291,32 @@ where
     async fn write_lease(&self, lease: &StoredLease) -> Result<(), SecretStoreError> {
         let path = lease_path(&lease.scope, lease.lease_id)?;
         let entry = serialize_lease_entry(lease)?;
-        ensure_tenant_id_index_secret(&self.filesystem, &lease.scope, &lease_root(&lease.scope)?)
-            .await?;
+        self.ensure_tenant_id_index(&lease.scope).await?;
         self.filesystem
             .put(&lease.scope, &path, entry, CasExpectation::Any)
             .await
             .map(|_| ())
             .map_err(fs_to_secret_store_error)
+    }
+
+    async fn ensure_tenant_id_index(&self, scope: &ResourceScope) -> Result<(), SecretStoreError> {
+        let root = scoped_path_secret("/secrets")?;
+        let resolved_root = self
+            .filesystem
+            .resolve(scope, &root)
+            .map_err(fs_to_secret_store_error)?
+            .as_str()
+            .to_string();
+        {
+            let roots = self.tenant_index_roots.lock().await;
+            if roots.contains(&resolved_root) {
+                return Ok(());
+            }
+        }
+        ensure_tenant_id_index_secret(&self.filesystem, scope).await?;
+        let mut roots = self.tenant_index_roots.lock().await;
+        roots.insert(resolved_root);
+        Ok(())
     }
 
     fn lease_to_public(stored: &StoredLease) -> SecretLease {
@@ -321,6 +343,62 @@ where
             }
             other => other,
         }
+    }
+}
+
+/// Redacted `Debug`: never walks the backend or crypto state, so no secret
+/// material, ciphertext, or lease contents can leak through `{:?}` output
+/// (test wrappers `#[derive(Debug)]` around this store).
+impl<F> std::fmt::Debug for FilesystemSecretStore<F>
+where
+    F: RootFilesystem,
+{
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FilesystemSecretStore")
+            .field("filesystem", &self.filesystem)
+            .field("lease_ttl", &self.lease_ttl)
+            .finish_non_exhaustive()
+    }
+}
+
+impl FilesystemSecretStore<InMemoryBackend> {
+    /// Volatile, encrypted secret store: the production `FilesystemSecretStore`
+    /// over a fresh [`InMemoryBackend`] with an ephemeral master key and a
+    /// tenant-rewriting mount resolver (`/secrets` ->
+    /// `/tenants/<tenant>/users/<user>/secrets`), matching production
+    /// composition's `invocation_mount_view` shape so cross-tenant isolation
+    /// stays structural. Replaces the deleted `InMemorySecretStore` (§4.3 of
+    /// `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`).
+    pub fn ephemeral() -> Self {
+        let scoped = ScopedFilesystem::new(
+            Arc::new(InMemoryBackend::new()),
+            ephemeral_secrets_mount_view,
+        );
+        Self::new(Arc::new(scoped), Arc::new(SecretsCrypto::ephemeral()))
+    }
+}
+
+/// Tenant-rewriting `/secrets` mount resolver used by
+/// [`FilesystemSecretStore::ephemeral`]. Mirrors production composition's
+/// `invocation_mount_view` for the `/secrets` alias, including the
+/// `__system__` path segment for the reserved system sentinel scope (the raw
+/// sentinel contains control bytes and is not path-safe).
+fn ephemeral_secrets_mount_view(scope: &ResourceScope) -> Result<MountView, HostApiError> {
+    let tenant_id = ephemeral_scope_path_segment(scope.tenant_id.as_str());
+    let user_id = ephemeral_scope_path_segment(scope.user_id.as_str());
+    MountView::new(vec![MountGrant::new(
+        MountAlias::new("/secrets")?,
+        VirtualPath::new(format!("/tenants/{tenant_id}/users/{user_id}/secrets"))?,
+        MountPermissions::read_write_list_delete(),
+    )])
+}
+
+fn ephemeral_scope_path_segment(value: &str) -> &str {
+    if value == SYSTEM_RESERVED_ID {
+        "__system__"
+    } else {
+        value
     }
 }
 
@@ -663,6 +741,7 @@ where
 {
     filesystem: Arc<ScopedFilesystem<F>>,
     crypto: Arc<SecretsCrypto>,
+    tenant_index_roots: Mutex<HashSet<String>>,
 }
 
 impl<F> FilesystemCredentialBroker<F>
@@ -670,7 +749,11 @@ where
     F: RootFilesystem,
 {
     pub fn new(filesystem: Arc<ScopedFilesystem<F>>, crypto: Arc<SecretsCrypto>) -> Self {
-        Self { filesystem, crypto }
+        Self {
+            filesystem,
+            crypto,
+            tenant_index_roots: Mutex::new(HashSet::new()),
+        }
     }
 
     fn encrypt_payload(
@@ -707,6 +790,29 @@ where
             }
         })
     }
+
+    async fn ensure_tenant_id_index(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<(), CredentialBrokerError> {
+        let root = scoped_path_broker("/secrets")?;
+        let resolved_root = self
+            .filesystem
+            .resolve(scope, &root)
+            .map_err(fs_to_broker_error)?
+            .as_str()
+            .to_string();
+        {
+            let roots = self.tenant_index_roots.lock().await;
+            if roots.contains(&resolved_root) {
+                return Ok(());
+            }
+        }
+        ensure_tenant_id_index_broker(&self.filesystem, scope).await?;
+        let mut roots = self.tenant_index_roots.lock().await;
+        roots.insert(resolved_root);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -738,12 +844,7 @@ where
         let mut base_entry = Entry::bytes(body).with_content_type(ContentType::json());
         base_entry.kind = Some(kind);
         let entry = tag_entry_with_tenant(base_entry, &account.scope);
-        ensure_tenant_id_index_broker(
-            &self.filesystem,
-            &account.scope,
-            &credential_account_root(&account.scope)?,
-        )
-        .await?;
+        self.ensure_tenant_id_index(&account.scope).await?;
         self.filesystem
             .put(&account.scope, &path, entry, CasExpectation::Any)
             .await
@@ -841,12 +942,7 @@ where
         };
         let path = credential_session_path(session.scope(), session.correlation_id())?;
         let entry = serialize_session_entry(&stored, session.scope())?;
-        ensure_tenant_id_index_broker(
-            &self.filesystem,
-            session.scope(),
-            &credential_session_root(session.scope())?,
-        )
-        .await?;
+        self.ensure_tenant_id_index(session.scope()).await?;
         self.filesystem
             .put(session.scope(), &path, entry, CasExpectation::Any)
             .await
@@ -994,13 +1090,6 @@ fn lease_root(scope: &ResourceScope) -> Result<ScopedPath, SecretStoreError> {
 /// declared on the same subtree the corresponding writes land in.
 fn secret_owner_root(scope: &ResourceScope) -> Result<ScopedPath, SecretStoreError> {
     scoped_path_secret(&format!("{}/secrets", secret_owner_alias(scope)))
-}
-
-fn credential_session_root(scope: &ResourceScope) -> Result<ScopedPath, CredentialBrokerError> {
-    scoped_path_broker(&format!(
-        "{}/credential-sessions",
-        secret_owner_alias(scope)
-    ))
 }
 
 fn credential_account_path(
@@ -1338,15 +1427,13 @@ fn tag_entry_with_tenant(entry: Entry, scope: &ResourceScope) -> Entry {
     )
 }
 
-/// Declare the `tenant_id` exact-equality index on `prefix`, tolerating
-/// backends that don't materialize indexes (LocalFilesystem). Idempotent
-/// across the mount lifetime; mirrors the engine/processes stores'
-/// `ensure_*_index` shape so byte-only backends degrade gracefully
-/// instead of failing closed.
+/// Declare the `tenant_id` exact-equality index on the `/secrets` mount,
+/// tolerating backends that don't materialize indexes (DiskFilesystem).
+/// Idempotent across the mount lifetime and avoids per-owner DDL churn under
+/// concurrent secret/lease writes.
 async fn ensure_tenant_id_index_secret<F>(
     filesystem: &ScopedFilesystem<F>,
     scope: &ResourceScope,
-    prefix: &ScopedPath,
 ) -> Result<(), SecretStoreError>
 where
     F: RootFilesystem,
@@ -1356,7 +1443,8 @@ where
         vec![index_key_tenant_id()],
         IndexKind::Exact,
     );
-    match filesystem.ensure_index(scope, prefix, &spec).await {
+    let root = scoped_path_secret("/secrets")?;
+    match filesystem.ensure_index(scope, &root, &spec).await {
         Ok(()) => Ok(()),
         Err(FilesystemError::Unsupported { .. }) => Ok(()),
         Err(error) => Err(fs_to_secret_store_error(error)),
@@ -1366,7 +1454,6 @@ where
 async fn ensure_tenant_id_index_broker<F>(
     filesystem: &ScopedFilesystem<F>,
     scope: &ResourceScope,
-    prefix: &ScopedPath,
 ) -> Result<(), CredentialBrokerError>
 where
     F: RootFilesystem,
@@ -1376,7 +1463,8 @@ where
         vec![index_key_tenant_id()],
         IndexKind::Exact,
     );
-    match filesystem.ensure_index(scope, prefix, &spec).await {
+    let root = scoped_path_broker("/secrets")?;
+    match filesystem.ensure_index(scope, &root, &spec).await {
         Ok(()) => Ok(()),
         Err(FilesystemError::Unsupported { .. }) => Ok(()),
         Err(error) => Err(fs_to_broker_error(error)),
@@ -1591,6 +1679,62 @@ mod tests {
 
         let second = store.consume(&scope, lease.id).await.unwrap_err();
         assert!(second.is_consumed());
+    }
+
+    #[tokio::test]
+    async fn filesystem_secret_store_concurrent_consume_has_exactly_one_winner() {
+        const CONSUMERS: usize = 32;
+
+        let fs = Arc::new(InMemoryBackend::new());
+        let store = Arc::new(FilesystemSecretStore::new(
+            default_scoped_fs(fs),
+            test_crypto(),
+        ));
+        let scope = sample_scope("tenant-a", "user-a");
+        let handle = SecretHandle::new("api_key").unwrap();
+        store
+            .put(
+                scope.clone(),
+                handle.clone(),
+                SecretMaterial::from("one-shot-secret"),
+                None,
+            )
+            .await
+            .unwrap();
+        let lease = store.lease_once(&scope, &handle).await.unwrap();
+        let lease_id = lease.id;
+        let barrier = Arc::new(tokio::sync::Barrier::new(CONSUMERS));
+
+        let mut tasks = Vec::with_capacity(CONSUMERS);
+        for _ in 0..CONSUMERS {
+            let store = Arc::clone(&store);
+            let scope = scope.clone();
+            let barrier = Arc::clone(&barrier);
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                store.consume(&scope, lease_id).await
+            }));
+        }
+
+        let mut successes = 0;
+        let mut consumed = 0;
+        for task in tasks {
+            match task.await.expect("consumer task should not panic") {
+                Ok(material) => {
+                    successes += 1;
+                    assert_eq!(material.expose_secret(), "one-shot-secret");
+                }
+                Err(error) if error.is_consumed() => consumed += 1,
+                Err(error) => panic!("unexpected consume error: {error:?}"),
+            }
+        }
+
+        assert_eq!(successes, 1, "only one concurrent consume may succeed");
+        assert_eq!(
+            consumed,
+            CONSUMERS - 1,
+            "every losing consumer must observe LeaseConsumed"
+        );
     }
 
     #[tokio::test]

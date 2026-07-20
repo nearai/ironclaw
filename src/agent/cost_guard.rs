@@ -12,7 +12,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use tokio::sync::Mutex;
 
-use ironclaw_llm::costs;
+use ironclaw_common::llm_costs as costs;
 
 /// Configuration for cost guardrails.
 #[derive(Debug, Clone, Default)]

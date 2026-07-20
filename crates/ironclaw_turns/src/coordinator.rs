@@ -57,9 +57,10 @@ fn trace_coordinator_latency_error<E: ?Sized>(
 
 use crate::{
     AdmissionRejection, CancelRunRequest, CancelRunResponse, GetRunStateRequest,
-    InMemoryRunProfileResolver, ResumeTurnRequest, ResumeTurnResponse, RunProfileResolver,
-    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnCapacityResource, TurnError,
-    TurnRunId, TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
+    InMemoryRunProfileResolver, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest,
+    RetryTurnResponse, RunProfileResolver, SubmitChildRunRequest, SubmitTurnRequest,
+    SubmitTurnResponse, TurnCapacityResource, TurnError, TurnRunId, TurnRunState, TurnScope,
+    TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
     events::EventCursor,
     lifecycle::{LifecyclePublicationErrorPort, NoopLifecyclePublicationErrorPort},
 };
@@ -136,6 +137,8 @@ pub trait TurnCoordinator: Send + Sync {
         &self,
         request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError>;
+
+    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError>;
 
     async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError>;
 
@@ -248,6 +251,15 @@ fn submit_event_cursor(response: &SubmitTurnResponse) -> EventCursor {
 }
 
 fn resume_wake(scope: TurnScope, response: &ResumeTurnResponse) -> TurnRunWake {
+    TurnRunWake {
+        scope,
+        run_id: response.run_id,
+        status: response.status,
+        event_cursor: response.event_cursor,
+    }
+}
+
+fn retry_wake(scope: TurnScope, response: &RetryTurnResponse) -> TurnRunWake {
     TurnRunWake {
         scope,
         run_id: response.run_id,
@@ -418,6 +430,17 @@ where
         Ok(response)
     }
 
+    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
+        let scope = request.scope.clone();
+        let response = self.store.retry_turn(request).await?;
+        notify_queued_run_best_effort(
+            self.wake_notifier.as_ref(),
+            retry_wake(scope.clone(), &response),
+        );
+        deferred_publication_error(self.publication_error_port.as_ref(), response.event_cursor)?;
+        Ok(response)
+    }
+
     async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
         let started_at = live_latency_started_at();
         let scope = request.scope.clone();
@@ -559,6 +582,10 @@ where
         request: ResumeTurnRequest,
     ) -> Result<ResumeTurnResponse, TurnError> {
         self.as_ref().resume_turn(request).await
+    }
+
+    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
+        self.as_ref().retry_turn(request).await
     }
 
     async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {

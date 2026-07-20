@@ -224,7 +224,7 @@ async fn test_dm_from_owner_accepted() {
 
     let config = serde_json::json!({
         "owner_id": "U42OWNER",
-        "dm_policy": "pairing",
+        "dm_policy": "allowlist",
         "allow_from": [],
     })
     .to_string();
@@ -296,19 +296,17 @@ async fn test_dm_unauthorized_blocked_allowlist() {
 }
 
 #[tokio::test]
-async fn test_dm_pairing_policy_triggers_flow() {
+async fn test_default_dm_policy_blocks_unknown_dm() {
     require_slack_wasm!();
     let runtime = create_test_runtime();
-    let pairing_store = Arc::new(PairingStore::new_noop());
 
     let config = serde_json::json!({
         "owner_id": null,
-        "dm_policy": "pairing",
         "allow_from": [],
     })
     .to_string();
 
-    let channel = create_slack_channel_with_store(runtime, &config, pairing_store.clone()).await;
+    let channel = create_slack_channel(runtime, &config).await;
 
     let body = build_slack_event_callback(serde_json::json!({
         "type": "message",

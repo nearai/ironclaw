@@ -820,10 +820,7 @@ mod tests {
             );
         }
 
-        let first = buffer.query(RebornLogQueryRequest {
-            limit: Some(2),
-            ..RebornLogQueryRequest::default()
-        });
+        let first = buffer.query(RebornLogQueryRequest::default().set_limit(2));
         assert_eq!(
             first
                 .entries
@@ -834,11 +831,11 @@ mod tests {
         );
         let cursor = first.next_cursor.expect("older page cursor");
 
-        let second = buffer.query(RebornLogQueryRequest {
-            limit: Some(2),
-            cursor: Some(cursor),
-            ..RebornLogQueryRequest::default()
-        });
+        let second = buffer.query(
+            RebornLogQueryRequest::default()
+                .set_limit(2)
+                .set_cursor(cursor),
+        );
         assert_eq!(
             second
                 .entries
@@ -860,10 +857,7 @@ mod tests {
             );
         }
 
-        let response = buffer.query(RebornLogQueryRequest {
-            limit: Some(10),
-            ..RebornLogQueryRequest::default()
-        });
+        let response = buffer.query(RebornLogQueryRequest::default().set_limit(10));
 
         assert_eq!(
             response
@@ -887,11 +881,11 @@ mod tests {
             );
         }
 
-        let response = buffer.query(RebornLogQueryRequest {
-            limit: Some(2),
-            cursor: Some("before:not-a-number".to_string()),
-            ..RebornLogQueryRequest::default()
-        });
+        let response = buffer.query(
+            RebornLogQueryRequest::default()
+                .set_limit(2)
+                .set_cursor("before:not-a-number"),
+        );
 
         assert_eq!(
             response
@@ -911,12 +905,12 @@ mod tests {
         buffer.record(RebornLogLevel::Warn, "ironclaw::beta", "beta".to_string());
         buffer.record(RebornLogLevel::Warn, "other::beta", "other".to_string());
 
-        let response = buffer.query(RebornLogQueryRequest {
-            limit: Some(10),
-            level: Some(RebornLogLevel::Warn),
-            target: Some("ironclaw".to_string()),
-            ..RebornLogQueryRequest::default()
-        });
+        let response = buffer.query(
+            RebornLogQueryRequest::default()
+                .set_limit(10)
+                .set_level(RebornLogLevel::Warn)
+                .set_target("ironclaw"),
+        );
 
         assert_eq!(response.entries.len(), 1);
         assert_eq!(response.entries[0].message, "beta");
@@ -936,11 +930,11 @@ mod tests {
             "other target".to_string(),
         );
 
-        let response = buffer.query(RebornLogQueryRequest {
-            limit: Some(10),
-            target: Some("operatorlogs".to_string()),
-            ..RebornLogQueryRequest::default()
-        });
+        let response = buffer.query(
+            RebornLogQueryRequest::default()
+                .set_limit(10)
+                .set_target("operatorlogs"),
+        );
 
         assert_eq!(
             response
@@ -979,15 +973,15 @@ mod tests {
             ],
         );
 
-        let response = buffer.query(RebornLogQueryRequest {
-            limit: Some(10),
-            thread_id: Some("thread-a".to_string()),
-            run_id: Some("run-a".to_string()),
-            tool_call_id: Some("tool-call-a".to_string()),
-            tool_name: Some("shell".to_string()),
-            source: Some("slack".to_string()),
-            ..RebornLogQueryRequest::default()
-        });
+        let response = buffer.query(
+            RebornLogQueryRequest::default()
+                .set_limit(10)
+                .set_thread_id("thread-a")
+                .set_run_id("run-a")
+                .set_tool_call_id("tool-call-a")
+                .set_tool_name("shell")
+                .set_source("slack"),
+        );
 
         assert_eq!(response.entries.len(), 1);
         assert_eq!(response.entries[0].message, "thread a run a");
@@ -1023,13 +1017,13 @@ mod tests {
             &[("run_id".to_string(), "run-a".to_string())],
         );
 
-        let response = buffer.query(RebornLogQueryRequest {
-            limit: Some(10),
-            level: Some(RebornLogLevel::Warn),
-            target: Some("ironclaw".to_string()),
-            run_id: Some("run-a".to_string()),
-            ..RebornLogQueryRequest::default()
-        });
+        let response = buffer.query(
+            RebornLogQueryRequest::default()
+                .set_limit(10)
+                .set_level(RebornLogLevel::Warn)
+                .set_target("ironclaw")
+                .set_run_id("run-a"),
+        );
 
         assert_eq!(
             response
@@ -1056,12 +1050,12 @@ mod tests {
             ],
         );
 
-        let response = buffer.query(RebornLogQueryRequest {
-            limit: Some(10),
-            run_id: Some("inner-run".to_string()),
-            source: Some("inner-source".to_string()),
-            ..RebornLogQueryRequest::default()
-        });
+        let response = buffer.query(
+            RebornLogQueryRequest::default()
+                .set_limit(10)
+                .set_run_id("inner-run")
+                .set_source("inner-source"),
+        );
 
         assert_eq!(response.entries.len(), 1);
         assert_eq!(response.entries[0].run_id.as_deref(), Some("inner-run"));
@@ -1079,11 +1073,11 @@ mod tests {
             &[("run_id".to_string(), run_id.clone())],
         );
 
-        let response = buffer.query(RebornLogQueryRequest {
-            limit: Some(10),
-            run_id: Some(run_id),
-            ..RebornLogQueryRequest::default()
-        });
+        let response = buffer.query(
+            RebornLogQueryRequest::default()
+                .set_limit(10)
+                .set_run_id(run_id),
+        );
 
         assert_eq!(response.entries.len(), 1);
         assert_eq!(response.entries[0].message, "overlong run id");
@@ -1126,16 +1120,16 @@ mod tests {
             );
         });
 
-        let response = operator_log_buffer().query(RebornLogQueryRequest {
-            limit: Some(10),
-            thread_id: Some(thread_id.clone()),
-            run_id: Some(run_id.clone()),
-            turn_id: Some(turn_id.clone()),
-            tool_call_id: Some(tool_call_id.clone()),
-            tool_name: Some(tool_name.to_string()),
-            source: Some(source.to_string()),
-            ..RebornLogQueryRequest::default()
-        });
+        let response = operator_log_buffer().query(
+            RebornLogQueryRequest::default()
+                .set_limit(10)
+                .set_thread_id(thread_id.clone())
+                .set_run_id(run_id.clone())
+                .set_turn_id(turn_id.clone())
+                .set_tool_call_id(tool_call_id.clone())
+                .set_tool_name(tool_name)
+                .set_source(source),
+        );
 
         assert_eq!(response.entries.len(), 1);
         let message = &response.entries[0].message;
@@ -1179,11 +1173,11 @@ mod tests {
             );
         });
 
-        let response = operator_log_buffer().query(RebornLogQueryRequest {
-            limit: Some(10),
-            run_id: Some(event_run_id.clone()),
-            ..RebornLogQueryRequest::default()
-        });
+        let response = operator_log_buffer().query(
+            RebornLogQueryRequest::default()
+                .set_limit(10)
+                .set_run_id(event_run_id.clone()),
+        );
 
         assert_eq!(response.entries.len(), 1);
         assert_eq!(
@@ -1213,11 +1207,11 @@ mod tests {
             );
         });
 
-        let response = operator_log_buffer().query(RebornLogQueryRequest {
-            limit: Some(10),
-            run_id: Some(run_id.clone()),
-            ..RebornLogQueryRequest::default()
-        });
+        let response = operator_log_buffer().query(
+            RebornLogQueryRequest::default()
+                .set_limit(10)
+                .set_run_id(run_id.clone()),
+        );
 
         assert_eq!(response.entries.len(), 1);
         assert_eq!(response.entries[0].run_id.as_deref(), Some(run_id.as_str()));
@@ -1241,11 +1235,11 @@ mod tests {
             );
         }
 
-        let first = buffer.query(RebornLogQueryRequest {
-            limit: Some(2),
-            thread_id: Some("thread-a".to_string()),
-            ..RebornLogQueryRequest::default()
-        });
+        let first = buffer.query(
+            RebornLogQueryRequest::default()
+                .set_limit(2)
+                .set_thread_id("thread-a"),
+        );
         assert_eq!(
             first
                 .entries
@@ -1256,12 +1250,12 @@ mod tests {
         );
         let cursor = first.next_cursor.expect("older scoped page cursor");
 
-        let second = buffer.query(RebornLogQueryRequest {
-            limit: Some(2),
-            cursor: Some(cursor),
-            thread_id: Some("thread-a".to_string()),
-            ..RebornLogQueryRequest::default()
-        });
+        let second = buffer.query(
+            RebornLogQueryRequest::default()
+                .set_limit(2)
+                .set_cursor(cursor)
+                .set_thread_id("thread-a"),
+        );
         assert_eq!(
             second
                 .entries
@@ -1288,11 +1282,11 @@ mod tests {
             &[("thread_id".to_string(), "thread-a".to_string())],
         );
 
-        let response = buffer.query(RebornLogQueryRequest {
-            limit: Some(10),
-            thread_id: Some("thread-a".to_string()),
-            ..RebornLogQueryRequest::default()
-        });
+        let response = buffer.query(
+            RebornLogQueryRequest::default()
+                .set_limit(10)
+                .set_thread_id("thread-a"),
+        );
 
         assert_eq!(response.entries.len(), 1);
         assert_eq!(response.entries[0].message, "scoped");
@@ -1307,10 +1301,7 @@ mod tests {
             "token sk-proj-test1234567890abcdefghij".to_string(),
         );
 
-        let response = buffer.query(RebornLogQueryRequest {
-            limit: Some(1),
-            ..RebornLogQueryRequest::default()
-        });
+        let response = buffer.query(RebornLogQueryRequest::default().set_limit(1));
 
         assert_eq!(
             response.entries[0].message,
@@ -1327,10 +1318,7 @@ mod tests {
             "failed to read /home/user/.config/gh/hosts.yml, retrying".to_string(),
         );
 
-        let response = buffer.query(RebornLogQueryRequest {
-            limit: Some(1),
-            ..RebornLogQueryRequest::default()
-        });
+        let response = buffer.query(RebornLogQueryRequest::default().set_limit(1));
 
         assert_eq!(
             response.entries[0].message,
@@ -1348,10 +1336,7 @@ mod tests {
                 .to_string(),
         );
 
-        let response = buffer.query(RebornLogQueryRequest {
-            limit: Some(1),
-            ..RebornLogQueryRequest::default()
-        });
+        let response = buffer.query(RebornLogQueryRequest::default().set_limit(1));
 
         assert_eq!(
             response.entries[0].message,
@@ -1369,10 +1354,7 @@ mod tests {
                 .to_string(),
         );
 
-        let response = buffer.query(RebornLogQueryRequest {
-            limit: Some(1),
-            ..RebornLogQueryRequest::default()
-        });
+        let response = buffer.query(RebornLogQueryRequest::default().set_limit(1));
 
         assert_eq!(
             response.entries[0].message,
@@ -1391,11 +1373,7 @@ mod tests {
             );
         }
 
-        let response = buffer.query(RebornLogQueryRequest {
-            limit: Some(2),
-            tail: true,
-            ..RebornLogQueryRequest::default()
-        });
+        let response = buffer.query(RebornLogQueryRequest::default().set_limit(2).set_tail(true));
 
         assert_eq!(
             response
@@ -1420,11 +1398,7 @@ mod tests {
                 format!("message {index}"),
             );
         }
-        let tail = buffer.query(RebornLogQueryRequest {
-            limit: Some(2),
-            tail: true,
-            ..RebornLogQueryRequest::default()
-        });
+        let tail = buffer.query(RebornLogQueryRequest::default().set_limit(2).set_tail(true));
         let cursor = tail.next_cursor.expect("follow cursor");
         buffer.record(
             RebornLogLevel::Warn,
@@ -1437,12 +1411,12 @@ mod tests {
             "message 4".to_string(),
         );
 
-        let response = buffer.query(RebornLogQueryRequest {
-            limit: Some(10),
-            cursor: Some(cursor),
-            follow: true,
-            ..RebornLogQueryRequest::default()
-        });
+        let response = buffer.query(
+            RebornLogQueryRequest::default()
+                .set_limit(10)
+                .set_cursor(cursor)
+                .set_follow(true),
+        );
 
         assert_eq!(
             response
@@ -1466,11 +1440,11 @@ mod tests {
             );
         }
 
-        let response = buffer.query(RebornLogQueryRequest {
-            limit: Some(10),
-            follow: true,
-            ..RebornLogQueryRequest::default()
-        });
+        let response = buffer.query(
+            RebornLogQueryRequest::default()
+                .set_limit(10)
+                .set_follow(true),
+        );
 
         assert!(response.entries.is_empty());
         assert!(response.tail_supported);
@@ -1488,12 +1462,12 @@ mod tests {
             "newer non-match".to_string(),
         );
 
-        let response = buffer.query(RebornLogQueryRequest {
-            limit: Some(10),
-            level: Some(RebornLogLevel::Warn),
-            tail: true,
-            ..RebornLogQueryRequest::default()
-        });
+        let response = buffer.query(
+            RebornLogQueryRequest::default()
+                .set_limit(10)
+                .set_level(RebornLogLevel::Warn)
+                .set_tail(true),
+        );
 
         assert_eq!(response.entries.len(), 1);
         assert_eq!(response.entries[0].message, "match");
@@ -1511,13 +1485,13 @@ mod tests {
             "newer non-match".to_string(),
         );
 
-        let response = buffer.query(RebornLogQueryRequest {
-            limit: Some(10),
-            cursor: Some("after:1".to_string()),
-            level: Some(RebornLogLevel::Warn),
-            follow: true,
-            ..RebornLogQueryRequest::default()
-        });
+        let response = buffer.query(
+            RebornLogQueryRequest::default()
+                .set_limit(10)
+                .set_cursor("after:1")
+                .set_level(RebornLogLevel::Warn)
+                .set_follow(true),
+        );
 
         assert_eq!(response.entries.len(), 1);
         assert_eq!(response.entries[0].message, "match");
@@ -1539,21 +1513,21 @@ mod tests {
             "info match".to_string(),
         );
 
-        let warn_response = buffer.query(RebornLogQueryRequest {
-            limit: Some(10),
-            cursor: Some("after:1".to_string()),
-            level: Some(RebornLogLevel::Warn),
-            follow: true,
-            ..RebornLogQueryRequest::default()
-        });
+        let warn_response = buffer.query(
+            RebornLogQueryRequest::default()
+                .set_limit(10)
+                .set_cursor("after:1")
+                .set_level(RebornLogLevel::Warn)
+                .set_follow(true),
+        );
 
-        let info_response = buffer.query(RebornLogQueryRequest {
-            limit: Some(10),
-            cursor: warn_response.next_cursor,
-            level: Some(RebornLogLevel::Info),
-            follow: true,
-            ..RebornLogQueryRequest::default()
-        });
+        let info_response = buffer.query(
+            RebornLogQueryRequest::default()
+                .set_limit(10)
+                .set_cursor(warn_response.next_cursor.expect("warn follow cursor"))
+                .set_level(RebornLogLevel::Info)
+                .set_follow(true),
+        );
 
         assert_eq!(info_response.entries.len(), 1);
         assert_eq!(info_response.entries[0].message, "info match");
@@ -1569,10 +1543,7 @@ mod tests {
             "\u{1F600}".repeat(MAX_LOG_MESSAGE_BYTES),
         );
 
-        let response = buffer.query(RebornLogQueryRequest {
-            limit: Some(1),
-            ..RebornLogQueryRequest::default()
-        });
+        let response = buffer.query(RebornLogQueryRequest::default().set_limit(1));
 
         let message = &response.entries[0].message;
         assert!(message.len() <= MAX_LOG_MESSAGE_BYTES);
@@ -1591,10 +1562,7 @@ mod tests {
             );
         }
 
-        let response = buffer.query(RebornLogQueryRequest {
-            limit: Some(100),
-            ..RebornLogQueryRequest::default()
-        });
+        let response = buffer.query(RebornLogQueryRequest::default().set_limit(100));
 
         let message_bytes = response
             .entries

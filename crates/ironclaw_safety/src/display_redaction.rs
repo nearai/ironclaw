@@ -509,13 +509,11 @@ fn token_contains_absolute_posix_path(token: &str) -> bool {
     false
 }
 
-// A slash opening a single bare-word segment ("/pair", "/help") is a slash
-// command or route, not a filesystem leak — redacting it corrupts
-// first-party copy (the Slack "/pair" recovery guidance shipped to WebChat as
-// "run [redacted] in Slack"). Treat the slash as a path only when it opens
-// real path shape: a second segment ("/tmp/x") or a dotted, file-like first
-// segment ("/secrets.env"). Trailing sentence punctuation does not count as
-// a segment dot ("run /pair." stays a command).
+// A slash opening a single bare-word segment ("/help", "/status") is a slash
+// command or route, not a filesystem leak. Treat the slash as a path only when
+// it opens real path shape: a second segment ("/tmp/x") or a dotted, file-like
+// first segment ("/secrets.env"). Trailing sentence punctuation does not count
+// as a segment dot ("run /help." stays a command).
 fn absolute_posix_segment_looks_like_path(rest: &str) -> bool {
     let segment_end = rest.find('/').unwrap_or(rest.len());
     if segment_end < rest.len() {
@@ -559,19 +557,15 @@ mod tests {
 
     #[test]
     fn sanitize_display_text_keeps_slash_commands_but_redacts_paths() {
-        // "/pair" is the Slack slash command shipped in first-party pairing
-        // copy; a single bare-word slash token is a command/route, not a
-        // filesystem leak — redacting it corrupted the persisted WebChat
-        // pairing card into "run [redacted] in Slack". Real paths (a second
-        // segment, or a dotted file-like first segment) must stay redacted.
+        // A single bare-word slash token is a command/route, not a filesystem
+        // leak. Real paths (a second segment, or a dotted file-like first
+        // segment) must stay redacted.
         assert_eq!(
-            sanitize_display_text(
-                "If a code is invalid or expired, run /pair in Slack for a fresh one.",
-            ),
-            "If a code is invalid or expired, run /pair in Slack for a fresh one.",
+            sanitize_display_text("Run /help in the chat surface for available commands."),
+            "Run /help in the chat surface for available commands.",
         );
         // Trailing sentence punctuation does not turn a command into a path.
-        assert_eq!(sanitize_display_text("Run /pair."), "Run /pair.");
+        assert_eq!(sanitize_display_text("Run /help."), "Run /help.");
 
         assert_eq!(sanitize_display_text("cat /etc/passwd"), "cat [redacted]");
         assert_eq!(sanitize_display_text("see /tmp/x"), "see [redacted]");

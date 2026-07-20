@@ -1,27 +1,28 @@
 use std::sync::Arc;
 
 use ironclaw_host_api::{CapabilityDisplayOutputPreview, CapabilityId, InvocationId};
-use ironclaw_loop_support::{
-    CapabilityResultWrite, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
+use ironclaw_loop_host::{
+    CapabilityResultWrite, DurablePersistence, LoopCapabilityInputResolver,
+    LoopCapabilityResultWriter,
 };
 use ironclaw_threads::{
     CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewStatus, EnsureThreadRequest,
     InMemorySessionThreadService, MessageKind, SessionThreadService, ThreadHistoryRequest,
-    ThreadScope,
 };
 
-use super::{CapabilityDisplayPreviewStore, LocalDevCapabilityIo, provider_tool_call, run_context};
+use super::{
+    CapabilityDisplayPreviewStore, StagedCapabilityIo, UserId, local_dev_thread_scope_for_run,
+    provider_tool_call, run_context,
+};
 
 #[tokio::test]
 async fn capability_io_writes_display_preview_to_durable_history() {
     let run_context = run_context("durable-display-preview").await;
-    let thread_scope = ThreadScope {
-        tenant_id: run_context.scope.tenant_id.clone(),
-        agent_id: run_context.scope.agent_id.clone().expect("agent id"),
-        project_id: run_context.scope.project_id.clone(),
-        owner_user_id: None,
-        mission_id: None,
-    };
+    let fallback_user_id = UserId::new("durable-display-preview-owner").expect("fallback user id");
+    // The durable preview sink derives the thread scope from the run context;
+    // register the thread under that same derived scope.
+    let thread_scope = local_dev_thread_scope_for_run(&run_context, &fallback_user_id)
+        .expect("run scope has an agent");
     let thread_service = Arc::new(InMemorySessionThreadService::default());
     thread_service
         .ensure_thread(EnsureThreadRequest {
@@ -33,10 +34,10 @@ async fn capability_io_writes_display_preview_to_durable_history() {
         })
         .await
         .expect("thread exists");
-    let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+    let capability_io = StagedCapabilityIo::new_with_durable_previews(
         Arc::new(CapabilityDisplayPreviewStore::default()),
         thread_service.clone(),
-        thread_scope.clone(),
+        fallback_user_id.clone(),
     );
     let input_ref = capability_io
         .register_provider_tool_call_input(
@@ -64,6 +65,7 @@ async fn capability_io_writes_display_preview_to_durable_history() {
                 subtitle: Some("/workspace/main.rs".to_string()),
                 truncated: false,
             }),
+            durable_persistence: DurablePersistence::Persist,
         })
         .await
         .map(|_| ())
@@ -105,13 +107,9 @@ async fn capability_io_writes_display_preview_to_durable_history() {
 #[tokio::test]
 async fn capability_io_writes_failure_display_preview_to_durable_history() {
     let run_context = run_context("durable-failure-preview").await;
-    let thread_scope = ThreadScope {
-        tenant_id: run_context.scope.tenant_id.clone(),
-        agent_id: run_context.scope.agent_id.clone().expect("agent id"),
-        project_id: run_context.scope.project_id.clone(),
-        owner_user_id: None,
-        mission_id: None,
-    };
+    let fallback_user_id = UserId::new("durable-failure-preview-owner").expect("fallback user id");
+    let thread_scope = local_dev_thread_scope_for_run(&run_context, &fallback_user_id)
+        .expect("run scope has an agent");
     let thread_service = Arc::new(InMemorySessionThreadService::default());
     thread_service
         .ensure_thread(EnsureThreadRequest {
@@ -123,10 +121,10 @@ async fn capability_io_writes_failure_display_preview_to_durable_history() {
         })
         .await
         .expect("thread exists");
-    let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+    let capability_io = StagedCapabilityIo::new_with_durable_previews(
         Arc::new(CapabilityDisplayPreviewStore::default()),
         thread_service.clone(),
-        thread_scope.clone(),
+        fallback_user_id.clone(),
     );
     let input_ref = capability_io
         .register_provider_tool_call_input(

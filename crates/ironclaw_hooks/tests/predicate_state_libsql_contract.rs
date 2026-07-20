@@ -34,7 +34,7 @@
 //! macro we cannot gate. So we own the runner: cases run **serially** by
 //! default (one heavy fill at a time), and the cases that intentionally
 //! exercise concurrency get their own multi-thread Tokio runtime. The
-//! `contract-tests` feature on the `ironclaw_hooks` dev-dependency exposes the
+//! `test-support` feature on the `ironclaw_hooks` dev-dependency exposes the
 //! `predicate_state::contract` functions we call directly here instead of
 //! through the `predicate_backend_contract_test!` macro.
 
@@ -525,9 +525,10 @@ async fn per_tenant_quota_isolates_under_concurrent_pressure() {
     // The backend now self-bounds open connections (see the concurrency
     // contract on `LibSqlPredicateStateBackend`), so the test no longer needs
     // its own admission semaphore — the flood is dispatched all at once and
-    // the backend's permits queue it. The contention that matters — many
-    // writers serialising on the single `BEGIN IMMEDIATE` write lock and the
-    // eviction path racing — is fully exercised.
+    // the backend's write lock queues it before each task opens its libSQL
+    // write connection. The contention that matters — many writers flowing
+    // through the single `BEGIN IMMEDIATE` write path and the eviction path
+    // racing — is fully exercised.
     let flood = MAX_KEYS_PER_TENANT + 16;
     let mut handles = Vec::with_capacity(flood);
     for i in 0..flood {

@@ -291,8 +291,8 @@ mod tests {
             .upsert_pairing_request("telegram", "user-999", None)
             .await
             .unwrap();
-        let _req_slack = db
-            .upsert_pairing_request("slack", "user-999", None)
+        let _req_discord = db
+            .upsert_pairing_request("discord", "user-999", None)
             .await
             .unwrap();
 
@@ -301,7 +301,7 @@ mod tests {
             .await
             .unwrap();
 
-        // telegram resolves; slack does not
+        // telegram resolves; discord does not
         assert!(
             db.resolve_channel_identity("telegram", "user-999")
                 .await
@@ -309,7 +309,7 @@ mod tests {
                 .is_some()
         );
         assert!(
-            db.resolve_channel_identity("slack", "user-999")
+            db.resolve_channel_identity("discord", "user-999")
                 .await
                 .unwrap()
                 .is_none()

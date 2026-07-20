@@ -1,66 +1,91 @@
 ---
 paths:
-  - "src/**/*.rs"
+  - "crates/**/*.rs"
   - "tests/**"
 ---
-# Testing Rules
+# Reborn testing rules
 
-## Test Tiers
+## Integration-first coverage
 
-| Tier | Command | External deps |
-|------|---------|---------------|
-| Unit | `cargo test` | None |
-| Integration | `cargo test --features integration` | Running PostgreSQL |
-| Live | `cargo test --features integration -- --ignored` | PostgreSQL + LLM API keys |
+New or changed production-wired behavior ships with a test in
+`tests/integration/` using the production composition and asserting at a
+meaningful seam: captured model request, mediated egress, durable store reopen,
+event/projection output, capability evidence, approval state, or runtime result.
+Waiting only for a completed status is not sufficient.
 
-Run `bash scripts/check-boundaries.sh` to verify test tier gating.
+Crate-tier tests are appropriate for local invariants and public contract
+conformance. They may replace an integration test only when the integration
+harness cannot reach the path; explain that limitation in the PR. Never add
+test-only wiring for behavior production does not wire.
 
-## Key Patterns
+Read `.claude/skills/ironclaw-reborn-testing/SKILL.md` and
+`tests/integration/CLAUDE.md` before adding a cross-layer scenario.
 
-- Unit tests in `mod tests {}` at the bottom of each file
-- Async tests with `#[tokio::test]`
-- No mocks, prefer real implementations or stubs
-- Use `tempfile` crate for test directories, never hardcode `/tmp/`
-- Regression test with every bug fix (enforced by commit-msg hook)
-- Integration tests (`--test workspace_integration`) require PostgreSQL; skipped if DB is unreachable
+## Test tiers
 
-## Test Through the Caller, Not Just the Helper
+1. **Unit/contract:** pure logic and local public contracts —
+   `cargo test -p OWNING_CRATE`.
+2. **In-process Reborn integration:** whole deterministic turns with the real
+   product workflow, runner, loop, decorator chain, and in-memory filesystem —
+   `cargo test --test reborn_integration_SCENARIO`.
+3. **Architecture:** dependency and composition boundaries —
+   `cargo test -p ironclaw_architecture`.
+4. **Backend/runtime integration:** DB-, Docker-, or runtime-shaped behavior —
+   use the owning feature-gated suite and `cargo test --features integration`
+   when required by its guide.
+5. **Recorded model behavior:** hermetic fixtures for tool choice/request shape;
+   validate with `scripts/ci/check-reborn-qa-fixtures.sh`.
+6. **Browser/E2E:** user-visible WebUI flows under `tests/e2e/`.
+7. **Live canary:** ignored, credentialed drift checks; supplemental only.
 
-**When a helper gates a side-effecting flow, the test must go through the caller — not just the helper in isolation.**
+Use `bash scripts/reborn-e2e-rust.sh` when a Reborn contract or whole-path
+behavior changes. Verify workflow coverage rather than assuming a green PR ran
+every integration tier.
 
-A whole class of bugs in this repo has the same shape: a wrapper function silently loses one of its inputs, and the unit test for the helper passes because it never crosses the layer where the input gets dropped.
+## Test through the caller
 
-Real examples (do not let these recur):
+A helper-only unit test is insufficient when all of these are true:
 
-| Bug | Helper | What got lost | How a caller-level test would have caught it |
-|-----|--------|--------------|------------------------------------------------|
-| nearai/ironclaw#1948 | `McpServerConfig::has_custom_auth_header()` | Helper existed but `requires_auth()` never consulted it, so MCP triggered OAuth/DCR even with a user-set `Authorization` header | A test driving `mcp::factory::create_client_from_config()` with a header-bearing config and asserting zero OAuth-state side effects |
-| nearai/ironclaw#1921 | `derive_activation_status(ext, has_owner_binding)` | Wrapper hardcodes the underlying classifier's `has_paired` axis to `false`, even though `classify_wasm_channel_activation` takes both bools | A test driving `extensions_list_handler` against a DB with a real `channel_identities` row and asserting `Active`, not `Pairing` |
-| nearai/ironclaw#1502 | `window.open` mock `(url) => { window._lastOpenedUrl = url }` | Mock captured only the URL, silently swallowing `target` and `windowFeatures`; a regression to same-tab open would not fail | A mock capturing all three args plus an assert that `target === '_blank'` |
+1. A predicate, classifier, or transform gates a side effect.
+2. A wrapper or computed input sits between the helper and the effect.
+3. The helper has multiple inputs or the caller derives an input from context.
 
-### When the rule applies
+Drive the public caller or inline the helper into its sole caller. Runtime and
+browser doubles capture every argument the production call supplies.
 
-You must add a caller-level test (not just a helper-level unit test) when **all** of the following are true:
+For provider decorators, runtime adapters, and capability wrappers, the test
+must exercise the complete production chain. A direct leaf call does not prove
+delegation, redaction, retry, or policy behavior survives every wrapper.
 
-1. The helper is a **predicate, classifier, or transform** whose return value gates a side effect (HTTP call, DB write, UI mutation, OAuth flow, secret read, tool execution, sandbox launch, etc.).
-2. There is **at least one wrapper or call site** between the helper and the side effect.
-3. The helper has **more than one input** *or* its caller computes any of the inputs from the surrounding context.
+## Required properties
 
-If all three are true, a unit test on the helper alone is **not sufficient regression coverage**. You must additionally either:
+- Every bug fix includes a regression test that fails before the fix. The
+  commit-msg hook and `.github/workflows/regression-test-check.yml` enforce the
+  repository convention for marked fix/high-risk changes. `[skip-regression-check]`
+  is an explicit, review-visible escape hatch for genuinely infeasible cases;
+  never use it to avoid a reproducible caller-path test.
+- Extend an existing suite when it owns the same seam.
+- Use `tempfile` for test files and directories. Never hardcode system
+  temporary-directory paths.
+- Avoid ignored or TODO-pinned tests; landed tests run in CI.
+- Prefer real in-memory implementations, deterministic fakes, or recording
+  adapters over mocks that duplicate internal behavior.
+- External services are hermetic. Live canaries supplement deterministic tests.
+- Test denial, cancellation, restart, conflict, redaction, scope isolation, and
+  partial failure where the contract exposes them.
+- Recorded model fixtures contain no secrets or PII and pass the repository
+  fixture validator.
+- Reborn integration coverage follows the committed ratchet in
+  `tests/integration/coverage-floor.toml`; when coverage is intentionally added,
+  follow that file's same-PR recapture/floor-update instructions.
 
-- Add a test that drives the call site (`*_handler`, `factory::create_*`, `manager::*`), **or**
-- Inline the helper into its single caller so there is no wrapper to silently drop an input.
+## Validation
 
-### Where the test belongs
+Run targeted crate tests first. Add architecture tests when dependency edges or
+ownership change, and the Reborn integration/E2E harness when behavior crosses
+turns, runtime lanes, authorization, approvals, networking, secrets, product
+workflow, or capability dispatch. Re-derive exact commands from
+`crates/AGENTS.md` and the owning crate guide rather than copying stale commands.
 
-Most of these gaps are above unit-test scope and below e2e scope. Default to the **integration tier** (`cargo test --features integration`):
-
-- `tests/<module>_integration.rs` for Rust integration tests against the public handler/factory surface
-- `tests/multi_tenant_integration.rs` when the lost axis is per-user state
-- `tests/e2e/scenarios/test_*.py` when the lost axis is browser-visible
-
-Unit tests in `mod tests {}` are still fine for the helper itself, but they do not satisfy this rule.
-
-### Mock hygiene corollary
-
-When you mock a browser/runtime API in a test, the mock's signature must match the production call site's signature, and assertions should cover **every argument** the production code passes. A `(url) => {}` stub for a `window.open(url, target, features)` call site is a silent argument-loss bug waiting to happen.
+Reborn dependency/composition boundary enforcement is
+`cargo test -p ironclaw_architecture`.

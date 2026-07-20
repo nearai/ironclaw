@@ -15,7 +15,7 @@ use ironclaw_host_api::{
     RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
-use ironclaw_secrets::InMemorySecretStore;
+use ironclaw_secrets::FilesystemSecretStore;
 use ironclaw_turns::{
     AcceptedMessageRef, BlockedReason, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
     GetRunStateRequest, IdempotencyKey, LoopCheckpointStateRef, ReplyTargetBindingRef,
@@ -27,11 +27,11 @@ use ironclaw_turns::{
 use secrecy::SecretString;
 use std::sync::Mutex;
 
-use crate::auth::AUTH_CONTINUATION_DISPATCH_FAILED_CODE;
+use crate::product_auth::api::auth::AUTH_CONTINUATION_DISPATCH_FAILED_CODE;
 
 use super::*;
-use crate::notion_oauth::{NOTION_PROVIDER_ID, notion_provider_spec};
-use crate::oauth_provider_client::HostOAuthProviderClient;
+use crate::product_auth::oauth::notion_oauth::{NOTION_PROVIDER_ID, notion_provider_spec};
+use crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderClient;
 
 #[derive(Clone)]
 struct ErrorTurnCoordinator {
@@ -58,6 +58,13 @@ impl TurnCoordinator for ErrorTurnCoordinator {
         Err(self.resume_error.clone())
     }
 
+    async fn retry_turn(
+        &self,
+        _request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        panic!("retry_turn is not used by auth continuation error mapping tests");
+    }
+
     async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
         panic!("cancel_run is not used by auth continuation error mapping tests");
     }
@@ -80,6 +87,7 @@ fn auth_error_mapping_run_state(request: &GetRunStateRequest) -> TurnRunState {
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
         resolved_model_route: None,
+        model_usage: None,
         received_at: Utc::now(),
         checkpoint_id: None,
         gate_ref: Some(GateRef::new("gate:auth-error").unwrap()), // safety: fixed test gate literal is valid.
@@ -185,6 +193,7 @@ async fn local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator() {
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let submit = turn_coordinator
         .submit_turn(SubmitTurnRequest {
+            requested_model: None,
             scope: scope.clone(),
             actor: actor.clone(),
             accepted_message_ref: AcceptedMessageRef::new("message-auth-callback").unwrap(),
@@ -365,6 +374,114 @@ async fn production_libsql_google_oauth_backend_captures_wasm_credential_provide
     );
 }
 
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked_runs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = Arc::new(
+        libsql::Builder::new_local(dir.path().join("reborn.db").display().to_string())
+            .build()
+            .await
+            .expect("build libsql database"),
+    );
+    let services = build_reborn_services(
+        RebornBuildInput::libsql(
+            RebornCompositionProfile::Production,
+            "production-auth-fanout-owner",
+            db,
+            dir.path().join("events.db").display().to_string(),
+            None,
+            ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
+        )
+        .with_product_auth_ports(in_memory_product_auth_ports())
+        .with_production_trust_policy(Arc::new(
+            builtin_first_party_trust_policy().expect("builtin trust policy"),
+        ))
+        .with_runtime_policy(EffectiveRuntimePolicy {
+            deployment: ironclaw_host_api::DeploymentMode::HostedMultiTenant,
+            requested_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+            resolved_profile: ironclaw_host_api::RuntimeProfile::HostedSafe,
+            filesystem_backend: FilesystemBackendKind::TenantWorkspace,
+            process_backend: ProcessBackendKind::None,
+            network_mode: ironclaw_host_api::NetworkMode::Brokered,
+            secret_mode: SecretMode::TenantBroker,
+            approval_policy: ironclaw_host_api::runtime_policy::ApprovalPolicy::AskAlways,
+            audit_mode: ironclaw_host_api::AuditMode::Standard,
+        }),
+    )
+    .await
+    .expect("production services build");
+    let product_auth = services.product_auth.as_ref().expect("product auth");
+    let turn_coordinator = services
+        .turn_coordinator
+        .as_ref()
+        .expect("turn coordinator");
+    let production_runtime = services
+        .production_runtime
+        .as_ref()
+        .expect("production runtime");
+    #[cfg(not(feature = "postgres"))]
+    let RebornProductionRuntimeServices::LibSql(graph) = production_runtime;
+    #[cfg(feature = "postgres")]
+    let graph = match production_runtime {
+        RebornProductionRuntimeServices::LibSql(graph) => graph,
+        RebornProductionRuntimeServices::Postgres(_) => panic!("expected libsql runtime"),
+    };
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let first_scope = turn_scope();
+    let second_scope = TurnScope::new_with_owner(
+        first_scope.tenant_id.clone(),
+        first_scope.agent_id.clone(),
+        first_scope.project_id.clone(),
+        ThreadId::new("thread-auth-second").unwrap(),
+        Some(actor.user_id.clone()),
+    );
+    let first_run = submit_and_block_provider_auth_run(
+        turn_coordinator.as_ref(),
+        graph.turn_state.as_ref(),
+        first_scope.clone(),
+        actor.clone(),
+        "first",
+        "github",
+        "github",
+    )
+    .await;
+    let second_run = submit_and_block_provider_auth_run(
+        turn_coordinator.as_ref(),
+        graph.turn_state.as_ref(),
+        second_scope.clone(),
+        actor.clone(),
+        "second",
+        "github",
+        "github",
+    )
+    .await;
+    let auth_scope = auth_scope_for_turn(&first_scope, &actor);
+    let flow_id = create_flow(
+        product_auth,
+        auth_scope.clone(),
+        AuthContinuationRef::TurnGateResume {
+            turn_run_ref: TurnRunRef::new(first_run.to_string()).unwrap(),
+            gate_ref: AuthGateRef::new("gate:fanout-first").unwrap(),
+        },
+    )
+    .await;
+
+    product_auth
+        .handle_oauth_callback(authorized_request(auth_scope, flow_id))
+        .await
+        .expect("callback resumes every same-owner provider gate");
+
+    for (scope, run_id) in [(first_scope, first_run), (second_scope, second_run)] {
+        let state = turn_coordinator
+            .get_run_state(GetRunStateRequest { scope, run_id })
+            .await
+            .expect("run state");
+        assert_eq!(state.status, TurnStatus::Queued);
+        assert_eq!(state.gate_ref, None);
+    }
+}
+
 #[tokio::test]
 async fn local_dev_notion_oauth_backend_builds_with_host_provider_config() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -423,7 +540,7 @@ async fn oauth_callback_exchanges_notion_through_reborn_product_auth_boundary() 
     let provider_client = HostOAuthProviderClient::new(
         notion_provider_spec(),
         egress.clone(),
-        Arc::new(InMemorySecretStore::new()),
+        Arc::new(FilesystemSecretStore::ephemeral()),
         Arc::new(NoopObligationHandler),
         OAuthClientId::new("notion-client-123").expect("client id"),
         OAuthRedirectUri::new("https://app.example/oauth/notion/callback").expect("redirect uri"),
@@ -532,7 +649,7 @@ async fn oauth_callback_with_stale_gate_maps_to_terminal_invalid_request() {
 }
 
 #[tokio::test]
-async fn oauth_callback_with_lifecycle_activation_returns_ok_without_resume() {
+async fn oauth_callback_with_lifecycle_activation_activates_and_publishes_extension() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_reborn_services(
         RebornBuildInput::local_dev(
@@ -544,22 +661,210 @@ async fn oauth_callback_with_lifecycle_activation_returns_ok_without_resume() {
     .await
     .expect("local-dev services build");
     let product_auth = services.product_auth.as_ref().expect("product auth");
+    let extension_management = services
+        .local_runtime
+        .as_ref()
+        .and_then(|runtime| runtime.extension_management.as_ref())
+        .expect("extension management");
+    let package_ref = ironclaw_product_workflow::LifecyclePackageRef::new(
+        ironclaw_product_workflow::LifecyclePackageKind::Extension,
+        "github",
+    )
+    .expect("github package ref");
+    let lifecycle_owner = UserId::new("alice").expect("valid lifecycle owner"); // safety: fixed test user id literal is valid.
+    extension_management
+        .install(package_ref.clone(), &lifecycle_owner)
+        .await
+        .expect("install github before OAuth");
     let auth_scope = auth_scope_for_turn(
         &turn_scope(),
         &TurnActor::new(UserId::new("alice").unwrap()),
     );
     let continuation = AuthContinuationRef::LifecycleActivation {
-        package_ref: LifecyclePackageRef::new("github-extension").unwrap(),
+        package_ref: LifecyclePackageRef::new("github").unwrap(),
     };
     let flow_id = create_flow(product_auth, auth_scope.clone(), continuation.clone()).await;
 
     let response = product_auth
         .handle_oauth_callback(authorized_request(auth_scope, flow_id))
         .await
-        .expect("lifecycle continuation is deferred");
+        .expect("OAuth callback activates extension");
 
     assert_eq!(response.flow_id, flow_id);
     assert_eq!(response.continuation, continuation);
+    let projection = extension_management
+        .project(package_ref, &lifecycle_owner)
+        .await
+        .expect("project github after OAuth callback");
+    assert_eq!(
+        projection.phase,
+        ironclaw_product_workflow::LifecyclePhase::Active
+    );
+    assert!(
+        extension_management
+            .active_model_visible_capabilities()
+            .await
+            .expect("active extension capabilities")
+            .iter()
+            .any(|capability| capability.id.as_str() == "github.search_issues"),
+        "OAuth callback must publish GitHub tools before reporting success"
+    );
+}
+
+#[tokio::test]
+async fn slack_oauth_callback_activates_and_publishes_all_personal_tools() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let services = build_reborn_services(
+        RebornBuildInput::local_dev(
+            "local-dev-slack-auth-lifecycle-owner",
+            dir.path().join("local-dev"),
+        )
+        .with_product_auth_ports(in_memory_product_auth_ports()),
+    )
+    .await
+    .expect("local-dev services build");
+    let product_auth = services.product_auth.as_ref().expect("product auth");
+    let turn_coordinator = services
+        .turn_coordinator
+        .as_ref()
+        .expect("turn coordinator");
+    let local_runtime = services.local_runtime.as_ref().expect("local runtime");
+    let extension_management = services
+        .local_runtime
+        .as_ref()
+        .and_then(|runtime| runtime.extension_management.as_ref())
+        .expect("extension management");
+    let package_ref = ironclaw_product_workflow::LifecyclePackageRef::new(
+        ironclaw_product_workflow::LifecyclePackageKind::Extension,
+        "slack",
+    )
+    .expect("Slack package ref");
+    let lifecycle_owner = UserId::new("alice").expect("valid lifecycle owner"); // safety: fixed test user id literal is valid.
+    extension_management
+        .install(package_ref.clone(), &lifecycle_owner)
+        .await
+        .expect("install Slack before OAuth");
+    let auth_scope = auth_scope_for_turn(
+        &turn_scope(),
+        &TurnActor::new(UserId::new("alice").unwrap()),
+    );
+    let blocked_scope = turn_scope();
+    let blocked_run = submit_and_block_provider_auth_run(
+        turn_coordinator.as_ref(),
+        local_runtime.turn_state.as_ref(),
+        blocked_scope.clone(),
+        TurnActor::new(UserId::new("alice").unwrap()),
+        "slack-lifecycle",
+        ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID,
+        "slack",
+    )
+    .await;
+    let slack_provider = AuthProviderId::new(ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID)
+        .expect("Slack personal provider");
+    let flow_id = create_provider_flow(
+        product_auth,
+        auth_scope.clone(),
+        AuthContinuationRef::LifecycleActivation {
+            package_ref: LifecyclePackageRef::new("slack").unwrap(),
+        },
+        slack_provider.clone(),
+    )
+    .await;
+    let scopes = crate::extension_host::available_extensions::slack_personal_oauth_setup_scopes()
+        .iter()
+        .map(|scope| ProviderScope::new(*scope).expect("Slack OAuth scope"))
+        .collect();
+
+    product_auth
+        .handle_oauth_callback(authorized_provider_request(
+            auth_scope,
+            flow_id,
+            slack_provider,
+            scopes,
+        ))
+        .await
+        .expect("Slack OAuth callback activates extension");
+
+    assert_eq!(
+        extension_management
+            .project(package_ref, &lifecycle_owner)
+            .await
+            .expect("project Slack after OAuth")
+            .phase,
+        ironclaw_product_workflow::LifecyclePhase::Active
+    );
+    let mut slack_capabilities = extension_management
+        .active_model_visible_capabilities()
+        .await
+        .expect("active Slack capabilities")
+        .into_iter()
+        .map(|capability| capability.id.as_str().to_string())
+        .filter(|capability_id| capability_id.starts_with("slack."))
+        .collect::<Vec<_>>();
+    slack_capabilities.sort();
+    assert_eq!(
+        slack_capabilities,
+        vec![
+            "slack.get_conversation_history",
+            "slack.get_conversation_info",
+            "slack.get_thread_replies",
+            "slack.get_user_info",
+            "slack.list_conversations",
+            "slack.search_messages",
+            "slack.send_message",
+            "slack.whoami",
+        ]
+    );
+    let blocked_state = turn_coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: blocked_scope,
+            run_id: blocked_run,
+        })
+        .await
+        .expect("blocked Slack run after OAuth");
+    assert_eq!(blocked_state.status, TurnStatus::Queued);
+    assert_eq!(blocked_state.gate_ref, None);
+}
+
+#[tokio::test]
+async fn failed_lifecycle_activation_is_not_projected_as_completed_oauth() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let services = build_reborn_services(
+        RebornBuildInput::local_dev(
+            "local-dev-auth-lifecycle-failure-owner",
+            dir.path().join("local-dev"),
+        )
+        .with_product_auth_ports(in_memory_product_auth_ports()),
+    )
+    .await
+    .expect("local-dev services build");
+    let product_auth = services.product_auth.as_ref().expect("product auth");
+    let auth_scope = auth_scope_for_turn(
+        &turn_scope(),
+        &TurnActor::new(UserId::new("alice").unwrap()),
+    );
+    let flow_id = create_flow(
+        product_auth,
+        auth_scope.clone(),
+        AuthContinuationRef::LifecycleActivation {
+            package_ref: LifecyclePackageRef::new("github").unwrap(),
+        },
+    )
+    .await;
+
+    product_auth
+        .handle_oauth_callback(authorized_request(auth_scope.clone(), flow_id))
+        .await
+        .expect_err("uninstalled extension cannot activate after OAuth");
+
+    assert_eq!(
+        product_auth
+            .reconcile_oauth_flow(&auth_scope, flow_id)
+            .await
+            .expect("sanitized flow status"),
+        ironclaw_auth::AuthFlowStatus::Failed,
+        "the popup poll must terminate after lifecycle activation fails"
+    );
 }
 
 #[tokio::test]
@@ -640,6 +945,81 @@ fn in_memory_product_auth_ports() -> RebornProductAuthServicePorts {
 }
 
 #[cfg(test)]
+async fn submit_and_block_provider_auth_run(
+    turn_coordinator: &dyn TurnCoordinator,
+    transition: &dyn TurnRunTransitionPort,
+    scope: TurnScope,
+    actor: TurnActor,
+    suffix: &str,
+    provider: &str,
+    requester_extension: &str,
+) -> TurnRunId {
+    let submit = turn_coordinator
+        .submit_turn(SubmitTurnRequest {
+            requested_model: None,
+            scope: scope.clone(),
+            actor,
+            accepted_message_ref: AcceptedMessageRef::new(format!("message-fanout-{suffix}"))
+                .unwrap(),
+            source_binding_ref: SourceBindingRef::new(format!("source-fanout-{suffix}")).unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new(format!("reply-fanout-{suffix}"))
+                .unwrap(),
+            requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
+            idempotency_key: IdempotencyKey::new(format!("submit-fanout-{suffix}")).unwrap(),
+            received_at: Utc::now(),
+            requested_run_id: None,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
+            product_context: None,
+        })
+        .await
+        .expect("submit turn");
+    let SubmitTurnResponse::Accepted { run_id, .. } = submit;
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    transition
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope),
+        })
+        .await
+        .expect("claim run")
+        .expect("queued run exists");
+    transition
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: LoopCheckpointStateRef::new(format!("checkpoint:fanout-{suffix}")).unwrap(),
+            reason: BlockedReason::Auth {
+                gate_ref: GateRef::new(format!("gate:fanout-{suffix}")).unwrap(),
+                credential_requirements: vec![
+                    ironclaw_host_api::RuntimeCredentialAuthRequirement {
+                        provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new(
+                            provider,
+                        )
+                        .unwrap(),
+                        setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                            scopes: Vec::new(),
+                        },
+                        requester_extension: ironclaw_host_api::ExtensionId::new(
+                            requester_extension,
+                        )
+                        .unwrap(),
+                        provider_scopes: Vec::new(),
+                    },
+                ],
+            },
+        })
+        .await
+        .expect("block auth gate");
+    run_id
+}
+
+#[cfg(test)]
 fn auth_scope_for_turn(scope: &TurnScope, actor: &TurnActor) -> AuthProductScope {
     AuthProductScope::new(
         ResourceScope {
@@ -689,13 +1069,14 @@ fn provider_scope(value: &str) -> ProviderScope {
 #[cfg(test)]
 async fn submit_and_block_auth_run(
     turn_coordinator: &dyn ironclaw_turns::TurnCoordinator,
-    local_runtime: &RebornLocalRuntimeServices,
+    local_runtime: &RebornRuntimeSubstrate,
     scope: TurnScope,
     actor: TurnActor,
     gate_ref: &str,
 ) -> ironclaw_turns::TurnRunId {
     let submit = turn_coordinator
         .submit_turn(SubmitTurnRequest {
+            requested_model: None,
             scope: scope.clone(),
             actor,
             accepted_message_ref: AcceptedMessageRef::new("message-auth-callback-2").unwrap(),
@@ -749,13 +1130,22 @@ async fn create_flow(
     scope: AuthProductScope,
     continuation: AuthContinuationRef,
 ) -> AuthFlowId {
+    create_provider_flow(product_auth, scope, continuation, provider()).await
+}
+
+async fn create_provider_flow(
+    product_auth: &RebornProductAuthServices,
+    scope: AuthProductScope,
+    continuation: AuthContinuationRef,
+    provider: AuthProviderId,
+) -> AuthFlowId {
     product_auth
         .flow_manager()
         .create_flow(NewAuthFlow {
             id: None,
             scope,
             kind: AuthFlowKind::IntegrationCredential,
-            provider: provider(),
+            provider,
             challenge: AuthChallenge::OAuthUrl {
                 authorization_url: authorization_url("https://provider.example/oauth"),
                 expires_at: Utc::now() + Duration::minutes(5),
@@ -805,13 +1195,22 @@ fn authorized_request(
     scope: AuthProductScope,
     flow_id: AuthFlowId,
 ) -> crate::RebornOAuthCallbackRequest {
+    authorized_provider_request(scope, flow_id, provider(), vec![provider_scope("repo")])
+}
+
+fn authorized_provider_request(
+    scope: AuthProductScope,
+    flow_id: AuthFlowId,
+    provider: AuthProviderId,
+    scopes: Vec<ProviderScope>,
+) -> crate::RebornOAuthCallbackRequest {
     crate::RebornOAuthCallbackRequest {
         scope,
         flow_id,
         opaque_state_hash: state_hash(),
         outcome: crate::RebornOAuthCallbackOutcome::Authorized {
             provider_request: OAuthProviderCallbackRequest {
-                provider: provider(),
+                provider,
                 account_label: label(),
                 authorization_code: OAuthAuthorizationCode::new(SecretString::from(
                     "raw-auth-code".to_string(),
@@ -823,7 +1222,7 @@ fn authorized_request(
                 ))
                 .unwrap(),
                 pkce_verifier_hash: pkce_hash(),
-                scopes: vec![provider_scope("repo")],
+                scopes,
             },
         },
     }

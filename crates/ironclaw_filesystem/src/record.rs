@@ -250,8 +250,8 @@ pub enum CasExpectation {
     /// Path must currently hold the named version. Used for claim/consume/
     /// status transitions.
     Version(RecordVersion),
-    /// Overwrite regardless of current state. Used only by backfills / admin
-    /// flows; domain code should default to one of the other variants.
+    /// Overwrite regardless of current state. Used only by backfills /
+    /// admin flows; domain code should default to one of the other variants.
     Any,
 }
 

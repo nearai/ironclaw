@@ -36,7 +36,7 @@ is_shared_test_path() {
     .github/workflows/test.yml|.github/workflows/reborn-tests.yml|.github/workflows/reborn-e2e.yml|.github/workflows/nightly-deep-ci.yml)
       return 0
       ;;
-    crates/ironclaw_common/*|crates/ironclaw_host_api/*|crates/ironclaw_host_runtime/*|crates/ironclaw_loop_support/*)
+    crates/ironclaw_common/*|crates/ironclaw_host_api/*|crates/ironclaw_host_runtime/*|crates/ironclaw_loop_host/*)
       return 0
       ;;
     crates/ironclaw_filesystem/*|crates/ironclaw_memory/*|crates/ironclaw_events/*|crates/ironclaw_event_projections/*|crates/ironclaw_event_streams/*)
@@ -66,25 +66,28 @@ is_shared_test_path() {
 is_reborn_test_path() {
   local path="$1"
   case "$path" in
-    docs/reborn/*|scripts/reborn-e2e-rust.sh|scripts/ci/run-reborn-root-partition.sh|scripts/ci/run-reborn-group-tests.sh|tests/reborn_*|tests/integration/*|tests/support/reborn_parity_qa/*|tests/fixtures/llm_traces/reborn_qa/*|tests/e2e/scenarios/test_reborn_*)
+    docs/reborn/*|scripts/reborn-e2e-rust.sh|scripts/ci/run-reborn-root-partition.sh|scripts/ci/run-reborn-group-tests.sh|scripts/ci/check-reborn-responses-e2e-manifest.py|tests/reborn_*|tests/integration/*|tests/support/reborn_parity_qa/*|tests/fixtures/llm_traces/reborn_qa/*|tests/e2e/reborn_coverage_tests.txt|tests/e2e/reborn_responses_e2e_tests.txt|tests/e2e/scenarios/test_reborn_*)
       return 0
       ;;
     crates/ironclaw_architecture/*)
       return 0
       ;;
-    crates/ironclaw_reborn/*|crates/ironclaw_reborn_*/*)
+    crates/ironclaw_runner/*|crates/ironclaw_reborn_*/*)
       return 0
       ;;
     crates/ironclaw_product_*/*|crates/ironclaw_slack_v2_adapter/*|crates/ironclaw_telegram_v2_adapter/*)
       return 0
       ;;
-    crates/ironclaw_wasm_product_adapters/*|crates/ironclaw_webui_v2/*)
+    crates/ironclaw_channel_host/*|crates/ironclaw_channel_delivery/*|crates/ironclaw_telegram_extension/*)
+      return 0
+      ;;
+    crates/ironclaw_wasm_product_adapters/*|crates/ironclaw_webui/*)
       return 0
       ;;
     crates/ironclaw_conversations/*|crates/ironclaw_outbound/*|crates/ironclaw_triggers/*)
       return 0
       ;;
-    scripts/ci/reborn-coverage-*.sh|scripts/ci/test-reborn-coverage.sh|scripts/ci/check-test-suite-boundaries.sh|scripts/ci/classify-test-scope.sh|scripts/ci/test-classify-test-scope.sh)
+    scripts/ci/reborn-coverage-*.sh|scripts/ci/test-reborn-coverage.sh|scripts/ci/test-reborn-coverage-*.sh|scripts/ci/lib/reborn_coverage_lcov.py|scripts/ci/check-test-suite-boundaries.sh|scripts/ci/classify-test-scope.sh|scripts/ci/test-classify-test-scope.sh)
       return 0
       ;;
     *)

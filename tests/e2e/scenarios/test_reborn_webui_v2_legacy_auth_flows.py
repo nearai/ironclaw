@@ -190,7 +190,7 @@ async def _open_stubbed_auth_thread(
         handle_resolve,
     )
 
-    await page.goto(f"{reborn_v2_server}/v2/chat/{THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}")
+    await page.goto(f"{reborn_v2_server}/chat/{THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}")
     await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(timeout=15000)
     await expect(page.locator(SEL_V2["msg_user"]).first).to_contain_text(
         "Use a protected integration", timeout=15000
@@ -605,17 +605,45 @@ async def test_reborn_legacy_oauth_prompt_opens_https_authorization_only(
         await expect(gate).to_contain_text("Connect GitHub")
         await expect(gate).to_contain_text("Authorize")
 
+        await page.evaluate(
+            """
+            () => {
+              window.__openedAuth = [];
+              window.open = (url, target, features) => {
+                const popup = {
+                  closed: false,
+                  close() { this.closed = true; },
+                  location: {
+                    _href: url,
+                    get href() { return this._href; },
+                    set href(value) {
+                      this._href = value;
+                      window.__openedAuth.push({ kind: "navigate", url: value });
+                    },
+                  },
+                };
+                window.__openedAuth.push({ kind: "open", url, target, features });
+                return popup;
+              };
+            }
+            """
+        )
         cta = gate.locator(SEL_V2["auth_oauth_open"])
         await expect(cta).to_have_attribute("href", auth_url)
         await cta.click()
         assert await page.evaluate("() => window.__openedAuth") == [
             {
-                "url": auth_url,
+                "kind": "open",
+                "url": "about:blank",
                 "target": "_blank",
-                "features": "noopener,noreferrer",
+                "features": "width=600,height=600",
+            },
+            {
+                "kind": "navigate",
+                "url": auth_url,
             }
         ]
-        await expect(gate).to_contain_text("Waiting for authorization to complete")
+        await expect(gate).to_contain_text("Waiting for GitHub")
 
         await gate.get_by_role("button", name="Cancel").click()
         await expect(gate).to_be_hidden(timeout=5000)

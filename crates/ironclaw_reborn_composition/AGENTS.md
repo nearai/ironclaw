@@ -5,7 +5,7 @@
 - Read `CLAUDE.md` first; it is the crate-local guardrail file.
 - Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these neighboring contracts before changing behavior:
-  - `crates/ironclaw_reborn/AGENTS.md`
+  - `crates/ironclaw_runner/AGENTS.md`
   - `crates/ironclaw_reborn_config/AGENTS.md`
   - `crates/ironclaw_host_runtime/AGENTS.md`
   - `crates/ironclaw_turns/AGENTS.md`
@@ -13,7 +13,7 @@
 ## What This Crate Owns
 
 - Facade-shaped production composition root for Reborn.
-- Top-level factories that expose `HostRuntime`, `TurnCoordinator`, readiness, runtime/profile inputs, and LLM catalog wiring: `RebornServices`/`build_reborn_services` (`factory`), `RebornBuildInput`/`RebornBuildError`, and the feature-gated LLM catalog resolvers (`llm_catalog`).
+- Top-level factories that expose `HostRuntime`, `TurnCoordinator`, readiness, runtime/profile inputs, and LLM catalog wiring: `RebornServices`/`build_reborn_services` (`factory`), `RebornBuildInput`/`RebornBuildError`, and the feature-gated LLM catalog resolvers (`llm_admin::llm_catalog`).
 - The `RebornRuntime` conversation-level facade (`RebornRuntime`/`build_reborn_runtime`, `AssistantReply`, `ConversationId`, `RebornRuntimeError`) and its runtime inputs (`RebornRuntimeInput`/`RebornRuntimeIdentity`, `TurnRunnerSettings`/`PollSettings`, heartbeat/poll-interval defaults).
 - Product-live adapter wiring (`product_live_adapters`): `ProductLivePlannedRuntimeAdapters`, capability authority/IO/model-route settings, `capability_allowlist`, `visible_capability_request_for_run`; and the WebUI facade (`webui`).
 - Production and migration-dry-run profile validation for required handles (`profile`, `readiness`).

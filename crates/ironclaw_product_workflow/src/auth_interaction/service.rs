@@ -457,6 +457,7 @@ fn map_auth_product_error(error: AuthProductError) -> ProductWorkflowError {
         | AuthProductError::TokenExchangeFailed
         | AuthProductError::CredentialMissing
         | AuthProductError::AccountSelectionRequired
+        | AuthProductError::ProviderIdentityAlreadyConnected
         | AuthProductError::InvalidRequest { .. } => {
             auth_rejected(AuthInteractionRejectionKind::UnsupportedResult)
         }
@@ -486,7 +487,9 @@ fn map_credential_selection_error(error: AuthProductError) -> ProductWorkflowErr
         | AuthProductError::ProviderDenied
         | AuthProductError::RefreshFailed
         | AuthProductError::InvalidGrant => auth_rejected(AuthInteractionRejectionKind::StaleAuth),
-        AuthProductError::MalformedCallback | AuthProductError::TokenExchangeFailed => {
+        AuthProductError::MalformedCallback
+        | AuthProductError::TokenExchangeFailed
+        | AuthProductError::ProviderIdentityAlreadyConnected => {
             auth_rejected(AuthInteractionRejectionKind::UnsupportedResult)
         }
     }

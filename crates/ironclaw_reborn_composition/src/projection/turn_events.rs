@@ -5,24 +5,21 @@ use std::{
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
-use ironclaw_host_api::{
-    Action, ApprovalRequest, InvocationId, NetworkMethod, NetworkScheme, UserId,
-};
+use ironclaw_host_api::{InvocationId, UserId};
 use ironclaw_product_adapters::{
-    ApprovalPromptActionView, ApprovalPromptContextView, ApprovalPromptDestinationView,
-    ApprovalPromptDetailView, ApprovalPromptScopeView, AuthPromptContextView, GatePromptView,
+    ApprovalPromptContextView, AuthPromptContextView, AuthPromptView, GatePromptView,
     ProductAdapterError, ProductGateKind, ProductOutboundPayload, ProductProjectionItem,
     ProductProjectionState, ProductWorkflowRejectionKind, RedactedString,
 };
 use ironclaw_product_workflow::{
-    ApprovalInteractionScope, approval_request_id_from_gate_ref, is_approval_gate_ref,
+    approval_prompt_lookup, enrich_auth_prompt_view, is_approval_gate_ref,
 };
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_turns::{
-    GateRef, GetRunStateRequest, SanitizedFailure, TurnActor, TurnBlockedGateKind, TurnCoordinator,
-    TurnError, TurnEventKind, TurnEventProjectionCursor, TurnEventProjectionError,
-    TurnEventProjectionRequest, TurnEventProjectionSource, TurnEventReducerService,
-    TurnLifecycleEvent, TurnRunId, TurnScope, TurnStatus,
+    GateRef, GetRunStateRequest, ModelInvalidOutputDetailReason, SanitizedFailure,
+    TurnBlockedGateKind, TurnCoordinator, TurnError, TurnEventKind, TurnEventProjectionCursor,
+    TurnEventProjectionError, TurnEventProjectionRequest, TurnEventProjectionSource,
+    TurnEventReducerService, TurnLifecycleEvent, TurnRunId, TurnScope, TurnStatus,
     run_profile::{
         SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest,
         SystemInferenceTaskId, SystemPromptId, SystemPromptSource, SystemTaskKind,
@@ -32,9 +29,8 @@ use ironclaw_turns::{
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 
 use crate::AuthChallengeProvider;
-use crate::auth_prompt::{BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth};
-use crate::failure_summary::{
-    pinned_failure_summary_for_category, reborn_failure_summary_for_category,
+use ironclaw_runner::failure_summary::{
+    pinned_failure_summary_for_category, reborn_failure_summary_for_category_and_detail,
 };
 
 pub(super) const WEBUI_TURN_EVENT_PAGE_LIMIT: usize = 256;
@@ -53,6 +49,13 @@ pub(super) struct TurnEventPayload {
 pub(crate) struct FailureExplanationInput {
     pub(crate) failure_category: String,
     pub(crate) fallback_summary: String,
+    /// Model-visible, secret-scrubbed raw cause carried from the failure
+    /// record (e.g. a provider HTTP status line or a missing schema-ref path).
+    /// Unlike `fallback_summary`, this is the original error text so the
+    /// explainer is given the real facts rather than only the coarse category.
+    /// Producers scrub secret VALUES before populating it; the prompt builder
+    /// re-runs [`sanitize_model_visible_text`] as defense in depth.
+    pub(crate) detail: Option<String>,
 }
 
 #[async_trait]
@@ -405,19 +408,28 @@ async fn blocked_prompt_payload(
     let gate_ref_str = gate_ref.as_str().to_string();
     match event.status {
         TurnStatus::BlockedAuth => {
-            let view = auth_prompt_view_for_blocked_auth(BlockedAuthPromptRequest {
-                fallback_owner_user_id: event.owner_user_id.as_ref().unwrap_or(caller_user_id),
-                scope: &event.scope,
-                run_id: event.run_id,
-                gate_ref: &gate_ref_str,
-                invocation_id: blocked_invocation_id,
-                body: event
-                    .sanitized_reason
-                    .clone()
-                    .unwrap_or_else(|| "Authenticate to continue this run.".to_string()),
-                credential_requirements: &state.credential_requirements,
+            let view = enrich_auth_prompt_view(
+                AuthPromptView {
+                    turn_run_id: event.run_id,
+                    auth_request_ref: gate_ref_str,
+                    invocation_id: blocked_invocation_id,
+                    headline: "Authentication required".to_string(),
+                    body: event
+                        .sanitized_reason
+                        .clone()
+                        .unwrap_or_else(|| "Authenticate to continue this run.".to_string()),
+                    challenge_kind: None,
+                    provider: None,
+                    account_label: None,
+                    authorization_url: None,
+                    expires_at: None,
+                    connection: None,
+                },
+                event.owner_user_id.as_ref().unwrap_or(caller_user_id),
+                &event.scope,
+                &state.credential_requirements,
                 auth_challenges,
-            })
+            )
             .await?;
             Ok(Some(ProductOutboundPayload::AuthPrompt(view)))
         }
@@ -429,7 +441,7 @@ async fn blocked_prompt_payload(
                 gate_ref,
                 gate_ref_str,
             )
-            .await,
+            .await?,
         )),
         TurnStatus::BlockedResource => Ok(Some(gate_prompt(
             event,
@@ -460,205 +472,28 @@ async fn approval_gate_prompt(
     event: &TurnLifecycleEvent,
     gate_ref: &GateRef,
     gate_ref_string: String,
-) -> ProductOutboundPayload {
+) -> Result<ProductOutboundPayload, ProductAdapterError> {
     let owner_user_id = event.owner_user_id.as_ref().unwrap_or(caller_user_id);
-    let lookup =
-        approval_prompt_lookup(approval_requests, gate_ref, owner_user_id, &event.scope).await;
-    gate_prompt_with_context(
+    let lookup = approval_prompt_lookup(approval_requests, gate_ref, owner_user_id, &event.scope)
+        .await
+        .map_err(|error| {
+            tracing::debug!(
+                %error,
+                run_id = %event.run_id,
+                "approval request lookup failed during gate projection"
+            );
+            ProductAdapterError::WorkflowTransient {
+                reason: RedactedString::new("approval request lookup failed"),
+            }
+        })?;
+    Ok(gate_prompt_with_context(
         event,
         gate_ref_string,
         "Approval required",
         is_approval_gate_ref(gate_ref.as_str()),
         lookup.context,
         lookup.invocation_id,
-    )
-}
-
-/// Resolve an approval gate's request details (tool/action/reason) into the
-/// rendered context view, by looking it up in the `ApprovalRequestStore` by
-/// gate ref. Shared by the WebUI gate projection and the Slack approval prompt
-/// so both surface the *same* "what is being approved" data from one source.
-/// Returns `None` when no store is wired, the gate ref is not an approval ref,
-/// the request is missing, or the lookup fails.
-#[cfg(feature = "slack-v2-host-beta")]
-pub(crate) async fn approval_prompt_context_view(
-    approval_requests: Option<&dyn ApprovalRequestStore>,
-    gate_ref: &GateRef,
-    owner_user_id: &UserId,
-    turn_scope: &TurnScope,
-) -> Option<ApprovalPromptContextView> {
-    approval_prompt_lookup(approval_requests, gate_ref, owner_user_id, turn_scope)
-        .await
-        .context
-}
-
-#[derive(Debug, Default)]
-struct ApprovalPromptLookup {
-    context: Option<ApprovalPromptContextView>,
-    invocation_id: Option<InvocationId>,
-}
-
-async fn approval_prompt_lookup(
-    approval_requests: Option<&dyn ApprovalRequestStore>,
-    gate_ref: &GateRef,
-    owner_user_id: &UserId,
-    turn_scope: &TurnScope,
-) -> ApprovalPromptLookup {
-    let (store, request_id) =
-        match approval_requests.zip(approval_request_id_from_gate_ref(gate_ref).ok()) {
-            Some(value) => value,
-            None => return ApprovalPromptLookup::default(),
-        };
-    let scope =
-        ApprovalInteractionScope::from_turn(turn_scope, &TurnActor::new(owner_user_id.clone()))
-            .to_resource_scope();
-    match store.get(&scope, request_id).await {
-        Ok(Some(record)) => ApprovalPromptLookup {
-            context: approval_context_for_request(&record.request),
-            invocation_id: Some(record.scope.invocation_id),
-        },
-        Ok(None) => ApprovalPromptLookup::default(),
-        Err(error) => {
-            tracing::debug!(
-                %error,
-                request_id = %request_id,
-                "approval request lookup failed during gate projection"
-            );
-            // silent-ok: approval context is best-effort UI enrichment; gate prompts remain actionable without it
-            ApprovalPromptLookup::default()
-        }
-    }
-}
-
-fn approval_context_for_request(request: &ApprovalRequest) -> Option<ApprovalPromptContextView> {
-    let (tool_name, action, destination, details) =
-        approval_action_context(request.action.as_ref())?;
-    ApprovalPromptContextView::new(
-        tool_name,
-        action,
-        ApprovalPromptScopeView::new(
-            approval_scope_label(request),
-            request.reusable_scope.is_some(),
-        )
-        .ok()?,
-        non_empty_string(&request.reason),
-        destination,
-        details,
-    )
-    .ok()
-}
-
-fn approval_action_context(
-    action: &Action,
-) -> Option<(
-    String,
-    ApprovalPromptActionView,
-    Option<ApprovalPromptDestinationView>,
-    Vec<ApprovalPromptDetailView>,
-)> {
-    match action {
-        Action::Dispatch {
-            capability,
-            estimated_resources,
-        } => {
-            let mut details = vec![detail("Capability", capability.as_str())?];
-            if let Some(bytes) = estimated_resources.network_egress_bytes {
-                details.push(detail("Estimated network egress", format_bytes(bytes))?);
-            }
-            Some((
-                capability.as_str().to_string(),
-                ApprovalPromptActionView::new("Run tool", None).ok()?,
-                None,
-                details,
-            ))
-        }
-        Action::SpawnCapability {
-            capability,
-            estimated_resources,
-        } => {
-            let mut details = vec![detail("Capability", capability.as_str())?];
-            if let Some(process_count) = estimated_resources.process_count {
-                details.push(detail("Processes", process_count.to_string())?);
-            }
-            Some((
-                capability.as_str().to_string(),
-                ApprovalPromptActionView::new("Start tool", None).ok()?,
-                None,
-                details,
-            ))
-        }
-        Action::Network {
-            target,
-            method,
-            estimated_bytes,
-        } => {
-            let destination =
-                network_destination(method, target.scheme, &target.host, target.port)?;
-            let mut details = vec![detail("Method", method_label(method))?];
-            if let Some(bytes) = estimated_bytes {
-                details.push(detail("Estimated transfer", format_bytes(*bytes))?);
-            }
-            Some((
-                "builtin.http".to_string(),
-                ApprovalPromptActionView::new("Network request", Some(*method)).ok()?,
-                Some(destination),
-                details,
-            ))
-        }
-        _ => None,
-    }
-}
-
-fn approval_scope_label(request: &ApprovalRequest) -> &'static str {
-    if request.reusable_scope.is_some() {
-        "Reusable grant"
-    } else {
-        "This request only"
-    }
-}
-
-fn network_destination(
-    method: &NetworkMethod,
-    scheme: NetworkScheme,
-    host: &str,
-    port: Option<u16>,
-) -> Option<ApprovalPromptDestinationView> {
-    let scheme = match scheme {
-        NetworkScheme::Http => "http",
-        NetworkScheme::Https => "https",
-    };
-    let authority = match port {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_string(),
-    };
-    let url = format!("{scheme}://{authority}");
-    ApprovalPromptDestinationView::new(
-        format!("{} {url}", method_label(method)),
-        Some(url),
-        Some(host.to_string()),
-    )
-    .ok()
-}
-
-fn detail(label: impl Into<String>, value: impl Into<String>) -> Option<ApprovalPromptDetailView> {
-    ApprovalPromptDetailView::new(label, value).ok()
-}
-
-fn method_label(method: &NetworkMethod) -> String {
-    method.to_string().to_ascii_uppercase()
-}
-
-fn format_bytes(bytes: u64) -> String {
-    format!("{bytes} bytes")
-}
-
-fn non_empty_string(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
+    ))
 }
 
 fn gate_prompt(
@@ -717,6 +552,7 @@ fn turn_event_projection_state(
         status: turn_status_wire(event.status).to_string(),
         failure_category: failure_details.category,
         failure_summary: failure_details.summary,
+        retryable: event.retryable,
     }];
     if let Some(item) = gate_projection_item(event, blocked_prompt)? {
         items.push(item);
@@ -875,13 +711,25 @@ async fn failure_details_for_turn_event(
     let Some(category) = failure_category_for_turn_event(event) else {
         return FailureProjectionDetails::default();
     };
-    let fallback_summary = reborn_failure_summary_for_category(Some(&category)).to_string();
+    // The model-visible raw cause for the failure travels on the failure
+    // record's detail channel, surfaced on `TurnLifecycleEvent.detail` by the
+    // upstream runner. Source it here so the explainer (and model) get the real
+    // cause instead of only the bounded category.
+    let detail = detail_for_turn_event(event, &category);
+    let invalid_output_detail =
+        ModelInvalidOutputDetailReason::from_failure_category_and_safe_summary(
+            &category,
+            detail.as_deref(),
+        );
+    let fallback_summary =
+        reborn_failure_summary_for_category_and_detail(Some(&category), invalid_output_detail)
+            .to_string();
     let cache_key = FailureExplanationCacheKey {
         run_id: event.run_id,
         category: category.clone(),
     };
     let summary = cached_failure_summary(failure_explanation_cache, cache_key, || async {
-        failure_summary_for_turn_event(failure_explainer, &category, fallback_summary).await
+        failure_summary_for_turn_event(failure_explainer, &category, fallback_summary, detail).await
     })
     .await;
     FailureProjectionDetails {
@@ -907,6 +755,7 @@ async fn failure_summary_for_turn_event(
     failure_explainer: &dyn FailureExplanationProvider,
     category: &str,
     fallback_summary: String,
+    detail: Option<String>,
 ) -> String {
     if let Some(summary) = pinned_failure_summary_for_category(category) {
         return summary.to_string();
@@ -915,9 +764,23 @@ async fn failure_summary_for_turn_event(
         .explain_failure(FailureExplanationInput {
             failure_category: category.to_string(),
             fallback_summary: fallback_summary.clone(),
+            detail,
         })
         .await
         .unwrap_or(fallback_summary)
+}
+
+/// Resolve the model-visible detail to hand the failure explainer.
+///
+/// Sources the secret-scrubbed raw cause from `TurnLifecycleEvent.detail`, the
+/// dedicated channel distinct from `sanitized_reason` (which is consumed as the
+/// `failure_category`). The detail originates on
+/// `AgentLoopHostError`/`HostManagedModelError` upstream and is threaded through
+/// the executor/driver diagnostics into the failure record and onto the event.
+/// `None` when the failed run recorded no distinct cause, in which case the
+/// explainer falls back to the category summary.
+fn detail_for_turn_event(event: &TurnLifecycleEvent, _category: &str) -> Option<String> {
+    event.detail.clone()
 }
 
 fn failure_category_for_turn_event(event: &TurnLifecycleEvent) -> Option<String> {
@@ -948,15 +811,38 @@ fn failure_explanation_request(input: &FailureExplanationInput) -> Option<System
 }
 
 fn failure_explanation_system_prompt() -> &'static str {
-    ironclaw_loop_support::FAILURE_EXPLANATION_SYSTEM_PROMPT
+    ironclaw_loop_host::FAILURE_EXPLANATION_SYSTEM_PROMPT
 }
 
-fn failure_explanation_user_prompt(input: &FailureExplanationInput) -> String {
-    format!(
+pub(super) fn failure_explanation_user_prompt(input: &FailureExplanationInput) -> String {
+    let mut prompt = format!(
         "status: failed\nfailure_category: {}\nfallback_summary: {}\n",
         sanitize_model_visible_text(&input.failure_category),
         sanitize_model_visible_text(&input.fallback_summary),
-    )
+    );
+    // Give the explainer the real cause when one survived from the failure
+    // record. Re-run the value-scrubber as defense in depth even though the
+    // producer is expected to have scrubbed secret VALUES already; skip the
+    // line entirely when the detail is absent or scrubs to empty.
+    //
+    // Unlike `failure_category`/`fallback_summary` (host-authored, derived from
+    // the category), `detail` is untrusted provider/tool/runtime error text.
+    // `sanitize_model_visible_text` redacts credential-shaped tokens but keeps
+    // newlines and instruction-like content, so appending it raw would let a
+    // crafted error (e.g. from an MCP server or provider body) inject extra
+    // prompt fields or directives — a `\nfallback_summary: ...\nIgnore previous
+    // instructions...` — into the explainer, whose output becomes the public
+    // `failure_summary`. JSON-string-escape it so it stays a single quoted data
+    // value the model reads as data, never as prompt structure.
+    if let Some(detail) = input.detail.as_deref() {
+        let scrubbed = sanitize_model_visible_text(detail);
+        if !scrubbed.trim().is_empty() {
+            let quoted = serde_json::to_string(&scrubbed)
+                .unwrap_or_else(|_| "\"<undisplayable detail>\"".to_string());
+            prompt.push_str(&format!("detail: {quoted}\n"));
+        }
+    }
+    prompt
 }
 
 pub(super) fn bounded_failure_explanation(content: &str) -> Option<String> {
@@ -975,7 +861,7 @@ pub(super) fn bounded_failure_explanation(content: &str) -> Option<String> {
     (!truncated.is_empty()).then_some(truncated)
 }
 
-fn turn_status_wire(status: TurnStatus) -> &'static str {
+pub(super) fn turn_status_wire(status: TurnStatus) -> &'static str {
     match status {
         TurnStatus::Queued => "queued",
         TurnStatus::Running => "running",

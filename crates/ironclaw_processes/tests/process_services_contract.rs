@@ -7,7 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_processes::*;
 use serde_json::json;
@@ -15,7 +15,7 @@ use tokio::{sync::Notify, time::timeout};
 
 #[tokio::test]
 async fn process_services_wire_background_results_to_host() {
-    let services = ProcessServices::in_memory();
+    let services = in_mem_process_services();
     let manager = services.background_manager(Arc::new(SuccessExecutor));
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
@@ -30,7 +30,9 @@ async fn process_services_wire_background_results_to_host() {
     let result = host.await_result(&scope, process_id).await.unwrap();
 
     assert_eq!(result.status, ProcessStatus::Completed);
-    assert_eq!(result.output, Some(json!({"ok": true})));
+    // Filesystem store externalizes output behind `output_ref` (§4.3).
+    assert_eq!(result.output, None);
+    assert!(result.output_ref.is_some());
     assert_eq!(
         host.output(&scope, process_id).await.unwrap(),
         Some(json!({"ok": true}))
@@ -49,7 +51,7 @@ async fn process_services_wire_background_results_to_host() {
 
 #[tokio::test]
 async fn process_services_share_cancellation_registry_between_host_and_manager() {
-    let services = ProcessServices::in_memory();
+    let services = in_mem_process_services();
     let executor = Arc::new(CancellationAwareExecutor::default());
     let manager = services.background_manager(executor.clone());
     let invocation_id = InvocationId::new();
@@ -105,7 +107,7 @@ async fn filesystem_process_services_store_output_refs() {
 
 #[tokio::test]
 async fn background_manager_passes_spawn_mounts_and_reservation_to_executor() {
-    let services = ProcessServices::in_memory();
+    let services = in_mem_process_services();
     let executor = Arc::new(RecordingHandoffExecutor::default());
     let manager = services.background_manager(Arc::clone(&executor));
     let invocation_id = InvocationId::new();
@@ -116,13 +118,14 @@ async fn background_manager_passes_spawn_mounts_and_reservation_to_executor() {
         "/projects/project1",
         MountPermissions::read_only(),
     );
-    let estimate = ResourceEstimate {
-        process_count: Some(1),
-        concurrency_slots: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default()
+        .set_process_count(1)
+        .set_concurrency_slots(1);
     let reservation_id = ResourceReservationId::new();
+    let authenticated_actor_user_id =
+        UserId::new("slack-alice").expect("valid authenticated actor user id");
     let mut start = process_start(process_id, invocation_id, scope.clone());
+    start.authenticated_actor_user_id = Some(authenticated_actor_user_id.clone());
     start.mounts = mounts.clone();
     start.estimated_resources = estimate.clone();
     start.resource_reservation_id = Some(reservation_id);
@@ -132,6 +135,10 @@ async fn background_manager_passes_spawn_mounts_and_reservation_to_executor() {
     let request = executor.wait_for_request().await;
     assert_eq!(request.process_id, process_id);
     assert_eq!(request.scope, scope);
+    assert_eq!(
+        request.authenticated_actor_user_id,
+        Some(authenticated_actor_user_id.clone())
+    );
     assert_eq!(request.mounts, mounts);
     let reservation = request
         .resource_reservation
@@ -139,6 +146,16 @@ async fn background_manager_passes_spawn_mounts_and_reservation_to_executor() {
     assert_eq!(reservation.id, reservation_id);
     assert_eq!(reservation.scope, request.scope);
     assert_eq!(reservation.estimate, estimate);
+    assert_eq!(
+        services
+            .process_store()
+            .get(&scope, process_id)
+            .await
+            .unwrap()
+            .expect("process record must be persisted")
+            .authenticated_actor_user_id,
+        Some(authenticated_actor_user_id)
+    );
 }
 
 struct SuccessExecutor;
@@ -240,6 +257,7 @@ fn process_start(
         parent_process_id: None,
         invocation_id,
         scope,
+        authenticated_actor_user_id: None,
         extension_id: ExtensionId::new("echo").unwrap(),
         capability_id: CapabilityId::new("echo.say").unwrap(),
         runtime: RuntimeKind::Wasm,
@@ -251,9 +269,9 @@ fn process_start(
     }
 }
 
-fn engine_filesystem() -> Arc<ScopedFilesystem<LocalFilesystem>> {
+fn engine_filesystem() -> Arc<ScopedFilesystem<DiskFilesystem>> {
     let storage = tempfile::tempdir().unwrap().keep();
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/engine").unwrap(),
         HostPath::from_path_buf(storage),
@@ -288,4 +306,14 @@ fn sample_scope(invocation_id: InvocationId, tenant: &str, user: &str) -> Resour
         thread_id: None,
         invocation_id,
     }
+}
+
+fn in_mem_process_services() -> ProcessServices<
+    FilesystemProcessStore<InMemoryBackend>,
+    FilesystemProcessResultStore<InMemoryBackend>,
+> {
+    ProcessServices::filesystem(scoped_processes_filesystem(
+        Arc::new(InMemoryBackend::new()),
+        "/engine/tenants/tenant1/users/user1/processes",
+    ))
 }

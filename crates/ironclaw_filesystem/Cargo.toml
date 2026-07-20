@@ -10,14 +10,18 @@ homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "substrates"
+
 [features]
 default = []
 postgres = ["dep:deadpool-postgres", "dep:tokio-postgres"]
-libsql = ["dep:libsql"]
+libsql = ["dep:libsql", "dep:deadpool"]
 
 [dependencies]
 async-trait = "0.1"
 blake3 = "1"
+deadpool = { version = "0.12", optional = true, default-features = false, features = ["managed", "rt_tokio_1"] }
 deadpool-postgres = { version = "0.14", optional = true }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_observability = { path = "../ironclaw_observability" }
@@ -32,6 +36,6 @@ tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt", "test-util"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "test-util"] }
 tracing-test = { version = "0.2", features = ["no-env-filter"] }
 uuid = { version = "1", features = ["v4"] }

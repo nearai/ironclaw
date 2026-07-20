@@ -72,6 +72,13 @@ pub struct CapabilityDescriptor {
     pub effects: Vec<EffectKind>,
     pub default_permission: PermissionMode,
     pub runtime_credentials: Vec<RuntimeCredentialRequirement>,
+    /// Declared network egress allowlist for this capability, independent of any
+    /// runtime credential. This lets a keyless-but-networked tool (one that
+    /// declares the `Network` effect but injects no secret) populate its
+    /// `ApplyNetworkPolicy` allowlist directly from the manifest. Credential
+    /// `audience`s are folded in on top of these at grant issuance.
+    #[serde(default)]
+    pub network_targets: Vec<NetworkTargetPattern>,
     pub resource_profile: Option<ResourceProfile>,
 }
 
@@ -125,14 +132,23 @@ pub enum RuntimeCredentialAccountSetup {
     ManualToken,
     #[serde(rename = "oauth")]
     OAuth { scopes: Vec<String> },
-    /// Per-user connection to an inbound channel established out-of-band (e.g.
-    /// Slack pairing-code redemption), not a stored secret. The requirement is
-    /// satisfied by the caller's channel identity binding rather than a
-    /// credential account, and it blocks activation through the same auth-gate
-    /// rail as OAuth/manual-token — the browser resolves it by redeeming the
-    /// pairing code and then resolving the gate. `channel` is the connectable
-    /// channel id (e.g. `slack`); the render copy is re-derived from it.
-    ChannelPairing { channel: String },
+    /// Channel pairing: the user links an external account by consuming a
+    /// host-issued code on the external side (e.g. Telegram deep-link
+    /// `/start <code>`). No credential account is minted — satisfaction is
+    /// re-derived from the channel's binding store when the parked run
+    /// re-checks its requirements. Unlike the retired Slack `channel_pairing`
+    /// connect gate, this variant is host-issued-code, provider-keyed, and
+    /// serviced by the standard auth-continuation fan-out.
+    Pairing,
+    /// Setup kinds this enum no longer models but persisted records may still
+    /// carry — e.g. the pre-OAuth `channel_pairing` Slack connect gate removed
+    /// by #5604, which was serialized inside `TurnRunRecord.credential_requirements`
+    /// for runs parked on the connect gate. Turn-state snapshot decoding is
+    /// all-or-nothing, so an unrecognized kind must fold here instead of
+    /// making every thread's turn state unloadable. Carriers treat a retired
+    /// setup as not-serviceable (no challenge can be produced for it).
+    #[serde(other)]
+    Retired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,4 +174,46 @@ pub struct GrantConstraints {
     pub resource_ceiling: Option<ResourceCeiling>,
     pub expires_at: Option<Timestamp>,
     pub max_invocations: Option<u64>,
+}
+
+#[cfg(test)]
+mod credential_setup_wire_tests {
+    use super::RuntimeCredentialAccountSetup;
+
+    /// Persisted `TurnRunRecord.credential_requirements` may still carry setup
+    /// kinds this enum no longer models (the pre-OAuth `channel_pairing` Slack
+    /// connect gate, removed by #5604). Snapshot decoding is all-or-nothing,
+    /// so an unrecognized kind must fold into [`RuntimeCredentialAccountSetup::Retired`]
+    /// instead of failing the whole turn-state snapshot.
+    #[test]
+    fn legacy_channel_pairing_setup_still_deserializes() {
+        let parsed: RuntimeCredentialAccountSetup =
+            serde_json::from_str(r#"{"kind":"channel_pairing","channel":"slack"}"#)
+                .expect("legacy persisted setup kind must stay loadable");
+        assert_eq!(parsed, RuntimeCredentialAccountSetup::Retired);
+
+        let parsed: RuntimeCredentialAccountSetup =
+            serde_json::from_str(r#"{"kind":"some_future_kind"}"#)
+                .expect("unknown setup kinds must stay loadable");
+        assert_eq!(parsed, RuntimeCredentialAccountSetup::Retired);
+
+        // Current kinds keep their exact wire shape.
+        let parsed: RuntimeCredentialAccountSetup =
+            serde_json::from_str(r#"{"kind":"oauth","scopes":["users:read"]}"#).expect("oauth");
+        assert_eq!(
+            parsed,
+            RuntimeCredentialAccountSetup::OAuth {
+                scopes: vec!["users:read".to_string()]
+            }
+        );
+
+        let parsed: RuntimeCredentialAccountSetup =
+            serde_json::from_str(r#"{"kind":"pairing"}"#).expect("pairing");
+        assert_eq!(parsed, RuntimeCredentialAccountSetup::Pairing);
+        assert_eq!(
+            serde_json::to_value(RuntimeCredentialAccountSetup::Pairing).expect("serializes"),
+            serde_json::json!({"kind": "pairing"}),
+            "the pairing gate's persisted wire shape is locked"
+        );
+    }
 }

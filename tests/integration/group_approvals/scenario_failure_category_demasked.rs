@@ -4,7 +4,7 @@
 //! `RebornIntegrationGroupBuilder::into_group` (`tests/integration/support/group.rs`
 //! ~line 472) wires `.with_checkpoint_state_store(..)` onto the group-level
 //! `ThreadCheckpointLoopExitEvidencePort` -- the de-mask fix. Without it,
-//! `verify_failure_evidence` (`crates/ironclaw_reborn/src/loop_exit_applier.rs`)
+//! `verify_failure_evidence` (`crates/ironclaw_runner/src/loop_exit_applier.rs`)
 //! short-circuits `Ok(false)` on a `None` store, so `validate_failed_exit`
 //! (`crates/ironclaw_turns/src/loop_exit.rs`) rewrites every `Failed` exit to
 //! the opaque `"driver_protocol_violation"` category. With the store wired, a
@@ -18,8 +18,9 @@
 //! Failure is produced deterministically: an EMPTY scripted-reply list
 //! (`.script([])`) makes `TraceLlm::next_step` return `LlmError::RequestFailed`
 //! on the first model call; once the bounded-retry `RecoveryStrategy` budget
-//! is exhausted, the loop emits `LoopExit::Failed` with
-//! `LoopFailureKind::ModelError` (category `"model_error"`).
+//! is exhausted, the loop emits `LoopExit::Failed`. Under the provider-error
+//! fidelity mapping (`ModelErrorClass::Unavailable`), an exhausted gateway
+//! that cannot serve the call surfaces as category `"model_unavailable"`.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use ironclaw_turns::TurnStatus;
@@ -53,14 +54,14 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     }
 
     // Empirically confirmed: `TraceLlm` exhaustion surfaces as
-    // `LoopFailureKind::ModelError` -> category `"model_error"`
-    // (`crates/ironclaw_turns/src/loop_exit.rs`). Asserting the exact value
-    // proves the de-masked path produces the loop's REAL reason, not just
-    // any non-sentinel category.
-    if failure.category() != "model_error" {
+    // `ModelErrorClass::Unavailable` -> category `"model_unavailable"`
+    // (`crates/ironclaw_agent_loop/src/executor/mapping.rs`). Asserting the
+    // exact value proves the de-masked path produces the loop's REAL reason,
+    // not just any non-sentinel category.
+    if failure.category() != "model_unavailable" {
         return Err(format!(
-            "expected de-masked failure category \"model_error\" (TraceLlm exhaustion -> \
-             LoopFailureKind::ModelError), got {failure:?}"
+            "expected de-masked failure category \"model_unavailable\" (TraceLlm exhaustion -> \
+             ModelErrorClass::Unavailable), got {failure:?}"
         )
         .into());
     }

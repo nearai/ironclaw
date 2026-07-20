@@ -3,28 +3,35 @@
 // `first_party_tools/` (per crate CLAUDE.md, runtime services get their own module).
 //
 // Note: `MemoryBackedUserProfileSource` does NOT implement `HostUserProfileSource`
-// here because `ironclaw_loop_support` (which owns the trait) already depends on
+// here because `ironclaw_loop_host` (which owns the trait) already depends on
 // `ironclaw_host_runtime`, so a reverse dependency would be circular. The
 // `impl HostUserProfileSource for MemoryBackedUserProfileSource` is added by the
 // composition layer (`ironclaw_reborn_composition`) that can see both crates. This
 // matches how `WorkspaceIdentityContextSource` implements `HostIdentityContextSource`:
-// the struct lives in `src/workspace/` while the trait lives in `ironclaw_loop_support`.
+// the struct lives in `src/workspace/` while the trait lives in `ironclaw_loop_host`.
 
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use chrono_tz::Tz;
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::{CorrelationId, InvocationId, ResourceScope};
+use ironclaw_host_api::{CorrelationId, InvocationId, ResourceScope, TenantId, UserId};
 use ironclaw_memory::{MemoryInvocation, MemoryService};
 use ironclaw_memory_native::NativeMemoryService;
 use ironclaw_turns::run_profile::{Locale, LoopRunContext, UserProfileContext};
 use serde::Deserialize;
+use tokio::sync::Notify;
 
 /// Hard cap on the profile document size. profile_set writes are small and
 /// bounded; a document larger than this can only come from an external/manual
 /// edit, so we refuse to spend per-turn CPU/heap parsing it and degrade to
 /// no-profile instead.
 const MAX_PROFILE_DOCUMENT_BYTES: usize = 64 * 1024;
+const PROFILE_CACHE_TTL: Duration = Duration::from_secs(5);
+const PROFILE_CACHE_MAX_ENTRIES: usize = 1024;
 
 /// Reads the run owner's profile document and resolves it into a validated
 /// `UserProfileContext`.
@@ -34,9 +41,19 @@ const MAX_PROFILE_DOCUMENT_BYTES: usize = 64 * 1024;
 /// exactly one place (the provider) and a future provider can swap profile reads
 /// alongside the rest of the memory facade. This source owns the
 /// `ironclaw_memory` / `ironclaw_memory_native` dependency so the loop driver and
-/// `ironclaw_reborn` never import it.
+/// `ironclaw_runner` never import it.
+///
+/// A short-TTL read-through cache with single-flight dedup sits in front of the
+/// provider on this hot loop-start path: concurrent turns for the same
+/// `(tenant, user)` coalesce onto one read, and repeat reads inside the TTL serve
+/// the already-resolved value. The profile is keyed to the human user
+/// (`agent=None, project=None`, spec §10) regardless of run scope, so the cache
+/// key is `(tenant_id, user_id)` only.
 pub struct MemoryBackedUserProfileSource {
     memory_service: Arc<dyn MemoryService>,
+    cache: Mutex<UserProfileCache>,
+    inflight: Arc<Mutex<HashMap<UserProfileCacheKey, Arc<Notify>>>>,
+    cache_ttl: Duration,
 }
 
 impl MemoryBackedUserProfileSource {
@@ -44,7 +61,12 @@ impl MemoryBackedUserProfileSource {
     /// native provider via [`from_filesystem`](Self::from_filesystem); tests
     /// inject a stub.
     pub fn new(memory_service: Arc<dyn MemoryService>) -> Self {
-        Self { memory_service }
+        Self {
+            memory_service,
+            cache: Mutex::new(UserProfileCache::default()),
+            inflight: Arc::new(Mutex::new(HashMap::new())),
+            cache_ttl: PROFILE_CACHE_TTL,
+        }
     }
 
     /// Build a source backed by the native memory provider over `filesystem`.
@@ -57,6 +79,16 @@ impl MemoryBackedUserProfileSource {
         )))
     }
 
+    #[cfg(test)]
+    fn new_with_cache_ttl(memory_service: Arc<dyn MemoryService>, cache_ttl: Duration) -> Self {
+        Self {
+            memory_service,
+            cache: Mutex::new(UserProfileCache::default()),
+            inflight: Arc::new(Mutex::new(HashMap::new())),
+            cache_ttl,
+        }
+    }
+
     /// Core resolution logic. Called by `HostUserProfileSource::resolve_user_profile`
     /// implemented by the composition layer, which avoids a circular crate dependency.
     pub async fn resolve_user_profile(
@@ -65,8 +97,35 @@ impl MemoryBackedUserProfileSource {
     ) -> Option<UserProfileContext> {
         // Profile is keyed to the human user; the provider narrows to
         // `agent=None, project=None` internally (spec §10) regardless of the run's
-        // agent/project scope, so the scope-narrowing decision is not duplicated
-        // here.
+        // agent/project scope, so the cache key is `(tenant_id, user_id)` only.
+        let actor = run_context.actor.as_ref()?;
+        let scope = &run_context.scope;
+        let cache_key = UserProfileCacheKey {
+            tenant_id: scope.tenant_id.clone(),
+            user_id: actor.user_id.clone(),
+        };
+        loop {
+            if let Some(profile) = self.cached_profile(&cache_key) {
+                return profile;
+            }
+            match self.begin_profile_load(&cache_key) {
+                ProfileLoad::Follower(notify) => {
+                    notify.notified().await;
+                }
+                ProfileLoad::Leader(leader) => {
+                    let profile = self.resolve_user_profile_uncached(run_context).await;
+                    self.store_cached_profile(cache_key.clone(), profile.clone());
+                    leader.finish();
+                    return profile;
+                }
+            }
+        }
+    }
+
+    async fn resolve_user_profile_uncached(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Option<UserProfileContext> {
         let actor = run_context.actor.as_ref()?;
         let scope = &run_context.scope;
         let invocation = MemoryInvocation {
@@ -142,6 +201,129 @@ impl MemoryBackedUserProfileSource {
         }
         Some(profile)
     }
+
+    fn cached_profile(&self, key: &UserProfileCacheKey) -> Option<Option<UserProfileContext>> {
+        self.cache.lock().ok()?.get(key)
+    }
+
+    fn store_cached_profile(&self, key: UserProfileCacheKey, profile: Option<UserProfileContext>) {
+        if self.cache_ttl.is_zero() || profile.is_none() {
+            return;
+        }
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.insert(key, profile, self.cache_ttl);
+        }
+    }
+
+    fn begin_profile_load(&self, key: &UserProfileCacheKey) -> ProfileLoad {
+        let mut inflight = self
+            .inflight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(notify) = inflight.get(key) {
+            return ProfileLoad::Follower(Arc::clone(notify));
+        }
+        let notify = Arc::new(Notify::new());
+        inflight.insert(key.clone(), Arc::clone(&notify));
+        ProfileLoad::Leader(ProfileLoadLeader {
+            inflight: Arc::clone(&self.inflight),
+            key: key.clone(),
+            notify,
+            finished: false,
+        })
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct UserProfileCacheKey {
+    tenant_id: TenantId,
+    user_id: UserId,
+}
+
+enum ProfileLoad {
+    Leader(ProfileLoadLeader),
+    Follower(Arc<Notify>),
+}
+
+struct ProfileLoadLeader {
+    inflight: Arc<Mutex<HashMap<UserProfileCacheKey, Arc<Notify>>>>,
+    key: UserProfileCacheKey,
+    notify: Arc<Notify>,
+    finished: bool,
+}
+
+impl ProfileLoadLeader {
+    fn finish(mut self) {
+        self.cleanup();
+        self.finished = true;
+    }
+
+    fn cleanup(&self) {
+        self.inflight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.key);
+        self.notify.notify_waiters();
+    }
+}
+
+impl Drop for ProfileLoadLeader {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.cleanup();
+        }
+    }
+}
+
+struct UserProfileCacheEntry {
+    profile: Option<UserProfileContext>,
+    expires_at: Instant,
+}
+
+#[derive(Default)]
+struct UserProfileCache {
+    entries: HashMap<UserProfileCacheKey, UserProfileCacheEntry>,
+}
+
+impl UserProfileCache {
+    fn get(&mut self, key: &UserProfileCacheKey) -> Option<Option<UserProfileContext>> {
+        let now = Instant::now();
+        if let Some(entry) = self.entries.get(key)
+            && entry.expires_at > now
+        {
+            return Some(entry.profile.clone());
+        }
+        self.entries.remove(key);
+        None
+    }
+
+    fn insert(
+        &mut self,
+        key: UserProfileCacheKey,
+        profile: Option<UserProfileContext>,
+        ttl: Duration,
+    ) {
+        let now = Instant::now();
+        if self.entries.len() >= PROFILE_CACHE_MAX_ENTRIES {
+            self.entries.retain(|_, entry| entry.expires_at > now);
+        }
+        if self.entries.len() >= PROFILE_CACHE_MAX_ENTRIES
+            && let Some(oldest_key) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.expires_at)
+                .map(|(key, _)| key.clone())
+        {
+            self.entries.remove(&oldest_key);
+        }
+        self.entries.insert(
+            key,
+            UserProfileCacheEntry {
+                profile,
+                expires_at: now + ttl,
+            },
+        );
+    }
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -156,7 +338,7 @@ struct ProfileJson {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
     use ironclaw_host_api::{TenantId, ThreadId, UserId};
@@ -170,11 +352,25 @@ mod tests {
 
     use super::*;
 
-    /// Stub memory provider: `profile_read` returns a fixed document so the tests
-    /// exercise the host's parse/size-cap/validation logic, not the provider's
-    /// scope/path resolution (covered by the native facade + round-trip tests).
+    /// Stub memory provider: `profile_read` returns the currently-held document so
+    /// the tests exercise the host's parse/size-cap/validation and cache logic, not
+    /// the provider's scope/path resolution (covered by the native facade +
+    /// round-trip tests). The document is swappable so the cache tests can mutate
+    /// the underlying store between reads.
     struct StubProfileMemoryService {
-        document: Option<Vec<u8>>,
+        document: Mutex<Option<Vec<u8>>>,
+    }
+
+    impl StubProfileMemoryService {
+        fn new(document: Option<Vec<u8>>) -> Self {
+            Self {
+                document: Mutex::new(document),
+            }
+        }
+
+        fn set_document(&self, document: Option<Vec<u8>>) {
+            *self.document.lock().unwrap() = document;
+        }
     }
 
     #[async_trait]
@@ -184,13 +380,13 @@ mod tests {
             _invocation: MemoryInvocation,
         ) -> Result<MemoryServiceProfileReadResponse, MemoryServiceError> {
             Ok(MemoryServiceProfileReadResponse {
-                document: self.document.clone(),
+                document: self.document.lock().unwrap().clone(),
             })
         }
     }
 
     fn source_with_document(document: Option<Vec<u8>>) -> MemoryBackedUserProfileSource {
-        MemoryBackedUserProfileSource::new(Arc::new(StubProfileMemoryService { document }))
+        MemoryBackedUserProfileSource::new(Arc::new(StubProfileMemoryService::new(document)))
     }
 
     /// Build a test `LoopRunContext` with an actor, mirroring the `identity_context.rs` pattern.
@@ -265,6 +461,63 @@ mod tests {
             source.resolve_user_profile(&run_ctx).await.is_none(),
             "missing doc must resolve to None"
         );
+    }
+
+    #[tokio::test]
+    async fn profile_cache_serves_hits_until_ttl_expires() {
+        let stub = Arc::new(StubProfileMemoryService::new(Some(
+            r#"{"locale":"ja-JP"}"#.as_bytes().to_vec(),
+        )));
+        let source = MemoryBackedUserProfileSource::new_with_cache_ttl(
+            stub.clone(),
+            Duration::from_secs(60),
+        );
+        let run_ctx = run_context_with_user("tenant-a", "user-1").await;
+        let resolved = source.resolve_user_profile(&run_ctx).await.unwrap();
+        assert_eq!(resolved.locale.as_ref().map(|l| l.as_str()), Some("ja-JP"));
+
+        // Change the underlying store; the cache should still serve the resolved
+        // value inside the TTL.
+        stub.set_document(Some(r#"{"locale":"en-US"}"#.as_bytes().to_vec()));
+        let cached = source.resolve_user_profile(&run_ctx).await.unwrap();
+        assert_eq!(
+            cached.locale.as_ref().map(|l| l.as_str()),
+            Some("ja-JP"),
+            "profile cache should serve the already-resolved value inside the TTL"
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_cache_does_not_serve_misses_after_profile_is_created() {
+        let stub = Arc::new(StubProfileMemoryService::new(None));
+        let source = MemoryBackedUserProfileSource::new_with_cache_ttl(
+            stub.clone(),
+            Duration::from_secs(60),
+        );
+        let run_ctx = run_context_with_user("tenant-a", "user-1").await;
+        assert!(source.resolve_user_profile(&run_ctx).await.is_none());
+
+        // A miss is not cached, so a profile created afterwards resolves on the next read.
+        stub.set_document(Some(r#"{"locale":"en-US"}"#.as_bytes().to_vec()));
+        let resolved = source.resolve_user_profile(&run_ctx).await.unwrap();
+        assert_eq!(resolved.locale.as_ref().map(|l| l.as_str()), Some("en-US"));
+    }
+
+    #[tokio::test]
+    async fn profile_cache_refreshes_after_ttl_expires() {
+        let stub = Arc::new(StubProfileMemoryService::new(None));
+        let source = MemoryBackedUserProfileSource::new_with_cache_ttl(
+            stub.clone(),
+            Duration::from_millis(1),
+        );
+        let run_ctx = run_context_with_user("tenant-a", "user-1").await;
+        assert!(source.resolve_user_profile(&run_ctx).await.is_none());
+
+        stub.set_document(Some(r#"{"locale":"en-US"}"#.as_bytes().to_vec()));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let resolved = source.resolve_user_profile(&run_ctx).await.unwrap();
+        assert_eq!(resolved.locale.as_ref().map(|l| l.as_str()), Some("en-US"));
     }
 
     #[tokio::test]

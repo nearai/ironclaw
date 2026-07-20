@@ -497,6 +497,7 @@ mod tests {
                 onboarding,
             },
             phase,
+            install_scope: None,
         }
     }
 

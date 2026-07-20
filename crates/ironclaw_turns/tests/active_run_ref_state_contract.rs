@@ -26,6 +26,16 @@ impl TurnStateStore for FailingTurnStateStore {
         unreachable!("active_run_ref_state only calls get_run_state")
     }
 
+    async fn retry_turn(
+        &self,
+        request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        // WS-3 implements this.
+        Err(TurnError::RunNotRetryable {
+            run_id: request.run_id,
+        })
+    }
+
     async fn request_cancel(
         &self,
         _request: ironclaw_turns::CancelRunRequest,
@@ -61,6 +71,7 @@ fn submit_request_for(
     idempotency_key: &str,
 ) -> ironclaw_turns::SubmitTurnRequest {
     ironclaw_turns::SubmitTurnRequest {
+        requested_model: None,
         scope,
         actor: turn_actor(),
         accepted_message_ref: AcceptedMessageRef::new(format!("message-{idempotency_key}"))

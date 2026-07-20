@@ -1,10 +1,10 @@
 /// Test double substituting the production `LoopCapabilityPortFactory` wiring:
-/// `LocalDevLoopCapabilityPortFactory` (`crates/ironclaw_reborn_composition/src/runtime/local_dev.rs`)
-/// and `HostRuntimeLoopCapabilityPortFactory` (`crates/ironclaw_loop_support/src/capability_port.rs`).
+/// `RefreshingLoopCapabilityPortFactory` (`crates/ironclaw_reborn_composition/src/runtime/local_dev.rs`)
+/// and `HostRuntimeLoopCapabilityPortFactory` (`crates/ironclaw_loop_host/src/capability_port.rs`).
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_loop_support::LoopCapabilityPortFactory;
+use ironclaw_loop_host::LoopCapabilityPortFactory;
 use ironclaw_turns::run_profile::{AgentLoopHostError, LoopCapabilityPort, LoopRunContext};
 
 use super::super::harness::HostRuntimeCapabilityHarness;

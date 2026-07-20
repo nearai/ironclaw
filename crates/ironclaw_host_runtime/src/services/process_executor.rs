@@ -215,8 +215,12 @@ impl ProcessExecutor for RuntimeDispatchProcessExecutor {
         let result = self
             .dispatcher
             .dispatch_json(CapabilityDispatchRequest {
+                // Spawned processes are long-running and outlive loop runs, so
+                // they carry no run-scoped identity.
+                run_id: None,
                 capability_id: request.capability_id,
                 scope: request.scope,
+                authenticated_actor_user_id: request.authenticated_actor_user_id,
                 estimate: request.estimate,
                 mounts: Some(request.mounts),
                 resource_reservation: request.resource_reservation,
@@ -300,6 +304,48 @@ mod tests {
     #[derive(Clone)]
     struct CancellingDispatcher {
         cancellation: ProcessCancellationToken,
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingCapabilityDispatcher {
+        calls: Arc<Mutex<Vec<CapabilityDispatchRequest>>>,
+    }
+
+    impl RecordingCapabilityDispatcher {
+        fn calls(&self) -> Vec<CapabilityDispatchRequest> {
+            self.calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl CapabilityDispatcher for RecordingCapabilityDispatcher {
+        async fn dispatch_json(
+            &self,
+            request: CapabilityDispatchRequest,
+        ) -> Result<CapabilityDispatchResult, DispatchError> {
+            self.calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(request.clone());
+            Ok(CapabilityDispatchResult {
+                capability_id: request.capability_id,
+                provider: ExtensionId::new("demo").unwrap(),
+                runtime: RuntimeKind::Script,
+                output: json!({"ok": true}),
+                display_preview: None,
+                usage: ResourceUsage::default(),
+                receipt: ResourceReceipt {
+                    id: ResourceReservationId::new(),
+                    scope: request.scope,
+                    status: ReservationStatus::Reconciled,
+                    estimate: ResourceEstimate::default(),
+                    actual: Some(ResourceUsage::default()),
+                },
+            })
+        }
     }
 
     #[async_trait]
@@ -441,6 +487,26 @@ mod tests {
         assert_eq!(error.kind, "cancelled");
     }
 
+    #[tokio::test]
+    async fn runtime_dispatch_executor_preserves_authenticated_actor() {
+        // safety: test dispatcher call is in-memory and does not execute an external capability.
+        let dispatcher = Arc::new(RecordingCapabilityDispatcher::default());
+        let executor = RuntimeDispatchProcessExecutor::new(dispatcher.clone());
+        let mut request = sample_process_request("demo.background", RuntimeKind::Script);
+        let actor = UserId::new("slack-alice").unwrap();
+        request.authenticated_actor_user_id = Some(actor.clone());
+        let expected_scope = request.scope.clone();
+        let expected_capability_id = request.capability_id.clone();
+
+        executor.execute(request).await.unwrap();
+
+        let calls = dispatcher.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].authenticated_actor_user_id, Some(actor));
+        assert_eq!(calls[0].scope, expected_scope);
+        assert_eq!(calls[0].capability_id, expected_capability_id);
+    }
+
     #[test]
     fn dispatch_error_kind_maps_dispatch_variants() {
         let capability = CapabilityId::new("demo.background").unwrap();
@@ -496,6 +562,7 @@ mod tests {
             (
                 DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::OutputDecode,
+                    safe_summary: None,
                 },
                 "output_decode",
             ),
@@ -522,6 +589,7 @@ mod tests {
                 thread_id: Some(ThreadId::new("thread").unwrap()),
                 invocation_id: InvocationId::new(),
             },
+            authenticated_actor_user_id: None,
             extension_id: ExtensionId::new("system").unwrap(),
             capability_id: CapabilityId::new(capability_id).unwrap(),
             runtime,

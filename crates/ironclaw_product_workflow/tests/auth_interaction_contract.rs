@@ -1,3 +1,4 @@
+// arch-exempt: large_file, cross-surface auth interaction contract suite, plan #5905
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -183,6 +184,22 @@ impl AuthFlowManager for RecordingFlowManager {
         Err(AuthProductError::BackendUnavailable)
     }
 
+    async fn claim_continuation_dispatch(
+        &self,
+        _scope: &AuthProductScope,
+        _input: ironclaw_auth::AuthContinuationDispatchClaimInput,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        Err(AuthProductError::BackendUnavailable)
+    }
+
+    async fn settle_continuation_dispatch(
+        &self,
+        _scope: &AuthProductScope,
+        _input: ironclaw_auth::AuthContinuationDispatchSettlementInput,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        Err(AuthProductError::BackendUnavailable)
+    }
+
     async fn cancel_flow(
         &self,
         scope: &AuthProductScope,
@@ -339,6 +356,13 @@ impl TurnCoordinator for RecordingTurnCoordinator {
         Ok(response)
     }
 
+    async fn retry_turn(
+        &self,
+        _request: ironclaw_turns::RetryTurnRequest,
+    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
+        panic!("auth interactions must not retry a turn")
+    }
+
     async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
         let run_id = request.run_id;
         self.cancellations.lock().expect("lock").push(request);
@@ -367,6 +391,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             resolved_model_route: None,
+            model_usage: None,
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: self.gate_ref.lock().expect("lock").clone(),
@@ -1736,6 +1761,7 @@ fn auth_flow(
             gate_ref: AuthGateRef::new(gate_ref.as_str()).unwrap(),
         },
         credential_account_id,
+        credential_secret_fingerprint: None,
         update_binding: Option::<CredentialAccountUpdateBinding>::None,
         opaque_state_hash: None,
         pkce_verifier_hash: None,

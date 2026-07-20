@@ -286,6 +286,7 @@ impl InstructionBundleBuilder {
                 let content_ref = skill_snippet_model_message_ref(
                     &snippet.snippet_ref,
                     &snippet.safe_summary,
+                    &snippet.model_content,
                     skill_ordinal,
                 )?;
                 let Some(metadata) = snippet.metadata.as_ref() else {

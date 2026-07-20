@@ -48,9 +48,9 @@ and policy engine, consumed only by the root `ironclaw` crate through
 `src/bridge/`. It is **not part of Reborn**: the dependency-boundary tests
 forbid Reborn crates from importing it, and nothing else in this document
 describes it. Do not build new Reborn behavior on it; it retires with the
-monolith. `ironclaw_tui`, `ironclaw_gateway`, `ironclaw_oauth`, and
-`ironclaw_embeddings` are in the same v1-only category despite living in
-`crates/`.
+monolith. `ironclaw_tui`, `ironclaw_gateway`, and `ironclaw_embeddings` are
+in the same v1-only category despite living in `crates/`. The v1 loopback
+OAuth transport is folded into `ironclaw_auth::oauth` until v1 retires.
 
 ## Mental Model
 
@@ -241,8 +241,8 @@ Use this table when deciding where a new concern belongs.
 
 | Layer | May call | Must not call | Owns | Typical crates |
 | --- | --- | --- | --- | --- |
-| Products | Composition facade, product workflow, projection/read APIs | Raw stores, `RuntimeDispatcher`, concrete loop drivers, substrate internals | UX, transport normalization, user-visible replies/events, approval/auth UI | `ironclaw_reborn_cli`, `ironclaw_webui_v2`, product adapters |
-| Composition | Turn coordinator, host runtime, loop driver registry, substrates through typed constructors | Product-specific branching in lower crates, test/dev escape hatches in production | Service graph, profile mode, readiness, facade handles | `ironclaw_reborn_composition`, `ironclaw_reborn` |
+| Products | Composition facade, product workflow, projection/read APIs | Raw stores, `RuntimeDispatcher`, concrete loop drivers, substrate internals | UX, transport normalization, user-visible replies/events, approval/auth UI | `ironclaw_reborn_cli`, `ironclaw_webui`, product adapters |
+| Composition | Turn coordinator, host runtime, loop driver registry, substrates through typed constructors | Product-specific branching in lower crates, test/dev escape hatches in production | Service graph, profile mode, readiness, facade handles | `ironclaw_reborn_composition`, `ironclaw_runner` |
 | Userland loops | `AgentLoopDriverHost` ports only | `CapabilityHost`, `RuntimeDispatcher`, secret/network stores, product adapters | Prompt/model/tool strategy, retry/stop/gate decisions, loop-local checkpoints | `ironclaw_agent_loop`, loop families |
 | Kernel boundary | Substrates and runtime lanes through typed policy/authority APIs | Product UX decisions, loop strategy internals | Authorization, approvals, exact invocation leases, active locks, runner leases, validated exits, resource/process ownership | `ironclaw_turns`, `ironclaw_host_runtime`, `ironclaw_authorization`, `ironclaw_approvals` |
 | Substrates | Lower neutral contracts and storage backends | Product facade APIs, loop behavior, direct authority escalation | Durable records, files, memory, events, projections, threads, resource stores, runtime adapters | `ironclaw_filesystem`, `ironclaw_memory`, `ironclaw_events`, `ironclaw_threads`, runtime lane crates |
@@ -292,18 +292,18 @@ authority decision.
 ```mermaid
 flowchart TD
     CLI["ironclaw_reborn_cli\nUX shell"]
-    WebUI["ironclaw_webui_v2 /\nweb ingress"]
+    WebUI["ironclaw_webui /\nweb ingress"]
     Runtime["ironclaw_reborn_composition::RebornRuntime\nproduct-facing handle"]
     Factory["build_reborn_runtime /\nbuild_reborn_services"]
     Coordinator["ironclaw_turns::TurnCoordinator\nadapter-safe turn API"]
     Store["TurnStateStore + Checkpoint stores\nmemory/filesystem/libSQL/Postgres slices"]
-    Worker["TurnRunScheduler (ironclaw_host_runtime)\n+ RebornTurnRunExecutor (ironclaw_reborn)\nclaim, heartbeat, invoke, apply"]
+    Worker["TurnRunScheduler + RebornTurnRunExecutor\n(ironclaw_runner)\nclaim, heartbeat, invoke, apply"]
     Registry["DriverRegistry\nregistered loop drivers"]
     Planned["PlannedDriver\nAgentLoopDriver adapter"]
     Executor["ironclaw_agent_loop::CanonicalAgentLoopExecutor\ncanonical tick pipeline"]
     Family["LoopFamily\nsealed planner strategy composition"]
     Host["AgentLoopDriverHost\nprompt/model/capability/transcript/checkpoint ports"]
-    LoopSupport["ironclaw_loop_support\nhost-port adapters"]
+    LoopSupport["ironclaw_loop_host\nhost-port adapters"]
     HostRuntime["ironclaw_host_runtime\nCapabilityHost, dispatcher, processes, approvals"]
     LLM["ironclaw_llm / model gateway\nprovider boundary"]
     Threads["ironclaw_threads\nconversation transcript"]
@@ -338,10 +338,10 @@ flowchart TD
 | Crate | Owns | Does not own |
 | --- | --- | --- |
 | `ironclaw_reborn_composition` | Product-facing runtime assembly, facade handles, local/prod profiles, WebUI/runtime integration, projection services. | Low-level policy internals or direct product traffic bypassing Reborn adapters. |
-| `ironclaw_reborn` | Concrete Reborn loop driver registry, planned/text driver adapters, the per-run turn-run executor (`RebornTurnRunExecutor`), loop host factory, exit applier wiring. The claiming/heartbeat scheduler (`TurnRunScheduler`) lives in `ironclaw_host_runtime`. | Loop strategy internals, neutral turn contracts, product idempotency/binding policy. |
+| `ironclaw_runner` | Trusted worker-side control plane: claiming/heartbeat scheduler (`TurnRunScheduler`), per-run executor (`RebornTurnRunExecutor`), concrete loop driver registry, planned/text driver adapters, loop host factory, and exit-applier wiring. | Loop strategy internals, neutral turn contracts, product idempotency/binding policy, or host-runtime service implementation. |
 | `ironclaw_turns` | Turn/run IDs, scopes, coordinator API, runner transition ports, state machine contracts, loop-exit DTOs, run profiles, checkpoint contracts. | Runtime dispatch, product adapters, raw prompts/tool inputs/secrets. |
 | `ironclaw_agent_loop` | Canonical executor, loop families, sealed strategy composition, resumable loop state. | Host services, runtime lanes, product transport, provider auth. |
-| `ironclaw_loop_support` | Reusable adapters that implement loop host ports over threads, model gateways, capabilities, skills, checkpoints, cancellation, subagents. | Product-facing runtime facade or durable turn state ownership. |
+| `ironclaw_loop_host` | Reusable adapters that implement loop host ports over threads, model gateways, capabilities, skills, checkpoints, cancellation, subagents. | Product-facing runtime facade or durable turn state ownership. |
 | `ironclaw_host_runtime` | Kernel-facing host runtime services: capability host, dispatcher composition, approvals, resources, processes, secrets/network mediation. | Agent-loop planning or product conversation UX. |
 
 ## Dependency Direction
@@ -354,7 +354,7 @@ host_api / common / prompt_envelope
   -> filesystem / memory / events / projections / streams / resources / trust
   -> auth / authorization / approvals / run_state / runtime_policy / secrets / network
   -> host_runtime / dispatcher / processes / runtime lanes
-  -> turns / threads / loop_support / agent_loop / capabilities
+  -> turns / threads / loop_host / agent_loop / capabilities
   -> reborn / reborn_composition / product workflow / adapters
   -> reborn_cli / webui / gateway / TUI / product entry points
 ```
@@ -363,8 +363,8 @@ host_api / common / prompt_envelope
 flowchart BT
     Entry["CLI / WebUI / product adapters"]
     Composition["ironclaw_reborn_composition"]
-    Reborn["ironclaw_reborn"]
-    LoopSupport["ironclaw_loop_support"]
+    Reborn["ironclaw_runner"]
+    LoopSupport["ironclaw_loop_host"]
     AgentLoop["ironclaw_agent_loop"]
     Turns["ironclaw_turns"]
     Runtime["ironclaw_host_runtime\n+ dispatcher/process lanes"]
@@ -486,10 +486,10 @@ The normal single-message flow is:
 2. Caller submits SubmitTurnRequest to TurnCoordinator.
 3. TurnCoordinator persists turn/run state, enforces active-thread ownership,
    resolves the run profile, and emits a wake hint.
-4. TurnRunScheduler (in ironclaw_host_runtime) wakes or polls, recovers
+4. TurnRunScheduler (in ironclaw_runner) wakes or polls, recovers
    expired leases, and claims queued runs — concurrently, bounded by a
    semaphore plus per-user and per-inbound-type caps.
-5. For each claimed run, RebornTurnRunExecutor (in ironclaw_reborn) resolves
+5. For each claimed run, RebornTurnRunExecutor (in ironclaw_runner) resolves
    the assigned AgentLoopDriver from DriverRegistry.
 6. The executor builds a per-run AgentLoopDriverHost from the host factory
    and persists a model-route snapshot before invoking the driver.
@@ -540,8 +540,8 @@ sequenceDiagram
 
 ## Runner And Lease Flow
 
-`TurnRunScheduler` (in `ironclaw_host_runtime`) plus `RebornTurnRunExecutor`
-(in `ironclaw_reborn`) form the trusted worker-side control plane. It does not
+`TurnRunScheduler` plus `RebornTurnRunExecutor` (both in `ironclaw_runner`)
+form the trusted worker-side control plane. It does not
 accept traffic directly; the scheduler claims durable work already accepted by
 `TurnCoordinator` and runs claimed executions concurrently under a bounded
 semaphore with per-user and per-inbound-type caps.
@@ -702,7 +702,7 @@ Capability execution is deliberately indirect:
 ```text
 model tool call / loop capability candidate
   -> AgentLoopDriverHost::invoke_capability
-  -> loop-support capability port
+  -> loop-host capability port
   -> host runtime CapabilityHost
       -> extension/capability lookup
       -> authorization, approval, leases, resources, network/secrets policy
@@ -827,7 +827,7 @@ Subagent work is modeled as child runs, not as a second private loop engine.
 > **Status note (2026-07):** the machinery below is wired and tested, but the
 > `builtin.spawn_subagent` capability is currently deny-filtered off in all
 > shipped profiles (`TEMP(disable-spawn-subagents)` in
-> `crates/ironclaw_reborn/src/runtime.rs`) — the model cannot invoke it until
+> `crates/ironclaw_runner/src/runtime.rs`) — the model cannot invoke it until
 > that filter is lifted.
 
 ```text
@@ -902,7 +902,7 @@ entry point for CLI, WebUI, and harness callers. It:
 - builds substrate services with `build_reborn_services`;
 - wires thread, turn, checkpoint, event, approval, auth, skill, and projection
   services;
-- builds the default planned runtime through `ironclaw_reborn`;
+- builds the default planned runtime through `ironclaw_runner`;
 - starts the `TurnRunScheduler` + `RebornTurnRunExecutor` pair;
 - exposes task-level methods such as `new_conversation`, `send_user_message`,
   cancellation, approval/auth interactions, WebUI handles, and skill execution.
@@ -929,7 +929,7 @@ Use these routes for common changes:
 | Change | Start in | Also check | Avoid |
 | --- | --- | --- | --- |
 | Add product surface | Product adapter/WebUI/CLI crate, then `ironclaw_reborn_composition` facade if a new handle is needed. | Product workflow, projection/auth/approval APIs, e2e harness. | Direct store/worker/dispatcher imports from product code. |
-| Add loop family | `ironclaw_agent_loop` family/planner/executor tests, then `ironclaw_reborn` driver registration/profile wiring. | Checkpoint schema, run profile, loop-exit validation. | Exposing strategy slots or host runtime handles to loops. |
+| Add loop family | `ironclaw_agent_loop` family/planner/executor tests, then `ironclaw_runner` driver registration/profile wiring. | Checkpoint schema, run profile, loop-exit validation. | Exposing strategy slots or host runtime handles to loops. |
 | Add capability | Descriptor/extension registry, capability surface, host runtime/handler or runtime lane. | Authorization, approvals, obligations, resource estimates, redaction, architecture tests. | Calling dispatcher directly or treating visibility as authority. |
 | Add runtime lane | Owning runtime crate + `RuntimeDispatcher` adapter + host-runtime policy handoffs. | Network/secrets/resources/process/audit contracts. | Direct network/secrets/filesystem access inside the lane. |
 | Add persistence | Owning domain trait first, then libSQL/PostgreSQL parity where production-facing. | Contract tests, migration/backfill, idempotency/recovery semantics. | Backend-only behavior divergence. |
@@ -1002,11 +1002,11 @@ Partial or evolving:
 - `crates/ironclaw_agent_loop/src/executor.rs`
 - `crates/ironclaw_agent_loop/src/family.rs`
 - `crates/ironclaw_agent_loop/src/state.rs`
-- `crates/ironclaw_reborn/src/planned_driver.rs`
-- `crates/ironclaw_reborn/src/turn_runner.rs`
-- `crates/ironclaw_reborn/src/turn_run_executor.rs`
-- `crates/ironclaw_host_runtime/src/turn_scheduler.rs`
-- `crates/ironclaw_reborn/src/runtime.rs`
-- `crates/ironclaw_reborn/src/loop_driver_host.rs`
+- `crates/ironclaw_runner/src/planned_driver.rs`
+- `crates/ironclaw_runner/src/turn_runner.rs`
+- `crates/ironclaw_runner/src/turn_run_executor.rs`
+- `crates/ironclaw_runner/src/turn_scheduler.rs`
+- `crates/ironclaw_runner/src/runtime.rs`
+- `crates/ironclaw_runner/src/loop_driver_host.rs`
 - `crates/ironclaw_reborn_composition/src/runtime.rs`
 - `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs`

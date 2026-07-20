@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-pub use ironclaw_wasm_sandbox_core::SandboxLimits as ProductAdapterComponentLimits;
+pub use ironclaw_wasm::wasm_sandbox_core::SandboxLimits as ProductAdapterComponentLimits;
 
 pub const PRODUCT_ADAPTER_WIT_VERSION: &str = "0.1.0";
 

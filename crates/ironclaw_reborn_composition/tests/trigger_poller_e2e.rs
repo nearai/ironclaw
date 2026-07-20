@@ -23,22 +23,21 @@ use ironclaw_host_runtime::{
     RuntimeCapabilityOutcome, RuntimeCapabilityRequest, TRIGGER_CREATE_CAPABILITY_ID,
     TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse,
 };
-use ironclaw_reborn::runtime::ToolDisclosureMode;
 use ironclaw_reborn_composition::{
-    RebornCompositionProfile, RebornLocalRuntimeProfileOptions, RebornRuntime,
-    RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerSettings, build_reborn_runtime,
+    RebornCompositionProfile, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornRuntimeProfileOptions, TriggerPollerSettings, build_reborn_runtime,
     local_runtime_build_input_with_options,
 };
+use ironclaw_runner::runtime::ToolDisclosureMode;
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerId, TriggerPollerWorkerConfig, TriggerRecord,
     TriggerRepository, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
-use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::run_profile::{
     LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
 };
@@ -55,7 +54,7 @@ const TRIGGER_PROMPT: &str = "trigger-e2e-prompt-marker-do-not-rephrase";
 /// the trigger repository after the fire settles.
 const SELF_CREATE_MARKER_TRIGGER_NAME: &str = "self-created-by-fire-should-not-exist";
 /// Mirrors the production capability-id -> provider-tool-name transform
-/// (`provider_tool_name_base` in `ironclaw_loop_support::capability_port`,
+/// (`provider_tool_name_base` in `ironclaw_loop_host::capability_port`,
 /// private to that crate) so this test tracks the `TRIGGER_*_CAPABILITY_ID`
 /// constants automatically instead of hardcoding their mapped results. Only
 /// the `.` -> `__` replacement is needed for these capability ids (all of the
@@ -154,7 +153,7 @@ impl HostManagedModelGateway for RecordingGateway {
 /// Whichever registrations succeed (capability visible + permitted) are
 /// forwarded together as one `capability_calls` response, which the loop
 /// will actually dispatch — including staging the real JSON input through
-/// the run's real `LocalDevCapabilityIo`, so a genuinely unpatched surface
+/// the run's real `StagedCapabilityIo`, so a genuinely unpatched surface
 /// would really create a second trigger and/or remove/pause/resume the
 /// target trigger. If every registration is denied (the fixed, expected
 /// behavior), there is nothing to dispatch and a plain reply is returned
@@ -354,6 +353,21 @@ where
     last.expect("at least one read should have succeeded in wait_for_settled")
 }
 
+async fn wait_for_mutator_registration_outcomes(
+    gateway: &TriggerMutatorAttemptGateway,
+    deadline: Duration,
+) -> (Vec<String>, BTreeMap<String, Result<(), String>>) {
+    let stop = Instant::now() + deadline;
+    loop {
+        let captured_contents = gateway.captured_message_contents().await;
+        let outcomes = gateway.registration_outcomes().await;
+        if outcomes.len() == 4 || Instant::now() >= stop {
+            return (captured_contents, outcomes);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 fn current_minute_slot() -> chrono::DateTime<Utc> {
     let now_seconds = Utc::now().timestamp();
     let minute_seconds = now_seconds - now_seconds.rem_euclid(60);
@@ -382,7 +396,7 @@ async fn build_runtime_with<G: HostManagedModelGateway + 'static>(
         RebornCompositionProfile::LocalDevYolo,
         USER,
         root.path().join("local-dev"),
-        RebornLocalRuntimeProfileOptions {
+        RebornRuntimeProfileOptions {
             confirm_host_access: true,
         },
     )
@@ -420,7 +434,7 @@ async fn build_runtime_with_tool_disclosure<G: HostManagedModelGateway + 'static
         RebornCompositionProfile::LocalDevYolo,
         USER,
         root.path().join("local-dev"),
-        RebornLocalRuntimeProfileOptions {
+        RebornRuntimeProfileOptions {
             confirm_host_access: true,
         },
     )
@@ -472,7 +486,6 @@ async fn invoke_trigger_create(runtime: &RebornRuntime, input: Value) -> Value {
             CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID).expect("capability id"),
             ResourceEstimate::default(),
             input,
-            trigger_management_trust_decision(),
         ))
         .await
         .expect("trigger create invocation completes");
@@ -524,18 +537,6 @@ fn trigger_management_execution_context() -> ExecutionContext {
     context
 }
 
-fn trigger_management_trust_decision() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::AdminConfig,
-        evaluated_at: Utc::now(),
-    }
-}
-
 #[tokio::test]
 async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
     let root = tempfile::tempdir().expect("tempdir");
@@ -547,10 +548,7 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
         &root,
         Arc::clone(&recording_gateway),
         TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
-            TriggerPollerWorkerConfig {
-                poll_interval: Duration::from_millis(20),
-                ..Default::default()
-            },
+            TriggerPollerWorkerConfig::default().set_poll_interval(Duration::from_millis(20)),
         ),
     )
     .await;
@@ -598,6 +596,7 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
         schedule: TriggerSchedule::once(Utc::now() - chrono::Duration::seconds(120), "UTC")
             .expect("valid once schedule"),
         prompt: TRIGGER_PROMPT.to_string(),
+        delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: Utc::now() - chrono::Duration::seconds(120),
         last_run_at: None,
@@ -711,10 +710,7 @@ async fn builtin_trigger_create_pairs_creator_and_poller_submits_turn() {
         &root,
         Arc::clone(&recording_gateway),
         TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
-            TriggerPollerWorkerConfig {
-                poll_interval: Duration::from_millis(20),
-                ..Default::default()
-            },
+            TriggerPollerWorkerConfig::default().set_poll_interval(Duration::from_millis(20)),
         ),
     )
     .await;
@@ -834,10 +830,7 @@ async fn builtin_created_recurring_trigger_fires_again_after_first_run_settles()
         &root,
         Arc::clone(&recording_gateway),
         TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
-            TriggerPollerWorkerConfig {
-                poll_interval: Duration::from_millis(20),
-                ..Default::default()
-            },
+            TriggerPollerWorkerConfig::default().set_poll_interval(Duration::from_millis(20)),
         ),
     )
     .await;
@@ -960,10 +953,7 @@ async fn trigger_poller_does_not_fire_trigger_with_future_next_run_at() {
         &root,
         Arc::clone(&recording_gateway),
         TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
-            TriggerPollerWorkerConfig {
-                poll_interval: Duration::from_millis(20),
-                ..Default::default()
-            },
+            TriggerPollerWorkerConfig::default().set_poll_interval(Duration::from_millis(20)),
         ),
     )
     .await;
@@ -1004,6 +994,7 @@ async fn trigger_poller_does_not_fire_trigger_with_future_next_run_at() {
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::cron("* * * * *").expect("valid cron expression"),
         prompt: TRIGGER_PROMPT.to_string(),
+        delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: Utc::now() + chrono::Duration::seconds(3600),
         last_run_at: None,
@@ -1080,10 +1071,7 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
         &root,
         Arc::clone(&recording_gateway),
         TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
-            TriggerPollerWorkerConfig {
-                poll_interval: Duration::from_millis(20),
-                ..Default::default()
-            },
+            TriggerPollerWorkerConfig::default().set_poll_interval(Duration::from_millis(20)),
         ),
     )
     .await;
@@ -1114,6 +1102,7 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
         source: TriggerSourceKind::Schedule,
         schedule: TriggerSchedule::once(fire_at, "UTC").expect("valid once schedule"),
         prompt: TRIGGER_PROMPT.to_string(),
+        delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: fire_at,
         last_run_at: None,
@@ -1191,10 +1180,7 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
         &root,
         Arc::clone(&recording_gateway),
         TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
-            TriggerPollerWorkerConfig {
-                poll_interval: Duration::from_millis(20),
-                ..Default::default()
-            },
+            TriggerPollerWorkerConfig::default().set_poll_interval(Duration::from_millis(20)),
         ),
     )
     .await;
@@ -1238,6 +1224,7 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
         // Every minute — recurring cron stays Scheduled after each fire.
         schedule: TriggerSchedule::cron("* * * * *").expect("valid cron expression"),
         prompt: TRIGGER_PROMPT.to_string(),
+        delivery_target: None,
         state: TriggerState::Scheduled,
         next_run_at: original_next_run_at,
         last_run_at: None,
@@ -1396,10 +1383,7 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
         &root,
         Arc::clone(&gateway),
         TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
-            TriggerPollerWorkerConfig {
-                poll_interval: Duration::from_millis(20),
-                ..Default::default()
-            },
+            TriggerPollerWorkerConfig::default().set_poll_interval(Duration::from_millis(20)),
         ),
         tool_disclosure,
     )
@@ -1447,10 +1431,9 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
     // legitimate trigger's id before the fire runs.
     gateway.set_mutator_target_trigger_id(trigger_id).await;
 
-    // Wait for the fire to settle. This is the model's ONLY turn where a
-    // capability call can be attempted (`invoke_trigger_create` above never
-    // touched the model), so once `last_status` is set, the mutator
-    // self-attempts inside `gateway` have already run to completion.
+    // Wait for the submit settlement first. `mark_fire_accepted` sets
+    // `last_status` when the turn is accepted, before the scheduler has
+    // necessarily executed the fired run's model turn.
     let settled = wait_for_settled(
         &repo,
         &tenant_id,
@@ -1460,17 +1443,23 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
     )
     .await;
 
-    runtime.shutdown().await.expect("runtime shutdown");
+    // This is the model's only turn where a capability call can be attempted
+    // (`invoke_trigger_create` above never touched the model). Wait for the
+    // gateway-side registration attempts before shutting the runtime down; a
+    // shutdown immediately after submit settlement can stop a queued run before
+    // it reaches the model.
+    let (captured_contents, registration_outcomes) =
+        wait_for_mutator_registration_outcomes(gateway.as_ref(), Duration::from_secs(15)).await;
 
-    let captured_contents = gateway.captured_message_contents().await;
-    let registration_outcomes = gateway.registration_outcomes().await;
+    runtime.shutdown().await.expect("runtime shutdown");
 
     assert_eq!(
         registration_outcomes.len(),
         4,
         "the fired run must have attempted all 4 scheduled-trigger mutator \
          registrations (create/remove/pause/resume) — captured_messages: \
-         {captured_contents:?}, outcomes: {registration_outcomes:?}"
+         {captured_contents:?}, outcomes: {registration_outcomes:?}, \
+         settled_record: {settled:?}"
     );
 
     // Core assertion, mechanism-level: the surface must deny EVERY mutator
@@ -1488,7 +1477,7 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
     // would return `Ok(candidate)` for it — with a REAL, run-scoped staged
     // input, because `register_provider_tool_call` is the exact path a
     // native provider tool call uses to stage its arguments through the
-    // run's real `LocalDevCapabilityIo`. The loop would then actually
+    // run's real `StagedCapabilityIo`. The loop would then actually
     // dispatch that mutator against the staged input, and either the marker
     // trigger asserted absent below WOULD exist, or the original trigger's
     // state WOULD have changed. Reverting any one entry of the

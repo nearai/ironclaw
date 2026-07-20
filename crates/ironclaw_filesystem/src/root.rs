@@ -53,7 +53,7 @@ pub trait RootFilesystem: Send + Sync {
     /// the unified surface must implement `put` natively. Byte-only backends
     /// can do this with a thin delegation to their own native `write_file`,
     /// gated on `kind = None`, empty `indexed`, and `CasExpectation::Any`;
-    /// see `LocalFilesystem::put` for the canonical pattern. We deliberately
+    /// see `DiskFilesystem::put` for the canonical pattern. We deliberately
     /// do **not** route the default `put` through `self.write_file`, because
     /// the default `write_file` routes through `self.put` — a backend that
     /// overrode neither would recurse to a stack overflow.
@@ -73,7 +73,7 @@ pub trait RootFilesystem: Send + Sync {
     /// other direction in the trait default. Byte-only backends implement
     /// `get` by wrapping their native `read_file` result in
     /// `Some(VersionedEntry { entry: Entry::bytes(body), version: 0 })`
-    /// directly. See `LocalFilesystem::get` for the canonical pattern.
+    /// directly. See `DiskFilesystem::get` for the canonical pattern.
     async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
         unsupported(path, FilesystemOperation::ReadFile)
     }
@@ -161,6 +161,38 @@ pub trait RootFilesystem: Send + Sync {
             operation: FilesystemOperation::Delete,
             reason: "delete is not supported by this backend".to_string(),
         })
+    }
+
+    /// Deletes the single entry at `path` only when its current version
+    /// equals `expected_version` — the CAS counterpart of
+    /// [`delete`](Self::delete), never sweeping a subtree, event logs, or
+    /// sequence counters. An absent row surfaces [`FilesystemError::NotFound`]
+    /// (already gone, benign); a row at another version surfaces
+    /// [`FilesystemError::VersionMismatch`]. Default impl is `Unsupported`,
+    /// same as [`put`](Self::put): backends opt in natively.
+    ///
+    /// Version tokens are not generation-stable: a path's version restarts at
+    /// 1 on a fresh put after a prior delete. An `expected_version` captured
+    /// before a delete+recreate cycle can match a different incarnation of
+    /// the same path (ABA). This method is a sound standalone precondition
+    /// only for paths that are never recreated; callers that do recreate
+    /// paths must pair every successful delete with an unconditional
+    /// postcondition recheck.
+    ///
+    /// Takes a bare [`RecordVersion`] rather than [`put`](Self::put)'s
+    /// [`CasExpectation`]: `Absent`/`Any` are meaningless preconditions for a
+    /// delete (there is nothing to delete if the path is already absent, and
+    /// an unconditional delete is just [`delete`](Self::delete)), so the only
+    /// expressible precondition here is "at this version" — narrowing the
+    /// parameter type to `RecordVersion` makes that the only option, rather
+    /// than leaving two variants callers could pass but that would be
+    /// meaningless.
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        _expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        unsupported(path, FilesystemOperation::Delete)
     }
 
     // ─── Atomicity ────────────────────────────────────────────────────────
@@ -420,5 +452,31 @@ mod tests {
         assert!(none.is_empty());
         assert_eq!(first_two.len(), 2);
         assert_eq!(first_two[1].seq, SeqNo::from_backend(2));
+    }
+
+    /// `DefaultBoundedBackend` does not override `delete_if_version`, so
+    /// calling it must reach the trait's default body and fail closed with
+    /// `Unsupported` rather than panicking, silently no-op'ing, or falling
+    /// through to some other operation's error variant. Pins the
+    /// currently-untested default arm (round-5 review finding, PR #5749).
+    #[tokio::test]
+    async fn delete_if_version_default_returns_unsupported() {
+        let backend = DefaultBoundedBackend;
+        let path = VirtualPath::new("/projects/leaf").unwrap();
+
+        let result = backend
+            .delete_if_version(&path, RecordVersion::from_backend(1))
+            .await;
+
+        assert!(
+            matches!(
+                &result,
+                Err(FilesystemError::Unsupported {
+                    path: err_path,
+                    operation: FilesystemOperation::Delete,
+                }) if err_path == &path
+            ),
+            "default delete_if_version must fail closed with Unsupported{{Delete}}, got: {result:?}"
+        );
     }
 }

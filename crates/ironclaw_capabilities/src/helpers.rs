@@ -325,6 +325,7 @@ pub(crate) fn run_state_error_kind(error: &RunStateError) -> &'static str {
         RunStateError::InvocationAlreadyExists { .. } => "InvocationAlreadyExists",
         RunStateError::UnknownApprovalRequest { .. } => "UnknownApprovalRequest",
         RunStateError::ApprovalRequestAlreadyExists { .. } => "ApprovalRequestAlreadyExists",
+        RunStateError::GateRecordAlreadyExists { .. } => "GateRecordAlreadyExists",
         RunStateError::ApprovalNotPending { .. } => "ApprovalNotPending",
         RunStateError::InvalidPath(_) => "InvalidPath",
         RunStateError::Filesystem(_) => "Filesystem",

@@ -12,11 +12,12 @@
 use std::sync::Arc;
 
 use ironclaw_conversations::{
-    AdapterInstallationId, AdapterKind, ConversationBindingService, ConversationRouteKind,
-    ExternalActorRef, ExternalConversationRef, ExternalEventId,
+    AdapterInstallationId, AdapterKind, ConditionalUnpairOutcome, ConversationBindingService,
+    ConversationRouteKind, ExpectedExternalActorOwner, ExternalActorBindingEpoch, ExternalActorRef,
+    ExternalConversationRef, ExternalEventId, InboundTurnError,
     RebornFilesystemConversationServices, ResolveConversationRequest,
 };
-use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{CasExpectation, InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId, UserId,
     VirtualPath,
@@ -135,6 +136,217 @@ async fn filesystem_conversation_services_round_trip_persisted_state_on_reopen()
         .unwrap();
     assert_eq!(resolution.tenant_id, tenant_id("tenant-a"));
     assert_eq!(resolution.actor.user_id, user_id("alice"));
+}
+
+#[tokio::test]
+async fn filesystem_conversation_services_persist_unpair_revocation_on_reopen() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_conversations_fs(Arc::clone(&backend), "tenant-a", "alice");
+
+    let services = RebornFilesystemConversationServices::new(Arc::clone(&scoped))
+        .await
+        .unwrap();
+    services
+        .pair_external_actor(
+            tenant_id("tenant-a"),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user_id("alice"),
+        )
+        .await
+        .unwrap();
+    let first = services
+        .resolve_or_create_binding(resolve_request(
+            tenant_id("tenant-a"),
+            external_actor("telegram-user-1"),
+            external_conversation("chat-unpair-persisted"),
+            "event-before-unpair",
+        ))
+        .await
+        .unwrap();
+    services
+        .unpair_external_actor(
+            &tenant_id("tenant-a"),
+            &telegram(),
+            &default_installation(),
+            &external_actor("telegram-user-1"),
+        )
+        .await
+        .unwrap();
+    drop(services);
+
+    let reopened = RebornFilesystemConversationServices::new(scoped)
+        .await
+        .unwrap();
+    reopened
+        .pair_external_actor(
+            tenant_id("tenant-a"),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user_id("alice"),
+        )
+        .await
+        .unwrap();
+    let stale = reopened
+        .lookup_binding(resolve_request(
+            tenant_id("tenant-a"),
+            external_actor("telegram-user-1"),
+            external_conversation("chat-unpair-persisted"),
+            "event-after-reopen-lookup",
+        ))
+        .await
+        .expect_err("old direct binding should remain revoked after reopen");
+    assert!(matches!(stale, InboundTurnError::BindingRequired { .. }));
+
+    let rebound = reopened
+        .resolve_or_create_binding(resolve_request(
+            tenant_id("tenant-a"),
+            external_actor("telegram-user-1"),
+            external_conversation("chat-unpair-persisted"),
+            "event-after-reopen-repair",
+        ))
+        .await
+        .unwrap();
+    assert_ne!(
+        rebound.turn_scope.thread_id, first.turn_scope.thread_id,
+        "re-pair after persisted unpair should create a fresh direct route"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_conversation_services_persist_conditional_unpair_epochs_on_reopen() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_conversations_fs(Arc::clone(&backend), "tenant-a", "alice");
+    let actor = external_actor("telegram-user-epoch");
+    let first_epoch = ExternalActorBindingEpoch::new("generation-1").expect("epoch");
+    let second_epoch = ExternalActorBindingEpoch::new("generation-2").expect("epoch");
+
+    let services = RebornFilesystemConversationServices::new(Arc::clone(&scoped))
+        .await
+        .expect("services");
+    services
+        .pair_external_actor_with_epoch(
+            tenant_id("tenant-a"),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user_id("alice"),
+            first_epoch.clone(),
+        )
+        .await
+        .expect("first pairing");
+    let first = services
+        .resolve_or_create_binding(resolve_request(
+            tenant_id("tenant-a"),
+            actor.clone(),
+            external_conversation("chat-epoch"),
+            "event-epoch-first",
+        ))
+        .await
+        .expect("first binding");
+    assert_eq!(first.binding_epoch, Some(first_epoch.clone()));
+    services
+        .pair_external_actor_with_epoch(
+            tenant_id("tenant-a"),
+            telegram(),
+            default_installation(),
+            actor.clone(),
+            user_id("alice"),
+            second_epoch.clone(),
+        )
+        .await
+        .expect("new generation pairing");
+    drop(services);
+
+    let reopened = RebornFilesystemConversationServices::new(scoped)
+        .await
+        .expect("reopen");
+    let stale = reopened
+        .unpair_external_actor_if_owned_by(
+            &tenant_id("tenant-a"),
+            &telegram(),
+            &default_installation(),
+            &actor,
+            &ExpectedExternalActorOwner {
+                user_id: user_id("alice"),
+                binding_epoch: Some(first_epoch),
+            },
+        )
+        .await
+        .expect("stale unpair");
+    assert_eq!(stale, ConditionalUnpairOutcome::OwnerChanged);
+
+    let current = reopened
+        .lookup_binding(resolve_request(
+            tenant_id("tenant-a"),
+            actor,
+            external_conversation("chat-epoch"),
+            "event-epoch-current",
+        ))
+        .await
+        .expect("new generation and route remain");
+    assert_eq!(current.turn_scope.thread_id, first.turn_scope.thread_id);
+    assert_eq!(current.binding_epoch, Some(second_epoch));
+}
+
+#[tokio::test]
+async fn filesystem_conversation_services_reopen_snapshot_without_pairing_epochs() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_conversations_fs(Arc::clone(&backend), "tenant-a", "alice");
+    let services = RebornFilesystemConversationServices::new(Arc::clone(&scoped))
+        .await
+        .expect("services");
+    services
+        .pair_external_actor(
+            tenant_id("tenant-a"),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-legacy-snapshot"),
+            user_id("alice"),
+        )
+        .await
+        .expect("pair actor");
+    drop(services);
+
+    let state_path = VirtualPath::new("/tenants/tenant-a/users/alice/conversations/state.json")
+        .expect("state path");
+    let mut versioned = backend
+        .get(&state_path)
+        .await
+        .expect("read state")
+        .expect("stored state");
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&versioned.entry.body).expect("state json");
+    state
+        .as_object_mut()
+        .expect("state object")
+        .remove("pairing_epochs");
+    versioned.entry.body = serde_json::to_vec(&state).expect("legacy state json");
+    backend
+        .put(
+            &state_path,
+            versioned.entry,
+            CasExpectation::Version(versioned.version),
+        )
+        .await
+        .expect("write legacy snapshot");
+
+    let reopened = RebornFilesystemConversationServices::new(scoped)
+        .await
+        .expect("old snapshots remain readable");
+    let resolution = reopened
+        .resolve_or_create_binding(resolve_request(
+            tenant_id("tenant-a"),
+            external_actor("telegram-user-legacy-snapshot"),
+            external_conversation("chat-legacy-snapshot"),
+            "event-legacy-snapshot",
+        ))
+        .await
+        .expect("legacy epoch-less pairing remains usable");
+    assert_eq!(resolution.actor.user_id, user_id("alice"));
+    assert_eq!(resolution.binding_epoch, None);
 }
 
 /// Regression for the `ScopedFilesystem` migration: two

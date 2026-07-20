@@ -15,9 +15,15 @@ use crate::{
 
 static LOCAL_WRITE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Local filesystem backend mounted into the virtual namespace.
+/// The on-disk `RootFilesystem` backend, mounted into the virtual namespace.
+///
+/// The name states the **storage medium** — disk, a peer of `InMemoryBackend`,
+/// `LibSqlRootFilesystem`, and `PostgresRootFilesystem` — not a deployment mode.
+/// Renamed from `LocalFilesystem` because `Local` read like a deployment tier
+/// while this is simply the disk backend a `DeploymentConfig` may select
+/// (arch-simplification §4.4 Bucket 2).
 #[derive(Debug, Default)]
-pub struct LocalFilesystem {
+pub struct DiskFilesystem {
     mounts: Vec<LocalMount>,
 }
 
@@ -27,7 +33,7 @@ struct LocalMount {
     host_root: PathBuf,
 }
 
-impl LocalFilesystem {
+impl DiskFilesystem {
     pub fn new() -> Self {
         Self::default()
     }
@@ -176,7 +182,7 @@ impl LocalFilesystem {
 }
 
 #[async_trait]
-impl RootFilesystem for LocalFilesystem {
+impl RootFilesystem for DiskFilesystem {
     /// Native `put` for the byte-only local filesystem. Opaque-file entries
     /// (`kind = None`, empty `indexed`) support `CasExpectation::Any` and
     /// `CasExpectation::Absent`; record-shaped entries, populated indexed
@@ -371,7 +377,7 @@ impl RootFilesystem for LocalFilesystem {
     }
 }
 
-impl LocalFilesystem {
+impl DiskFilesystem {
     async fn write_file_with_cas(
         &self,
         path: &VirtualPath,
@@ -431,7 +437,12 @@ async fn atomic_write_file(
                 io_error(virtual_path.clone(), FilesystemOperation::WriteFile, error)
             }),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let _ = tokio::fs::remove_file(&temp).await;
+                if let Err(cleanup_error) = tokio::fs::remove_file(&temp).await {
+                    tracing::debug!(
+                        error = ?cleanup_error,
+                        "best-effort cleanup of write temp file failed after CAS conflict"
+                    );
+                }
                 Err(FilesystemError::VersionMismatch {
                     path: virtual_path.clone(),
                     expected: None,
@@ -439,7 +450,12 @@ async fn atomic_write_file(
                 })
             }
             Err(error) => {
-                let _ = tokio::fs::remove_file(&temp).await;
+                if let Err(cleanup_error) = tokio::fs::remove_file(&temp).await {
+                    tracing::debug!(
+                        error = ?cleanup_error,
+                        "best-effort cleanup of write temp file failed after hard-link error"
+                    );
+                }
                 Err(io_error(
                     virtual_path.clone(),
                     FilesystemOperation::WriteFile,
@@ -572,7 +588,7 @@ mod tests {
     #[tracing_test::traced_test]
     async fn missing_local_paths_do_not_log_backend_error() {
         let storage = tempdir().unwrap();
-        let mut root = LocalFilesystem::new();
+        let mut root = DiskFilesystem::new();
         root.mount_local(
             VirtualPath::new("/projects").unwrap(),
             HostPath::from_path_buf(storage.path().to_path_buf()),

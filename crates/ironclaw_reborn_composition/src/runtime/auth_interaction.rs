@@ -13,7 +13,7 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_turns::{GateRef, TurnPersistenceSnapshot, TurnRunId, TurnScope, TurnStatus};
 
-use crate::factory::LocalDevTurnStateStore;
+use crate::turn_run_snapshot::TurnRunSnapshotSource;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BlockedAuthRun {
@@ -21,8 +21,12 @@ struct BlockedAuthRun {
     gate_ref: GateRef,
 }
 
-pub(super) struct LocalDevAuthInteractionReadModel {
-    turn_state: Arc<LocalDevTurnStateStore>,
+pub(super) struct SnapshotAuthInteractionReadModel {
+    /// A trait object (not the concrete `ComposedTurnStateStore`) so a
+    /// caller can substitute a different turn-state store's snapshot view —
+    /// see `turn_run_snapshot::TurnRunSnapshotSource` and
+    /// `build_webui_auth_interaction_service_with_turn_run_source`.
+    turn_state: Arc<dyn TurnRunSnapshotSource>,
     flow_records: Arc<dyn AuthFlowRecordSource>,
 }
 
@@ -45,9 +49,9 @@ impl AuthInteractionService for UnavailableAuthInteractionService {
     }
 }
 
-impl LocalDevAuthInteractionReadModel {
+impl SnapshotAuthInteractionReadModel {
     pub(super) fn new(
-        turn_state: Arc<LocalDevTurnStateStore>,
+        turn_state: Arc<dyn TurnRunSnapshotSource>,
         flow_records: Arc<dyn AuthFlowRecordSource>,
     ) -> Self {
         Self {
@@ -57,32 +61,13 @@ impl LocalDevAuthInteractionReadModel {
     }
 
     async fn snapshot(&self) -> Result<TurnPersistenceSnapshot, ProductWorkflowError> {
-        // The durable filesystem store returns an async `Result`; the in-memory
-        // authority (no-DB builds, or any build with `inmemory-turn-state`)
-        // returns a sync infallible snapshot.
-        #[cfg(all(
-            any(feature = "libsql", feature = "postgres"),
-            not(feature = "inmemory-turn-state")
-        ))]
-        {
-            self.turn_state
-                .persistence_snapshot()
-                .await
-                .map_err(|error| {
-                    tracing::debug!(
-                        %error,
-                        "auth interaction read model could not read turn persistence snapshot"
-                    );
-                    auth_read_model_unavailable()
-                })
-        }
-        #[cfg(any(
-            feature = "inmemory-turn-state",
-            not(any(feature = "libsql", feature = "postgres"))
-        ))]
-        {
-            Ok(self.turn_state.persistence_snapshot())
-        }
+        self.turn_state.turn_run_snapshot().await.map_err(|error| {
+            tracing::debug!(
+                %error,
+                "auth interaction read model could not read turn persistence snapshot"
+            );
+            auth_read_model_unavailable()
+        })
     }
 
     async fn blocked_auth_runs(
@@ -231,7 +216,7 @@ fn matching_flow_for_run(
         .cloned())
 }
 
-impl LocalDevAuthInteractionReadModel {
+impl SnapshotAuthInteractionReadModel {
     async fn owner_flows(
         &self,
         scope: &AuthInteractionScope,
@@ -241,7 +226,7 @@ impl LocalDevAuthInteractionReadModel {
 }
 
 #[async_trait]
-impl AuthInteractionReadModel for LocalDevAuthInteractionReadModel {
+impl AuthInteractionReadModel for SnapshotAuthInteractionReadModel {
     async fn auth_gates(
         &self,
         scope: &AuthInteractionScope,

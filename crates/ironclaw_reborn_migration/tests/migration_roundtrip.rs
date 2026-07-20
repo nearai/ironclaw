@@ -14,7 +14,9 @@ use ironclaw::agent::routine::{NotifyConfig, Routine, RoutineAction, RoutineGuar
 use ironclaw::config::{DatabaseBackend, DatabaseConfig, SslMode};
 use ironclaw::db::{Database, DatabaseHandles, UserIdentityRecord, connect_with_handles};
 use ironclaw::secrets::{CreateSecretParams, SecretsCrypto, create_secrets_store};
-use ironclaw::tools::wasm::{LibSqlWasmToolStore, StoreToolParams, TrustLevel, WasmToolStore};
+use ironclaw::tools::wasm::{
+    LibSqlWasmToolStore, StoreToolParams, ToolStatus, TrustLevel, WasmToolStore,
+};
 use ironclaw_host_api::TenantId;
 use ironclaw_reborn_migration::{Domain, MigrationOptions, SourceDb, TargetStore, run_migration};
 use ironclaw_triggers::{LibSqlTriggerRepository, TriggerRepository, TriggerSchedule};
@@ -24,6 +26,7 @@ use uuid::Uuid;
 const TENANT: &str = "acme";
 const AGENT: &str = "assistant";
 const USER: &str = "alice";
+const USER_BOB: &str = "bob";
 /// 64-char string ≥ 32 bytes (used verbatim as HKDF IKM by v1 + Reborn crypto).
 const MASTER_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -253,22 +256,27 @@ async fn seed_identities(db: &dyn Database, handles: &DatabaseHandles) {
         .expect("connect");
     // Raw users insert — `get_or_create_user` would additionally seed an
     // assistant thread (a real v1 behavior, but it would perturb the thread
-    // counts this test pins), so insert the row directly.
-    conn.execute(
-        "INSERT INTO users (id, email, display_name, status, role, created_at, updated_at, metadata) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)",
-        (
-            USER.to_string(),
-            "alice@example.com".to_string(),
-            "Alice".to_string(),
-            "active".to_string(),
-            "member".to_string(),
-            now.to_rfc3339(),
-            "{}".to_string(),
-        ),
-    )
-    .await
-    .expect("seed user row");
+    // counts this test pins), so insert the rows directly.
+    for (user_id, email, display_name) in [
+        (USER, "alice@example.com", "Alice"),
+        (USER_BOB, "bob@example.com", "Bob"),
+    ] {
+        conn.execute(
+            "INSERT INTO users (id, email, display_name, status, role, created_at, updated_at, metadata) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)",
+            (
+                user_id.to_string(),
+                email.to_string(),
+                display_name.to_string(),
+                "active".to_string(),
+                "member".to_string(),
+                now.to_rfc3339(),
+                "{}".to_string(),
+            ),
+        )
+        .await
+        .expect("seed user row");
+    }
 
     db.create_identity(&UserIdentityRecord {
         id: Uuid::new_v4(),
@@ -313,37 +321,105 @@ async fn seed_secret(handles: &DatabaseHandles) {
 async fn seed_wasm_tool(handles: &DatabaseHandles) {
     let db = handles.libsql_db.clone().expect("libsql handle");
     let store = LibSqlWasmToolStore::new(db.clone());
-    // A default (Active) install so the migration derives Enabled activation.
-    let tool = store
-        .store(StoreToolParams {
-            user_id: USER.to_string(),
-            name: "weather".to_string(),
-            version: "1.0.0".to_string(),
-            wit_version: "0.1.0".to_string(),
-            description: "Weather lookup".to_string(),
-            wasm_binary: b"\0asm-fake-binary".to_vec(),
-            parameters_schema: serde_json::json!({"type": "object"}),
-            source_url: None,
-            trust_level: TrustLevel::User,
-        })
-        .await
-        .expect("seed wasm tool");
+    // Same-named installs for two users exercise canonicalization. The
+    // disagreeing source states must produce one disabled canonical row.
+    for user_id in [USER, USER_BOB] {
+        let tool = store
+            .store(StoreToolParams {
+                user_id: user_id.to_string(),
+                name: "weather".to_string(),
+                version: "1.0.0".to_string(),
+                wit_version: "0.1.0".to_string(),
+                description: "Weather lookup".to_string(),
+                wasm_binary: b"\0asm-fake-binary".to_vec(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                source_url: None,
+                trust_level: TrustLevel::User,
+            })
+            .await
+            .expect("seed wasm tool");
+        store
+            .update_status(
+                user_id,
+                "weather",
+                if user_id == USER {
+                    ToolStatus::Active
+                } else {
+                    ToolStatus::Disabled
+                },
+            )
+            .await
+            .expect("seed tool status");
 
-    // Seed tool_capabilities with an allowed secret (no trait writer exists) so
-    // the migration derives a credential binding to the migrated secret and
-    // records the capability-config gap. `openai_api_key` matches the seeded
-    // secret above.
+        // Seed tool_capabilities with an allowed secret (no trait writer
+        // exists) so both source rows contribute the same credential binding.
+        let conn = db.connect().expect("connect");
+        conn.execute(
+            "INSERT INTO tool_capabilities (id, wasm_tool_id, allowed_secrets) VALUES (?1, ?2, ?3)",
+            (
+                Uuid::new_v4().to_string(),
+                tool.id.to_string(),
+                serde_json::json!(["openai_api_key"]).to_string(),
+            ),
+        )
+        .await
+        .expect("seed tool capabilities");
+    }
+}
+
+async fn set_wasm_tool_status(path: &Path, user_id: &str, status: ToolStatus) {
+    let db = Arc::new(
+        libsql::Builder::new_local(path)
+            .build()
+            .await
+            .expect("open v1 fixture for status update"),
+    );
+    let store = LibSqlWasmToolStore::new(db);
+    store
+        .update_status(user_id, "weather", status)
+        .await
+        .expect("update wasm tool status");
+}
+
+async fn set_wasm_tool_description(path: &Path, user_id: &str, description: &str) {
+    let db = libsql::Builder::new_local(path)
+        .build()
+        .await
+        .expect("open v1 fixture for metadata update");
     let conn = db.connect().expect("connect");
-    conn.execute(
-        "INSERT INTO tool_capabilities (id, wasm_tool_id, allowed_secrets) VALUES (?1, ?2, ?3)",
-        (
-            Uuid::new_v4().to_string(),
-            tool.id.to_string(),
-            serde_json::json!(["openai_api_key"]).to_string(),
-        ),
-    )
-    .await
-    .expect("seed tool capabilities");
+    let changed = conn
+        .execute(
+            "UPDATE wasm_tools SET description = ?1 WHERE user_id = ?2 AND name = ?3",
+            (
+                description.to_string(),
+                user_id.to_string(),
+                "weather".to_string(),
+            ),
+        )
+        .await
+        .expect("update wasm tool description");
+    assert_eq!(changed, 1, "expected one source tool metadata row");
+}
+
+async fn set_wasm_tool_allowed_secret(path: &Path, user_id: &str, secret: &str) {
+    let db = libsql::Builder::new_local(path)
+        .build()
+        .await
+        .expect("open v1 fixture for credential update");
+    let conn = db.connect().expect("connect");
+    let changed = conn
+        .execute(
+            "UPDATE tool_capabilities SET allowed_secrets = ?1 \
+             WHERE wasm_tool_id = (SELECT id FROM wasm_tools WHERE user_id = ?2 AND name = ?3)",
+            (
+                serde_json::json!([secret]).to_string(),
+                user_id.to_string(),
+                "weather".to_string(),
+            ),
+        )
+        .await
+        .expect("update wasm tool credentials");
+    assert_eq!(changed, 1, "expected one source tool capability row");
 }
 
 fn cron(expr: &str) -> Trigger {
@@ -497,8 +573,9 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
         (Domain::Memory, 1),
         // the seeded secret decrypts, re-encrypts, and carries no expiry → 0.
         (Domain::Secret, 0),
-        // the migrated wasm tool: manifest_fidelity + capabilities (2).
-        (Domain::Extension, 2),
+        // the two source installs each record manifest_fidelity + capabilities.
+        // They merge into one canonical installation row.
+        (Domain::Extension, 4),
         // unconditional pairing_requests gap (both identities adopt cleanly).
         (Domain::Identity, 1),
         // unconditional heartbeat_state gap.
@@ -554,29 +631,42 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
     assert_eq!(report.stats.secrets, 1, "secrets: {:?}", report.stats);
     // 1 OAuth identity + 1 channel identity adopted.
     assert_eq!(report.stats.identities, 2, "identities: {:?}", report.stats);
-    // 1 installed wasm tool → ExtensionInstallation.
+    // 2 same-named user installs → 1 canonical ExtensionInstallation.
     assert_eq!(report.stats.extensions, 1, "extensions: {:?}", report.stats);
 
     // Extension installation invariants: the on-disk installation record must
-    // carry Enabled activation (v1 tool status was Active) and the credential
-    // binding derived from tool_capabilities.allowed_secrets (openai_api_key).
+    // carry the canonical id, both private owners, fail-closed Disabled
+    // activation, and the merged credential binding.
     let installation_doc =
         reborn_entry_content(&dst, "%/system/extensions/.installations/state.json").await;
-    assert!(
-        installation_doc.contains("openai_api_key"),
-        "installation record must carry the allowed_secrets credential binding; got: {installation_doc}"
+    let installation_state: serde_json::Value =
+        serde_json::from_str(&installation_doc).expect("installation state JSON");
+    let installations = installation_state["installations"]
+        .as_array()
+        .expect("installation array");
+    assert_eq!(
+        installations.len(),
+        1,
+        "same-named source installs must canonicalize to one row"
     );
-    // Match the exact serialized `ExtensionActivationState` token (snake_case
-    // JSON value), not a loose substring, so a future `*_enabled`/`disabled`
-    // state can't pass by accident.
-    assert!(
-        installation_doc.contains("\"enabled\""),
-        "an Active v1 tool must migrate to Enabled activation; got: {installation_doc}"
+    let installation = &installations[0];
+    assert_eq!(installation["installation_id"], "weather");
+    assert_eq!(installation["extension_id"], "weather");
+    assert_eq!(installation["activation_state"], "disabled");
+    assert_eq!(installation["owner"]["kind"], "users");
+    assert_eq!(
+        installation["owner"]["user_ids"],
+        serde_json::json!([USER, USER_BOB])
     );
-    assert!(
-        !installation_doc.contains("\"disabled\""),
-        "the migrated installation must not be Disabled; got: {installation_doc}"
+    assert_eq!(
+        installation["credential_bindings"]
+            .as_array()
+            .expect("credential binding array")
+            .len(),
+        1,
+        "agreeing duplicate credential bindings must be merged"
     );
+    assert!(installation_doc.contains("openai_api_key"));
 
     // On-disk durability of the deferred domains (fresh connection).
     assert!(
@@ -629,6 +719,101 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
         1,
         "re-run must not write a second installation state document"
     );
+    assert_eq!(
+        reborn_entry_content(&dst, "%/system/extensions/.installations/state.json").await,
+        installation_doc,
+        "re-run must preserve deterministic canonical extension state"
+    );
+}
+
+/// Caller-level migration coverage: run the public converter and reopen the
+/// persisted extension state, proving that two agreeing active source rows
+/// stay enabled after the shared canonical reducer merges their owners.
+#[tokio::test]
+async fn migrates_all_active_duplicate_users_as_enabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = seed_v1_fixture(dir.path()).await;
+    set_wasm_tool_status(&src, USER_BOB, ToolStatus::Active).await;
+    let dst = dir.path().join("reborn-all-active.db");
+
+    let report = run_migration(options(src, dst.clone(), false))
+        .await
+        .expect("migration runs");
+
+    assert_eq!(report.stats.extensions, 1);
+    let installation_doc =
+        reborn_entry_content(&dst, "%/system/extensions/.installations/state.json").await;
+    let state: serde_json::Value = serde_json::from_str(&installation_doc).unwrap();
+    let installations = state["installations"].as_array().unwrap();
+    assert_eq!(installations.len(), 1);
+    assert_eq!(installations[0]["activation_state"], "enabled");
+    assert_eq!(installations[0]["owner"]["kind"], "users");
+    assert_eq!(
+        installations[0]["owner"]["user_ids"],
+        serde_json::json!([USER, USER_BOB])
+    );
+}
+
+/// Caller-level migration coverage for incompatible source metadata: the
+/// grouped source rows are reported and skipped before a manifest is written.
+#[tokio::test]
+async fn migration_records_metadata_conflict_without_partial_extension() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = seed_v1_fixture(dir.path()).await;
+    set_wasm_tool_description(&src, USER_BOB, "Different weather metadata").await;
+    let dst = dir.path().join("reborn-metadata-conflict.db");
+
+    let report = run_migration(options(src, dst.clone(), false))
+        .await
+        .expect("migration runs");
+
+    assert_eq!(report.stats.extensions, 0);
+    assert_eq!(report.losses_in(Domain::Extension), 5);
+    assert!(report.lossy.iter().any(|loss| {
+        loss.domain == Domain::Extension
+            && loss.field == "canonicalization"
+            && loss.detail.contains("no partial canonical installation")
+    }));
+    assert_eq!(
+        reborn_entry_count(&dst, "%/system/extensions/.installations/state.json").await,
+        0,
+        "metadata conflict must not write a partial canonical installation"
+    );
+}
+
+/// Caller-level migration coverage for distinct v1 allowed secrets: because
+/// v1 stores secret names rather than a separate credential-handle mapping,
+/// distinct names are distinct target bindings and must merge safely. The
+/// shared reducer's conflicting-handle fail-closed policy is covered at the
+/// persisted-store seam, where legacy rows can contain that ambiguity.
+#[tokio::test]
+async fn migration_merges_distinct_credential_bindings() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = seed_v1_fixture(dir.path()).await;
+    set_wasm_tool_allowed_secret(&src, USER_BOB, "different_api_key").await;
+    let dst = dir.path().join("reborn-credential-conflict.db");
+
+    let report = run_migration(options(src, dst.clone(), false))
+        .await
+        .expect("migration runs");
+
+    assert_eq!(report.stats.extensions, 1);
+    assert_eq!(report.losses_in(Domain::Extension), 4);
+    let installation_doc =
+        reborn_entry_content(&dst, "%/system/extensions/.installations/state.json").await;
+    let state: serde_json::Value = serde_json::from_str(&installation_doc).unwrap();
+    let bindings = state["installations"][0]["credential_bindings"]
+        .as_array()
+        .unwrap();
+    assert_eq!(bindings.len(), 2);
+    assert!(bindings.iter().any(|binding| {
+        binding["credential_handle"] == "openai_api_key"
+            && binding["secret_handle"] == "openai_api_key"
+    }));
+    assert!(bindings.iter().any(|binding| {
+        binding["credential_handle"] == "different_api_key"
+            && binding["secret_handle"] == "different_api_key"
+    }));
 }
 
 #[tokio::test]

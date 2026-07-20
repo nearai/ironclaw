@@ -1,10 +1,11 @@
+// arch-exempt: large_file, mechanical LocalFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::DiskFilesystem;
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
     AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet,
     CorrelationId, CredentialStageError, Decision, EffectKind, ExecutionContext, ExtensionId,
@@ -26,10 +27,9 @@ use ironclaw_processes::ProcessServices;
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceGovernor, ResourceLimits,
 };
-use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
+use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
 use ironclaw_trust::{
-    AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
-    HostTrustPolicy, TrustDecision, TrustProvenance,
+    AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy, TrustDecision,
 };
 use ironclaw_wasm::{
     RecordingWasmHostHttp, WasmHostError, WasmHttpResponse, WitToolExecution, WitToolHost,
@@ -133,7 +133,7 @@ async fn host_runtime_services_routes_structured_github_wasm_search_through_runt
     let network = RecordingNetworkHttpEgress::with_body(
         br#"{"total_count":0,"incomplete_results":false,"items":[]}"#.to_vec(),
     );
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let slot_handle = SecretHandle::new("github_runtime_token").unwrap();
     let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
     let services = HostRuntimeServices::new(
@@ -221,7 +221,7 @@ async fn host_runtime_services_restages_github_product_auth_for_multi_request_wa
     let network = RecordingNetworkHttpEgress::with_body(
         format!(r#"{{"ref":"refs/heads/main","object":{{"sha":"{source_sha}"}}}}"#).into_bytes(),
     );
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let slot_handle = SecretHandle::new("github_runtime_token").unwrap();
     let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
     let services = HostRuntimeServices::new(
@@ -313,7 +313,7 @@ async fn host_runtime_services_routes_google_drive_wasm_list_files_with_scoped_g
     let scope = sample_scope(InvocationId::new());
     let policy = google_drive_policy();
     let network = RecordingNetworkHttpEgress::with_body(br#"{"files":[]}"#.to_vec());
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let slot_handle = SecretHandle::new("google_runtime_token").unwrap();
     let account_access_secret = SecretHandle::new("google_manual_access").unwrap();
     let required_scopes = vec!["https://www.googleapis.com/auth/drive.readonly".to_string()];
@@ -422,7 +422,7 @@ async fn host_runtime_services_extracts_google_drive_download_binary_into_text()
         br#"{"id":"file-1","name":"hello.pdf","mimeType":"application/pdf"}"#.to_vec(),
         pdf,
     );
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let account_access_secret = SecretHandle::new("google_drive_download_access").unwrap();
     let required_scopes = vec!["https://www.googleapis.com/auth/drive.readonly".to_string()];
     let services = google_wasm_services_for_test!(
@@ -484,7 +484,7 @@ async fn host_runtime_services_maps_google_drive_wasm_401_to_auth_required() {
         401,
         br#"{"error":{"status":"UNAUTHENTICATED","message":"Invalid Credentials"}}"#.to_vec(),
     );
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let account_access_secret = SecretHandle::new("google_drive_access").unwrap();
     let required_scopes = vec!["https://www.googleapis.com/auth/drive.readonly".to_string()];
     let services = google_wasm_services_for_test!(
@@ -559,7 +559,7 @@ async fn host_runtime_services_maps_google_drive_upload_wasm_401_to_auth_require
         401,
         br#"{"error":{"status":"UNAUTHENTICATED","message":"Invalid Credentials"}}"#.to_vec(),
     );
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let account_access_secret = SecretHandle::new("google_drive_upload_access").unwrap();
     let required_scopes = vec!["https://www.googleapis.com/auth/drive".to_string()];
     let services = google_wasm_services_for_test!(
@@ -635,7 +635,7 @@ async fn host_runtime_services_routes_google_docs_wasm_get_document_with_scoped_
     let network = RecordingNetworkHttpEgress::with_body(
         br#"{"documentId":"doc-1","title":"Doc","revisionId":"r1","body":{"content":[{"endIndex":5}]}}"#.to_vec(),
     );
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let account_access_secret = SecretHandle::new("google_docs_access").unwrap();
     let required_scopes = vec!["https://www.googleapis.com/auth/documents.readonly".to_string()];
     let services = google_wasm_services_for_test!(
@@ -694,7 +694,7 @@ async fn host_runtime_services_routes_google_sheets_wasm_get_spreadsheet_with_sc
     let network = RecordingNetworkHttpEgress::with_body(
         br#"{"spreadsheetId":"sheet-1","properties":{"title":"Sheet"},"spreadsheetUrl":"https://docs.google.com/spreadsheets/d/sheet-1","sheets":[],"namedRanges":[]}"#.to_vec(),
     );
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let account_access_secret = SecretHandle::new("google_sheets_access").unwrap();
     let required_scopes = vec!["https://www.googleapis.com/auth/spreadsheets.readonly".to_string()];
     let services = google_wasm_services_for_test!(
@@ -753,7 +753,7 @@ async fn host_runtime_services_routes_google_slides_wasm_get_presentation_with_s
     let network = RecordingNetworkHttpEgress::with_body(
         br#"{"presentationId":"slides-1","title":"Slides","revisionId":"r1","slides":[]}"#.to_vec(),
     );
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let account_access_secret = SecretHandle::new("google_slides_access").unwrap();
     let required_scopes =
         vec!["https://www.googleapis.com/auth/presentations.readonly".to_string()];
@@ -811,7 +811,7 @@ async fn host_runtime_services_maps_github_wasm_input_errors_to_invalid_input() 
     let network = RecordingNetworkHttpEgress::with_body(
         br#"{"total_count":0,"incomplete_results":false,"items":[]}"#.to_vec(),
     );
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
     let services = github_wasm_services_for_test!(
         network.clone(),
@@ -853,7 +853,7 @@ async fn host_runtime_services_maps_github_search_validation_status_to_invalid_i
         422,
         br#"{"message":"Validation Failed","errors":[{"message":"\"YYYY-MM-DD\" is not a recognized date/time format.","resource":"Search","field":"q","code":"invalid"}],"status":"422"}"#.to_vec(),
     );
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
     let services = github_wasm_services_for_test!(
         network.clone(),
@@ -893,7 +893,7 @@ async fn host_runtime_services_keeps_github_non_validation_422_as_operation_fail
         br#"{"message":"Validation failed, or the endpoint has been spammed.","status":"422"}"#
             .to_vec(),
     );
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
     let services = github_wasm_services_for_test!(
         network.clone(),
@@ -931,7 +931,7 @@ async fn host_runtime_services_missing_github_runtime_secret_blocks_on_auth() {
     let network = RecordingNetworkHttpEgress::with_body(
         br#"{"total_count":0,"incomplete_results":false,"items":[]}"#.to_vec(),
     );
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let slot_handle = SecretHandle::new("github_runtime_token").unwrap();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_github_package()),
@@ -985,6 +985,191 @@ async fn host_runtime_services_missing_github_runtime_secret_blocks_on_auth() {
     assert!(
         network.requests().is_empty(),
         "missing credential must block before dispatch"
+    );
+}
+
+/// Audit F-010: per-user token isolation for the `slack_user` first-party
+/// tool. A `slack_user` capability dispatch must inject the *authenticated
+/// user's personal* Slack token — the `xoxp-` user token resolved from the
+/// per-user `slack_personal` product-auth account — as the
+/// `Authorization: Bearer` header on the slack.com egress, and never the
+/// workspace bot (`xoxb-`) token. This mirrors the github/google search
+/// injection contracts above, driven through the full `invoke_capability`
+/// path (authorizer obligation -> credential-account resolver -> secret
+/// store -> staged injection -> recorded egress).
+#[tokio::test]
+async fn host_runtime_services_injects_personal_xoxp_token_for_slack_user_search_capability() {
+    let capability_id = CapabilityId::new("slack.search_messages").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    // A per-user *personal* Slack token, shaped like a real `xoxp-` user token
+    // so a regression that swapped in a bot (`xoxb-`) token changes the bytes.
+    let personal_user_token = "xoxp-fake-personal-user-token-9999";
+    let policy = slack_policy();
+    let network = RecordingNetworkHttpEgress::with_body(
+        br#"{"ok":true,"messages":{"total":2,"matches":[]}}"#.to_vec(),
+    );
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let slot_handle = SecretHandle::new("slack_user_token").unwrap();
+    let account_access_secret = SecretHandle::new("slack_personal_access").unwrap();
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_slack_user_package()),
+        Arc::new(filesystem_with_slack_user_package()),
+        Arc::new(governor_with_default_limit(sample_account())),
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::ApplyNetworkPolicy {
+                policy: policy.clone(),
+            },
+            Obligation::InjectCredentialAccountOnce {
+                handle: slot_handle,
+                provider: RuntimeCredentialAccountProviderId::new("slack_personal").unwrap(),
+                setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                    scopes: slack_user_scopes(),
+                },
+                provider_scopes: slack_user_scopes(),
+                requester_extension: ExtensionId::new("slack").unwrap(),
+            },
+        ])),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_runtime_credential_account_resolver(Arc::new(
+        FixedSlackRuntimeCredentialAccountResolver {
+            expected_scopes: slack_user_scopes(),
+            result: Ok(account_access_secret.clone()),
+        },
+    ))
+    .with_trust_policy(Arc::new(slack_user_first_party_trust_policy()))
+    .try_with_host_http_egress(network.clone())
+    .unwrap()
+    .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
+    .unwrap();
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from(personal_user_token),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"query": "deploy"}),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id);
+            assert_eq!(completed.output["ok"], json!(true));
+            assert_eq!(completed.output["total"], json!(2));
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+    let requests = network.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, NetworkMethod::Get);
+    assert_eq!(
+        requests[0].url,
+        "https://slack.com/api/search.messages?query=deploy&count=20"
+    );
+    assert_eq!(requests[0].policy, policy);
+    // The injected credential is the per-user personal xoxp token that was
+    // resolved from the `slack_personal` account and stored under this scope.
+    let authorization = requests[0]
+        .headers
+        .iter()
+        .find(|(name, _)| name == "authorization");
+    assert_eq!(
+        authorization,
+        Some(&(
+            "authorization".to_string(),
+            format!("Bearer {personal_user_token}"),
+        ))
+    );
+    // ...and it is never a workspace bot token: F-010 requires the personal
+    // (`xoxp-`) user token, not the `xoxb-` bot token the `slack` channel uses.
+    let (_, header_value) = authorization.unwrap();
+    assert!(
+        !header_value.contains("xoxb-"),
+        "slack_user must not inject a bot token, got: {header_value}"
+    );
+}
+
+/// Audit F-010 companion: a MISSING `slack_personal` account must gate the
+/// `slack_user` tool on auth — it must never silently fall back to another
+/// credential (e.g. the workspace bot token). Mirrors the github
+/// missing-secret contract: the resolver returns `AuthRequired`, and no
+/// slack.com egress happens.
+#[tokio::test]
+async fn host_runtime_services_missing_slack_personal_account_blocks_slack_user_on_auth() {
+    let capability_id = CapabilityId::new("slack.search_messages").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let policy = slack_policy();
+    let network = RecordingNetworkHttpEgress::with_body(
+        br#"{"ok":true,"messages":{"total":0,"matches":[]}}"#.to_vec(),
+    );
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let slot_handle = SecretHandle::new("slack_user_token").unwrap();
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_slack_user_package()),
+        Arc::new(filesystem_with_slack_user_package()),
+        Arc::new(governor_with_default_limit(sample_account())),
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::ApplyNetworkPolicy {
+                policy: policy.clone(),
+            },
+            Obligation::InjectCredentialAccountOnce {
+                handle: slot_handle,
+                provider: RuntimeCredentialAccountProviderId::new("slack_personal").unwrap(),
+                setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                    scopes: slack_user_scopes(),
+                },
+                provider_scopes: slack_user_scopes(),
+                requester_extension: ExtensionId::new("slack").unwrap(),
+            },
+        ])),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_runtime_credential_account_resolver(Arc::new(
+        FixedSlackRuntimeCredentialAccountResolver {
+            expected_scopes: slack_user_scopes(),
+            result: Err(CredentialStageError::AuthRequired),
+        },
+    ))
+    .with_trust_policy(Arc::new(slack_user_first_party_trust_policy()))
+    .try_with_host_http_egress(network.clone())
+    .unwrap()
+    .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
+    .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"query": "deploy"}),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::AuthRequired(gate) => {
+            assert_eq!(gate.capability_id, capability_id);
+        }
+        other => panic!("expected auth-required outcome, got {other:?}"),
+    }
+    assert!(
+        network.requests().is_empty(),
+        "missing slack_personal account must block before slack.com egress"
     );
 }
 
@@ -1811,6 +1996,135 @@ impl RuntimeCredentialAccountResolver for FixedGoogleRuntimeCredentialAccountRes
     }
 }
 
+// ---- slack_user (audit F-010) helpers ----------------------------------
+//
+// Mirror the github/google first-party WASM harness above for the `slack_user`
+// tool: load its bundled manifest + WASM, drive a capability through
+// `invoke_capability`, and assert the per-user personal-token injection.
+
+/// Credential-account resolver for the `slack_user` tool. Asserts the runtime
+/// asks for the per-user *personal* account (`slack_personal`) on behalf of the
+/// `slack_user` extension — never a workspace/bot credential — before handing
+/// back the fixed access-secret handle (or an auth-required error).
+#[derive(Debug)]
+struct FixedSlackRuntimeCredentialAccountResolver {
+    expected_scopes: Vec<String>,
+    result: Result<SecretHandle, CredentialStageError>,
+}
+
+#[async_trait]
+impl RuntimeCredentialAccountResolver for FixedSlackRuntimeCredentialAccountResolver {
+    async fn resolve_access_secret(
+        &self,
+        request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<RuntimeCredentialAccessSecret, CredentialStageError> {
+        assert_eq!(request.provider.as_str(), "slack_personal");
+        assert_eq!(request.requester_extension.as_str(), "slack");
+        assert_eq!(request.provider_scopes, self.expected_scopes.as_slice());
+        self.result
+            .clone()
+            .map(|handle| RuntimeCredentialAccessSecret {
+                scope: request.scope.clone(),
+                handle,
+            })
+    }
+}
+
+fn registry_with_slack_user_package() -> ExtensionRegistry {
+    let manifest = ExtensionManifest::parse_with_host_api_contracts(
+        &std::fs::read_to_string(slack_user_asset_root().join("manifest.toml")).unwrap(),
+        ManifestSource::HostBundled,
+        &default_host_port_catalog().unwrap(),
+        &default_host_api_contract_registry().unwrap(),
+    )
+    .unwrap();
+    let package = ExtensionPackage::from_manifest(
+        manifest,
+        VirtualPath::new("/system/extensions/slack").unwrap(),
+    )
+    .unwrap();
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    registry
+}
+
+fn filesystem_with_slack_user_package() -> DiskFilesystem {
+    let mut filesystem = DiskFilesystem::new();
+    filesystem
+        .mount_local(
+            VirtualPath::new("/system/extensions").unwrap(),
+            HostPath::from_path_buf(slack_user_asset_root().parent().unwrap().to_path_buf()),
+        )
+        .unwrap();
+    filesystem
+}
+
+fn slack_user_asset_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("crates/ironclaw_first_party_extensions/assets/slack")
+}
+
+fn slack_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "slack.com".to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(10_000),
+    }
+}
+
+/// The read-only scopes the Slack read capabilities (e.g. slack.search_messages)
+/// request. Kept in lockstep with `assets/slack/manifest.toml`, where the
+/// read-only tools request only read scopes and only send_message adds chat:write.
+fn slack_user_scopes() -> Vec<String> {
+    [
+        "search:read",
+        "channels:history",
+        "groups:history",
+        "im:history",
+        "mpim:history",
+        "channels:read",
+        "groups:read",
+        "im:read",
+        "mpim:read",
+        "users:read",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+/// The scope set `slack.send_message` requests: the read scopes plus
+/// chat:write, in lockstep with its manifest runtime_credentials entry.
+fn slack_user_write_scopes() -> Vec<String> {
+    let mut scopes = slack_user_scopes();
+    scopes.push("chat:write".to_string());
+    scopes
+}
+
+fn slack_user_first_party_trust_policy() -> HostTrustPolicy {
+    HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(vec![
+        AdminEntry::for_local_manifest(
+            PackageId::new("slack").unwrap(),
+            "/system/extensions/slack/manifest.toml".to_string(),
+            None,
+            HostTrustAssignment::first_party(),
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::Network,
+                EffectKind::UseSecret,
+                EffectKind::ExternalWrite,
+            ],
+            None,
+        ),
+    ]))])
+    .unwrap()
+}
+
 fn registry_with_github_package() -> ExtensionRegistry {
     let manifest = ExtensionManifest::parse_with_host_api_contracts(
         &std::fs::read_to_string(github_asset_root().join("manifest.toml")).unwrap(),
@@ -1833,8 +2147,8 @@ fn registry_with_google_drive_package() -> ExtensionRegistry {
     registry_with_google_package("google-drive")
 }
 
-fn filesystem_with_github_package() -> LocalFilesystem {
-    let mut filesystem = LocalFilesystem::new();
+fn filesystem_with_github_package() -> DiskFilesystem {
+    let mut filesystem = DiskFilesystem::new();
     filesystem
         .mount_local(
             VirtualPath::new("/system/extensions").unwrap(),
@@ -1844,7 +2158,7 @@ fn filesystem_with_github_package() -> LocalFilesystem {
     filesystem
 }
 
-fn filesystem_with_google_drive_package() -> LocalFilesystem {
+fn filesystem_with_google_drive_package() -> DiskFilesystem {
     filesystem_with_google_package("google-drive")
 }
 
@@ -1866,8 +2180,8 @@ fn registry_with_google_package(package_id: &str) -> ExtensionRegistry {
     registry
 }
 
-fn filesystem_with_google_package(package_id: &str) -> LocalFilesystem {
-    let mut filesystem = LocalFilesystem::new();
+fn filesystem_with_google_package(package_id: &str) -> DiskFilesystem {
+    let mut filesystem = DiskFilesystem::new();
     filesystem
         .mount_local(
             VirtualPath::new("/system/extensions").unwrap(),
@@ -1984,13 +2298,7 @@ fn wasm_runtime_request_for_scope(
     input: serde_json::Value,
 ) -> RuntimeCapabilityRequest {
     let context = execution_context_with_dispatch_grant_for_scope(capability_id.clone(), scope);
-    RuntimeCapabilityRequest::new(
-        context,
-        capability_id,
-        wasm_http_estimate(),
-        input,
-        trust_decision_with_dispatch_authority(),
-    )
+    RuntimeCapabilityRequest::new(context, capability_id, wasm_http_estimate(), input)
 }
 
 fn execution_context_with_dispatch_grant_for_scope(
@@ -1998,12 +2306,14 @@ fn execution_context_with_dispatch_grant_for_scope(
     scope: ResourceScope,
 ) -> ExecutionContext {
     let context = ExecutionContext {
+        run_id: None,
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
         parent_process_id: None,
         tenant_id: scope.tenant_id.clone(),
         user_id: scope.user_id.clone(),
+        authenticated_actor_user_id: None,
         agent_id: scope.agent_id.clone(),
         project_id: scope.project_id.clone(),
         mission_id: scope.mission_id.clone(),
@@ -2042,23 +2352,6 @@ fn capability_grants(capability: CapabilityId) -> CapabilitySet {
         },
     });
     grants
-}
-
-fn trust_decision_with_dispatch_authority() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![
-                EffectKind::DispatchCapability,
-                EffectKind::Network,
-                EffectKind::UseSecret,
-                EffectKind::ExternalWrite,
-            ],
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::Default,
-        evaluated_at: Utc::now(),
-    }
 }
 
 fn execute_bundled_github_wasm(
@@ -2148,24 +2441,20 @@ fn governor_with_default_limit(account: ResourceAccount) -> InMemoryResourceGove
     governor
         .set_limit(
             account,
-            ResourceLimits {
-                max_concurrency_slots: Some(10),
-                max_network_egress_bytes: Some(10_000),
-                max_output_bytes: Some(100_000),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_concurrency_slots(10)
+                .set_max_network_egress_bytes(10_000)
+                .set_max_output_bytes(100_000),
         )
         .unwrap();
     governor
 }
 
 fn wasm_http_estimate() -> ResourceEstimate {
-    ResourceEstimate {
-        concurrency_slots: Some(1),
-        network_egress_bytes: Some(10),
-        output_bytes: Some(10_000),
-        ..ResourceEstimate::default()
-    }
+    ResourceEstimate::default()
+        .set_concurrency_slots(1)
+        .set_network_egress_bytes(10)
+        .set_output_bytes(10_000)
 }
 
 fn sample_account() -> ResourceAccount {
@@ -2194,4 +2483,1167 @@ fn github_policy() -> NetworkPolicy {
         deny_private_ip_ranges: true,
         max_egress_bytes: Some(10_000),
     }
+}
+
+// ─── Slack personal (user-token) WASM tool ──────────────────────────────────
+//
+// Same contract tier as the GitHub/Google tests above: the REAL bundled
+// `slack_user_tool.wasm` dispatched through the full `invoke_capability`
+// path, with the network scripted per Slack Web API method. Pins the
+// ID→name enrichment contract: read outputs carry human-readable
+// `user_display_name` fields alongside raw Slack user ids, resolved inside
+// the tool (one `users.info` per distinct id), and enrichment is
+// best-effort — a failing `users.info` must never break the read itself.
+
+/// URL-substring-keyed scripted egress: first matching entry serves the
+/// response. The Slack enrichment flow needs different bodies for
+/// `conversations.history` / `conversations.list` and each `users.info`
+/// lookup, which the single fixed-body recorder above cannot express.
+#[derive(Debug, Clone)]
+struct UrlKeyedSlackEgress {
+    requests: Arc<std::sync::Mutex<Vec<NetworkHttpRequest>>>,
+    responses: Vec<(&'static str, u16, &'static str)>,
+}
+
+impl UrlKeyedSlackEgress {
+    fn new(responses: Vec<(&'static str, u16, &'static str)>) -> Self {
+        Self {
+            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+            responses,
+        }
+    }
+
+    fn requests(&self) -> Vec<NetworkHttpRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl NetworkHttpEgress for UrlKeyedSlackEgress {
+    async fn execute(
+        &self,
+        request: NetworkHttpRequest,
+    ) -> Result<NetworkHttpResponse, NetworkHttpError> {
+        let request_bytes = request.body.len() as u64;
+        let matched = self
+            .responses
+            .iter()
+            .find(|(needle, _, _)| request.url.contains(needle))
+            .map(|(_, status, body)| (*status, body.as_bytes().to_vec()))
+            .unwrap_or((404, b"{\"ok\":false,\"error\":\"unscripted_url\"}".to_vec()));
+        self.requests.lock().unwrap().push(request);
+        Ok(NetworkHttpResponse {
+            status: matched.0,
+            headers: Vec::new(),
+            body: matched.1.clone(),
+            usage: NetworkUsage {
+                request_bytes,
+                response_bytes: matched.1.len() as u64,
+                resolved_ip: None,
+            },
+        })
+    }
+}
+
+/// Ordered scripted egress: serves responses strictly first-in-first-out,
+/// one per request, regardless of URL (404 when exhausted). Needed where the
+/// SAME endpoint must answer differently across sequential calls — e.g. the
+/// `chat.postMessage` as_user retry, which `UrlKeyedSlackEgress` cannot
+/// express because its first matching entry always wins.
+#[derive(Debug, Clone)]
+struct SequencedSlackEgress {
+    requests: Arc<std::sync::Mutex<Vec<NetworkHttpRequest>>>,
+    responses: Arc<std::sync::Mutex<std::collections::VecDeque<(u16, &'static str)>>>,
+}
+
+impl SequencedSlackEgress {
+    fn new(responses: Vec<(u16, &'static str)>) -> Self {
+        Self {
+            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+            responses: Arc::new(std::sync::Mutex::new(responses.into_iter().collect())),
+        }
+    }
+
+    fn requests(&self) -> Vec<NetworkHttpRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl NetworkHttpEgress for SequencedSlackEgress {
+    async fn execute(
+        &self,
+        request: NetworkHttpRequest,
+    ) -> Result<NetworkHttpResponse, NetworkHttpError> {
+        let request_bytes = request.body.len() as u64;
+        let matched = self
+            .responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .map(|(status, body)| (status, body.as_bytes().to_vec()))
+            .unwrap_or((
+                404,
+                b"{\"ok\":false,\"error\":\"unscripted_call\"}".to_vec(),
+            ));
+        self.requests.lock().unwrap().push(request);
+        Ok(NetworkHttpResponse {
+            status: matched.0,
+            headers: Vec::new(),
+            body: matched.1.clone(),
+            usage: NetworkUsage {
+                request_bytes,
+                response_bytes: matched.1.len() as u64,
+                resolved_ip: None,
+            },
+        })
+    }
+}
+
+/// Build the Slack services + seed the personal token for the enrichment
+/// contract tests, reusing the F-010 fixtures (`registry_with_slack_user_package`
+/// / `slack_policy` / `slack_user_scopes` / trust policy) with the URL-keyed
+/// egress above.
+macro_rules! slack_enrichment_services_for_test {
+    ($network:expr, $secret_store:expr $(,)?) => {
+        slack_enrichment_services_for_test!($network, $secret_store, slack_user_scopes())
+    };
+    ($network:expr, $secret_store:expr, $scopes:expr $(,)?) => {{
+        HostRuntimeServices::new(
+            Arc::new(registry_with_slack_user_package()),
+            Arc::new(filesystem_with_slack_user_package()),
+            Arc::new(governor_with_default_limit(sample_account())),
+            Arc::new(ObligatingAuthorizer::new(vec![
+                Obligation::ApplyNetworkPolicy {
+                    policy: slack_policy(),
+                },
+                Obligation::InjectCredentialAccountOnce {
+                    handle: SecretHandle::new("slack_user_token").unwrap(),
+                    provider: RuntimeCredentialAccountProviderId::new("slack_personal").unwrap(),
+                    setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+                        scopes: $scopes,
+                    },
+                    provider_scopes: $scopes,
+                    requester_extension: ExtensionId::new("slack").unwrap(),
+                },
+            ])),
+            ProcessServices::in_memory(),
+            CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        )
+        .with_secret_store($secret_store)
+        .with_runtime_credential_account_resolver(Arc::new(
+            FixedSlackRuntimeCredentialAccountResolver {
+                expected_scopes: $scopes,
+                result: Ok(SecretHandle::new("slack_personal_access").unwrap()),
+            },
+        ))
+        .with_trust_policy(Arc::new(slack_user_first_party_trust_policy()))
+        .try_with_host_http_egress($network)
+        .unwrap()
+        .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
+        .unwrap()
+    }};
+}
+
+async fn seed_slack_user_token(
+    secret_store: &FilesystemSecretStore<InMemoryBackend>,
+    scope: &ResourceScope,
+) {
+    secret_store
+        .put(
+            scope.clone(),
+            SecretHandle::new("slack_personal_access").unwrap(),
+            SecretMaterial::from("xoxp-fake-fixture-token"),
+            None,
+        )
+        .await
+        .unwrap();
+}
+
+const SLACK_HISTORY_BODY: &str = r#"{"ok":true,"has_more":false,"messages":[
+    {"type":"message","user":"U0AAA","text":"hey","ts":"1751970001.000100","thread_ts":"1751970001.000100","reply_count":2},
+    {"type":"message","user":"U0BBB","text":"yo","ts":"1751970002.000100"},
+    {"type":"message","user":"U0AAA","text":"again","ts":"1751970003.000100"}
+]}"#;
+const SLACK_USER_AAA_BODY: &str = r#"{"ok":true,"user":{"id":"U0AAA","name":"firat","is_bot":false,"profile":{"display_name":"Firat","real_name":"Firat Sertgoz"}}}"#;
+const SLACK_USER_BBB_BODY: &str = r#"{"ok":true,"user":{"id":"U0BBB","name":"ada","is_bot":false,"profile":{"display_name":"","real_name":"Ada Lovelace"}}}"#;
+const SLACK_AUTH_TEST_SELF_AAA_BODY: &str =
+    r#"{"ok":true,"user_id":"U0AAA","user":"firat","team_id":"T0TEAM"}"#;
+
+/// Digest bug regression (raw `U0ANBHZUUUR`-style ids in user-facing output):
+/// history messages must carry `user_display_name` resolved INSIDE the tool —
+/// one `users.info` call per DISTINCT author — so name resolution is the
+/// default path, not something the model has to remember to do.
+#[tokio::test]
+async fn slack_history_output_carries_display_names_alongside_raw_user_ids() {
+    let capability_id = CapabilityId::new("slack.get_conversation_history").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = UrlKeyedSlackEgress::new(vec![
+        ("conversations.history", 200, SLACK_HISTORY_BODY),
+        ("users.info?user=U0AAA", 200, SLACK_USER_AAA_BODY),
+        ("users.info?user=U0BBB", 200, SLACK_USER_BBB_BODY),
+        ("auth.test", 200, SLACK_AUTH_TEST_SELF_AAA_BODY),
+    ]);
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"channel": "D0FIRAT"}),
+        ))
+        .await
+        .unwrap();
+
+    let output = match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => completed.output,
+        other => panic!("expected completed outcome, got {other:?}"),
+    };
+    let messages = output["messages"].as_array().expect("messages array");
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0]["user"], json!("U0AAA"));
+    assert_eq!(
+        messages[0]["user_display_name"],
+        json!("Firat"),
+        "history output must resolve raw user ids to display names: {output}"
+    );
+    assert_eq!(
+        messages[1]["user_display_name"],
+        json!("Ada Lovelace"),
+        "empty display_name must fall back to real_name: {output}"
+    );
+    assert_eq!(messages[2]["user_display_name"], json!("Firat"));
+
+    // One users.info per DISTINCT author — the in-call cache, not per-message.
+    let lookups = network
+        .requests()
+        .iter()
+        .filter(|request| request.url.contains("users.info"))
+        .count();
+    assert_eq!(
+        lookups, 2,
+        "expected exactly one users.info lookup per distinct author"
+    );
+
+    // Identity-attribution regression ("says George is off but it's actually
+    // me"): the tool must mark which messages the CONNECTED account authored,
+    // so the model can attribute the requester's own words to the requester.
+    assert_eq!(
+        output["current_user_id"],
+        json!("U0AAA"),
+        "history output must surface the connected account's user id: {output}"
+    );
+    assert_eq!(
+        messages[0]["is_current_user"],
+        json!(true),
+        "messages authored by the connected account must be marked: {output}"
+    );
+    assert_eq!(
+        messages[1]["is_current_user"],
+        json!(false),
+        "other authors must be explicitly not-current-user: {output}"
+    );
+    assert_eq!(messages[2]["is_current_user"], json!(true));
+
+    // Threads: history returns only thread PARENTS (replies live behind
+    // conversations.replies), so the parent must advertise its reply_count —
+    // the model's cue to fetch the thread with slack.get_thread_replies.
+    assert_eq!(
+        messages[0]["reply_count"],
+        json!(2),
+        "thread parents must surface reply_count: {output}"
+    );
+    assert!(
+        messages[1].get("reply_count").is_none(),
+        "non-parents must not fabricate a reply_count: {output}"
+    );
+}
+
+const SLACK_REPLIES_BODY: &str = r#"{"ok":true,"has_more":false,"messages":[
+    {"type":"message","user":"U0AAA","text":"parent","ts":"1751970001.000100","thread_ts":"1751970001.000100","reply_count":2},
+    {"type":"message","user":"U0BBB","text":"first reply <@U0AAA> &amp; co","ts":"1751970005.000100","thread_ts":"1751970001.000100"},
+    {"type":"message","user":"U0AAA","text":"second reply","ts":"1751970006.000100","thread_ts":"1751970001.000100"}
+]}"#;
+
+/// Thread replies are NOT in `conversations.history`; `slack.get_thread_replies`
+/// must fetch them via `conversations.replies` with the same enrichment
+/// contract as history: resolved display names (one users.info per distinct
+/// author) and connected-account marking.
+#[tokio::test]
+async fn slack_thread_replies_resolve_names_and_mark_connected_account() {
+    let capability_id = CapabilityId::new("slack.get_thread_replies").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = UrlKeyedSlackEgress::new(vec![
+        ("conversations.replies", 200, SLACK_REPLIES_BODY),
+        ("users.info?user=U0AAA", 200, SLACK_USER_AAA_BODY),
+        ("users.info?user=U0BBB", 200, SLACK_USER_BBB_BODY),
+        ("auth.test", 200, SLACK_AUTH_TEST_SELF_AAA_BODY),
+    ]);
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"channel": "C0GENERAL", "thread_ts": "1751970001.000100"}),
+        ))
+        .await
+        .unwrap();
+
+    let output = match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => completed.output,
+        other => panic!("expected completed outcome, got {other:?}"),
+    };
+    let replies_request = network
+        .requests()
+        .into_iter()
+        .find(|request| request.url.contains("conversations.replies"))
+        .expect("get_thread_replies must call conversations.replies");
+    assert!(
+        replies_request.url.contains("channel=C0GENERAL")
+            && replies_request.url.contains("ts=1751970001.000100"),
+        "conversations.replies must be keyed by channel + thread ts: {}",
+        replies_request.url
+    );
+
+    let messages = output["messages"].as_array().expect("messages array");
+    assert_eq!(messages.len(), 3);
+    assert_eq!(
+        messages[1]["user_display_name"],
+        json!("Ada Lovelace"),
+        "thread replies must resolve display names like history does: {output}"
+    );
+    assert_eq!(
+        messages[1]["text"],
+        json!("first reply @Firat & co"),
+        "thread reply text must resolve in-text mentions and entities: {output}"
+    );
+    assert_eq!(
+        output["current_user_id"],
+        json!("U0AAA"),
+        "thread replies must surface the connected account: {output}"
+    );
+    assert_eq!(messages[0]["is_current_user"], json!(true));
+    assert_eq!(
+        messages[1]["is_current_user"],
+        json!(false),
+        "thread replies must mark the connected account's messages: {output}"
+    );
+}
+
+/// DM entries from `list_conversations` carry the counterpart's display name
+/// next to the raw `user` id (a DM has no `name` in Slack's API, so without
+/// this the model can only echo the raw id).
+#[tokio::test]
+async fn slack_list_conversations_dms_carry_counterpart_display_names() {
+    let capability_id = CapabilityId::new("slack.list_conversations").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = UrlKeyedSlackEgress::new(vec![
+        (
+            "conversations.list",
+            200,
+            r#"{"ok":true,"channels":[{"id":"D0FIRAT","is_im":true,"is_channel":false,"is_private":false,"is_mpim":false,"user":"U0AAA"}]}"#,
+        ),
+        ("users.info?user=U0AAA", 200, SLACK_USER_AAA_BODY),
+    ]);
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"types": "im"}),
+        ))
+        .await
+        .unwrap();
+
+    let output = match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => completed.output,
+        other => panic!("expected completed outcome, got {other:?}"),
+    };
+    let conversations = output["conversations"].as_array().expect("conversations");
+    assert_eq!(conversations[0]["user"], json!("U0AAA"));
+    assert_eq!(
+        conversations[0]["user_display_name"],
+        json!("Firat"),
+        "DM list entries must resolve the counterpart id to a display name: {output}"
+    );
+}
+
+/// `conversations.list` reality check: Slack returns channels you can SEE,
+/// not only ones you're in. The tool must surface `is_member` per channel
+/// (absent for DMs, which have no membership axis), pass an input `cursor`
+/// through, and return `next_cursor` so the model can page instead of
+/// concluding from the first page.
+#[tokio::test]
+async fn slack_list_conversations_surfaces_membership_and_pagination() {
+    let capability_id = CapabilityId::new("slack.list_conversations").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = UrlKeyedSlackEgress::new(vec![(
+        "conversations.list",
+        200,
+        r#"{"ok":true,"channels":[
+            {"id":"C0IN","name":"general","is_channel":true,"is_private":false,"is_im":false,"is_mpim":false,"is_member":true},
+            {"id":"C0OUT","name":"random","is_channel":true,"is_private":false,"is_im":false,"is_mpim":false,"is_member":false},
+            {"id":"D0FIRAT","is_im":true,"is_channel":false,"is_private":false,"is_mpim":false,"user":"U0AAA"}
+        ],"response_metadata":{"next_cursor":"dXNlcjpVMEc5V0ZYTlo="}}"#,
+    )]);
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"types": "public_channel,im", "cursor": "page-two-cursor"}),
+        ))
+        .await
+        .unwrap();
+
+    let output = match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => completed.output,
+        other => panic!("expected completed outcome, got {other:?}"),
+    };
+    let list_request = network
+        .requests()
+        .into_iter()
+        .find(|request| request.url.contains("conversations.list"))
+        .expect("list_conversations must call conversations.list");
+    assert!(
+        list_request.url.contains("cursor=page-two-cursor"),
+        "input cursor must be passed through to Slack: {}",
+        list_request.url
+    );
+
+    let conversations = output["conversations"].as_array().expect("conversations");
+    assert_eq!(conversations[0]["is_member"], json!(true));
+    assert_eq!(
+        conversations[1]["is_member"],
+        json!(false),
+        "channels merely visible to the token must be marked non-member: {output}"
+    );
+    assert!(
+        conversations[2].get("is_member").is_none(),
+        "DMs have no membership axis; is_member must be absent, not fabricated: {output}"
+    );
+    assert_eq!(
+        output["next_cursor"],
+        json!("dXNlcjpVMEc5V0ZYTlo="),
+        "next_cursor must surface so the model can page: {output}"
+    );
+}
+
+/// QA-10F exact-target regression: when the prompt already supplies a DM
+/// conversation ID, the capability must query that ID directly instead of
+/// scanning a potentially truncated conversation list and guessing among
+/// same-name users. Dispatch the real bundled WASM through HostRuntime so the
+/// capability-id routing, HTTP request, response mapping, and name enrichment
+/// are all covered together.
+#[tokio::test]
+async fn slack_get_conversation_info_resolves_exact_dm_counterpart() {
+    let capability_id = CapabilityId::new("slack.get_conversation_info").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = UrlKeyedSlackEgress::new(vec![
+        (
+            "conversations.info?channel=D0FIRAT",
+            200,
+            r#"{"ok":true,"channel":{"id":"D0FIRAT","is_channel":false,"is_private":true,"is_im":true,"is_mpim":false,"user":"U0BBB"}}"#,
+        ),
+        ("users.info?user=U0BBB", 200, SLACK_USER_BBB_BODY),
+    ]);
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id,
+            scope,
+            json!({"channel": "D0FIRAT"}),
+        ))
+        .await
+        .unwrap();
+
+    let output = match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => completed.output,
+        other => panic!("expected completed outcome, got {other:?}"),
+    };
+    assert_eq!(output["conversation"]["id"], json!("D0FIRAT"));
+    assert_eq!(output["conversation"]["user"], json!("U0BBB"));
+    assert_eq!(
+        output["conversation"]["user_display_name"],
+        json!("Ada Lovelace")
+    );
+
+    let requests = network.requests();
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.url.ends_with("conversations.info?channel=D0FIRAT")),
+        "exact conversation lookup was not sent: {requests:#?}"
+    );
+}
+
+/// A successful HTTP response without the requested conversation must not
+/// become a successful empty lookup that could send a later write elsewhere.
+#[tokio::test]
+async fn slack_get_conversation_info_rejects_missing_conversation_identity() {
+    let capability_id = CapabilityId::new("slack.get_conversation_info").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = UrlKeyedSlackEgress::new(vec![(
+        "conversations.info?channel=D0FIRAT",
+        200,
+        r#"{"ok":true,"channel":{"is_im":true,"user":"U0BBB"}}"#,
+    )]);
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let services = slack_enrichment_services_for_test!(network, Arc::clone(&secret_store));
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id,
+            scope,
+            json!({"channel": "D0FIRAT"}),
+        ))
+        .await
+        .unwrap();
+
+    let failure = match outcome {
+        RuntimeCapabilityOutcome::Failed(failure) => failure,
+        other => panic!("expected failed outcome, got {other:?}"),
+    };
+    assert_eq!(
+        failure.kind,
+        RuntimeFailureKind::OperationFailed,
+        "malformed exact lookup must fail instead of returning an empty conversation: {failure:?}"
+    );
+}
+
+/// A DM lookup without Slack's authoritative counterpart user cannot support
+/// a correct mention, even when the returned conversation ID is exact.
+#[tokio::test]
+async fn slack_get_conversation_info_rejects_dm_without_counterpart() {
+    let capability_id = CapabilityId::new("slack.get_conversation_info").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = UrlKeyedSlackEgress::new(vec![(
+        "conversations.info?channel=D0FIRAT",
+        200,
+        r#"{"ok":true,"channel":{"id":"D0FIRAT","is_channel":false,"is_private":true,"is_im":true,"is_mpim":false}}"#,
+    )]);
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let services = slack_enrichment_services_for_test!(network, Arc::clone(&secret_store));
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id,
+            scope,
+            json!({"channel": "D0FIRAT"}),
+        ))
+        .await
+        .unwrap();
+
+    let failure = match outcome {
+        RuntimeCapabilityOutcome::Failed(failure) => failure,
+        other => panic!("expected failed outcome, got {other:?}"),
+    };
+    assert_eq!(
+        failure.kind,
+        RuntimeFailureKind::OperationFailed,
+        "a DM without its authoritative counterpart must fail: {failure:?}"
+    );
+}
+
+/// Slack rejects `limit=1000` (the real maximum is 999). The guest must clamp
+/// out-of-range limits instead of letting the read fail on an avoidable
+/// invalid_limit round-trip.
+#[tokio::test]
+async fn slack_history_limit_is_clamped_to_slack_maximum() {
+    let capability_id = CapabilityId::new("slack.get_conversation_history").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = UrlKeyedSlackEgress::new(vec![
+        ("conversations.history", 200, SLACK_HISTORY_BODY),
+        ("users.info", 200, SLACK_USER_AAA_BODY),
+        ("auth.test", 200, SLACK_AUTH_TEST_SELF_AAA_BODY),
+    ]);
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"channel": "D0FIRAT", "limit": 5000}),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(_) => {}
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+    let history_request = network
+        .requests()
+        .into_iter()
+        .find(|request| request.url.contains("conversations.history"))
+        .expect("history must call conversations.history");
+    assert!(
+        history_request.url.contains("limit=999"),
+        "out-of-range limits must clamp to Slack's real maximum of 999: {}",
+        history_request.url
+    );
+}
+
+/// `search.messages` matches must carry the same author enrichment as history
+/// (`user_display_name`), surface `thread_ts` so threaded hits can be followed
+/// up with slack.get_thread_replies, and pass an input `page` through to
+/// Slack's paging.
+#[tokio::test]
+async fn slack_search_matches_carry_display_names_thread_ts_and_page() {
+    let capability_id = CapabilityId::new("slack.search_messages").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = UrlKeyedSlackEgress::new(vec![
+        (
+            "search.messages",
+            200,
+            r#"{"ok":true,"query":"deploy","messages":{"total":2,"matches":[
+                {"iid":"1","channel":{"id":"C0GENERAL","name":"general"},"type":"message","user":"U0AAA","username":"firat","ts":"1751970001.000100","text":"deploy went fine per <@U0BBB>","permalink":"https://x.slack.com/archives/C0GENERAL/p1751970001000100","thread_ts":"1751960000.000100"},
+                {"iid":"2","channel":{"id":"C0GENERAL","name":"general"},"type":"message","user":"U0BBB","username":"ada","ts":"1751970002.000100","text":"deploying again cc <@U0QQQQQQQ|contractor.jane>","permalink":"https://x.slack.com/archives/C0GENERAL/p1751970002000100"}
+            ]}}"#,
+        ),
+        ("users.info?user=U0AAA", 200, SLACK_USER_AAA_BODY),
+        ("users.info?user=U0BBB", 200, SLACK_USER_BBB_BODY),
+    ]);
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"query": "deploy", "page": 3}),
+        ))
+        .await
+        .unwrap();
+
+    let output = match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => completed.output,
+        other => panic!("expected completed outcome, got {other:?}"),
+    };
+    let search_request = network
+        .requests()
+        .into_iter()
+        .find(|request| request.url.contains("search.messages"))
+        .expect("search must call search.messages");
+    assert!(
+        search_request.url.contains("page=3"),
+        "input page must be passed through to Slack paging: {}",
+        search_request.url
+    );
+
+    let matches = output["matches"].as_array().expect("matches array");
+    assert_eq!(
+        matches[0]["user_display_name"],
+        json!("Firat"),
+        "search matches must resolve author display names like history does: {output}"
+    );
+    assert_eq!(
+        matches[1]["user_display_name"],
+        json!("Ada Lovelace"),
+        "empty display_name must fall back to real_name: {output}"
+    );
+    assert_eq!(
+        matches[0]["thread_ts"],
+        json!("1751960000.000100"),
+        "threaded search hits must surface thread_ts for follow-up: {output}"
+    );
+    assert!(
+        matches[1].get("thread_ts").is_none(),
+        "non-threaded matches must not fabricate thread_ts: {output}"
+    );
+    let first_text = matches[0]["text"].as_str().expect("text");
+    assert!(
+        first_text.contains("@Ada Lovelace") && !first_text.contains("<@U"),
+        "search match text must resolve in-text mentions like history does: {output}"
+    );
+    // Digest/names-not-ids (qa_9c) rides the SAME resolver as quoted-message
+    // hygiene (qa_10i): a labeled mention whose id can't be resolved via
+    // users.info must render Slack's inline label rather than leak the raw id.
+    let second_text = matches[1]["text"].as_str().expect("text");
+    assert!(
+        second_text.contains("@contractor.jane") && !second_text.contains("<@U0QQQQQQQ"),
+        "search/digest text must fall back to the inline label for unresolvable mentions: {output}"
+    );
+}
+
+/// Inbound entity hygiene (qa_10i): message text arrives with raw Slack
+/// control tokens — `<@U…>` mentions, `<#C…|name>` channel refs, HTML
+/// entities — and the model leaks the raw ids into user-facing replies.
+/// The tool must resolve in-text mentions to `@Display Name` via the same
+/// users.info cache/budget as author enrichment; a labeled mention whose id
+/// can't be resolved falls back to Slack's own inline `|label` (never leaking
+/// the raw id), while a bare unresolved mention stays as-is (never fabricated).
+/// Channel refs render as `#name`, and &amp;/&lt;/&gt; decode.
+#[tokio::test]
+async fn slack_history_text_resolves_in_text_entities_to_display_names() {
+    let capability_id = CapabilityId::new("slack.get_conversation_history").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = UrlKeyedSlackEgress::new(vec![
+        (
+            "conversations.history",
+            200,
+            r#"{"ok":true,"has_more":false,"messages":[
+                {"type":"message","user":"U0AAA","text":"ENTITYMSG please sync with <@U0BBB>","ts":"1751970001.000100"},
+                {"type":"message","user":"U0AAA","text":"see <@U0AAA|firat> &amp; <#C0GENERAL|general> re &lt;q3&gt; <@U0ZZZZZZZ> cc <@U0ZZZZZZZ|external.person> <https://x.example/a|link>","ts":"1751970002.000100"}
+            ]}"#,
+        ),
+        ("users.info?user=U0AAA", 200, SLACK_USER_AAA_BODY),
+        ("users.info?user=U0BBB", 200, SLACK_USER_BBB_BODY),
+    ]);
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"channel": "D0FIRAT"}),
+        ))
+        .await
+        .unwrap();
+
+    let output = match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => completed.output,
+        other => panic!("expected completed outcome, got {other:?}"),
+    };
+    let messages = output["messages"].as_array().expect("messages array");
+    let first_text = messages[0]["text"].as_str().expect("text");
+    assert!(
+        first_text.contains("@Ada Lovelace"),
+        "in-text mentions must resolve to display names: {output}"
+    );
+    assert!(
+        !first_text.contains("<@U"),
+        "resolved mention tokens must not leak raw user ids: {output}"
+    );
+
+    let second_text = messages[1]["text"].as_str().expect("text");
+    assert!(
+        second_text.contains("@Firat"),
+        "labeled mention tokens (<@U…|label>) must resolve to display names: {output}"
+    );
+    assert!(
+        second_text.contains("#general"),
+        "channel refs (<#C…|name>) must render as #name: {output}"
+    );
+    assert!(
+        second_text.contains("& ") && second_text.contains("<q3>"),
+        "HTML entities (&amp; &lt; &gt;) must decode: {output}"
+    );
+    assert!(
+        second_text.contains("<@U0ZZZZZZZ>"),
+        "unresolved BARE mention tokens must stay as-is, never fabricated: {output}"
+    );
+    // A LABELED mention whose id can't be resolved via users.info must fall
+    // back to Slack's own inline label (`@external.person`) instead of leaking
+    // the raw `<@U0ZZZZZZZ|external.person>` token — the same inline-label
+    // fallback the `<#C…|name>` channel-ref arm uses. This is the qa_10i leak
+    // vector: a labeled mention that resolution missed still carries the raw id.
+    assert!(
+        second_text.contains("@external.person"),
+        "labeled mention with an unresolvable id must render Slack's inline label: {output}"
+    );
+    assert!(
+        !second_text.contains("<@U0ZZZZZZZ|"),
+        "labeled unresolvable mention must not leak the raw <@U…|label> token: {output}"
+    );
+    assert!(
+        second_text.contains("<https://x.example/a|link>"),
+        "link tokens must pass through untouched: {output}"
+    );
+
+    // In-text ids ride the SAME lookup cache and budget as author
+    // enrichment: U0AAA (author + labeled mention) dedupes to one lookup,
+    // U0BBB and the unresolvable U0ZZZZZZZ take one attempt each.
+    let lookups = network
+        .requests()
+        .iter()
+        .filter(|request| request.url.contains("users.info"))
+        .count();
+    assert_eq!(
+        lookups, 3,
+        "in-text mention ids must share the users.info cache/budget"
+    );
+}
+
+/// Wrong-identity regression (qa_10f): `chat.postMessage` with a CLASSIC
+/// Slack app user token defaults to as_user=false, which attributes the
+/// post to the APP (bot_id/bot_profile) instead of the connected user —
+/// the probe found the mention message authored `bot: True`. The tool's
+/// contract is "posts as you", so the payload must pin `as_user: true`.
+#[tokio::test]
+async fn slack_send_message_posts_as_the_connected_user() {
+    let capability_id = CapabilityId::new("slack.send_message").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = UrlKeyedSlackEgress::new(vec![(
+        "chat.postMessage",
+        200,
+        r#"{"ok":true,"channel":"D0FIRAT","ts":"1751970009.000100"}"#,
+    )]);
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let services = slack_enrichment_services_for_test!(
+        network.clone(),
+        Arc::clone(&secret_store),
+        slack_user_write_scopes()
+    );
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"channel": "D0FIRAT", "text": "hey <@U0BBB> MENTION_X"}),
+        ))
+        .await
+        .unwrap();
+
+    let output = match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => completed.output,
+        other => panic!("expected completed outcome, got {other:?}"),
+    };
+    assert_eq!(output["ts"], json!("1751970009.000100"));
+
+    let post_request = network
+        .requests()
+        .into_iter()
+        .find(|request| request.url.contains("chat.postMessage"))
+        .expect("send_message must call chat.postMessage");
+    let body: serde_json::Value = serde_json::from_slice(&post_request.body).unwrap();
+    assert_eq!(
+        body["as_user"],
+        json!(true),
+        "user-token posts must pin as_user=true so classic apps attribute the \
+         message to the connected user, not the app: {body}"
+    );
+    assert_eq!(body["text"], json!("hey <@U0BBB> MENTION_X"));
+}
+
+/// Granular (new) Slack apps reject the legacy as_user flag with
+/// `as_user_not_supported` — their user-token posts are always authored by
+/// the user — so the send must retry exactly once without the flag instead
+/// of failing.
+#[tokio::test]
+async fn slack_send_message_retries_without_as_user_for_granular_apps() {
+    let capability_id = CapabilityId::new("slack.send_message").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = SequencedSlackEgress::new(vec![
+        (200, r#"{"ok":false,"error":"as_user_not_supported"}"#),
+        (
+            200,
+            r#"{"ok":true,"channel":"D0FIRAT","ts":"1751970010.000100"}"#,
+        ),
+    ]);
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let services = slack_enrichment_services_for_test!(
+        network.clone(),
+        Arc::clone(&secret_store),
+        slack_user_write_scopes()
+    );
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"channel": "D0FIRAT", "text": "hello again"}),
+        ))
+        .await
+        .unwrap();
+
+    let output = match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => completed.output,
+        other => panic!("expected completed outcome despite as_user rejection, got {other:?}"),
+    };
+    assert_eq!(output["ts"], json!("1751970010.000100"));
+
+    let requests = network.requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "exactly one retry without as_user is allowed"
+    );
+    let first: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let second: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+    assert_eq!(first["as_user"], json!(true));
+    assert!(
+        second.get("as_user").is_none(),
+        "the granular-app retry must drop the legacy as_user flag: {second}"
+    );
+    assert_eq!(second["text"], json!("hello again"));
+}
+
+/// Enrichment is best-effort: a failing `users.info` (missing scope, outage)
+/// must never break the read itself — raw ids still return, names are simply
+/// absent.
+#[tokio::test]
+async fn slack_history_read_survives_users_info_failure_without_names() {
+    let capability_id = CapabilityId::new("slack.get_conversation_history").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = UrlKeyedSlackEgress::new(vec![
+        ("conversations.history", 200, SLACK_HISTORY_BODY),
+        ("users.info", 200, r#"{"ok":false,"error":"missing_scope"}"#),
+    ]);
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"channel": "D0FIRAT"}),
+        ))
+        .await
+        .unwrap();
+
+    let output = match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => completed.output,
+        other => panic!("expected completed outcome despite users.info failure, got {other:?}"),
+    };
+    let messages = output["messages"].as_array().expect("messages array");
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0]["user"], json!("U0AAA"));
+    assert!(
+        messages[0].get("user_display_name").is_none(),
+        "no display name should be fabricated when users.info fails: {output}"
+    );
+    // auth.test is unscripted here (fixture 404s it): identity marking must
+    // degrade to absent — never a fabricated attribution, never a failed read.
+    assert!(
+        output.get("current_user_id").is_none(),
+        "current_user_id must be absent when auth.test fails: {output}"
+    );
+    assert!(
+        messages[0].get("is_current_user").is_none(),
+        "is_current_user must be absent when the connected identity is unknown: {output}"
+    );
+}
+
+/// Identity-attribution regression, part 2: the model must be able to ask
+/// "who am I on Slack?" directly. `slack.whoami` resolves the CONNECTED
+/// account via `auth.test` + a best-effort `users.info` for the display name.
+#[tokio::test]
+async fn slack_whoami_resolves_connected_identity() {
+    let capability_id = CapabilityId::new("slack.whoami").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = UrlKeyedSlackEgress::new(vec![
+        ("auth.test", 200, SLACK_AUTH_TEST_SELF_AAA_BODY),
+        ("users.info?user=U0AAA", 200, SLACK_USER_AAA_BODY),
+    ]);
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({}),
+        ))
+        .await
+        .unwrap();
+
+    let output = match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => completed.output,
+        other => panic!("expected completed outcome, got {other:?}"),
+    };
+    assert_eq!(output["ok"], json!(true));
+    assert_eq!(
+        output["user_id"],
+        json!("U0AAA"),
+        "whoami must return the connected account's user id: {output}"
+    );
+    assert_eq!(
+        output["user_display_name"],
+        json!("Firat"),
+        "whoami must resolve the connected account's display name: {output}"
+    );
+}
+
+/// Structured guest errors: a Slack `ok:false` code must reach the model as
+/// actionable failure detail, not be erased to a generic "the tool operation
+/// failed". `channel_not_found` is model-fixable (list conversations, pick
+/// another id), so it must classify as InvalidInput AND carry the code in the
+/// model-visible failure message.
+#[tokio::test]
+async fn slack_channel_not_found_surfaces_code_in_model_visible_failure() {
+    let capability_id = CapabilityId::new("slack.get_conversation_history").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = UrlKeyedSlackEgress::new(vec![(
+        "conversations.history",
+        200,
+        r#"{"ok":false,"error":"channel_not_found"}"#,
+    )]);
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"channel": "C0MISSING"}),
+        ))
+        .await
+        .unwrap();
+
+    let failure = match outcome {
+        RuntimeCapabilityOutcome::Failed(failure) => failure,
+        other => panic!("expected failed outcome, got {other:?}"),
+    };
+    assert_eq!(
+        failure.kind,
+        RuntimeFailureKind::InvalidInput,
+        "channel_not_found is a model-fixable input error: {failure:?}"
+    );
+    let message = failure.message.as_deref().unwrap_or_default();
+    assert!(
+        message.contains("channel_not_found"),
+        "model-visible failure detail must carry the Slack error code, got: {message:?}"
+    );
+}
+
+const SLACK_USER_STATUS_BODY: &str = r#"{"ok":true,"user":{"id":"U0CCC","name":"george","is_bot":false,"tz":"America/New_York","tz_label":"Eastern Daylight Time","profile":{"display_name":"George","real_name":"George Harrison","title":"Guitarist","status_text":"On vacation until July 20","status_emoji":":palm_tree:","status_expiration":1753027199}}}"#;
+
+/// Presence honesty: `get_user_info` must surface the profile fields an
+/// "is George around?" question actually needs — Slack status text/emoji,
+/// timezone, title — instead of hiding them and letting the model guess.
+#[tokio::test]
+async fn slack_get_user_info_surfaces_status_and_timezone() {
+    let capability_id = CapabilityId::new("slack.get_user_info").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network =
+        UrlKeyedSlackEgress::new(vec![("users.info?user=U0CCC", 200, SLACK_USER_STATUS_BODY)]);
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"user_id": "U0CCC"}),
+        ))
+        .await
+        .unwrap();
+
+    let output = match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => completed.output,
+        other => panic!("expected completed outcome, got {other:?}"),
+    };
+    let user = &output["user"];
+    assert_eq!(
+        user["status_text"],
+        json!("On vacation until July 20"),
+        "get_user_info must surface the Slack status text: {output}"
+    );
+    assert_eq!(user["status_emoji"], json!(":palm_tree:"));
+    assert_eq!(user["status_expiration"], json!(1_753_027_199));
+    assert_eq!(
+        user["tz"],
+        json!("America/New_York"),
+        "get_user_info must surface the user's timezone: {output}"
+    );
+    assert_eq!(user["tz_label"], json!("Eastern Daylight Time"));
+    assert_eq!(user["title"], json!("Guitarist"));
+}
+
+/// Review follow-up (PR #5898): name resolution is capped so a busy channel
+/// cannot turn one history read into dozens of sequential `users.info`
+/// round-trips (the WASM tool is synchronous). First-seen authors win the
+/// budget; authors past the cap keep raw ids only — the same degraded shape
+/// as a failed lookup, which the model already tolerates.
+#[tokio::test]
+async fn slack_history_name_resolution_is_capped_per_call() {
+    let capability_id = CapabilityId::new("slack.get_conversation_history").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let mut messages = Vec::new();
+    for index in 0..30 {
+        messages.push(format!(
+            r#"{{"type":"message","user":"U{index:04}","text":"m{index}","ts":"1751970{index:03}.000100"}}"#
+        ));
+    }
+    let history_body = Box::leak(
+        format!(
+            r#"{{"ok":true,"has_more":false,"messages":[{}]}}"#,
+            messages.join(",")
+        )
+        .into_boxed_str(),
+    );
+    let network = UrlKeyedSlackEgress::new(vec![
+        ("conversations.history", 200, history_body),
+        ("users.info", 200, SLACK_USER_AAA_BODY),
+    ]);
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
+    seed_slack_user_token(&secret_store, &scope).await;
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"channel": "C0BUSY"}),
+        ))
+        .await
+        .unwrap();
+
+    let output = match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => completed.output,
+        other => panic!("expected completed outcome, got {other:?}"),
+    };
+    let lookups = network
+        .requests()
+        .iter()
+        .filter(|request| request.url.contains("users.info"))
+        .count();
+    assert_eq!(
+        lookups, 25,
+        "users.info lookups must be capped at 25 per call, first-seen order"
+    );
+    let messages = output["messages"].as_array().expect("messages array");
+    assert!(
+        messages[24].get("user_display_name").is_some(),
+        "authors inside the lookup budget must be named: {output}"
+    );
+    assert!(
+        messages[25].get("user_display_name").is_none(),
+        "authors past the lookup budget keep raw ids only: {output}"
+    );
 }

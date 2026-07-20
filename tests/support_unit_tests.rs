@@ -256,9 +256,61 @@ mod test_channel_tests {
             )
             .await
             .unwrap();
+        channel
+            .send_status(
+                StatusUpdate::tool_started(
+                    "shell".to_string(),
+                    &serde_json::json!({"command": "cargo run zizmor --version"}),
+                ),
+                &metadata,
+            )
+            .await
+            .unwrap();
 
+        // The identity accessor stays bare-name (several suites compare with
+        // `==`); the display accessor carries the argument-prefixed form the
+        // live-canary assertions grep. Regression: after engine v2's removal no
+        // accessor surfaced the detail, so "did any shell attempt mention
+        // zizmor" could never see the command.
         let started = channel.tool_calls_started();
-        assert_eq!(started, vec!["memory_search", "echo"]);
+        assert_eq!(started, vec!["memory_search", "echo", "shell"]);
+        let display = channel.tool_call_display_names();
+        assert_eq!(
+            display,
+            vec!["memory_search", "echo", "shell(cargo run zizmor --version)"]
+        );
+    }
+
+    /// Regression for the dropped routine-notify receiver: the rig used to
+    /// construct the RoutineEngine with `(notify_tx, _notify_rx)`, so every
+    /// routine-path notification died with "channel closed" and the only
+    /// coverage was the ignored live mission canary. This pins the forwarder
+    /// seam the rig now wires: a response sent down the notify channel must
+    /// land in the TestChannel's captured responses.
+    #[tokio::test]
+    async fn routine_notify_forwarder_delivers_into_test_channel() {
+        use ironclaw::channels::OutgoingResponse;
+
+        let channel = Arc::new(TestChannel::new());
+        let (notify_tx, notify_rx) = tokio::sync::mpsc::channel::<OutgoingResponse>(4);
+        crate::support::test_rig::spawn_routine_notify_forwarder(notify_rx, Arc::clone(&channel));
+
+        notify_tx
+            .send(OutgoingResponse {
+                content: "✅ *Routine 'daily-news-digest'*: ok".to_string(),
+                thread_id: None,
+                attachments: Vec::new(),
+                inline_attachments: Vec::new(),
+                metadata: serde_json::json!({"source": "routine"}),
+            })
+            .await
+            .expect("forwarder receiver must be alive");
+
+        let responses = channel
+            .wait_for_responses(1, std::time::Duration::from_secs(5))
+            .await;
+        assert_eq!(responses.len(), 1, "routine notification must be captured");
+        assert!(responses[0].content.contains("daily-news-digest"));
     }
 
     #[tokio::test]
@@ -368,12 +420,12 @@ mod reborn_support_tests {
     use async_trait::async_trait;
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{
-        AgentId, CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
-        NetworkMethod, NetworkPolicy, NetworkTargetPattern, ProjectId, ResourceScope, TenantId,
-        ThreadId, UserId, VirtualPath,
+        AgentId, Blocked, CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions,
+        MountView, NetworkMethod, NetworkPolicy, NetworkTargetPattern, ProjectId, Resolution,
+        ResourceScope, TenantId, ThreadId, UserId, VirtualPath,
     };
     use ironclaw_llm::{LlmProvider, ToolCompletionRequest};
-    use ironclaw_loop_support::{
+    use ironclaw_loop_host::{
         HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessage,
         HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
         HostManagedToolResultContent,
@@ -403,12 +455,13 @@ mod reborn_support_tests {
     };
     use ironclaw_turns::{
         CancelRunRequest, CancelRunResponse, GetRunStateRequest, LoopMessageRef,
-        ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
-        RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnCoordinator,
-        TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+        ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest,
+        RetryTurnResponse, RunProfileId, RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse,
+        ThreadBusy, TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
+        TurnStatus,
         events::EventCursor,
         run_profile::{
-            CapabilityBatchInvocation, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
+            CapabilityBatchInvocation, CapabilityInputRef, CapabilityInvocation,
             LoopCapabilityPort, ModelProfileId, ParentLoopOutput, VisibleCapabilityRequest,
         },
     };
@@ -1258,8 +1311,8 @@ mod reborn_support_tests {
         assert!(outcome.stopped_on_suspension);
         assert!(
             matches!(
-                outcome.outcomes.as_slice(),
-                [CapabilityOutcome::ApprovalRequired { .. }]
+                outcome.resolutions.as_slice(),
+                [Resolution::Blocked(Blocked::Approval(_))]
             ),
             "batch should return only the first suspension"
         );
@@ -2420,6 +2473,7 @@ mod reborn_support_tests {
                     thread_id,
                     vec![ProductProjectionItem::Text {
                         id: format!("item:{thread_id}"),
+                        run_id: None,
                         body: body.to_string(),
                     }],
                 )
@@ -2574,6 +2628,13 @@ mod reborn_support_tests {
             _request: ResumeTurnRequest,
         ) -> Result<ResumeTurnResponse, TurnError> {
             panic!("resume_turn is not used by reborn support tests")
+        }
+
+        async fn retry_turn(
+            &self,
+            _request: RetryTurnRequest,
+        ) -> Result<RetryTurnResponse, TurnError> {
+            panic!("retry_turn is not used by reborn support tests")
         }
 
         async fn cancel_run(

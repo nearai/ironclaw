@@ -10,6 +10,9 @@ homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "legacy"
+
 [features]
 default = ["clipboard"]
 clipboard = ["dep:arboard", "dep:image"]

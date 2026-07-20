@@ -224,8 +224,8 @@ Update the approval/auth prompt text rendered by
 2. Post live-run gate prompts into the originating message's thread
    (`thread_ts` on the prompt post) — pure UX, reduces channel noise;
    B already makes correctness independent of where the prompt lands.
-3. Slack DM pairing writes `CommunicationPreferenceRecord` (triggered
-   push default).
+3. Slack OAuth-bound DM provisioning writes `CommunicationPreferenceRecord`
+   (triggered push default).
 4. Decide top-level channel `approve` semantics (currently noop by
    design at `payload.rs:147-150`).
 5. Per-gate conversation routing for concurrent gates in one DM. The
@@ -242,7 +242,7 @@ Update the approval/auth prompt text rendered by
 
 | Concern | Assessment |
 |---|---|
-| Authorization bypass | None added. Route records redirect scope only; actor always comes from the binding/pairing services and the inner interaction services authorize. Mirrors the existing wrapper's user-mismatch-forwards-unchanged stance. |
+| Authorization bypass | None added. Route records redirect scope only; actor always comes from the binding/auth services and the inner interaction services authorize. Mirrors the existing wrapper's user-mismatch-forwards-unchanged stance. |
 | Replay/staleness | 48h TTL + opportunistic sweep already exist; fallback re-checks `is_expired`. Idempotency keys (`approval_resolution_idempotency_key`) unchanged. |
 | Ambiguity | Conversation-keyed lookup is one-record-per-thread; no `AmbiguousGate` regression. Multiple gates in one run posting to the same thread overwrite — last prompt wins, acceptable because only one gate blocks a run at a time. |
 | Regression on working flows | Fallback fires only after today's paths fail (`BindingRequired`/`MissingGate`), so DM explicit-ref and WebUI flows are untouched. `list_pending` invariant preserved. |

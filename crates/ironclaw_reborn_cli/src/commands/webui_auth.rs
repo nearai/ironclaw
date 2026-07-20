@@ -1,4 +1,4 @@
-//! WebChat v2 auth-surface assembly for `ironclaw-reborn serve`.
+//! WebChat v2 auth-surface assembly for `ironclaw serve`.
 //!
 //! Owns the one place that turns host config into the pair the listener
 //! needs: the `WebuiAuthenticator` the protected v2 routes use, plus the
@@ -15,9 +15,12 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId};
 use ironclaw_reborn_composition::{
-    LocalTriggerAccessStore, PublicRouteMount, RebornIdentityResolver, WebuiAuthenticator,
+    LocalTriggerAccessStore, PublicRouteMount, RebornIdentityResolver,
 };
-use ironclaw_reborn_webui_ingress::{SignedSessionLoginConfig, build_signed_session_login};
+use ironclaw_webui::{
+    CompositeAuthenticator, SessionAuthenticator, SignedSessionLoginConfig, WebuiAuthenticator,
+    build_signed_session_login, empty_webui_v2_auth_providers_mount, signed_session_store,
+};
 use secrecy::SecretString;
 
 use crate::commands::serve_sso::SsoStartupConfig;
@@ -47,7 +50,9 @@ pub(crate) struct LocalTriggerAccessBootstrapConfig {
 /// Build the auth surface from resolved startup config.
 ///
 /// With no SSO provider configured (`sso_startup` is `None`), the listener
-/// keeps its plain env-bearer authenticator and mounts no public routes.
+/// keeps its env-bearer authenticator, also validates signed session tokens
+/// minted by the admin API, and mounts only the inert auth surface so
+/// `/auth/providers` can return an empty provider list.
 /// With providers configured, this layers the fail-closed email-domain
 /// admission adapter on top of the runtime-owned canonical Reborn identity
 /// resolver and hands the result to the ingress signed-session builder.
@@ -70,12 +75,28 @@ pub(crate) async fn build_webui_auth_surface(
     local_trigger_access: Option<LocalTriggerAccessBootstrapConfig>,
 ) -> anyhow::Result<WebuiAuthSurface> {
     let Some(sso) = sso_startup else {
-        // No SSO providers: keep the env-bearer authenticator and mount no
-        // public routes. There are no SSO logins to seed local trigger
-        // access for, so any bootstrap config is unused on this path.
+        // No SSO providers: no public login routes, and no SSO logins to seed
+        // local trigger access for (bootstrap config is unused here). But the
+        // serve layer *always* wires the admin-API token minter, which mints
+        // signed **session** tokens (the user-create bearer). Those validate
+        // only through a `SessionAuthenticator` over the same signed store —
+        // absent it, an admin-created user's API token would 401 on every
+        // request (regression caught by `tests/e2e/scenarios/test_admin_api.py`).
+        // Compose the env-bearer (operator) authenticator with a session
+        // authenticator over that store so minted tokens work without SSO;
+        // operator capabilities still follow the env token only, so the session
+        // bearer stays non-operator.
+        let session_authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(
+            SessionAuthenticator::new(signed_session_store(&session_signing_secret, &tenant_id)),
+        );
+        let authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(CompositeAuthenticator::new(
+            session_authenticator,
+            env_authenticator,
+        ));
+        let public_mount = empty_webui_v2_auth_providers_mount();
         return Ok(WebuiAuthSurface {
-            authenticator: env_authenticator,
-            public_mount: None,
+            authenticator,
+            public_mount: Some(public_mount),
         });
     };
 
@@ -111,7 +132,7 @@ pub(crate) async fn build_webui_auth_surface(
     .expect("non-empty providers always produce login wiring"); // safety: sso_startup_config_from_env returns None when providers is empty, so this Some(sso) arm always has a non-empty provider list
 
     eprintln!(
-        "ironclaw-reborn: WebChat v2 SSO login mounted — \
+        "ironclaw: WebChat v2 SSO login mounted — \
          see GET /auth/providers for the enabled set"
     );
     Ok(WebuiAuthSurface {
@@ -137,10 +158,8 @@ mod tests {
     use super::*;
 
     use async_trait::async_trait;
-    use ironclaw_reborn_composition::WebuiAuthentication;
-    use ironclaw_reborn_webui_ingress::{
-        OAuthError, OAuthProvider, OAuthProviderName, OAuthUserProfile,
-    };
+    use ironclaw_webui::WebuiAuthentication;
+    use ironclaw_webui::{OAuthError, OAuthProvider, OAuthProviderName, OAuthUserProfile};
 
     /// Bearer verifier that accepts nothing — stands in for the env-bearer
     /// authenticator without pulling in its construction requirements.
@@ -213,10 +232,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_sso_keeps_env_authenticator_and_mounts_no_public_routes() {
-        // With no SSO configured the surface is the plain env-bearer
-        // authenticator and no public login routes — the absent-resolver
-        // check must not fire on this path, and a bootstrap config is unused.
+    async fn no_sso_composes_env_and_session_auth_and_mounts_empty_provider_route() {
+        // With no SSO configured the surface still needs env-bearer access
+        // plus signed-session bearer access for admin-created users. It also
+        // mounts an inert public auth surface for provider discovery. The
+        // absent-resolver check must not fire on this path, and a bootstrap
+        // config is unused.
         let result = build_webui_auth_surface(
             None,
             None,
@@ -229,8 +250,11 @@ mod tests {
 
         match result {
             Ok(surface) => assert!(
-                surface.public_mount.is_none(),
-                "no SSO must mount no public login routes"
+                surface.public_mount.as_ref().is_some_and(|mount| {
+                    mount.descriptors.len() == 1
+                        && mount.descriptors[0].route_pattern().as_str() == "/auth/providers"
+                }),
+                "no SSO must mount only /auth/providers with an empty list"
             ),
             Err(error) => panic!("no SSO is a valid configuration, got error: {error}"),
         }

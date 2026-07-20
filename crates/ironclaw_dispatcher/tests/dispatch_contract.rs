@@ -1,16 +1,13 @@
 mod support;
 
-use support::legacy_capability_fixture_to_v2;
+use support::{RecordingExecutor, legacy_capability_fixture_to_v2};
 
-use std::sync::{Arc, Mutex};
-
-use async_trait::async_trait;
 use ironclaw_dispatcher::*;
 use ironclaw_extensions::*;
 use ironclaw_filesystem::*;
 use ironclaw_host_api::*;
 use ironclaw_resources::*;
-use serde_json::{Value, json};
+use serde_json::json;
 
 #[tokio::test]
 async fn dispatcher_routes_wasm_capability_through_registered_adapter() {
@@ -19,32 +16,30 @@ async fn dispatcher_routes_wasm_capability_through_registered_adapter() {
     registry
         .insert(package_from_manifest(WASM_MANIFEST))
         .unwrap();
-    let adapter = RecordingAdapter::new(RuntimeKind::Wasm, json!({"message": "hello adapter"}));
+    let executor = RecordingExecutor::new()
+        .static_output(RuntimeKind::Wasm, json!({"message": "hello adapter"}));
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                max_output_bytes: Some(10_000),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_concurrency_slots(1)
+                .set_max_output_bytes(10_000),
         )
         .unwrap();
 
-    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
-        .with_runtime_adapter(RuntimeKind::Wasm, &adapter);
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor, executor.clone());
     let result = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
-            },
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_output_bytes(10_000),
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "hello dispatcher"}),
@@ -60,7 +55,7 @@ async fn dispatcher_routes_wasm_capability_through_registered_adapter() {
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert!(governor.usage_for(&account).output_bytes > 0);
 
-    let requests = adapter.requests();
+    let requests = executor.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].provider, ExtensionId::new("echo").unwrap());
     assert_eq!(
@@ -68,6 +63,7 @@ async fn dispatcher_routes_wasm_capability_through_registered_adapter() {
         CapabilityId::new("echo.say").unwrap()
     );
     assert_eq!(requests[0].runtime, RuntimeKind::Wasm);
+    assert_eq!(requests[0].lane, RuntimeLane::Wasm);
     assert_eq!(requests[0].input, json!({"message": "hello dispatcher"}));
 }
 
@@ -78,7 +74,7 @@ async fn dispatcher_routes_script_capability_through_registered_adapter() {
     registry
         .insert(package_from_manifest(SCRIPT_MANIFEST))
         .unwrap();
-    let adapter = RecordingAdapter::new(
+    let executor = RecordingExecutor::new().static_output(
         RuntimeKind::Script,
         json!({
             "message": "hello script adapter"
@@ -90,27 +86,24 @@ async fn dispatcher_routes_script_capability_through_registered_adapter() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                max_process_count: Some(10),
-                max_output_bytes: Some(10_000),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_concurrency_slots(1)
+                .set_max_process_count(10)
+                .set_max_output_bytes(10_000),
         )
         .unwrap();
 
-    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
-        .with_runtime_adapter(RuntimeKind::Script, &adapter);
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor, executor);
     let result = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("script.echo").unwrap(),
             scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
-            },
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_process_count(1)
+                .set_output_bytes(10_000),
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "hello script dispatcher"}),
@@ -137,34 +130,31 @@ async fn dispatcher_redacts_runtime_adapter_failure_details() {
     registry
         .insert(package_from_manifest(SCRIPT_MANIFEST))
         .unwrap();
-    let adapter =
-        RecordingAdapter::failing(RuntimeKind::Script, RuntimeDispatchErrorKind::ExitFailure);
+    let executor = RecordingExecutor::new()
+        .failing(RuntimeKind::Script, RuntimeDispatchErrorKind::ExitFailure);
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     governor
         .set_limit(
             ResourceAccount::tenant(scope.tenant_id.clone()),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                max_process_count: Some(10),
-                max_output_bytes: Some(10_000),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_concurrency_slots(1)
+                .set_max_process_count(10)
+                .set_max_output_bytes(10_000),
         )
         .unwrap();
 
-    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
-        .with_runtime_adapter(RuntimeKind::Script, &adapter);
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor, executor);
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("script.echo").unwrap(),
             scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
-            },
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_process_count(1)
+                .set_output_bytes(10_000),
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "redact stderr"}),
@@ -190,7 +180,7 @@ async fn dispatcher_routes_mcp_capability_through_registered_adapter() {
     registry
         .insert(package_from_manifest(MCP_MANIFEST))
         .unwrap();
-    let adapter = RecordingAdapter::new(
+    let executor = RecordingExecutor::new().static_output(
         RuntimeKind::Mcp,
         json!({
             "matches": ["ironclaw"]
@@ -202,27 +192,24 @@ async fn dispatcher_routes_mcp_capability_through_registered_adapter() {
     governor
         .set_limit(
             account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                max_process_count: Some(1),
-                max_output_bytes: Some(10_000),
-                ..ResourceLimits::default()
-            },
+            ResourceLimits::default()
+                .set_max_concurrency_slots(1)
+                .set_max_process_count(1)
+                .set_max_output_bytes(10_000),
         )
         .unwrap();
 
-    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
-        .with_runtime_adapter(RuntimeKind::Mcp, &adapter);
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor, executor);
     let result = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("github-mcp.search").unwrap(),
             scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
-            },
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_process_count(1)
+                .set_output_bytes(10_000),
             mounts: None,
             resource_reservation: None,
             input: json!({"query": "ironclaw"}),
@@ -249,18 +236,16 @@ async fn dispatcher_fails_unknown_capability_without_reserving_resources() {
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
-    let adapter = RecordingAdapter::new(RuntimeKind::Wasm, json!({}));
+    let executor = RecordingExecutor::new().static_output(RuntimeKind::Wasm, json!({}));
 
-    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
-        .with_runtime_adapter(RuntimeKind::Wasm, &adapter);
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor, executor.clone());
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("missing.say").unwrap(),
             scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
-            },
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default().set_concurrency_slots(1),
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "nope"}),
@@ -271,7 +256,7 @@ async fn dispatcher_fails_unknown_capability_without_reserving_resources() {
     assert!(matches!(err, DispatchError::UnknownCapability { .. }));
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert_eq!(governor.usage_for(&account), ResourceTally::default());
-    assert!(adapter.requests().is_empty());
+    assert!(executor.requests().is_empty());
 }
 
 #[tokio::test]
@@ -281,18 +266,17 @@ async fn dispatcher_releases_prepared_reservation_when_validation_fails_before_a
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
-    let estimate = ResourceEstimate {
-        concurrency_slots: Some(1),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default().set_concurrency_slots(1);
     let reservation = governor.reserve(scope.clone(), estimate.clone()).unwrap();
     assert_eq!(governor.reserved_for(&account).concurrency_slots, 1);
 
-    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor);
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor, RecordingExecutor::new());
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("missing.say").unwrap(),
             scope,
+            authenticated_actor_user_id: None,
             estimate,
             mounts: None,
             resource_reservation: Some(reservation),
@@ -317,16 +301,16 @@ async fn dispatcher_requires_mcp_backend_before_reserving_resources() {
     let scope = sample_scope();
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
 
-    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor);
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor, RecordingExecutor::new());
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("github-mcp.search").unwrap(),
             scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                ..ResourceEstimate::default()
-            },
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_process_count(1),
             mounts: None,
             resource_reservation: None,
             input: json!({"query": "blocked"}),
@@ -355,16 +339,16 @@ async fn dispatcher_requires_script_backend_before_reserving_resources() {
     let scope = sample_scope();
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
 
-    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor);
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor, RecordingExecutor::new());
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("script.echo").unwrap(),
             scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                ..ResourceEstimate::default()
-            },
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default()
+                .set_concurrency_slots(1)
+                .set_process_count(1),
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "blocked"}),
@@ -393,15 +377,14 @@ async fn dispatcher_requires_wasm_backend_before_reserving_resources() {
     let scope = sample_scope();
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
 
-    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor);
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor, RecordingExecutor::new());
     let err = dispatcher
         .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
-            },
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default().set_concurrency_slots(1),
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "blocked"}),
@@ -419,110 +402,56 @@ async fn dispatcher_requires_wasm_backend_before_reserving_resources() {
     assert_eq!(governor.usage_for(&account), ResourceTally::default());
 }
 
-#[derive(Clone)]
-struct RecordingAdapter {
-    runtime: RuntimeKind,
-    output: Value,
-    failure: Option<RuntimeDispatchErrorKind>,
-    requests: Arc<Mutex<Vec<RecordedAdapterRequest>>>,
-}
+#[tokio::test]
+async fn dispatcher_fails_closed_for_system_runtime_without_routing_to_a_lane() {
+    // `RuntimeKind::System` is host-internal — `RuntimeLane::from_runtime_kind`
+    // returns `None`, so a System capability must never be dispatched to a lane.
+    // Even with every untrusted lane wired, the executor is not consulted and
+    // dispatch fails closed with the redacted `MissingRuntimeBackend`.
+    let fs = mounted_empty_extension_root();
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(package_from_bundled_manifest(SYSTEM_MANIFEST))
+        .unwrap();
+    let executor = RecordingExecutor::new()
+        .echo(RuntimeKind::Wasm)
+        .echo(RuntimeKind::Mcp)
+        .echo(RuntimeKind::Script)
+        .echo(RuntimeKind::FirstParty);
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
 
-impl RecordingAdapter {
-    fn new(runtime: RuntimeKind, output: Value) -> Self {
-        Self {
-            runtime,
-            output,
-            failure: None,
-            requests: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-
-    fn failing(runtime: RuntimeKind, failure: RuntimeDispatchErrorKind) -> Self {
-        Self {
-            runtime,
-            output: json!(null),
-            failure: Some(failure),
-            requests: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-
-    fn requests(&self) -> Vec<RecordedAdapterRequest> {
-        self.requests.lock().unwrap().clone()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct RecordedAdapterRequest {
-    provider: ExtensionId,
-    capability_id: CapabilityId,
-    runtime: RuntimeKind,
-    input: Value,
-}
-
-#[async_trait]
-impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingAdapter {
-    async fn dispatch_json(
-        &self,
-        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
-    ) -> Result<RuntimeAdapterResult, DispatchError> {
-        self.requests.lock().unwrap().push(RecordedAdapterRequest {
-            provider: request.package.id.clone(),
-            capability_id: request.capability_id.clone(),
-            runtime: request.descriptor.runtime,
-            input: request.input.clone(),
-        });
-        if let Some(kind) = self.failure {
-            return Err(dispatch_error_for_runtime(self.runtime, kind));
-        }
-
-        let usage = ResourceUsage {
-            output_bytes: serde_json::to_vec(&self.output).unwrap().len() as u64,
-            process_count: u32::from(matches!(
-                self.runtime,
-                RuntimeKind::Script | RuntimeKind::Mcp
-            )),
-            ..ResourceUsage::default()
-        };
-        let reservation = request
-            .governor
-            .reserve(request.scope.clone(), request.estimate.clone())
-            .map_err(|_| {
-                dispatch_error_for_runtime(self.runtime, RuntimeDispatchErrorKind::Resource)
-            })?;
-        let receipt = request
-            .governor
-            .reconcile(reservation.id, usage.clone())
-            .map_err(|_| {
-                dispatch_error_for_runtime(self.runtime, RuntimeDispatchErrorKind::Resource)
-            })?;
-        Ok(RuntimeAdapterResult {
-            output: self.output.clone(),
-            display_preview: None,
-            output_bytes: usage.output_bytes,
-            usage,
-            receipt,
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor, executor.clone());
+    let err = dispatcher
+        .dispatch_json(CapabilityDispatchRequest {
+            run_id: None,
+            capability_id: CapabilityId::new("system-ext.op").unwrap(),
+            scope,
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default().set_concurrency_slots(1),
+            mounts: None,
+            resource_reservation: None,
+            input: json!({"message": "host-internal"}),
         })
-    }
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        DispatchError::MissingRuntimeBackend {
+            runtime: RuntimeKind::System
+        }
+    ));
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert_eq!(governor.usage_for(&account), ResourceTally::default());
+    // The closed executor was never consulted for a host-internal runtime.
+    assert!(executor.requests().is_empty());
 }
 
-fn dispatch_error_for_runtime(
-    runtime: RuntimeKind,
-    kind: RuntimeDispatchErrorKind,
-) -> DispatchError {
-    match runtime {
-        RuntimeKind::Wasm => DispatchError::Wasm { kind },
-        RuntimeKind::Script => DispatchError::Script { kind },
-        RuntimeKind::Mcp => DispatchError::Mcp { kind },
-        RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::UnsupportedRuntime {
-            capability: CapabilityId::new("system.unsupported").unwrap(),
-            runtime,
-        },
-    }
-}
-
-fn mounted_empty_extension_root() -> LocalFilesystem {
+fn mounted_empty_extension_root() -> DiskFilesystem {
     let storage = tempfile::tempdir().unwrap().keep();
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage),
@@ -545,6 +474,19 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
         &HostPortCatalog::empty(),
     )
     .unwrap()
+}
+
+// `System`/`FirstParty` runtimes are only assertible by a host-bundled source.
+fn package_from_bundled_manifest(manifest: &str) -> ExtensionPackage {
+    let manifest = legacy_capability_fixture_to_v2(manifest);
+    let manifest = ExtensionManifest::parse(
+        &manifest,
+        ManifestSource::HostBundled,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap();
+    let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
+    ExtensionPackage::from_manifest(manifest, root).unwrap()
 }
 
 fn sample_scope() -> ResourceScope {
@@ -615,6 +557,25 @@ args = ["-c", "cat"]
 [[capabilities]]
 id = "script.echo"
 description = "Echo script"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+parameters_schema = { type = "object" }
+"#;
+
+const SYSTEM_MANIFEST: &str = r#"
+id = "system-ext"
+name = "System Ext"
+version = "0.1.0"
+description = "Host-internal system runtime demo extension"
+trust = "untrusted"
+
+[runtime]
+kind = "system"
+service = "master-key"
+
+[[capabilities]]
+id = "system-ext.op"
+description = "Host-internal op"
 effects = ["dispatch_capability"]
 default_permission = "allow"
 parameters_schema = { type = "object" }

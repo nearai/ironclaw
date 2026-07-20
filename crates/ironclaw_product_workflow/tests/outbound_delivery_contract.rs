@@ -1,14 +1,17 @@
+// arch-exempt: large_file, mechanical InMemoryOutboundStateStore -> FilesystemOutboundStateStore<InMemoryBackend> §4.3 store consolidation, no logic change, plan #6168
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
-    CommunicationPreferenceVersion, DeliveryDefaultScope, InMemoryOutboundStateStore,
+    CommunicationPreferenceVersion, DeliveryDefaultScope, FilesystemOutboundStateStore,
     LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundError, OutboundPolicyService,
     OutboundStateStore, ProjectionSubscriptionRecord, ReplyTargetBindingClaim,
     ReplyTargetBindingValidator, RequestedOutboundContext, RequestedOutboundKind,
@@ -283,10 +286,18 @@ impl ProductOutboundTargetResolver for DmRequiringFakeProductOutboundTargetResol
     }
 }
 
-#[derive(Default)]
 struct StatusFailingOutboundStore {
-    inner: InMemoryOutboundStateStore,
+    inner: FilesystemOutboundStateStore<InMemoryBackend>,
     status_update_requests: Mutex<Vec<UpdateDeliveryStatusRequest>>,
+}
+
+impl Default for StatusFailingOutboundStore {
+    fn default() -> Self {
+        Self {
+            inner: in_memory_backed_outbound_state_store(),
+            status_update_requests: Mutex::new(Vec::new()),
+        }
+    }
 }
 
 impl StatusFailingOutboundStore {
@@ -690,7 +701,7 @@ fn progress_payload() -> ProductOutboundPayload {
 }
 
 fn configured_policy<'a>(
-    store: &'a InMemoryOutboundStateStore,
+    store: &'a FilesystemOutboundStateStore<InMemoryBackend>,
     validator: &'a FakeReplyTargetBindingValidator,
 ) -> OutboundPolicyService<'a> {
     OutboundPolicyService::new(store, &ACCESS_POLICY, validator)
@@ -716,7 +727,7 @@ fn preference_record(scope: &TurnScope) -> CommunicationPreferenceRecord {
 #[tokio::test]
 async fn authorized_final_reply_renders_through_telegram_egress_after_validation() {
     let scope = scope();
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_backed_outbound_state_store();
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     let preferences = FakePreferenceRepository::default();
@@ -788,7 +799,7 @@ async fn authorized_final_reply_renders_through_telegram_egress_after_validation
 #[tokio::test]
 async fn synchronous_response_marks_attempt_delivered() {
     let scope = scope();
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_backed_outbound_state_store();
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     let preferences = FakePreferenceRepository::default();
@@ -834,7 +845,7 @@ async fn synchronous_response_marks_attempt_delivered() {
 #[tokio::test]
 async fn deferred_render_keeps_attempt_pending_and_skips_delivery_status_side_effects() {
     let scope = scope();
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_backed_outbound_state_store();
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     let preferences = FakePreferenceRepository::default();
@@ -958,7 +969,7 @@ async fn requested_outbound_preserves_actor_and_modality_before_rendering() {
     let scope = scope();
     let requesting_actor = actor();
     let requested_modality = CommunicationModality::Voice;
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_backed_outbound_state_store();
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     validator.require_actor(requesting_actor.clone());
@@ -1018,7 +1029,7 @@ async fn requested_outbound_preserves_actor_and_modality_before_rendering() {
 #[tokio::test]
 async fn mismatched_payload_kind_marks_authorized_attempt_failed_without_render() {
     let scope = scope();
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_backed_outbound_state_store();
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     let preferences = FakePreferenceRepository::default();
@@ -1214,7 +1225,7 @@ async fn target_metadata_failure_with_status_update_failure_preserves_workflow_e
 #[tokio::test]
 async fn target_metadata_failure_marks_attempt_failed_without_render() {
     let scope = scope();
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_backed_outbound_state_store();
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     let preferences = FakePreferenceRepository::default();
@@ -1283,7 +1294,7 @@ async fn target_metadata_rejection_errors_mark_attempt_failed_rejected() {
 
     for (index, workflow_error) in cases.into_iter().enumerate() {
         let scope = scope();
-        let store = InMemoryOutboundStateStore::default();
+        let store = in_memory_backed_outbound_state_store();
         let validator = FakeReplyTargetBindingValidator::default();
         validator.allow(validated_reply_target());
         let preferences = FakePreferenceRepository::default();
@@ -1343,7 +1354,7 @@ async fn target_metadata_rejection_errors_mark_attempt_failed_rejected() {
 #[tokio::test]
 async fn keep_alive_payload_marks_authorized_attempt_failed_without_render() {
     let scope = scope();
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_backed_outbound_state_store();
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     let preferences = FakePreferenceRepository::default();
@@ -1403,7 +1414,7 @@ async fn keep_alive_payload_marks_authorized_attempt_failed_without_render() {
 #[tokio::test]
 async fn adapter_render_failure_is_returned_and_marks_attempt_failed() {
     let scope = scope();
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_backed_outbound_state_store();
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     let preferences = FakePreferenceRepository::default();
@@ -1488,7 +1499,7 @@ async fn adapter_non_retryable_errors_mark_attempt_failed_rejected() {
 
     for (index, adapter_error) in cases.into_iter().enumerate() {
         let scope = scope();
-        let store = InMemoryOutboundStateStore::default();
+        let store = in_memory_backed_outbound_state_store();
         let validator = FakeReplyTargetBindingValidator::default();
         validator.allow(validated_reply_target());
         let preferences = FakePreferenceRepository::default();
@@ -1615,7 +1626,7 @@ async fn adapter_render_failure_preserves_adapter_error_when_status_update_fails
 #[tokio::test]
 async fn revoked_or_rejected_target_does_not_call_render_or_egress() {
     let scope = scope();
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_backed_outbound_state_store();
     let validator = FakeReplyTargetBindingValidator::default();
     let preferences = FakePreferenceRepository::default();
     seed_preference(&preferences, &scope);
@@ -1662,7 +1673,7 @@ async fn revoked_or_rejected_target_does_not_call_render_or_egress() {
 #[tokio::test]
 async fn no_delivery_system_event_does_not_call_render_or_egress() {
     let scope = scope();
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_backed_outbound_state_store();
     let validator = FakeReplyTargetBindingValidator::default();
     let preferences = FakePreferenceRepository::default();
     let resolver = FakeProductOutboundTargetResolver::default();
@@ -1716,7 +1727,7 @@ async fn no_delivery_system_event_does_not_call_render_or_egress() {
 #[tokio::test]
 async fn require_direct_message_true_propagates_to_resolver_and_maps_to_rejected() {
     let scope = scope();
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_backed_outbound_state_store();
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     let preferences = FakePreferenceRepository::default();
@@ -1777,7 +1788,7 @@ async fn require_direct_message_true_propagates_to_resolver_and_maps_to_rejected
 #[tokio::test]
 async fn require_direct_message_false_does_not_trigger_dm_rejection() {
     let scope = scope();
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_backed_outbound_state_store();
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     let preferences = FakePreferenceRepository::default();

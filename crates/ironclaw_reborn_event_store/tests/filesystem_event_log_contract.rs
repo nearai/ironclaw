@@ -256,10 +256,8 @@ async fn filesystem_event_log_replay_filters_by_read_scope() {
     .await
     .expect("append a2");
 
-    let project_a = ReadScope {
-        project_id: scope_a.project_id.clone(),
-        ..ReadScope::default()
-    };
+    let project_a = ReadScope::default()
+        .set_project_id(scope_a.project_id.clone().expect("fixture has project id"));
     let replay = log
         .read_after_cursor(&stream, &project_a, None, 10)
         .await
@@ -295,10 +293,8 @@ async fn filesystem_event_log_replay_advances_past_trailing_filtered_records() {
     .await
     .expect("append b");
 
-    let project_a = ReadScope {
-        project_id: scope_a.project_id.clone(),
-        ..ReadScope::default()
-    };
+    let project_a = ReadScope::default()
+        .set_project_id(scope_a.project_id.clone().expect("fixture has project id"));
     let replay = log
         .read_after_cursor(&stream, &project_a, None, 10)
         .await
@@ -407,10 +403,8 @@ async fn filesystem_audit_log_round_trips_and_filters() {
         .await
         .expect("append audit b");
 
-    let project_a = ReadScope {
-        project_id: scope_a.project_id.clone(),
-        ..ReadScope::default()
-    };
+    let project_a = ReadScope::default()
+        .set_project_id(scope_a.project_id.clone().expect("fixture has project id"));
     let replay = log
         .read_after_cursor(&stream, &project_a, None, 10)
         .await

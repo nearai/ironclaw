@@ -378,10 +378,26 @@ pub struct LifecycleSearchExtensionSummary {
     pub installation_phase: Option<LifecyclePhase>,
 }
 
+/// Whether an installed extension is tenant-shared or private to the caller
+/// (#5459 P1). Serialized on the wire; `#[serde(default)]`-friendly via
+/// `Option` on the summary so pre-#5459 payloads keep deserializing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleInstallScope {
+    /// Installed for the whole tenant (admin install) — visible to every user.
+    Shared,
+    /// Installed privately by the caller — visible only to them.
+    Private,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LifecycleInstalledExtensionSummary {
     pub summary: LifecycleExtensionSummary,
     pub phase: LifecyclePhase,
+    /// `None` only when the caller has no visible installation (projection of
+    /// an uninstalled package); list responses always carry `Some`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_scope: Option<LifecycleInstallScope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -411,12 +427,8 @@ pub enum LifecycleExtensionCredentialSetup {
     OAuth {
         scopes: Vec<String>,
     },
-    /// Twin of [`RuntimeCredentialAccountSetup::ChannelPairing`]: a per-user
-    /// inbound-channel connection satisfied by an out-of-band pairing binding,
-    /// not a stored secret. `channel` is the connectable channel id.
-    ChannelPairing {
-        channel: String,
-    },
+    /// Channel pairing (host-issued code consumed on the external side).
+    Pairing,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -529,6 +541,19 @@ pub trait LifecycleProductFacade: Send + Sync {
         context: LifecycleProductContext,
         package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError>;
+
+    /// Import a standalone extension from an uploaded bundle (zip bytes) — the
+    /// WebUI "Install Tool" path. Default is unavailable; only the local runtime
+    /// facade implements it.
+    async fn import_extension_bundle(
+        &self,
+        _context: LifecycleProductContext,
+        _bundle: Vec<u8>,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        Err(ProductWorkflowError::InvalidBindingRequest {
+            reason: "extension import is not supported by this runtime".to_string(),
+        })
+    }
 }
 
 #[derive(Debug, Clone)]

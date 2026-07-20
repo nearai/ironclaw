@@ -97,11 +97,17 @@ derive hashes for opaque state/code/verifier values, then call
 claims the flow through `AuthFlowManager`, performs provider exchange through
 `AuthProviderClient`, completes the auth flow through `AuthFlowManager`, and
 dispatches an `AuthContinuationEvent` to the injected continuation dispatcher.
-If continuation dispatch fails, the handler returns a sanitized retryable error
-instead of reporting callback success; retrying an already-completed callback
-may re-dispatch the typed continuation without re-exchanging provider code until
-that dispatch is durably marked. After the continuation marker is stored,
-callback replay returns the completed flow without dispatching again.
+If continuation dispatch fails, the handler returns a sanitized retryable
+error instead of reporting callback success. Lifecycle continuations take a
+durable, per-flow claim with a lease/fence before their side effect; retry or
+explicit reconciliation may reclaim an abandoned lease without re-exchanging
+provider code, and only the current claimant may settle it. After the
+continuation marker is stored, callback replay returns the completed flow
+without dispatching again. A lifecycle activation that is still missing
+another declared credential settles the current credential flow successfully
+with typed credential blockers; it does not revoke that credential or resume
+blocked runs. The completion that satisfies the final credential activates the
+extension, publishes its tools, and then delegates to blocked-auth fanout.
 Callback route code must not activate extensions, resume turns, replay prompts,
 or dispatch runtime work directly.
 
@@ -122,8 +128,8 @@ that specific typed auth continuation into a `TurnCoordinator::resume_turn` call
 using the canonical turn scope, actor, run id, and gate ref carried by the auth
 event. It does not define auth state, credential vocabulary, or generic
 continuation dispatch. Setup-only, lifecycle-activation, and product-action
-continuations remain explicit non-turn cases for their owning handlers and must
-not be performed inline by the OAuth callback route.
+continuations remain explicit cases for their owning continuation dispatchers.
+The provider callback route itself never owns those side effects.
 
 `ironclaw_product_workflow::AuthInteractionService` owns the product/WebUI
 blocked-auth interaction loop from #3094. It reads auth-required gates from
@@ -251,9 +257,18 @@ Rules:
 - Public callbacks must validate and claim the scoped flow/state/provider/PKCE
   hash before exchanging raw code/verifier through non-serializable one-shot
   provider inputs and completing the flow.
+- Once a callback is tied to a known scoped flow, missing authorization code,
+  missing one-shot PKCE material, or malformed/invalid scope input must durably
+  mark that flow `failed` before discarding callback material. Provider denial
+  is terminal through the same scoped flow boundary.
 - Callback completion emits typed continuations; callback routes must not
   directly activate extensions, resume turns, replay messages, or dispatch work.
 - Terminal flows cannot be completed or canceled again.
+- `CredentialSecretFingerprint` values loaded from durable state are exactly 64
+  lowercase hexadecimal characters. Compensation compares that fingerprint
+  before revocation: `compensated` removes only the exact failed generation,
+  `superseded` preserves newer secret material, and `already_absent` is an
+  idempotent converged success. Retryable backend failures retain the journal.
 
 ---
 
@@ -478,7 +493,7 @@ pretending cleanup succeeded.
 
 The Reborn composition mounts host-owned HTTP routes that enter
 `RebornProductAuthServices` (see
-`crates/ironclaw_reborn_composition/src/product_auth_serve/mod.rs`). All mutation
+`crates/ironclaw_reborn_composition/src/product_auth/serve/mod.rs`). All mutation
 routes share the same `LocalGateway` + `BearerToken` + per-caller body and
 rate-limit posture as the original `oauth/start` route and derive
 `AuthProductScope` from the authenticated caller, never from caller-supplied
@@ -488,6 +503,8 @@ tenant/user fields.
 | --- | --- | --- |
 | `POST` | `/api/reborn/product-auth/oauth/start` | Open an OAuth setup flow; returns redacted authorization URL + invocation scope. |
 | `GET`  | `/api/reborn/product-auth/oauth/callback/{flow_id}` | Public OAuth callback; validates scope/state hash before any product effect. |
+| `GET` | `/api/reborn/product-auth/oauth/flow/{flow_id}/status` | Observational caller-scoped durable status read. It performs no continuation dispatch, activation, compensation, provider cleanup, or other writes. |
+| `POST` | `/api/reborn/product-auth/oauth/flow/{flow_id}/reconcile` | Explicit bounded recovery command that resumes a claimed lifecycle continuation or converges its exact compensation and provider cleanup journals. |
 | `POST` | `/api/reborn/product-auth/oauth/google/start` | Open a Google product-auth setup flow from configured Reborn Google OAuth client metadata; returns a Google authorization URL with PKCE/offline consent and invocation scope. |
 | `GET`  | `/api/reborn/product-auth/oauth/google/callback` | Public static Google OAuth callback; resolves flow/scope from auth-owned encoded state, validates the durable state hash/PKCE claim, and completes through `RebornProductAuthServices`. |
 | `POST` | `/api/reborn/product-auth/manual-token/submit` | One-shot manual-token setup + secret-submit (legacy WebUI shape, compatibility). |
@@ -500,6 +517,14 @@ tenant/user fields.
 | `POST` | `/api/reborn/product-auth/lifecycle/cleanup` | Apply ownership-aware deactivate/uninstall cleanup for an extension; returns a redacted `SecretCleanupReport`. |
 
 Rules:
+
+- Extension-scoped OAuth start requires a production-wired installed-extension
+  lookup and revalidates installation after the flow/connection epoch is
+  created. If removal wins the race, start is aborted and its one-shot state is
+  cleaned instead of returning an authorization URL for an uninstalled package.
+- Browser watchers use the explicit `POST .../reconcile` command when recovery
+  is required. `GET .../status` remains safe for caches, probes, and monitoring
+  because it is strictly observational.
 
 - `secret-submit` is the only product-facing entry point for raw manual-token
   material. The raw token never enters tool arguments, model transcript,

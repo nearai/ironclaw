@@ -1,31 +1,37 @@
-# Reborn integration-tier coverage exemptions.
+# Reborn integration-tier coverage exemptions. Each [[exemption]] excludes one
+# source file (`module`) or one whole crate (`crate`, never both) from the
+# per-crate accounting in scripts/ci/reborn-coverage-summary.sh — informational only, reason + issue required per entry.
 #
-# Each [[exemption]] entry excludes ONE source file from the per-crate
-# "uncovered" accounting in the Reborn integration-tier coverage report:
-#   - Computed by scripts/ci/reborn-coverage-summary.sh from the merged lcov
-#     tracefile (scripts/ci/reborn-coverage-merge-lcov.sh), scoped to
-#     crates/ironclaw_* (all workspace crates the int-tier suites exercise).
-#   - Rendered by the `coverage-report` job in
-#     .github/workflows/reborn-tests.yml into $GITHUB_STEP_SUMMARY and a
-#     sticky PR comment.
+# Schema — exactly ONE of `module`/`crate` per entry (never both, never
+# neither; reborn-coverage-summary.sh rejects malformed entries at parse
+# time):
 #
-# An exempted file's lines are dropped from the per-crate table's
-# covered/total line counts entirely — they neither help nor hurt a crate's
-# percentage — and the file is listed verbatim, with its reason and tracking
-# issue, in the report's own "Exemptions" section. The exclusion must stay
-# visible, never silent.
-#
-# This coverage signal is INFORMATIONAL ONLY: no ratchet, no fail threshold,
-# on this report yet. Exemptions exist for visibility/triage today, not to
-# game a gate that doesn't exist — every entry still needs a reason and a
-# tracking issue so a future ratchet effort (or a reviewer) can tell "known,
-# tracked gap" from "nobody looked".
-#
-# Schema (repeat the [[exemption]] table once per exempted file):
-#
+#   # Per-file form: exempts one source file.
 #   [[exemption]]
-#   module = "crates/ironclaw_x/src/y.rs"                       # required: repo-relative source path
-#   reason = "why this file cannot be exercised by int-tier tests"  # required
-#   issue  = "https://github.com/nearai/ironclaw/issues/NNNN"   # required: tracking issue
+#   module = "crates/ironclaw_x/src/y.rs"                       # repo-relative source path
+#   reason = "why this file cannot be exercised by the Reborn CI jobs"
+#   issue  = "https://github.com/nearai/ironclaw/issues/5657"   # required: tracking issue
 #
-# No entries yet — add one per exemption, each with `reason` and `issue`.
+#   # Whole-crate form: exempts every file under crates/<crate>/.
+#   [[exemption]]
+#   crate  = "ironclaw_x"
+#   reason = "why this whole crate is out of scope for this report"
+#   issue  = "https://github.com/nearai/ironclaw/issues/5657"   # required: tracking issue
+
+# Three crates below are v1-only (consumed exclusively by root `ironclaw`, no
+# crates/*/Cargo.toml dependents); already covered by .github/workflows/test.yml ("Tests (Legacy)"). Tracked by #5657.
+
+[[exemption]]
+crate  = "ironclaw_embeddings"
+reason = "v1-only: consumed only by root `ironclaw` (src/app.rs, src/tools/builtin/memory.rs, src/workspace/mod.rs, src/config/{mod,embeddings}.rs); no crates/* dependents. Covered by \"Tests (Legacy)\"."
+issue  = "https://github.com/nearai/ironclaw/issues/5657"
+
+[[exemption]]
+crate  = "ironclaw_gateway"
+reason = "v1-only: consumed only by root `ironclaw` (src/channels/web/platform/static_files.rs, src/channels/web/handlers/frontend.rs); no crates/* dependents. Covered by \"Tests (Legacy)\"."
+issue  = "https://github.com/nearai/ironclaw/issues/5657"
+
+[[exemption]]
+crate  = "ironclaw_tui"
+reason = "v1-only: consumed only by root `ironclaw` (src/main.rs, src/channels/tui.rs); no crates/* dependents. Crate's own doc comment confirms it bridges INTO v1, not Reborn. Covered by \"Tests (Legacy)\"."
+issue  = "https://github.com/nearai/ironclaw/issues/5657"

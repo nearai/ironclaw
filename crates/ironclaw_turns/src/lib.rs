@@ -35,11 +35,9 @@ pub use admission::{
 pub use block_persistence::TurnStateBlockPersistence;
 pub use checkpoint_state::{
     CheckpointStateMatchMetadata, CheckpointStateRecord, CheckpointStateStore,
-    GetCheckpointStateRequest, GetLoopCheckpointRequest, InMemoryCheckpointStateStore,
-    InMemoryLoopCheckpointStore, LoopCheckpointRecord, LoopCheckpointStore,
+    GetCheckpointStateRequest, GetLoopCheckpointRequest, LoopCheckpointRecord, LoopCheckpointStore,
     MAX_CHECKPOINT_STATE_PAYLOAD_BYTES, PutCheckpointStateRequest, PutLoopCheckpointRequest,
-    RedactedCheckpointPayload, checkpoint_state_metadata_matches_request,
-    checkpoint_state_record_matches_request, new_checkpoint_state_ref,
+    RedactedCheckpointPayload, checkpoint_state_metadata_matches_request, new_checkpoint_state_ref,
 };
 pub use coordinator::{
     AllowAllTurnAdmissionPolicy, DefaultTurnCoordinator, NoopTurnRunWakeNotifier,
@@ -58,12 +56,15 @@ pub use external_tool_catalog::{
     ExternalToolCatalog, ExternalToolCatalogError, ExternalToolSpec, ExternalToolSpecError,
     InMemoryExternalToolCatalog, PendingExternalCall,
 };
-pub use filesystem_store::{FilesystemTurnStateBlockPersistence, FilesystemTurnStateStore};
+pub use filesystem_store::{
+    FilesystemTurnStateBlockPersistence, FilesystemTurnStateRowStore, FilesystemTurnStateStore,
+    FilesystemTurnStateStoreKind, TurnStateDurabilityPolicy,
+};
 pub use ids::{
     AcceptedMessageRef, CapabilityActivityId, GateRef, IdempotencyKey, LoopDiagnosticRef,
-    LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, LoopUsageSummaryRef,
-    ReplyTargetBindingRef, RunProfileId, RunProfileRequest, RunProfileVersion, SourceBindingRef,
-    TurnCheckpointId, TurnId, TurnLeaseToken, TurnRunId, TurnRunnerId,
+    LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, ReplyTargetBindingRef, RunProfileId,
+    RunProfileRequest, RunProfileVersion, SourceBindingRef, TurnCheckpointId, TurnId,
+    TurnLeaseToken, TurnRunId, TurnRunnerId,
 };
 pub use lifecycle::{
     DefaultTurnLifecycleEventBus, LifecyclePublicationErrorPort, LifecyclePublishingTurnStateStore,
@@ -82,9 +83,11 @@ pub use origin::{
 };
 pub use request::{
     CancelRunRequest, GateResumeDisposition, GetRunStateRequest, ResumeTurnPrecondition,
-    ResumeTurnRequest, SubmitChildRunRequest, SubmitTurnRequest, TurnTimestamp,
+    ResumeTurnRequest, RetryTurnRequest, SubmitChildRunRequest, SubmitTurnRequest, TurnTimestamp,
 };
-pub use response::{CancelRunResponse, ResumeTurnResponse, SubmitTurnResponse, ThreadBusy};
+pub use response::{
+    CancelRunResponse, ResumeTurnResponse, RetryTurnResponse, SubmitTurnResponse, ThreadBusy,
+};
 pub use run_profile::{
     AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverResumeRequest,
     AgentLoopDriverRunRequest, CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy,
@@ -101,9 +104,10 @@ pub use run_profile::{
 };
 pub use scope::{TurnActor, TurnScope};
 pub use status::{
-    AdmissionRejection, AdmissionRejectionReason, BlockedReason, SanitizedCancelReason,
-    SanitizedFailure, TurnActiveRunRefState, TurnCapacityResource, TurnError, TurnErrorCategory,
-    TurnRunProfile, TurnRunState, TurnStatus,
+    AdmissionRejection, AdmissionRejectionReason, BlockedReason, ModelInvalidOutputDetailReason,
+    SanitizedCancelReason, SanitizedFailure, TurnActiveRunRefState, TurnCapacityResource,
+    TurnError, TurnErrorCategory, TurnRunProfile, TurnRunState, TurnStatus,
+    is_recoverability_critical,
 };
 pub use store::{
     SpawnTreeReservation, SpawnTreeReservationKey, TurnActiveLockKey, TurnActiveLockRecord,

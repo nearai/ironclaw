@@ -1,7 +1,7 @@
 //! E-PROJ seam smoke test: the `project_lifecycle` group surfaces the local-dev
 //! synthetic `project_create` capability; a scripted `builtin.project_create`
 //! call dispatches through the REAL synthetic-capability wrap
-//! (`wrap_local_dev_synthetic_capabilities` + `project_create_capability`) and
+//! (`wrap_synthetic_capabilities` + `project_create_capability`) and
 //! persists a project via the real `ProjectService`.
 //!
 //! A result-contains assertion alone would pass a silent-no-op regression that
@@ -24,8 +24,15 @@ use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::project_service_fault::FAULT_INJECT_DENIED_PROJECT_NAME;
 use reborn_support::reply::RebornScriptedReply;
 
-#[tokio::test]
-async fn project_create_capability_dispatches_and_persists_project() {
+#[test]
+fn project_create_capability_dispatches_and_persists_project() {
+    run_async_test_with_stack(
+        "project_create_capability_dispatches_and_persists_project",
+        project_create_capability_dispatches_and_persists_project_impl,
+    );
+}
+
+async fn project_create_capability_dispatches_and_persists_project_impl() {
     let group = RebornIntegrationGroup::project_lifecycle()
         .await
         .expect("project-lifecycle group builds");
@@ -92,8 +99,15 @@ async fn project_create_capability_dispatches_and_persists_project() {
 /// `InvalidInput` error to a recoverable, model-visible `Failed` tool error —
 /// proving the reject path routes through Completed-turn/Failed-outcome
 /// plumbing rather than aborting the run.
-#[tokio::test]
-async fn project_create_invalid_input_routes_to_recoverable_tool_error() {
+#[test]
+fn project_create_invalid_input_routes_to_recoverable_tool_error() {
+    run_async_test_with_stack(
+        "project_create_invalid_input_routes_to_recoverable_tool_error",
+        project_create_invalid_input_routes_to_recoverable_tool_error_impl,
+    );
+}
+
+async fn project_create_invalid_input_routes_to_recoverable_tool_error_impl() {
     let group = RebornIntegrationGroup::project_lifecycle()
         .await
         .expect("project-lifecycle group builds");
@@ -140,8 +154,15 @@ async fn project_create_invalid_input_routes_to_recoverable_tool_error() {
 /// independently confirmed bug for provider-tool-call-originated invocations
 /// under local-dev composition (issue #5608) that collapses the "retry twice,
 /// then Failed" contract into an immediate `driver_unavailable`.
-#[tokio::test]
-async fn project_create_denied_fault_routes_to_recoverable_tool_error() {
+#[test]
+fn project_create_denied_fault_routes_to_recoverable_tool_error() {
+    run_async_test_with_stack(
+        "project_create_denied_fault_routes_to_recoverable_tool_error",
+        project_create_denied_fault_routes_to_recoverable_tool_error_impl,
+    );
+}
+
+async fn project_create_denied_fault_routes_to_recoverable_tool_error_impl() {
     let group = RebornIntegrationGroup::project_lifecycle_fault_injected()
         .await
         .expect("project-lifecycle fault-injection group builds");
@@ -175,4 +196,25 @@ async fn project_create_denied_fault_routes_to_recoverable_tool_error() {
         .assert_reply_contains("not permitted")
         .await
         .expect("run recovered and finalized instead of dying at the fault");
+}
+
+fn run_async_test_with_stack<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio test runtime")
+                .block_on(test());
+        })
+        .expect("spawn stack-sized test thread");
+    if let Err(panic) = handle.join() {
+        std::panic::resume_unwind(panic);
+    }
 }

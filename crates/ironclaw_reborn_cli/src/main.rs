@@ -1,9 +1,13 @@
 mod cli;
 mod commands;
 mod context;
+mod dto;
 mod file_write;
 mod operator_env;
+mod render;
 mod runtime;
+mod serve_invocation;
+mod webui_token;
 
 fn main() -> anyhow::Result<()> {
     // Mirror the v1 binary's behavior so dev workflows can keep LLM

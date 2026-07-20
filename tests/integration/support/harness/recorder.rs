@@ -2,7 +2,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{CapabilityId, ResourceScope, RuntimeHttpEgressRequest};
-use ironclaw_network::NetworkHttpRequest;
+use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
 use ironclaw_turns::{GateRef, run_profile::CapabilityInvocation};
 
 use super::super::doubles::RecordingTestCapabilityPort;
@@ -55,7 +55,7 @@ impl HarnessCapabilityRecorder {
     /// `None` for the Echo backend and HostRuntime harnesses without skill activation.
     pub(crate) fn skill_context_source(
         &self,
-    ) -> Option<Arc<dyn ironclaw_loop_support::HostSkillContextSource>> {
+    ) -> Option<Arc<dyn ironclaw_loop_host::HostSkillContextSource>> {
         match self {
             Self::Recording(_) => None,
             Self::HostRuntime(harness) => harness.skill_context_source_for_test(),
@@ -93,6 +93,16 @@ impl HarnessCapabilityRecorder {
         match self {
             Self::Recording(_) => Vec::new(),
             Self::HostRuntime(harness) => harness.network_http_requests(),
+        }
+    }
+
+    /// S1 seam: requests that reached the real-egress-pipeline's wire-level
+    /// transport recorder. Empty for every backend but
+    /// `BuiltinHttpToolsRealEgress`.
+    pub(crate) fn real_egress_transport_requests(&self) -> Vec<NetworkTransportRequest> {
+        match self {
+            Self::Recording(_) => Vec::new(),
+            Self::HostRuntime(harness) => harness.real_egress_transport_requests(),
         }
     }
 

@@ -11,6 +11,13 @@ slack:
       real_name: QA Reviewer
       email: qa-reviewer@example.com
       presence: active
+      profile:
+        title: Release reviewer
+        status_text: Reviewing the release candidate
+        status_emoji: ":mag:"
+    - name: no-email-user
+      real_name: No Email User
+      presence: away
   channels:
     - name: reborn-alerts
       topic: Reborn alert delivery
@@ -28,6 +35,17 @@ slack:
         - im:write
         - im:history
         - users:read
+        - users.profile:read
+        - users.profile:write
+        - channels:join
+        - channels:manage
+        - files:read
+        - files:write
         - reactions:read
         - reactions:write
+    - token: emulate-slack-limited-token
+      user: qa-reviewer
+      scopes:
+        - users:read
+        - users.profile:read
   strict_scopes: true

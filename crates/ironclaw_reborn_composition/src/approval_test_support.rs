@@ -5,16 +5,11 @@ use ironclaw_host_runtime::{
     RuntimeFailureKind,
 };
 use ironclaw_run_state::ApprovalRequestStore;
-use ironclaw_trust::TrustDecision;
 
-use crate::{
-    RebornServices,
-    factory::RebornLocalRuntimeServices,
-    local_dev_capability_policy::{
-        LocalDevApprovalPolicyAction, LocalDevCapabilityPolicyError,
-        local_dev_one_shot_lease_approval,
-    },
+use crate::builtin_capability_policy::{
+    BuiltinApprovalPolicyAction, BuiltinCapabilityPolicyError, builtin_one_shot_lease_approval,
 };
+use crate::{RebornServices, factory::RebornRuntimeSubstrate};
 
 /// Turn the global auto-approve switch off for `context`'s actor scope.
 /// Global auto-approve defaults ON, so any test exercising the per-tool approval
@@ -22,7 +17,7 @@ use crate::{
 /// integration-test and root-crate binaries keep their own copies (they cannot
 /// see this crate-internal helper).
 pub(crate) async fn disable_global_auto_approve(
-    local_runtime: &RebornLocalRuntimeServices,
+    local_runtime: &RebornRuntimeSubstrate,
     context: &ExecutionContext,
 ) {
     local_runtime
@@ -41,11 +36,8 @@ pub(crate) async fn invoke_json_with_local_dev_approval(
     capability_id: &str,
     context: ExecutionContext,
     input: serde_json::Value,
-    trust_decision: TrustDecision,
 ) -> Result<serde_json::Value, RuntimeFailureKind> {
-    match invoke_with_local_dev_approval(services, capability_id, context, input, trust_decision)
-        .await
-    {
+    match invoke_with_local_dev_approval(services, capability_id, context, input).await {
         RuntimeCapabilityOutcome::Completed(completed) => Ok(completed.output),
         RuntimeCapabilityOutcome::Failed(failure) => Err(failure.kind),
         other => panic!("unexpected runtime outcome: {other:?}"),
@@ -57,7 +49,6 @@ pub(crate) async fn invoke_with_local_dev_approval(
     capability_id: &str,
     context: ExecutionContext,
     input: serde_json::Value,
-    trust_decision: TrustDecision,
 ) -> RuntimeCapabilityOutcome {
     let runtime = services
         .host_runtime
@@ -75,7 +66,6 @@ pub(crate) async fn invoke_with_local_dev_approval(
             capability.clone(),
             estimate.clone(),
             input.clone(),
-            trust_decision.clone(),
         ))
         .await
         .expect("runtime invocation completes"); // safety: test-only helper in #[cfg(test)] module.
@@ -87,7 +77,7 @@ pub(crate) async fn invoke_with_local_dev_approval(
                 .await
                 .expect("local-dev approval record read") // safety: test-only helper in #[cfg(test)] module.
                 .expect("local-dev approval request persisted"); // safety: test-only helper in #[cfg(test)] module.
-            let policy_action = LocalDevApprovalPolicyAction::from_host_action(
+            let policy_action = BuiltinApprovalPolicyAction::from_host_action(
                 approval_record.request.action.as_ref(),
             )
             .expect("dispatch or spawn action in local-dev approval"); // safety: test-only approval helper compiled only under #[cfg(test)].
@@ -103,7 +93,7 @@ pub(crate) async fn invoke_with_local_dev_approval(
                 &local_runtime.system_extensions_lifecycle_mounts,
             ) {
                 Ok(approval) => approval,
-                Err(LocalDevCapabilityPolicyError::MissingGrant { .. }) => {
+                Err(BuiltinCapabilityPolicyError::MissingGrant { .. }) => {
                     lease_approval_from_context(&context, &capability)
                 }
                 Err(error) => {
@@ -133,7 +123,6 @@ pub(crate) async fn invoke_with_local_dev_approval(
                     capability,
                     estimate,
                     input,
-                    trust_decision,
                 ))
                 .await
                 .expect("approved runtime invocation resumes") // safety: test-only helper in #[cfg(test)] module.
@@ -157,5 +146,5 @@ fn lease_approval_from_context(
         .expect("matching test capability grant") // safety: test-only helper in #[cfg(test)] module.
         .constraints
         .clone();
-    local_dev_one_shot_lease_approval(constraints)
+    builtin_one_shot_lease_approval(constraints)
 }

@@ -140,9 +140,9 @@ git commit -m "feat(turns): add LoopRuntimeContext type with time rendering"
 
 **Files:** none modified. Output = findings notes returned as text.
 
-- [ ] **Step 1:** In `crates/ironclaw_reborn/src/loop_driver_host.rs`, locate where the loop/prompt port is constructed for a run (near `spawn` ~line 626, `run` ~line 700, `run_context` ~line 1712). Report exact file:line where `HostManagedLoopPromptPort` (or its wrapper) is built and which builder methods (`with_safety_context`, `with_current_surface…`) are chained, so `with_runtime_context` can be added at the same site.
-- [ ] **Step 2:** Report whether any existing user-timezone source is reachable from that construction site (search `timezone`, `Tz`, `user_tz` in `ironclaw_reborn`, `ironclaw_reborn_composition`, run profile types). Expected answer: none → wire `None`.
-- [ ] **Step 3:** In `crates/ironclaw_reborn/src/model_gateway.rs` tests (and `crates/ironclaw_turns/tests/agent_loop_host_contract.rs`), identify the existing test that proves prompt-bundle content reaches the final model request through the caller path; report its name and file:line so Task 5 can mirror it.
+- [ ] **Step 1:** In `crates/ironclaw_runner/src/loop_driver_host.rs`, locate where the loop/prompt port is constructed for a run (near `spawn` ~line 626, `run` ~line 700, `run_context` ~line 1712). Report exact file:line where `HostManagedLoopPromptPort` (or its wrapper) is built and which builder methods (`with_safety_context`, `with_current_surface…`) are chained, so `with_runtime_context` can be added at the same site.
+- [ ] **Step 2:** Report whether any existing user-timezone source is reachable from that construction site (search `timezone`, `Tz`, `user_tz` in `ironclaw_runner`, `ironclaw_reborn_composition`, run profile types). Expected answer: none → wire `None`.
+- [ ] **Step 3:** In `crates/ironclaw_runner/src/model_gateway.rs` tests (and `crates/ironclaw_turns/tests/agent_loop_host_contract.rs`), identify the existing test that proves prompt-bundle content reaches the final model request through the caller path; report its name and file:line so Task 5 can mirror it.
 
 ---
 
@@ -297,14 +297,14 @@ git commit -m "feat(turns): attach runtime context through host prompt port"
 ### Task 5: Reborn wiring + caller-path test
 
 **Files (exact lines come from Task 2 recon):**
-- Modify: `crates/ironclaw_reborn/src/loop_driver_host.rs` (prompt-port construction site)
-- Test: `crates/ironclaw_reborn/src/model_gateway.rs` tests (mirror the recon-identified caller-path test)
+- Modify: `crates/ironclaw_runner/src/loop_driver_host.rs` (prompt-port construction site)
+- Test: `crates/ironclaw_runner/src/model_gateway.rs` tests (mirror the recon-identified caller-path test)
 
 - [ ] **Step 1: Write failing caller-path test** — drive a real loop turn through the model gateway test harness and assert the final model request's messages include a system message containing `Current date/time at loop start:`. This is the test-through-the-caller requirement (`.claude/rules/testing.md`).
 
 - [ ] **Step 2: Run, verify fail**
 
-Run: `cargo test -p ironclaw_reborn model_gateway`
+Run: `cargo test -p ironclaw_runner model_gateway`
 Expected: new test FAILS (no runtime section yet — wiring absent).
 
 - [ ] **Step 3: Implement** — at the prompt-port construction site, stamp once per loop spawn:
@@ -316,17 +316,17 @@ Expected: new test FAILS (no runtime section yet — wiring absent).
 })
 ```
 
-This is the only place wall-clock is read. Resume-after-pause re-stamps (loop start = this execution). If `chrono` is not yet a direct dep of `ironclaw_reborn`, add `chrono = { workspace = true }`.
+This is the only place wall-clock is read. Resume-after-pause re-stamps (loop start = this execution). If `chrono` is not yet a direct dep of `ironclaw_runner`, add `chrono = { workspace = true }`.
 
 - [ ] **Step 4: Run, verify pass**
 
-Run: `cargo test -p ironclaw_reborn`
+Run: `cargo test -p ironclaw_runner`
 Expected: all pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/ironclaw_reborn
+git add crates/ironclaw_runner
 git commit -m "feat(reborn): stamp loop-start runtime context into prompt bundles"
 ```
 
@@ -336,7 +336,7 @@ git commit -m "feat(reborn): stamp loop-start runtime context into prompt bundle
 
 - [ ] **Step 1:** `cargo fmt`
 - [ ] **Step 2:** `cargo clippy --all --benches --tests --examples --all-features` — zero warnings
-- [ ] **Step 3:** `cargo test -p ironclaw_turns -p ironclaw_reborn -p ironclaw_loop_support -p ironclaw_agent_loop`
+- [ ] **Step 3:** `cargo test -p ironclaw_turns -p ironclaw_runner -p ironclaw_loop_host -p ironclaw_agent_loop`
 - [ ] **Step 4:** Commit any fmt/clippy fixups:
 
 ```bash

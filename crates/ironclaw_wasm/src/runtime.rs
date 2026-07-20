@@ -3,14 +3,13 @@ use std::time::Instant;
 use wasmtime::component::Linker;
 use wasmtime::{Config, Engine, Store};
 
-use ironclaw_wasm_sandbox_core::SandboxLimits;
-
 use crate::bindings;
 use crate::config::{EPOCH_TICK_INTERVAL, WIT_TOOL_VERSION, WitToolRuntimeConfig};
 use crate::error::WasmError;
 use crate::host::WitToolHost;
 use crate::store::StoreData;
 use crate::types::{PreparedWitTool, WitToolExecution, WitToolRequest};
+use crate::wasm_sandbox_core::SandboxLimits;
 
 /// Reborn WIT-compatible WASM tool runtime.
 ///

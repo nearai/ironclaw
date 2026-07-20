@@ -74,6 +74,15 @@ pub(crate) fn direct_children(
 }
 
 #[cfg(feature = "libsql")]
+pub(crate) fn descendant_path_range(path: &VirtualPath) -> (String, String) {
+    let prefix = path.as_str().trim_end_matches('/');
+    // Descendants share the literal "{prefix}/" component boundary. The
+    // exclusive upper bound "{prefix}0" works because '/' sorts before '0'
+    // in the normalized virtual path alphabet used by these storage paths.
+    (format!("{prefix}/"), format!("{prefix}0"))
+}
+
+#[cfg(feature = "libsql")]
 pub(crate) fn child_path_like_pattern(path: &VirtualPath) -> String {
     let mut pattern = String::new();
     for character in path.as_str().trim_end_matches('/').chars() {
@@ -105,11 +114,21 @@ pub(crate) fn db_error(
     operation: FilesystemOperation,
     error: tokio_postgres::Error,
 ) -> FilesystemError {
+    if error.code().is_some_and(is_postgres_contention) {
+        return FilesystemError::BackendBusy { path, operation };
+    }
     FilesystemError::Backend {
         path,
         operation,
         reason: error.to_string(),
     }
+}
+
+#[cfg(feature = "postgres")]
+fn is_postgres_contention(code: &tokio_postgres::error::SqlState) -> bool {
+    code == &tokio_postgres::error::SqlState::T_R_SERIALIZATION_FAILURE
+        || code == &tokio_postgres::error::SqlState::T_R_DEADLOCK_DETECTED
+        || code == &tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE
 }
 
 #[cfg(feature = "libsql")]
@@ -118,11 +137,29 @@ pub(crate) fn libsql_db_error(
     operation: FilesystemOperation,
     error: libsql::Error,
 ) -> FilesystemError {
+    if is_libsql_contention(&error) {
+        return FilesystemError::BackendBusy { path, operation };
+    }
     FilesystemError::Backend {
         path,
         operation,
         reason: error.to_string(),
     }
+}
+
+#[cfg(feature = "libsql")]
+fn is_libsql_contention(error: &libsql::Error) -> bool {
+    const SQLITE_BUSY: i32 = 5;
+    const SQLITE_LOCKED: i32 = 6;
+
+    let primary_code = match error {
+        libsql::Error::SqliteFailure(code, _) => Some(*code),
+        libsql::Error::RemoteSqliteFailure(code, extended_code, _) => {
+            Some(if *code == 0 { *extended_code } else { *code })
+        }
+        _ => None,
+    };
+    primary_code.is_some_and(|code| matches!(code & 0xff, SQLITE_BUSY | SQLITE_LOCKED))
 }
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]
@@ -297,4 +334,149 @@ pub(crate) fn page_offset_to_i64(path: &VirtualPath, offset: u64) -> Result<i64,
         operation: FilesystemOperation::Query,
         reason: format!("page offset {offset} exceeds backend i64 range"),
     })
+}
+
+#[cfg(all(test, feature = "libsql"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn libsql_busy_and_locked_errors_preserve_retryable_contention() {
+        let path = VirtualPath::new("/resources/deltas/log").expect("valid path"); // safety: test-only fixture
+
+        for error in [
+            libsql::Error::SqliteFailure(5, "database is busy".to_string()),
+            libsql::Error::SqliteFailure(6, "database is locked".to_string()),
+            libsql::Error::SqliteFailure(261, "extended busy code".to_string()),
+            libsql::Error::RemoteSqliteFailure(5, 517, "remote database is busy".to_string()),
+            libsql::Error::RemoteSqliteFailure(0, 262, "remote table is locked".to_string()),
+        ] {
+            let error = libsql_db_error(path.clone(), FilesystemOperation::Append, error);
+
+            assert!(matches!( // safety: test-only assertion
+                error,
+                FilesystemError::BackendBusy {
+                    path: error_path,
+                    operation: FilesystemOperation::Append,
+                } if error_path == path
+            ));
+        }
+    }
+
+    #[test]
+    fn libsql_non_contention_errors_remain_terminal_backend_errors() {
+        let path = VirtualPath::new("/resources/deltas/log").expect("valid path"); // safety: test-only fixture
+        let error = libsql_db_error(
+            path.clone(),
+            FilesystemOperation::Append,
+            libsql::Error::SqliteFailure(11, "database disk image is malformed".to_string()),
+        );
+
+        assert!(matches!( // safety: test-only assertion
+            error,
+            FilesystemError::Backend {
+                path: error_path,
+                operation: FilesystemOperation::Append,
+                ..
+            } if error_path == path
+        ));
+    }
+}
+
+#[cfg(all(test, feature = "postgres"))]
+mod postgres_tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use tokio_postgres::error::SqlState;
+
+    use super::*;
+
+    #[test]
+    fn postgres_transient_write_conflicts_are_retryable_contention() {
+        for code in [
+            SqlState::T_R_SERIALIZATION_FAILURE,
+            SqlState::T_R_DEADLOCK_DETECTED,
+            SqlState::LOCK_NOT_AVAILABLE,
+        ] {
+            assert!(is_postgres_contention(&code));
+        }
+
+        assert!(!is_postgres_contention(&SqlState::UNIQUE_VIOLATION));
+    }
+
+    #[tokio::test]
+    async fn postgres_real_lock_not_available_maps_to_backend_busy_when_configured() {
+        if std::env::var("IRONCLAW_SKIP_POSTGRES_TESTS").is_ok() {
+            return;
+        }
+        let url = std::env::var("IRONCLAW_FILESYSTEM_POSTGRES_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"));
+        let Ok(url) = url else {
+            return;
+        };
+        let (locker, locker_connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+            .await
+            .expect("configured Postgres locker connection");
+        let (contender, contender_connection) =
+            tokio_postgres::connect(&url, tokio_postgres::NoTls)
+                .await
+                .expect("configured Postgres contender connection");
+        let locker_task = tokio::spawn(async move {
+            let _ = locker_connection.await;
+        });
+        let contender_task = tokio::spawn(async move {
+            let _ = contender_connection.await;
+        });
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let table = format!("ironclaw_lock_mapping_{suffix}");
+        locker
+            .batch_execute(&format!(
+                "CREATE TABLE {table} (id INTEGER PRIMARY KEY); \
+                 INSERT INTO {table} (id) VALUES (1);"
+            ))
+            .await
+            .expect("create lock-test row");
+        locker
+            .batch_execute("BEGIN")
+            .await
+            .expect("begin locker transaction");
+        locker
+            .query_one(
+                &format!("SELECT id FROM {table} WHERE id = 1 FOR UPDATE"),
+                &[],
+            )
+            .await
+            .expect("locker holds row lock");
+
+        let postgres_error = contender
+            .query_one(
+                &format!("SELECT id FROM {table} WHERE id = 1 FOR UPDATE NOWAIT"),
+                &[],
+            )
+            .await
+            .expect_err("NOWAIT contender must receive lock-not-available");
+        assert_eq!(postgres_error.code(), Some(&SqlState::LOCK_NOT_AVAILABLE));
+
+        let path = VirtualPath::new("/resources/deltas/log").expect("valid path");
+        let mapped = db_error(path.clone(), FilesystemOperation::Append, postgres_error);
+        assert!(matches!(
+            mapped,
+            FilesystemError::BackendBusy {
+                path: error_path,
+                operation: FilesystemOperation::Append,
+            } if error_path == path
+        ));
+
+        locker
+            .batch_execute(&format!("ROLLBACK; DROP TABLE {table};"))
+            .await
+            .expect("release lock and remove test table");
+        drop(locker);
+        drop(contender);
+        locker_task.await.expect("locker connection task");
+        contender_task.await.expect("contender connection task");
+    }
 }

@@ -14,7 +14,7 @@ use ironclaw_host_runtime::memory_binding::{
 use ironclaw_reborn_config::MemorySection;
 
 use crate::RebornBuildError;
-use crate::profile::RebornCompositionProfile;
+use crate::root::profile::RebornCompositionProfile;
 
 fn deployment_profile(profile: RebornCompositionProfile) -> MemoryDeploymentProfile {
     match profile {

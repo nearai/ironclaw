@@ -3,7 +3,7 @@
 **Date:** 2026-05-21
 **Status:** Historical design snapshot; current Reborn crates live on `main`
 
-> **Current status (2026-07):** the worker-side control plane is `TurnRunScheduler` (`ironclaw_host_runtime`) plus `RebornTurnRunExecutor` (`ironclaw_reborn`).
+> **Current status (2026-07):** the worker-side control plane is `TurnRunScheduler` plus `RebornTurnRunExecutor`, co-located in `ironclaw_runner`.
 **Target architecture:** IronClaw Reborn (`crates/ironclaw_*`)
 **Source baseline:** `main` — the Reborn crates and contracts referenced below
 are in-tree.
@@ -275,7 +275,7 @@ fires; `InboundTurnService` starts the resulting agent turn.
 ### 5.4 `TriggerPollerWorker`
 
 A background tokio task modelled on `TurnRunScheduler`
-(`crates/ironclaw_host_runtime/src/turn_scheduler.rs`), which is the existing
+(`crates/ironclaw_runner/src/turn_scheduler.rs`), which is the existing
 precedent for a long-lived Reborn background worker. Loop:
 
 1. Tick every `poll_interval` (config, default ~30s).

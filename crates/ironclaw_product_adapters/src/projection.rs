@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{TurnActor, TurnScope};
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 
 use crate::auth::VerifiedAuthClaim;
 use crate::error::ProductAdapterError;
@@ -164,10 +165,41 @@ pub struct ProjectionSubscriptionRequest {
     pub after_cursor: Option<ProjectionCursor>,
 }
 
+pub struct ProjectionStreamSubscription {
+    receiver: mpsc::Receiver<Result<ProductOutboundEnvelope, ProductAdapterError>>,
+}
+
+impl ProjectionStreamSubscription {
+    pub fn new(
+        receiver: mpsc::Receiver<Result<ProductOutboundEnvelope, ProductAdapterError>>,
+    ) -> Self {
+        Self { receiver }
+    }
+
+    pub async fn next(&mut self) -> Option<Result<ProductOutboundEnvelope, ProductAdapterError>> {
+        self.receiver.recv().await
+    }
+}
+
 #[async_trait]
 pub trait ProjectionStream: Send + Sync {
     async fn drain(
         &self,
         request: ProjectionSubscriptionRequest,
     ) -> Result<Vec<ProductOutboundEnvelope>, ProductAdapterError>;
+
+    fn supports_subscription(&self) -> bool {
+        false
+    }
+
+    async fn subscribe(
+        &self,
+        _request: ProjectionSubscriptionRequest,
+    ) -> Result<ProjectionStreamSubscription, ProductAdapterError> {
+        Err(ProductAdapterError::Internal {
+            detail: RedactedString::new(
+                "projection subscription is not supported by this ProjectionStream implementation",
+            ),
+        })
+    }
 }

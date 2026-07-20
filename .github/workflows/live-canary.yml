@@ -66,6 +66,11 @@ on:
         type: string
         required: false
         default: ""
+      trigger_actor:
+        description: "Optional GitHub login of the maintainer who authorized a ChatOps PR live-QA run."
+        type: string
+        required: false
+        default: ""
       use_target_harness:
         description: "Use target_ref's Reborn WebUI v2 live QA harness instead of restoring the canonical main harness."
         type: boolean
@@ -542,11 +547,318 @@ jobs:
           path: artifacts/live-canary/
           retention-days: 14
 
+  approve-reborn-webui-v2-pr-live-qa:
+    name: Approve PR code for Reborn WebUI v2 live QA
+    if: >
+      github.event_name == 'workflow_dispatch' &&
+      inputs.target_ref != '' &&
+      (inputs.lane == 'all' || inputs.lane == 'reborn-webui-v2-live-qa')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: reborn-live-canary-pr
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Require trusted approval or maintainer-triggered PR live QA
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TARGET_PR: ${{ inputs.target_pr }}
+          TARGET_REF: ${{ inputs.target_ref }}
+          # A workflow_dispatch created by Live Canary Command is attributed to
+          # github-actions[bot]. The command verifies this original actor has
+          # repository write access before dispatching; direct dispatches use
+          # GitHub's real triggering actor instead.
+          TRIGGER_ACTOR: ${{ inputs.trigger_actor || github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          if ! [[ "${TARGET_PR}" =~ ^[0-9]+$ && "${TARGET_REF}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::A valid target_pr and full target_ref are required for PR live QA."
+            exit 1
+          fi
+
+          pr_json="$(gh pr view "${TARGET_PR}" --repo "${REPO}" --json isCrossRepository,headRefOid)"
+          if [[ "$(jq -r '.isCrossRepository' <<< "${pr_json}")" == "true" ]]; then
+            echo "::error::Refusing to run live QA with secrets on a forked PR."
+            exit 1
+          fi
+          if [[ "$(jq -r '.headRefOid' <<< "${pr_json}")" != "${TARGET_REF}" ]]; then
+            echo "::error::target_ref does not match PR #${TARGET_PR} head SHA."
+            exit 1
+          fi
+
+          trusted_approval=""
+          while IFS=$'\t' read -r reviewer commit_id; do
+            [[ "${commit_id}" == "${TARGET_REF}" ]] || continue
+            permission="$(gh api "repos/${REPO}/collaborators/${reviewer}/permission" --jq '.permission')"
+            if [[ "${permission}" == "admin" || "${permission}" == "maintain" || "${permission}" == "write" ]]; then
+              trusted_approval="${reviewer}"
+              break
+            fi
+          done < <(
+            gh api --paginate "repos/${REPO}/pulls/${TARGET_PR}/reviews" \
+              --jq 'sort_by(.submitted_at) | group_by(.user.login) | map(last) | .[] | select(.state == "APPROVED") | [.user.login, .commit_id] | @tsv'
+          )
+
+          if [[ -z "${trusted_approval}" && "${TRIGGER_ACTOR}" =~ ^[A-Za-z0-9-]+$ ]]; then
+            permission="$(gh api "repos/${REPO}/collaborators/${TRIGGER_ACTOR}/permission" --jq '.permission')"
+            if [[ "${permission}" == "admin" || "${permission}" == "maintain" || "${permission}" == "write" ]]; then
+              trusted_approval="${TRIGGER_ACTOR} (authorized trigger)"
+            fi
+          fi
+
+          if [[ -z "${trusted_approval}" ]]; then
+            echo "::error::PR #${TARGET_PR} head ${TARGET_REF} requires either an approving review from a collaborator with write access or a trigger by a collaborator with write access before live secrets can be used."
+            exit 1
+          fi
+          echo "Trusted authorization for ${TARGET_REF} was provided by ${trusted_approval}."
+
+  preflight-reborn-webui-v2-google-oauth:
+    name: Preflight Reborn WebUI v2 Google OAuth
+    needs: approve-reborn-webui-v2-pr-live-qa
+    if: >
+      always() &&
+      (
+        github.event_name == 'schedule' ||
+        (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'reborn-webui-v2-live-qa'))
+      ) &&
+      (inputs.target_ref == '' || needs.approve-reborn-webui-v2-pr-live-qa.result == 'success')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      status: ${{ steps.refresh.outputs.status }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Refresh Google OAuth access token
+        id: refresh
+        continue-on-error: true
+        env:
+          IRONCLAW_REBORN_GOOGLE_CLIENT_ID: ${{ secrets.IRONCLAW_REBORN_GOOGLE_CLIENT_ID || secrets.GOOGLE_CLIENT_ID || secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET: ${{ secrets.IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET || secrets.GOOGLE_CLIENT_SECRET || secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          AUTH_LIVE_GOOGLE_REFRESH_TOKEN: ${{ secrets.AUTH_LIVE_GOOGLE_REFRESH_TOKEN }}
+        run: >-
+          python3 scripts/reborn_webui_v2_live_qa/refresh_google_oauth.py
+          --github-output "${GITHUB_OUTPUT}"
+      - name: Report Google OAuth infrastructure failure
+        if: steps.refresh.outcome != 'success'
+        env:
+          GOOGLE_OAUTH_STATUS: ${{ steps.refresh.outputs.status }}
+        run: |
+          echo "::error::Reborn WebUI v2 Google OAuth preflight failed: ${GOOGLE_OAUTH_STATUS:-unknown}. Google-dependent cases will be skipped; non-Google cases will continue."
+          exit 1
+
+  prepare-reborn-webui-v2-live-qa:
+    name: Prepare Reborn WebUI v2 live QA binary
+    if: >
+      always() &&
+      (
+        (github.event_name == 'schedule' && github.event.schedule == '0 */3 * * *') ||
+        (
+          github.event_name == 'workflow_dispatch' &&
+          (inputs.lane == 'all' || inputs.lane == 'reborn-webui-v2-live-qa') &&
+          (inputs.target_ref == '' || needs.approve-reborn-webui-v2-pr-live-qa.result == 'success')
+        )
+      )
+    needs: approve-reborn-webui-v2-pr-live-qa
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    outputs:
+      checkout_ref: ${{ steps.target.outputs.checkout_ref }}
+      build_source: ${{ steps.lookup.outputs.source || steps.fallback.outputs.source }}
+    steps:
+      - name: Resolve and validate Reborn WebUI v2 target
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TARGET_PR: ${{ inputs.target_pr }}
+          TARGET_REF: ${{ inputs.target_ref }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${TARGET_REF}" ]]; then
+            echo "checkout_ref=${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          if ! [[ "${TARGET_REF}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::target_ref must be a full commit SHA for reborn-webui-v2-live-qa."
+            exit 1
+          fi
+          if ! [[ "${TARGET_PR}" =~ ^[0-9]+$ ]]; then
+            echo "::error::target_pr is required when target_ref is supplied for reborn-webui-v2-live-qa."
+            exit 1
+          fi
+          pr_json="$(gh pr view "${TARGET_PR}" --repo "${REPO}" --json isCrossRepository,headRefOid)"
+          if [[ "$(jq -r '.isCrossRepository' <<< "${pr_json}")" == "true" ]]; then
+            echo "::error::Refusing to run reborn-webui-v2-live-qa with live secrets on a forked PR."
+            exit 1
+          fi
+          if [[ "$(jq -r '.headRefOid' <<< "${pr_json}")" != "${TARGET_REF}" ]]; then
+            echo "::error::target_ref does not match PR #${TARGET_PR} head SHA."
+            exit 1
+          fi
+          echo "checkout_ref=${TARGET_REF}" >> "${GITHUB_OUTPUT}"
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+          ref: ${{ steps.target.outputs.checkout_ref }}
+
+      - name: Find successful Reborn E2E binary for target SHA
+        id: lookup
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TARGET_REF: ${{ steps.target.outputs.checkout_ref }}
+        run: |
+          set -euo pipefail
+          artifact_name="reborn-webui-v2-binary-${TARGET_REF}"
+          workflow_id="$(gh api "repos/${REPO}/actions/workflows/reborn-e2e.yml" --jq '.id')"
+          mkdir -p artifacts/prepared-reborn-webui-v2-binary
+          echo "found=0" >> "${GITHUB_OUTPUT}"
+
+          for attempt in $(seq 1 20); do
+            runs="$(gh api --method GET "repos/${REPO}/actions/workflows/${workflow_id}/runs" \
+              -f head_sha="${TARGET_REF}" -f per_page=10)"
+            run="$(jq -c '[.workflow_runs[] | select(.head_sha == $sha)] | sort_by(.created_at) | reverse | .[0] // empty' \
+              --arg sha "${TARGET_REF}" <<< "${runs}")"
+            if [[ -z "${run}" ]]; then
+              if [[ ${attempt} -le 2 ]]; then
+                echo "No Reborn E2E run exists for ${TARGET_REF} yet; waiting for CI to start (${attempt}/2)."
+                sleep 15
+                continue
+              fi
+              echo "No Reborn E2E run exists for ${TARGET_REF}; using the canary fallback build."
+              exit 0
+            fi
+
+            status="$(jq -r '.status' <<< "${run}")"
+            conclusion="$(jq -r '.conclusion // ""' <<< "${run}")"
+            run_id="$(jq -r '.id' <<< "${run}")"
+            if [[ "${status}" != "completed" ]]; then
+              echo "Reborn E2E run ${run_id} is ${status}; waiting for its tested binary (${attempt}/20)."
+              sleep 15
+              continue
+            fi
+            if [[ "${conclusion}" != "success" ]]; then
+              echo "Reborn E2E run ${run_id} concluded ${conclusion}; using the canary fallback build."
+              exit 0
+            fi
+
+            artifacts="$(gh api --method GET "repos/${REPO}/actions/runs/${run_id}/artifacts" -f per_page=100)"
+            artifact_id="$(jq -r '[.artifacts[] | select(.expired == false and .name == $name)] | .[0].id // empty' \
+              --arg name "${artifact_name}" <<< "${artifacts}")"
+            if [[ -z "${artifact_id}" ]]; then
+              echo "Successful Reborn E2E run ${run_id} has no ${artifact_name}; using the canary fallback build."
+              exit 0
+            fi
+
+            if ! (
+              set -e
+              rm -rf artifacts/prepared-reborn-webui-v2-binary
+              mkdir -p artifacts/prepared-reborn-webui-v2-binary
+              gh api "repos/${REPO}/actions/artifacts/${artifact_id}/zip" > "${RUNNER_TEMP}/reborn-webui-v2-binary.zip"
+              unzip -q "${RUNNER_TEMP}/reborn-webui-v2-binary.zip" -d artifacts/prepared-reborn-webui-v2-binary
+              python3 scripts/live-canary/validate_reborn_binary_artifact.py \
+                artifacts/prepared-reborn-webui-v2-binary \
+                "${TARGET_REF}" \
+                "libsql"
+            ); then
+              echo "::warning::The Reborn E2E artifact could not be downloaded or validated; using the canary fallback build."
+              rm -rf artifacts/prepared-reborn-webui-v2-binary
+              mkdir -p artifacts/prepared-reborn-webui-v2-binary
+              exit 0
+            fi
+            echo "found=1" >> "${GITHUB_OUTPUT}"
+            echo "source=reborn-e2e" >> "${GITHUB_OUTPUT}"
+            echo "Using tested Reborn E2E binary from run ${run_id}."
+            exit 0
+          done
+
+          echo "Reborn E2E did not finish within five minutes; using the canary fallback build."
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        if: steps.lookup.outputs.found != '1'
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        if: steps.lookup.outputs.found != '1'
+        with:
+          key: live-canary-reborn-webui-v2-live-qa
+
+      - name: Setup OVH sccache
+        if: steps.lookup.outputs.found != '1'
+        uses: ./.github/actions/setup-sccache-dist
+        with:
+          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
+          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
+          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
+          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
+          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
+          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
+
+      - name: Build fallback Reborn WebUI v2 binary once
+        if: steps.lookup.outputs.found != '1'
+        env:
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: >-
+          cargo build
+          -p ironclaw_reborn_cli
+          --bin ironclaw
+
+      - name: Package fallback Reborn WebUI v2 binary
+        id: fallback
+        if: steps.lookup.outputs.found != '1'
+        env:
+          TARGET_REF: ${{ steps.target.outputs.checkout_ref }}
+        run: |
+          set -euo pipefail
+          rm -rf artifacts/prepared-reborn-webui-v2-binary
+          mkdir -p artifacts/prepared-reborn-webui-v2-binary
+          # Temporary compatibility member for downstream QA consumers; remove
+          # after every consumer invokes the canonical ironclaw binary.
+          cp target/debug/ironclaw target/debug/ironclaw-reborn
+          tar -C target/debug -czf artifacts/prepared-reborn-webui-v2-binary/ironclaw-reborn.tar.gz ironclaw ironclaw-reborn
+          (
+            cd artifacts/prepared-reborn-webui-v2-binary
+            sha256sum ironclaw-reborn.tar.gz > ironclaw-reborn.tar.gz.sha256
+          )
+          jq -n \
+            --arg product_ref "${TARGET_REF}" \
+            --argjson features '["libsql"]' \
+            '{format_version: 1, product_ref: $product_ref, features: $features}' \
+            > artifacts/prepared-reborn-webui-v2-binary/manifest.json
+          echo "source=canary-fallback" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload prepared Reborn WebUI v2 binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: prepared-reborn-webui-v2-binary-${{ steps.target.outputs.checkout_ref }}
+          path: artifacts/prepared-reborn-webui-v2-binary/
+          if-no-files-found: error
+          retention-days: 1
+
   reborn-webui-v2-live-qa:
     name: Reborn WebUI v2 Live QA (${{ matrix.shard_name }})
+    needs:
+      - prepare-reborn-webui-v2-live-qa
+      - preflight-reborn-webui-v2-google-oauth
     if: >
-      (github.event_name == 'schedule' && github.event.schedule == '0 */3 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'reborn-webui-v2-live-qa'))
+      always() &&
+      needs.prepare-reborn-webui-v2-live-qa.result == 'success' &&
+      (
+        github.event_name == 'schedule' ||
+        (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'reborn-webui-v2-live-qa'))
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
@@ -556,9 +868,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - shard_id: qa-2
-            shard_name: QA 2
-            cases: qa_2a_gmail_connect,qa_2b_calendar_connect,qa_2c_drive_connect,qa_2d_calendar_prep_live_chat,qa_2e_calendar_prep_email_routine,qa_2f_calendar_prep_email_delivery
+          - shard_id: qa-2-connect
+            shard_name: QA 2A-2C
+            cases: qa_2a_gmail_connect,qa_2b_calendar_connect,qa_2c_drive_connect
+          - shard_id: qa-2-workflow
+            shard_name: QA 2D-2F
+            cases: qa_2d_calendar_prep_live_chat,qa_2e_calendar_prep_email_routine,qa_2f_calendar_prep_email_delivery
           - shard_id: qa-3
             shard_name: QA 3
             cases: qa_3a_slack_connect,qa_3b_endpoint_status_live_chat,qa_3c_endpoint_status_slack_routine,qa_3d_endpoint_status_slack_delivery
@@ -568,16 +883,44 @@ jobs:
           - shard_id: qa-5
             shard_name: QA 5
             cases: qa_5a_slack_connect,qa_5b_drive_connect,qa_5c_strategy_doc_knowledge_base,qa_5d_slack_strategy_doc_answer
-          - shard_id: qa-6
-            shard_name: QA 6
-            cases: qa_6a_gmail_connect,qa_6b_sheets_connect,qa_6c_gmail_to_sheet_live_chat,qa_6d_gmail_to_sheet_routine,qa_6e_gmail_to_sheet_delivery
+          - shard_id: qa-6-connect
+            shard_name: QA 6A-6C
+            cases: qa_6a_gmail_connect,qa_6b_sheets_connect,qa_6c_gmail_to_sheet_live_chat
+          - shard_id: qa-6-workflow
+            shard_name: QA 6D-6E
+            cases: qa_6d_gmail_to_sheet_routine,qa_6e_gmail_to_sheet_delivery
           - shard_id: qa-7
             shard_name: QA 7
             cases: qa_7a_slack_product_channel_connect,qa_7b_sheets_connect,qa_7c_slack_bug_logger_routine,qa_7d_slack_bug_message_trigger,qa_7e_slack_bug_sheet_delivery
-          - shard_id: qa-8
-            shard_name: QA 8
-            cases: qa_8a_slack_connect,qa_8b_hn_keyword_live_chat,qa_8c_hn_keyword_slack_routine,qa_8d_hn_keyword_slack_delivery
+          - shard_id: qa-8-monitor
+            shard_name: QA 8A-8C
+            cases: qa_8a_slack_connect,qa_8b_hn_keyword_live_chat,qa_8c_hn_keyword_slack_routine
+          - shard_id: qa-8-delivery
+            shard_name: QA 8D
+            cases: qa_8d_hn_keyword_slack_delivery
+          # Automation delivery probes, in the 3-hourly cron rotation (the
+          # delivery-routing fixes from #5898 are merged and live-verified
+          # green). Guards regressions in: wrong-channel routine delivery,
+          # duplicate DM delivery, raw Slack user ids leaking into digests,
+          # and per-trigger delivery-target routing.
+          - shard_id: qa-9
+            shard_name: QA 9
+            cases: qa_9a_slack_connect,qa_9b_routine_dm_delivery_exactly_once,qa_9c_slack_digest_names_not_ids,qa_9d_routine_per_trigger_delivery_target
+          # Slack tool-correctness probes, in the 3-hourly cron rotation (the
+          # tool-surface fixes from #5898 are merged and live-verified green).
+          # Guards regressions in: self-attribution, status readback, thread
+          # replies, membership honesty, error honesty, mention encoding,
+          # last-sent recall, email hallucination, and raw-entity hygiene.
+          - shard_id: qa-10
+            shard_name: QA 10
+            cases: qa_10a_slack_self_attribution,qa_10b_slack_ooo_status,qa_10c_slack_thread_replies,qa_10d_slack_channel_membership,qa_10e_slack_error_honesty,qa_10f_slack_mention_encoding,qa_10g_slack_last_message_sent,qa_10g_slack_last_message_sent_global,qa_10h_slack_email_hallucination_guard,qa_10i_slack_raw_entity_hygiene
     env:
+      REBORN_WEBUI_V2_GOOGLE_CASES: >-
+        qa_2a_gmail_connect,qa_2b_calendar_connect,qa_2c_drive_connect,qa_2d_calendar_prep_live_chat,qa_2e_calendar_prep_email_routine,qa_2f_calendar_prep_email_delivery,
+        qa_4a_gmail_connect,qa_4e_github_release_email_delivery,
+        qa_5b_drive_connect,qa_5c_strategy_doc_knowledge_base,qa_5d_slack_strategy_doc_answer,
+        qa_6a_gmail_connect,qa_6b_sheets_connect,qa_6c_gmail_to_sheet_live_chat,qa_6d_gmail_to_sheet_routine,qa_6e_gmail_to_sheet_delivery,
+        qa_7b_sheets_connect,qa_7c_slack_bug_logger_routine,qa_7e_slack_bug_sheet_delivery
       REBORN_WEBUI_V2_LIVE_QA_LLM_API_KEY_ENV: NEARAI_API_KEY
       REBORN_WEBUI_V2_LIVE_QA_LLM_PROVIDER_ID: nearai
       REBORN_WEBUI_V2_LIVE_QA_LLM_MODEL: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_LLM_MODEL || 'deepseek-ai/DeepSeek-V4-Flash' }}
@@ -591,6 +934,7 @@ jobs:
       REBORN_WEBUI_V2_LIVE_QA_SLACK_API_APP_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_API_APP_ID }}
       REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_USER_ID }}
       REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_SUBJECT_USER_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_ROUTE_SUBJECT_USER_ID }}
+      REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_ID: ${{ vars.REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_ID }}
       LIVE_OPENAI_COMPATIBLE_BASE_URL: ${{ vars.LIVE_OPENAI_COMPATIBLE_BASE_URL || 'https://cloud-api.near.ai/v1' }}
       LIVE_OPENAI_COMPATIBLE_MODEL: ${{ vars.LIVE_OPENAI_COMPATIBLE_MODEL || 'Qwen/Qwen3.5-122B-A10B' }}
     steps:
@@ -599,6 +943,7 @@ jobs:
         shell: bash
         env:
           REQUESTED_CASES: ${{ github.event_name == 'schedule' && 'all' || inputs.cases || vars.REBORN_WEBUI_V2_LIVE_QA_CASES || 'all' }}
+          DISPATCH_ONLY_SHARD: ${{ matrix.dispatch_only || false }}
           SHARD_CASES: ${{ matrix.cases }}
           ALL_SHARD_CASES: >-
             qa_2a_gmail_connect,qa_2b_calendar_connect,qa_2c_drive_connect,qa_2d_calendar_prep_live_chat,qa_2e_calendar_prep_email_routine,qa_2f_calendar_prep_email_delivery,
@@ -607,11 +952,31 @@ jobs:
             qa_5a_slack_connect,qa_5b_drive_connect,qa_5c_strategy_doc_knowledge_base,qa_5d_slack_strategy_doc_answer,
             qa_6a_gmail_connect,qa_6b_sheets_connect,qa_6c_gmail_to_sheet_live_chat,qa_6d_gmail_to_sheet_routine,qa_6e_gmail_to_sheet_delivery,
             qa_7a_slack_product_channel_connect,qa_7b_sheets_connect,qa_7c_slack_bug_logger_routine,qa_7d_slack_bug_message_trigger,qa_7e_slack_bug_sheet_delivery,
-            qa_8a_slack_connect,qa_8b_hn_keyword_live_chat,qa_8c_hn_keyword_slack_routine,qa_8d_hn_keyword_slack_delivery
+            qa_8a_slack_connect,qa_8b_hn_keyword_live_chat,qa_8c_hn_keyword_slack_routine,qa_8d_hn_keyword_slack_delivery,
+            qa_9a_slack_connect,qa_9b_routine_dm_delivery_exactly_once,qa_9c_slack_digest_names_not_ids,qa_9d_routine_per_trigger_delivery_target,
+            qa_10a_slack_self_attribution,qa_10b_slack_ooo_status,qa_10c_slack_thread_replies,qa_10d_slack_channel_membership,qa_10e_slack_error_honesty,qa_10f_slack_mention_encoding,qa_10g_slack_last_message_sent,qa_10g_slack_last_message_sent_global,qa_10h_slack_email_hallucination_guard,qa_10i_slack_raw_entity_hygiene
         run: |
           set -euo pipefail
+          if [[ "${DISPATCH_ONLY_SHARD}" == "true" && "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
+            echo "REBORN_WEBUI_V2_LIVE_QA_SKIP_SHARD=1" >> "${GITHUB_ENV}"
+            echo "REBORN_WEBUI_V2_LIVE_QA_CASES_RESOLUTION=dispatch-only-shard" >> "${GITHUB_ENV}"
+            echo "skip_shard=1" >> "${GITHUB_OUTPUT}"
+            echo "Shard is dispatch_only; skipping on schedule."
+            exit 0
+          fi
           cases="$(echo "${REQUESTED_CASES:-}" | xargs)"
           if [[ -z "${cases}" || "${cases}" == "all" || "${cases}" == "ALL" || "${cases}" == "*" ]]; then
+            if [[ "${DISPATCH_ONLY_SHARD}" == "true" ]]; then
+              # dispatch_only shards run ONLY when one of their cases is
+              # explicitly requested — a bare /canary or default dispatch
+              # (cases=all) must not run an expected-red shard on an
+              # unrelated PR.
+              echo "REBORN_WEBUI_V2_LIVE_QA_SKIP_SHARD=1" >> "${GITHUB_ENV}"
+              echo "REBORN_WEBUI_V2_LIVE_QA_CASES_RESOLUTION=dispatch-only-shard-default-cases" >> "${GITHUB_ENV}"
+              echo "skip_shard=1" >> "${GITHUB_OUTPUT}"
+              echo "Shard is dispatch_only and no shard case was explicitly requested; skipping."
+              exit 0
+            fi
             echo "CASES=${SHARD_CASES}" >> "${GITHUB_ENV}"
             echo "REBORN_WEBUI_V2_LIVE_QA_CASES_RESOLUTION=matrix-shard" >> "${GITHUB_ENV}"
             echo "skip_shard=0" >> "${GITHUB_OUTPUT}"
@@ -656,49 +1021,38 @@ jobs:
               echo "Running requested cases in this shard: ${joined}"
             fi
           fi
-      - name: Validate Reborn WebUI v2 live QA target ref
-        id: validate_reborn_webui_v2_target
-        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1' && github.event_name == 'workflow_dispatch' && inputs.target_ref != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          TARGET_PR: ${{ inputs.target_pr }}
-          TARGET_REF: ${{ inputs.target_ref }}
-        run: |
-          set -euo pipefail
-          if ! [[ "${TARGET_REF}" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::target_ref must be a full commit SHA for reborn-webui-v2-live-qa."
-            exit 1
-          fi
-          if ! [[ "${TARGET_PR}" =~ ^[0-9]+$ ]]; then
-            echo "::error::target_pr is required when target_ref is supplied for reborn-webui-v2-live-qa."
-            exit 1
-          fi
-          pr_json="$(gh pr view "${TARGET_PR}" --repo "${REPO}" --json isCrossRepository,headRefOid)"
-          is_cross_repository="$(jq -r '.isCrossRepository' <<< "${pr_json}")"
-          head_sha="$(jq -r '.headRefOid' <<< "${pr_json}")"
-          if [[ "${is_cross_repository}" == "true" ]]; then
-            echo "::error::Refusing to run reborn-webui-v2-live-qa with live secrets on a forked PR."
-            exit 1
-          fi
-          if [[ "${head_sha}" != "${TARGET_REF}" ]]; then
-            echo "::error::target_ref does not match PR #${TARGET_PR} head SHA."
-            exit 1
-          fi
-          echo "checkout_ref=${TARGET_REF}" >> "${GITHUB_OUTPUT}"
-      - name: Resolve default Reborn WebUI v2 live QA checkout ref
-        id: default_reborn_webui_v2_target
-        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1' && (github.event_name != 'workflow_dispatch' || inputs.target_ref == '')
-        run: |
-          echo "checkout_ref=${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
         with:
           persist-credentials: false
-          ref: ${{ steps.validate_reborn_webui_v2_target.outputs.checkout_ref || steps.default_reborn_webui_v2_target.outputs.checkout_ref }}
+          ref: ${{ needs.prepare-reborn-webui-v2-live-qa.outputs.checkout_ref }}
+      - name: Suppress Google cases after OAuth preflight failure
+        id: filter_reborn_webui_v2_google_cases
+        shell: bash
+        env:
+          RESOLVE_SKIP_SHARD: ${{ steps.resolve_reborn_webui_v2_cases.outputs.skip_shard }}
+          GOOGLE_OAUTH_STATUS: ${{ needs.preflight-reborn-webui-v2-google-oauth.outputs.status }}
+        run: |
+          set -euo pipefail
+          if [[ "${RESOLVE_SKIP_SHARD}" == "1" ]]; then
+            echo "skip_shard=1" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          if [[ "${GOOGLE_OAUTH_STATUS}" == "healthy" ]]; then
+            echo "skip_shard=0" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          python3 .github/scripts/google_oauth_cases.py \
+            --mode suppress \
+            --cases "${CASES:-}" \
+            --google-cases "${REBORN_WEBUI_V2_GOOGLE_CASES}" \
+            --status "${GOOGLE_OAUTH_STATUS:-unknown}" \
+            --github-env "${GITHUB_ENV}" \
+            --github-output "${GITHUB_OUTPUT}"
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         if: >
-          steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1' &&
+          steps.filter_reborn_webui_v2_google_cases.outputs.skip_shard != '1' &&
           github.event_name == 'workflow_dispatch' &&
           inputs.target_ref != '' &&
           inputs.use_target_harness != true
@@ -708,7 +1062,7 @@ jobs:
           path: .canonical-live-qa-harness
       - name: Restore canonical Reborn WebUI v2 live QA harness
         if: >
-          steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1' &&
+          steps.filter_reborn_webui_v2_google_cases.outputs.skip_shard != '1' &&
           github.event_name == 'workflow_dispatch' &&
           inputs.target_ref != '' &&
           inputs.use_target_harness != true
@@ -724,44 +1078,56 @@ jobs:
           cp .canonical-live-qa-harness/tests/e2e/ironclaw_e2e.egg-info/requires.txt tests/e2e/ironclaw_e2e.egg-info/requires.txt
           rm -rf .canonical-live-qa-harness
           echo "REBORN_WEBUI_V2_LIVE_QA_HARNESS_REF=${harness_ref}" >> "${GITHUB_ENV}"
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
-        with:
-          targets: wasm32-wasip2
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
+        if: steps.filter_reborn_webui_v2_google_cases.outputs.skip_shard != '1'
         with:
           python-version: "3.12"
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
+          cache: pip
+          cache-dependency-path: tests/e2e/pyproject.toml
+
+      - name: Cache Playwright browsers
+        if: steps.filter_reborn_webui_v2_google_cases.outputs.skip_shard != '1'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          key: live-canary-reborn-webui-v2-live-qa
-      - name: Setup OVH sccache
-        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
-        uses: ./.github/actions/setup-sccache-dist
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('tests/e2e/pyproject.toml') }}
+          restore-keys: ${{ runner.os }}-playwright-
+
+      - name: Download prepared Reborn WebUI v2 binary
+        if: steps.filter_reborn_webui_v2_google_cases.outputs.skip_shard != '1'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
-          auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
-          cache-ssh-host: ${{ vars.SCCACHE_CACHE_SSH_HOST }}
-          cache-ssh-user: ${{ vars.SCCACHE_CACHE_SSH_USER }}
-          cache-ssh-port: ${{ vars.SCCACHE_CACHE_SSH_PORT }}
-          cache-ssh-private-key: ${{ secrets.SCCACHE_CACHE_SSH_PRIVATE_KEY }}
-          cache-ssh-known-hosts: ${{ secrets.SCCACHE_CACHE_SSH_KNOWN_HOSTS }}
-          redis-password: ${{ secrets.SCCACHE_REDIS_PASSWORD }}
-      - name: Install cargo-component
-        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
-        run: cargo install cargo-component --locked || true
-      - name: Build WASM channels
-        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
-        run: ./scripts/build-wasm-extensions.sh --channels
+          name: prepared-reborn-webui-v2-binary-${{ needs.prepare-reborn-webui-v2-live-qa.outputs.checkout_ref }}
+          path: .live-qa-binary
+
+      - name: Verify and install prepared Reborn WebUI v2 binary
+        if: steps.filter_reborn_webui_v2_google_cases.outputs.skip_shard != '1'
+        env:
+          TARGET_REF: ${{ needs.prepare-reborn-webui-v2-live-qa.outputs.checkout_ref }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${TARGET_REF}"
+          python3 scripts/live-canary/validate_reborn_binary_artifact.py \
+            .live-qa-binary \
+            "${TARGET_REF}" \
+            "libsql"
+          mkdir -p target/debug
+          tar -C target/debug -xzf .live-qa-binary/ironclaw-reborn.tar.gz
+          chmod 755 target/debug/ironclaw target/debug/ironclaw-reborn
       - name: Materialize Reborn WebUI v2 live QA sensitive secrets to files
-        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
+        if: steps.filter_reborn_webui_v2_google_cases.outputs.skip_shard != '1'
         shell: bash
         env:
           NEARAI_API_KEY: ${{ secrets.NEARAI_API_KEY || secrets.LIVE_OPENAI_COMPATIBLE_API_KEY }}
           LIVE_OPENAI_COMPATIBLE_API_KEY: ${{ secrets.LIVE_OPENAI_COMPATIBLE_API_KEY }}
           IRONCLAW_REBORN_SLACK_SIGNING_SECRET: ${{ secrets.IRONCLAW_REBORN_SLACK_SIGNING_SECRET }}
           IRONCLAW_REBORN_SLACK_BOT_TOKEN: ${{ secrets.IRONCLAW_REBORN_SLACK_BOT_TOKEN }}
+          REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_SECRET: ${{ secrets.REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_SECRET }}
+          AUTH_LIVE_SLACK_ACCESS_TOKEN: ${{ secrets.AUTH_LIVE_SLACK_ACCESS_TOKEN || secrets.AUTH_LIVE_SLACK_USER_TOKEN || secrets.REBORN_WEBUI_V2_LIVE_QA_SLACK_USER_TOKEN }}
+          # Optional second HUMAN Slack identity for the QA 10 shard (future
+          # dedicated canary user). Arms that strictly need it assert and go
+          # red with a distinct precondition message when it is absent.
+          AUTH_LIVE_SLACK_SECOND_USER_TOKEN: ${{ secrets.AUTH_LIVE_SLACK_SECOND_USER_TOKEN || '' }}
           IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET: ${{ secrets.IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET || secrets.GOOGLE_CLIENT_SECRET || secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
           AUTH_LIVE_GOOGLE_ACCESS_TOKEN: ${{ secrets.AUTH_LIVE_GOOGLE_ACCESS_TOKEN }}
           AUTH_LIVE_GOOGLE_REFRESH_TOKEN: ${{ secrets.AUTH_LIVE_GOOGLE_REFRESH_TOKEN }}
@@ -789,25 +1155,63 @@ jobs:
           write_secret "LIVE_OPENAI_COMPATIBLE_API_KEY" "${LIVE_OPENAI_COMPATIBLE_API_KEY:-}"
           write_secret "IRONCLAW_REBORN_SLACK_SIGNING_SECRET" "${IRONCLAW_REBORN_SLACK_SIGNING_SECRET:-}"
           write_secret "IRONCLAW_REBORN_SLACK_BOT_TOKEN" "${IRONCLAW_REBORN_SLACK_BOT_TOKEN:-}"
+          write_secret "REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_SECRET" "${REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_SECRET:-}"
+          write_secret "AUTH_LIVE_SLACK_ACCESS_TOKEN" "${AUTH_LIVE_SLACK_ACCESS_TOKEN:-}"
+          write_secret "AUTH_LIVE_SLACK_SECOND_USER_TOKEN" "${AUTH_LIVE_SLACK_SECOND_USER_TOKEN:-}"
           write_secret "IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET" "${IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET:-}"
           write_secret "AUTH_LIVE_GOOGLE_ACCESS_TOKEN" "${AUTH_LIVE_GOOGLE_ACCESS_TOKEN:-}"
           write_secret "AUTH_LIVE_GOOGLE_REFRESH_TOKEN" "${AUTH_LIVE_GOOGLE_REFRESH_TOKEN:-}"
           write_secret "AUTH_LIVE_GITHUB_TOKEN" "${AUTH_LIVE_GITHUB_TOKEN:-}"
           write_secret "TELEGRAM_BOT_TOKEN" "${TELEGRAM_BOT_TOKEN:-}"
           write_secret "TELEGRAM_WEBHOOK_SECRET" "${TELEGRAM_WEBHOOK_SECRET:-}"
+      - name: Mint fresh Google OAuth access token for selected cases
+        id: mint_reborn_webui_v2_google_token
+        if: steps.filter_reborn_webui_v2_google_cases.outputs.skip_shard != '1'
+        shell: bash
+        run: |
+          set +x
+          set -euo pipefail
+          if ! python3 .github/scripts/google_oauth_cases.py \
+            --mode needs-google --cases "${CASES}" \
+            --google-cases "${REBORN_WEBUI_V2_GOOGLE_CASES}"; then
+            echo "skip_shard=0" >> "${GITHUB_OUTPUT}"
+            echo "Selected cases do not require Google OAuth."
+            exit 0
+          fi
+          access_token_path="${RUNNER_TEMP}/reborn-webui-v2-live-qa-secrets/AUTH_LIVE_GOOGLE_ACCESS_TOKEN"
+          refresh_status_path="${RUNNER_TEMP}/reborn-webui-v2-google-refresh-output"
+          if python3 scripts/reborn_webui_v2_live_qa/refresh_google_oauth.py \
+            --access-token-path "${access_token_path}" \
+            --github-output "${refresh_status_path}"; then
+            echo "AUTH_LIVE_GOOGLE_ACCESS_TOKEN_PATH=${access_token_path}" >> "${GITHUB_ENV}"
+            echo "skip_shard=0" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          refresh_status="$(sed -n 's/^status=//p' "${refresh_status_path}" | tail -1)"
+          python3 .github/scripts/google_oauth_cases.py \
+            --mode suppress \
+            --cases "${CASES}" \
+            --google-cases "${REBORN_WEBUI_V2_GOOGLE_CASES}" \
+            --status "${refresh_status:-unknown}" \
+            --github-env "${GITHUB_ENV}" \
+            --github-output "${GITHUB_OUTPUT}"
       - name: Run Reborn WebUI v2 live QA lane
-        if: steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
+        if: >
+          steps.filter_reborn_webui_v2_google_cases.outputs.skip_shard != '1' &&
+          steps.mint_reborn_webui_v2_google_token.outputs.skip_shard != '1'
         env:
           LANE: reborn-webui-v2-live-qa
           PROVIDER: reborn-webui-v2-${{ matrix.shard_id }}
           COMMAND_TIMEOUT: 90m
           PLAYWRIGHT_INSTALL: with-deps
+          REBORN_WEBUI_V2_LIVE_QA_BUILD_SOURCE: ${{ needs.prepare-reborn-webui-v2-live-qa.outputs.build_source }}
+          SKIP_BUILD: "1"
         run: scripts/live-canary/run.sh
       - name: Scrub artifacts
-        if: always() && steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
+        if: always() && steps.filter_reborn_webui_v2_google_cases.outputs.skip_shard != '1'
         run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
       - name: Upload artifacts
-        if: always() && steps.resolve_reborn_webui_v2_cases.outputs.skip_shard != '1'
+        if: always() && steps.filter_reborn_webui_v2_google_cases.outputs.skip_shard != '1'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: live-canary-reborn-webui-v2-live-qa-${{ matrix.shard_id }}
@@ -1134,6 +1538,7 @@ jobs:
       - auth-live-seeded
       - auth-browser-consent
       - workflow-canary
+      - preflight-reborn-webui-v2-google-oauth
       - reborn-webui-v2-live-qa
       - deterministic-replay
       - public-smoke
@@ -1183,6 +1588,7 @@ jobs:
           CANARY_TARGET_PR: ${{ github.event_name == 'workflow_dispatch' && inputs.target_pr || '' }}
           CANARY_TARGET_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.target_ref || '' }}
           CANARY_TRIGGER_CONTEXT: ${{ github.event_name == 'workflow_dispatch' && inputs.trigger_context || '' }}
+          REBORN_GOOGLE_OAUTH_PREFLIGHT_STATUS: ${{ needs.preflight-reborn-webui-v2-google-oauth.outputs.status }}
           CANARY_CREATE_ISSUES: "0"
           CANARY_POST_PR_COMMENT: ${{ github.event_name == 'workflow_dispatch' && inputs.target_pr != '' && '1' || '0' }}
         run: |

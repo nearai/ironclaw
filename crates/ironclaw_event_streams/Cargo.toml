@@ -6,6 +6,9 @@ rust-version.workspace = true
 description = "Transport-neutral Reborn projection stream manager"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "substrates"
+
 [dependencies]
 async-trait = "0.1"
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
@@ -21,4 +24,6 @@ tokio = { version = "1", features = ["macros", "sync", "rt"] }
 [dev-dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 ironclaw_events = { path = "../ironclaw_events" }
+# Enables the in-memory-backed outbound-state store constructor for tests only.
+ironclaw_outbound = { path = "../ironclaw_outbound", features = ["test-support"] }
 tokio = { version = "1", features = ["macros", "rt", "time"] }

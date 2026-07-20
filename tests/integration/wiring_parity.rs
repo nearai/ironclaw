@@ -64,8 +64,9 @@ const EXPECTED_PRODUCTION_SHAPE: DefaultPlannedRuntimePartsShape =
         cancellation_factory: false, // :3407 hardcoded None
         skill_context_source: true,  // :2917-2929 local_dev_filesystem_skill_context_source
         attachment_read_port: true,  // :3372-3376 local_runtime.map(ProjectScopedAttachmentReader)
-        input_queue: false,          // hardcoded None
-        model_policy_guard: false,   // hardcoded None
+        gate_record_store: true, // local_runtime.map(gate_record_store) — always Some when local_runtime present
+        input_queue: false,      // hardcoded None
+        model_policy_guard: false, // hardcoded None
         // :3027-3073 — scope: this constant models the NO-LLM local-dev
         // shape. When `model_gateway_override` is set (the harness's
         // scripted `TraceLlm` path, and any test build), `llm_cost_table` is
@@ -80,8 +81,8 @@ const EXPECTED_PRODUCTION_SHAPE: DefaultPlannedRuntimePartsShape =
         // local-dev/harness scope this file compares.
         model_budget_accountant: false,
         safety_context: false,                  // hardcoded None
-        hook_security_audit_sink: true,         // :3452 always Some(TracingSecurityAuditSink)
-        turn_event_sink: true,                  // :3453 always Some(turn_event_sink)
+        hook_security_audit_sink: true, // runtime.rs:3780 always Some(TracingSecurityAuditSink)
+        turn_event_sink: true,          // runtime.rs:3781 always Some(turn_event_sink)
         hook_dispatcher_builder_factory: false, // :3230-3258 None, HooksActivationConfig defaults OFF
         communication_context_provider: true,   // :3337-3357 Some whenever local_runtime present
         scheduler_wake_wiring: false, // :2847-2857 None outside Production/MigrationDryRun
@@ -104,6 +105,13 @@ const ALLOWED_DIVERGENCES: &[(&str, &str)] = &[
          production: always Some via local_runtime.map(ProjectScopedAttachmentReader) (runtime.rs:3372-3376)",
     ),
     (
+        "gate_record_store",
+        "harness: Some only for groups with approval parts (the only ones that raise a durable \
+         auth gate to render credential_requirements from); production: always Some via \
+         local_runtime.map(gate_record_store). A harness group without approval parts never raises \
+         a resumable auth gate, so the None is behavior-neutral for the executor read.",
+    ),
+    (
         "turn_event_sink",
         "harness: None unless .with_turn_event_sink() was called (group.rs); \
          production: always Some, no config gate (runtime.rs:3453)",
@@ -112,13 +120,6 @@ const ALLOWED_DIVERGENCES: &[(&str, &str)] = &[
         "communication_context_provider",
         "harness: None unless .communication_context_provider() was called (group.rs); \
          production: always Some whenever local_runtime is present (runtime.rs:3337-3357)",
-    ),
-    (
-        "hook_security_audit_sink",
-        "harness: always None (group.rs's into_group, hook_security_audit_sink field) — no \
-         RecordingSecurityAuditSink double exists yet (standing gap, tracked by \
-         nearai/ironclaw#5640, not a substitution); \
-         production: always Some(TracingSecurityAuditSink) (runtime.rs:3452)",
     ),
 ];
 
@@ -136,6 +137,7 @@ fn mask(
         "cancellation_factory" => shape.cancellation_factory = from.cancellation_factory,
         "skill_context_source" => shape.skill_context_source = from.skill_context_source,
         "attachment_read_port" => shape.attachment_read_port = from.attachment_read_port,
+        "gate_record_store" => shape.gate_record_store = from.gate_record_store,
         "input_queue" => shape.input_queue = from.input_queue,
         "model_policy_guard" => shape.model_policy_guard = from.model_policy_guard,
         "model_budget_accountant" => shape.model_budget_accountant = from.model_budget_accountant,
@@ -264,6 +266,13 @@ const SYNTHETIC_CAPABILITY_SKIP_LIST: &[(&str, &str)] = &[
          (harness/profiles/skill.rs) is a local-dev synthetic capability (E-SKILL, \
          ironclaw_reborn_composition::test_support), not part of builtin_first_party_package(); \
          skill_management_tools_profile()'s ids in the same file ARE checked below",
+    ),
+    (
+        "extension",
+        "extension_visibility_probe_tools_profile()'s visprobe.* ids \
+         (harness/profiles/extension.rs) belong to a synthetic fixture package published \
+         only via test-support publish, never part of any production manifest; \
+         extension_lifecycle_tools_profile()'s ids in the same file ARE checked below",
     ),
 ];
 
