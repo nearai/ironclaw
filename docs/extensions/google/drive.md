@@ -22,7 +22,7 @@ In your Google Cloud project, navigate to **APIs & Services → Library**, searc
 <Step title="Install the Extension">
 
 ```bash
-ironclaw registry install google-drive
+ironclaw registry install google_drive
 ```
 
 </Step>
@@ -30,7 +30,7 @@ ironclaw registry install google-drive
 <Step title="Authorize Access">
 
 ```bash
-ironclaw tool auth google-drive
+ironclaw tool auth google_drive
 ```
 
 IronClaw will provide a URL for you to authenticate - remember to follow the [auth setup](./oauth-setup) to enable your agent to capture the callback. If possible, it will open a browser window. Once approved, the token is stored securely and refreshed automatically.
