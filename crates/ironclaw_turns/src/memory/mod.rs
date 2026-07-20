@@ -114,6 +114,12 @@ pub(crate) const DEFAULT_RUNNER_LEASE_TTL_SECONDS: i64 = 90;
 /// it is terminal-failed with `crash_retry_exhausted`.
 const DEFAULT_MAX_CRASH_RECOVERY_RECLAIMS: u32 = 5;
 
+/// Default backpressure bound for the row store's async write-behind window.
+/// Sized so a burst of non-critical churn (queued/running/cancel-requested
+/// transitions) can coalesce into batched journal appends without an unbounded
+/// backlog, while keeping the worst-case crash-loss window small.
+const DEFAULT_MAX_PENDING_WRITE_BEHIND_DELTAS: usize = 128;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InMemoryTurnStateStoreLimits {
     pub max_events: usize,
@@ -146,6 +152,14 @@ pub struct InMemoryTurnStateStoreLimits {
     /// genuine-invariant reason `crash_retry_exhausted` (never `lease_expired`),
     /// so a run that keeps crashing pre-checkpoint cannot re-drive forever.
     pub max_crash_recovery_reclaims: u32,
+    /// Backpressure bound for the row store's async write-behind mode
+    /// ([`crate::TurnStateDurabilityPolicy::WriteBehind`]). Non-critical
+    /// transitions return `Ok` immediately after enqueue without awaiting the
+    /// durable ack, so the enqueued-but-un-acked delta window is otherwise
+    /// unbounded. When the window reaches this cap, the next non-critical op
+    /// awaits the OLDEST pending ack before returning — bounding both memory and
+    /// the crash-loss window. Unused under `WriteThrough` (every op awaits).
+    pub max_pending_write_behind_deltas: usize,
 }
 
 impl Default for InMemoryTurnStateStoreLimits {
@@ -159,6 +173,7 @@ impl Default for InMemoryTurnStateStoreLimits {
             max_concurrent_trigger_runs: None,
             max_concurrent_conversation_runs: None,
             max_crash_recovery_reclaims: DEFAULT_MAX_CRASH_RECOVERY_RECLAIMS,
+            max_pending_write_behind_deltas: DEFAULT_MAX_PENDING_WRITE_BEHIND_DELTAS,
         }
     }
 }
@@ -225,6 +240,14 @@ impl InMemoryTurnStateStoreLimits {
 
     pub fn set_max_crash_recovery_reclaims(mut self, max_crash_recovery_reclaims: u32) -> Self {
         self.max_crash_recovery_reclaims = max_crash_recovery_reclaims;
+        self
+    }
+
+    pub fn set_max_pending_write_behind_deltas(
+        mut self,
+        max_pending_write_behind_deltas: usize,
+    ) -> Self {
+        self.max_pending_write_behind_deltas = max_pending_write_behind_deltas;
         self
     }
 }
