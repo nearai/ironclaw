@@ -11,10 +11,10 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
         CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
-        CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion, ConcurrencyHint,
-        LoopCapabilityPort, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
-        ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
-        VisibleCapabilityRequest, VisibleCapabilitySurface, capability_outcome_to_resolution,
+        CapabilityInvocation, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort,
+        LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReplay,
+        ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
 };
 
@@ -163,7 +163,7 @@ pub(super) trait SyntheticCapabilityHandler: Send + Sync {
     async fn invoke(
         &self,
         invocation: SyntheticCapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError>;
+    ) -> Result<Resolution, AgentLoopHostError>;
 }
 
 struct SyntheticCapabilityPort {
@@ -567,18 +567,15 @@ impl LoopCapabilityPort for SyntheticCapabilityPort {
                 );
             }
         }
-        // Synthetic handlers still produce `CapabilityOutcome` (unchanged
-        // internal trait); collapse it to the host `Resolution` at this
-        // `LoopCapabilityPort` boundary.
-        let outcome = handler
+        // Synthetic handlers emit the host `Resolution` directly (§5.3 Stage 2b).
+        handler
             .invoke(SyntheticCapabilityInvocation {
                 run_context: self.run_context.clone(),
                 request,
                 input,
                 result_writer: Arc::clone(&self.result_writer),
             })
-            .await?;
-        Ok(capability_outcome_to_resolution(outcome).resolution)
+            .await
     }
 
     async fn invoke_capability_batch(
@@ -610,6 +607,7 @@ mod tests {
     use super::*;
 
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+    use ironclaw_turns::run_profile::resolution;
     use ironclaw_loop_host::{
         CapabilityResultWrite, CapabilityWriteResult, EmptyLoopCapabilityPort,
     };
@@ -694,7 +692,7 @@ mod tests {
         async fn invoke(
             &self,
             _invocation: SyntheticCapabilityInvocation,
-        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        ) -> Result<Resolution, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Internal,
                 "test handler should not be invoked",
@@ -718,19 +716,16 @@ mod tests {
         async fn invoke(
             &self,
             _invocation: SyntheticCapabilityInvocation,
-        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        ) -> Result<Resolution, AgentLoopHostError> {
             self.invocations.fetch_add(1, Ordering::SeqCst);
-            Ok(CapabilityOutcome::Completed(
-                ironclaw_turns::run_profile::CapabilityResultMessage {
-                    result_ref: LoopResultRef::new("result:synthetic-handler")
-                        .expect("valid result ref"),
-                    safe_summary: "synthetic handler completed".to_string(),
-                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-                    terminate_hint: false,
-                    byte_len: 0,
-                    output_digest: None,
-                    model_observation: None,
-                },
+            Ok(resolution::completed(
+                LoopResultRef::new("result:synthetic-handler").expect("valid result ref"),
+                "synthetic handler completed".to_string(),
+                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                false,
+                0,
+                None,
+                None,
             ))
         }
     }

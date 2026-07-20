@@ -19,9 +19,9 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, AssistantReply,
         CancellationPolicy, CapabilityBatchInvocation, CapabilityCallCandidate,
-        CapabilityDescriptorView, CapabilityFailure, CapabilityFailureKind, CapabilityInputRef,
-        CapabilityInvocation, CapabilityOutcome, CapabilityProgress, CapabilityResultMessage,
-        CapabilitySurfaceProfileId, CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId,
+        CapabilityDescriptorView, CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation,
+        CapabilityProgress, CapabilitySurfaceProfileId, CapabilitySurfaceVersion, CheckpointPolicy,
+        CheckpointSchemaId,
         ConcurrencyClass, ConcurrencyHint, ContentDigest, ContextProfileId,
         FinalizeAssistantMessage, LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind,
         LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome,
@@ -34,7 +34,7 @@ use ironclaw_turns::{
         RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier,
         RunClassId, RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass,
         StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
-        VisibleCapabilitySurface, capability_outcome_to_resolution,
+        VisibleCapabilitySurface, resolution,
     },
 };
 
@@ -596,33 +596,16 @@ impl ScriptedCapabilityOutcome {
     }
 }
 
-/// Convert a fixture [`CapabilityOutcome`] to its host_api [`Resolution`] channel
-/// via the production mapping ([`capability_outcome_to_resolution`]), discarding
-/// the side records the pure mapping also emits.
-///
-/// The §5.3 capability-result flip re-points the loop's ~150 existing
-/// `CapabilityOutcome` test fixtures at `Resolution`. This lets each of those
-/// convert through the real mapping instead of hand-rolling a `Resolution` by
-/// hand (which would drift from the acceptance table). Additive: nothing wires
-/// it yet.
-pub fn resolution_from_scripted_outcome(outcome: CapabilityOutcome) -> Resolution {
-    capability_outcome_to_resolution(outcome).resolution
-}
-
-/// Convert a batch of fixture [`CapabilityOutcome`]s to a [`ResolutionBatch`],
-/// mapping each through [`resolution_from_scripted_outcome`] and carrying the
-/// `stopped_on_suspension` flag through unchanged — the `Resolution`-over-
-/// `CapabilityOutcome` analogue of `CapabilityBatchOutcome`, for the flip's
-/// batch-loop test sites.
+/// Bundle fixture [`Resolution`]s into a [`ResolutionBatch`], carrying the
+/// `stopped_on_suspension` flag through unchanged — the batch-loop test sites'
+/// helper (§5.3 Stage 2b: producers emit `Resolution` directly, so fixtures
+/// build them through `ironclaw_turns::run_profile::resolution::*`).
 pub fn resolution_batch_from_scripted(
-    outcomes: impl IntoIterator<Item = CapabilityOutcome>,
+    resolutions: impl IntoIterator<Item = Resolution>,
     stopped_on_suspension: bool,
 ) -> ResolutionBatch {
     ResolutionBatch {
-        resolutions: outcomes
-            .into_iter()
-            .map(resolution_from_scripted_outcome)
-            .collect(),
+        resolutions: resolutions.into_iter().collect(),
         stopped_on_suspension,
     }
 }
@@ -866,7 +849,6 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockAgentLoopDriverHost
                     "single-call retry script exhausted",
                 ))
             })
-            .map(|outcome| capability_outcome_to_resolution(outcome).resolution)
     }
 
     async fn invoke_capability_batch(
@@ -877,17 +859,13 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockAgentLoopDriverHost
             call_count: request.invocations.len(),
             stop_on_first_suspension: request.stop_on_first_suspension,
         });
-        let outcomes = lock_or_panic(&self.script)
+        let resolutions: Vec<Resolution> = lock_or_panic(&self.script)
             .capability_outcomes
             .pop_front()
             .unwrap_or_default()
             .into_iter()
             .map(scripted_capability_outcome)
             .collect::<Result<Vec<_>, _>>()?;
-        let resolutions: Vec<Resolution> = outcomes
-            .into_iter()
-            .map(|outcome| capability_outcome_to_resolution(outcome).resolution)
-            .collect();
         // `parks()`, not `is_suspension()` (H1): a re-entrant gate stops the batch too.
         let stopped_on_suspension =
             request.stop_on_first_suspension && resolutions.iter().any(Resolution::parks);
@@ -1146,73 +1124,37 @@ fn scripted_capability_call(call: ScriptedCapabilityCall) -> CapabilityCallCandi
 
 fn scripted_capability_outcome(
     outcome: ScriptedCapabilityOutcome,
-) -> Result<CapabilityOutcome, AgentLoopHostError> {
+) -> Result<Resolution, AgentLoopHostError> {
     match outcome {
         ScriptedCapabilityOutcome::Completed {
             result_ref,
             progress,
             terminate_hint,
             output_digest,
-        } => Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
-            result_ref: LoopResultRef::new(result_ref)
-                .unwrap_or_else(|error| panic!("test result ref should be valid: {error}")),
-            safe_summary: "completed".to_string(),
-            progress,
-            terminate_hint,
-            byte_len: 0,
-            output_digest,
-            model_observation: None,
-        })),
+        } => Ok(resolution::completed(LoopResultRef::new(result_ref)
+                .unwrap_or_else(|error| panic!("test result ref should be valid: {error}")), "completed".to_string(), progress, terminate_hint, 0, output_digest, None)),
         ScriptedCapabilityOutcome::ApprovalRequired { gate_ref } => {
-            Ok(CapabilityOutcome::ApprovalRequired {
-                gate_ref: loop_gate_ref(&gate_ref),
-                safe_summary: "approval required".to_string(),
-                approval_resume: None,
-            })
+            Ok(resolution::approval_required(loop_gate_ref(&gate_ref), "approval required".to_string(), None).resolution)
         }
         ScriptedCapabilityOutcome::AuthRequired { gate_ref } => {
-            Ok(CapabilityOutcome::AuthRequired {
-                gate_ref: loop_gate_ref(&gate_ref),
-                credential_requirements: Vec::new(),
-                safe_summary: "auth required".to_string(),
-                auth_resume: None,
-            })
+            Ok(resolution::auth_required(loop_gate_ref(&gate_ref), Vec::new(), "auth required".to_string(), None).resolution)
         }
         ScriptedCapabilityOutcome::ResourceBlocked { gate_ref } => {
-            Ok(CapabilityOutcome::ResourceBlocked {
-                gate_ref: loop_gate_ref(&gate_ref),
-                safe_summary: "resource blocked".to_string(),
-            })
+            Ok(resolution::resource_blocked(loop_gate_ref(&gate_ref), "resource blocked".to_string()).resolution)
         }
         ScriptedCapabilityOutcome::AwaitDependentRun {
             gate_ref,
             result_ref,
             byte_len,
-        } => Ok(CapabilityOutcome::AwaitDependentRun {
-            gate_ref: loop_gate_ref(&gate_ref),
-            result_ref: loop_result_ref(&result_ref),
-            safe_summary: "await dependent run".to_string(),
-            byte_len,
-            model_observation: None,
-        }),
+        } => Ok(resolution::await_dependent_run(loop_gate_ref(&gate_ref), loop_result_ref(&result_ref), "await dependent run".to_string(), byte_len, None).resolution),
         ScriptedCapabilityOutcome::SpawnedChildRun {
             child_run_id,
             result_ref,
             byte_len,
-        } => Ok(CapabilityOutcome::SpawnedChildRun {
-            child_run_id,
-            result_ref: LoopResultRef::new(result_ref)
-                .unwrap_or_else(|error| panic!("test result ref should be valid: {error}")),
-            safe_summary: "spawned child run".to_string(),
-            byte_len,
-            model_observation: None,
-        }),
+        } => Ok(resolution::spawned_child_run(child_run_id, LoopResultRef::new(result_ref)
+                .unwrap_or_else(|error| panic!("test result ref should be valid: {error}")), "spawned child run".to_string(), byte_len, None)),
         ScriptedCapabilityOutcome::Failed { error_kind } => {
-            Ok(CapabilityOutcome::Failed(CapabilityFailure {
-                error_kind,
-                safe_summary: "failed".to_string(),
-                detail: None,
-            }))
+            Ok(resolution::failed(error_kind, "failed".to_string(), None))
         }
     }
 }
@@ -1307,36 +1249,31 @@ fn clone_mutex_vec<T: Clone>(mutex: &Mutex<Vec<T>>) -> Vec<T> {
 mod tests {
     use super::*;
 
-    /// Build a fixture `CapabilityOutcome` from a scripted outcome via the same
+    /// Build a fixture [`Resolution`] from a scripted outcome via the same
     /// private mapper the mock host uses, so these tests exercise the real
-    /// fixture-shaped inputs the flip will feed the helpers.
-    fn outcome(scripted: ScriptedCapabilityOutcome) -> CapabilityOutcome {
-        scripted_capability_outcome(scripted).expect("scripted fixture builds an outcome")
+    /// fixture-shaped inputs the helpers consume.
+    fn outcome(scripted: ScriptedCapabilityOutcome) -> Resolution {
+        scripted_capability_outcome(scripted).expect("scripted fixture builds a resolution")
     }
 
     #[test]
     fn scripted_outcome_maps_to_the_right_resolution_channel() {
         // Completed → Done (ran, does not park).
-        let completed = resolution_from_scripted_outcome(outcome(
-            ScriptedCapabilityOutcome::completed("result:one"),
-        ));
+        let completed = outcome(ScriptedCapabilityOutcome::completed("result:one"));
         assert_eq!(completed.kind(), "done");
         assert!(!completed.parks());
 
         // Failed → Done (a recoverable failure rides the Done channel; the model
         // can retry) — it does not park.
-        let failed =
-            resolution_from_scripted_outcome(outcome(ScriptedCapabilityOutcome::failed("network")));
+        let failed = outcome(ScriptedCapabilityOutcome::failed("network"));
         assert_eq!(failed.kind(), "done");
         assert!(!failed.parks());
 
         // ApprovalRequired → Blocked (a re-entrant gate): it parks but is NOT a
         // suspension — the distinction parks() exists to preserve.
-        let approval = resolution_from_scripted_outcome(outcome(
-            ScriptedCapabilityOutcome::ApprovalRequired {
-                gate_ref: "gate:approve-1".to_string(),
-            },
-        ));
+        let approval = outcome(ScriptedCapabilityOutcome::ApprovalRequired {
+            gate_ref: "gate:approve-1".to_string(),
+        });
         assert_eq!(approval.kind(), "blocked");
         assert!(approval.parks());
         assert!(!approval.is_suspension());

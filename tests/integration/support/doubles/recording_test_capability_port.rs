@@ -20,9 +20,9 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
         CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
-        CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilitySurfaceVersion,
-        ConcurrencyHint, LoopCapabilityPort, ProviderToolCallReplay, ProviderToolDefinition,
-        VisibleCapabilityRequest, VisibleCapabilitySurface, capability_outcome_to_resolution,
+        CapabilityInvocation, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort,
+        ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
+        VisibleCapabilitySurface, resolution,
     },
 };
 use serde_json::json;
@@ -157,18 +157,18 @@ impl RecordingTestCapabilityPort {
         allowlist
     }
 
-    fn completed_result(&self) -> CapabilityOutcome {
+    fn completed_result(&self) -> Resolution {
         let ordinal = self.next_result.fetch_add(1, Ordering::SeqCst);
-        CapabilityOutcome::Completed(CapabilityResultMessage {
-            result_ref: ironclaw_turns::LoopResultRef::new(format!("result:test-echo-{ordinal}"))
+        resolution::completed(
+            ironclaw_turns::LoopResultRef::new(format!("result:test-echo-{ordinal}"))
                 .expect("valid result ref"),
-            safe_summary: "echo: hi".to_string(),
-            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-            terminate_hint: false,
-            byte_len: 0,
-            output_digest: None,
-            model_observation: None,
-        })
+            "echo: hi".to_string(),
+            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            false,
+            0,
+            None,
+            None,
+        )
     }
 }
 
@@ -272,35 +272,30 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
         if matches!(self.mode, CapabilityMode::ApprovalThenEcho)
             && self.approval_calls.fetch_add(1, Ordering::SeqCst) == 0
         {
-            return Ok(
-                capability_outcome_to_resolution(CapabilityOutcome::ApprovalRequired {
-                    gate_ref: LoopGateRef::new("gate:test-approval").expect("valid gate ref"),
-                    safe_summary: "test approval required".to_string(),
-                    approval_resume: None,
-                })
-                .resolution,
-            );
+            return Ok(resolution::approval_required(
+                LoopGateRef::new("gate:test-approval").expect("valid gate ref"),
+                "test approval required".to_string(),
+                None,
+            )
+            .resolution);
         }
         if matches!(self.mode, CapabilityMode::SpawnAuthThenApprovalThenEcho) {
             match self.approval_calls.fetch_add(1, Ordering::SeqCst) {
                 0 => {
-                    return Ok(capability_outcome_to_resolution(self.completed_result()).resolution);
+                    return Ok(self.completed_result());
                 }
                 1 => {
-                    return Ok(capability_outcome_to_resolution(
-                        CapabilityOutcome::ApprovalRequired {
-                            gate_ref: LoopGateRef::new("gate:test-approval")
-                                .expect("valid gate ref"),
-                            safe_summary: "test approval required".to_string(),
-                            approval_resume: None,
-                        },
+                    return Ok(resolution::approval_required(
+                        LoopGateRef::new("gate:test-approval").expect("valid gate ref"),
+                        "test approval required".to_string(),
+                        None,
                     )
                     .resolution);
                 }
                 _ => {}
             }
         }
-        Ok(capability_outcome_to_resolution(self.completed_result()).resolution)
+        Ok(self.completed_result())
     }
 
     async fn invoke_capability_batch(

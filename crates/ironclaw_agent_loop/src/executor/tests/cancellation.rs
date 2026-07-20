@@ -1,6 +1,7 @@
 use super::{
+    resolution,
     AgentLoopExecutor, AgentLoopExecutorError, AgentLoopHostError, AgentLoopHostErrorKind,
-    CanonicalAgentLoopExecutor, CapabilityFailureKind, CapabilityOutcome, CapabilityResultMessage,
+    CanonicalAgentLoopExecutor, CapabilityFailureKind,
     CheckpointKind, HostStage, LoopCancelReasonKind, LoopCancelledReasonKind, LoopCheckpointKind,
     LoopExecutionState, LoopExit, LoopGateRef, LoopInput, LoopInputAckToken, LoopInputBatch,
     LoopInputCursor, LoopInterruptKind, LoopResultRef, LoopRunInfoPort, LoopSafeSummary, MockHost,
@@ -539,14 +540,8 @@ async fn cancellation_after_retry_prompt_rebuild_skips_second_model_call() {
 #[tokio::test]
 async fn capability_cancelled_returns_cancelled_exit_without_retry() {
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
-        ironclaw_turns::run_profile::CapabilityBatchOutcome {
-            outcomes: vec![CapabilityOutcome::Failed(
-                ironclaw_turns::run_profile::CapabilityFailure {
-                    error_kind: CapabilityFailureKind::Cancelled,
-                    safe_summary: "capability cancelled".to_string(),
-                    detail: None,
-                },
-            )],
+        ironclaw_host_api::ResolutionBatch {
+            resolutions: vec![resolution::failed(CapabilityFailureKind::Cancelled, "capability cancelled".to_string(), None)],
             stopped_on_suspension: false,
         },
     ]);
@@ -670,16 +665,8 @@ async fn cancellation_after_before_side_effect_checkpoint_skips_capability_call(
 async fn cancellation_after_capability_batch_preserves_completed_result() {
     let result_ref = LoopResultRef::new("result:late-cancel").expect("valid");
     let host = MockHost::new(vec![calls_response()])
-        .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
-            outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
-                result_ref: result_ref.clone(),
-                safe_summary: "completed before cancellation".to_string(),
-                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-                terminate_hint: true,
-                byte_len: 0,
-                output_digest: None,
-                model_observation: None,
-            })],
+        .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+            resolutions: vec![resolution::completed(result_ref.clone(), "completed before cancellation".to_string(), ironclaw_turns::run_profile::CapabilityProgress::MadeProgress, true, 0, None, None)],
             stopped_on_suspension: false,
         }])
         .cancel_after_batch_invocation();

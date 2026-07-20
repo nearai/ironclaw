@@ -28,11 +28,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_host_api::{Resolution, ResolutionBatch, TenantId};
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, CapabilityBatchInvocation, CapabilityCallCandidate, CapabilityDenied,
-    CapabilityDeniedReasonKind, CapabilityInvocation, CapabilityOutcome, LoopCapabilityPort,
-    ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolDefinition,
-    RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
-    capability_outcome_to_resolution,
+    AgentLoopHostError, CapabilityBatchInvocation, CapabilityCallCandidate,
+    CapabilityDeniedReasonKind, CapabilityInvocation, LoopCapabilityPort, ProviderToolCall,
+    ProviderToolCallCapabilityIds, ProviderToolDefinition, RegisterProviderToolCallRequest,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
 };
 
 use crate::dispatch::{BeforeCapabilityDispatchOutcome, HookDispatcher};
@@ -276,9 +275,9 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
             .await;
         let outcome = self.run_dispatch(&request, provider.clone()).await;
         let result = match self.decision_to_outcome(&outcome).await {
-            // Hook produced a restrictive decision: map its `CapabilityOutcome`
-            // onto the host_api `Resolution` channel the loop now speaks.
-            Some(translated) => Ok(capability_outcome_to_resolution(translated).resolution),
+            // Hook produced a restrictive decision — already a host_api
+            // `Resolution` on the channel the loop speaks.
+            Some(resolution) => Ok(resolution),
             // Hooks allowed: forward to the inner port, which already returns a
             // `Resolution` (§5.3 flip) — pure pass-through, no variant inspection.
             None => self.inner.invoke_capability(request).await,
@@ -354,13 +353,11 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
                 .await;
             let dispatch = self.run_dispatch(&invocation, provider.clone()).await;
             match self.decision_to_outcome(&dispatch).await {
-                Some(translated) => {
-                    // Map the hook's restrictive `CapabilityOutcome` onto the
-                    // host_api `Resolution` the loop now speaks, then gate the
-                    // batch-stop decision on `Resolution::parks()` — the correct
-                    // superset of the old `CapabilityOutcome::is_suspension`
-                    // (H1: a re-entrant gate parks the batch too).
-                    let resolution = capability_outcome_to_resolution(translated).resolution;
+                Some(resolution) => {
+                    // The hook's restrictive decision is already a host_api
+                    // `Resolution`; gate the batch-stop decision on
+                    // `Resolution::parks()` (H1: a re-entrant gate parks the
+                    // batch too).
                     let parks = resolution.parks();
                     slots.push(Slot::Resolved {
                         resolution: Box::new(resolution),
@@ -518,38 +515,45 @@ impl HookedLoopCapabilityPort {
     async fn decision_to_outcome(
         &self,
         dispatched: &BeforeCapabilityDispatchOutcome,
-    ) -> Option<CapabilityOutcome> {
+    ) -> Option<Resolution> {
         match dispatched.decision.inner() {
             GateDecisionInner::Allow => None,
-            GateDecisionInner::Deny { reason } => {
-                Some(CapabilityOutcome::Denied(CapabilityDenied {
-                    reason_kind: CapabilityDeniedReasonKind::unknown("hook_denied")
+            GateDecisionInner::Deny { reason } => Some(
+                resolution::denied(
+                    CapabilityDeniedReasonKind::unknown("hook_denied")
                         .expect("hook_denied is a valid loop-safe identifier"), // safety: literal ASCII identifier, validated by LoopGateRef constructor contract
-                    safe_summary: reason.as_str().to_string(),
-                }))
-            }
+                    reason.as_str().to_string(),
+                )
+                .resolution,
+            ),
             GateDecisionInner::PauseApproval { reason } => {
                 match self
                     .gate_ref_factory
                     .mint_approval_ref(reason.as_str())
                     .await
                 {
-                    Ok(gate_ref) => Some(CapabilityOutcome::ApprovalRequired {
-                        gate_ref,
-                        safe_summary: reason.as_str().to_string(),
-                        approval_resume: None,
-                    }),
+                    Ok(gate_ref) => Some(
+                        resolution::approval_required(
+                            gate_ref,
+                            reason.as_str().to_string(),
+                            None,
+                        )
+                        .resolution,
+                    ),
                     Err(_) => Some(fail_closed_gate_ref_unavailable(reason.as_str())),
                 }
             }
             GateDecisionInner::PauseAuth { reason } => {
                 match self.gate_ref_factory.mint_auth_ref(reason.as_str()).await {
-                    Ok(gate_ref) => Some(CapabilityOutcome::AuthRequired {
-                        gate_ref,
-                        credential_requirements: Vec::new(),
-                        safe_summary: reason.as_str().to_string(),
-                        auth_resume: None,
-                    }),
+                    Ok(gate_ref) => Some(
+                        resolution::auth_required(
+                            gate_ref,
+                            Vec::new(),
+                            reason.as_str().to_string(),
+                            None,
+                        )
+                        .resolution,
+                    ),
                     Err(_) => Some(fail_closed_gate_ref_unavailable(reason.as_str())),
                 }
             }
@@ -561,12 +565,13 @@ impl HookedLoopCapabilityPort {
 /// pause-class decision. The safe summary intentionally carries only the
 /// hook's already-sanitized reason — the underlying host error is dropped to
 /// avoid leaking internal gate-router state into model-visible output.
-fn fail_closed_gate_ref_unavailable(sanitized_reason: &str) -> CapabilityOutcome {
-    CapabilityOutcome::Denied(CapabilityDenied {
-        reason_kind: CapabilityDeniedReasonKind::unknown("hook_gate_ref_unavailable")
+fn fail_closed_gate_ref_unavailable(sanitized_reason: &str) -> Resolution {
+    resolution::denied(
+        CapabilityDeniedReasonKind::unknown("hook_gate_ref_unavailable")
             .expect("hook_gate_ref_unavailable is a valid loop-safe identifier"), // safety: literal ASCII identifier, validated by LoopGateRef constructor contract
-        safe_summary: sanitized_reason.to_string(),
-    })
+        sanitized_reason.to_string(),
+    )
+    .resolution
 }
 
 /// Counts the JSON-serialized byte length of `value` without allocating
@@ -655,8 +660,7 @@ mod tests {
     use ironclaw_host_api::{CapabilityId, DenyReason, RuntimeKind};
     use ironclaw_turns::LoopResultRef;
     use ironclaw_turns::run_profile::{
-        CapabilityDescriptorView, CapabilityInputRef, CapabilityResultMessage,
-        CapabilitySurfaceVersion,
+        CapabilityDescriptorView, CapabilityInputRef, CapabilitySurfaceVersion,
     };
     use std::sync::Mutex;
 
@@ -718,17 +722,15 @@ mod tests {
                 .lock()
                 .expect("not poisoned")
                 .push(request.capability_id.clone());
-            let completed = CapabilityOutcome::Completed(CapabilityResultMessage {
-                result_ref: LoopResultRef::new(format!("result:{}", request.capability_id))
-                    .expect("ok"),
-                safe_summary: format!("ran {}", request.capability_id),
-                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-                terminate_hint: false,
-                byte_len: 0,
-                output_digest: None,
-                model_observation: None,
-            });
-            Ok(capability_outcome_to_resolution(completed).resolution)
+            Ok(resolution::completed(
+                LoopResultRef::new(format!("result:{}", request.capability_id)).expect("ok"),
+                format!("ran {}", request.capability_id),
+                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                false,
+                0,
+                None,
+                None,
+            ))
         }
 
         async fn invoke_capability_batch(

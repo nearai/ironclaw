@@ -43,9 +43,9 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
         AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityBatchInvocation,
-        CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInputIssue, CapabilityInputRef,
-        CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
-        FinalizeAssistantMessage, HostManagedLoopPromptPort,
+        CapabilityDeniedReasonKind, CapabilityInputIssue, CapabilityInputRef, CapabilityInvocation,
+        CapabilitySurfaceVersion, FinalizeAssistantMessage, HostManagedLoopPromptPort,
+        resolution,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
         InMemoryRunProfileResolver, LoopCapabilityPort, LoopContextBundle,
         LoopContextCompactionKind, LoopContextMessage, LoopContextPort, LoopContextRequest,
@@ -57,7 +57,7 @@ use ironclaw_turns::{
         ParentLoopOutput, PersonalContextPolicy, PromptMode, PromptSkillContextMetadata,
         ProviderToolCallReference, ProviderToolDefinition, SkillVisibility, ToolObservationDetail,
         ToolObservationStatus, UpdateAssistantDraft, VisibleCapabilityRequest,
-        VisibleCapabilitySurface, capability_outcome_to_resolution,
+        VisibleCapabilitySurface,
     },
 };
 use tracing_test::traced_test;
@@ -4935,11 +4935,11 @@ impl LoopCapabilityPort for StaticToolDefinitionPort {
         &self,
         _request: CapabilityInvocation,
     ) -> Result<Resolution, AgentLoopHostError> {
-        let outcome = CapabilityOutcome::Denied(CapabilityDenied {
-            reason_kind: CapabilityDeniedReasonKind::EmptySurface,
-            safe_summary: "test capability port does not execute tools".to_string(),
-        });
-        Ok(capability_outcome_to_resolution(outcome).resolution)
+        Ok(resolution::denied(
+            CapabilityDeniedReasonKind::EmptySurface,
+            "test capability port does not execute tools".to_string(),
+        )
+        .resolution)
     }
 
     async fn invoke_capability_batch(
@@ -4950,11 +4950,11 @@ impl LoopCapabilityPort for StaticToolDefinitionPort {
             .invocations
             .into_iter()
             .map(|_| {
-                let outcome = CapabilityOutcome::Denied(CapabilityDenied {
-                    reason_kind: CapabilityDeniedReasonKind::EmptySurface,
-                    safe_summary: "test capability port does not execute tools".to_string(),
-                });
-                capability_outcome_to_resolution(outcome).resolution
+                resolution::denied(
+                    CapabilityDeniedReasonKind::EmptySurface,
+                    "test capability port does not execute tools".to_string(),
+                )
+                .resolution
             })
             .collect();
         Ok(ResolutionBatch {

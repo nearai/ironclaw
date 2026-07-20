@@ -145,15 +145,15 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
         AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityBatchInvocation,
-        CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInvocation, CapabilityOutcome,
-        CapabilitySurfaceVersion, FinalizeAssistantMessage, InstructionMaterializationStore,
+        CapabilityDeniedReasonKind, CapabilityInvocation, CapabilitySurfaceVersion,
+        FinalizeAssistantMessage, InstructionMaterializationStore,
         LoopCapabilityPort, LoopContextBundle, LoopContextCompactionKind,
         LoopContextCompactionMetadata, LoopContextMessage, LoopContextPort, LoopContextRequest,
         LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputCursor,
         LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse, LoopModelUsage,
         LoopPromptBundleAuthority, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
         LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput, PromptMode, UpdateAssistantDraft,
-        VisibleCapabilityRequest, VisibleCapabilitySurface, capability_outcome_to_resolution,
+        VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
         sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
     },
 };
@@ -931,10 +931,10 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for EmptyLoopCapabilityPort
             .invocations
             .into_iter()
             .map(|_| {
-                capability_outcome_to_resolution(CapabilityOutcome::Denied(CapabilityDenied {
-                    reason_kind: CapabilityDeniedReasonKind::EmptySurface,
-                    safe_summary: "no capabilities are available to this loop".to_string(),
-                }))
+                resolution::denied(
+                    CapabilityDeniedReasonKind::EmptySurface,
+                    "no capabilities are available to this loop".to_string(),
+                )
                 .resolution
             })
             .collect();

@@ -9,7 +9,7 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, AssistantReply,
         CancellationPolicy, CapabilityBatchInvocation, CapabilityCallCandidate,
-        CapabilityDescriptorView, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
+        CapabilityDescriptorView, CapabilityInputRef, CapabilityInvocation,
         CapabilitySurfaceProfileId, CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId,
         ConcurrencyClass, ContextProfileId, FinalizeAssistantMessage, LoopCancelReasonKind,
         LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest,
@@ -22,7 +22,7 @@ use ironclaw_turns::{
         RegisterProviderToolCallRequest, ResolvedRunProfile, ResourceBudgetPolicy,
         ResourceBudgetTier, RunClassId, RunProfileFingerprint, RuntimeProfileConstraints,
         SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
-        VisibleCapabilitySurface, capability_outcome_to_resolution,
+        VisibleCapabilitySurface,
     },
 };
 
@@ -53,8 +53,8 @@ pub(super) struct MockHost {
     compaction: MockCompactionSupport,
     input_batches: Arc<Mutex<VecDeque<LoopInputBatch>>>,
     acked_input_tokens: Arc<Mutex<Vec<LoopInputAckToken>>>,
-    batch_outcomes: Arc<Mutex<VecDeque<ironclaw_turns::run_profile::CapabilityBatchOutcome>>>,
-    single_outcomes: Arc<Mutex<VecDeque<CapabilityOutcome>>>,
+    batch_outcomes: Arc<Mutex<VecDeque<ironclaw_host_api::ResolutionBatch>>>,
+    single_outcomes: Arc<Mutex<VecDeque<ironclaw_host_api::Resolution>>>,
     checkpoints: Arc<Mutex<Vec<LoopCheckpointKind>>>,
     batch_invocations: Arc<Mutex<Vec<CapabilityBatchInvocation>>>,
     single_invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
@@ -167,13 +167,16 @@ impl MockHost {
 
     pub(super) fn with_batch_outcomes(
         self,
-        outcomes: Vec<ironclaw_turns::run_profile::CapabilityBatchOutcome>,
+        outcomes: Vec<ironclaw_host_api::ResolutionBatch>,
     ) -> Self {
         *self.batch_outcomes.lock().expect("lock") = outcomes.into();
         self
     }
 
-    pub(super) fn with_single_outcomes(self, outcomes: Vec<CapabilityOutcome>) -> Self {
+    pub(super) fn with_single_outcomes(
+        self,
+        outcomes: Vec<ironclaw_host_api::Resolution>,
+    ) -> Self {
         *self.single_outcomes.lock().expect("lock") = outcomes.into();
         self
     }
@@ -775,7 +778,6 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
             .ok_or_else(|| {
                 AgentLoopHostError::new(AgentLoopHostErrorKind::Internal, "single script exhausted")
             })
-            .map(|outcome| capability_outcome_to_resolution(outcome).resolution)
     }
 
     async fn invoke_capability_batch(
@@ -786,7 +788,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
         if let Some(kind) = *self.fail_batch_with.lock().expect("lock") {
             return Err(AgentLoopHostError::new(kind, "scripted batch failure"));
         }
-        let outcome = self
+        let batch = self
             .batch_outcomes
             .lock()
             .expect("lock")
@@ -797,14 +799,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
         if *self.cancel_after_batch_invocation.lock().expect("lock") {
             self.request_cancellation(LoopCancelReasonKind::UserRequested);
         }
-        Ok(ironclaw_host_api::ResolutionBatch {
-            resolutions: outcome
-                .outcomes
-                .into_iter()
-                .map(|o| capability_outcome_to_resolution(o).resolution)
-                .collect(),
-            stopped_on_suspension: outcome.stopped_on_suspension,
-        })
+        Ok(batch)
     }
 }
 
