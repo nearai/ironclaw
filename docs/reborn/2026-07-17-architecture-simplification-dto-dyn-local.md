@@ -2282,25 +2282,57 @@ loop-facing capability result and every result mirror is deleted.
   (`FROZEN_COLLAPSE_DTOS`): `CapabilityInvocation` (turns),
   `RuntimeCapability{,Resume,AuthResume}Request` (host_runtime),
   `Capability{Invocation,Resume,AuthResume}Request` (capabilities),
-  `CapabilityDispatchRequest` (host_api), `RuntimeAdapterRequest` (dispatcher). The
-  `Invocation` / `Authorized` / `AuthorizeResult` vocabulary exists and `authorize()`
-  is extracted (`capabilities/src/host.rs`), but still consumes
-  `CapabilityInvocationRequest` and mints the `Authorized` witness only as a
-  *forward-looking artifact* — `dispatch()` still routes via `obligation_outcome`,
-  not the witness (the §9 "later slice" markers). Planned slice sequence,
-  risk-ordered, each a small stacked PR with `ironclaw_architecture` green:
-  **D1** — `dispatch()`/dispatcher consume `Authorized` (+ resolved handles),
-  retire `CapabilityDispatchRequest` + `RuntimeAdapterRequest` (lower half, first-party
-  lane PoC per §9); **D2** — `authorize(&Invocation) -> AuthorizeResult`, host_runtime
-  builds `Invocation`, retire `RuntimeCapabilityRequest` + `CapabilityInvocationRequest`;
-  **D3** — the loop membrane (`loop_host::capability_port`) mints `Invocation` sealing
-  origin/actor/scope, retire `CapabilityInvocation`; **D4** — resume + auth-resume
-  reconstruct `Invocation` from the host-private `ReplayPayloadStore`, retire the four
-  resume mirrors → `FROZEN_COLLAPSE_DTOS` empty; **D5** — the **security milestone**:
-  inline the four policy checks into `authorize()` so the `Authorized` seal becomes
-  load-bearing (vacuous until then, §9 / §5.3.2); **D6** — ratchet-to-empty + measure
-  (type / `dyn` / boundary-test diff, §9 step 4). Invoke (D1–D3) precedes resume (D4)
-  because resume carries the replay/gate-reconstitution hazards of the #6287/#6299 class.
+  `CapabilityDispatchRequest` (host_api), `RuntimeAdapterRequest` (dispatcher).
+
+  **Feasibility finding (2026-07-20, three independent probes — no code changed).**
+  An attempt to slice the retirement per-hop (invoke / resume / dispatch, in
+  parallel) was run as three isolated worktree probes. **All three STOPPED with
+  the same root cause:** the request mirrors carry the *pre-authorization
+  authority envelope* — a full `ExecutionContext` (`grants: CapabilitySet`,
+  `mounts: MountView`, `trust: TrustClass`, `correlation_id`, `extension_id`,
+  `runtime`, `process_id`, `parent_process_id`, `authenticated_actor_user_id`)
+  plus a host-computed `trust_decision` — whereas `host_api::Invocation` (7
+  fields: `activity_id, capability, input, scope, actor, origin, estimate`) is the
+  *post-authorization down-projection* the kernel *already* builds inside
+  `seal_authorization` (`capabilities/src/host.rs`). `Invocation` sits **below**
+  `authorize()`, not at its input. Concretely, retiring the mirrors onto
+  `Invocation` in isolation would:
+  - fresh-mint `correlation_id` (a distinct identity restored from
+    `prior_approval.correlation_id` on auth-resume) — the identity-confusion
+    hazard class of `types.md`;
+  - default `grants`/`trust`/`mounts` that are **authorization inputs**
+    (`authorize_dispatch_with_trust`, `validate()`), changing decisions — and on
+    resume specifically drop the `context.grants` mutation
+    (`apply_persistent_approval_policy`) that exists to prevent the #6299
+    persistent-approval Allow→Deny regression;
+  - be unable to represent actor-less system/one-shot contexts
+    (`Invocation.actor: UserId` is required; `ExecutionContext.authenticated_actor_user_id`
+    is legitimately `None`), which `authorize()` serves today with no witness;
+  - (dispatch) move reservation authority — the `Authorized` witness's
+    `mounts`/`reservation` are synthesized `None`→default, whereas dispatch uses
+    the raw obligation options with a **governor reservation fallback** in the
+    dispatcher; and hit a non-kernel production caller (`RuntimeDispatchProcessExecutor`)
+    that cannot mint `Authorized` (seal restricted to the kernel crate by
+    `reborn_authorized_seal_ratchet`).
+
+  **Corrected sequence — the per-hop retirements are consequences, not
+  precursors.** The load-bearing first slice is the doc's own "authority as a
+  fold" step (§3 / §5.3.2): move authority-envelope *derivation*
+  (`grants`/`mounts`/`trust` resolution) from the caller/membrane **into**
+  `authorize()`, so `authorize(&Invocation)` derives what it needs and the
+  outputs are absorbed by the sealed `Authorized`, rather than a pre-built
+  `ExecutionContext` being threaded through. This is the **security milestone**
+  the earlier plan mislabeled "D5/last" — it is actually first, and it is one
+  security-critical, non-parallelizable slice (the design decision: where
+  `correlation_id`/`grants`/`mounts`/`trust`/`runtime`/`extension_id` live once
+  `ExecutionContext` is retired — expand `Invocation`/`Authorized` to carry them,
+  or have `authorize()` resolve them from `scope` + descriptor + policy). **Only
+  after that carrier exists** do the mirror retirements land, in whatever hop
+  order is convenient — invoke, resume (respecting the #6287/#6299 replay/lease
+  identities), and dispatch (the two-layer `host_api`-vocabulary vs.
+  runtime-handles split collapsing onto `Authorized` + handles) — followed by
+  ratchet-to-empty + measurement (§9 step 4). Until the carrier lands, all nine
+  `FROZEN_COLLAPSE_DTOS` entries must stay frozen.
 
 - **Slice 0** — the reference-model property suite (§11.4), prerequisite for
   consolidating the turns-cluster store (Slice A's deferred remainder).
