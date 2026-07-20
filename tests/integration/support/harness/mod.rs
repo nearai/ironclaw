@@ -701,7 +701,7 @@ impl HostRuntimeCapabilityHarness {
         }) {
             let tenant = skill_activation_tenant
                 .ok_or("skill_activation_tools harness requires with_skill_activation_tenant")?;
-            ironclaw_reborn_composition::test_support::build_local_dev_skill_context_source_for_test(
+            ironclaw_reborn_composition::test_support::build_skill_context_source_for_test(
                 &services, &tenant, true,
             )
             .map(Arc::new)
@@ -1606,7 +1606,7 @@ impl HostRuntimeCapabilityHarness {
         // through the real activation handshake (`extension_surface_source`'s
         // `ExtensionCapabilitySurface::provider_trust()`, same
         // `extension_management` + grantee production's factory reads) --
-        // queried the SAME way `build_local_dev_extension_management_for_test`
+        // queried the SAME way `build_extension_management_for_test`
         // -> `extension_surface_source` will read it downstream in
         // `create_refreshing_capability_port_for_test`. NOT the same
         // as "this harness has `reborn_services` wired": a harness can have
@@ -1687,92 +1687,91 @@ impl HostRuntimeCapabilityHarness {
                 }
             })
             .collect();
-        let parts =
-            ironclaw_reborn_composition::test_support::RefreshingCapabilityPortTestParts {
-                runtime: self.runtime.lock().unwrap().clone(),
-                run_context: run_context.clone(),
-                fallback_user_id: dispatch_user,
-                // All four mount views = this harness's single `mounts` view.
-                // Production splits skill/memory/system-extensions mounts off
-                // the local-dev workspace root, but this harness has ONE
-                // profile-built view and the pre-seam behavior was "every
-                // capability executes (and is granted) under `self.mounts`
-                // unless `capability_mount_overrides` says otherwise" — a
-                // `MountView::default()` here would instead OVERRIDE the
-                // memory/skill capability families down to an empty view via
-                // `build_inner`'s per-domain `with_capability_execution_mount`
-                // special-cases, silently blinding `builtin.memory_*`.
-                workspace_mounts: self.mounts.clone(),
-                skill_mounts: self.mounts.clone(),
-                memory_mounts: self.mounts.clone(),
-                system_extensions_lifecycle_mounts: self.mounts.clone(),
-                input_resolver,
-                result_writer,
-                milestone_sink: milestone_sink.clone() as Arc<dyn LoopHostMilestoneSink>,
-                skill_activation_source: self.skill_activation_source.clone(),
-                project_service,
-                // result_read (durable tool-result projection seam, issue
-                // #5838): production always wires the run's session thread
-                // service into the synthetic `result_read` capability, so
-                // this is a required (non-`Option`) field. Harnesses that
-                // opted into `.with_durable_capability_io()` populate
-                // `durable_capability_io_thread_service` with the REAL group
-                // thread service; every other harness gets a fresh in-memory
-                // no-op service, mirroring the `project_service`/
-                // `tool_permission_overrides` "no opinion -> default" pattern
-                // above -- `result_read` is simply never granted for those
-                // harnesses (not in `capability_ids`), so the default is
-                // never actually read.
-                thread_service: self
-                    .durable_capability_io_thread_service
-                    .lock()
-                    .unwrap()
-                    .clone()
-                    .unwrap_or_else(|| {
-                        Arc::new(ironclaw_threads::InMemorySessionThreadService::default())
-                    }),
-                trajectory_observer: None,
-                // Feeds the same active-extension authority (installed +
-                // activated extensions like `github`, `gmail`, MCP servers)
-                // production's `capability_wiring` folds into every refresh
-                // (`runtime/local_dev.rs:132-133`); `None` when this harness
-                // was built without `RebornServices` (mirrors the old
-                // `local_dev_active_extension_authority_for_test` early-return).
-                extension_management: self.reborn_services.as_ref().and_then(|services| {
-                    ironclaw_reborn_composition::test_support::build_local_dev_extension_management_for_test(
-                        services,
-                    )
+        let parts = ironclaw_reborn_composition::test_support::RefreshingCapabilityPortTestParts {
+            runtime: self.runtime.lock().unwrap().clone(),
+            run_context: run_context.clone(),
+            fallback_user_id: dispatch_user,
+            // All four mount views = this harness's single `mounts` view.
+            // Production splits skill/memory/system-extensions mounts off
+            // the local-dev workspace root, but this harness has ONE
+            // profile-built view and the pre-seam behavior was "every
+            // capability executes (and is granted) under `self.mounts`
+            // unless `capability_mount_overrides` says otherwise" — a
+            // `MountView::default()` here would instead OVERRIDE the
+            // memory/skill capability families down to an empty view via
+            // `build_inner`'s per-domain `with_capability_execution_mount`
+            // special-cases, silently blinding `builtin.memory_*`.
+            workspace_mounts: self.mounts.clone(),
+            skill_mounts: self.mounts.clone(),
+            memory_mounts: self.mounts.clone(),
+            system_extensions_lifecycle_mounts: self.mounts.clone(),
+            input_resolver,
+            result_writer,
+            milestone_sink: milestone_sink.clone() as Arc<dyn LoopHostMilestoneSink>,
+            skill_activation_source: self.skill_activation_source.clone(),
+            project_service,
+            // result_read (durable tool-result projection seam, issue
+            // #5838): production always wires the run's session thread
+            // service into the synthetic `result_read` capability, so
+            // this is a required (non-`Option`) field. Harnesses that
+            // opted into `.with_durable_capability_io()` populate
+            // `durable_capability_io_thread_service` with the REAL group
+            // thread service; every other harness gets a fresh in-memory
+            // no-op service, mirroring the `project_service`/
+            // `tool_permission_overrides` "no opinion -> default" pattern
+            // above -- `result_read` is simply never granted for those
+            // harnesses (not in `capability_ids`), so the default is
+            // never actually read.
+            thread_service: self
+                .durable_capability_io_thread_service
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| {
+                    Arc::new(ironclaw_threads::InMemorySessionThreadService::default())
                 }),
-                outbound_preferences_facade,
-                outbound_delivery_target_set_requires_approval,
-                tool_permission_overrides,
-                auto_approve_settings,
-                persistent_approval_policies,
-                approval_requests,
-                capability_leases,
-                gate_record_store,
-                replay_payload_store,
-                // `self.capability_mount_overrides` is the SAME per-capability
-                // mount-override list production's `skill_mounts`/`memory_mounts`/
-                // `system_extensions_lifecycle_mounts` special-cases apply
-                // automatically for their own fixed capability-id lists; passing
-                // it here too (rather than splitting it across those three
-                // fields, which this harness has no per-domain tracking for)
-                // reaches the SAME final per-capability mount via the override
-                // map, applied after those defaults in `build_inner`.
-                capability_execution_mount_overrides: self
-                    .capability_mount_overrides
-                    .iter()
-                    .cloned()
-                    .collect(),
-                additional_provider_trust,
-                // Whole-set narrowing over the FULL granted-capability set to
-                // this harness's exhaustive `capability_ids` allowlist,
-                // including the empty case (zero grants). See
-                // `additional_capability_grants` doc for the invariant.
-                capability_id_filter: Some(self.capability_ids.iter().cloned().collect()),
-                additional_capability_grants,
-            };
+            trajectory_observer: None,
+            // Feeds the same active-extension authority (installed +
+            // activated extensions like `github`, `gmail`, MCP servers)
+            // production's `capability_wiring` folds into every refresh
+            // (`runtime/local_dev.rs:132-133`); `None` when this harness
+            // was built without `RebornServices` (mirrors the old
+            // `local_dev_active_extension_authority_for_test` early-return).
+            extension_management: self.reborn_services.as_ref().and_then(|services| {
+                ironclaw_reborn_composition::test_support::build_extension_management_for_test(
+                    services,
+                )
+            }),
+            outbound_preferences_facade,
+            outbound_delivery_target_set_requires_approval,
+            tool_permission_overrides,
+            auto_approve_settings,
+            persistent_approval_policies,
+            approval_requests,
+            capability_leases,
+            gate_record_store,
+            replay_payload_store,
+            // `self.capability_mount_overrides` is the SAME per-capability
+            // mount-override list production's `skill_mounts`/`memory_mounts`/
+            // `system_extensions_lifecycle_mounts` special-cases apply
+            // automatically for their own fixed capability-id lists; passing
+            // it here too (rather than splitting it across those three
+            // fields, which this harness has no per-domain tracking for)
+            // reaches the SAME final per-capability mount via the override
+            // map, applied after those defaults in `build_inner`.
+            capability_execution_mount_overrides: self
+                .capability_mount_overrides
+                .iter()
+                .cloned()
+                .collect(),
+            additional_provider_trust,
+            // Whole-set narrowing over the FULL granted-capability set to
+            // this harness's exhaustive `capability_ids` allowlist,
+            // including the empty case (zero grants). See
+            // `additional_capability_grants` doc for the invariant.
+            capability_id_filter: Some(self.capability_ids.iter().cloned().collect()),
+            additional_capability_grants,
+        };
         let port =
             ironclaw_reborn_composition::test_support::create_refreshing_capability_port_for_test(
                 parts,

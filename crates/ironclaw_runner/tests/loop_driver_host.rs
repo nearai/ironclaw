@@ -43,16 +43,17 @@ use ironclaw_host_runtime::{
 use ironclaw_loop_host::{
     AwaitEdgeSettler, CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
     CapabilitySurfaceProfileResolver, CapabilityWriteResult, EmptyLoopCapabilityPort,
-    EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
-    HostIdentityContextSource, HostIdentityMessageContent, HostInputBatch, HostInputEnvelope,
-    HostInputQueue, HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind,
-    HostManagedModelGateway, HostManagedModelMessageRole, HostManagedModelRequest,
-    HostManagedModelResponse, HostManagedModelStreamSink, HostRuntimeLoopCapabilityPort,
-    HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
-    HostUserProfileSource, IdentityApplicability, IdentityFileName, JsonSpawnSubagentInputCodec,
-    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
-    ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
-    SubagentSpawnGoalStore, identity_message_ref, loop_driver_execution_extension_id,
+    EmptyUserProfileSource, FilesystemCheckpointStateStore, HostIdentityContextBuildError,
+    HostIdentityContextCandidate, HostIdentityContextSource, HostIdentityMessageContent,
+    HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError, HostManagedModelError,
+    HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessageRole,
+    HostManagedModelRequest, HostManagedModelResponse, HostManagedModelStreamSink,
+    HostRuntimeLoopCapabilityPort, HostSkillContextBuildError, HostSkillContextCandidate,
+    HostSkillContextSource, HostUserProfileSource, IdentityApplicability, IdentityFileName,
+    JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
+    LoopCapabilityResultWriter, ProductLiveCancellationProbe, RunCancellationFactory,
+    RunCancellationHandle, SubagentSpawnGoalStore, identity_message_ref,
+    loop_driver_execution_extension_id,
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_resources::InMemoryResourceGovernor;
@@ -110,11 +111,10 @@ use ironclaw_turns::{
     AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
     AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, CancelRunRequest, CancelRunResponse,
     CheckpointStateStore, DefaultTurnCoordinator, EventCursor, GetCheckpointStateRequest,
-    GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, InMemoryCheckpointStateStore,
-    InMemoryLoopCheckpointStore, InMemoryRunProfileResolver, InMemoryTurnEventSink,
-    InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, LoopBlocked, LoopBlockedKind,
-    LoopCheckpointRecord, LoopCheckpointStore, LoopCompleted, LoopCompletionKind, LoopExit,
-    LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, PutCheckpointStateRequest,
+    GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver,
+    InMemoryTurnEventSink, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, LoopBlocked,
+    LoopBlockedKind, LoopCheckpointRecord, LoopCheckpointStore, LoopCompleted, LoopCompletionKind,
+    LoopExit, LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, PutCheckpointStateRequest,
     PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnRequest, RunProfileId,
     RunProfileRequest, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
     SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy,
@@ -230,6 +230,8 @@ fn in_memory_await_edge_evidence_store() -> Arc<FilesystemAwaitEdgeStore<InMemor
     ));
     Arc::new(FilesystemAwaitEdgeStore::new(fs))
 }
+
+use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
 
 fn test_safety_context() -> InstructionSafetyContext {
     InstructionSafetyContext::new("policy:test", "test safety context")
@@ -2060,7 +2062,7 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
         thread_service.clone(),
         thread_scope.clone(),
         gateway.clone(),
-        Arc::new(InMemoryCheckpointStateStore::default()),
+        in_memory_checkpoint_state_store(),
         turn_store.clone(),
         loop_checkpoint_store,
         milestone_sink,
@@ -8383,7 +8385,7 @@ struct CapabilityHostFactory {
     thread_service: Arc<InMemorySessionThreadService>,
     thread_scope: ThreadScope,
     model_gateway: Arc<RecordingGateway>,
-    checkpoint_state_store: Arc<InMemoryCheckpointStateStore>,
+    checkpoint_state_store: Arc<FilesystemCheckpointStateStore<InMemoryBackend>>,
     loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     milestone_sink: Arc<InMemoryLoopHostMilestoneSink>,
     runtime: Arc<dyn HostRuntime + Send + Sync>,
@@ -8823,9 +8825,9 @@ async fn queue_fixture_turn(
 
 struct HostFixture {
     thread_service: Arc<InMemorySessionThreadService>,
-    checkpoint_state_store: Arc<InMemoryCheckpointStateStore>,
+    checkpoint_state_store: Arc<FilesystemCheckpointStateStore<InMemoryBackend>>,
     turn_state_store: Arc<StaticTurnStateStore>,
-    loop_checkpoint_store: Arc<InMemoryLoopCheckpointStore>,
+    loop_checkpoint_store: Arc<InMemoryTurnStateStore>,
     gateway: Arc<RecordingGateway>,
     milestone_sink: Arc<InMemoryLoopHostMilestoneSink>,
     thread_scope: ThreadScope,
@@ -8850,8 +8852,8 @@ impl HostFixture {
         mark_submitted: bool,
     ) -> Self {
         let thread_service = Arc::new(InMemorySessionThreadService::default());
-        let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
-        let loop_checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
+        let checkpoint_state_store = in_memory_checkpoint_state_store();
+        let loop_checkpoint_store = Arc::new(InMemoryTurnStateStore::default());
         let gateway = Arc::new(RecordingGateway::reply("model says hi"));
         let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
         let tenant_id = TenantId::new("tenant-text-host").unwrap();

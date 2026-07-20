@@ -2780,11 +2780,12 @@ mod compaction_tests;
 mod tests {
     use super::*;
 
+    use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_loop_host::FilesystemCheckpointStateStore;
     use ironclaw_turns::{
-        InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryRunProfileResolver,
-        PutLoopCheckpointRequest, RunProfileResolver, TurnActor, TurnCheckpointId, TurnId,
-        TurnRunId, TurnScope,
+        InMemoryRunProfileResolver, InMemoryTurnStateStore, PutLoopCheckpointRequest,
+        RunProfileResolver, TurnActor, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
         run_profile::{
             AgentLoopHostErrorKind, CheckpointSchemaId, InMemoryLoopHostMilestoneSink,
             LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopCheckpointRequest,
@@ -2856,15 +2857,17 @@ mod tests {
         );
     }
 
+    use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
+
     fn test_checkpoint_port(
         context: LoopRunContext,
     ) -> (
         HostManagedLoopCheckpointPort,
-        Arc<InMemoryCheckpointStateStore>,
-        Arc<InMemoryLoopCheckpointStore>,
+        Arc<FilesystemCheckpointStateStore<InMemoryBackend>>,
+        Arc<InMemoryTurnStateStore>,
     ) {
-        let state_store = Arc::new(InMemoryCheckpointStateStore::default());
-        let checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
+        let state_store = in_memory_checkpoint_state_store();
+        let checkpoint_store = Arc::new(InMemoryTurnStateStore::default());
         let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
         let port = HostManagedLoopCheckpointPort::new(
             context,

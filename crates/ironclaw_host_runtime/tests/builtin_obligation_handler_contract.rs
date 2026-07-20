@@ -14,6 +14,7 @@ use ironclaw_capabilities::{
 };
 use ironclaw_events::InMemoryAuditSink;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, BuiltinObligationServices, CapabilitySurfaceVersion,
@@ -23,7 +24,7 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
 use ironclaw_secrets::{
-    InMemorySecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
+    FilesystemSecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
     SecretStoreError,
 };
 use ironclaw_trust::TrustDecision;
@@ -38,7 +39,7 @@ fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRu
 }
 
 fn obligation_services(
-    secret_store: Arc<InMemorySecretStore>,
+    secret_store: Arc<FilesystemSecretStore<InMemoryBackend>>,
     governor: Arc<InMemoryResourceGovernor>,
 ) -> BuiltinObligationServices {
     BuiltinObligationServices::new(Arc::new(InMemoryAuditSink::new()), secret_store, governor)
@@ -582,7 +583,7 @@ async fn builtin_obligation_handler_fails_closed_when_redacted_object_keys_colli
 #[tokio::test]
 async fn builtin_obligation_handler_stores_network_policy_for_runtime_handoff() {
     let services = obligation_services(
-        Arc::new(InMemorySecretStore::new()),
+        Arc::new(FilesystemSecretStore::ephemeral()),
         Arc::new(InMemoryResourceGovernor::new()),
     );
     let handler = services.obligation_handler();
@@ -608,7 +609,7 @@ async fn builtin_obligation_handler_stores_network_policy_for_runtime_handoff() 
 #[tokio::test]
 async fn builtin_obligation_handler_removes_network_policy_on_abort() {
     let services = obligation_services(
-        Arc::new(InMemorySecretStore::new()),
+        Arc::new(FilesystemSecretStore::ephemeral()),
         Arc::new(InMemoryResourceGovernor::new()),
     );
     let handler = services.obligation_handler();
@@ -645,7 +646,7 @@ async fn builtin_obligation_handler_removes_network_policy_on_abort() {
 #[tokio::test]
 async fn network_obligation_handoff_isolates_agent_scope() {
     let services = obligation_services(
-        Arc::new(InMemorySecretStore::new()),
+        Arc::new(FilesystemSecretStore::ephemeral()),
         Arc::new(InMemoryResourceGovernor::new()),
     );
     let handler = services.obligation_handler();
@@ -671,7 +672,7 @@ async fn network_obligation_handoff_isolates_agent_scope() {
 
 #[tokio::test]
 async fn builtin_obligation_handler_leases_consumes_and_stages_secret_once() {
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let services = obligation_services(secret_store.clone(), governor);
     let handler = services.obligation_handler();
@@ -749,7 +750,7 @@ async fn builtin_obligation_handler_fails_closed_when_secret_disappears_after_pr
 
 #[tokio::test]
 async fn builtin_obligation_handler_removes_staged_secret_on_abort() {
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let services = obligation_services(secret_store.clone(), governor);
     let handler = services.obligation_handler();
@@ -796,7 +797,7 @@ async fn builtin_obligation_handler_removes_staged_secret_on_abort() {
 
 #[tokio::test]
 async fn builtin_obligation_handler_satisfy_preserves_staged_handoffs_when_releasing_reservation() {
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let services = obligation_services(secret_store.clone(), governor.clone());
     let handler = services.obligation_handler();
@@ -842,7 +843,7 @@ async fn builtin_obligation_handler_satisfy_preserves_staged_handoffs_when_relea
 
 #[tokio::test]
 async fn builtin_obligation_handler_cleans_unused_staged_handoffs_after_dispatch_completion() {
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let services = obligation_services(
         secret_store.clone(),
         Arc::new(InMemoryResourceGovernor::new()),
@@ -1314,14 +1315,14 @@ impl RuntimeCredentialAccountResolver for SourceScopedHandleResolver {
 
 #[derive(Debug)]
 struct SecretDisappearsAfterPreflight {
-    inner: InMemorySecretStore,
+    inner: FilesystemSecretStore<InMemoryBackend>,
     metadata_calls: AtomicUsize,
 }
 
 impl SecretDisappearsAfterPreflight {
     fn new() -> Self {
         Self {
-            inner: InMemorySecretStore::new(),
+            inner: FilesystemSecretStore::ephemeral(),
             metadata_calls: AtomicUsize::new(0),
         }
     }
@@ -1401,7 +1402,7 @@ impl SecretStore for SecretDisappearsAfterPreflight {
 #[tokio::test]
 async fn inject_credential_account_once_fails_when_no_resolver_wired() {
     // Services built without a credential_account_resolver — obligation must hard-fail.
-    let secret_store = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
+    let secret_store = Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral());
     let governor = Arc::new(ironclaw_resources::InMemoryResourceGovernor::new());
     let services = BuiltinObligationServices::new(
         Arc::new(ironclaw_events::InMemoryAuditSink::new()),
@@ -1440,7 +1441,7 @@ async fn inject_credential_account_once_fails_when_no_resolver_wired() {
 #[tokio::test]
 async fn inject_credential_account_once_fails_when_resolver_returns_auth_required() {
     // Services wired with a resolver that always returns AuthRequired.
-    let secret_store = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
+    let secret_store = Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral());
     let governor = Arc::new(ironclaw_resources::InMemoryResourceGovernor::new());
     let services = BuiltinObligationServices::new(
         Arc::new(ironclaw_events::InMemoryAuditSink::new()),
@@ -1493,7 +1494,7 @@ async fn inject_credential_account_once_resolves_and_stages_secret() {
     // obligation is satisfied, and the staged secret appears in the injection store.
     let access_handle = ironclaw_host_api::SecretHandle::new("github_access_secret").unwrap();
     let injection_slot = ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap();
-    let secret_store = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
+    let secret_store = Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral());
     // Seed the store with material under the access handle.
     secret_store
         .put(
@@ -1546,7 +1547,7 @@ async fn inject_credential_account_once_reads_from_resolved_source_scope() {
     let mut target_scope = source_scope.clone();
     target_scope.project_id = Some(ProjectId::new("project-a").unwrap());
     target_scope.invocation_id = InvocationId::new();
-    let secret_store = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
+    let secret_store = Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral());
     secret_store
         .put(
             source_scope.clone(),
@@ -1601,7 +1602,7 @@ async fn inject_credential_account_once_maps_unknown_resolved_secret_to_auth_req
     // staged-credential semantics so the runtime auth gate fires consistently
     // regardless of which staging lane (obligation vs stager) discovered the gap.
     let access_handle = ironclaw_host_api::SecretHandle::new("missing_secret").unwrap();
-    let secret_store = Arc::new(ironclaw_secrets::InMemorySecretStore::new()); // empty store
+    let secret_store = Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()); // empty store
     let governor = Arc::new(ironclaw_resources::InMemoryResourceGovernor::new());
     let services = BuiltinObligationServices::new(
         Arc::new(ironclaw_events::InMemoryAuditSink::new()),

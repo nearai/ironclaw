@@ -108,10 +108,10 @@ pub enum GoogleOauthSecretStoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_secrets::InMemorySecretStore;
+    use ironclaw_secrets::FilesystemSecretStore;
 
     fn store() -> GoogleOauthSecretStore {
-        GoogleOauthSecretStore::new(Arc::new(InMemorySecretStore::new()))
+        GoogleOauthSecretStore::new(Arc::new(FilesystemSecretStore::ephemeral()))
     }
 
     #[tokio::test]

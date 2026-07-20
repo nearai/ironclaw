@@ -1010,3 +1010,65 @@ async fn global_auto_approve_does_not_bypass_manifest_ineligible_tool_through_st
         "global auto-approve must not bypass a manifest-ineligible tool, got {decision:?}"
     );
 }
+
+#[test]
+fn absent_runtime_policy_fails_closed_to_ask_always_without_minimal_bypass() {
+    // Regression for the §4.4 mode-as-type leak: `local_dev_approval_policy`
+    // used to answer an absent runtime policy with
+    // `unwrap_or(RuntimeProfile::LocalDev)` — inventing a *deployment profile*
+    // to derive authority from, and defaulting the approval width to the
+    // narrower-than-safest `AskDestructive`. It now fails closed on both axes.
+    let policy = builtin_capability_policy().expect("capability policy");
+
+    // `ReadFilesystem` is not in either gate-effect set, so under the old
+    // `AskDestructive` default it did not require approval. Under the
+    // fail-closed `AskAlways` default any non-empty effect set does.
+    assert!(
+        local_dev_effects_require_approval(None, &policy, &[EffectKind::ReadFilesystem]),
+        "an absent runtime policy must fail closed to AskAlways"
+    );
+    // The empty effect set still needs no approval under AskAlways — the
+    // fallback tightens the width, it does not gate effect-free capabilities.
+    assert!(!local_dev_effects_require_approval(None, &policy, &[]));
+}
+
+#[test]
+fn resolved_yolo_policy_allows_minimal_bypass_but_org_ceiling_removes_it() {
+    // The paired positive case, driven through the production caller: a
+    // resolved trusted-laptop policy bypasses effect gates under `Minimal`,
+    // and the same request under an org ceiling does not.
+    let policy = builtin_capability_policy().expect("capability policy");
+    let effects = [EffectKind::SpawnProcess];
+
+    let yolo = ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest {
+        yolo_disclosure_acknowledged: true,
+        ..ironclaw_runtime_policy::ResolveRequest::new(
+            ironclaw_host_api::runtime_policy::DeploymentMode::LocalSingleUser,
+            ironclaw_host_api::runtime_policy::RuntimeProfile::LocalYolo,
+        )
+    })
+    .expect("local yolo resolves");
+    assert_eq!(
+        yolo.approval_policy,
+        ironclaw_host_api::runtime_policy::ApprovalPolicy::Minimal
+    );
+    assert!(
+        !local_dev_effects_require_approval(Some(&yolo), &policy, &effects),
+        "resolved local-yolo must bypass effect gates under Minimal"
+    );
+
+    let narrowed = ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest {
+        yolo_disclosure_acknowledged: true,
+        org_policy: ironclaw_runtime_policy::OrgPolicyConstraints::default()
+            .set_max_profile(ironclaw_host_api::runtime_policy::RuntimeProfile::LocalDev),
+        ..ironclaw_runtime_policy::ResolveRequest::new(
+            ironclaw_host_api::runtime_policy::DeploymentMode::LocalSingleUser,
+            ironclaw_host_api::runtime_policy::RuntimeProfile::LocalYolo,
+        )
+    })
+    .expect("narrowed local yolo resolves");
+    assert!(
+        local_dev_effects_require_approval(Some(&narrowed), &policy, &effects),
+        "an org ceiling that removes yolo must restore effect gates"
+    );
+}

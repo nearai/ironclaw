@@ -469,9 +469,8 @@ mod tests {
 
     use crate::{
         slack::slack_actor_identity::slack_user_identity_provider_user_id,
-        slack::slack_outbound_targets::{
-            InMemorySlackPersonalDmTargetStore, SlackPersonalDmTarget, SlackPersonalDmTargetKey,
-        },
+        slack::slack_host_state::test_support::in_memory_slack_host_state,
+        slack::slack_outbound_targets::{SlackPersonalDmTarget, SlackPersonalDmTargetKey},
         slack::slack_personal_binding::{
             RebornUserIdentityBindingError, SlackConnectionCleanupSelector, SlackConnectionEpoch,
             SlackDisconnectFence, SlackUserIdentityCleanupBinding,
@@ -491,7 +490,7 @@ mod tests {
             slack_provider_user_id,
             user_id.clone(),
         )]));
-        let dm_target_store = Arc::new(InMemorySlackPersonalDmTargetStore::new());
+        let dm_target_store = Arc::new(in_memory_slack_host_state("tenant:test"));
         let actor_pairings = Arc::new(RecordingConversationActorPairingService::default());
         let dm_target_key = SlackPersonalDmTargetKey::new(
             tenant_id.clone(),
@@ -699,7 +698,7 @@ mod tests {
             user_identity_delete_store: identity_store.clone(),
             user_binding_lifecycle_store: identity_store.clone(),
             conversation_actor_pairings: Arc::new(FailingConversationActorPairingService),
-            personal_dm_target_store: Arc::new(InMemorySlackPersonalDmTargetStore::new()),
+            personal_dm_target_store: Arc::new(in_memory_slack_host_state("tenant:test")),
             personal_credential_cleanup: None,
         };
         let caller =
@@ -747,7 +746,7 @@ mod tests {
             user_identity_delete_store: identity_store.clone(),
             user_binding_lifecycle_store: identity_store.clone(),
             conversation_actor_pairings: actor_pairings.clone(),
-            personal_dm_target_store: Arc::new(InMemorySlackPersonalDmTargetStore::new()),
+            personal_dm_target_store: Arc::new(in_memory_slack_host_state("tenant:test")),
             personal_credential_cleanup: None,
         };
         let caller =
@@ -811,7 +810,7 @@ mod tests {
             user_identity_delete_store: identity_store.clone(),
             user_binding_lifecycle_store: identity_store.clone(),
             conversation_actor_pairings: actor_pairings.clone(),
-            personal_dm_target_store: Arc::new(InMemorySlackPersonalDmTargetStore::new()),
+            personal_dm_target_store: Arc::new(in_memory_slack_host_state("tenant:test")),
             personal_credential_cleanup: None,
         };
         let caller =
@@ -857,7 +856,7 @@ mod tests {
             user_identity_delete_store: identity_store.clone(),
             user_binding_lifecycle_store: identity_store.clone(),
             conversation_actor_pairings: actor_pairings.clone(),
-            personal_dm_target_store: Arc::new(InMemorySlackPersonalDmTargetStore::new()),
+            personal_dm_target_store: Arc::new(in_memory_slack_host_state("tenant:test")),
             personal_credential_cleanup: None,
         };
         let caller = WebUiAuthenticatedCaller::new(tenant_id, user_id, None::<AgentId>, None);
@@ -942,7 +941,7 @@ mod tests {
             conversation_actor_pairings: Arc::new(
                 RecordingConversationActorPairingService::default(),
             ),
-            personal_dm_target_store: Arc::new(InMemorySlackPersonalDmTargetStore::new()),
+            personal_dm_target_store: Arc::new(in_memory_slack_host_state("tenant:test")),
             personal_credential_cleanup: None,
         };
         let caller =
@@ -976,7 +975,7 @@ mod tests {
         )]));
         let cleanup = Arc::new(RecordingCleanupService::default());
         let actor_pairings = Arc::new(RecordingConversationActorPairingService::default());
-        let dm_target_store = Arc::new(InMemorySlackPersonalDmTargetStore::new());
+        let dm_target_store = Arc::new(in_memory_slack_host_state("tenant:test"));
         let dm_key = SlackPersonalDmTargetKey::new(
             tenant_id.clone(),
             installation_id.clone(),
@@ -1090,7 +1089,7 @@ mod tests {
             slack_user_identity_provider_user_id(&stale_installation, "U123"),
             user_id.clone(),
         )]));
-        let dm_target_store = Arc::new(InMemorySlackPersonalDmTargetStore::new());
+        let dm_target_store = Arc::new(in_memory_slack_host_state("tenant:test"));
         let current_dm_key = SlackPersonalDmTargetKey::new(
             tenant_id.clone(),
             current_installation.clone(),
@@ -1183,7 +1182,7 @@ mod tests {
         let stale_installation =
             AdapterInstallationId::new("install-dm-only").expect("stale installation");
         let identity_store = Arc::new(RecordingSlackIdentityStore::new([]));
-        let dm_target_store = Arc::new(InMemorySlackPersonalDmTargetStore::new());
+        let dm_target_store = Arc::new(in_memory_slack_host_state("tenant:test"));
         let stale_dm_key = SlackPersonalDmTargetKey::new(
             tenant_id.clone(),
             stale_installation.clone(),
@@ -1280,7 +1279,7 @@ mod tests {
             conversation_actor_pairings: Arc::new(
                 RecordingConversationActorPairingService::default(),
             ),
-            personal_dm_target_store: Arc::new(InMemorySlackPersonalDmTargetStore::new()),
+            personal_dm_target_store: Arc::new(in_memory_slack_host_state("tenant:test")),
             personal_credential_cleanup: Some(cleanup),
         };
         let caller = WebUiAuthenticatedCaller::new(tenant_id, user_id, None::<AgentId>, None);
@@ -1334,7 +1333,7 @@ mod tests {
             conversation_actor_pairings: Arc::new(
                 RecordingConversationActorPairingService::default(),
             ),
-            personal_dm_target_store: Arc::new(InMemorySlackPersonalDmTargetStore::new()),
+            personal_dm_target_store: Arc::new(in_memory_slack_host_state("tenant:test")),
             personal_credential_cleanup: None,
         };
         let caller =
@@ -1375,7 +1374,7 @@ mod tests {
             conversation_actor_pairings: Arc::new(
                 RecordingConversationActorPairingService::default(),
             ),
-            personal_dm_target_store: Arc::new(InMemorySlackPersonalDmTargetStore::new()),
+            personal_dm_target_store: Arc::new(in_memory_slack_host_state("tenant:test")),
             personal_credential_cleanup: None,
         };
         let caller = WebUiAuthenticatedCaller::new(
@@ -1414,7 +1413,7 @@ mod tests {
             conversation_actor_pairings: Arc::new(
                 RecordingConversationActorPairingService::default(),
             ),
-            personal_dm_target_store: Arc::new(InMemorySlackPersonalDmTargetStore::new()),
+            personal_dm_target_store: Arc::new(in_memory_slack_host_state("tenant:test")),
             personal_credential_cleanup: Some(Arc::new(FailingCleanupService)),
         };
         let caller =

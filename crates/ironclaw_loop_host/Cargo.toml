@@ -13,6 +13,11 @@ publish = false
 [package.metadata.ironclaw]
 layer = "loops"
 
+[features]
+# Test-only constructors (in-memory-backed store seams). Disabled by default;
+# enable only from a downstream crate's [dev-dependencies].
+test-support = []
+
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
