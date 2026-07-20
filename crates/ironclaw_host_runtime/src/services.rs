@@ -645,6 +645,7 @@ where
             self.surface_version.clone(),
             runtime_policy,
         )
+        .with_scoped_overlay(Arc::clone(&self.scoped_overlay))
         .with_surface_filesystem(surface_filesystem)
         .with_trust_policy_dyn(Arc::clone(&self.trust_policy))
         .with_process_manager(process_manager)
