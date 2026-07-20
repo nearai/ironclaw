@@ -467,9 +467,23 @@ function applyProjectionItems({
         continue;
       }
       if (isStaleLocalRunStatus) {
+        replaceExistingRunFailureMessage(setMessages, {
+          runId,
+          status,
+          failureCategory,
+          failureSummary,
+          connectionContextForRunFailure,
+        });
         continue;
       }
       if (isStaleTerminalStatus) {
+        replaceExistingRunFailureMessage(setMessages, {
+          runId,
+          status,
+          failureCategory,
+          failureSummary,
+          connectionContextForRunFailure,
+        });
         const activeResolvedPromptState = locallyResolvedStateForRun(
           locallyResolvedGatesRef,
           activeRunRef?.current?.runId,
@@ -790,6 +804,7 @@ function appendRunFailureMessage(
     failureCategory,
     failureSummary,
     connectionContextForRunFailure,
+    onlyIfPresent = false,
   },
 ) {
   // Dedup by `err-<runId>` so replays of the same projection
@@ -823,6 +838,7 @@ function appendRunFailureMessage(
       };
       return next;
     }
+    if (onlyIfPresent) return prev;
     const lastMessage = prev[prev.length - 1];
     if (isAdjacentDuplicateRunFailure(lastMessage, content)) {
       const replacement = promotedRunFailureMessage(lastMessage, messageId);
@@ -843,6 +859,13 @@ function appendRunFailureMessage(
       }),
     ];
   });
+}
+
+function replaceExistingRunFailureMessage(setMessages, details) {
+  if (details.status !== "failed" && details.status !== "recovery_required") {
+    return;
+  }
+  appendRunFailureMessage(setMessages, { ...details, onlyIfPresent: true });
 }
 
 // A projection can report an unknown run failure before the send response maps

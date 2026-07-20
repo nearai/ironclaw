@@ -2612,6 +2612,69 @@ test("useChatEvents: terminal run failure replaces its provisional stream error"
   });
 });
 
+test("useChatEvents: stale terminal failure promotes its own stream error after retry", () => {
+  const harness = createUseChatEventsHarness({
+    failureMessageForRunStatus: ({ failureSummary }) =>
+      failureSummary || "The run failed before producing a reply.",
+  });
+  harness.setCurrentActiveRun({
+    runId: "run-before-retry",
+    threadId: "thread-1",
+    status: "running",
+  });
+
+  harness.handleEvent({
+    type: "error",
+    frame: {
+      error: "connection lost",
+      kind: "service_unavailable",
+      retryable: true,
+    },
+  });
+
+  harness.setCurrentActiveRun({
+    runId: "run-after-retry",
+    threadId: "thread-1",
+    status: "running",
+    source: "local",
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: "run-before-retry",
+              status: "failed",
+              failure_category: "model_context_limit",
+              failure_summary: "The request exceeded the model's context limit.",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(plain(harness.activeRun), {
+    runId: "run-after-retry",
+    threadId: "thread-1",
+    status: "running",
+    source: "local",
+  });
+  assert.deepEqual(plain(harness.messages), [
+    {
+      id: "err-run-before-retry",
+      role: "error",
+      content: "The request exceeded the model's context limit.",
+      timestamp: harness.messages[0].timestamp,
+      failureStatus: "failed",
+      failureCategory: "model_context_limit",
+      failureSummary: "The request exceeded the model's context limit.",
+    },
+  ]);
+});
+
 test("useChatEvents: stream error dedupe only suppresses adjacent repeats", () => {
   const seenStreamErrors = [];
   const harness = createUseChatEventsHarness({
