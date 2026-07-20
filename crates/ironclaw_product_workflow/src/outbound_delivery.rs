@@ -9,8 +9,9 @@ use ironclaw_outbound::{
 };
 use ironclaw_product_adapters::{
     ExternalActorRef, ExternalConversationRef, OutboundDeliverySink, ProductAdapter,
-    ProductAdapterError, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
-    ProductRenderOutcome, ProjectionCursor, ProtocolHttpEgress,
+    ProductAdapterError, ProductOutboundAttachment, ProductOutboundEnvelope,
+    ProductOutboundPayload, ProductOutboundTarget, ProductRenderOutcome, ProjectionCursor,
+    ProtocolHttpEgress,
 };
 use thiserror::Error;
 use tracing::debug;
@@ -121,6 +122,25 @@ pub async fn prepare_and_render_product_outbound(
     target_resolver: &dyn ProductOutboundTargetResolver,
     request: ProductOutboundDeliveryRequest<'_>,
 ) -> Result<ProductOutboundDeliveryOutcome, ProductOutboundDeliveryError> {
+    prepare_and_render_product_outbound_with_attachments(
+        outbound_policy,
+        communication_preferences,
+        target_resolver,
+        request,
+        Vec::new(),
+    )
+    .await
+}
+
+/// Attachment-aware variant used after channel delivery resolves workspace
+/// paths through the scoped project-filesystem reader.
+pub async fn prepare_and_render_product_outbound_with_attachments(
+    outbound_policy: &OutboundPolicyService<'_>,
+    communication_preferences: &dyn CommunicationPreferenceRepository,
+    target_resolver: &dyn ProductOutboundTargetResolver,
+    request: ProductOutboundDeliveryRequest<'_>,
+    attachments: Vec<ProductOutboundAttachment>,
+) -> Result<ProductOutboundDeliveryOutcome, ProductOutboundDeliveryError> {
     let delivery_kind = OutboundPushKind::from(request.delivery.resolution_request.delivery_kind());
     let payload_kind = outbound_push_kind_for_payload(&request.payload);
     let require_direct_message = request.require_direct_message_target;
@@ -183,7 +203,12 @@ pub async fn prepare_and_render_product_outbound(
     };
     let render_result = request
         .adapter
-        .render_outbound(envelope, request.egress, request.delivery_sink)
+        .render_outbound_with_attachments(
+            envelope,
+            attachments,
+            request.egress,
+            request.delivery_sink,
+        )
         .await;
     let render_outcome = match render_result {
         Ok(render_outcome) => render_outcome,

@@ -45,7 +45,7 @@ fn longest_file_prefix(token: &str) -> Option<&str> {
         if !bytes[end - 1].is_ascii_alphanumeric() {
             continue;
         }
-        let candidate = &token[..end];
+        let candidate = token.get(..end)?;
         let filename = candidate.rsplit('/').next()?;
         let (_, extension) = filename.rsplit_once('.')?;
         if !extension.is_empty() && extension.bytes().all(|byte| byte.is_ascii_alphanumeric()) {

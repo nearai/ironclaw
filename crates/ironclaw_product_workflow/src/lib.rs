@@ -149,6 +149,7 @@ pub use outbound_delivery::{
     ProductOutboundDeliveryError, ProductOutboundDeliveryOutcome, ProductOutboundDeliveryRequest,
     ProductOutboundStatusUpdateFailure, ProductOutboundTargetResolver,
     VerifiedProductOutboundTargetMetadata, prepare_and_render_product_outbound,
+    prepare_and_render_product_outbound_with_attachments,
 };
 pub use policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,

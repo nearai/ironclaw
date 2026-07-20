@@ -6,14 +6,15 @@ use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, DeclaredEgressHost, DeclaredEgressTarget,
     DeliveryStatus, EgressCredentialHandle, EgressRequest, OutboundDeliverySink,
     ParsedProductInbound, ProductAdapter, ProductAdapterCapabilities, ProductAdapterError,
-    ProductAdapterId, ProductCapabilityFlag, ProductOutboundEnvelope, ProductOutboundPayload,
-    ProductOutboundTarget, ProductRenderOutcome, ProductSurfaceKind, ProtocolAuthEvidence,
-    ProtocolHttpEgress,
+    ProductAdapterId, ProductCapabilityFlag, ProductOutboundAttachment, ProductOutboundEnvelope,
+    ProductOutboundPayload, ProductOutboundTarget, ProductRenderOutcome, ProductSurfaceKind,
+    ProtocolAuthEvidence, ProtocolHttpEgress,
 };
 use ironclaw_turns::TurnRunId;
 
 use crate::delivery::send_slack_post_message;
-use crate::payload::{SLACK_API_HOST, SlackPayloadParseError, parse_slack_event};
+use crate::files::upload_workspace_file;
+use crate::payload::{SLACK_API_HOST, SLACK_FILES_HOST, SlackPayloadParseError, parse_slack_event};
 use crate::render::{
     SlackRenderError, render_auth_prompt, render_final_reply_messages, render_gate_prompt,
 };
@@ -38,10 +39,17 @@ pub struct SlackV2Adapter {
 
 impl SlackV2Adapter {
     pub fn new(config: SlackV2AdapterConfig) -> Self {
-        let declared_egress = vec![DeclaredEgressTarget::new(
-            DeclaredEgressHost::new(SLACK_API_HOST).expect("static Slack host valid"), // safety: compile-time const "slack.com" satisfies DeclaredEgressHost validation
-            Some(config.egress_credential_handle.clone()),
-        )];
+        let declared_egress = vec![
+            DeclaredEgressTarget::new(
+                declared_static_host(SLACK_API_HOST),
+                Some(config.egress_credential_handle.clone()),
+            ),
+            DeclaredEgressTarget::new(
+                declared_static_host(SLACK_FILES_HOST),
+                Some(config.egress_credential_handle.clone()),
+            ),
+            DeclaredEgressTarget::new(declared_static_host(SLACK_FILES_HOST), None),
+        ];
         Self {
             config,
             capabilities: slack_default_capabilities(),
@@ -67,7 +75,17 @@ pub fn slack_request_signature_auth_requirement() -> AuthRequirement {
 }
 
 pub fn slack_declared_egress_hosts() -> Vec<DeclaredEgressHost> {
-    vec![DeclaredEgressHost::new(SLACK_API_HOST).expect("static Slack host valid")] // safety: compile-time const "slack.com" satisfies DeclaredEgressHost validation
+    vec![
+        declared_static_host(SLACK_API_HOST),
+        declared_static_host(SLACK_FILES_HOST),
+    ]
+}
+
+fn declared_static_host(host: &'static str) -> DeclaredEgressHost {
+    match DeclaredEgressHost::new(host) {
+        Ok(host) => host,
+        Err(_) => unreachable!("compile-time Slack host constants satisfy host validation"),
+    }
 }
 
 #[async_trait]
@@ -126,6 +144,17 @@ impl ProductAdapter for SlackV2Adapter {
         egress: &dyn ProtocolHttpEgress,
         delivery_sink: &dyn OutboundDeliverySink,
     ) -> Result<ProductRenderOutcome, ProductAdapterError> {
+        self.render_outbound_with_attachments(envelope, Vec::new(), egress, delivery_sink)
+            .await
+    }
+
+    async fn render_outbound_with_attachments(
+        &self,
+        envelope: ProductOutboundEnvelope,
+        attachments: Vec<ProductOutboundAttachment>,
+        egress: &dyn ProtocolHttpEgress,
+        delivery_sink: &dyn OutboundDeliverySink,
+    ) -> Result<ProductRenderOutcome, ProductAdapterError> {
         if envelope.adapter_id != self.config.adapter_id {
             return Err(ProductAdapterError::InvalidIdentifier {
                 kind: "envelope.adapter_id",
@@ -150,6 +179,43 @@ impl ProductAdapter for SlackV2Adapter {
         let attempt_id = envelope.delivery_attempt_id;
         let target_binding = envelope.target.reply_target_binding_ref.clone();
         let run_id = payload_run_id(&envelope.payload);
+        if !attachments.is_empty()
+            && !matches!(&envelope.payload, ProductOutboundPayload::FinalReply(_))
+        {
+            let reason = RedactedString::new("Slack files are supported only on final replies");
+            record_status(
+                delivery_sink,
+                DeliveryStatus::FailedPermanent {
+                    attempt_id,
+                    target: target_binding,
+                    run_id,
+                    reason: reason.clone(),
+                },
+            )
+            .await;
+            return Err(ProductAdapterError::EgressDenied { reason });
+        }
+        let file_target = if attachments.is_empty() {
+            None
+        } else {
+            match crate::render::slack_reply_target(&envelope.target) {
+                Ok(target) => Some(target),
+                Err(error) => {
+                    let reason = RedactedString::new(error.to_string());
+                    record_status(
+                        delivery_sink,
+                        DeliveryStatus::FailedPermanent {
+                            attempt_id,
+                            target: target_binding.clone(),
+                            run_id,
+                            reason: reason.clone(),
+                        },
+                    )
+                    .await;
+                    return Err(ProductAdapterError::EgressDenied { reason });
+                }
+            }
+        };
 
         let requests = match render_supported_payload(
             &envelope.target,
@@ -214,6 +280,34 @@ impl ProductAdapter for SlackV2Adapter {
                 return Err(error.adapter_error);
             }
             delivered_any_part = true;
+        }
+
+        if let Some(file_target) = file_target.as_ref() {
+            for attachment in &attachments {
+                if upload_workspace_file(
+                    egress,
+                    self.config.egress_credential_handle.clone(),
+                    file_target,
+                    attachment,
+                )
+                .await
+                .is_err()
+                {
+                    let reason =
+                        RedactedString::new("partial Slack delivery: workspace file upload failed");
+                    record_status(
+                        delivery_sink,
+                        DeliveryStatus::FailedPermanent {
+                            attempt_id,
+                            target: target_binding.clone(),
+                            run_id,
+                            reason: reason.clone(),
+                        },
+                    )
+                    .await;
+                    return Err(ProductAdapterError::EgressDenied { reason });
+                }
+            }
         }
 
         record_status(
@@ -301,8 +395,8 @@ mod tests {
     use chrono::Utc;
     use ironclaw_product_adapters::auth::mark_request_signature_verified;
     use ironclaw_product_adapters::{
-        DeliveryStatus, ExternalConversationRef, FakeOutboundDeliverySink, FakeProtocolHttpEgress,
-        FinalReplyView, ProductOutboundTarget,
+        DeliveryStatus, EgressResponse, ExternalConversationRef, FakeOutboundDeliverySink,
+        FakeProtocolHttpEgress, FinalReplyView, ProductOutboundTarget,
     };
     use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId};
 
@@ -346,6 +440,68 @@ mod tests {
         })
     }
 
+    #[tokio::test]
+    async fn final_reply_workspace_file_uses_external_upload_sequence() {
+        let adapter = SlackV2Adapter::new(config());
+        let egress =
+            FakeProtocolHttpEgress::new([SLACK_API_HOST.to_string(), SLACK_FILES_HOST.to_string()]);
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            SLACK_API_HOST,
+            Ok(EgressResponse::new(200, br#"{"ok":true}"#.to_vec())),
+        );
+        egress.program_response(
+            SLACK_API_HOST,
+            Ok(EgressResponse::new(
+                200,
+                br#"{"ok":true,"upload_url":"https://files.slack.com/upload/v1/abc","file_id":"F123"}"#
+                    .to_vec(),
+            )),
+        );
+        egress.program_response(
+            SLACK_API_HOST,
+            Ok(EgressResponse::new(200, br#"{"ok":true}"#.to_vec())),
+        );
+        egress.program_response(
+            SLACK_FILES_HOST,
+            Ok(EgressResponse::new(200, b"OK".to_vec())),
+        );
+        let sink = FakeOutboundDeliverySink::new();
+        let attachment = ProductOutboundAttachment::new(
+            "/workspace/report.pdf",
+            "report.pdf",
+            "application/pdf",
+            b"pdf bytes".to_vec(),
+        )
+        .expect("attachment");
+
+        adapter
+            .render_outbound_with_attachments(
+                envelope(final_reply_payload("Created the report")),
+                vec![attachment],
+                &egress,
+                &sink,
+            )
+            .await
+            .expect("message and file deliver");
+
+        let calls = egress.calls();
+        assert_eq!(calls.len(), 4);
+        assert_eq!(calls[0].path, "/api/chat.postMessage");
+        assert!(
+            calls[1]
+                .path
+                .starts_with("/api/files.getUploadURLExternal?")
+        );
+        assert_eq!(calls[2].host, SLACK_FILES_HOST);
+        assert_eq!(calls[2].body, b"pdf bytes");
+        assert_eq!(calls[3].path, "/api/files.completeUploadExternal");
+        assert!(matches!(
+            sink.statuses().as_slice(),
+            [DeliveryStatus::Delivered { .. }]
+        ));
+    }
+
     #[test]
     fn metadata_declares_signature_auth_and_paired_egress() {
         let adapter = SlackV2Adapter::new(config());
@@ -370,14 +526,26 @@ mod tests {
                 .capabilities()
                 .contains(ProductCapabilityFlag::InboundCommands)
         );
-        assert_eq!(adapter.declared_egress().len(), 1);
-        assert_eq!(adapter.declared_egress()[0].host.as_str(), SLACK_API_HOST);
+        let declared: Vec<_> = adapter
+            .declared_egress()
+            .iter()
+            .map(|target| {
+                (
+                    target.host.as_str(),
+                    target
+                        .credential_handle
+                        .as_ref()
+                        .map(EgressCredentialHandle::as_str),
+                )
+            })
+            .collect();
         assert_eq!(
-            adapter.declared_egress()[0]
-                .credential_handle
-                .as_ref()
-                .map(EgressCredentialHandle::as_str),
-            Some("slack_bot_token")
+            declared,
+            vec![
+                (SLACK_API_HOST, Some("slack_bot_token")),
+                (SLACK_FILES_HOST, Some("slack_bot_token")),
+                (SLACK_FILES_HOST, None),
+            ]
         );
     }
 

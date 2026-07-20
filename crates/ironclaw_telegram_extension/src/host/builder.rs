@@ -16,6 +16,7 @@ use ironclaw_wasm_product_adapters::EgressPolicy;
 use sha2::{Digest, Sha256};
 
 use crate::TelegramHostBuildError;
+use crate::attachment_materializer::TelegramAttachmentMaterializer;
 use crate::bot_api::HostEgressTelegramBotApi;
 use crate::channel_routes::TelegramChannelRouteConfig;
 use crate::delivery::{DynamicTelegramTriggeredRunDeliveryHook, TelegramOutboundTargetProvider};
@@ -51,6 +52,8 @@ pub async fn build_telegram_host(
         turn_coordinator,
         approval_interactions,
         auth_interactions,
+        inbound_attachment_lander,
+        project_filesystem_reader,
         delivery_services,
         setup_activation,
     } = input;
@@ -87,6 +90,10 @@ pub async fn build_telegram_host(
         EgressPolicy::new(telegram_declared_egress_targets(token_handle.clone())),
         telegram_host_scope_template(&config),
     ));
+    let inbound_attachment_materializer = Arc::new(TelegramAttachmentMaterializer::new(
+        Arc::clone(&egress),
+        token_handle.clone(),
+    ));
     let triggered_run_delivery = Arc::clone(&delivery_services.triggered_run_delivery);
     let revision_parts = Arc::new(TelegramRevisionWorkflowParts::new(
         config.clone(),
@@ -98,6 +105,9 @@ pub async fn build_telegram_host(
         turn_coordinator,
         approval_interactions,
         auth_interactions,
+        inbound_attachment_lander,
+        inbound_attachment_materializer,
+        project_filesystem_reader,
         delivery_services,
         egress,
         token_handle,

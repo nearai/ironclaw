@@ -6,14 +6,16 @@ use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, DeclaredEgressHost, DeclaredEgressTarget,
     DeliveryStatus, EgressCredentialHandle, OutboundDeliverySink, ParsedProductInbound,
     ProductAdapter, ProductAdapterCapabilities, ProductAdapterError, ProductAdapterId,
-    ProductCapabilityFlag, ProductOutboundEnvelope, ProductOutboundPayload, ProductRenderOutcome,
-    ProductSurfaceKind, ProtocolAuthEvidence, ProtocolHttpEgress, ProtocolHttpEgressError,
+    ProductCapabilityFlag, ProductOutboundAttachment, ProductOutboundEnvelope,
+    ProductOutboundPayload, ProductRenderOutcome, ProductSurfaceKind, ProtocolAuthEvidence,
+    ProtocolHttpEgress, ProtocolHttpEgressError,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId};
 
 use crate::payload::{GroupTriggerPolicy, TELEGRAM_API_HOST, parse_telegram_update};
 use crate::render::{
-    render_auth_prompt, render_final_reply, render_gate_prompt, render_progress_typing,
+    render_auth_prompt, render_document, render_final_reply, render_gate_prompt,
+    render_progress_typing,
 };
 
 /// Configuration for a Telegram v2 adapter installation.
@@ -155,6 +157,17 @@ impl ProductAdapter for TelegramV2Adapter {
         egress: &dyn ProtocolHttpEgress,
         delivery_sink: &dyn OutboundDeliverySink,
     ) -> Result<ProductRenderOutcome, ProductAdapterError> {
+        self.render_outbound_with_attachments(envelope, Vec::new(), egress, delivery_sink)
+            .await
+    }
+
+    async fn render_outbound_with_attachments(
+        &self,
+        envelope: ProductOutboundEnvelope,
+        attachments: Vec<ProductOutboundAttachment>,
+        egress: &dyn ProtocolHttpEgress,
+        delivery_sink: &dyn OutboundDeliverySink,
+    ) -> Result<ProductRenderOutcome, ProductAdapterError> {
         // Henry's review on PR #3355: fail closed when the envelope's
         // installation does not match this adapter. Projection routing
         // mistakes must not let one Telegram installation render with
@@ -196,6 +209,23 @@ impl ProductAdapter for TelegramV2Adapter {
             ProductOutboundPayload::AuthPrompt(view) => Some(view.turn_run_id),
             _ => None,
         };
+        if !attachments.is_empty()
+            && !matches!(&envelope.payload, ProductOutboundPayload::FinalReply(_))
+        {
+            let reason =
+                RedactedString::new("Telegram attachments are supported only on final replies");
+            record_status(
+                delivery_sink,
+                DeliveryStatus::FailedPermanent {
+                    attempt_id,
+                    target: target_binding,
+                    run_id,
+                    reason: reason.clone(),
+                },
+            )
+            .await;
+            return Err(ProductAdapterError::EgressDenied { reason });
+        }
 
         // Resolve the concrete chat target once, preferring the host-resolved
         // conversation ref (populated on the live reply path) over the opaque
@@ -208,7 +238,35 @@ impl ProductAdapter for TelegramV2Adapter {
                 match resolved_target.clone().and_then(|reply| {
                     render_final_reply(&reply, &view, self.config.egress_credential_handle.clone())
                 }) {
-                    Ok(reqs) => reqs,
+                    Ok(mut reqs) => {
+                        let reply = match resolved_target.as_ref() {
+                            Ok(reply) => reply,
+                            Err(render_err) => return Err(map_render_error(render_err.clone())),
+                        };
+                        for attachment in &attachments {
+                            match render_document(
+                                reply,
+                                attachment,
+                                self.config.egress_credential_handle.clone(),
+                            ) {
+                                Ok(request) => reqs.push(request),
+                                Err(render_err) => {
+                                    record_status(
+                                        delivery_sink,
+                                        DeliveryStatus::FailedPermanent {
+                                            attempt_id,
+                                            target: target_binding.clone(),
+                                            run_id,
+                                            reason: RedactedString::new(render_err.to_string()),
+                                        },
+                                    )
+                                    .await;
+                                    return Err(map_render_error(render_err));
+                                }
+                            }
+                        }
+                        reqs
+                    }
                     Err(render_err) => {
                         // Malformed reply target is a permanent data-shape
                         // failure; retrying won't help.
@@ -555,6 +613,9 @@ fn map_render_error(err: crate::render::TelegramRenderError) -> ProductAdapterEr
                 reason: err.to_string(),
             }
         }
+        crate::render::TelegramRenderError::Attachment { .. } => ProductAdapterError::Internal {
+            detail: RedactedString::new(err.to_string()),
+        },
     }
 }
 
@@ -739,6 +800,51 @@ mod tests {
             "all chunks landed -> Delivered, got {:?}",
             statuses[0]
         );
+    }
+
+    #[tokio::test]
+    async fn final_reply_workspace_file_sends_message_then_document() {
+        let adapter = TelegramV2Adapter::new(config(false));
+        let egress = FakeProtocolHttpEgress::new(["api.telegram.org".to_string()]);
+        egress.allow_credential_handle("telegram_bot_token");
+        let sink = ironclaw_product_adapters::FakeOutboundDeliverySink::new();
+        let envelope = final_reply_envelope(
+            adapter.adapter_id().clone(),
+            adapter.installation_id().clone(),
+        );
+        let attachment = ProductOutboundAttachment::new(
+            "/workspace/report.pdf",
+            "report.pdf",
+            "application/pdf",
+            b"pdf bytes".to_vec(),
+        )
+        .expect("attachment");
+
+        adapter
+            .render_outbound_with_attachments(envelope, vec![attachment], &egress, &sink)
+            .await
+            .expect("message and document deliver");
+
+        let calls = egress.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].path, "/sendMessage");
+        assert_eq!(calls[1].path, "/sendDocument");
+        assert!(
+            calls[1]
+                .headers
+                .iter()
+                .any(|header| header.value().starts_with("multipart/form-data; boundary="))
+        );
+        assert!(
+            calls[1]
+                .body
+                .windows(b"pdf bytes".len())
+                .any(|window| window == b"pdf bytes")
+        );
+        assert!(matches!(
+            sink.statuses().as_slice(),
+            [DeliveryStatus::Delivered { .. }]
+        ));
     }
 
     /// qa-telegram:C3 — once ANY chunk has been delivered, a later failure

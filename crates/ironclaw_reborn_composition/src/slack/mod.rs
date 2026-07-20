@@ -1,4 +1,5 @@
 pub(crate) mod slack_actor_identity;
+pub(crate) mod slack_attachment_materializer;
 pub(crate) mod slack_channel_connection;
 pub(crate) mod slack_channel_routes;
 pub(crate) mod slack_connectable_channel;

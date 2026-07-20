@@ -18,7 +18,7 @@ mod projection;
 pub mod redaction;
 mod workflow;
 
-pub use adapter::{ProductAdapter, ProductAdapterHealth};
+pub use adapter::{ProductAdapter, ProductAdapterHealth, ProductOutboundAttachment};
 pub use auth::{AuthRequirement, ProtocolAuthEvidence, ProtocolAuthFailure, VerifiedAuthClaim};
 #[cfg(feature = "host-auth-mint")]
 pub use auth::{

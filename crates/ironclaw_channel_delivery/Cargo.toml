@@ -20,6 +20,7 @@ test-support = []
 async-trait = "0.1"
 chrono = "0.4"
 ironclaw_channel_host = { path = "../ironclaw_channel_host" }
+ironclaw_attachments = { path = "../ironclaw_attachments" }
 ironclaw_conversations = { path = "../ironclaw_conversations" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_outbound = { path = "../ironclaw_outbound" }

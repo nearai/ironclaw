@@ -17,8 +17,9 @@ use ironclaw_product_adapters::{
 };
 use ironclaw_product_workflow::{
     ProductOutboundDeliveryRequest, ProductOutboundTargetResolver, ProductWorkflowError,
-    ResolvedBinding, VerifiedProductOutboundTargetMetadata, approval_prompt_context_view,
-    enrich_auth_prompt_view, prepare_and_render_product_outbound,
+    ProjectFilesystemReader, ResolvedBinding, VerifiedProductOutboundTargetMetadata,
+    approval_prompt_context_view, enrich_auth_prompt_view,
+    prepare_and_render_product_outbound_with_attachments,
 };
 use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, SessionThreadService, ThreadScope};
 use ironclaw_triggers::TriggerFire;
@@ -36,6 +37,7 @@ use crate::actionable::{
 use crate::hooks::{PostSubmitDeliveryError, PostSubmitDeliveryHook};
 use crate::routing::{TrackingPostEgress, record_gate_route_if_needed};
 use crate::services::*;
+use crate::workspace_attachments::resolve_workspace_attachments;
 
 /// Drives triggered-run delivery for a single submitted run.
 ///
@@ -65,6 +67,7 @@ pub struct TriggeredRunDeliveryDriver {
     /// `driver_fire_with_unresolvable_delivery_target_records_target_unavailable`.
     // arch-exempt: optional_arc, reduced test drivers omit the cross-owner target strategy while production wiring supplies it and targeted fires fail closed without it, plan #6159
     outbound_target_provider: Option<Arc<dyn OutboundDeliveryTargetProvider>>,
+    project_filesystem: Option<Arc<dyn ProjectFilesystemReader>>,
 }
 
 impl TriggeredRunDeliveryDriver {
@@ -119,6 +122,7 @@ impl TriggeredRunDeliveryDriver {
             route_store,
             fallback_agent_id,
             outbound_target_provider: None,
+            project_filesystem: None,
         }
     }
 
@@ -130,6 +134,14 @@ impl TriggeredRunDeliveryDriver {
         provider: Arc<dyn OutboundDeliveryTargetProvider>,
     ) -> Self {
         self.outbound_target_provider = Some(provider);
+        self
+    }
+
+    pub fn with_project_filesystem_reader(
+        mut self,
+        reader: Arc<dyn ProjectFilesystemReader>,
+    ) -> Self {
+        self.project_filesystem = Some(reader);
         self
     }
 
@@ -226,6 +238,7 @@ impl TriggeredRunDeliveryDriver {
         let delivery_store = Arc::clone(&self.delivery_store);
         let fallback_agent_id = self.fallback_agent_id.clone();
         let outbound_target_provider = self.outbound_target_provider.clone();
+        let project_filesystem = self.project_filesystem.clone();
 
         // The trigger poller invokes this hook from its bounded lifecycle
         // owner. Await the actual delivery here so shutdown can drain it.
@@ -256,6 +269,7 @@ impl TriggeredRunDeliveryDriver {
             &*delivery_store,
             &fallback_agent_id,
             outbound_target_provider.as_deref(),
+            project_filesystem.as_deref(),
         )
         .await
         .map_err(outcome_persistence_error)?;
@@ -312,6 +326,7 @@ async fn deliver_triggered_run(
     delivery_store: &dyn TriggeredRunDeliveryStore,
     fallback_agent_id: &ironclaw_host_api::AgentId,
     outbound_target_provider: Option<&dyn OutboundDeliveryTargetProvider>,
+    project_filesystem: Option<&dyn ProjectFilesystemReader>,
 ) -> Result<TriggeredRunDeliveryOutcomeKind, String> {
     // The actor is the trigger creator.
     let actor = TurnActor::new(fire.creator_user_id.clone());
@@ -488,12 +503,14 @@ async fn deliver_triggered_run(
         let delivery_result = deliver_triggered_notification(
             services,
             &scope,
+            &thread_scope,
             &actor,
             run_id,
             &state,
             &authority,
             notification,
             require_direct_message_target,
+            project_filesystem,
         )
         .await;
 
@@ -599,7 +616,16 @@ async fn deliver_triggered_run(
                     gate_ref_for_routing: None,
                 };
                 let outcome = match deliver_triggered_notification(
-                    services, &scope, &actor, run_id, &state, &authority, notice, false,
+                    services,
+                    &scope,
+                    &thread_scope,
+                    &actor,
+                    run_id,
+                    &state,
+                    &authority,
+                    notice,
+                    false,
+                    project_filesystem,
                 )
                 .await
                 {
@@ -937,12 +963,14 @@ impl std::fmt::Display for TriggeredNotificationFailure {
 async fn deliver_triggered_notification(
     services: &FinalReplyDeliveryServices,
     scope: &TurnScope,
+    thread_scope: &ThreadScope,
     actor: &TurnActor,
     run_id: TurnRunId,
     state: &TurnRunState,
     authority: &TriggeredChannelReplyTargetAuthority,
     notification: ChannelActionableNotification,
     require_direct_message_target: bool,
+    project_filesystem: Option<&dyn ProjectFilesystemReader>,
 ) -> Result<Vec<PostedChannelMessage>, TriggeredNotificationFailure> {
     let ChannelActionableNotification {
         event_kind,
@@ -1000,7 +1028,10 @@ async fn deliver_triggered_notification(
         Arc::clone(&services.egress),
         Arc::clone(&services.channel_protocol),
     );
-    let render_result = prepare_and_render_product_outbound(
+    let attachments = resolve_workspace_attachments(&payload, thread_scope, project_filesystem)
+        .await
+        .map_err(|error| TriggeredNotificationFailure::Other(error.to_string()))?;
+    let render_result = prepare_and_render_product_outbound_with_attachments(
         &outbound_policy,
         services.communication_preferences.as_ref(),
         authority,
@@ -1016,6 +1047,7 @@ async fn deliver_triggered_notification(
             delivery_sink: services.delivery_sink.as_ref(),
             require_direct_message_target,
         },
+        attachments,
     )
     .await;
 

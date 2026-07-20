@@ -5,6 +5,7 @@
 //! hands off to the accepted-message turn submission seam. Keeping replay and
 //! submit/deferred handling behind that seam prevents adapter-specific binding
 //! code from owning the whole inbound turn pipeline.
+// arch-exempt: large_file, canonical inbound attachment landing is a minimal extension of the channel submission seam; decomposition remains tracked by the channel architecture plan, plan #6159
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -254,6 +255,7 @@ pub struct DefaultInboundTurnService<B, T, C> {
     thread_service: T,
     turn_coordinator: C,
     inbound_attachments: Option<Arc<dyn InboundAttachmentLander>>,
+    // arch-exempt: optional_arc, WebUI supplies bytes directly while native channels install the provider materializer; descriptor-bearing messages fail closed when it is absent, plan #6159
     inbound_attachment_materializer: Option<Arc<dyn InboundAttachmentMaterializer>>,
 }
 

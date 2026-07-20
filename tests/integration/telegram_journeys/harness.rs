@@ -123,6 +123,19 @@ pub(crate) fn json_response(status: u16, body: Value) -> NetworkHttpResponse {
     }
 }
 
+pub(crate) fn bytes_response(status: u16, body: Vec<u8>) -> NetworkHttpResponse {
+    NetworkHttpResponse {
+        status,
+        headers: Vec::new(),
+        usage: NetworkUsage {
+            request_bytes: 0,
+            response_bytes: body.len() as u64,
+            resolved_ip: None,
+        },
+        body,
+    }
+}
+
 #[async_trait]
 impl NetworkHttpEgress for ScriptedTelegramNetwork {
     async fn execute(
@@ -134,8 +147,7 @@ impl NetworkHttpEgress for ScriptedTelegramNetwork {
         // log: `requests().last()` after the push races concurrent egress
         // calls and could pair this URL with another call's body,
         // misdirecting the failure toggle.
-        let request_body: Value =
-            serde_json::from_slice(&request.body).expect("captured sendMessage body is valid JSON");
+        let request_body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
         self.requests
             .lock()
             .expect("network requests lock")
@@ -147,6 +159,13 @@ impl NetworkHttpEgress for ScriptedTelegramNetwork {
             )
         } else if url.ends_with("/setWebhook") || url.ends_with("/deleteWebhook") {
             json_response(200, json!({"ok": true, "result": true}))
+        } else if url.contains("/getFile?") {
+            json_response(
+                200,
+                json!({"ok": true, "result": {"file_path": "documents/journey-notes.txt"}}),
+            )
+        } else if url.contains("/file/bot") && url.ends_with("/documents/journey-notes.txt") {
+            bytes_response(200, b"journey attachment bytes".to_vec())
         } else if url.ends_with("/sendMessage") {
             let matched_failure = {
                 let mut toggle = self.fail_matching_send.lock().expect("fail toggle lock");
@@ -305,6 +324,26 @@ pub(crate) async fn call_route(
 /// A private-chat Telegram `message` update.
 pub(crate) fn dm_update(update_id: i64, text: &str) -> Value {
     dm_update_from(update_id, TG_USER_ID, TG_CHAT_ID, text)
+}
+
+pub(crate) fn dm_document_update(update_id: i64) -> Value {
+    json!({
+        "update_id": update_id,
+        "message": {
+            "message_id": update_id,
+            "from": {"id": TG_USER_ID, "is_bot": false, "first_name": "Journey"},
+            "chat": {"id": TG_CHAT_ID, "type": "private"},
+            "date": 1_700_000_000,
+            "caption": "Please review the attached report",
+            "document": {
+                "file_id": "telegram-journey-file",
+                "file_unique_id": "telegram-journey-unique",
+                "file_name": "journey-notes.txt",
+                "mime_type": "text/plain",
+                "file_size": 24
+            }
+        }
+    })
 }
 
 pub(crate) fn dm_update_from(update_id: i64, tg_user: i64, chat_id: i64, text: &str) -> Value {

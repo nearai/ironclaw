@@ -208,7 +208,12 @@ travels as an opaque credential handle substituted into the URL path by the
 mediated host egress (`{telegram_bot_token}` placeholder — token bytes never
 appear in adapter-visible state, composition inputs, or logs).
 
-Final replies render as plain text. Replies over Telegram's 4096-UTF-16-unit
+Final replies render as plain text. When the final text references a valid
+`/workspace/file.ext` path (the same recognition contract used by WebUI), the
+host reads that file through the scoped project filesystem and appends a native
+`sendDocument` upload after the ordered text messages. Missing, unreadable, or
+oversized referenced files fail the delivery honestly; they are never silently
+dropped. Replies over Telegram's 4096-UTF-16-unit
 message cap split into **ordered lossless `sendMessage` chunks** (never inside
 a character), sent sequentially; a mid-sequence failure stops the remaining
 chunks and records ONE honest failure status for the attempt — already-sent
@@ -284,6 +289,13 @@ effects), and refusal to parse unverified auth evidence. The adapter's
 group/supergroup trigger logic exists but is moot at the host tier: the
 host admits private-chat messages only and wires `recognized_commands`
 empty. `ExternalProgressPush` remains opt-in and is wired off.
+
+Descriptor-bearing messages are materialized only after idempotency replay and
+inbound policy succeed. The Telegram host calls `getFile`, downloads through
+the credential-mediated `/file/bot{token}/...` route, enforces the shared
+10-file / 5 MiB-each / 10 MiB-total channel budget, and hands bytes to the same
+canonical workspace lander used by WebUI. A lookup/download/limit failure
+rejects or retries the whole intake; no attachment-less turn is submitted.
 
 ## Exclusivity guard (v1 monolith arbitration)
 

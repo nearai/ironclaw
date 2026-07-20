@@ -15,6 +15,7 @@
 
 mod adapter;
 mod delivery;
+mod files;
 mod mrkdwn;
 mod payload;
 mod render;
@@ -26,7 +27,7 @@ pub use adapter::{
     slack_request_signature_auth_requirement,
 };
 pub use payload::{
-    SLACK_API_HOST, SLACK_USER_ACTOR_KIND, SlackPayloadParseError, SlackUrlVerificationChallenge,
-    parse_slack_event, parse_slack_url_verification_challenge,
+    SLACK_API_HOST, SLACK_FILES_HOST, SLACK_USER_ACTOR_KIND, SlackPayloadParseError,
+    SlackUrlVerificationChallenge, parse_slack_event, parse_slack_url_verification_challenge,
 };
 pub use render::{SlackRenderError, render_final_reply};

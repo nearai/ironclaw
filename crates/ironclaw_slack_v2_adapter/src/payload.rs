@@ -14,6 +14,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 pub const SLACK_API_HOST: &str = "slack.com";
+pub const SLACK_FILES_HOST: &str = "files.slack.com";
 pub const SLACK_USER_ACTOR_KIND: &str = "slack_user";
 const SLACK_SYSTEM_ACTOR_KIND: &str = "slack_system";
 const SLACK_IGNORED_ACTOR_ID: &str = "slack_ignored_actor";

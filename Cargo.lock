@@ -4041,6 +4041,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "ironclaw_attachments",
  "ironclaw_auth",
  "ironclaw_channel_host",
  "ironclaw_conversations",
@@ -5349,6 +5350,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "url",
  "uuid",
 ]
 
@@ -5387,6 +5389,7 @@ dependencies = [
  "axum 0.8.9",
  "chrono",
  "http-body-util",
+ "ironclaw_attachments",
  "ironclaw_auth",
  "ironclaw_authorization",
  "ironclaw_channel_delivery",
@@ -5420,6 +5423,7 @@ dependencies = [
  "tokio",
  "tower 0.5.3",
  "tracing",
+ "url",
 ]
 
 [[package]]

@@ -26,14 +26,14 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::RebornFilesystemIdempotencyLedger;
 use ironclaw_product_workflow::{
     ApprovalInteractionService, AuthInteractionService, ConversationBindingService,
-    DefaultInboundTurnService, DefaultProductWorkflow, ProductActorUserResolutionRequest,
-    ProductActorUserResolver, ProductConversationBindingService, ProductConversationRouteKey,
-    ProductConversationSubjectRouteResolver, ProductInstallationKey, ProductInstallationScope,
-    ProductWorkflowError, ResolveBindingRequest, ResolvedBinding, ResolvedProductActorUser,
-    StaticProductInstallationResolver,
+    DefaultInboundTurnService, DefaultProductWorkflow, InboundAttachmentLander,
+    ProductActorUserResolutionRequest, ProductActorUserResolver, ProductConversationBindingService,
+    ProductConversationRouteKey, ProductConversationSubjectRouteResolver, ProductInstallationKey,
+    ProductInstallationScope, ProductWorkflowError, ProjectFilesystemReader, ResolveBindingRequest,
+    ResolvedBinding, ResolvedProductActorUser, StaticProductInstallationResolver,
 };
 use ironclaw_slack_v2_adapter::{
-    SLACK_API_HOST, SLACK_V2_ADAPTER_ID, SlackV2Adapter, SlackV2AdapterConfig,
+    SLACK_API_HOST, SLACK_FILES_HOST, SLACK_V2_ADAPTER_ID, SlackV2Adapter, SlackV2AdapterConfig,
     slack_request_signature_auth_requirement,
 };
 use ironclaw_threads::SessionThreadService;
@@ -52,6 +52,7 @@ use crate::RebornRuntime;
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
 use crate::product_auth::serve::SlackPersonalOAuthBindingConfig;
 use crate::slack::slack_actor_identity::SlackUserIdentityActorResolver;
+use crate::slack::slack_attachment_materializer::SlackAttachmentMaterializer;
 use crate::slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
 };
@@ -653,6 +654,8 @@ struct SlackHostBetaRuntimeParts {
     auth_interaction_service: Arc<dyn AuthInteractionService>,
     auth_challenge_provider: Option<Arc<dyn crate::AuthChallengeProvider>>,
     auth_flow_canceller: Option<Arc<dyn crate::BlockedAuthFlowCanceller>>,
+    inbound_attachment_lander: Arc<dyn InboundAttachmentLander>,
+    project_filesystem_reader: Arc<dyn ProjectFilesystemReader>,
 }
 
 impl SlackHostBetaRuntimeParts {
@@ -668,6 +671,9 @@ impl SlackHostBetaRuntimeParts {
                 Arc::clone(&local_runtime.delivered_gate_routes),
             ),
         );
+        let workspace_filesystem = runtime
+            .webui_workspace_filesystem()
+            .ok_or(SlackHostBetaBuildError::DurableHostStateUnavailable)?;
         Ok(Self {
             local_runtime: Arc::clone(local_runtime),
             thread_service: runtime.webui_thread_service(),
@@ -676,6 +682,17 @@ impl SlackHostBetaRuntimeParts {
             auth_interaction_service: runtime.webui_auth_interaction_service(),
             auth_challenge_provider: runtime.auth_challenge_provider(),
             auth_flow_canceller: runtime.blocked_auth_flow_canceller(),
+            inbound_attachment_lander: Arc::new(
+                crate::support::fs::ProjectScopedAttachmentLander::new(Arc::clone(
+                    &workspace_filesystem,
+                )),
+            ),
+            project_filesystem_reader: Arc::new(
+                crate::support::fs::ProjectScopedFilesystemReader::with_max_read_bytes(
+                    workspace_filesystem,
+                    ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64,
+                ),
+            ),
         })
     }
 }
@@ -791,7 +808,8 @@ fn build_triggered_run_delivery_hook_from_parts(
         route_store,
         config.agent_id.clone(),
     )
-    .with_outbound_target_provider(outbound_target_provider);
+    .with_outbound_target_provider(outbound_target_provider)
+    .with_project_filesystem_reader(Arc::clone(&parts.project_filesystem_reader));
     Ok(Arc::new(driver))
 }
 
@@ -1107,6 +1125,7 @@ fn build_slack_installation_record_with_resolvers(
         egress_credential_handle: token_handle.clone(),
         auth_requirement: slack_request_signature_auth_requirement(),
     }));
+    let egress = slack_protocol_egress_from_parts(parts, &config, token_handle.clone())?;
 
     let SlackConversationServices {
         binding: conversation_port,
@@ -1139,11 +1158,18 @@ fn build_slack_installation_record_with_resolvers(
     )]);
     let binding = ProductConversationBindingService::new(conversation_port, installation_resolver);
 
-    let inbound = Arc::new(DefaultInboundTurnService::new(
-        binding.clone(),
-        Arc::clone(&parts.thread_service),
-        Arc::clone(&parts.turn_coordinator),
-    ));
+    let inbound = Arc::new(
+        DefaultInboundTurnService::new(
+            binding.clone(),
+            Arc::clone(&parts.thread_service),
+            Arc::clone(&parts.turn_coordinator),
+        )
+        .with_inbound_attachment_materializer(Arc::new(SlackAttachmentMaterializer::new(
+            Arc::clone(&egress),
+            token_handle.clone(),
+        )))
+        .with_inbound_attachments(Arc::clone(&parts.inbound_attachment_lander)),
+    );
     let route_store: Arc<dyn DeliveredGateRouteStore> =
         Arc::clone(&parts.local_runtime.delivered_gate_routes);
     let workflow = Arc::new(
@@ -1188,31 +1214,33 @@ fn build_slack_installation_record_with_resolvers(
         ),
     ));
 
-    let egress = slack_protocol_egress_from_parts(parts, &config, token_handle)?;
     let outbound_store: Arc<dyn OutboundStateStore> =
         Arc::clone(&parts.local_runtime.outbound_state);
     let preferences: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository> =
         Arc::clone(&parts.local_runtime.outbound_preferences);
     let delivery_sink: Arc<dyn OutboundDeliverySink> = Arc::new(NoopSlackDeliverySink);
-    let observer = Arc::new(FinalReplyDeliveryObserver::with_settings(
-        FinalReplyDeliveryServices {
-            channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
-            binding_service: Arc::new(binding),
-            thread_service: Arc::clone(&parts.thread_service),
-            turn_coordinator: Arc::clone(&parts.turn_coordinator),
-            outbound_store,
-            route_store,
-            communication_preferences: preferences,
-            adapter,
-            egress,
-            delivery_sink,
-            auth_challenges: parts.auth_challenge_provider.clone(),
-            auth_flow_canceller: parts.auth_flow_canceller.clone(),
-            approval_requests: Some(Arc::clone(&parts.local_runtime.approval_requests)
-                as Arc<dyn ironclaw_run_state::ApprovalRequestStore>),
-        },
-        FinalReplyDeliverySettings::default(),
-    ));
+    let observer = Arc::new(
+        FinalReplyDeliveryObserver::with_settings(
+            FinalReplyDeliveryServices {
+                channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
+                binding_service: Arc::new(binding),
+                thread_service: Arc::clone(&parts.thread_service),
+                turn_coordinator: Arc::clone(&parts.turn_coordinator),
+                outbound_store,
+                route_store,
+                communication_preferences: preferences,
+                adapter,
+                egress,
+                delivery_sink,
+                auth_challenges: parts.auth_challenge_provider.clone(),
+                auth_flow_canceller: parts.auth_flow_canceller.clone(),
+                approval_requests: Some(Arc::clone(&parts.local_runtime.approval_requests)
+                    as Arc<dyn ironclaw_run_state::ApprovalRequestStore>),
+            },
+            FinalReplyDeliverySettings::default(),
+        )
+        .with_project_filesystem_reader(Arc::clone(&parts.project_filesystem_reader)),
+    );
 
     Ok(SlackInstallationRecord::new(
         config.tenant_id,
@@ -1283,7 +1311,13 @@ fn slack_declared_egress_targets(
 ) -> Result<Vec<DeclaredEgressTarget>, SlackHostBetaBuildError> {
     let host = DeclaredEgressHost::new(SLACK_API_HOST)
         .map_err(|reason| invalid_config("slack_api_host", reason.to_string()))?;
-    Ok(vec![DeclaredEgressTarget::new(host, Some(token_handle))])
+    let files_host = DeclaredEgressHost::new(SLACK_FILES_HOST)
+        .map_err(|reason| invalid_config("slack_files_host", reason.to_string()))?;
+    Ok(vec![
+        DeclaredEgressTarget::new(host, Some(token_handle.clone())),
+        DeclaredEgressTarget::new(files_host.clone(), Some(token_handle)),
+        DeclaredEgressTarget::new(files_host, None),
+    ])
 }
 
 #[derive(Clone)]
@@ -1347,6 +1381,7 @@ mod tests {
     use ironclaw_authorization::GrantAuthorizer;
     use ironclaw_extensions::ExtensionRegistry;
     use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
+    use ironclaw_host_api::NetworkMethod;
     use ironclaw_host_runtime::{
         CapabilitySurfaceVersion, HostRuntimeHttpEgressPort, HostRuntimeServices,
     };
@@ -1862,6 +1897,59 @@ mod tests {
         assert_eq!(final_reply["channel"], "D0HOST");
         assert_eq!(final_reply["text"], "ok");
         assert_eq!(final_reply["mrkdwn"], true);
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn build_slack_host_beta_mounts_lands_file_share_before_running_turn() {
+        let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+        let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
+            host_egress_port_for_test(Arc::clone(&egress)),
+        )))
+        .await;
+        let mounts =
+            build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
+        bind_slack_oauth_user(&mounts).await;
+
+        let body = dm_file_share_event_body();
+        post_signed_slack_event(&mounts.events, &body).await;
+        if let Some(drain) = mounts.events.drain.as_ref() {
+            drain.drain().await;
+        }
+
+        let history = wait_for_slack_thread_history(&runtime).await;
+        let accepted_message = history
+            .messages
+            .iter()
+            .find(|message| message.content.as_deref() == Some("Please review these notes"))
+            .expect("attachment-bearing Slack message is accepted");
+        assert_eq!(accepted_message.attachments.len(), 1);
+        let attachment = &accepted_message.attachments[0];
+        assert_eq!(attachment.id, "F-JOURNEY");
+        assert_eq!(attachment.filename.as_deref(), Some("journey-notes.txt"));
+        assert_eq!(attachment.mime_type, "text/plain");
+        assert_eq!(attachment.size_bytes, Some(24));
+        assert!(attachment.storage_key.is_some());
+        assert_eq!(
+            attachment.extracted_text.as_deref(),
+            Some("journey attachment bytes")
+        );
+
+        let requests = egress.requests();
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.url.contains("/api/files.info?file=F-JOURNEY"))
+        );
+        assert!(requests.iter().any(|request| {
+            request
+                .url
+                .ends_with("/files-pri/T0HOST-F-JOURNEY/journey-notes.txt")
+                && request.method == NetworkMethod::Get
+        }));
+        let final_reply = wait_for_slack_post_message(&egress, "ok").await;
+        assert_eq!(final_reply["channel"], "D0HOST");
 
         runtime.shutdown().await.expect("runtime shuts down");
     }
@@ -3773,6 +3861,31 @@ mod tests {
         .to_string()
     }
 
+    fn dm_file_share_event_body() -> String {
+        serde_json::json!({
+            "type": "event_callback",
+            "team_id": TEAM,
+            "api_app_id": API_APP,
+            "event_id": "Ev-host-beta-file-share",
+            "event": {
+                "type": "message",
+                "subtype": "file_share",
+                "channel_type": "im",
+                "user": SLACK_USER,
+                "channel": "D0HOST",
+                "text": "Please review these notes",
+                "ts": "1710000000.000035",
+                "files": [{
+                    "id": "F-JOURNEY",
+                    "mimetype": "text/plain",
+                    "name": "journey-notes.txt",
+                    "size": 24
+                }]
+            }
+        })
+        .to_string()
+    }
+
     fn app_mention_event_body_with(event_id: &str, text: &str, ts: &str) -> String {
         serde_json::json!({
             "type": "event_callback",
@@ -3992,7 +4105,18 @@ mod tests {
             &self,
             request: NetworkHttpRequest,
         ) -> Result<NetworkHttpResponse, NetworkHttpError> {
-            let (status, response) = if request.url.contains("/api/conversations.open") {
+            let (status, response) = if request.url.contains("/api/files.info") {
+                (
+                    200,
+                    br#"{"ok":true,"file":{"url_private_download":"https://files.slack.com/files-pri/T0HOST-F-JOURNEY/journey-notes.txt"}}"#
+                        .to_vec(),
+                )
+            } else if request
+                .url
+                .ends_with("/files-pri/T0HOST-F-JOURNEY/journey-notes.txt")
+            {
+                (200, b"journey attachment bytes".to_vec())
+            } else if request.url.contains("/api/conversations.open") {
                 if let Some(n) = self.conversations_open_fail_after {
                     let count = self
                         .requests
