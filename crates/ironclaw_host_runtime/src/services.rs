@@ -220,6 +220,32 @@ impl ProductAuthProviderRuntimePorts {
             .await
     }
 
+    /// Stage the secret for `scope` after resolving its OWNER scope the same
+    /// way the dispatch-time obligation preflight does (caller's own secret
+    /// first, then the tenant-shared admin-managed secret). A full run scope
+    /// (project/thread/invocation populated) can then stage a secret stored
+    /// under the user's canonical secret scope. Returns `AuthRequired` when no
+    /// owner scope holds the handle.
+    pub async fn stage_owner_resolved_secret_once(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        handle: &SecretHandle,
+    ) -> Result<(), ProductAuthCredentialStageError> {
+        let owner = crate::obligations::secret_owner_scope(
+            self.secret_store.as_ref(),
+            scope,
+            handle,
+        )
+        .await
+        .map_err(stage_secret_error)?;
+        let Some(source_scope) = owner else {
+            return Err(ProductAuthCredentialStageError::AuthRequired);
+        };
+        self.stage_secret_from_scope_once(&source_scope, scope, capability_id, handle)
+            .await
+    }
+
     pub async fn stage_secret_from_scope_once(
         &self,
         source_scope: &ResourceScope,

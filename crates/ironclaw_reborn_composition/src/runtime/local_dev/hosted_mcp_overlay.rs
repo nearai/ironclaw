@@ -127,7 +127,7 @@ impl HostedMcpOverlayRefresher {
         // "user has no token" verdict.
         match self
             .runtime_ports
-            .stage_secret_once(scope, capability_id, handle)
+            .stage_owner_resolved_secret_once(scope, capability_id, handle)
             .await
         {
             Ok(()) => {}
