@@ -4,12 +4,12 @@ use ironclaw_authorization::{
 };
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{
-    ActivityId, AuthorizeResult, Authorized, Blocked, CapabilityAuthorizer, CapabilityDescriptor,
-    CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher, CapabilityGrantId,
-    CapabilityId, Decision, DenyReason, DenyRef, DispatchError, ExecutionContext, GateRef,
-    GateWaypoint, Invocation, InvocationFingerprint, InvocationId, InvocationOrigin, Obligation,
-    ProcessId, ProductKind, ResourceEstimate, ResourceReservation, ResourceReservationId,
-    ResourceScope, RuntimeLane,
+    ActivityId, Actor, AuthorizeResult, Authorized, Blocked, CapabilityAuthorizer,
+    CapabilityDescriptor, CapabilityDispatchRequest, CapabilityDispatchResult,
+    CapabilityDispatcher, CapabilityGrantId, CapabilityId, Decision, DenyReason, DenyRef,
+    DispatchError, ExecutionContext, GateRef, GateWaypoint, Invocation, InvocationFingerprint,
+    InvocationId, InvocationOrigin, Obligation, ProcessId, ProductKind, ResourceEstimate,
+    ResourceReservation, ResourceReservationId, ResourceScope, RuntimeLane,
 };
 use ironclaw_processes::{ProcessManager, ProcessStart};
 use ironclaw_run_state::{
@@ -787,9 +787,16 @@ where
             // ownership of the request `input`.
             input: input.clone(),
             scope: scope.clone(),
-            actor,
+            // Actor-less contexts already early-returned above (`?` on the
+            // `authenticated_actor_user_id` bind), so a witness is minted only for
+            // a sealed human here; `Actor::System` is produced later, once the
+            // fold routes actor-less contexts through `authorize()`.
+            actor: Actor::Sealed(actor),
             origin,
             estimate: estimate.clone(),
+            correlation_id: context.correlation_id,
+            process_id: context.process_id,
+            parent_process_id: context.parent_process_id,
         };
         let mounts = obligation_outcome.mounts.clone().unwrap_or_default();
         let reservation = obligation_outcome
@@ -3039,7 +3046,10 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
             invocation.capability,
             CapabilityId::new("echo.say").unwrap()
         );
-        assert_eq!(invocation.actor, UserId::new("actor").unwrap());
+        assert_eq!(
+            invocation.actor,
+            Actor::Sealed(UserId::new("actor").unwrap())
+        );
         assert_eq!(invocation.input, serde_json::json!({"message": "hi"}));
     }
 }
