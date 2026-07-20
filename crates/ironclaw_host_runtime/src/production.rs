@@ -407,44 +407,48 @@ impl DefaultHostRuntime {
         })
     }
 
-    /// §5.3.2 authority-as-a-fold — step 1: the runtime-policy + trust gates
-    /// that open the pre-authorize derivation, shared by the byte-identical
-    /// `invoke_capability` / `spawn_capability` entry points. Runs
-    /// `enforce_runtime_policy` then `evaluate_invocation_trust`, setting
-    /// `context.trust` on success. On rejection it logs the gate + error kind
-    /// and returns the ready-to-surface [`RuntimeCapabilityOutcome`] tagged by
-    /// gate, so the caller emits its own per-entry-point latency trace and
-    /// returns it. Behavior-preserving apart from consolidating the two paths'
-    /// `debug!` message text; de-dups the inline copies and names the seam a
-    /// later slice lifts into the kernel `authorize()`. `resume`/`auth_resume`
-    /// keep their own copies because their reject paths carry an extra
-    /// blocked-resume failure side effect (`fail_matching_blocked_resume_on_preflight_error`).
+    /// §5.3.2 authority-as-a-fold — the runtime-policy + trust gates that open
+    /// the pre-authorize derivation, shared by all four dispatch entry points
+    /// (`invoke`/`spawn`/`resume`/`auth_resume`). Runs `enforce_runtime_policy`
+    /// then `evaluate_invocation_trust`, setting `context.trust` on success. On
+    /// rejection it logs the gate + error kind and returns the ready-to-surface
+    /// [`RuntimeCapabilityOutcome`] tagged by gate, plus the `error_kind` string:
+    /// the caller emits its own per-entry-point latency trace and, for
+    /// resume/auth-resume, drives its blocked-resume failure side effect
+    /// (`fail_matching_blocked_{,auth_}resume_on_preflight_error`) before
+    /// returning. Behavior-preserving apart from consolidating the paths'
+    /// `debug!` message text; de-dups the four inline copies and names the seam
+    /// a later slice lifts into the kernel `authorize()`.
     fn open_pre_authorization(
         &self,
         context: &mut ironclaw_host_api::ExecutionContext,
         capability_id: &CapabilityId,
     ) -> Result<TrustDecision, PreAuthorizationRejected> {
         if let Err(error) = self.enforce_runtime_policy(capability_id) {
+            let error_kind = error.kind();
             tracing::debug!(
                 capability_id = %capability_id,
-                runtime_policy_error_kind = error.kind(),
+                runtime_policy_error_kind = error_kind,
                 "capability runtime policy rejected invocation before authorization"
             );
-            return Err(PreAuthorizationRejected::RuntimePolicy(Box::new(
-                runtime_policy_failure(capability_id.clone(), error),
-            )));
+            return Err(PreAuthorizationRejected::RuntimePolicy {
+                outcome: Box::new(runtime_policy_failure(capability_id.clone(), error)),
+                error_kind,
+            });
         }
         let trust_decision = match self.evaluate_invocation_trust(capability_id) {
             Ok(host_decision) => host_decision,
             Err(error) => {
+                let error_kind = error.kind();
                 tracing::debug!(
                     capability_id = %capability_id,
-                    trust_error_kind = error.kind(),
+                    trust_error_kind = error_kind,
                     "capability trust evaluation failed before authorization"
                 );
-                return Err(PreAuthorizationRejected::Trust(Box::new(
-                    trust_evaluation_failure(capability_id.clone(), error),
-                )));
+                return Err(PreAuthorizationRejected::Trust {
+                    outcome: Box::new(trust_evaluation_failure(capability_id.clone(), error)),
+                    error_kind,
+                });
             }
         };
         context.trust = trust_decision.effective_trust.class();
@@ -454,11 +458,19 @@ impl DefaultHostRuntime {
 
 /// Which pre-authorize gate rejected in
 /// [`DefaultHostRuntime::open_pre_authorization`], carrying the ready-to-surface
-/// outcome so the caller picks its own per-entry-point latency label before
-/// returning it.
+/// `outcome` (so the caller picks its own per-entry-point latency label before
+/// returning it) and the `error_kind` string (so the resume/auth-resume callers
+/// can drive their blocked-resume failure side effect, which the invoke/spawn
+/// callers ignore).
 enum PreAuthorizationRejected {
-    RuntimePolicy(Box<RuntimeCapabilityOutcome>),
-    Trust(Box<RuntimeCapabilityOutcome>),
+    RuntimePolicy {
+        outcome: Box<RuntimeCapabilityOutcome>,
+        error_kind: &'static str,
+    },
+    Trust {
+        outcome: Box<RuntimeCapabilityOutcome>,
+        error_kind: &'static str,
+    },
 }
 
 #[async_trait]
@@ -491,7 +503,7 @@ impl HostRuntime for DefaultHostRuntime {
 
         let trust_decision = match self.open_pre_authorization(&mut context, &capability_id) {
             Ok(trust_decision) => trust_decision,
-            Err(PreAuthorizationRejected::RuntimePolicy(outcome)) => {
+            Err(PreAuthorizationRejected::RuntimePolicy { outcome, .. }) => {
                 trace_capability_latency_ok(
                     "invoke_capability_policy_rejected",
                     &capability_id,
@@ -500,7 +512,7 @@ impl HostRuntime for DefaultHostRuntime {
                 );
                 return Ok(*outcome);
             }
-            Err(PreAuthorizationRejected::Trust(outcome)) => {
+            Err(PreAuthorizationRejected::Trust { outcome, .. }) => {
                 trace_capability_latency_ok(
                     "invoke_capability_trust_rejected",
                     &capability_id,
@@ -677,8 +689,8 @@ impl HostRuntime for DefaultHostRuntime {
         let trust_decision = match self.open_pre_authorization(&mut context, &capability_id) {
             Ok(trust_decision) => trust_decision,
             Err(
-                PreAuthorizationRejected::RuntimePolicy(outcome)
-                | PreAuthorizationRejected::Trust(outcome),
+                PreAuthorizationRejected::RuntimePolicy { outcome, .. }
+                | PreAuthorizationRejected::Trust { outcome, .. },
             ) => return Ok(*outcome),
         };
 
@@ -766,41 +778,28 @@ impl HostRuntime for DefaultHostRuntime {
             );
         }
 
-        if let Err(error) = self.enforce_runtime_policy(&capability_id) {
-            tracing::debug!(
-                capability_id = %capability_id,
-                runtime_policy_error_kind = error.kind(),
-                "capability runtime policy rejected resume before dispatch"
-            );
-            self.fail_matching_blocked_resume_on_preflight_error(
-                &context,
-                &capability_id,
-                approval_request_id,
-                error.kind(),
-            )
-            .await;
-            return Ok(runtime_policy_failure(capability_id, error));
-        }
-
-        let trust_decision = match self.evaluate_invocation_trust(&capability_id) {
-            Ok(host_decision) => host_decision,
-            Err(error) => {
-                tracing::debug!(
-                    capability_id = %capability_id,
-                    trust_error_kind = error.kind(),
-                    "capability trust evaluation failed before resume"
-                );
+        let trust_decision = match self.open_pre_authorization(&mut context, &capability_id) {
+            Ok(trust_decision) => trust_decision,
+            Err(
+                PreAuthorizationRejected::RuntimePolicy {
+                    outcome,
+                    error_kind,
+                }
+                | PreAuthorizationRejected::Trust {
+                    outcome,
+                    error_kind,
+                },
+            ) => {
                 self.fail_matching_blocked_resume_on_preflight_error(
                     &context,
                     &capability_id,
                     approval_request_id,
-                    error.kind(),
+                    error_kind,
                 )
                 .await;
-                return Ok(trust_evaluation_failure(capability_id, error));
+                return Ok(*outcome);
             }
         };
-        context.trust = trust_decision.effective_trust.class();
 
         let registry = self.registry.snapshot();
         let host = self.capability_host(&registry);
@@ -874,39 +873,27 @@ impl HostRuntime for DefaultHostRuntime {
             );
         }
 
-        if let Err(error) = self.enforce_runtime_policy(&capability_id) {
-            tracing::debug!(
-                capability_id = %capability_id,
-                runtime_policy_error_kind = error.kind(),
-                "capability runtime policy rejected auth-resume before dispatch"
-            );
-            self.fail_matching_blocked_auth_resume_on_preflight_error(
-                &context,
-                &capability_id,
-                error.kind(),
-            )
-            .await;
-            return Ok(runtime_policy_failure(capability_id, error));
-        }
-
-        let trust_decision = match self.evaluate_invocation_trust(&capability_id) {
-            Ok(host_decision) => host_decision,
-            Err(error) => {
-                tracing::debug!(
-                    capability_id = %capability_id,
-                    trust_error_kind = error.kind(),
-                    "capability trust evaluation failed before auth-resume"
-                );
+        let trust_decision = match self.open_pre_authorization(&mut context, &capability_id) {
+            Ok(trust_decision) => trust_decision,
+            Err(
+                PreAuthorizationRejected::RuntimePolicy {
+                    outcome,
+                    error_kind,
+                }
+                | PreAuthorizationRejected::Trust {
+                    outcome,
+                    error_kind,
+                },
+            ) => {
                 self.fail_matching_blocked_auth_resume_on_preflight_error(
                     &context,
                     &capability_id,
-                    error.kind(),
+                    error_kind,
                 )
                 .await;
-                return Ok(trust_evaluation_failure(capability_id, error));
+                return Ok(*outcome);
             }
         };
-        context.trust = trust_decision.effective_trust.class();
 
         let registry = self.registry.snapshot();
         // Re-apply the persistent-approval grant on the auth-resume preflight,
