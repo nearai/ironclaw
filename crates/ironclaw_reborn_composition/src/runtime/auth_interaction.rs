@@ -145,8 +145,14 @@ impl SnapshotAuthInteractionReadModel {
         run_id: TurnRunId,
         gate_ref: &GateRef,
     ) -> Result<Option<AuthFlowRecord>, ProductWorkflowError> {
-        self.flow_records
-            .flow_for_turn_gate(turn_gate_query(scope, run_id, gate_ref)?)
+        let mut query = turn_gate_query(scope, run_id, gate_ref)?;
+        // An auth-resolution side effect may succeed before its delivery marker
+        // is durably written. Keep exactly those terminal flows reachable so a
+        // retry can replay the idempotent effect and acknowledge the resolution.
+        query.include_terminal = true;
+        let flow = self
+            .flow_records
+            .flow_for_turn_gate(query)
             .await
             .map_err(|error| {
                 tracing::warn!(
@@ -156,7 +162,8 @@ impl SnapshotAuthInteractionReadModel {
                     "local-dev auth read model failed to query flow for turn gate"
                 );
                 auth_read_model_unavailable()
-            })
+            })?;
+        Ok(flow.filter(|record| record.resolution_delivered_at.is_none()))
     }
 }
 

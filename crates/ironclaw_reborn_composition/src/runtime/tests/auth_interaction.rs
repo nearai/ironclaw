@@ -5,9 +5,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_auth::{
-    AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthGateRef, AuthProductScope,
-    AuthProviderId, AuthSessionId, AuthSurface, InMemoryAuthProductServices, NewAuthFlow,
-    OAuthAuthorizationUrl, OpaqueStateHash, PkceVerifierHash, TurnRunRef,
+    AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthFlowOutcome, AuthFlowRecord, AuthGateRef,
+    AuthProductScope, AuthProviderId, AuthResolved, AuthSessionId, AuthSurface,
+    InMemoryAuthProductServices, NewAuthFlow, OAuthAuthorizationUrl, OpaqueStateHash,
+    PkceVerifierHash, TurnRunRef,
 };
 use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
@@ -19,7 +20,9 @@ use ironclaw_loop_host::{
     HostManagedModelResponse,
 };
 use ironclaw_product_workflow::{
-    AuthInteractionRejectionKind, ListPendingAuthInteractionsRequest, ProductWorkflowError,
+    AuthInteractionDecision, AuthInteractionRejectionKind, AuthResolutionDispatchOutcome,
+    ListPendingAuthInteractionsRequest, ProductAuthTurnGateResumeDispatcher, ProductWorkflowError,
+    ResolveAuthInteractionRequest,
 };
 use ironclaw_turns::runner::{BlockRunRequest, ClaimRunRequest, TurnRunTransitionPort};
 use ironclaw_turns::{
@@ -97,6 +100,102 @@ async fn local_dev_runtime_auth_interactions_use_flow_record_source() {
     assert_eq!(view.scope.thread_id, scope.thread_id);
     assert_eq!(view.run_id, run_id);
     assert_eq!(view.auth_request_ref, gate_ref);
+
+    runtime.shutdown().await.expect("runtime shutdown");
+}
+
+#[tokio::test]
+async fn local_dev_auth_retry_reaches_terminal_flow_without_delivery_marker() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let runtime = build_runtime("auth-terminal-retry", root.path().join("local-dev"), None)
+        .await
+        .expect("runtime builds");
+    let conversation = runtime.new_conversation().await.expect("conversation");
+    let scope = TurnScope::new_with_owner(
+        runtime.thread_scope.tenant_id.clone(),
+        Some(runtime.thread_scope.agent_id.clone()),
+        runtime.thread_scope.project_id.clone(),
+        conversation.0,
+        Some(UserId::new("auth-terminal-retry-user").expect("owner")),
+    );
+    let actor = TurnActor::new(runtime.actor_user_id.clone());
+    let gate_ref = GateRef::new("gate:auth-terminal-retry").expect("gate");
+    let run_id = submit_and_block_auth_run(
+        &runtime,
+        scope.clone(),
+        actor.clone(),
+        &gate_ref,
+        Vec::new(),
+    )
+    .await;
+    let flow = create_auth_flow(&runtime, &scope, &actor, run_id, &gate_ref).await;
+    let product_auth = runtime
+        .services
+        .product_auth
+        .as_ref()
+        .expect("product auth");
+    let canceled = product_auth
+        .flow_manager()
+        .cancel_flow(&flow.scope, flow.id)
+        .await
+        .expect("flow resolves as user aborted");
+    assert_eq!(
+        canceled.state,
+        ironclaw_auth::AuthFlowState::Resolved(AuthFlowOutcome::UserAborted)
+    );
+
+    let dispatcher = ProductAuthTurnGateResumeDispatcher::new(
+        runtime
+            .services
+            .turn_coordinator
+            .clone()
+            .expect("turn coordinator"),
+    );
+    let first = dispatcher
+        .dispatch_auth_resolved(AuthResolved {
+            flow_id: canceled.id,
+            scope: canceled.scope.clone(),
+            continuation: canceled.continuation.clone(),
+            provider: canceled.provider.clone(),
+            outcome: AuthFlowOutcome::UserAborted,
+            resolved_at: canceled.updated_at,
+        })
+        .await
+        .expect("first cancellation side effect succeeds");
+    assert!(matches!(first, AuthResolutionDispatchOutcome::Canceled(_)));
+    let undelivered = product_auth
+        .flow_manager()
+        .get_flow(&canceled.scope, canceled.id)
+        .await
+        .expect("read terminal flow")
+        .expect("terminal flow exists");
+    assert!(undelivered.resolution_delivered_at.is_none());
+
+    let retry_error = runtime
+        .webui_auth_interaction_service()
+        .resolve(ResolveAuthInteractionRequest {
+            scope,
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: AuthInteractionDecision::Deny,
+            idempotency_key: IdempotencyKey::new("auth-terminal-retry").expect("idempotency key"),
+        })
+        .await
+        .expect_err("the resolved exact gate is stale after its marker is acknowledged");
+    assert!(matches!(
+        retry_error,
+        ProductWorkflowError::AuthInteractionRejected {
+            kind: AuthInteractionRejectionKind::StaleAuth
+        }
+    ));
+    let acknowledged = product_auth
+        .flow_manager()
+        .get_flow(&canceled.scope, canceled.id)
+        .await
+        .expect("read acknowledged flow")
+        .expect("acknowledged flow exists");
+    assert!(acknowledged.resolution_delivered_at.is_some());
 
     runtime.shutdown().await.expect("runtime shutdown");
 }
@@ -263,7 +362,7 @@ async fn create_auth_flow(
     actor: &TurnActor,
     run_id: TurnRunId,
     gate_ref: &GateRef,
-) {
+) -> AuthFlowRecord {
     runtime
         .services
         .product_auth
@@ -290,7 +389,7 @@ async fn create_auth_flow(
             expires_at: Utc::now() + chrono::Duration::minutes(5),
         })
         .await
-        .expect("auth flow");
+        .expect("auth flow")
 }
 
 fn auth_scope_for_turn(scope: &TurnScope, actor: &TurnActor) -> AuthProductScope {
