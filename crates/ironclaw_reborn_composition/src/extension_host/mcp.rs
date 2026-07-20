@@ -139,7 +139,17 @@ impl HostedMcpEndpoint {
 }
 
 pub(crate) fn hosted_http_mcp_endpoint(package: &ExtensionPackage) -> Option<HostedMcpEndpoint> {
-    if package.manifest.source != ManifestSource::HostBundled {
+    // InstalledLocal (operator-installed volume packages) get the same hosted
+    // credential planning as compiled-in first-party manifests: both pass v2
+    // manifest validation (credential audience must equal the runtime URL host)
+    // and authorization still requires the trust grant to carry the secret
+    // handle before an InjectSecretOnce obligation is staged. Without this,
+    // volume MCP extensions egress unauthenticated (their manifest-declared
+    // runtime_credentials are silently dropped at planning).
+    if !matches!(
+        package.manifest.source,
+        ManifestSource::HostBundled | ManifestSource::InstalledLocal
+    ) {
         return None;
     }
     let ExtensionRuntime::Mcp {
@@ -274,6 +284,42 @@ mod tests {
         assert_eq!(
             plan.network_policy.allowed_targets[0].host_pattern,
             "fixture.example.com"
+        );
+    }
+
+    #[test]
+    fn planner_projects_credentials_for_installed_local_http_mcp_provider() {
+        // Regression: volume-installed (InstalledLocal) hosted-MCP manifests
+        // must get the same credential planning as HostBundled ones — before
+        // the fix the planner returned a default (credential-free) plan and
+        // the extension egressed unauthenticated (agent-market auth_required).
+        let registry = Arc::new(SharedExtensionRegistry::new(registry_with_provider_source(
+            "agent-market",
+            "https://market.example.com/mcp",
+            "agent-market.search_agents",
+            "agent-market-token",
+            ManifestSource::InstalledLocal,
+        )));
+        let planner = RegistryMcpEgressPlanner::new(registry);
+        let provider = ExtensionId::new("agent-market").unwrap();
+        let cap = CapabilityId::new("agent-market.search_agents").unwrap();
+        let scope = sample_scope();
+
+        let plan = planner.plan(sample_plan_request(
+            &provider,
+            &cap,
+            "https://market.example.com/mcp",
+            &scope,
+        ));
+
+        assert_eq!(plan.credential_injections.len(), 1);
+        assert_eq!(
+            plan.credential_injections[0].handle,
+            SecretHandle::new("agent-market-token").unwrap()
+        );
+        assert_eq!(
+            plan.network_policy.allowed_targets[0].host_pattern,
+            "market.example.com"
         );
     }
 
@@ -473,6 +519,22 @@ mod tests {
         capability_id: &str,
         credential_handle: &str,
     ) -> ironclaw_extensions::ExtensionRegistry {
+        registry_with_provider_source(
+            provider,
+            url,
+            capability_id,
+            credential_handle,
+            ManifestSource::HostBundled,
+        )
+    }
+
+    fn registry_with_provider_source(
+        provider: &str,
+        url: &str,
+        capability_id: &str,
+        credential_handle: &str,
+        source: ManifestSource,
+    ) -> ironclaw_extensions::ExtensionRegistry {
         let mut registry = ironclaw_extensions::ExtensionRegistry::new();
         let host = url::Url::parse(url)
             .unwrap()
@@ -488,7 +550,7 @@ mod tests {
                         name: provider.to_string(),
                         version: "0.1.0".to_string(),
                         description: "Hosted MCP".to_string(),
-                        source: ManifestSource::HostBundled,
+                        source,
                         requested_trust: ironclaw_host_api::RequestedTrustClass::ThirdParty,
                         descriptor_trust_default: TrustClass::Sandbox,
                         runtime: ironclaw_extensions::ExtensionRuntime::Mcp {
