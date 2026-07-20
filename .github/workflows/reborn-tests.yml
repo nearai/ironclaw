@@ -117,17 +117,30 @@ jobs:
                   [
                     .packages[]
                     | select(
-                        (.name == "ironclaw")
-                        or (.name == "ironclaw_runner")
-                        or (.name | startswith("ironclaw_reborn"))
-                        or (.name | startswith("ironclaw_product"))
-                        or (.name == "ironclaw_architecture")
-                        or (.name == "ironclaw_slack_v2_adapter")
-                        or (.name == "ironclaw_channel_host")
-                        or (.name == "ironclaw_telegram_extension")
-                        or (.name == "ironclaw_telegram_v2_adapter")
-                        or (.name == "ironclaw_wasm_product_adapters")
-                        or (.name | startswith("ironclaw_webui"))
+                        (
+                          (.name == "ironclaw")
+                          or (.name == "ironclaw_runner")
+                          or (.name | startswith("ironclaw_reborn"))
+                          or (.name | startswith("ironclaw_product"))
+                          or (.name == "ironclaw_architecture")
+                          or (.name == "ironclaw_slack_v2_adapter")
+                          or (.name == "ironclaw_channel_host")
+                          or (.name == "ironclaw_telegram_extension")
+                          or (.name == "ironclaw_telegram_v2_adapter")
+                          or (.name == "ironclaw_wasm_product_adapters")
+                          or (.name | startswith("ironclaw_webui"))
+                        )
+                        # The root workspace package (test-only host for the
+                        # reborn integration [[test]] targets) matches
+                        # startswith("ironclaw_reborn") by NAME only. Its
+                        # `[[test]]` suites run via the dedicated root /
+                        # integration-coverage / group jobs — never as a
+                        # per-crate bucket, where `--all-targets` would
+                        # redundantly (and, for env-sensitive integration
+                        # suites, incorrectly) re-run them. Pre-Tier-B this was
+                        # implicit: the host package was `ironclaw_legacy`,
+                        # which never matched the allowlist.
+                        and (.name != "ironclaw_reborn_integration_tests")
                       )
                     | .name
                   ]
