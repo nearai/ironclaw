@@ -1298,6 +1298,24 @@ async fn builtin_trigger_create_surfaces_structured_invalid_input_detail() {
             }),
             vec![("schedule.timezone", DispatchInputIssueCode::InvalidValue)],
         ),
+        (
+            "RFC3339 offset timezone mismatch",
+            json!({
+                "name": "Mismatched offset",
+                "prompt": "Run work",
+                "schedule": { "kind": "once", "at": "2099-06-25T01:00:00+09:00", "timezone": "Asia/Shanghai" }
+            }),
+            vec![("schedule.at", DispatchInputIssueCode::InvalidValue)],
+        ),
+        (
+            "past RFC3339 instant",
+            json!({
+                "name": "Past reminder",
+                "prompt": "Run work",
+                "schedule": { "kind": "once", "at": "2000-01-01T00:00:00Z", "timezone": "UTC" }
+            }),
+            vec![("schedule.at", DispatchInputIssueCode::InvalidValue)],
+        ),
     ];
 
     for (case_name, input, expected_issues) in cases {
@@ -1391,6 +1409,39 @@ async fn builtin_trigger_create_accepts_once_schedule() {
         }
         TriggerSchedule::Cron { .. } => panic!("expected Once schedule variant"),
     }
+}
+
+#[tokio::test]
+async fn builtin_trigger_create_accepts_rfc3339_once_schedule() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "RFC3339 reminder 2099",
+            "prompt": "Check the archives",
+            "schedule": { "kind": "once", "at": "2099-06-25T01:00:00+08:00", "timezone": "Asia/Shanghai" }
+        }),
+        context.clone(),
+    )
+    .await
+    .expect("RFC3339 once schedule must be accepted");
+
+    let records = repository
+        .list_triggers(context.resource_scope.tenant_id)
+        .await
+        .expect("list persisted triggers");
+    assert!(matches!(
+        records.as_slice(),
+        [TriggerRecord {
+            schedule: TriggerSchedule::Once { at, timezone },
+            ..
+        }] if at.to_rfc3339() == "2099-06-24T17:00:00+00:00"
+            && timezone == "Asia/Shanghai"
+    ));
 }
 
 /// Negative path: a `once` schedule whose `at` falls in a DST ambiguous fold

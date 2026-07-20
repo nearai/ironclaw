@@ -422,18 +422,53 @@ directly.
 The trigger system must expose `trigger_create`, `trigger_list`, `trigger_remove`,
 `trigger_pause`, and `trigger_resume` as first-party Reborn capabilities.
 
+The Reborn product surface also provides caller-scoped direct creation. WebUI v2
+calls the typed `RebornServicesApi` / `AutomationProductFacade` through
+`POST /api/webchat/v2/automations`; the HTTP handler must not dispatch the
+model-visible `builtin.trigger_create` capability. The initial product request
+accepts only `cron` and `once` schedules and strictly rejects legacy
+message/system/webhook triggers, execution settings, delivery settings, and
+post-create-disable fields. Tenant, creator, agent, and project scope must come
+from the authenticated caller, never from the request body.
+
+Before invoking `AutomationProductFacade`, the product boundary must convert
+`name` into the shared `AutomationName` type and reject values that are empty
+after trimming or exceed `MAX_AUTOMATION_NAME_BYTES`. The same boundary must
+reject prompts that are blank or exceed `MAX_TRIGGER_PROMPT_BYTES`, while
+preserving the original contents of valid prompts. These failures return
+sanitized, non-retryable `400 InvalidRequest` responses with
+`field = name|prompt` and stable `blank` or `too_long` validation codes. Invalid
+requests must not enter the automation facade or persistence path.
+
+`once.at` accepts either a local `YYYY-MM-DDTHH:MM:SS` value interpreted in the
+required IANA timezone, or an RFC3339 value with `Z` or an explicit UTC offset
+that identifies the absolute instant. The RFC3339 offset must match the actual
+offset of the named IANA timezone at that instant; otherwise creation is
+rejected before persistence with a non-retryable `400 InvalidRequest`. Local
+times continue to fail closed during DST overlaps or gaps, while an explicit
+matching RFC3339 offset can select one overlap occurrence unambiguously. Both
+forms are ultimately stored as the existing UTC instant plus IANA timezone and
+require no schema migration.
+
+The model capability and product facade must share the typed creation service
+owned by `ironclaw_triggers`. That service owns schedule conversion, future fire
+slot validation, record construction, repository upsert, creator pairing, and
+compensating deletion after pairing failure. Per-operation timeouts must retain
+the compensation path: a pairing timeout is a lifecycle failure and triggers an
+attempt to delete the newly written trigger. The product API returns
+`201 Created` with `RebornAutomationInfo` only after persistence and pairing
+both succeed.
+
 - `trigger_create` validates the schedule and timezone, captures caller scope,
-  pairs the caller as the host-trusted synthetic trigger actor used by the
-  poller, and persists the trigger. Schedule validation includes both cadence
+  persists the trigger, then pairs the caller as the host-trusted synthetic
+  trigger actor used by the poller. Schedule validation includes both cadence
   rejection (sub-minute and second-level fields) and IANA timezone validation;
-  both are enforced before persistence. This pairing is composition-owned
-  trigger management wiring; trigger repositories remain storage-only, and the
-  poller must still fail closed for records whose creator actor was not paired.
-- `trigger_create` pairs the creator before persisting the trigger record. This
-  intentionally fails closed before storage if the actor pairing cannot be
-  established, instead of storing a trigger that the poller cannot fire. A
-  pairing that remains after a later trigger-record write failure is reusable
-  creator-scoped authorization state, not a trigger-specific fire gate.
+  both are enforced before persistence. Pairing failure or timeout triggers a
+  compensating deletion of the newly persisted trigger, and creation succeeds
+  only after persistence and pairing both complete. This pairing is
+  composition-owned trigger management wiring; trigger repositories remain
+  storage-only, and the poller must still fail closed for records whose creator
+  actor was not paired.
 - Durable local-dev composition must share the same trigger conversation
   services between `trigger_create` pairing and trigger-poller fire submission.
   The shared service preserves the conversation store's mutation lock across
@@ -508,6 +543,17 @@ V1 acceptance does not require external delivery. A valid V1 trigger fire is one
   schedules are rejected before persistence.
 - `trigger_create` caller-level tests must prove accepted finite schedules with
   no future slot at dispatch time are rejected before persistence.
+- Direct product creation caller-level tests must drive
+  `RebornAutomationProductFacade::create_automation` and the real WebUI v2
+  router. They must prove exact authenticated scope persistence, cron/once
+  creation, list read-back, invalid input with zero writes, sanitized 503
+  mapping, and pairing-failure rollback.
+- Durable creation tests must exercise the shared typed creation service over
+  both libSQL and PostgreSQL repositories so persistence, scoped read-back, and
+  compensation semantics cannot drift by backend.
+- RFC3339 one-time caller-level tests must prove `Z`/offset normalization,
+  offset/timezone mismatch rejection, past-time zero writes, DST overlap
+  disambiguation, and identical product/capability semantics.
 - Trusted inbound caller-level tests must prove duplicate scheduled-slot retries
   replay the original accepted message and turn submission before binding
   creation.
@@ -522,6 +568,18 @@ V1 acceptance does not require external delivery. A valid V1 trigger fire is one
   `list_automations` and `trigger_list` while a fire is gate-parked, and absent
   once the fire reaches a terminal outcome — already covered by
   `tests/integration/group_triggers/scenario_triggered_gate_hold_visible.rs`.
+
+Corresponding verification commands:
+
+```bash
+cargo test -p ironclaw_triggers creation::tests
+cargo test -p ironclaw_triggers --features libsql --test repository_contract creation_service
+cargo test -p ironclaw_triggers --features postgres --test repository_contract creation_service
+cargo test -p ironclaw_product_workflow --test reborn_services_contract create_automation
+cargo test -p ironclaw_reborn_composition automation::facade::tests::mutation_tests::create_automation --lib
+cargo test -p ironclaw_webui --test webui_v2_descriptors_contract
+cargo test -p ironclaw_webui --test webui_v2_handlers_contract create_automation
+```
 
 ---
 

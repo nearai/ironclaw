@@ -36,6 +36,7 @@ use ironclaw_threads::{
     SessionThreadRecord, SessionThreadService, ThreadHistory, ThreadHistoryRequest,
     ThreadMessageId, ThreadScope,
 };
+use ironclaw_triggers::MAX_TRIGGER_PROMPT_BYTES;
 use ironclaw_turns::{
     AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
     ResumeTurnRequest, RetryTurnRequest, SanitizedCancelReason, SubmitTurnRequest,
@@ -52,8 +53,9 @@ use crate::{
     LifecycleProductFacade, ListPendingApprovalsRequest, ProductWorkflowError,
     ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
-    UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand, WebUiInboundValidationCode,
+    UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller, WebUiAutomationScheduleRequest,
+    WebUiCancelRunRequest, WebUiCreateAutomationRequest, WebUiCreateThreadRequest,
+    WebUiGateResolution, WebUiInboundCommand, WebUiInboundValidationCode,
     WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
     WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
     WebUiSendMessageRequest, WebUiSetupExtensionRequest,
@@ -624,6 +626,49 @@ pub struct AutomationListRequest {
     pub include_completed: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomationCreateRequest {
+    pub name: AutomationName,
+    pub prompt: String,
+    pub schedule: AutomationCreateSchedule,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutomationCreateSchedule {
+    Cron {
+        expression: String,
+        timezone: String,
+    },
+    Once {
+        at: String,
+        timezone: String,
+    },
+}
+
+impl WebUiCreateAutomationRequest {
+    fn into_request(self) -> Result<AutomationCreateRequest, RebornServicesError> {
+        let name = AutomationName::new(self.name).map_err(automation_name_validation_error)?;
+        let prompt = validate_automation_prompt(self.prompt)?;
+        let schedule = match self.schedule {
+            WebUiAutomationScheduleRequest::Cron {
+                expression,
+                timezone,
+            } => AutomationCreateSchedule::Cron {
+                expression,
+                timezone,
+            },
+            WebUiAutomationScheduleRequest::Once { at, timezone } => {
+                AutomationCreateSchedule::Once { at, timezone }
+            }
+        };
+        Ok(AutomationCreateRequest {
+            name,
+            prompt,
+            schedule,
+        })
+    }
+}
+
 /// Stored scope of a trigger-fired thread, returned by
 /// `AutomationProductFacade::resolve_run_thread_scope`.
 ///
@@ -682,6 +727,14 @@ struct AutomationApprovalThreadCandidate {
 
 #[async_trait]
 pub trait AutomationProductFacade: Send + Sync {
+    async fn create_automation(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _request: AutomationCreateRequest,
+    ) -> Result<RebornAutomationInfo, RebornServicesError> {
+        Err(automation_unavailable())
+    }
+
     async fn list_automations(
         &self,
         caller: ProductAgentBoundCaller,
@@ -2042,6 +2095,15 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         request: WebUiListAutomationsRequest,
     ) -> Result<RebornListAutomationsResponse, RebornServicesError>;
+
+    async fn create_automation(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiCreateAutomationRequest,
+    ) -> Result<RebornAutomationInfo, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
 
     async fn pause_automation(
         &self,
@@ -4602,6 +4664,24 @@ impl RebornServicesApi for RebornServices {
         })
     }
 
+    async fn create_automation(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiCreateAutomationRequest,
+    ) -> Result<RebornAutomationInfo, RebornServicesError> {
+        let Some(caller) = product_agent_bound_caller_from_webui(caller) else {
+            return Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
+        let request = request.into_request()?;
+        self.automation_facade
+            .create_automation(caller, request)
+            .await
+    }
+
     async fn pause_automation(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -6747,6 +6827,22 @@ impl From<AutomationNameError> for WebUiInboundValidationCode {
 
 fn automation_name_validation_error(error: AutomationNameError) -> RebornServicesError {
     RebornServicesError::validation(WebUiInboundValidationError::new("name", error.into()))
+}
+
+fn validate_automation_prompt(prompt: String) -> Result<String, RebornServicesError> {
+    let validation_code = if prompt.trim().is_empty() {
+        Some(WebUiInboundValidationCode::Blank)
+    } else if prompt.len() > MAX_TRIGGER_PROMPT_BYTES {
+        Some(WebUiInboundValidationCode::TooLong)
+    } else {
+        None
+    };
+    match validation_code {
+        Some(code) => Err(RebornServicesError::validation(
+            WebUiInboundValidationError::new("prompt", code),
+        )),
+        None => Ok(prompt),
+    }
 }
 
 fn notification_approval_timeout_error() -> RebornServicesError {

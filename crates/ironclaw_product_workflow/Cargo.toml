@@ -41,6 +41,7 @@ ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces", version = "0.1.0" }
 ironclaw_run_state = { path = "../ironclaw_run_state", version = "0.1.0" }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
+ironclaw_triggers = { path = "../ironclaw_triggers", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 ironclaw_product_context = { path = "../ironclaw_product_context", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }

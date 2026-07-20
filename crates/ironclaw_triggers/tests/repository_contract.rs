@@ -1,12 +1,19 @@
 #![cfg(any(feature = "libsql", feature = "postgres"))]
 
+use std::sync::Arc;
+
+use async_trait::async_trait;
 use chrono::{SecondsFormat, TimeZone, Utc};
 use ironclaw_common::AutomationName;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
+use ironclaw_host_api::{
+    AgentId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, Timestamp, UserId,
+};
 use ironclaw_triggers::{
     ActiveTriggerScanCursor, ClearActiveFireRequest, InMemoryTriggerRepository,
-    TriggerDeliveryTargetId, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
-    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
+    NoopTriggerCreationLifecycle, TriggerCreateLifecycle, TriggerCreateRequest,
+    TriggerCreateSchedule, TriggerCreationService, TriggerDeliveryTargetId, TriggerError,
+    TriggerId, TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule,
+    TriggerSourceKind, TriggerState,
 };
 use ironclaw_turns::TurnRunId;
 
@@ -14,10 +21,7 @@ use ironclaw_turns::TurnRunId;
 use {
     ironclaw_triggers::LibSqlTriggerRepository,
     libsql::params,
-    std::{
-        sync::Arc,
-        time::{Duration, Instant},
-    },
+    std::time::{Duration, Instant},
     tempfile::tempdir,
 };
 
@@ -1746,6 +1750,116 @@ async fn assert_round_trip_preserves_named_timezone(repo: &impl TriggerRepositor
             panic!("expected Cron schedule, got Once");
         }
     }
+}
+
+fn creation_scope() -> ResourceScope {
+    ResourceScope {
+        tenant_id: tenant("tenant-create"),
+        user_id: user("user-create"),
+        agent_id: Some(AgentId::new("agent-create").expect("agent")),
+        project_id: Some(ProjectId::new("project-create").expect("project")),
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    }
+}
+
+fn creation_request() -> TriggerCreateRequest {
+    TriggerCreateRequest {
+        scope: creation_scope(),
+        name: "Durable RFC3339 follow up".to_string(),
+        prompt: "Generate a durable follow up".to_string(),
+        schedule: TriggerCreateSchedule::Once {
+            at: "2099-06-25T01:00:00+08:00".to_string(),
+            timezone: "Asia/Shanghai".to_string(),
+        },
+        delivery_target: None,
+    }
+}
+
+async fn assert_creation_service_persists_and_reads_back(repository: Arc<dyn TriggerRepository>) {
+    let service = TriggerCreationService::new(
+        Arc::clone(&repository),
+        Arc::new(NoopTriggerCreationLifecycle),
+    );
+    let record = service
+        .create(creation_request())
+        .await
+        .expect("create durable trigger");
+    let records = repository
+        .list_scoped_triggers(
+            record.tenant_id.clone(),
+            record.creator_user_id.clone(),
+            record.agent_id.clone(),
+            record.project_id.clone(),
+            10,
+            &[],
+        )
+        .await
+        .expect("list created trigger");
+    assert!(matches!(
+        &record.schedule,
+        TriggerSchedule::Once { at, timezone }
+            if at.to_rfc3339() == "2099-06-24T17:00:00+00:00"
+                && timezone == "Asia/Shanghai"
+    ));
+    assert_eq!(records, vec![record]);
+}
+
+#[derive(Debug)]
+struct FailingCreationLifecycle;
+
+#[async_trait]
+impl TriggerCreateLifecycle for FailingCreationLifecycle {
+    async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
+        Err(TriggerError::Backend {
+            reason: "pairing unavailable".to_string(),
+        })
+    }
+}
+
+async fn assert_creation_service_rolls_back_pairing_failure(
+    repository: Arc<dyn TriggerRepository>,
+) {
+    let service =
+        TriggerCreationService::new(Arc::clone(&repository), Arc::new(FailingCreationLifecycle));
+    service
+        .create(creation_request())
+        .await
+        .expect_err("pairing failure returned");
+    assert!(
+        repository
+            .list_triggers(creation_scope().tenant_id)
+            .await
+            .expect("list triggers after rollback")
+            .is_empty()
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_creation_service_persists_and_rolls_back() {
+    let (_dir, repo) = build_libsql_repo().await;
+    let repository: Arc<dyn TriggerRepository> = Arc::new(repo);
+    assert_creation_service_persists_and_reads_back(Arc::clone(&repository)).await;
+
+    let (_dir, repo) = build_libsql_repo().await;
+    assert_creation_service_rolls_back_pairing_failure(Arc::new(repo)).await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_creation_service_persists_and_rolls_back() {
+    let Some((_container, pool)) = postgres_pool_or_skip().await else {
+        return;
+    };
+    let repo = PostgresTriggerRepository::new(pool.clone());
+    repo.run_migrations().await.expect("run migrations");
+    let repository: Arc<dyn TriggerRepository> = Arc::new(repo);
+    assert_creation_service_persists_and_reads_back(Arc::clone(&repository)).await;
+
+    clear_postgres_triggers(&pool).await;
+    assert_creation_service_rolls_back_pairing_failure(repository).await;
 }
 
 #[cfg(feature = "libsql")]

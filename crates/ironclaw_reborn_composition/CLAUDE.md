@@ -97,7 +97,7 @@ Inbound order (outer → inner → handler):
    refresh, and lifecycle cleanup — all 16 KiB; `send_message` 14 MiB
    (text + base64 inline attachments); `import_extension` 8 MiB (zip tool
    bundle: WASM module + manifest/schemas/prompts); `cancel_run`,
-   `resolve_gate`, and `rename_automation` 4 KiB; `get_timeline`,
+   `resolve_gate`, `create_automation`, and `rename_automation` 4 KiB; `get_timeline`,
    `stream_events`, and product-auth OAuth callback `NoBody`.
    `BodyLimitPolicy` is an exhaustive `match`, so a new variant added
    upstream fails the build rather than silently disabling
@@ -137,7 +137,7 @@ Inbound order (outer → inner → handler):
 9. `webui_v2_router(WebUiV2State::new(bundle.api))` — the v2
    handlers from `ironclaw_webui` (create-thread, list-threads, delete-thread,
    send-message, get-timeline, stream-events SSE, stream-events WS,
-   cancel-run, resolve-gate, setup-extension, list/rename automations).
+   cancel-run, resolve-gate, setup-extension, create/list/rename automations).
 
 After the complete descriptor set is assembled, composition derives every
 literal root namespace and supplies it to `static_router_with_config`. Exact

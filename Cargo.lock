@@ -4834,6 +4834,7 @@ dependencies = [
  "ironclaw_runner",
  "ironclaw_telegram_v2_adapter",
  "ironclaw_threads",
+ "ironclaw_triggers",
  "ironclaw_trust",
  "ironclaw_turns",
  "libsql",

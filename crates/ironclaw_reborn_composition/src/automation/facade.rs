@@ -1,19 +1,20 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use ironclaw_host_api::ThreadId;
-use ironclaw_host_api::Timestamp;
+use ironclaw_host_api::{InvocationId, ResourceScope, ThreadId, Timestamp};
 use ironclaw_product_workflow::{
-    AutomationListRequest, AutomationName, AutomationProductFacade, ProductAgentBoundCaller,
-    RebornAutomationActiveHold, RebornAutomationHoldReason, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    TriggerRunThreadScope,
+    AutomationCreateRequest, AutomationCreateSchedule, AutomationListRequest, AutomationName,
+    AutomationProductFacade, ProductAgentBoundCaller, RebornAutomationActiveHold,
+    RebornAutomationHoldReason, RebornAutomationInfo, RebornAutomationMutationResponse,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
+    RebornAutomationSource, RebornAutomationState, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, TriggerRunThreadScope,
 };
 use ironclaw_triggers::{
-    ActiveHoldProjection, ActiveHoldReason, TriggerActiveRunLookup, TriggerError, TriggerId,
-    TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus,
-    TriggerSchedule, TriggerSourceKind, TriggerState, active_holds_for_records,
+    ActiveHoldProjection, ActiveHoldReason, NoopTriggerCreationLifecycle, TriggerActiveRunLookup,
+    TriggerCreateLifecycle, TriggerCreateRequest, TriggerCreateSchedule, TriggerCreationError,
+    TriggerCreationService, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
+    TriggerRunHistoryStatus, TriggerRunRecord, TriggerRunStatus, TriggerSchedule,
+    TriggerSourceKind, TriggerState, active_holds_for_records,
 };
 
 const AUTOMATION_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
@@ -37,6 +38,7 @@ const AUTOMATION_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Clone)]
 pub struct RebornAutomationProductFacade {
     trigger_repository: Arc<dyn TriggerRepository>,
+    creation_service: TriggerCreationService,
     active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
     backend_timeout: Duration,
     /// Whether the background trigger poller is running. Surfaced to the WebUI
@@ -61,8 +63,14 @@ impl RebornAutomationProductFacade {
         trigger_repository: Arc<dyn TriggerRepository>,
         active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
     ) -> Self {
+        let creation_service = TriggerCreationService::new(
+            Arc::clone(&trigger_repository),
+            Arc::new(NoopTriggerCreationLifecycle),
+        )
+        .with_operation_timeout(AUTOMATION_BACKEND_TIMEOUT);
         Self {
             trigger_repository,
+            creation_service,
             active_run_lookup,
             backend_timeout: AUTOMATION_BACKEND_TIMEOUT,
             scheduler_enabled: true,
@@ -76,14 +84,30 @@ impl RebornAutomationProductFacade {
         self
     }
 
+    pub(crate) fn with_creation_lifecycle(
+        mut self,
+        lifecycle: Arc<dyn TriggerCreateLifecycle>,
+    ) -> Self {
+        self.creation_service =
+            TriggerCreationService::new(Arc::clone(&self.trigger_repository), lifecycle)
+                .with_operation_timeout(self.backend_timeout);
+        self
+    }
+
     #[cfg(test)]
     pub(crate) fn with_backend_timeout(
         trigger_repository: Arc<dyn TriggerRepository>,
         active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
         backend_timeout: Duration,
     ) -> Self {
+        let creation_service = TriggerCreationService::new(
+            Arc::clone(&trigger_repository),
+            Arc::new(NoopTriggerCreationLifecycle),
+        )
+        .with_operation_timeout(backend_timeout);
         Self {
             trigger_repository,
+            creation_service,
             active_run_lookup,
             backend_timeout,
             scheduler_enabled: true,
@@ -115,6 +139,46 @@ impl RebornAutomationProductFacade {
 impl AutomationProductFacade for RebornAutomationProductFacade {
     fn scheduler_enabled(&self) -> bool {
         self.scheduler_enabled
+    }
+
+    async fn create_automation(
+        &self,
+        caller: ProductAgentBoundCaller,
+        request: AutomationCreateRequest,
+    ) -> Result<RebornAutomationInfo, RebornServicesError> {
+        let schedule = match request.schedule {
+            AutomationCreateSchedule::Cron {
+                expression,
+                timezone,
+            } => TriggerCreateSchedule::Cron {
+                expression,
+                timezone,
+            },
+            AutomationCreateSchedule::Once { at, timezone } => {
+                TriggerCreateSchedule::Once { at, timezone }
+            }
+        };
+        let scope = ResourceScope {
+            tenant_id: caller.tenant_id,
+            user_id: caller.user_id,
+            agent_id: Some(caller.agent_id),
+            project_id: caller.project_id,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        let record = self
+            .creation_service
+            .create(TriggerCreateRequest {
+                scope,
+                name: request.name.into_inner(),
+                prompt: request.prompt,
+                schedule,
+                delivery_target: None,
+            })
+            .await
+            .map_err(map_trigger_creation_error)?;
+        Ok(automation_info_from_record(record, &[], None))
     }
 
     async fn list_automations(
@@ -543,6 +607,40 @@ fn map_trigger_error(error: TriggerError) -> RebornServicesError {
             403,
             false,
         ),
+    }
+}
+
+fn map_trigger_creation_error(error: TriggerCreationError) -> RebornServicesError {
+    match error {
+        TriggerCreationError::InvalidSchedule { .. }
+        | TriggerCreationError::NoFutureFireTime { .. }
+        | TriggerCreationError::InvalidDeliveryTarget { .. }
+        | TriggerCreationError::InvalidRecord { .. } => services_error(
+            RebornServicesErrorCode::InvalidRequest,
+            RebornServicesErrorKind::Validation,
+            400,
+            false,
+        ),
+        TriggerCreationError::Repository { .. } | TriggerCreationError::Lifecycle { .. } => {
+            services_error(
+                RebornServicesErrorCode::Unavailable,
+                RebornServicesErrorKind::ServiceUnavailable,
+                503,
+                true,
+            )
+        }
+        TriggerCreationError::Rollback { .. } => {
+            tracing::warn!(
+                error_kind = "automation_create_rollback_failed",
+                "automation create rollback failed after creator pairing error"
+            );
+            services_error(
+                RebornServicesErrorCode::Unavailable,
+                RebornServicesErrorKind::ServiceUnavailable,
+                503,
+                true,
+            )
+        }
     }
 }
 

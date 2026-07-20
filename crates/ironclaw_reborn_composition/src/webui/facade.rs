@@ -21,7 +21,7 @@ use ironclaw_product_workflow::{
     WebUiAuthenticatedCaller,
 };
 
-use ironclaw_triggers::TriggerRepository;
+use ironclaw_triggers::{TriggerCreateLifecycle, TriggerRepository};
 
 use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 use crate::{
@@ -176,6 +176,7 @@ impl std::fmt::Debug for RebornWebuiBundle {
 pub(crate) struct AutomationBacking {
     pub(crate) repository: Arc<dyn TriggerRepository>,
     pub(crate) snapshot_source: Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
+    pub(crate) creation_lifecycle: Arc<dyn TriggerCreateLifecycle>,
 }
 
 /// Resolves the [`AutomationBacking`] pair for whichever runtime is wired:
@@ -189,6 +190,7 @@ pub(crate) fn automation_backing(services: &crate::RebornServices) -> Option<Aut
             repository: Arc::clone(&local_runtime.trigger_repository),
             snapshot_source: Arc::clone(&local_runtime.turn_state)
                 as Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
+            creation_lifecycle: crate::factory::local_dev_trigger_create_hook(local_runtime),
         });
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     let from_local = from_local.or_else(|| {
@@ -198,6 +200,7 @@ pub(crate) fn automation_backing(services: &crate::RebornServices) -> Option<Aut
             .map(|production_runtime| AutomationBacking {
                 repository: production_runtime.trigger_repository(),
                 snapshot_source: production_runtime.turn_run_snapshot_source(),
+                creation_lifecycle: production_runtime.trigger_create_lifecycle(),
             })
     });
     from_local
@@ -396,6 +399,7 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         );
         api = api.with_automation_product_facade(Arc::new(
             RebornAutomationProductFacade::new(backing.repository, active_run_lookup)
+                .with_creation_lifecycle(backing.creation_lifecycle)
                 .with_scheduler_enabled(services.readiness.workers.trigger_poller),
         ));
     }

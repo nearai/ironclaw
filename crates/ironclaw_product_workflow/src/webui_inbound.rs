@@ -335,6 +335,28 @@ impl WebUiListAutomationsRequest {
     }
 }
 
+/// Browser body for creating a caller-scoped Reborn automation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUiCreateAutomationRequest {
+    pub name: String,
+    pub prompt: String,
+    pub schedule: WebUiAutomationScheduleRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebUiAutomationScheduleRequest {
+    Cron {
+        expression: String,
+        timezone: String,
+    },
+    Once {
+        at: String,
+        timezone: String,
+    },
+}
+
 /// Browser body for WebUI automation rename mutation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WebUiRenameAutomationRequest {

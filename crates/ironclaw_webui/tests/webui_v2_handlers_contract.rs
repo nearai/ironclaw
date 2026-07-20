@@ -1,3 +1,4 @@
+// arch-exempt: large_file, caller-level WebUI regressions stay with the shared router fixture, plan #5905
 //! Caller-level contract tests for the WebChat v2 axum handlers.
 //!
 //! Per `.claude/rules/testing.md` "Test Through the Caller", these tests
@@ -61,7 +62,8 @@ use ironclaw_product_workflow::{
     RebornSkillSearchResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornStreamEventsSubscription, RebornSubmitTurnResponse, RebornTimelineRequest,
     RebornTimelineResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    SetActiveLlmRequest, UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    SetActiveLlmRequest, UpsertLlmProviderRequest, WebUiAuthenticatedCaller,
+    WebUiAutomationScheduleRequest, WebUiCancelRunRequest, WebUiCreateAutomationRequest,
     WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
     WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
     WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
@@ -258,6 +260,7 @@ struct StubServices {
     retry_run_calls: Mutex<Vec<WebUiRetryRunRequest>>,
     list_threads_calls: Mutex<Vec<WebUiListThreadsRequest>>,
     list_automations_calls: Mutex<Vec<WebUiListAutomationsRequest>>,
+    create_automation_calls: Mutex<Vec<(WebUiAuthenticatedCaller, WebUiCreateAutomationRequest)>>,
     pause_automation_calls: Mutex<Vec<String>>,
     resume_automation_calls: Mutex<Vec<String>>,
     rename_automation_calls: Mutex<Vec<(String, WebUiRenameAutomationRequest)>>,
@@ -269,6 +272,7 @@ struct StubServices {
     /// Forwarded caller user-ids for each `trace_account_login_link` call.
     trace_account_login_link_callers: Mutex<Vec<String>>,
     next_list_automations_error: Mutex<Option<RebornServicesError>>,
+    next_create_automation_error: Mutex<Option<RebornServicesError>>,
     next_rename_automation_error: Mutex<Option<RebornServicesError>>,
     next_delete_automation_error: Mutex<Option<RebornServicesError>>,
     get_outbound_preferences_calls: Mutex<usize>,
@@ -343,6 +347,10 @@ impl StubServices {
 
     fn fail_list_automations(&self, error: RebornServicesError) {
         *self.next_list_automations_error.lock().expect("lock") = Some(error);
+    }
+
+    fn fail_create_automation(&self, error: RebornServicesError) {
+        *self.next_create_automation_error.lock().expect("lock") = Some(error);
     }
 
     fn fail_delete_automation(&self, error: RebornServicesError) {
@@ -854,6 +862,30 @@ impl RebornServicesApi for StubServices {
             )],
             scheduler_enabled: true,
         })
+    }
+
+    async fn create_automation(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiCreateAutomationRequest,
+    ) -> Result<RebornAutomationInfo, RebornServicesError> {
+        self.create_automation_calls
+            .lock()
+            .expect("lock")
+            .push((caller, request));
+        if let Some(error) = self
+            .next_create_automation_error
+            .lock()
+            .expect("lock")
+            .take()
+        {
+            return Err(error);
+        }
+        Ok(automation_info(
+            "automation-created",
+            "Daily status",
+            "0 9 * * *",
+        ))
     }
 
     async fn pause_automation(
@@ -2319,6 +2351,270 @@ async fn list_automations_forwards_query_limits_to_facade() {
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].limit, Some(5));
     assert_eq!(calls[0].run_limit, Some(7));
+}
+
+#[tokio::test]
+async fn create_automation_returns_201_and_forwards_cron_and_once_requests() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    for body in [
+        serde_json::json!({
+            "name": "Daily status",
+            "prompt": "Generate a daily status",
+            "schedule": {
+                "kind": "cron",
+                "expression": "0 9 * * *",
+                "timezone": "UTC"
+            }
+        }),
+        serde_json::json!({
+            "name": "Follow up",
+            "prompt": "Check deployment",
+            "schedule": {
+                "kind": "once",
+                "at": "2026-07-20T09:00:00",
+                "timezone": "Asia/Shanghai"
+            }
+        }),
+        serde_json::json!({
+            "name": "RFC3339 follow up",
+            "prompt": "Check deployment",
+            "schedule": {
+                "kind": "once",
+                "at": "2099-06-25T01:00:00+08:00",
+                "timezone": "Asia/Shanghai"
+            }
+        }),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/automations")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("create request"),
+            )
+            .await
+            .expect("create oneshot");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = read_json(response).await;
+        assert_eq!(body["automation_id"], "automation-created");
+    }
+
+    let calls = services
+        .create_automation_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls[0].0.tenant_id, caller().tenant_id);
+    assert_eq!(calls[0].0.user_id, caller().user_id);
+    assert_eq!(calls[0].0.agent_id, caller().agent_id);
+    assert_eq!(calls[0].0.project_id, caller().project_id);
+    assert_eq!(calls[0].1.name, "Daily status");
+    assert_eq!(calls[1].1.name, "Follow up");
+    assert!(matches!(
+        calls[2].1.schedule,
+        WebUiAutomationScheduleRequest::Once { ref at, ref timezone }
+            if at == "2099-06-25T01:00:00+08:00" && timezone == "Asia/Shanghai"
+    ));
+}
+
+#[tokio::test]
+async fn create_automation_maps_semantic_rfc3339_error_to_sanitized_400() {
+    for at in ["2099-06-25T01:00:00+09:00", "2000-01-01T00:00:00Z"] {
+        let services = Arc::new(StubServices::default());
+        services.fail_create_automation(RebornServicesError {
+            code: RebornServicesErrorCode::InvalidRequest,
+            kind: RebornServicesErrorKind::Validation,
+            status_code: 400,
+            retryable: false,
+            field: None,
+            validation_code: None,
+        });
+        let router = router_with(services.clone());
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/automations")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": "Invalid RFC3339 schedule",
+                            "prompt": "Check deployment",
+                            "schedule": {
+                                "kind": "once",
+                                "at": at,
+                                "timezone": if at.ends_with('Z') { "UTC" } else { "Asia/Shanghai" }
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .expect("create request"),
+            )
+            .await
+            .expect("create oneshot");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json(response).await;
+        assert_eq!(body["error"], "invalid_request");
+        assert_eq!(body["retryable"], false);
+        assert!(body.get("detail").is_none());
+        assert_eq!(
+            services.create_automation_calls.lock().expect("lock").len(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn create_automation_preserves_bounded_field_error_on_wire() {
+    let services = Arc::new(StubServices::default());
+    services.fail_create_automation(RebornServicesError {
+        code: RebornServicesErrorCode::InvalidRequest,
+        kind: RebornServicesErrorKind::Validation,
+        status_code: 400,
+        retryable: false,
+        field: Some("prompt".to_string()),
+        validation_code: Some(WebUiInboundValidationCode::TooLong),
+    });
+    let router = router_with(services.clone());
+    let oversized_prompt = "x".repeat(40 * 1024);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/automations")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "name": "Daily status",
+                        "prompt": oversized_prompt,
+                        "schedule": {
+                            "kind": "cron",
+                            "expression": "0 9 * * *",
+                            "timezone": "UTC"
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("create request"),
+        )
+        .await
+        .expect("create oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(body["kind"], "validation");
+    assert_eq!(body["retryable"], false);
+    assert_eq!(body["field"], "prompt");
+    assert_eq!(body["validation_code"], "too_long");
+    assert!(body.get("detail").is_none());
+    let calls = services
+        .create_automation_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].1.prompt.len(), 40 * 1024);
+}
+
+#[tokio::test]
+async fn create_automation_rejects_invalid_or_legacy_body_as_400_before_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    for body in [
+        serde_json::json!({
+            "name": "Daily status",
+            "prompt": "Generate a daily status",
+            "schedule": { "kind": "message_event", "pattern": "hello" }
+        }),
+        serde_json::json!({
+            "name": "Daily status",
+            "prompt": "Generate a daily status",
+            "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "UTC" },
+            "enabled": false
+        }),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/automations")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("invalid create request"),
+            )
+            .await
+            .expect("invalid create oneshot");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response_body = read_json(response).await;
+        assert_eq!(response_body["error"], "invalid_request");
+        assert_eq!(response_body["retryable"], false);
+    }
+
+    assert!(
+        services
+            .create_automation_calls
+            .lock()
+            .expect("lock")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn create_automation_maps_backend_error_to_sanitized_503() {
+    let services = Arc::new(StubServices::default());
+    services.fail_create_automation(RebornServicesError {
+        code: RebornServicesErrorCode::Unavailable,
+        kind: RebornServicesErrorKind::ServiceUnavailable,
+        status_code: 503,
+        retryable: true,
+        field: None,
+        validation_code: None,
+    });
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/automations")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "name": "Daily status",
+                        "prompt": "Generate a daily status",
+                        "schedule": {
+                            "kind": "cron",
+                            "expression": "0 9 * * *",
+                            "timezone": "UTC"
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("create request"),
+        )
+        .await
+        .expect("create oneshot");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "unavailable");
+    assert_eq!(body["kind"], "service_unavailable");
+    assert_eq!(body["retryable"], true);
+    assert!(body.get("detail").is_none());
 }
 
 #[tokio::test]

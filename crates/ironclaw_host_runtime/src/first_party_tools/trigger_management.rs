@@ -9,12 +9,17 @@ use ironclaw_host_api::{
 };
 use ironclaw_triggers::{
     ACTIVE_HOLD_LOOKUP_TIMEOUT, ActiveHoldProjection, ActiveHoldReason,
-    MissingTriggerActiveRunLookup, TriggerActiveRunLookup, TriggerError, TriggerId, TriggerRecord,
-    TriggerRecordValidationKind, TriggerRepository, TriggerRunRecord, TriggerSchedule,
-    TriggerScheduleValidationKind, TriggerSourceKind, TriggerState, active_holds_for_records,
+    MissingTriggerActiveRunLookup, NoopTriggerCreationLifecycle, SystemTriggerCreationClock,
+    TriggerActiveRunLookup, TriggerCreateRequest, TriggerCreateSchedule, TriggerCreateScheduleKind,
+    TriggerCreationClock, TriggerCreationError, TriggerCreationService, TriggerError, TriggerId,
+    TriggerRecord, TriggerRecordValidationKind, TriggerRepository, TriggerRunRecord,
+    TriggerScheduleValidationKind, TriggerState, active_holds_for_records,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+
+#[cfg(test)]
+use ironclaw_triggers::{TriggerSchedule, TriggerSourceKind};
 
 use crate::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -35,6 +40,10 @@ pub const TRIGGER_LIST_CAPABILITY_ID: &str = "builtin.trigger_list";
 pub const TRIGGER_REMOVE_CAPABILITY_ID: &str = "builtin.trigger_remove";
 pub const TRIGGER_PAUSE_CAPABILITY_ID: &str = "builtin.trigger_pause";
 pub const TRIGGER_RESUME_CAPABILITY_ID: &str = "builtin.trigger_resume";
+
+pub use ironclaw_triggers::TriggerCreateLifecycle as TriggerCreateHook;
+#[cfg(any(test, feature = "test-support"))]
+pub use ironclaw_triggers::TriggerCreationClock as TriggerManagementClock;
 
 const TRIGGER_CREATE_DESCRIPTION: &str = "Create a caller-scoped scheduled trigger (one-time or recurring). The prompt is the full task each fire performs. If delivery_target_id is set, never put a send, post, or deliver-results step for that result in the prompt; each fire's final reply is delivered automatically to that target. Do not tell the prompt to send results back to the requesting user. Asks like 'send me the result' are delivery routing, not a task step: pass delivery_target_id with an id from builtin__outbound_delivery_targets_list and keep every send-to-requester step, even one with a pinned conversation id, out of the prompt. Put messaging in the prompt only when messaging someone else is itself the task; pin that third-party recipient, resolved while the user is present. Without delivery_target_id, the user's default outbound target applies at fire time; builtin__outbound_delivery_target_set changes that user-wide default.";
 
@@ -84,11 +93,11 @@ pub(super) fn insert_handlers(
 ) -> Result<(), HostApiError> {
     // Compatibility wrapper: supplies `MissingTriggerActiveRunLookup`, so
     // callers through this path never project an `active_hold`, mirroring
-    // `NoopTriggerCreateHook` below (#5886).
+    // `NoopTriggerCreationLifecycle` below (#5886).
     insert_handlers_with_create_hook(
         registry,
         repository,
-        Arc::new(NoopTriggerCreateHook),
+        Arc::new(NoopTriggerCreationLifecycle),
         Arc::new(MissingTriggerActiveRunLookup),
     )
 }
@@ -102,9 +111,9 @@ pub(super) fn insert_handlers_with_create_hook(
     insert_trigger_handlers(
         registry,
         Arc::new(TriggerManagementToolHandler {
+            creation_service: TriggerCreationService::new(Arc::clone(&repository), create_hook),
             repository,
-            create_hook,
-            clock: Arc::new(SystemTriggerManagementClock),
+            clock: Arc::new(SystemTriggerCreationClock),
             active_run_lookup,
         }),
     )
@@ -119,8 +128,12 @@ pub(super) fn insert_handlers_with_clock(
     insert_trigger_handlers(
         registry,
         Arc::new(TriggerManagementToolHandler {
+            creation_service: TriggerCreationService::with_clock(
+                Arc::clone(&repository),
+                Arc::new(NoopTriggerCreationLifecycle),
+                Arc::clone(&clock),
+            ),
             repository,
-            create_hook: Arc::new(NoopTriggerCreateHook),
             clock,
             active_run_lookup: Arc::new(MissingTriggerActiveRunLookup),
         }),
@@ -151,64 +164,10 @@ fn insert_trigger_handlers(
     Ok(())
 }
 
-#[cfg(any(test, feature = "test-support"))]
-#[doc(hidden)]
-pub trait TriggerManagementClock: Send + Sync {
-    fn now(&self) -> DateTime<Utc>;
-}
-
-#[cfg(not(any(test, feature = "test-support")))]
-trait TriggerManagementClock: Send + Sync {
-    fn now(&self) -> DateTime<Utc>;
-}
-
-#[async_trait]
-pub trait TriggerCreateHook: Send + Sync {
-    /// Validate a model-supplied per-trigger delivery target id before the
-    /// record is persisted (ownership, existence, product availability).
-    ///
-    /// The default fails closed: hosts that can resolve outbound delivery
-    /// targets override this to accept caller-owned targets. Rejections must
-    /// use `TriggerRecordValidationKind::DeliveryTargetInvalid` so the tool
-    /// layer maps them to a `delivery_target_id` input issue.
-    async fn validate_delivery_target(
-        &self,
-        scope: &ResourceScope,
-        target: &ironclaw_triggers::TriggerDeliveryTargetId,
-    ) -> Result<(), TriggerError> {
-        let _ = (scope, target);
-        Err(TriggerError::InvalidRecord {
-            kind: TriggerRecordValidationKind::DeliveryTargetInvalid,
-            reason: "per-trigger delivery targets are not supported by this host".to_string(),
-        })
-    }
-
-    async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError>;
-}
-
-#[derive(Debug)]
-struct NoopTriggerCreateHook;
-
-#[async_trait]
-impl TriggerCreateHook for NoopTriggerCreateHook {
-    async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-struct SystemTriggerManagementClock;
-
-impl TriggerManagementClock for SystemTriggerManagementClock {
-    fn now(&self) -> DateTime<Utc> {
-        Utc::now()
-    }
-}
-
 struct TriggerManagementToolHandler {
+    creation_service: TriggerCreationService,
     repository: Arc<dyn TriggerRepository>,
-    create_hook: Arc<dyn TriggerCreateHook>,
-    clock: Arc<dyn TriggerManagementClock>,
+    clock: Arc<dyn TriggerCreationClock>,
     active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
 }
 
@@ -222,14 +181,7 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
         let started = Instant::now();
         let output = match request.capability_id.as_str() {
             TRIGGER_CREATE_CAPABILITY_ID => {
-                create_trigger(
-                    &*self.repository,
-                    &*self.create_hook,
-                    &request.scope,
-                    request.input,
-                    self.clock.now(),
-                )
-                .await?
+                create_trigger(&self.creation_service, &request.scope, request.input).await?
             }
             TRIGGER_LIST_CAPABILITY_ID => {
                 list_triggers(
@@ -289,27 +241,28 @@ enum TriggerScheduleInput {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TriggerScheduleInputKind {
-    Cron,
-    Once,
-}
-
 impl TriggerScheduleInput {
-    fn kind(&self) -> TriggerScheduleInputKind {
+    fn into_create_schedule(self) -> TriggerCreateSchedule {
         match self {
-            Self::Cron { .. } => TriggerScheduleInputKind::Cron,
-            Self::Once { .. } => TriggerScheduleInputKind::Once,
+            Self::Cron {
+                expression,
+                timezone,
+            } => TriggerCreateSchedule::Cron {
+                expression,
+                timezone,
+            },
+            Self::Once { at, timezone } => TriggerCreateSchedule::Once { at, timezone },
         }
     }
 
+    #[cfg(test)]
     fn into_schedule(self) -> Result<TriggerSchedule, TriggerError> {
         match self {
             Self::Cron {
                 expression,
                 timezone,
             } => TriggerSchedule::cron_with_timezone(expression, timezone),
-            Self::Once { at, timezone } => TriggerSchedule::once_from_local(&at, &timezone),
+            Self::Once { at, timezone } => TriggerSchedule::once_from_input(&at, &timezone),
         }
     }
 }
@@ -343,71 +296,28 @@ struct TriggerListInput {
 }
 
 async fn create_trigger(
-    repository: &dyn TriggerRepository,
-    create_hook: &dyn TriggerCreateHook,
+    creation_service: &TriggerCreationService,
     scope: &ResourceScope,
     input: Value,
-    now: DateTime<Utc>,
 ) -> Result<Value, FirstPartyCapabilityError> {
     let input: TriggerCreateInput = TriggerCreateInput::deserialize(&input)
         .map_err(|error| trigger_create_shape_error(&input, error))?;
-    let schedule_kind = input.schedule.kind();
-    let schedule = input
-        .schedule
-        .into_schedule()
-        .map_err(|error| trigger_schedule_error(schedule_kind, error))?;
-    let next_run_at = next_run_at_for_schedule(&schedule, now)
-        .map_err(|error| trigger_next_run_error(schedule_kind, error))?;
     let delivery_target = match input.delivery_target_id {
-        Some(raw) => {
-            let target = ironclaw_triggers::TriggerDeliveryTargetId::new(raw)
-                .map_err(trigger_record_error)?;
-            create_hook
-                .validate_delivery_target(scope, &target)
-                .await
-                .map_err(trigger_record_error)?;
-            Some(target)
-        }
+        Some(raw) => Some(
+            ironclaw_triggers::TriggerDeliveryTargetId::new(raw).map_err(trigger_record_error)?,
+        ),
         None => None,
     };
-    let record = TriggerRecord {
-        trigger_id: TriggerId::new(),
-        tenant_id: scope.tenant_id.clone(),
-        creator_user_id: scope.user_id.clone(),
-        agent_id: scope.agent_id.clone(),
-        project_id: scope.project_id.clone(),
-        name: input.name,
-        source: TriggerSourceKind::Schedule,
-        schedule,
-        prompt: input.prompt,
-        delivery_target,
-        state: TriggerState::Scheduled,
-        next_run_at,
-        last_run_at: None,
-        last_fired_slot: None,
-        last_status: None,
-        active_fire_slot: None,
-        active_run_ref: None,
-        created_at: now,
-    };
-    record.validate().map_err(trigger_record_error)?;
-    repository
-        .upsert_trigger(record.clone())
+    let record = creation_service
+        .create(TriggerCreateRequest {
+            scope: scope.clone(),
+            name: input.name,
+            prompt: input.prompt,
+            schedule: input.schedule.into_create_schedule(),
+            delivery_target,
+        })
         .await
-        .map_err(|error| trigger_repository_error("upsert_trigger", error))?;
-    if let Err(error) = create_hook.after_trigger_persisted(&record).await {
-        let hook_error = trigger_create_hook_error("after_trigger_persisted", error);
-        if let Err(remove_error) = repository
-            .remove_trigger(record.tenant_id.clone(), record.trigger_id)
-            .await
-        {
-            return Err(trigger_create_rollback_error(
-                "remove_trigger",
-                remove_error,
-            ));
-        }
-        return Err(hook_error);
-    }
+        .map_err(map_trigger_creation_error)?;
     Ok(json!({
         "trigger": trigger_output(&record, &[], None),
     }))
@@ -594,18 +504,6 @@ fn trigger_remove_output(record: &TriggerRecord) -> Value {
     })
 }
 
-fn next_run_at_for_schedule(
-    schedule: &TriggerSchedule,
-    now: DateTime<Utc>,
-) -> Result<DateTime<Utc>, TriggerError> {
-    schedule.next_slot_after(now).and_then(|next| {
-        next.ok_or_else(|| TriggerError::InvalidSchedule {
-            kind: TriggerScheduleValidationKind::NoFutureFireTime,
-            reason: "schedule has no future fire time".to_string(),
-        })
-    })
-}
-
 fn trigger_create_shape_error(
     input: &Value,
     _error: serde_json::Error,
@@ -759,7 +657,7 @@ fn invalid_trigger_input(issues: Vec<DispatchInputIssue>) -> FirstPartyCapabilit
 }
 
 fn trigger_schedule_error(
-    kind: TriggerScheduleInputKind,
+    kind: TriggerCreateScheduleKind,
     error: TriggerError,
 ) -> FirstPartyCapabilityError {
     let issue = match error {
@@ -768,10 +666,11 @@ fn trigger_schedule_error(
             ..
         } => invalid_value("schedule.timezone").expected("valid IANA timezone name"),
         TriggerError::InvalidSchedule { .. } => match kind {
-            TriggerScheduleInputKind::Cron => invalid_value("schedule.expression")
+            TriggerCreateScheduleKind::Cron => invalid_value("schedule.expression")
                 .expected("five-, six-, or seven-field cron with at least one-minute cadence"),
-            TriggerScheduleInputKind::Once => invalid_value("schedule.at")
-                .expected("YYYY-MM-DDTHH:MM:SS valid in the selected timezone"),
+            TriggerCreateScheduleKind::Once => invalid_value("schedule.at").expected(
+                "YYYY-MM-DDTHH:MM:SS or RFC3339 with an offset matching the selected timezone",
+            ),
         },
         other => invalid_value("schedule").expected(trigger_error_kind(&other)),
     };
@@ -818,13 +717,13 @@ fn trigger_record_error(error: TriggerError) -> FirstPartyCapabilityError {
 }
 
 fn trigger_next_run_error(
-    kind: TriggerScheduleInputKind,
+    kind: TriggerCreateScheduleKind,
     _error: TriggerError,
 ) -> FirstPartyCapabilityError {
     let issue = match kind {
-        TriggerScheduleInputKind::Cron => invalid_value("schedule.expression")
+        TriggerCreateScheduleKind::Cron => invalid_value("schedule.expression")
             .expected("cron expression with at least one future fire time"),
-        TriggerScheduleInputKind::Once => {
+        TriggerCreateScheduleKind::Once => {
             invalid_value("schedule.at").expected("future local datetime")
         }
     };
@@ -868,11 +767,13 @@ fn trigger_create_hook_error(
 
 fn trigger_create_rollback_error(
     repository_operation: &'static str,
+    lifecycle_error: TriggerError,
     error: TriggerError,
 ) -> FirstPartyCapabilityError {
     tracing::warn!(
         runtime_dispatch_error_kind = %RuntimeDispatchErrorKind::Backend,
         repository_operation,
+        lifecycle_error_kind = trigger_error_kind(&lifecycle_error),
         trigger_error_kind = trigger_error_kind(&error),
         error_kind = "trigger_create_rollback_failed",
         "trigger management capability create hook rollback failed"
@@ -881,6 +782,30 @@ fn trigger_create_rollback_error(
         RuntimeDispatchErrorKind::Backend,
         "trigger create rollback failed after hook error",
     )
+}
+
+fn map_trigger_creation_error(error: TriggerCreationError) -> FirstPartyCapabilityError {
+    match error {
+        TriggerCreationError::InvalidSchedule { kind, source } => {
+            trigger_schedule_error(kind, source)
+        }
+        TriggerCreationError::NoFutureFireTime { kind, source } => {
+            trigger_next_run_error(kind, source)
+        }
+        TriggerCreationError::InvalidDeliveryTarget { source }
+        | TriggerCreationError::InvalidRecord { source } => trigger_record_error(source),
+        TriggerCreationError::Repository { operation, source } => {
+            trigger_repository_error(operation, source)
+        }
+        TriggerCreationError::Lifecycle { operation, source } => {
+            trigger_create_hook_error(operation, source)
+        }
+        TriggerCreationError::Rollback {
+            operation,
+            lifecycle_error,
+            source,
+        } => trigger_create_rollback_error(operation, lifecycle_error, source),
+    }
 }
 
 fn trigger_error_kind(error: &TriggerError) -> &'static str {

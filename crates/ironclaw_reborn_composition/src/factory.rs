@@ -1206,6 +1206,19 @@ impl RebornProductionRuntimeServices {
             Self::Postgres(graph) => Arc::clone(&graph.turn_state) as _,
         }
     }
+
+    pub(crate) fn trigger_create_lifecycle(&self) -> Arc<dyn TriggerCreateHook> {
+        match self {
+            #[cfg(feature = "libsql")]
+            Self::LibSql(graph) => Arc::new(ScopedFilesystemTriggerCreatorPairingHook::new(
+                Arc::clone(&graph.scoped_filesystem),
+            )),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(graph) => Arc::new(ScopedFilesystemTriggerCreatorPairingHook::new(
+                Arc::clone(&graph.scoped_filesystem),
+            )),
+        }
+    }
 }
 
 // `trigger_conversation_services` is a `OnceCell<RebornFilesystemConversationServices>`
@@ -2874,7 +2887,7 @@ fn local_dev_trigger_conversation_services() -> InMemoryConversationServices {
     InMemoryConversationServices::default()
 }
 
-fn local_dev_trigger_create_hook(
+pub(crate) fn local_dev_trigger_create_hook(
     local_runtime: &Arc<RebornRuntimeSubstrate>,
 ) -> Arc<dyn TriggerCreateHook> {
     #[cfg(any(feature = "libsql", feature = "postgres"))]

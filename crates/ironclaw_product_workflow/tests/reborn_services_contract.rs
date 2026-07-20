@@ -34,19 +34,20 @@ use ironclaw_product_workflow::{
     AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,
     AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, ActiveModelReader, ApprovalInteractionActionView,
     ApprovalInteractionDecision, ApprovalInteractionScope, ApprovalInteractionService,
-    AuthInteractionDecision, AuthInteractionService, AutomationListRequest, AutomationName,
-    AutomationProductFacade, CodexLoginStart, ExtensionCredentialSetupService,
-    ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, FilesystemBrowseReader,
-    FsMount, InboundAttachmentLander, InboundAttachmentReader,
-    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
-    LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
-    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
-    LifecyclePackageRef, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
-    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleReadinessBlocker, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
-    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse, LlmActiveSelection,
-    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
-    LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
+    AuthInteractionDecision, AuthInteractionService, AutomationCreateRequest,
+    AutomationCreateSchedule, AutomationListRequest, AutomationName, AutomationProductFacade,
+    CodexLoginStart, ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
+    ExtensionCredentialSubmitRequest, FilesystemBrowseReader, FsMount, InboundAttachmentLander,
+    InboundAttachmentReader, LifecycleExtensionCredentialRequirement,
+    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
+    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
+    LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductAction,
+    LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
+    LifecycleProductResponse, LifecycleReadinessBlocker, ListPendingApprovalsRequest,
+    ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
+    ListPendingAuthInteractionsResponse, LlmActiveSelection, LlmConfigService,
+    LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
+    LlmProviderView, MAX_AUTOMATION_NAME_BYTES, NearAiLoginRequest, NearAiLoginStart,
     NearAiWalletLoginRequest, NearAiWalletLoginResult, OperatorLogsService,
     OperatorServiceLifecycleService, OperatorStatusService, OutboundPreferencesProductFacade,
     PendingApprovalInteractionView, ProductAgentBoundCaller, ProductWorkflowError, ProjectCaller,
@@ -79,11 +80,11 @@ use ironclaw_product_workflow::{
     ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
     ResolveAuthInteractionResponse, SetActiveLlmRequest, StaticConnectableChannelsProductFacade,
     StaticOperatorStatusService, TriggerRunThreadScope, UpsertLlmProviderRequest,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
-    automation_trigger_thread_metadata_json,
+    WebUiAuthenticatedCaller, WebUiAutomationScheduleRequest, WebUiCancelRunRequest,
+    WebUiCreateAutomationRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
+    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest, approval_gate_ref, automation_trigger_thread_metadata_json,
 };
 use ironclaw_product_workflow::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
@@ -103,6 +104,7 @@ use ironclaw_threads::{
     ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
     UpdateToolResultReferenceRequest,
 };
+use ironclaw_triggers::MAX_TRIGGER_PROMPT_BYTES;
 use ironclaw_turns::run_profile::{LoopModelRouteSnapshot, LoopModelUsage};
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
@@ -1015,6 +1017,12 @@ struct ListAutomationCall {
     include_completed: bool,
 }
 
+#[derive(Debug, Clone)]
+struct CreateAutomationCall {
+    caller: ProductAgentBoundCaller,
+    request: AutomationCreateRequest,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AutomationMutationAction {
     Pause,
@@ -1032,11 +1040,16 @@ struct AutomationMutationCall {
 
 #[derive(Default)]
 struct RecordingAutomationFacade {
+    create_calls: Mutex<Vec<CreateAutomationCall>>,
     list_calls: Mutex<Vec<ListAutomationCall>>,
     mutation_calls: Mutex<Vec<AutomationMutationCall>>,
 }
 
 impl RecordingAutomationFacade {
+    fn create_calls(&self) -> Vec<CreateAutomationCall> {
+        self.create_calls.lock().expect("lock").clone()
+    }
+
     fn list_calls(&self) -> Vec<ListAutomationCall> {
         self.list_calls.lock().expect("lock").clone()
     }
@@ -1048,6 +1061,23 @@ impl RecordingAutomationFacade {
 
 #[async_trait]
 impl AutomationProductFacade for RecordingAutomationFacade {
+    async fn create_automation(
+        &self,
+        caller: ProductAgentBoundCaller,
+        request: AutomationCreateRequest,
+    ) -> Result<RebornAutomationInfo, RebornServicesError> {
+        self.create_calls
+            .lock()
+            .expect("lock")
+            .push(CreateAutomationCall { caller, request });
+        Ok(automation_info(
+            "trigger-created",
+            "Daily status",
+            "0 9 * * *",
+            None,
+        ))
+    }
+
     async fn list_automations(
         &self,
         caller: ProductAgentBoundCaller,
@@ -5941,6 +5971,242 @@ async fn list_automations_rejects_missing_agent_id() {
     assert_eq!(automation_facade.list_calls().len(), 0);
 }
 
+fn cron_create_request() -> WebUiCreateAutomationRequest {
+    WebUiCreateAutomationRequest {
+        name: "Daily status".to_string(),
+        prompt: "Generate a daily status".to_string(),
+        schedule: WebUiAutomationScheduleRequest::Cron {
+            expression: "0 9 * * *".to_string(),
+            timezone: "UTC".to_string(),
+        },
+    }
+}
+
+#[tokio::test]
+async fn create_automation_rejects_missing_agent_id() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    let error = services
+        .create_automation(caller_without_agent(), cron_create_request())
+        .await
+        .expect_err("missing agent id should fail closed");
+
+    assert_eq!(error.code, RebornServicesErrorCode::InvalidRequest);
+    assert_eq!(error.status_code, 400);
+    assert!(!error.retryable);
+    assert!(automation_facade.create_calls().is_empty());
+}
+
+#[tokio::test]
+async fn create_automation_forwards_caller_scope_and_typed_request() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+    let caller = caller();
+
+    let created = services
+        .create_automation(caller.clone(), cron_create_request())
+        .await
+        .expect("create automation");
+
+    assert_eq!(created.automation_id, "trigger-created");
+    let calls = automation_facade.create_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].caller.tenant_id, caller.tenant_id);
+    assert_eq!(calls[0].caller.user_id, caller.user_id);
+    assert_eq!(calls[0].caller.agent_id, caller.agent_id.expect("agent"));
+    assert_eq!(calls[0].caller.project_id, caller.project_id);
+    assert_eq!(calls[0].request.name.as_str(), "Daily status");
+    assert_eq!(calls[0].request.prompt, "Generate a daily status");
+    assert_eq!(
+        calls[0].request.schedule,
+        AutomationCreateSchedule::Cron {
+            expression: "0 9 * * *".to_string(),
+            timezone: "UTC".to_string(),
+        }
+    );
+}
+
+#[tokio::test]
+async fn create_automation_validates_name_and_prompt_before_product_facade() {
+    let cases = [
+        (
+            "blank name",
+            "   ".to_string(),
+            "Generate a daily status".to_string(),
+            "name",
+            WebUiInboundValidationCode::Blank,
+        ),
+        (
+            "oversized name",
+            "界".repeat(MAX_AUTOMATION_NAME_BYTES / "界".len() + 1),
+            "Generate a daily status".to_string(),
+            "name",
+            WebUiInboundValidationCode::TooLong,
+        ),
+        (
+            "blank prompt",
+            "Daily status".to_string(),
+            " \t\r\n ".to_string(),
+            "prompt",
+            WebUiInboundValidationCode::Blank,
+        ),
+        (
+            "oversized prompt",
+            "Daily status".to_string(),
+            "界".repeat(MAX_TRIGGER_PROMPT_BYTES / "界".len() + 1),
+            "prompt",
+            WebUiInboundValidationCode::TooLong,
+        ),
+    ];
+
+    for (label, name, prompt, expected_field, expected_code) in cases {
+        let automation_facade = Arc::new(RecordingAutomationFacade::default());
+        let services = RebornServices::new(
+            Arc::new(InMemorySessionThreadService::default()),
+            Arc::new(FakeTurnCoordinator::default()),
+        )
+        .with_automation_product_facade(automation_facade.clone());
+        let mut request = cron_create_request();
+        request.name = name;
+        request.prompt = prompt;
+
+        let error = services
+            .create_automation(caller(), request)
+            .await
+            .expect_err(label);
+
+        assert_eq!(
+            error.code,
+            RebornServicesErrorCode::InvalidRequest,
+            "{label}"
+        );
+        assert_eq!(error.status_code, 400, "{label}");
+        assert!(!error.retryable, "{label}");
+        assert_eq!(error.field.as_deref(), Some(expected_field), "{label}");
+        assert_eq!(error.validation_code, Some(expected_code), "{label}");
+        assert!(automation_facade.create_calls().is_empty(), "{label}");
+    }
+}
+
+#[tokio::test]
+async fn create_automation_accepts_exact_utf8_byte_limits_and_preserves_prompt() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+    let name = "n".repeat(MAX_AUTOMATION_NAME_BYTES);
+    let prompt = format!(
+        "{}{}",
+        "界".repeat(MAX_TRIGGER_PROMPT_BYTES / "界".len()),
+        "x".repeat(MAX_TRIGGER_PROMPT_BYTES % "界".len())
+    );
+    assert_eq!(prompt.len(), MAX_TRIGGER_PROMPT_BYTES);
+    let mut request = cron_create_request();
+    request.name = name.clone();
+    request.prompt = prompt.clone();
+
+    services
+        .create_automation(caller(), request)
+        .await
+        .expect("exact byte limits should be accepted");
+
+    let calls = automation_facade.create_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].request.name.as_str(), name);
+    assert_eq!(calls[0].request.prompt, prompt);
+    assert_eq!(
+        calls[0].request.schedule,
+        AutomationCreateSchedule::Cron {
+            expression: "0 9 * * *".to_string(),
+            timezone: "UTC".to_string(),
+        }
+    );
+}
+
+#[tokio::test]
+async fn create_automation_preserves_rfc3339_once_input_at_product_boundary() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    services
+        .create_automation(
+            caller(),
+            WebUiCreateAutomationRequest {
+                name: "Follow up".to_string(),
+                prompt: "Check deployment".to_string(),
+                schedule: WebUiAutomationScheduleRequest::Once {
+                    at: "2099-06-25T01:00:00+08:00".to_string(),
+                    timezone: "Asia/Shanghai".to_string(),
+                },
+            },
+        )
+        .await
+        .expect("create RFC3339 automation");
+
+    let calls = automation_facade.create_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].request.schedule,
+        AutomationCreateSchedule::Once {
+            at: "2099-06-25T01:00:00+08:00".to_string(),
+            timezone: "Asia/Shanghai".to_string(),
+        }
+    );
+}
+
+#[test]
+fn create_automation_request_rejects_unknown_and_legacy_fields() {
+    for value in [
+        serde_json::json!({
+            "name": "Daily status",
+            "prompt": "Generate a daily status",
+            "schedule": { "kind": "message_event", "pattern": "hello" }
+        }),
+        serde_json::json!({
+            "name": "Daily status",
+            "prompt": "Generate a daily status",
+            "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "UTC" },
+            "enabled": false
+        }),
+        serde_json::json!({
+            "name": "Daily status",
+            "prompt": "Generate a daily status",
+            "schedule": { "kind": "cron", "expression": "0 9 * * *", "timezone": "UTC" },
+            "tenant_id": "other-tenant"
+        }),
+        serde_json::json!({
+            "name": "Daily status",
+            "prompt": "Generate a daily status",
+            "schedule": {
+                "kind": "cron",
+                "expression": "0 9 * * *",
+                "timezone": "UTC",
+                "execution": { "mode": "lightweight" }
+            }
+        }),
+    ] {
+        assert!(
+            serde_json::from_value::<WebUiCreateAutomationRequest>(value).is_err(),
+            "legacy or authority-bearing fields must be rejected"
+        );
+    }
+}
+
 #[tokio::test]
 async fn list_automations_clamps_oversize_limit_before_product_facade() {
     let automation_facade = Arc::new(RecordingAutomationFacade::default());
@@ -7943,6 +8209,14 @@ async fn automation_facade_unwired_fails_closed() {
     assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
     assert_eq!(error.status_code, 503);
     assert!(error.retryable);
+
+    let create_error = services
+        .create_automation(caller(), cron_create_request())
+        .await
+        .expect_err("unwired automation create facade");
+    assert_eq!(create_error.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(create_error.status_code, 503);
+    assert!(create_error.retryable);
 }
 
 #[tokio::test]

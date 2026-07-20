@@ -1,13 +1,208 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use ironclaw_host_api::UserId;
-use ironclaw_product_workflow::{AutomationName, AutomationProductFacade, RebornAutomationState};
-use ironclaw_triggers::{InMemoryTriggerRepository, TriggerId, TriggerRepository, TriggerState};
+use ironclaw_product_workflow::{
+    AutomationCreateRequest, AutomationCreateSchedule, AutomationName, AutomationProductFacade,
+    RebornAutomationSource, RebornAutomationState,
+};
+use ironclaw_triggers::{
+    InMemoryTriggerRepository, TriggerCreateLifecycle, TriggerError, TriggerId, TriggerRecord,
+    TriggerRepository, TriggerState,
+};
 
 use super::{caller, facade_over, make_record, now};
 
 fn automation_name(value: &str) -> AutomationName {
     AutomationName::new(value).expect("valid automation name")
+}
+
+fn cron_create_request(expression: &str, timezone: &str) -> AutomationCreateRequest {
+    AutomationCreateRequest {
+        name: automation_name("Daily status"),
+        prompt: "Generate a daily status".to_string(),
+        schedule: AutomationCreateSchedule::Cron {
+            expression: expression.to_string(),
+            timezone: timezone.to_string(),
+        },
+    }
+}
+
+fn once_create_request(at: impl Into<String>, timezone: &str) -> AutomationCreateRequest {
+    AutomationCreateRequest {
+        name: automation_name("Follow up"),
+        prompt: "Check deployment".to_string(),
+        schedule: AutomationCreateSchedule::Once {
+            at: at.into(),
+            timezone: timezone.to_string(),
+        },
+    }
+}
+
+#[tokio::test]
+async fn create_automation_persists_exact_caller_scope_and_reads_back() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let c = caller();
+    let facade = facade_over(repo.clone());
+
+    let created = facade
+        .create_automation(c.clone(), cron_create_request("0 9 * * *", "UTC"))
+        .await
+        .expect("create automation");
+
+    assert_eq!(created.name, "Daily status");
+    assert_eq!(created.state, RebornAutomationState::Scheduled);
+    assert!(matches!(
+        created.source,
+        RebornAutomationSource::Schedule { ref cron, ref timezone }
+            if cron == "0 9 * * *" && timezone == "UTC"
+    ));
+    let records = repo
+        .list_scoped_triggers(
+            c.tenant_id.clone(),
+            c.user_id.clone(),
+            Some(c.agent_id.clone()),
+            c.project_id.clone(),
+            10,
+            &[],
+        )
+        .await
+        .expect("list created automation");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].trigger_id.to_string(), created.automation_id);
+    assert_eq!(records[0].prompt, "Generate a daily status");
+}
+
+#[tokio::test]
+async fn create_automation_accepts_future_one_time_schedule() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let facade = facade_over(repo);
+    let future = (chrono::Utc::now() + chrono::Duration::days(2))
+        .format("%Y-%m-%dT%H:%M:%S")
+        .to_string();
+
+    let created = facade
+        .create_automation(caller(), once_create_request(future, "UTC"))
+        .await
+        .expect("create one-time automation");
+
+    assert!(matches!(
+        created.source,
+        RebornAutomationSource::Once { .. }
+    ));
+    assert!(created.next_run_at.is_some());
+}
+
+#[tokio::test]
+async fn create_automation_normalizes_rfc3339_and_reads_back_caller_scope() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let c = caller();
+    let facade = facade_over(repo.clone());
+
+    let created = facade
+        .create_automation(
+            c.clone(),
+            once_create_request("2099-06-25T01:00:00+08:00", "Asia/Shanghai"),
+        )
+        .await
+        .expect("create RFC3339 automation");
+    assert!(matches!(
+        created.source,
+        RebornAutomationSource::Once { ref at, ref timezone }
+            if at == "2099-06-24T17:00:00+00:00"
+                && timezone == "Asia/Shanghai"
+    ));
+
+    let records = repo
+        .list_scoped_triggers(
+            c.tenant_id,
+            c.user_id,
+            Some(c.agent_id),
+            c.project_id,
+            10,
+            &[],
+        )
+        .await
+        .expect("list RFC3339 automation");
+    assert_eq!(records.len(), 1);
+}
+
+#[tokio::test]
+async fn create_automation_rejects_rfc3339_offset_mismatch_without_write() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let facade = facade_over(repo.clone());
+
+    let error = facade
+        .create_automation(
+            caller(),
+            once_create_request("2099-06-25T01:00:00+09:00", "Asia/Shanghai"),
+        )
+        .await
+        .expect_err("mismatched RFC3339 offset rejected");
+    assert_eq!(error.status_code, 400);
+    assert!(!error.retryable);
+    assert!(
+        repo.list_triggers(caller().tenant_id)
+            .await
+            .expect("list triggers")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn create_automation_maps_invalid_schedule_to_bad_request_without_write() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let facade = facade_over(repo.clone());
+
+    let error = facade
+        .create_automation(caller(), cron_create_request("0 8 * *", "UTC"))
+        .await
+        .expect_err("invalid cron rejected");
+
+    assert_eq!(error.status_code, 400);
+    assert!(!error.retryable);
+    assert!(
+        repo.list_triggers(caller().tenant_id)
+            .await
+            .expect("list triggers")
+            .is_empty()
+    );
+}
+
+#[derive(Debug)]
+struct FailingCreateLifecycle;
+
+#[async_trait]
+impl TriggerCreateLifecycle for FailingCreateLifecycle {
+    async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
+        Err(TriggerError::Backend {
+            reason: "pairing unavailable".to_string(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn create_automation_maps_pairing_failure_to_503_and_rolls_back() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let facade =
+        facade_over(repo.clone()).with_creation_lifecycle(Arc::new(FailingCreateLifecycle));
+
+    let error = facade
+        .create_automation(
+            caller(),
+            once_create_request("2099-06-25T01:00:00+08:00", "Asia/Shanghai"),
+        )
+        .await
+        .expect_err("pairing failure returned");
+
+    assert_eq!(error.status_code, 503);
+    assert!(error.retryable);
+    assert!(
+        repo.list_triggers(caller().tenant_id)
+            .await
+            .expect("list triggers")
+            .is_empty()
+    );
 }
 
 #[tokio::test]
