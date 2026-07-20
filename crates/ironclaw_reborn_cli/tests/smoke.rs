@@ -357,7 +357,7 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
     );
     assert!(
         cli_manifest.contains("[package.metadata.dist]\ndist = false"),
-        "#6160 must not opt Reborn into cargo-dist before #6079 is resolved"
+        "#6160 must not opt Reborn into cargo-dist before its packaging contract is aligned"
     );
 }
 

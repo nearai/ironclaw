@@ -99,8 +99,8 @@ Reborn publisher validates the exact seven-artifact allowlist, restores the
 binary mode, and creates target-qualified `ironclaw-<target>.tar.gz` archives
 with per-archive and aggregate SHA-256 files. Those archives become permanent
 GitHub Release assets. They are direct binary archives, not cargo-dist
-installers; `ironclaw_reborn_cli` remains `dist = false` while #6079 owns the
-remaining package-version and installer contract.
+installers; `ironclaw_reborn_cli` remains `dist = false` until its package
+version and installer contracts are aligned.
 
 ## Deep tier (nightly)
 

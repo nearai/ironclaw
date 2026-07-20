@@ -668,9 +668,10 @@ images are published. The independent manual and hourly entry points in
 
 Current `dist plan --output-format=json` with `crates/ironclaw_reborn_cli` marked `dist = false` emits only the root legacy package artifacts (`ironclaw` package, `ironclaw-legacy` executable). Removing `dist = false` alone is not enough to ship the canonical Reborn `ironclaw` executable through cargo-dist because that plan is shaped around the root `ironclaw` package tag. The direct archives above do not resolve the remaining crate-version/tag alignment or cargo-dist WiX/installer contract; in particular, the CLI package version is not yet asserted to equal the `ironclaw-v*` tag.
 
-Follow-up issue: #6079 tracks the remaining Reborn version and installer packaging work.
+The remaining Reborn version and installer packaging work is outside this
+temporary release path.
 
-Until #6079 is resolved, keep:
+Until those contracts are aligned, keep:
 
 ```toml
 [package.metadata.dist]

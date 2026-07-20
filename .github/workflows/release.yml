@@ -48,8 +48,8 @@ on:
 
 jobs:
   # Compile the shipping Reborn binary on every supported release target.
-  # This is intentionally separate from cargo-dist until #6079 resolves the
-  # Reborn package/tag/installer contract.
+  # This is intentionally separate from cargo-dist while the Reborn
+  # package/tag/installer contract remains unsettled.
   reborn-binary-compile:
     name: Reborn binary compile
     uses: ./.github/workflows/reborn-release-compile.yml
@@ -306,7 +306,7 @@ jobs:
             echo
             echo "Each target-qualified archive contains the compiled \`ironclaw\` binary that passed the release matrix's native CLI smoke checks. The release also includes per-archive SHA-256 files and an aggregate \`sha256.sum\`."
             echo
-            echo "Legacy cargo-dist installers, WASM extensions, registry updates, announcements, and Docker images are not published by this workflow. Tag/package version alignment and installer packaging remain tracked by #6079."
+            echo "Legacy cargo-dist installers, WASM extensions, registry updates, announcements, and Docker images are not published by this workflow. Tag/package version alignment and installer packaging are outside this workflow's scope."
           } > "$notes_file"
 
           release_args=(

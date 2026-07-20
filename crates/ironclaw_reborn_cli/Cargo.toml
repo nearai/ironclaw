@@ -13,8 +13,8 @@ publish = false
 [package.metadata.ironclaw]
 layer = "app"
 
-# Keep disabled until #6079 resolves cargo-dist tag/versioning + Windows WiX
-# packaging for the standalone Reborn binary.
+# Keep disabled until cargo-dist tag/versioning and Windows WiX packaging are
+# aligned for the standalone Reborn binary.
 [package.metadata.dist]
 dist = false
 
