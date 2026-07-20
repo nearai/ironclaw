@@ -5,23 +5,61 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+use std::sync::LazyLock;
+
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::*;
 use ironclaw_capabilities::CapabilityHost;
 use ironclaw_extensions::*;
+use ironclaw_host_api::runtime_policy::{
+    ApprovalPolicy, AuditMode, DeploymentMode, FilesystemBackendKind, NetworkMode,
+    ProcessBackendKind, RuntimeProfile, SecretMode,
+};
 use ironclaw_host_api::*;
-use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+use ironclaw_trust::{
+    AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustError, TrustPolicy,
+    TrustPolicyInput, TrustProvenance,
+};
 use serde_json::json;
+
+/// Trust policy double supplying the kernel's in-fold `evaluate_trust`
+/// (§5.3.2/§9). It always returns the fixed `user_trusted` [`trust_decision`],
+/// so kernel trust-eval succeeds for the test packages and existing test
+/// outcomes are unchanged (the authorizer doubles ignore the decision anyway).
+struct StaticTrustPolicy;
+
+impl TrustPolicy for StaticTrustPolicy {
+    fn evaluate(&self, _input: &TrustPolicyInput) -> Result<TrustDecision, TrustError> {
+        Ok(trust_decision())
+    }
+}
+
+static DEFAULT_TRUST_POLICY: LazyLock<StaticTrustPolicy> = LazyLock::new(|| StaticTrustPolicy);
+
+/// Permissive runtime policy so the in-fold planner (`plan_capability`) never
+/// denies the test capabilities. Field shape mirrors
+/// `ironclaw_runtime_policy::planner` tests.
+static DEFAULT_RUNTIME_POLICY: LazyLock<EffectiveRuntimePolicy> =
+    LazyLock::new(|| EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::LocalDev,
+        resolved_profile: RuntimeProfile::LocalDev,
+        filesystem_backend: FilesystemBackendKind::HostWorkspace,
+        process_backend: ProcessBackendKind::LocalHost,
+        network_mode: NetworkMode::DirectLogged,
+        secret_mode: SecretMode::ScrubbedEnv,
+        approval_policy: ApprovalPolicy::AskDestructive,
+        audit_mode: AuditMode::LocalMinimal,
+    });
 
 /// Central constructor for `CapabilityHost` in tests.
 ///
 /// Every test builds its host through this helper instead of calling
 /// `CapabilityHost::new` inline, so a change to the kernel's construction
 /// signature (e.g. the §5.3.2 milestone adding the trust-policy / runtime-policy
-/// / policy-facts inputs) touches this one place rather than ~130 call sites.
-/// It currently forwards verbatim; the policy-input defaults are attached here
-/// as those inputs land.
+/// inputs) touches this one place rather than ~130 call sites. The trust-policy
+/// and runtime-policy defaults are supplied here as `&'static` permissive values.
 pub fn capability_host<'a, D>(
     registry: &'a ExtensionRegistry,
     dispatcher: &'a D,
@@ -30,7 +68,55 @@ pub fn capability_host<'a, D>(
 where
     D: CapabilityDispatcher + ?Sized,
 {
-    CapabilityHost::new(registry, dispatcher, authorizer)
+    CapabilityHost::new(
+        registry,
+        dispatcher,
+        authorizer,
+        &*DEFAULT_TRUST_POLICY,
+        &DEFAULT_RUNTIME_POLICY,
+    )
+}
+
+/// Trust policy double returning a caller-chosen fixed decision, for tests that
+/// exercise the kernel's in-fold trust ceiling (§5.3.2/§9) — e.g. a decision
+/// whose authority ceiling omits an effect, so a trust-aware authorizer denies.
+pub struct FixedTrustPolicy {
+    decision: TrustDecision,
+}
+
+impl FixedTrustPolicy {
+    pub fn with_effects(allowed_effects: Vec<EffectKind>) -> Self {
+        Self {
+            decision: trust_decision_with_effects(allowed_effects),
+        }
+    }
+}
+
+impl TrustPolicy for FixedTrustPolicy {
+    fn evaluate(&self, _input: &TrustPolicyInput) -> Result<TrustDecision, TrustError> {
+        Ok(self.decision.clone())
+    }
+}
+
+/// `capability_host` variant that injects a caller-supplied trust policy (the
+/// runtime policy stays the permissive default). Use only when a test needs a
+/// non-default kernel trust ceiling; otherwise use [`capability_host`].
+pub fn capability_host_with_trust_policy<'a, D>(
+    registry: &'a ExtensionRegistry,
+    dispatcher: &'a D,
+    authorizer: &'a dyn TrustAwareCapabilityDispatchAuthorizer,
+    trust_policy: &'a dyn TrustPolicy,
+) -> CapabilityHost<'a, D>
+where
+    D: CapabilityDispatcher + ?Sized,
+{
+    CapabilityHost::new(
+        registry,
+        dispatcher,
+        authorizer,
+        trust_policy,
+        &DEFAULT_RUNTIME_POLICY,
+    )
 }
 
 #[derive(Default)]

@@ -84,7 +84,11 @@ fn trust_policy_input_for_local_manifest(
     package: &ExtensionPackage,
 ) -> Result<TrustPolicyInput, TrustEvaluationError> {
     package
-        .trust_policy_input(local_manifest_source(package), package.manifest_digest(), None)
+        .trust_policy_input(
+            local_manifest_source(package),
+            package.manifest_digest(),
+            None,
+        )
         .map_err(|_| TrustEvaluationError::TrustInput)
 }
 

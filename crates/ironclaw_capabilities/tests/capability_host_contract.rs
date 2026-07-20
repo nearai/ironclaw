@@ -20,7 +20,6 @@ async fn capability_host_denies_missing_grant_before_dispatch() {
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "blocked"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -40,7 +39,13 @@ async fn capability_host_denies_dispatch_when_trust_ceiling_omits_capability_eff
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
     let authorizer = GrantAuthorizer::new();
-    let host = capability_host(&registry, &dispatcher, &authorizer);
+    // The kernel now computes trust in-fold (§5.3.2/§9); inject a trust policy
+    // whose authority ceiling omits the capability's effect so the trust-aware
+    // authorizer denies on the trust ceiling (previously a caller-stamped
+    // empty-effects `trust_decision` drove this).
+    let trust_policy = FixedTrustPolicy::with_effects(Vec::new());
+    let host =
+        capability_host_with_trust_policy(&registry, &dispatcher, &authorizer, &trust_policy);
     let context = execution_context(CapabilitySet {
         grants: vec![dispatch_grant()],
     });
@@ -51,7 +56,6 @@ async fn capability_host_denies_dispatch_when_trust_ceiling_omits_capability_eff
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "blocked by trust"}),
-            trust_decision: trust_decision_with_effects(Vec::new()),
         })
         .await
         .unwrap_err();
@@ -83,7 +87,6 @@ async fn capability_host_authorized_dispatch_uses_neutral_dispatch_port() {
             capability_id: capability_id(),
             estimate: ResourceEstimate::default().set_output_bytes(4096),
             input: json!({"message": "authorized"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap();
@@ -110,7 +113,6 @@ async fn capability_host_returns_approval_store_missing_when_approval_cannot_be_
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "needs approval"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -136,7 +138,6 @@ async fn capability_host_fails_closed_on_unsupported_obligations_before_dispatch
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "must not dispatch"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();

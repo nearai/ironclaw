@@ -42,7 +42,6 @@ async fn capability_host_invokes_through_runtime_dispatcher_and_completes_run() 
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap();
@@ -106,7 +105,6 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -135,7 +133,6 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap();
@@ -175,7 +172,6 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
             capability_id: capability_id(),
             estimate: ResourceEstimate::default().set_output_bytes(1_024),
             input: json!({"message":"approved"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -211,7 +207,6 @@ async fn capability_host_rejects_resume_from_wrong_user_scope_without_dispatch_o
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -239,7 +234,6 @@ async fn capability_host_rejects_resume_from_wrong_user_scope_without_dispatch_o
             capability_id: capability_id(),
             estimate,
             input,
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -297,7 +291,6 @@ async fn capability_host_rejects_expired_approval_lease_before_dispatch() {
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -330,7 +323,6 @@ async fn capability_host_rejects_expired_approval_lease_before_dispatch() {
             capability_id: capability_id(),
             estimate,
             input,
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();

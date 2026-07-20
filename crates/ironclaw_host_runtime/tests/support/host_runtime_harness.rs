@@ -1020,10 +1020,20 @@ pub(crate) struct SpawnObligationFixture {
 
 impl SpawnObligationFixture {
     pub(crate) async fn spawn(&self) -> ironclaw_processes::ProcessRecord {
+        // Kernel now computes trust + runtime-policy in-fold (§5.3.2/§9); supply
+        // a trust policy that mirrors the former `trust_decision_with_dispatch_authority`
+        // ceiling and a runtime policy that permits the script process backend.
+        let trust_policy = local_manifest_trust_policy(
+            "script",
+            vec![EffectKind::DispatchCapability, EffectKind::Network],
+        );
+        let runtime_policy = local_dev_runtime_policy();
         let host = CapabilityHost::new(
             self.registry.as_ref(),
             self.dispatcher.as_ref(),
             self.authorizer.as_ref(),
+            &trust_policy,
+            &runtime_policy,
         )
         .with_obligation_handler(self.handler.as_ref())
         .with_process_manager(self.process_manager.as_ref());
@@ -1033,7 +1043,6 @@ impl SpawnObligationFixture {
             capability_id: script_capability_id(),
             estimate: self.estimate.clone(),
             input: json!({"message": "background"}),
-            trust_decision: trust_decision_with_dispatch_authority(),
         })
         .await
         .unwrap()

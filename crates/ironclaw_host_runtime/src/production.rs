@@ -590,7 +590,6 @@ impl HostRuntime for DefaultHostRuntime {
             capability_id: capability_id.clone(),
             estimate,
             input,
-            trust_decision,
         };
 
         let dispatch_started_at = live_latency_started_at();
@@ -730,7 +729,6 @@ impl HostRuntime for DefaultHostRuntime {
             capability_id: capability_id.clone(),
             estimate,
             input,
-            trust_decision,
         };
 
         match host.spawn_json(spawn).await {
@@ -778,28 +776,31 @@ impl HostRuntime for DefaultHostRuntime {
             );
         }
 
-        let trust_decision = match self.open_pre_authorization(&mut context, &capability_id) {
-            Ok(trust_decision) => trust_decision,
-            Err(
-                PreAuthorizationRejected::RuntimePolicy {
-                    outcome,
-                    error_kind,
-                }
-                | PreAuthorizationRejected::Trust {
-                    outcome,
-                    error_kind,
-                },
-            ) => {
-                self.fail_matching_blocked_resume_on_preflight_error(
-                    &context,
-                    &capability_id,
-                    approval_request_id,
-                    error_kind,
-                )
-                .await;
-                return Ok(*outcome);
+        // Still runs `open_pre_authorization` for its context.trust stamp and
+        // fail-closed preflight (redundant with the kernel's in-fold trust +
+        // planning now; cleaned up in a later slice). The returned
+        // `TrustDecision` is no longer carried on the request — the kernel
+        // recomputes it — so only the rejection is consumed here.
+        if let Err(
+            PreAuthorizationRejected::RuntimePolicy {
+                outcome,
+                error_kind,
             }
-        };
+            | PreAuthorizationRejected::Trust {
+                outcome,
+                error_kind,
+            },
+        ) = self.open_pre_authorization(&mut context, &capability_id)
+        {
+            self.fail_matching_blocked_resume_on_preflight_error(
+                &context,
+                &capability_id,
+                approval_request_id,
+                error_kind,
+            )
+            .await;
+            return Ok(*outcome);
+        }
 
         let registry = self.registry.snapshot();
         let host = self.capability_host(&registry);
@@ -809,7 +810,6 @@ impl HostRuntime for DefaultHostRuntime {
             capability_id: capability_id.clone(),
             estimate,
             input,
-            trust_decision,
         };
 
         match host.resume_json(resume).await {
@@ -922,7 +922,6 @@ impl HostRuntime for DefaultHostRuntime {
             capability_id: capability_id.clone(),
             estimate,
             input,
-            trust_decision,
             approval_request_id,
         };
 
@@ -1038,7 +1037,6 @@ impl HostRuntime for DefaultHostRuntime {
             capability_id: capability_id.clone(),
             estimate,
             input,
-            trust_decision,
         };
 
         match host.resume_spawn_json(resume).await {
@@ -1257,8 +1255,13 @@ impl DefaultHostRuntime {
         &'a self,
         registry: &'a ExtensionRegistry,
     ) -> CapabilityHost<'a, dyn CapabilityDispatcher> {
-        let mut host =
-            CapabilityHost::new(registry, self.dispatcher.as_ref(), self.authorizer.as_ref());
+        let mut host = CapabilityHost::new(
+            registry,
+            self.dispatcher.as_ref(),
+            self.authorizer.as_ref(),
+            self.trust_policy.as_ref(),
+            &self.runtime_policy,
+        );
         if let Some(run_state_approval_store) = &self.run_state_approval_store {
             host = host.with_run_state_approval_store(run_state_approval_store.as_ref());
         } else {
@@ -1817,9 +1820,9 @@ impl RuntimePolicyEvaluationError {
             Self::Denied(PlannerError::NetworkRequiredButNetworkModeIsDeny { .. }) => {
                 "network_denied"
             }
-            Self::Denied(PlannerError::SecretAccessRequiredButSecretModeIsDeny {
-                ..
-            }) => "secret_denied",
+            Self::Denied(PlannerError::SecretAccessRequiredButSecretModeIsDeny { .. }) => {
+                "secret_denied"
+            }
         }
     }
 

@@ -30,7 +30,6 @@ async fn capability_host_uses_obligation_handler_before_dispatch() {
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "handled"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap();
@@ -61,7 +60,6 @@ async fn capability_host_still_fails_closed_when_handler_rejects_obligations() {
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "must not dispatch"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -115,7 +113,6 @@ async fn capability_host_passes_prepared_effects_to_dispatch() {
         capability_id: capability_id(),
         estimate: estimate.clone(),
         input: json!({"message": "prepared effects"}),
-        trust_decision: trust_decision(),
     })
     .await
     .unwrap();
@@ -148,7 +145,6 @@ async fn capability_host_completes_post_dispatch_obligations_before_returning() 
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "post dispatch"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap();
@@ -185,7 +181,6 @@ async fn capability_host_aborts_staged_obligations_when_completion_fails() {
             capability_id: capability_id(),
             estimate,
             input: json!({"message": "completion fails"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -231,7 +226,6 @@ async fn capability_host_passes_prepared_mounts_to_process_start() {
         capability_id: capability_id(),
         estimate: ResourceEstimate::default(),
         input: json!({"message": "prepared mount"}),
-        trust_decision: trust_decision(),
     })
     .await
     .unwrap();
@@ -269,7 +263,6 @@ async fn capability_host_aborts_prepared_obligations_when_process_start_fails() 
             capability_id: capability_id(),
             estimate,
             input: json!({"message": "spawn fails"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -299,7 +292,6 @@ async fn capability_host_rejects_post_output_obligations_for_spawn_before_handle
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "must not spawn"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();

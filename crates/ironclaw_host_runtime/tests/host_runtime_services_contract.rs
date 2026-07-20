@@ -5881,10 +5881,21 @@ async fn spawned_obligation_lifecycle_abort_cleans_up_when_process_start_fails()
     )
     .await;
     let failing_manager = FailingSpawnManager;
+    // Kernel now computes trust + runtime-policy in-fold (§5.3.2/§9); supply a
+    // trust policy mirroring the former dispatch-authority ceiling and a runtime
+    // policy that permits the script process backend, so the fold reaches the
+    // (failing) process spawn.
+    let trust_policy = local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability, EffectKind::Network],
+    );
+    let runtime_policy = local_dev_runtime_policy();
     let host = CapabilityHost::new(
         fixture.registry.as_ref(),
         fixture.dispatcher.as_ref(),
         fixture.authorizer.as_ref(),
+        &trust_policy,
+        &runtime_policy,
     )
     .with_obligation_handler(fixture.handler.as_ref())
     .with_process_manager(&failing_manager);
@@ -5895,7 +5906,6 @@ async fn spawned_obligation_lifecycle_abort_cleans_up_when_process_start_fails()
             capability_id: script_capability_id(),
             estimate: fixture.estimate.clone(),
             input: json!({"message": "spawn fails"}),
-            trust_decision: trust_decision_with_dispatch_authority(),
         })
         .await
         .unwrap_err();

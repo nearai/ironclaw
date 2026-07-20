@@ -7,18 +7,21 @@ use ironclaw_host_api::{
     ActivityId, Actor, AuthorizeResult, Authorized, Blocked, CapabilityAuthorizer,
     CapabilityDescriptor, CapabilityDispatchRequest, CapabilityDispatchResult,
     CapabilityDispatcher, CapabilityGrantId, CapabilityId, Decision, DenyReason, DenyRef,
-    DispatchError, ExecutionContext, GateRef, GateWaypoint, Invocation, InvocationFingerprint,
-    InvocationId, InvocationOrigin, Obligation, ProcessId, ProductKind, ResourceEstimate,
-    ResourceReservation, ResourceReservationId, ResourceScope, RuntimeLane,
+    DispatchError, EffectiveRuntimePolicy, ExecutionContext, GateRef, GateWaypoint, Invocation,
+    InvocationFingerprint, InvocationId, InvocationOrigin, Obligation, ProcessId, ProductKind,
+    ResourceEstimate, ResourceReservation, ResourceReservationId, ResourceScope, RuntimeLane,
 };
 use ironclaw_processes::{ProcessManager, ProcessStart};
 use ironclaw_run_state::{
     ApprovalRequestStore, ApprovalStatus, RunStart, RunStateApprovalStore, RunStateError,
     RunStateStore, RunStatus,
 };
+use ironclaw_runtime_policy::{PlannerError, plan_capability};
 use ironclaw_safety::shell_command_display_text;
-use ironclaw_trust::TrustDecision;
+use ironclaw_trust::{TrustDecision, TrustPolicy};
 use tracing::{debug, warn};
+
+use crate::trust::{TrustEvaluationError, evaluate_invocation_trust};
 
 use crate::helpers::{
     CapabilityActionKind, CapabilityRunStateTransition, apply_run_state_transition_if_configured,
@@ -45,6 +48,12 @@ where
     registry: &'a ExtensionRegistry,
     dispatcher: &'a D,
     authorizer: &'a dyn TrustAwareCapabilityDispatchAuthorizer,
+    /// Provider-trust classifier the kernel evaluates in-fold (§5.3.2/§9), so
+    /// trust is computed here rather than received as a caller-stamped field.
+    trust_policy: &'a dyn TrustPolicy,
+    /// Resolved runtime policy the in-fold planner (`plan_capability`) enforces
+    /// before dispatch — the relocation of host_runtime's `enforce_runtime_policy`.
+    runtime_policy: &'a EffectiveRuntimePolicy,
     run_state: Option<&'a dyn RunStateStore>,
     approval_requests: Option<&'a dyn ApprovalRequestStore>,
     run_state_approval_store: Option<&'a dyn RunStateApprovalStore>,
@@ -101,7 +110,6 @@ struct ResumedDispatchParams<'r> {
     capability_id: CapabilityId,
     estimate: ResourceEstimate,
     input: serde_json::Value,
-    trust_decision: TrustDecision,
     authorized_context: ExecutionContext,
     descriptor: &'r CapabilityDescriptor,
     /// Approval-lease state for this resume.  See [`ResumedLeaseState`].
@@ -168,11 +176,15 @@ where
         registry: &'a ExtensionRegistry,
         dispatcher: &'a D,
         authorizer: &'a dyn TrustAwareCapabilityDispatchAuthorizer,
+        trust_policy: &'a dyn TrustPolicy,
+        runtime_policy: &'a EffectiveRuntimePolicy,
     ) -> Self {
         Self {
             registry,
             dispatcher,
             authorizer,
+            trust_policy,
+            runtime_policy,
             run_state: None,
             approval_requests: None,
             run_state_approval_store: None,
@@ -423,6 +435,33 @@ where
     /// persist-and-rollback, obligation `prepare`, and each early error return —
     /// stays here, verbatim; `invoke_json` only maps the returned
     /// [`AuthorizeFold`] back to today's outcome.
+    /// Compute provider trust for `capability_id` (§5.3.2/§9): the kernel now
+    /// classifies trust itself instead of trusting a caller-stamped field.
+    fn evaluate_trust(
+        &self,
+        capability_id: &CapabilityId,
+    ) -> Result<TrustDecision, CapabilityInvocationError> {
+        evaluate_invocation_trust(self.registry, self.trust_policy, capability_id)
+            .map_err(|error| trust_error_to_invocation_error(capability_id, error))
+    }
+
+    /// Enforce runtime policy for `descriptor` (relocated from host_runtime's
+    /// `enforce_runtime_policy`). A planner refusal is a model-visible
+    /// `AuthorizationDenied` (-> `Authorization` failure kind), matching today's
+    /// `runtime_policy_failure`.
+    fn enforce_runtime_policy(
+        &self,
+        descriptor: &CapabilityDescriptor,
+    ) -> Result<(), CapabilityInvocationError> {
+        match plan_capability(descriptor, self.runtime_policy) {
+            Ok(_plan) => Ok(()),
+            Err(error) => Err(runtime_policy_error_to_invocation_error(
+                &descriptor.id,
+                error,
+            )),
+        }
+    }
+
     async fn authorize(
         &self,
         request: &CapabilityInvocationRequest,
@@ -474,13 +513,38 @@ where
             });
         };
 
+        // Kernel-computed trust + in-fold runtime-policy planning (§5.3.2/§9),
+        // relocated from host_runtime's `open_pre_authorization`. The
+        // `context.trust` stamp reproduces what `open_pre_authorization` did
+        // before calling the authorizer.
+        let trust_decision = match self.evaluate_trust(&request.capability_id) {
+            Ok(d) => d,
+            Err(error) => {
+                apply_run_state_transition_if_configured(
+                    self.run_state,
+                    &scope,
+                    invocation_id,
+                    &error,
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.enforce_runtime_policy(descriptor) {
+            apply_run_state_transition_if_configured(self.run_state, &scope, invocation_id, &error)
+                .await;
+            return Err(error);
+        }
+        let mut authorize_context = request.context.clone();
+        authorize_context.trust = trust_decision.effective_trust.class();
+
         match self
             .authorizer
             .authorize_dispatch_with_trust(
-                &request.context,
+                &authorize_context,
                 descriptor,
                 &request.estimate,
-                &request.trust_decision,
+                &trust_decision,
             )
             .await
         {
@@ -495,7 +559,7 @@ where
                 let obligation_outcome = match self
                     .prepare_obligations(
                         CapabilityObligationPhase::Invoke,
-                        &request.context,
+                        &authorize_context,
                         &request.capability_id,
                         &request.estimate,
                         allowed_obligations.clone(),
@@ -522,7 +586,7 @@ where
                     }
                 };
                 let result = self.seal_authorization(
-                    &request.context,
+                    &authorize_context,
                     &request.capability_id,
                     &request.estimate,
                     &request.input,
@@ -993,7 +1057,6 @@ where
             capability_id,
             estimate: request.estimate,
             input: request.input,
-            trust_decision: request.trust_decision,
             authorized_context,
             descriptor,
             lease_state: ResumedLeaseState::PendingClaim(PendingClaimAfterAuth {
@@ -1321,7 +1384,6 @@ where
             capability_id,
             estimate: request.estimate,
             input: request.input,
-            trust_decision: request.trust_decision,
             authorized_context,
             descriptor,
             lease_state: match approval_lease_to_consume {
@@ -1495,13 +1557,40 @@ where
         let mut authorized_context = request.context.clone();
         authorized_context.grants.grants.push(lease.grant.clone());
 
+        // Kernel-computed trust + in-fold runtime-policy planning (§5.3.2/§9) on
+        // the spawn-resume path, mirroring host_runtime's pre-authorization.
+        let trust_decision = match self.evaluate_trust(&capability_id) {
+            Ok(d) => d,
+            Err(error) => {
+                fail_run_if_configured(
+                    Some(run_state),
+                    &scope,
+                    invocation_id,
+                    "AuthorizationDenied",
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.enforce_runtime_policy(descriptor) {
+            fail_run_if_configured(
+                Some(run_state),
+                &scope,
+                invocation_id,
+                "AuthorizationDenied",
+            )
+            .await;
+            return Err(error);
+        }
+        authorized_context.trust = trust_decision.effective_trust.class();
+
         let obligations = match self
             .authorizer
             .authorize_spawn_with_trust(
                 &authorized_context,
                 descriptor,
                 &request.estimate,
-                &request.trust_decision,
+                &trust_decision,
             )
             .await
         {
@@ -1849,13 +1938,36 @@ where
             });
         };
 
+        // Kernel-computed trust + in-fold runtime-policy planning (§5.3.2/§9),
+        // mirroring `authorize()` on the spawn path.
+        let trust_decision = match self.evaluate_trust(&request.capability_id) {
+            Ok(d) => d,
+            Err(error) => {
+                apply_run_state_transition_if_configured(
+                    self.run_state,
+                    &scope,
+                    invocation_id,
+                    &error,
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.enforce_runtime_policy(descriptor) {
+            apply_run_state_transition_if_configured(self.run_state, &scope, invocation_id, &error)
+                .await;
+            return Err(error);
+        }
+        let mut authorize_context = request.context.clone();
+        authorize_context.trust = trust_decision.effective_trust.class();
+
         match self
             .authorizer
             .authorize_spawn_with_trust(
-                &request.context,
+                &authorize_context,
                 descriptor,
                 &request.estimate,
-                &request.trust_decision,
+                &trust_decision,
             )
             .await
         {
@@ -1866,7 +1978,7 @@ where
                 let obligation_outcome = match self
                     .prepare_obligations(
                         CapabilityObligationPhase::Spawn,
-                        &request.context,
+                        &authorize_context,
                         &request.capability_id,
                         &request.estimate,
                         allowed_obligations.clone(),
@@ -1886,7 +1998,7 @@ where
                     }
                 };
                 let result = self.seal_authorization(
-                    &request.context,
+                    &authorize_context,
                     &request.capability_id,
                     &request.estimate,
                     &request.input,
@@ -2073,13 +2185,33 @@ where
         &self,
         params: &ResumedDispatchParams<'_>,
     ) -> Result<AuthorizeFold, CapabilityInvocationError> {
+        // Kernel-computed trust (§5.3.2/§9): trust is classified here from the
+        // resumed capability id rather than carried on the request. Runtime-policy
+        // planning is NOT re-run on resume (it ran at the original invoke/spawn);
+        // the `context.trust` stamp reproduces `open_pre_authorization`.
+        let trust_decision = match self.evaluate_trust(&params.capability_id) {
+            Ok(d) => d,
+            Err(error) => {
+                fail_run_if_configured(
+                    Some(params.run_state),
+                    &params.scope,
+                    params.invocation_id,
+                    "AuthorizationDenied",
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        let mut authorize_context = params.authorized_context.clone();
+        authorize_context.trust = trust_decision.effective_trust.class();
+
         match self
             .authorizer
             .authorize_dispatch_with_trust(
-                &params.authorized_context,
+                &authorize_context,
                 params.descriptor,
                 &params.estimate,
-                &params.trust_decision,
+                &trust_decision,
             )
             .await
         {
@@ -2199,7 +2331,6 @@ where
             capability_id,
             estimate,
             input,
-            trust_decision: _,
             authorized_context,
             descriptor: _,
             lease_state,
@@ -2531,6 +2662,44 @@ where
                 "obligation abort failed after downstream side-effect failure",
             );
         }
+    }
+}
+
+/// Map a kernel trust-classification failure to the model-visible invocation
+/// error, preserving today's outcome kinds: the "unknown capability" case →
+/// `UnknownCapability` (host `MissingRuntime`); every other variant →
+/// `AuthorizationDenied` (host `Authorization`).
+fn trust_error_to_invocation_error(
+    capability_id: &CapabilityId,
+    error: TrustEvaluationError,
+) -> CapabilityInvocationError {
+    debug!(
+        capability_id = %capability_id,
+        trust_error = error.message(),
+        "kernel trust classification refused to produce a decision"
+    );
+    if error.is_unknown_capability() {
+        CapabilityInvocationError::UnknownCapability {
+            capability: capability_id.clone(),
+        }
+    } else {
+        CapabilityInvocationError::AuthorizationDenied {
+            capability: capability_id.clone(),
+            reason: DenyReason::InternalInvariantViolation,
+        }
+    }
+}
+
+/// Map an in-fold runtime-policy planner refusal to the model-visible
+/// `AuthorizationDenied` (host `Authorization`), matching today's
+/// `runtime_policy_failure`.
+fn runtime_policy_error_to_invocation_error(
+    capability_id: &CapabilityId,
+    _error: PlannerError,
+) -> CapabilityInvocationError {
+    CapabilityInvocationError::AuthorizationDenied {
+        capability: capability_id.clone(),
+        reason: DenyReason::PolicyDenied,
     }
 }
 
@@ -2990,7 +3159,6 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
 
     fn allow_request() -> CapabilityInvocationRequest {
         use ironclaw_host_api::{CapabilitySet, MountView, RuntimeKind, TrustClass, UserId};
-        use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustProvenance};
         let mut context = ExecutionContext::local_default(
             UserId::new("user").unwrap(),
             ExtensionId::new("caller").unwrap(),
@@ -3007,7 +3175,21 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
             capability_id: CapabilityId::new("echo.say").unwrap(),
             estimate: ResourceEstimate::default(),
             input: serde_json::json!({"message": "hi"}),
-            trust_decision: TrustDecision {
+        }
+    }
+
+    /// Trust policy double for the in-fold `evaluate_trust` (§5.3.2/§9): always
+    /// classifies the echo package as `user_trusted` so the kernel trust-eval
+    /// succeeds and the `AllowAuthorizer` reaches the seal.
+    struct StaticTrustPolicy;
+
+    impl TrustPolicy for StaticTrustPolicy {
+        fn evaluate(
+            &self,
+            _input: &ironclaw_trust::TrustPolicyInput,
+        ) -> Result<TrustDecision, ironclaw_trust::TrustError> {
+            use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustProvenance};
+            Ok(TrustDecision {
                 effective_trust: EffectiveTrustClass::user_trusted(),
                 authority_ceiling: AuthorityCeiling {
                     allowed_effects: Vec::new(),
@@ -3015,7 +3197,28 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
                 },
                 provenance: TrustProvenance::Default,
                 evaluated_at: chrono::Utc::now(),
-            },
+            })
+        }
+    }
+
+    /// Permissive runtime policy so the in-fold planner never denies the echo
+    /// capability (echo declares only `dispatch_capability`, so no backend
+    /// constraint is even exercised).
+    fn permissive_runtime_policy() -> EffectiveRuntimePolicy {
+        use ironclaw_host_api::runtime_policy::{
+            ApprovalPolicy, AuditMode, DeploymentMode, FilesystemBackendKind, NetworkMode,
+            ProcessBackendKind, RuntimeProfile, SecretMode,
+        };
+        EffectiveRuntimePolicy {
+            deployment: DeploymentMode::LocalSingleUser,
+            requested_profile: RuntimeProfile::LocalDev,
+            resolved_profile: RuntimeProfile::LocalDev,
+            filesystem_backend: FilesystemBackendKind::HostWorkspace,
+            process_backend: ProcessBackendKind::LocalHost,
+            network_mode: NetworkMode::DirectLogged,
+            secret_mode: SecretMode::ScrubbedEnv,
+            approval_policy: ApprovalPolicy::AskDestructive,
+            audit_mode: AuditMode::LocalMinimal,
         }
     }
 
@@ -3029,7 +3232,15 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
         let registry = echo_registry();
         let dispatcher = UnusedDispatcher;
         let authorizer = AllowAuthorizer;
-        let host = CapabilityHost::new(&registry, &dispatcher, &authorizer);
+        let trust_policy = StaticTrustPolicy;
+        let runtime_policy = permissive_runtime_policy();
+        let host = CapabilityHost::new(
+            &registry,
+            &dispatcher,
+            &authorizer,
+            &trust_policy,
+            &runtime_policy,
+        );
 
         let request = allow_request();
         let fold = host.authorize(&request).await.unwrap();
