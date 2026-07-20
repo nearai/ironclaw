@@ -27,6 +27,35 @@ function normalizeEffectiveSource(source) {
   return ["default", "global", "override"].includes(source) ? source : "default";
 }
 
+function persistedToolFromConfigEntry(entry, expectedName, requestedState) {
+  const value = entry?.value;
+  const hasPersistedShape =
+    entry?.key === `${TOOL_PREFIX}${expectedName}` &&
+    value != null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    value.name === expectedName &&
+    TOOL_PERMISSION_STATES.has(value.state) &&
+    TOOL_PERMISSION_STATES.has(value.default_state) &&
+    typeof value.locked === "boolean" &&
+    ["default", "global", "override", "locked"].includes(value.effective_source) &&
+    entry.source === value.effective_source &&
+    typeof entry.mutable === "boolean";
+  if (!hasPersistedShape) {
+    throw new Error("Permission save response is missing a valid persisted tool entry");
+  }
+
+  const tool = toolFromConfigEntry(entry);
+  const confirmsRequestedState =
+    requestedState === "default"
+      ? value.effective_source !== "override"
+      : tool?.state === requestedState;
+  if (!tool || !confirmsRequestedState) {
+    throw new Error("Permission save response did not confirm the requested tool state");
+  }
+  return tool;
+}
+
 export function toolFromConfigEntry(entry) {
   if (!entry?.key?.startsWith(TOOL_PREFIX)) return null;
   const value = entry.value || {};
@@ -207,7 +236,8 @@ export async function updateToolPermission(name, state) {
       body: JSON.stringify({ state: normalized }),
       signal: controller.signal,
     });
-    return { success: true, tool: toolFromConfigEntry(data.entry), entry: data.entry };
+    const tool = persistedToolFromConfigEntry(data?.entry, name, normalized);
+    return { success: true, tool, entry: data.entry };
   } finally {
     clearTimeout(timeoutId);
   }
