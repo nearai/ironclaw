@@ -17,8 +17,8 @@ For local source runs:
 
 ```bash
 cargo run -q \
-  -p ironclaw_reborn_cli \
-  --bin ironclaw-reborn \
+  -p ironclaw \
+  --bin ironclaw \
   -- serve
 ```
 
@@ -26,8 +26,8 @@ For a local source build:
 
 ```bash
 cargo build \
-  -p ironclaw_reborn_cli \
-  --bin ironclaw-reborn
+  -p ironclaw \
+  --bin ironclaw
 ```
 
 Slack is disabled unless the mounted or seeded Reborn config enables it.
@@ -235,8 +235,8 @@ Start the service:
 
 ```bash
 cargo run -q \
-  -p ironclaw_reborn_cli \
-  --bin ironclaw-reborn \
+  -p ironclaw \
+  --bin ironclaw \
   -- serve --host 127.0.0.1 --port 3000
 ```
 

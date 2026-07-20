@@ -226,7 +226,7 @@ jobs:
       # surfaces are both unconditional, so one binary covers every scenario
       # selected below.
       - name: Build instrumented ironclaw-reborn
-        run: cargo build -p ironclaw_reborn_cli --bin ironclaw
+        run: cargo build -p ironclaw --bin ironclaw
 
       - name: Mark OpenAI-compatible binary build
         run: touch target/debug/.ironclaw-reborn-openai-compat.stamp

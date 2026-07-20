@@ -39,11 +39,11 @@
 
 ## Quick Start
 
-Install the latest IronClaw release on macOS, Linux, or Windows/WSL:
+Install the Reborn `1.0.0-rc.1` release on macOS, Linux, or Windows/WSL:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-installer.sh | sh
+  https://github.com/nearai/ironclaw/releases/download/ironclaw-v1.0.0-rc.1/ironclaw-installer.sh | sh
 ```
 
 Then run the guided setup:
@@ -114,7 +114,7 @@ pre-built binaries and installers.
 <details>
   <summary>Install via Windows Installer (Windows)</summary>
 
-Download the [Windows Installer](https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-x86_64-pc-windows-msvc.msi) and run it.
+Download the [Windows Installer](https://github.com/nearai/ironclaw/releases/download/ironclaw-v1.0.0-rc.1/ironclaw-x86_64-pc-windows-msvc.msi) and run it.
 
 </details>
 
@@ -122,7 +122,7 @@ Download the [Windows Installer](https://github.com/nearai/ironclaw/releases/lat
   <summary>Install via PowerShell script (Windows)</summary>
 
 ```powershell
-irm https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-installer.ps1 | iex
+irm https://github.com/nearai/ironclaw/releases/download/ironclaw-v1.0.0-rc.1/ironclaw-installer.ps1 | iex
 ```
 
 </details>
@@ -132,16 +132,7 @@ irm https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-install
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-installer.sh | sh
-```
-
-</details>
-
-<details>
-  <summary>Install via Homebrew (macOS/Linux)</summary>
-
-```sh
-brew install ironclaw
+  https://github.com/nearai/ironclaw/releases/download/ironclaw-v1.0.0-rc.1/ironclaw-installer.sh | sh
 ```
 
 </details>
@@ -155,7 +146,7 @@ Source builds require Rust 1.96+ and Node.js 22+ with Corepack/pnpm.
 git clone https://github.com/nearai/ironclaw.git
 cd ironclaw
 corepack enable pnpm
-cargo install --locked --path crates/ironclaw_reborn_cli --features full
+cargo install --locked --path crates/ironclaw_reborn_cli
 ```
 
 </details>

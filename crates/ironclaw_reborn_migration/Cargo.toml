@@ -50,7 +50,7 @@ postgres = [
 
 [dependencies]
 # ── v1 / engine-v2 read side (the legacy monolith) ──────────────────────────
-ironclaw = { path = "../..", default-features = false, optional = true }
+ironclaw = { package = "ironclaw_legacy", path = "../..", default-features = false, optional = true }
 
 # ── Reborn write side (path deps; versions intentionally unpinned) ───────────
 ironclaw_common = { path = "../ironclaw_common" }

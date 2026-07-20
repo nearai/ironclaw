@@ -386,7 +386,7 @@ def build_reborn_binary() -> Path:
     build_env = os.environ.copy()
     build_env.setdefault("CARGO_PROFILE_DEV_DEBUG", "0")
     build_env.setdefault("CARGO_INCREMENTAL", "0")
-    command = ["cargo", "build", "-p", "ironclaw_reborn_cli"]
+    command = ["cargo", "build", "-p", "ironclaw"]
     if features:
         command += ["--features", features]
     command += ["--bin", "ironclaw"]

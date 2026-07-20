@@ -33,7 +33,7 @@ COPY channels-src/ channels-src/
 COPY wit/ wit/
 COPY providers.json providers.json
 
-RUN cargo build --release --package ironclaw --no-default-features --features libsql --bin ironclaw-legacy
+RUN cargo build --release --package ironclaw_legacy --no-default-features --features libsql --bin ironclaw-legacy
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim

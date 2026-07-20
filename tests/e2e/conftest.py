@@ -397,7 +397,7 @@ def ironclaw_binary():
         subprocess.run(
             [
                 "cargo", "build",
-                "-p", "ironclaw",
+                "-p", "ironclaw_legacy",
                 "--bin", "ironclaw-legacy",
                 "--no-default-features",
                 "--features", "libsql",
@@ -429,7 +429,7 @@ def ironclaw_reborn_binary():
         subprocess.run(
             [
                 "cargo", "build",
-                "-p", "ironclaw_reborn_cli",
+                "-p", "ironclaw",
                 "--bin", "ironclaw",
             ],
             cwd=ROOT,
@@ -472,7 +472,7 @@ def ironclaw_reborn_openai_compat_binary():
         subprocess.run(
             [
                 "cargo", "build",
-                "-p", "ironclaw_reborn_cli",
+                "-p", "ironclaw",
                 "--bin", "ironclaw",
             ],
             cwd=ROOT,
