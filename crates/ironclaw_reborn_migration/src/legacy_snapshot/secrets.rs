@@ -60,7 +60,7 @@ impl SecretsCrypto {
                 "Encrypted value too short".to_string(),
             ));
         }
-        let derived_key = self.derive_key(salt);
+        let derived_key = self.derive_key(salt)?;
         let cipher = Aes256Gcm::new_from_slice(&derived_key)
             .map_err(|e| SecretError::DecryptionFailed(format!("Failed to create cipher: {e}")))?;
         let (nonce_bytes, ciphertext) = encrypted_value.split_at(NONCE_SIZE);
@@ -71,16 +71,13 @@ impl SecretsCrypto {
         DecryptedSecret::from_bytes(plaintext)
     }
 
-    fn derive_key(&self, salt: &[u8]) -> [u8; KEY_SIZE] {
+    fn derive_key(&self, salt: &[u8]) -> Result<[u8; KEY_SIZE], SecretError> {
         let master_bytes = self.master_key.expose_secret().as_bytes();
         let hk = Hkdf::<Sha256>::new(Some(salt), master_bytes);
         let mut derived = [0u8; KEY_SIZE];
-        // Same 32-byte output requested from HKDF-SHA256 as the original —
-        // expand() only fails when the requested length exceeds 255 * hash
-        // output size, which 32 never does.
         hk.expand(b"near-agent-secrets-v1", &mut derived)
-            .expect("HKDF-SHA256 expand to 32 bytes never fails");
-        derived
+            .map_err(|_| SecretError::DecryptionFailed("HKDF expansion failed".to_string()))?;
+        Ok(derived)
     }
 }
 

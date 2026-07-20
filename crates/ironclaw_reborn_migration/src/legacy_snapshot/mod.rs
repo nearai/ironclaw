@@ -14,6 +14,8 @@ pub(crate) mod connect;
 pub(crate) mod error;
 #[cfg(feature = "libsql")]
 pub(crate) mod libsql_helpers;
+#[cfg(all(test, feature = "postgres"))]
+mod postgres_tests;
 pub(crate) mod queries;
 pub(crate) mod secrets;
 pub(crate) mod types;

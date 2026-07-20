@@ -5089,22 +5089,19 @@ dependencies = [
  "ironclaw_threads",
  "ironclaw_triggers",
  "libsql",
- "rustls 0.23.41",
- "rustls-native-certs 0.8.4",
  "secrecy",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
+ "testcontainers-modules",
  "thiserror 2.0.18",
  "tokio",
  "tokio-postgres",
- "tokio-postgres-rustls",
  "tracing",
  "tracing-subscriber",
  "ulid",
  "uuid",
- "webpki-roots 1.0.7",
 ]
 
 [[package]]

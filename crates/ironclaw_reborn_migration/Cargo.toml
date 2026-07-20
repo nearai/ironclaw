@@ -34,10 +34,6 @@ libsql = ["dep:libsql", "ironclaw_reborn_composition/libsql"]
 postgres = [
     "dep:deadpool-postgres",
     "dep:tokio-postgres",
-    "dep:tokio-postgres-rustls",
-    "dep:rustls",
-    "dep:rustls-native-certs",
-    "dep:webpki-roots",
     "ironclaw_reborn_composition/postgres",
 ]
 
@@ -85,13 +81,13 @@ sha2 = "0.11"
 deadpool-postgres = { version = "0.14", optional = true }
 libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 tokio-postgres = { version = "0.7", optional = true, features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"] }
-tokio-postgres-rustls = { version = "0.13", optional = true }
-rustls = { version = "0.23", optional = true, default-features = false, features = ["std", "ring", "tls12"] }
-rustls-native-certs = { version = "0.8", optional = true }
-webpki-roots = { version = "1.0", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+# Dev-only: `legacy_snapshot::postgres_tests` (Postgres coverage for the
+# frozen v1 reader) — skips gracefully when Docker is unavailable, same
+# pattern as `ironclaw_reborn_composition`/`ironclaw_triggers`.
+testcontainers-modules = { version = "0.12", features = ["postgres"] }
 # Dev-only: `tests/migration_roundtrip.rs` seeds its v1 fixture through the
 # real v1 write path (actual INSERT/migration code, not raw SQL) for fidelity —
 # the fixture must look exactly like what a real v1 install produces. This is

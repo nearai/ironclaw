@@ -13,8 +13,12 @@
 //! one-time cutover tool. Instead this reader requires the source database to
 //! already be at the schema version it was frozen against (realistic: the v1
 //! app was in normal use, applying its own migrations, right up until this
-//! tool runs) and [`ensure_schema_current`] fails loud with a specific
-//! missing-column error rather than silently reading a partial row.
+//! tool runs). [`ensure_schema_current`] checks this for `routines` — the
+//! table with the most migrations layered onto it, so the likeliest to go
+//! stale — and fails loud with a specific missing-column error there rather
+//! than silently reading a partial row; it is not a general guarantee across
+//! every table this reader touches (see [`super::queries`] and
+//! [`super::libsql_helpers`] for how the other tables degrade on drift).
 
 #[cfg(feature = "libsql")]
 use std::path::Path;
@@ -22,7 +26,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 #[cfg(feature = "postgres")]
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::SecretString;
 
 use super::error::LegacyError;
 use crate::options::SourceDb;
@@ -117,65 +121,26 @@ async fn open_libsql(path: &Path) -> Result<libsql::Database, LegacyError> {
         .map_err(|e| LegacyError::Connect(format!("failed to open libSQL database: {e}")))
 }
 
-/// Build a rustls-based TLS connector, frozen from `src/db/tls.rs`. Tries the
-/// platform's native certificate store first, falling back to bundled
-/// Mozilla roots (`webpki-roots`) when the system store yields none (minimal
-/// container images without `ca-certificates`). No certificate-verification
-/// override — this must stay at least as strict as the original.
-#[cfg(feature = "postgres")]
-fn make_rustls_connector() -> Result<tokio_postgres_rustls::MakeRustlsConnect, rustls::Error> {
-    let mut root_store = rustls::RootCertStore::empty();
-
-    let native = rustls_native_certs::load_native_certs();
-    for e in &native.errors {
-        tracing::warn!("error loading system root certs: {e}");
-    }
-    for cert in native.certs {
-        if let Err(e) = root_store.add(cert) {
-            tracing::warn!("skipping invalid system root cert: {e}");
-        }
-    }
-
-    if root_store.is_empty() {
-        tracing::info!("no system root certificates found, using bundled Mozilla roots");
-        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    }
-
-    let config = rustls::ClientConfig::builder_with_provider(
-        rustls::crypto::ring::default_provider().into(),
-    )
-    .with_safe_default_protocol_versions()?
-    .with_root_certificates(root_store)
-    .with_no_client_auth();
-    Ok(tokio_postgres_rustls::MakeRustlsConnect::new(config))
-}
-
-/// Open a Postgres pool. Frozen from `Store::new` + `src/db/tls::create_pool`
-/// — always uses a TLS-capable connector (mirroring the original's `Prefer`/
-/// `Require` path); this migration tool is an operator-run, short-lived
-/// process against a database an operator supplies, so there is no
-/// `DATABASE_SSLMODE=disable` local-dev case to preserve here the way the
-/// long-running `ironclaw` service has.
+/// Open a Postgres pool via the canonical Reborn helper
+/// ([`ironclaw_reborn_composition::open_reborn_postgres_pool_with_max_size`]),
+/// the same one [`crate::target::open_postgres_pool`] uses for the write
+/// side — so the source connection inherits the same fail-closed remote-TLS
+/// policy (reject `sslmode=disable` on any non-local host, upgrade `Prefer`
+/// to `Require`) without this crate hand-rolling a second TLS connector.
 #[cfg(feature = "postgres")]
 fn open_postgres(url: &SecretString) -> Result<deadpool_postgres::Pool, LegacyError> {
-    let mut cfg = deadpool_postgres::Config::new();
-    cfg.url = Some(url.expose_secret().to_string());
-    cfg.pool = Some(deadpool_postgres::PoolConfig {
-        max_size: 4,
-        ..Default::default()
-    });
-
-    let tls = make_rustls_connector().map_err(|e| LegacyError::Connect(e.to_string()))?;
-    cfg.create_pool(Some(deadpool_postgres::Runtime::Tokio1), tls)
+    ironclaw_reborn_composition::open_reborn_postgres_pool_with_max_size(url.clone(), 4)
         .map_err(|e| LegacyError::Connect(e.to_string()))
 }
 
-/// Table/column pairs this reader depends on that were added by later v1
-/// migrations (rather than present in the original schema) — a good canary
-/// for "this source database predates the schema this reader was frozen
-/// against". Only `routines` columns are checked: it is the table with the
-/// most migrations layered onto it (notify_*, dedup_window_secs, state), so a
-/// missing column there is the most likely sign of an out-of-date database.
+/// Columns this reader depends on that were added by later v1 migrations
+/// (rather than present in the original schema) — checked only for
+/// `routines`, the table with the most migrations layered onto it (notify_*,
+/// dedup_window_secs, state), so a missing column there is the most likely
+/// sign of an out-of-date database. This is not exhaustive: it is the one
+/// canary this reader checks, not a guarantee that every table/column this
+/// crate reads is present (`postgres_row_to_routine` in [`super::queries`]
+/// reads exactly these 24 columns by name, so keep the two lists in sync).
 /// The check is skipped entirely if `routines` itself doesn't exist — a
 /// minimal v1 install legitimately has no routines table, and that is a
 /// normal empty-result case elsewhere in this crate, not a schema mismatch.
