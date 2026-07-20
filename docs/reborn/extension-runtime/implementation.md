@@ -75,7 +75,7 @@ Not generic yet — the work:
 | `ironclaw_reborn_composition` | Assembly only: construct stores/ports/host/engine, mount routers, inject resolvers. `src/slack/**` deleted by P6; consumes the first-party package inventory as opaque bundles — no catalog, no extension names (P7) |
 | `ironclaw_first_party_extensions` | The package inventory: one module per package (`src/packages/<id>.rs`) owning that package's embeds, asset descriptors, digest, and bespoke copy, beside `assets/<id>/`; exports opaque bundles consumed by composition and the CLI |
 | `ironclaw_webui_v2` | Generic surface/config/connect UI from wire data; Slack components deleted |
-| `ironclaw_reborn_cli` | Assembles the native factory registry (the only generic-side crate allowed to link concrete extension crates); `serve_slack.rs` and Slack feature deleted |
+| `ironclaw` (`crates/ironclaw_reborn_cli`) | Assembles the native factory registry (the only generic-side crate allowed to link concrete extension crates); `serve_slack.rs` and Slack feature deleted |
 | `ironclaw_llm` | `CommunicationPresentationPolicy` input replaces concrete channel formatting |
 | `ironclaw_reborn_traces` | Generic extension/surface origin ids replace concrete variants |
 | `ironclaw_architecture` | New specificity scanner + dependency gates (section 12) |
@@ -84,7 +84,7 @@ Not generic yet — the work:
 **Deleted crates (2):** `ironclaw_slack_extension`, `ironclaw_telegram_extension` (folded into their extension crates).
 
 **Dependency rule (gated):** generic crates never depend on concrete extension
-crates. Only `ironclaw_reborn_cli` (assembly of the native factory registry)
+crates. Only the canonical `ironclaw` CLI package (assembly of the native factory registry)
 and tests may. Concrete crates depend on `ironclaw_host_api` /
 `ironclaw_product_adapters` contract types only — never on composition, the
 engine, or the router.
@@ -506,7 +506,7 @@ carries a removal note in `checklist.md`.
     allowlist with enforced shrinkage: an entry whose file no longer matches
     fails; a new violating path fails; the list is empty at P7.
   - add dependency gate: no generic crate depends on a concrete extension
-    crate (`cargo metadata`); only `ironclaw_reborn_cli` and tests may.
+    crate (`cargo metadata`); only the canonical `ironclaw` CLI package and tests may.
   - `scripts/ci/check-generic-without-concrete.sh`: asserts via `cargo tree`
     that each generic crate's graph contains no concrete extension crate, then
     `cargo test -p` each generic crate — the deletion test, automated in CI.

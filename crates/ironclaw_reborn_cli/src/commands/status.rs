@@ -83,7 +83,7 @@ fn build_status_dto_with_service_state(
 }
 
 const SERVICE_NOT_RUNNING_LOGIN_NOTE: &str = "service is not running — start with \
-     `ironclaw-reborn service restart`; link available once running";
+     `ironclaw service restart`; link available once running";
 
 /// Overrides `(login_link, login_note)` when the live service state is
 /// *known* not-running (`Stopped`/`NotInstalled`) — no login link can be
@@ -592,6 +592,7 @@ redirect_uri = "http://127.0.0.1:3000/oauth/google/callback"
         dto.render_text_to(&mut buf).expect("render must succeed");
         let text = String::from_utf8(buf).expect("render output must be UTF-8");
         assert!(!text.contains("login_link:"));
-        assert!(text.contains(SERVICE_NOT_RUNNING_LOGIN_NOTE));
+        assert!(text.contains("`ironclaw service restart`"));
+        assert!(!text.contains("ironclaw-reborn service restart"));
     }
 }

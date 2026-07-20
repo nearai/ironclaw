@@ -33,7 +33,7 @@ The `--no-onboard` CLI flag suppresses auto-detection.
 ### Reborn Standalone Onboarding
 
 ```
-ironclaw-reborn onboard [--force] [--dry-run] [--import-history]
+ironclaw onboard [--force] [--dry-run] [--import-history]
 ```
 
 This command is owned by the standalone Reborn binary, not by `src/setup`.
@@ -41,7 +41,7 @@ It initializes `IRONCLAW_REBORN_HOME` / `~/.ironclaw/reborn`, creates or
 preserves Reborn `config.toml` and `providers.json`, and writes the Reborn
 `.onboard-completed.json` marker without reading or mutating v1 database,
 channel, settings, or setup state. The detailed Reborn-specific contract lives
-in `docs/reborn/onboarding.md`; changes to `ironclaw-reborn onboard` should keep
+in `docs/reborn/onboarding.md`; changes to `ironclaw onboard` should keep
 that document and this boundary note in sync.
 
 ---

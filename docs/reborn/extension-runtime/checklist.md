@@ -879,7 +879,7 @@ Rules — kept short on purpose:
   `concrete_extension_crates_link_only_from_the_binary_and_tests`
   (`crates/ironclaw_architecture/tests/reborn_extension_specificity.rs`,
   empty `CONCRETE_DEPENDENCY_EXCEPTIONS`).
-- [x] DEL-7 Only `ironclaw_reborn_cli` and tests depend on concrete extension
+- [x] DEL-7 Only the canonical `ironclaw` CLI package and tests depend on concrete extension
   crates (`cargo metadata` gate). — `CONCRETE_DEPENDENCY_EXCEPTIONS` is
   empty; composition keeps `ironclaw_slack_extension` as a dev-dependency
   only (the sanctioned test linkage); the CLI supplies the Slack channel
@@ -947,7 +947,7 @@ Rules — kept short on purpose:
   `ironclaw_first_party_extensions::packages::telegram`; P7b DEL-8 lane A
   migrated the former `available_extensions.rs::telegram_package` builder into
   the self-contained inventory), the binary-assembled
-  entrypoint binding (`ironclaw_reborn_cli::runtime::native_extensions`),
+  entrypoint binding (`crates/ironclaw_reborn_cli/src/runtime/native_extensions.rs`),
   the real channel-egress transport with host-side path-placeholder token
   injection (`HostRuntimeChannelEgressTransport`,
   `path_placeholder_injection_substitutes_the_secret_host_side`), and the
@@ -986,7 +986,7 @@ Rules — kept short on purpose:
   fixture (`AcmeFixtureChannelAdapter`, `tests/integration/support`), not a
   browser-serveable bundled package; the production/e2e catalog carries only
   real extensions (github, slack, google-*, nearai-mcp, notion-mcp), so
-  `ironclaw-reborn serve` cannot install acme. The generic channel-surface
+  `ironclaw serve` cannot install acme. The generic channel-surface
   rendering (the substantive UI-2 claim — every channel renders through the
   same components with no per-extension frontend logic) is therefore proven
   with the REAL bundled channels: the wire is frozen by the golden fixture

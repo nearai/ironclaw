@@ -61,7 +61,7 @@
     <Product
         Id='*'
         Name='ironclaw'
-        UpgradeCode='D0156E61-BA37-451E-8AB9-1A2ECCCFA48F'
+        UpgradeCode='650712A0-A6B4-4584-829A-03A90CE3D7D9'
         Manufacturer='NEAR AI'
         Language='1033'
         Codepage='1252'
@@ -110,7 +110,7 @@
                     -->
 
                     <Directory Id='Bin' Name='bin'>
-                        <Component Id='Path' Guid='F90B6EA6-87F7-499B-BB19-CF55DE1EB339' KeyPath='yes'>
+                        <Component Id='Path' Guid='9BB3F0DB-3513-45E6-A23B-CE5A5E5C1759' KeyPath='yes'>
                             <Environment
                                 Id='PATH'
                                 Name='PATH'
@@ -123,17 +123,9 @@
                         <Component Id='binary0' Guid='*'>
                             <File
                                 Id='exe0'
-                                Name='ironclaw-legacy.exe'
+                                Name='ironclaw.exe'
                                 DiskId='1'
-                                Source='$(var.CargoTargetBinDir)\ironclaw-legacy.exe'
-                                KeyPath='yes'/>
-                        </Component>
-                        <Component Id='binary1' Guid='*'>
-                            <File
-                                Id='exe1'
-                                Name='sandbox_daemon.exe'
-                                DiskId='1'
-                                Source='$(var.CargoTargetBinDir)\sandbox_daemon.exe'
+                                Source='$(var.CargoTargetBinDir)\ironclaw.exe'
                                 KeyPath='yes'/>
                         </Component>
                     </Directory>
@@ -158,7 +150,6 @@
             <!--<ComponentRef Id='License'/>-->
 
             <ComponentRef Id='binary0'/>
-            <ComponentRef Id='binary1'/>
 
             <Feature
                 Id='Environment'

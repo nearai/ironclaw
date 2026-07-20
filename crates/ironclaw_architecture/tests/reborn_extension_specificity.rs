@@ -15,7 +15,7 @@
 //!   the product code.
 //! - **The package inventory crate** (`ironclaw_first_party_extensions`) —
 //!   it owns the concrete packages and their native executors.
-//! - **Sanctioned assemblers** — `ironclaw_reborn_cli` (the binary assembles
+//! - **Sanctioned assemblers** — `ironclaw` (the binary assembles
 //!   the native factory registry; overview §4.0) and this architecture crate
 //!   (names terms on purpose).
 //! - **Legacy-layer / v1 crates** — the v1 enclave is being strangled
@@ -706,7 +706,7 @@ const SANCTIONED_SCAN_EXEMPT_CRATES: &[&str] = &[
     // The package inventory + native executors for bundled extensions.
     "ironclaw_first_party_extensions",
     // The binary assembles the native factory registry (overview §4.0).
-    "ironclaw_reborn_cli",
+    "ironclaw",
     // One-time forward migrations name what they fold forward.
     // This crate's tests name every term on purpose.
     "ironclaw_architecture",
@@ -1481,7 +1481,7 @@ fn concrete_extension_crates_link_only_from_the_binary_and_tests() {
         if !(name == "ironclaw" || name.starts_with("ironclaw_")) {
             continue;
         }
-        if name == "ironclaw_reborn_cli" || CONCRETE_EXTENSION_CRATES.contains(&name) {
+        if name == "ironclaw" || CONCRETE_EXTENSION_CRATES.contains(&name) {
             continue;
         }
         let Some(dependencies) = package["dependencies"].as_array() else {
@@ -1507,7 +1507,7 @@ fn concrete_extension_crates_link_only_from_the_binary_and_tests() {
             }
             violations.push(format!(
                 "{name} takes a production dependency on concrete extension crate \
-                 {dependency_name}; only ironclaw_reborn_cli (native factory assembly) and \
+                 {dependency_name}; only ironclaw (native factory assembly) and \
                  dev-dependencies may"
             ));
         }

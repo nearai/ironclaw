@@ -8,34 +8,6 @@ use std::{
 
 const INVALID_PROFILE_MESSAGE: &str = "IRONCLAW_REBORN_PROFILE must be one of";
 
-/// Guards the bind-close-then-spawn window every `unused_local_port()`
-/// caller below goes through: the helper binds a listener to port 0 to get
-/// an OS-assigned free port, reads it back, and closes it — then hands
-/// that port number to a spawned `serve` child to bind itself. Between the
-/// helper's close and the child's own bind, `cargo test`'s parallel test
-/// threads can race for the same freed port (one test's helper grabs the
-/// port another test's child is about to bind), causing real cross-talk —
-/// proven in CI logs, one test observing another test's HTTP response.
-/// Every test that spawns a `serve`-mode child on a port from
-/// `unused_local_port()` takes this lock before allocating its port and
-/// holds it for the rest of the test (dropped at function end), so no two
-/// of these tests' allocate-then-spawn windows can overlap. This is a
-/// small serialization fix, not a port-reservation framework — do not
-/// extend it into a pool or retry-with-backoff mechanism.
-static SERVE_PORT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// `true` when `config_text` carries a live (uncommented) `provider_id =`
-/// line — used to assert a de-seeded `config.toml` has no `[llm.default]`
-/// slot. A plain `.contains("provider_id =")` also matches the stub's own
-/// commented-out `# provider_id = "nearai"` example line, so this only
-/// counts a line whose first non-whitespace character isn't `#`.
-fn config_text_has_live_provider_id(config_text: &str) -> bool {
-    config_text.lines().any(|line| {
-        let trimmed = line.trim_start();
-        trimmed.starts_with("provider_id =") || trimmed.starts_with("provider_id=")
-    })
-}
-
 fn reborn_bin() -> &'static str {
     env!("CARGO_BIN_EXE_ironclaw")
 }
@@ -197,6 +169,215 @@ fn dockerfile_reborn_builds_with_production_features() {
 }
 
 #[test]
+fn release_ci_compiles_reborn_for_all_supported_targets() {
+    // This is a structural contract for release workflow wiring. Hosted Actions
+    // runs provide the behavioral cross-platform compile and startup validation.
+    let root = workspace_root();
+    let compile_workflow =
+        std::fs::read_to_string(root.join(".github/workflows/reborn-release-compile.yml"))
+            .expect("Reborn release compile workflow")
+            .replace("\r\n", "\n");
+    let release_workflow =
+        std::fs::read_to_string(root.join(".github/workflows/ironclaw-release.yml"))
+            .expect("release workflow")
+            .replace("\r\n", "\n");
+    let workspace_manifest = std::fs::read_to_string(root.join("Cargo.toml"))
+        .expect("workspace manifest")
+        .replace("\r\n", "\n");
+    let cli_manifest = std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/Cargo.toml"))
+        .expect("Reborn CLI manifest")
+        .replace("\r\n", "\n");
+    let dist_build_setup = std::fs::read_to_string(root.join(".github/dist-build-setup.yml"))
+        .expect("cargo-dist build setup")
+        .replace("\r\n", "\n");
+
+    let target_runners = [
+        ("x86_64-unknown-linux-gnu", "ubuntu-22.04"),
+        ("x86_64-unknown-linux-musl", "ubuntu-22.04"),
+        ("aarch64-unknown-linux-gnu", "ubuntu-24.04-arm"),
+        ("aarch64-unknown-linux-musl", "ubuntu-24.04-arm"),
+        ("x86_64-apple-darwin", "macos-15-intel"),
+        ("aarch64-apple-darwin", "macos-15"),
+        ("x86_64-pc-windows-msvc", "windows-2022"),
+    ];
+    let release_features = "libsql,postgres";
+
+    assert_eq!(
+        compile_workflow.matches("          - target: ").count(),
+        target_runners.len(),
+        "Reborn release compile matrix must contain exactly seven targets"
+    );
+    for (target, runner) in target_runners {
+        let matrix_entry = format!("          - target: {target}\n            runner: {runner}\n");
+        assert!(
+            compile_workflow.contains(&matrix_entry),
+            "Reborn release compile matrix must map {target} to {runner}"
+        );
+    }
+
+    assert!(
+        compile_workflow.contains("fail-fast: false")
+            && compile_workflow.contains("cargo build --locked --profile dist")
+            && compile_workflow.contains("--package ironclaw")
+            && compile_workflow.contains("            --bin ironclaw \\\n")
+            && !compile_workflow.contains("--bin ironclaw-reborn")
+            && compile_workflow.contains("--target \"$TARGET\"")
+            && compile_workflow
+                .contains(&format!("  REBORN_RELEASE_FEATURES: {release_features}\n"))
+            && compile_workflow.contains("            --features \"$REBORN_RELEASE_FEATURES\""),
+        "Reborn release CI must fully link the shipping binary and keep all target results"
+    );
+    assert!(
+        compile_workflow.matches("musl: true").count() == 2
+            && compile_workflow.contains("sudo apt-get install --yes musl-tools binutils file")
+            && compile_workflow.contains("CC_x86_64_unknown_linux_musl=musl-gcc")
+            && compile_workflow.contains("CC_aarch64_unknown_linux_musl=musl-gcc")
+            && !compile_workflow.contains("CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER")
+            && !compile_workflow.contains("CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER")
+            && compile_workflow.contains("node-version: \"22\"")
+            && compile_workflow.contains("corepack enable pnpm")
+            && compile_workflow.contains("binary: ironclaw.exe")
+            && !compile_workflow.contains("binary: ironclaw-reborn")
+            && compile_workflow.contains("core.longpaths true"),
+        "release CI must use musl-gcc for C dependencies without overriding Rust's self-contained musl linker"
+    );
+    for matrix_entry in [
+        concat!(
+            "          - target: x86_64-unknown-linux-musl\n",
+            "            runner: ubuntu-22.04\n",
+            "            binary: ironclaw\n",
+            "            musl: true\n",
+            "            cc_env: CC_x86_64_unknown_linux_musl=musl-gcc\n",
+        ),
+        concat!(
+            "          - target: aarch64-unknown-linux-musl\n",
+            "            runner: ubuntu-24.04-arm\n",
+            "            binary: ironclaw\n",
+            "            musl: true\n",
+            "            cc_env: CC_aarch64_unknown_linux_musl=musl-gcc\n",
+        ),
+    ] {
+        assert!(
+            compile_workflow.contains(matrix_entry),
+            "musl matrix entry must bind its target to the matching compiler: {matrix_entry}"
+        );
+    }
+    let configure_musl_compiler = concat!(
+        "      - name: Configure musl C compiler\n",
+        "        if: matrix.musl\n",
+        "        shell: bash\n",
+        "        env:\n",
+        "          CC_ENV: ${{ matrix.cc_env }}\n",
+        "        run: |\n",
+        "          echo \"$CC_ENV\" >> \"$GITHUB_ENV\"\n",
+    );
+    assert!(
+        compile_workflow.contains(configure_musl_compiler),
+        "musl compiler variables must be applied only to musl matrix entries"
+    );
+    assert!(
+        compile_workflow.contains("name: Verify musl portability\n        if: matrix.musl")
+            && compile_workflow.contains("readelf --program-headers --wide")
+            && compile_workflow.contains("readelf --dynamic --wide")
+            && compile_workflow.contains("INTERP")
+            && compile_workflow.contains("(NEEDED)")
+            && compile_workflow.contains("name: Smoke compiled binary")
+            && compile_workflow.contains("\"$binary_path\" --version")
+            && compile_workflow.contains("\"$binary_path\" --help > /dev/null")
+            && compile_workflow.contains("\"$binary_path\" profile list --json > /dev/null"),
+        "release CI must reject non-portable musl binaries and smoke the exact native artifacts"
+    );
+
+    let build_position = compile_workflow
+        .find("name: Compile ironclaw")
+        .expect("compile step");
+    let linkage_position = compile_workflow
+        .find("name: Verify musl portability")
+        .expect("musl linkage step");
+    let smoke_position = compile_workflow
+        .find("name: Smoke compiled binary")
+        .expect("binary smoke step");
+    let upload_position = compile_workflow
+        .find("name: Upload compile evidence")
+        .expect("compile evidence upload step");
+    assert!(
+        build_position < linkage_position
+            && linkage_position < smoke_position
+            && smoke_position < upload_position,
+        "linkage and runtime validation must gate artifact upload"
+    );
+    assert!(
+        compile_workflow.contains("name: reborn-compile-${{ matrix.target }}")
+            && compile_workflow.contains("if-no-files-found: error")
+            && !compile_workflow.contains("name: artifacts-reborn"),
+        "compile evidence must stay outside cargo-dist's artifacts-* release namespace"
+    );
+    assert!(
+        release_workflow.contains("  push:\n    tags:\n")
+            && release_workflow.contains("      - 'ironclaw")
+            && compile_workflow.contains("  workflow_call:\n")
+            && compile_workflow.contains("  workflow_dispatch:\n")
+            && !release_workflow.contains("\n  pull_request:\n")
+            && !compile_workflow.contains("  pull_request:\n"),
+        "cargo-dist release must be tag-only while the seven-target compile workflow remains an independent manual preflight"
+    );
+    assert!(
+        release_workflow.contains("\n  plan:\n")
+            && release_workflow.contains("\n  build-local-artifacts:\n")
+            && release_workflow.contains("\n  build-global-artifacts:\n")
+            && release_workflow.contains("\n  host:\n")
+            && release_workflow.contains("\n  announce:\n")
+            && release_workflow.contains("host --steps=create")
+            && release_workflow.contains("dist build")
+            && release_workflow.contains(
+                "dist host ${{ needs.plan.outputs.tag-flag }} --steps=upload --steps=release"
+            )
+            && release_workflow.contains("gh release create")
+            && !release_workflow.contains("uses: ./.github/workflows/reborn-release-compile.yml")
+            && compile_workflow.contains("permissions:\n  contents: read"),
+        "the generated workflow must own the cargo-dist plan/build/host/announce path without consuming manual compile evidence"
+    );
+    assert!(
+        workspace_manifest.contains("packages = [\"ironclaw\"]")
+            && workspace_manifest.contains("github-build-setup = \"../dist-build-setup.yml\"")
+            && workspace_manifest.contains("installers = [\"shell\", \"powershell\", \"msi\"]")
+            && workspace_manifest.contains("tag-namespace = \"ironclaw\"")
+            && workspace_manifest.contains("pr-run-mode = \"skip\""),
+        "cargo-dist must select only the canonical Reborn package and generate the supported installers without claiming the unavailable npm package name"
+    );
+    for target in [
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "aarch64-unknown-linux-musl",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "x86_64-pc-windows-msvc",
+    ] {
+        assert!(
+            workspace_manifest.contains(&format!("    \"{target}\",")),
+            "cargo-dist target list must contain {target}"
+        );
+    }
+    assert!(
+        dist_build_setup.contains("actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8")
+            && dist_build_setup.contains("node-version: 22")
+            && dist_build_setup.contains("corepack enable pnpm")
+            && release_workflow.contains("Install Node.js for the embedded WebUI")
+            && release_workflow.contains("corepack enable pnpm"),
+        "cargo-dist must install the WebUI build prerequisites before compiling artifacts"
+    );
+    assert!(
+        cli_manifest.contains("[package]\nname = \"ironclaw\"\nversion = \"")
+            && cli_manifest.contains("[package.metadata.dist]\ndist = true")
+            && cli_manifest.contains("features = [\"libsql\", \"postgres\"]")
+            && cli_manifest.contains("[package.metadata.wix]")
+            && cli_manifest.contains("[[bin]]\nname = \"ironclaw\""),
+        "the canonical Reborn package must be cargo-dist enabled with production features and WiX metadata"
+    );
+}
+
+#[test]
 fn dockerfile_reborn_does_not_package_the_retired_ownership_migration() {
     // Greenfield reconciliation (owner decision D1): the one-time extension
     // ownership migration crate is deleted, so the image must not try to
@@ -219,7 +400,7 @@ fn run_reborn_webui_builds_frontend_before_cargo() {
         .find("pnpm build")
         .expect("launcher should build WebUI frontend assets");
     let cargo_run = launcher
-        .find("CARGO=(cargo run -q -p ironclaw_reborn_cli")
+        .find("CARGO=(cargo run -q -p ironclaw")
         .expect("launcher should run the Reborn CLI");
     assert!(
         frontend_build < cargo_run,
@@ -1998,6 +2179,34 @@ fn serve_resolves_bearer_token_from_reborn_home_webui_token_file() {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+/// `true` when `config_text` carries a live (uncommented) `provider_id =`
+/// line — used to assert a de-seeded `config.toml` has no `[llm.default]`
+/// slot. A plain `.contains("provider_id =")` also matches the stub's own
+/// commented-out `# provider_id = "nearai"` example line, so this only
+/// counts a line whose first non-whitespace character isn't `#`.
+fn config_text_has_live_provider_id(config_text: &str) -> bool {
+    config_text.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("provider_id =") || trimmed.starts_with("provider_id=")
+    })
+}
+
+/// Guards the bind-close-then-spawn window every `unused_local_port()`
+/// caller below goes through: the helper binds a listener to port 0 to get
+/// an OS-assigned free port, reads it back, and closes it — then hands
+/// that port number to a spawned `serve` child to bind itself. Between the
+/// helper's close and the child's own bind, `cargo test`'s parallel test
+/// threads can race for the same freed port (one test's helper grabs the
+/// port another test's child is about to bind), causing real cross-talk —
+/// proven in CI logs, one test observing another test's HTTP response.
+/// Every test that spawns a `serve`-mode child on a port from
+/// `unused_local_port()` takes this lock before allocating its port and
+/// holds it for the rest of the test (dropped at function end), so no two
+/// of these tests' allocate-then-spawn windows can overlap. This is a
+/// small serialization fix, not a port-reservation framework — do not
+/// extend it into a pool or retry-with-backoff mechanism.
+static SERVE_PORT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn unused_local_port() -> u16 {
     std::net::TcpListener::bind(("127.0.0.1", 0))
@@ -6478,17 +6687,28 @@ api_key_env = "REBORN_TEST_UNSET_BC8F4D_KEY"
 }
 
 #[test]
-fn release_ci_skips_legacy_publish_dag_without_disabling_independent_docker_runs() {
+fn release_ci_publishes_reborn_without_enabling_legacy_or_docker_paths() {
     let root = workspace_root();
-    let release_workflow = std::fs::read_to_string(root.join(".github/workflows/release.yml"))
-        .expect("release workflow")
-        .replace("\r\n", "\n");
+    let release_workflow =
+        std::fs::read_to_string(root.join(".github/workflows/ironclaw-release.yml"))
+            .expect("release workflow")
+            .replace("\r\n", "\n");
     let docker_workflow = std::fs::read_to_string(root.join(".github/workflows/docker.yml"))
         .expect("Docker workflow")
         .replace("\r\n", "\n");
     let code_style_workflow =
         std::fs::read_to_string(root.join(".github/workflows/code_style.yml"))
             .expect("code style workflow")
+            .replace("\r\n", "\n");
+    let workspace_manifest = std::fs::read_to_string(root.join("Cargo.toml"))
+        .expect("workspace manifest")
+        .replace("\r\n", "\n");
+    let cli_manifest = std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/Cargo.toml"))
+        .expect("Reborn CLI manifest")
+        .replace("\r\n", "\n");
+    let wix_manifest =
+        std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/wix/main.wxs"))
+            .expect("Reborn WiX manifest")
             .replace("\r\n", "\n");
 
     let release_job = |job_name: &str| {
@@ -6499,7 +6719,7 @@ fn release_ci_skips_legacy_publish_dag_without_disabling_independent_docker_runs
                 (index == 0 || release_workflow.as_bytes()[index - 1] == b'\n')
                     .then_some(index + job_marker.len())
             })
-            .unwrap_or_else(|| panic!("release workflow should retain the {job_name} job"));
+            .unwrap_or_else(|| panic!("release workflow should define the {job_name} job"));
         let jobs_after_marker = &release_workflow[job_start..];
         let job_body = jobs_after_marker
             .lines()
@@ -6511,64 +6731,132 @@ fn release_ci_skips_legacy_publish_dag_without_disabling_independent_docker_runs
             .join("\n");
         assert!(
             !job_body.is_empty(),
-            "release workflow should retain the {job_name} job body"
+            "release workflow should define the {job_name} job body"
         );
         job_body
     };
 
-    let reborn_compile_job = release_job("reborn-binary-compile");
-    assert!(
-        reborn_compile_job.contains("uses: ./.github/workflows/reborn-release-compile.yml")
-            && reborn_compile_job.contains("ref: ${{ github.sha }}")
-            && !reborn_compile_job
-                .lines()
-                .any(|line| line.starts_with("    if:")),
-        "the Reborn compile matrix must remain the active release path"
-    );
-
     let plan_job = release_job("plan");
     assert!(
-        plan_job.contains("if: github.repository == ''")
-            && plan_job.contains("dist host --steps=create")
-            && plan_job.contains("dist plan --output-format=json"),
-        "release CI must retain but skip the legacy cargo-dist plan root"
+        plan_job.contains("host --steps=create")
+            && plan_job.contains("dist ${{")
+            && plan_job.contains("|| 'plan'")
+            && plan_job.contains("--output-format=json")
+            && plan_job.contains("artifacts-plan-dist-manifest")
+            && plan_job.contains("cargo-dist-cache"),
+        "cargo-dist plan must create the release and publish its build manifest"
     );
-    for legacy_job_name in [
-        "build-local-artifacts",
-        "build-global-artifacts",
+
+    assert!(
+        release_workflow.contains("name: Release\npermissions:\n  \"contents\": \"read\"\n")
+            && !plan_job.contains("permissions:"),
+        "release CI must default every job to read-only repository permissions"
+    );
+
+    let local_build_job = release_job("build-local-artifacts");
+    assert!(
+        local_build_job.contains("fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix")
+            && local_build_job.contains("fail-fast: false")
+            && local_build_job.contains("Install Node.js for the embedded WebUI")
+            && local_build_job.contains("corepack enable pnpm")
+            && local_build_job.contains("dist build ${{ needs.plan.outputs.tag-flag }}")
+            && local_build_job.contains("artifacts-build-local-${{ join(matrix.targets, '_') }}"),
+        "cargo-dist must build and upload every platform artifact from its generated matrix"
+    );
+    assert!(
+        !local_build_job.contains("permissions:") && !local_build_job.contains("GH_TOKEN:"),
+        "untrusted local builds must not receive elevated repository permissions or a GitHub token"
+    );
+
+    let global_build_job = release_job("build-global-artifacts");
+    assert!(
+        global_build_job.contains("build-local-artifacts")
+            && global_build_job.contains("\"--artifacts=global\"")
+            && global_build_job.contains("artifacts-build-global"),
+        "cargo-dist must generate checksums and universal installers after local builds"
+    );
+    assert!(
+        !global_build_job.contains("permissions:") && !global_build_job.contains("GH_TOKEN:"),
+        "global packaging must not receive elevated repository permissions or a GitHub token"
+    );
+
+    let host_job = release_job("host");
+    assert!(
+        host_job.contains("needs.plan.outputs.publishing == 'true'")
+            && host_job.contains("permissions:\n      \"contents\": \"write\"")
+            && host_job.contains("GH_TOKEN:")
+            && host_job.contains("--steps=upload --steps=release")
+            && host_job.contains("ANNOUNCEMENT_TITLE")
+            && host_job.contains("ANNOUNCEMENT_BODY")
+            && host_job.contains("PRERELEASE_FLAG")
+            && host_job.contains("gh release create")
+            && host_job.contains("--title \"$ANNOUNCEMENT_TITLE\"")
+            && host_job.contains("--notes-file \"$RUNNER_TEMP/notes.txt\"")
+            && host_job.contains("artifacts/*"),
+        "cargo-dist host must publish generated assets with generated title, notes, and prerelease state"
+    );
+
+    let announce_job = release_job("announce");
+    assert!(
+        announce_job.contains("- plan")
+            && announce_job.contains("- host")
+            && announce_job.contains("needs.host.result == 'success'")
+            && !announce_job.contains("registry")
+            && !announce_job.contains("checksum")
+            && !announce_job.contains("permissions:")
+            && !announce_job.contains("GH_TOKEN:"),
+        "cargo-dist announce must only finalize a successful hosted release, not run the legacy registry path"
+    );
+
+    for removed_job_name in [
+        "reborn-binary-compile",
+        "publish-reborn-binaries",
         "build-wasm-extensions",
-        "host",
+        "docker-image",
         "update-registry-checksums",
-        "announce",
     ] {
-        let legacy_job = release_job(legacy_job_name);
         assert!(
-            legacy_job.contains("\n      - plan\n"),
-            "legacy release job {legacy_job_name} must remain downstream of the disabled plan root"
+            !release_workflow.contains(&format!("\n  {removed_job_name}:\n")),
+            "Reborn-only cargo-dist release must not define the old {removed_job_name} job"
         );
     }
-
-    let docker_job = release_job("docker-image");
     assert!(
-        docker_job.contains("needs: host")
-            && docker_job.contains("if: github.repository == ''")
-            && docker_job.contains("uses: ./.github/workflows/docker.yml")
-            && docker_job.contains("release: true")
-            && docker_job.contains("secrets: inherit"),
-        "release CI must retain but skip its Docker build/publish caller"
+        !release_workflow.contains("uses: ./.github/workflows/docker.yml")
+            && !release_workflow.contains("ironclaw-legacy")
+            && !release_workflow.contains("ironclaw_legacy")
+            && !release_workflow.contains("reborn-compile-"),
+        "the release workflow must consume only cargo-dist Reborn artifacts"
     );
     assert!(
         docker_workflow.contains("workflow_dispatch:") && docker_workflow.contains("schedule:"),
         "the independent Docker workflow must remain manually and periodically runnable"
+    );
+    assert!(
+        workspace_manifest.contains("name = \"ironclaw_legacy\"")
+            && workspace_manifest.contains("[package.metadata.dist]\ndist = false")
+            && workspace_manifest.contains("packages = [\"ironclaw\"]")
+            && workspace_manifest.contains("allow-dirty = [\"ci\"]")
+            && cli_manifest.contains("[package]\nname = \"ironclaw\"\nversion = \"")
+            && cli_manifest.contains("[package.metadata.dist]\ndist = true"),
+        "cargo-dist package selection must exclude legacy and enable only Reborn"
+    );
+    assert!(
+        wix_manifest.contains("Name='ironclaw'")
+            && wix_manifest.contains("Name='ironclaw.exe'")
+            && wix_manifest.contains("Source='$(var.CargoTargetBinDir)\\ironclaw.exe'")
+            && !wix_manifest.contains("ironclaw-legacy")
+            && !root.join("wix/main.wxs").exists(),
+        "the MSI definition must install only the canonical Reborn executable"
     );
     let reborn_cli_selector = code_style_workflow
         .lines()
         .find(|line| line.contains("grep -Eq") && line.contains("crates/ironclaw_reborn_cli/"))
         .expect("code style workflow should classify Reborn CLI changes");
     assert!(
-        reborn_cli_selector.contains(
-            r"\.github/workflows/(code_style|release|docker|reborn-release-compile)\.yml$"
-        ),
+        reborn_cli_selector.contains(r"\.github/dist-build-setup\.yml$")
+            && reborn_cli_selector.contains(
+                r"\.github/workflows/(code_style|ironclaw-release|docker|reborn-release-compile)\.yml$"
+            ),
         "release workflow-only PRs must run the Reborn CLI smoke contract"
     );
     assert!(

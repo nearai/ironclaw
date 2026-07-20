@@ -57,7 +57,7 @@ RUN pnpm install --frozen-lockfile
 WORKDIR /app
 RUN cargo chef cook \
     --profile dist \
-    --package ironclaw_reborn_cli \
+    --package ironclaw \
     --features libsql,postgres \
     --recipe-path recipe.json
 
@@ -81,7 +81,7 @@ WORKDIR /app
 
 RUN cargo build \
     --profile dist \
-    --package ironclaw_reborn_cli \
+    --package ironclaw \
     --features libsql,postgres \
     --bin ironclaw
 
