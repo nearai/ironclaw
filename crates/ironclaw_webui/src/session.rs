@@ -22,15 +22,15 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 // Imports below are only used by `InMemorySessionStore`, which is gated
-// behind `dev-in-memory-session`. Gate the imports too so non-feature
+// behind `test-support`. Gate the imports too so non-feature
 // production builds don't warn about unused imports.
-#[cfg(any(test, feature = "dev-in-memory-session"))]
+#[cfg(any(test, feature = "test-support"))]
 use parking_lot::RwLock;
-#[cfg(any(test, feature = "dev-in-memory-session"))]
+#[cfg(any(test, feature = "test-support"))]
 use std::collections::HashMap;
-#[cfg(any(test, feature = "dev-in-memory-session"))]
+#[cfg(any(test, feature = "test-support"))]
 use subtle::ConstantTimeEq;
-#[cfg(any(test, feature = "dev-in-memory-session"))]
+#[cfg(any(test, feature = "test-support"))]
 use uuid::Uuid;
 
 /// Non-secret session identifier — a UUID stamped at creation and
@@ -146,16 +146,16 @@ pub trait SessionStore: Send + Sync + 'static {
 /// for local dev and the caller-level test harness — production
 /// deployments wire a durable `SessionStore` impl.
 ///
-/// Gated behind `dev-in-memory-session` so a production binary cannot
+/// Gated behind `test-support` so a production binary cannot
 /// accidentally name this type as its `SessionStore`. Tests are
 /// implicitly enabled via `cfg(test)`.
-#[cfg(any(test, feature = "dev-in-memory-session"))]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Default)]
 pub struct InMemorySessionStore {
     inner: RwLock<HashMap<String, SessionRecord>>,
 }
 
-#[cfg(any(test, feature = "dev-in-memory-session"))]
+#[cfg(any(test, feature = "test-support"))]
 impl InMemorySessionStore {
     pub fn new() -> Self {
         Self::default()
@@ -182,7 +182,7 @@ impl InMemorySessionStore {
     }
 }
 
-#[cfg(any(test, feature = "dev-in-memory-session"))]
+#[cfg(any(test, feature = "test-support"))]
 #[async_trait]
 impl SessionStore for InMemorySessionStore {
     async fn create_session(

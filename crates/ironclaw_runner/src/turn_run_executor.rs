@@ -10,17 +10,26 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ironclaw_host_api::{GateRecord, GateRef, ResourceScope};
 use ironclaw_observability::live_latency_started_at;
+use ironclaw_run_state::GateRecordStore;
 use ironclaw_turns::{
-    AgentLoopDriverError, AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopExit,
-    TurnStatus,
+    AgentLoopDriverError, AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopBlocked,
+    LoopBlockedKind, LoopExit, TurnStatus,
     run_profile::AgentLoopDriverHost,
     runner::{
         ClaimedTurnRun, RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest,
         TurnRunTransitionPort,
     },
 };
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
+
+/// The loop-facing routing-ref prefix an auth gate carries
+/// (`gate:auth-{gate_id}`), minted by `loop_gate_ref("auth", …)` in
+/// `ironclaw_loop_host`. The durable `GateRecord::Auth` is keyed by the uuid
+/// `gate_id` alone (via [`GateRef::for_auth_gate`]), so the runner strips this
+/// prefix to recover the same key the loop-host persisted under.
+const AUTH_GATE_LOOP_REF_PREFIX: &str = "gate:auth-";
 
 use crate::{
     driver_registry::{DriverRegistry, LoopDriverRegistryKey},
@@ -114,6 +123,17 @@ pub struct RebornTurnRunExecutor {
     loop_exit_applier: Arc<LoopExitApplier>,
     driver_registry: Arc<DriverRegistry>,
     host_factory: Arc<dyn HostFactory>,
+    /// Durable store the loop-host persisted `GateRecord::Auth` into (§5.2.9).
+    ///
+    /// After an auth block the executor re-sources the auth gate's
+    /// `credential_requirements` from this store, because the flip moved them
+    /// off the loop-facing channel onto the host-persisted record — the
+    /// loop-facing `LoopBlocked.credential_requirements` arrives empty. `None`
+    /// only for helper/test compositions that never wire a run-state
+    /// filesystem (they never raise a durable auth gate to render); every
+    /// production composition wires the SAME `Arc` it wired into the capability
+    /// port's `with_gate_record_store`, so an unwired production path is a bug.
+    gate_record_store: Option<Arc<dyn GateRecordStore>>,
 }
 
 impl RebornTurnRunExecutor {
@@ -121,11 +141,13 @@ impl RebornTurnRunExecutor {
         loop_exit_applier: Arc<LoopExitApplier>,
         driver_registry: Arc<DriverRegistry>,
         host_factory: Arc<dyn HostFactory>,
+        gate_record_store: Option<Arc<dyn GateRecordStore>>,
     ) -> Self {
         Self {
             loop_exit_applier,
             driver_registry,
             host_factory,
+            gate_record_store,
         }
     }
 }
@@ -356,13 +378,33 @@ impl RebornTurnRunExecutor {
     async fn apply_exit(
         &self,
         claimed: &ClaimedTurnRun,
-        exit: LoopExit,
+        mut exit: LoopExit,
         transitions: &Arc<dyn TurnRunTransitionPort>,
     ) -> Result<(), ()> {
         let started_at = live_latency_started_at();
         let run_id = claimed.state.run_id;
         let runner_id = claimed.runner_id;
-        let lease_token = claimed.lease_token;
+
+        // §5.2.9 render-from-record: an auth block arrives with empty
+        // `credential_requirements` (the flip moved them off the loop channel
+        // onto the host-persisted `GateRecord::Auth`). Re-source them here,
+        // BEFORE the trusted applier persists the `TurnRunRecord`, so the
+        // auth-prompt (`channel_delivery`) and resume (`blocked_auth_resume`)
+        // read a non-empty requirement set again.
+        if let LoopExit::Blocked(blocked) = &mut exit
+            && let Err(failure_tag) = self
+                .enrich_auth_block_credential_requirements(claimed, blocked)
+                .await
+        {
+            // The auth block's credential requirements could not be re-sourced
+            // from the durable record, so applying it would park the run on an
+            // unsubmittable (provider-null) auth gate. Record a terminal failure
+            // instead — the scheduler surfaces it and the run is failed rather
+            // than silently stranded.
+            return self
+                .record_exit_failure(claimed, transitions, failure_tag)
+                .await;
+        }
 
         match self.loop_exit_applier.apply(claimed, exit).await {
             Ok(state) => {
@@ -383,38 +425,172 @@ impl RebornTurnRunExecutor {
                     error = %err,
                     "failed to apply loop exit"
                 );
-                // Exit application failed: try recording a terminal failure
-                // through the transitions port so the run is not stranded.
-                // Falls back to "unknown_failure" before returning None so the
-                // run always reaches a terminal state if the port cooperates.
-                let failure = sanitized_failure("exit_application_failed")
-                    .unwrap_or_else(|| unknown_failure_error().failure().clone());
-                match transitions
-                    .record_runner_failure(RecordRunnerFailureRequest {
-                        run_id,
-                        runner_id,
-                        lease_token,
-                        failure,
-                    })
+                // Exit application failed: record a terminal failure through the
+                // transitions port so the run is not stranded. Falls back to
+                // "unknown_failure" so the run always reaches a terminal state if
+                // the port cooperates; `Err(())` (double-failure) signals the
+                // caller so the scheduler can attempt its own recording.
+                self.record_exit_failure(claimed, transitions, "exit_application_failed")
                     .await
-                {
-                    Ok(_) => Ok(()),
-                    Err(record_err) => {
-                        // Double-failure: both the applier and the fallback
-                        // transition failed. Signal the caller so the scheduler
-                        // can attempt its own terminal-failure recording.
-                        error!(
-                            runner_id = ?runner_id,
-                            run_id = ?run_id,
-                            error = %record_err,
-                            "failed to record terminal failure after exit application failure"
-                        );
-                        Err(())
-                    }
-                }
             }
         }
     }
+
+    /// Re-source an auth block's `credential_requirements` from the durable
+    /// [`GateRecord::Auth`] the loop-host persisted (§5.2.9 render-from-record).
+    ///
+    /// The §5.3 Stage 2 flip moved `credential_requirements` off the loop-facing
+    /// channel onto the host record, so an auth `LoopBlocked` arrives with them
+    /// empty. Without this, `TurnRunRecord.credential_requirements` would be
+    /// empty after an auth block — a regression for the auth-prompt view and the
+    /// blocked-auth resume path that both read it. Only auth blocks that arrive
+    /// empty are touched; a block that already carries requirements (or any
+    /// non-auth block) is left as-is.
+    ///
+    /// Tolerant pre-conditions (a missing store, or a non-auth/non-`gate:auth-`
+    /// ref) leave `credential_requirements` empty and log — the same pre-flip
+    /// regression, no worse, and not the flip's new failure surface.
+    ///
+    /// But when the store IS wired and its lookup does not yield the auth record
+    /// (a store read fault, a genuinely-absent record, or a wrong-kind record),
+    /// returning empty would let `apply_exit` persist an auth block with no
+    /// provider/scopes — an unsubmittable gate the user can never action, which
+    /// is exactly the regression this render-from-record path exists to prevent.
+    /// Those arms return `Err(tag)` so the caller fails the exit (recording a
+    /// terminal failure the scheduler surfaces) instead of stranding the run
+    /// (`.claude/rules/error-handling.md`).
+    async fn enrich_auth_block_credential_requirements(
+        &self,
+        claimed: &ClaimedTurnRun,
+        blocked: &mut LoopBlocked,
+    ) -> Result<(), &'static str> {
+        if blocked.kind != LoopBlockedKind::Auth || !blocked.credential_requirements.is_empty() {
+            return Ok(());
+        }
+        let run_id = claimed.state.run_id;
+        let Some(store) = self.gate_record_store.as_ref() else {
+            warn!(
+                run_id = %run_id,
+                "auth block: no gate record store wired; credential_requirements left empty"
+            );
+            return Ok(());
+        };
+        // Recover the durable `GateRecord::Auth` key from the loop routing ref
+        // `gate:auth-{gate_id}` — the loop-host persisted under the deterministic
+        // (name-based v5) `GateRef::for_auth_gate(gate_id)`, so the same gate id
+        // reproduces the identical key here.
+        let Some(gate_id) = blocked
+            .gate_ref
+            .as_str()
+            .strip_prefix(AUTH_GATE_LOOP_REF_PREFIX)
+        else {
+            warn!(
+                run_id = %run_id,
+                gate_ref = blocked.gate_ref.as_str(),
+                "auth block: loop gate ref is not an auth ref; credential_requirements left empty"
+            );
+            return Ok(());
+        };
+        let gate_ref = GateRef::for_auth_gate(gate_id);
+        let scope = auth_gate_record_read_scope(claimed);
+        match store.load(&scope, gate_ref).await {
+            Ok(Some(GateRecord::Auth {
+                credential_requirements,
+                ..
+            })) => {
+                blocked.credential_requirements = credential_requirements;
+                Ok(())
+            }
+            Ok(Some(other)) => {
+                error!(
+                    run_id = %run_id,
+                    gate_record_kind = other.kind(),
+                    "auth block: persisted gate record was not Auth; failing the exit rather than applying an unsubmittable auth block"
+                );
+                Err("auth_gate_record_wrong_kind")
+            }
+            Ok(None) => {
+                error!(
+                    run_id = %run_id,
+                    "auth block: no persisted gate record found for auth gate; failing the exit rather than applying an unsubmittable auth block"
+                );
+                Err("auth_gate_record_missing")
+            }
+            Err(error) => {
+                error!(
+                    run_id = %run_id,
+                    error = %error,
+                    "auth block: gate record store read failed; failing the exit rather than applying an unsubmittable auth block"
+                );
+                Err("auth_gate_record_read_failed")
+            }
+        }
+    }
+
+    /// Record a terminal failure for a run whose loop exit must not be applied
+    /// as-is — either the applier rejected it, or an auth block's credential
+    /// requirements could not be re-sourced from the durable record (applying it
+    /// would strand the run on an unsubmittable auth gate). Mirrors the applier's
+    /// own fallback so both routes leave the run terminal, never stranded.
+    /// Returns `Err(())` only on the double-failure where the transition port
+    /// itself fails, which the caller escalates to the scheduler.
+    async fn record_exit_failure(
+        &self,
+        claimed: &ClaimedTurnRun,
+        transitions: &Arc<dyn TurnRunTransitionPort>,
+        failure_tag: &'static str,
+    ) -> Result<(), ()> {
+        let run_id = claimed.state.run_id;
+        let runner_id = claimed.runner_id;
+        let lease_token = claimed.lease_token;
+        let failure = sanitized_failure(failure_tag)
+            .unwrap_or_else(|| unknown_failure_error().failure().clone());
+        match transitions
+            .record_runner_failure(RecordRunnerFailureRequest {
+                run_id,
+                runner_id,
+                lease_token,
+                failure,
+            })
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(record_err) => {
+                error!(
+                    runner_id = ?runner_id,
+                    run_id = ?run_id,
+                    error = %record_err,
+                    "failed to record terminal failure"
+                );
+                Err(())
+            }
+        }
+    }
+}
+
+/// Rebuild the resource-owner scope the loop-host persisted the auth
+/// [`GateRecord`] under, from the claimed run.
+///
+/// Must equal the save scope (`visible_request.context.resource_scope` in
+/// `ironclaw_loop_host`) on every axis [`same_scope_owner`] compares —
+/// tenant/user/agent/project/mission/thread; `invocation_id` is deliberately
+/// NOT part of the gate-record key (neither the path nor the owner check use
+/// it), so the runner does not need to reproduce it. The save side sets
+/// `user_id = explicit thread owner, else the run actor` (its final fallback to
+/// a composition-level default user id is unreachable for a claimed run, which
+/// always carries an actor); `to_resource_scope` supplies tenant/agent/project/
+/// thread and `mission_id = None`.
+fn auth_gate_record_read_scope(claimed: &ClaimedTurnRun) -> ResourceScope {
+    let mut scope = claimed.state.scope.to_resource_scope();
+    if let Some(user_id) = claimed
+        .state
+        .scope
+        .explicit_owner_user_id()
+        .or_else(|| claimed.state.actor.as_ref().map(|actor| &actor.user_id))
+    {
+        scope.user_id = user_id.clone();
+    }
+    scope
 }
 
 #[cfg(test)]
@@ -683,7 +859,7 @@ mod tests {
         let loop_exit_applier = Arc::new(LoopExitApplier::new(transitions, evidence));
         let driver_registry = Arc::new(DriverRegistry::new()); // empty — no drivers registered
         let host_factory = Arc::new(FailingHostFactory);
-        RebornTurnRunExecutor::new(loop_exit_applier, driver_registry, host_factory)
+        RebornTurnRunExecutor::new(loop_exit_applier, driver_registry, host_factory, None)
     }
 
     /// When the driver registry has no registered driver, `execute_claimed_run`
@@ -890,15 +1066,14 @@ mod tests {
         async fn invoke_capability(
             &self,
             _request: ironclaw_turns::run_profile::CapabilityInvocation,
-        ) -> Result<ironclaw_turns::run_profile::CapabilityOutcome, AgentLoopHostError> {
+        ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
             unimplemented!("stub: not called by executor")
         }
 
         async fn invoke_capability_batch(
             &self,
             _request: ironclaw_turns::run_profile::CapabilityBatchInvocation,
-        ) -> Result<ironclaw_turns::run_profile::CapabilityBatchOutcome, AgentLoopHostError>
-        {
+        ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
             unimplemented!("stub: not called by executor")
         }
     }
@@ -1046,7 +1221,7 @@ mod tests {
             )
             .expect("driver registration must succeed");
         let driver_registry = Arc::new(registry);
-        RebornTurnRunExecutor::new(loop_exit_applier, driver_registry, host_factory)
+        RebornTurnRunExecutor::new(loop_exit_applier, driver_registry, host_factory, None)
     }
 
     /// Variant that wires the SAME shared `transitions` port into both the
@@ -1067,7 +1242,7 @@ mod tests {
             )
             .expect("driver registration must succeed");
         let driver_registry = Arc::new(registry);
-        RebornTurnRunExecutor::new(loop_exit_applier, driver_registry, host_factory)
+        RebornTurnRunExecutor::new(loop_exit_applier, driver_registry, host_factory, None)
     }
 
     /// A driver that always returns a caller-supplied `AgentLoopDriverError`.
@@ -1127,6 +1302,7 @@ mod tests {
             loop_exit_applier,
             driver_registry,
             Arc::new(SucceedingHostFactoryWithSnapshot),
+            None,
         )
     }
 
@@ -1545,6 +1721,92 @@ mod tests {
         assert!(
             result.is_err(),
             "expected Err when both loop_exit_applier.apply and record_runner_failure fail"
+        );
+    }
+
+    /// #6287 IronLoop regression: an empty auth block whose credential
+    /// requirements cannot be re-sourced from the durable record must NOT be
+    /// applied — that parks the run on an unsubmittable (provider-null) auth gate
+    /// the user can never action. The flip made the durable `GateRecord::Auth`
+    /// the ONLY source of `credential_requirements`, so a lookup miss is a real
+    /// regression (not a no-worse degrade); `apply_exit` records a terminal
+    /// failure instead. Before the fix the miss arms only logged and left the
+    /// requirements empty, so `fail_run` would NOT have been called and the
+    /// unsubmittable block would have been applied.
+    #[tokio::test]
+    async fn auth_block_with_unsourceable_requirements_fails_the_exit() {
+        use ironclaw_host_api::{GateRecord, GateRef, ResourceScope};
+        use ironclaw_run_state::{GateRecordStore, RunStateError};
+        use ironclaw_turns::{
+            LoopBlocked, LoopBlockedKind, LoopCheckpointStateRef, LoopGateRef, TurnCheckpointId,
+        };
+
+        // A gate-record store that never yields the auth record (`Ok(None)`).
+        struct MissingAuthGateRecordStore;
+        #[async_trait]
+        impl GateRecordStore for MissingAuthGateRecordStore {
+            async fn save(
+                &self,
+                _scope: ResourceScope,
+                _gate_ref: GateRef,
+                _record: GateRecord,
+            ) -> Result<(), RunStateError> {
+                Ok(())
+            }
+            async fn load(
+                &self,
+                _scope: &ResourceScope,
+                _gate_ref: GateRef,
+            ) -> Result<Option<GateRecord>, RunStateError> {
+                Ok(None)
+            }
+        }
+
+        let transitions = Arc::new(RecordingTransitionPort::default());
+        let transitions_arc: Arc<dyn TurnRunTransitionPort> = transitions.clone();
+        let evidence = Arc::new(InMemoryLoopExitEvidencePort::new());
+        let loop_exit_applier = Arc::new(LoopExitApplier::new(transitions_arc.clone(), evidence));
+        let executor = RebornTurnRunExecutor::new(
+            loop_exit_applier,
+            Arc::new(DriverRegistry::new()),
+            Arc::new(FailingHostFactory),
+            Some(Arc::new(MissingAuthGateRecordStore)),
+        );
+
+        let claimed = test_claimed_run();
+        let run_id = claimed.state.run_id;
+
+        // Auth block arriving with EMPTY credential_requirements (the flip moved
+        // them onto the durable `GateRecord::Auth`) and an auth routing ref.
+        let exit = LoopExit::Blocked(LoopBlocked {
+            kind: LoopBlockedKind::Auth,
+            gate_ref: LoopGateRef::new("gate:auth-deadbeef").expect("valid gate ref"),
+            blocked_activity_id: None,
+            credential_requirements: Vec::new(),
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: LoopCheckpointStateRef::new("checkpoint:auth-block-unsourceable")
+                .expect("valid"),
+            exit_id: LoopExitId::new("exit:test").expect("valid"),
+        });
+
+        let result = executor.apply_exit(&claimed, exit, &transitions_arc).await;
+
+        // The exit is failed via a recorded terminal failure (Ok, not the
+        // catastrophic double-failure Err), and the block is NOT applied.
+        assert!(
+            result.is_ok(),
+            "apply_exit must record the terminal failure and return Ok; got {result:?}"
+        );
+        assert_eq!(
+            transitions.fail_run_call_count(),
+            1,
+            "an auth block with unsourceable requirements must be failed via a recorded \
+             terminal failure, not applied as an unsubmittable gate"
+        );
+        assert_eq!(
+            transitions.fail_run_calls.lock().unwrap()[0].run_id,
+            run_id,
+            "the terminal failure must target the claimed run"
         );
     }
 }

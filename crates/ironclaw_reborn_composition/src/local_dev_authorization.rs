@@ -16,8 +16,9 @@ use ironclaw_approvals::{
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_host_api::{
     CapabilityId, EffectKind, InvocationId, Principal, ResourceScope,
-    runtime_policy::{ApprovalPolicy, EffectiveRuntimePolicy, RuntimeProfile},
+    runtime_policy::{ApprovalPolicy, EffectiveRuntimePolicy},
 };
+use ironclaw_runtime_policy::MinimalApprovalBypass;
 use tokio::sync::Notify;
 
 use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
@@ -33,11 +34,11 @@ pub(crate) fn local_dev_authorizer(
     capability_policy: Arc<BuiltinCapabilityPolicy>,
     settings: Arc<dyn ApprovalSettingsProvider>,
 ) -> Arc<dyn TrustAwareCapabilityDispatchAuthorizer> {
-    let (approval_policy, resolved_profile) = local_dev_approval_policy(runtime_policy);
+    let (approval_policy, minimal_bypass) = local_dev_approval_policy(runtime_policy);
     let gate_effects = capability_policy.approval_gate_effects();
     let exempt_capabilities = capability_policy.approval_gate_exempt_capabilities();
     let gate_policy: Arc<dyn ProfileApprovalGatePolicy> = Arc::new(
-        RuntimeProfileApprovalGatePolicy::new(resolved_profile, gate_effects)
+        RuntimeProfileApprovalGatePolicy::new(minimal_bypass, gate_effects)
             .with_exempt_capabilities(exempt_capabilities),
     );
     profile_approval_authorizer(approval_policy, gate_policy, settings)
@@ -571,24 +572,31 @@ pub(crate) fn local_dev_effects_require_approval(
     capability_policy: &BuiltinCapabilityPolicy,
     effects: &[EffectKind],
 ) -> bool {
-    let (approval_policy, resolved_profile) = local_dev_approval_policy(runtime_policy);
-    RuntimeProfileApprovalGatePolicy::new(
-        resolved_profile,
-        capability_policy.approval_gate_effects(),
-    )
-    .effects_require_approval(approval_policy, effects)
+    let (approval_policy, minimal_bypass) = local_dev_approval_policy(runtime_policy);
+    RuntimeProfileApprovalGatePolicy::new(minimal_bypass, capability_policy.approval_gate_effects())
+        .effects_require_approval(approval_policy, effects)
 }
 
+/// Approval width plus the resolved `Minimal`-bypass value for a runtime
+/// policy.
+///
+/// The absent-policy case fails closed: `AskAlways` with the bypass denied.
+/// This deliberately replaces the previous `unwrap_or(RuntimeProfile::LocalDev)`
+/// fallback, which silently invented a *deployment profile* when none was
+/// resolved — the mode-as-type leak §4.4 removes, and a silent default on an
+/// authority decision that `.claude/rules/error-handling.md` forbids. Every
+/// production path resolves a policy (`build_reborn_runtime` rejects the input
+/// otherwise), so this arm is reachable only from callers that never had one.
 fn local_dev_approval_policy(
     runtime_policy: Option<&EffectiveRuntimePolicy>,
-) -> (ApprovalPolicy, RuntimeProfile) {
-    let approval_policy = runtime_policy
-        .map(|policy| policy.approval_policy)
-        .unwrap_or(ApprovalPolicy::AskDestructive);
-    let resolved_profile = runtime_policy
-        .map(|policy| policy.resolved_profile)
-        .unwrap_or(RuntimeProfile::LocalDev);
-    (approval_policy, resolved_profile)
+) -> (ApprovalPolicy, MinimalApprovalBypass) {
+    match runtime_policy {
+        Some(policy) => (
+            policy.approval_policy,
+            ironclaw_runtime_policy::minimal_approval_bypass(policy),
+        ),
+        None => (ApprovalPolicy::AskAlways, MinimalApprovalBypass::Denied),
+    }
 }
 
 #[cfg(test)]

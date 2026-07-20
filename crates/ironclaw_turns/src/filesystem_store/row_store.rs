@@ -1,3 +1,4 @@
+// arch-exempt: large_file, WAL row store (apply/reservation/journal + delta commit paths) predates decomposition; #6263 no-op-delta durability fix adds a small guard, plan #6263
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use futures_util::stream::{self, StreamExt, TryStreamExt};
@@ -62,6 +63,9 @@ const ROW_COLLECTION_READ_CONCURRENCY: usize = 32;
 /// Transitions still delegate to [`InMemoryTurnStateStore`]; only the durable
 /// representation changes from whole-snapshot CAS to a typed append log plus a
 /// process-local hot snapshot cache.
+// arch-exempt: large_file, long-lived embedded-authority refactor adds a shared
+// overlay-store acquisition helper (deduplicating the apply / targeted-delta
+// paths) rather than a second store-acquisition pipeline, plan #6263
 pub struct FilesystemTurnStateRowStore<F>
 where
     F: RootFilesystem,
@@ -70,7 +74,6 @@ where
     limits: InMemoryTurnStateStoreLimits,
     admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
     snapshot_state: AsyncMutex<Option<RowSnapshotState>>,
-    commit_gate: AsyncMutex<()>,
     legacy_migration_gate: Arc<AsyncMutex<()>>,
     materialize_gate: Arc<AsyncMutex<()>>,
     runner_leases: RunnerLeaseMemory,
@@ -146,7 +149,6 @@ where
             limits: InMemoryTurnStateStoreLimits::default(),
             admission_limit_provider: Arc::new(AllowAllTurnAdmissionLimitProvider),
             snapshot_state: AsyncMutex::new(None),
-            commit_gate: AsyncMutex::new(()),
             legacy_migration_gate: Arc::new(AsyncMutex::new(())),
             materialize_gate: Arc::clone(&materialize_gate),
             runner_leases: Arc::new(RwLock::new(HashMap::new())),
@@ -746,6 +748,37 @@ where
         )
     }
 
+    /// Acquire the long-lived embedded authority with the runner-lease overlay
+    /// applied, without rebuilding it from a full-snapshot clone.
+    ///
+    /// For [`RunnerLeaseOverlay::None`] and [`RunnerLeaseOverlay::Run`] this
+    /// reuses the cached authority in place (the `Run` case overlays a single
+    /// run record's live lease heartbeat onto it) — an O(1) reuse rather than a
+    /// per-op O(store-size) `from_persistence_snapshot` rebuild. Only
+    /// [`RunnerLeaseOverlay::All`] (expired-lease recovery) still rebuilds from
+    /// an overlaid snapshot clone, because it must overlay every run's lease.
+    async fn acquire_overlaid_store(
+        &self,
+        cached_store: Arc<InMemoryTurnStateStore>,
+        overlay_baseline: Option<TurnPersistenceSnapshot>,
+        overlay_run: Option<TurnRunRecord>,
+        overlay: RunnerLeaseOverlay,
+    ) -> Result<Arc<InMemoryTurnStateStore>, TurnError> {
+        if let Some(baseline) = overlay_baseline {
+            let (overlaid_snapshot, _) = self
+                .runner_lease_store()
+                .overlay((baseline, None), overlay)
+                .await?;
+            Ok(Arc::new(self.build_in_memory_store(overlaid_snapshot)?))
+        } else {
+            if let Some(run) = overlay_run {
+                let overlaid = self.runner_lease_store().overlay_run_record(run).await?;
+                cached_store.overlay_runner_lease_record(overlaid)?;
+            }
+            Ok(cached_store)
+        }
+    }
+
     async fn apply<T, A, Fut>(
         &self,
         overlay: RunnerLeaseOverlay,
@@ -757,20 +790,31 @@ where
         T: Send,
     {
         let critical = async {
-            let _commit_guard = self.commit_gate.lock().await;
             let mut guard = self.snapshot_state.lock().await;
             let mut refreshed_after_stale_error = false;
             loop {
                 self.ensure_snapshot_cache_for_mutation(&mut guard).await?;
-                let (baseline, current_journal_seq) = guard
-                    .as_ref()
-                    .map(|state| (state.snapshot.clone(), state.journal_seq))
-                    .unwrap_or_else(|| (TurnPersistenceSnapshot::default(), SeqNo::ZERO));
-                let (overlaid_snapshot, _) = self
-                    .runner_lease_store()
-                    .overlay((baseline.clone(), None), overlay)
+                let (baseline, current_journal_seq, cached_store, overlay_baseline, overlay_run) = {
+                    let state = guard.as_ref().ok_or_else(|| TurnError::Unavailable {
+                        reason: "row snapshot cache was not initialized".to_string(),
+                    })?;
+                    let overlay_baseline =
+                        matches!(overlay, RunnerLeaseOverlay::All).then(|| state.snapshot.clone());
+                    let overlay_run = match overlay {
+                        RunnerLeaseOverlay::Run(run_id) => state.run_record_by_id(run_id),
+                        RunnerLeaseOverlay::None | RunnerLeaseOverlay::All => None,
+                    };
+                    (
+                        state.snapshot.clone(),
+                        state.journal_seq,
+                        Arc::clone(&state.store),
+                        overlay_baseline,
+                        overlay_run,
+                    )
+                };
+                let store = self
+                    .acquire_overlaid_store(cached_store, overlay_baseline, overlay_run, overlay)
                     .await?;
-                let store = Arc::new(self.build_in_memory_store(overlaid_snapshot)?);
                 let outcome = apply(Arc::clone(&store)).await;
                 let mut new_snapshot = store.persistence_snapshot();
                 preserve_loop_checkpoints(&baseline, &mut new_snapshot);
@@ -803,6 +847,23 @@ where
                     }
                 };
                 let persist_delta = row_store_durable_delta(delta.clone());
+                // A durable-empty delta (the snapshot differs only in categories
+                // the durable delta strips — run/turn tombstones, admission
+                // scaffolding, retention floor — all rebuilt on load) must NOT
+                // consume a reservation sequence: `enqueue_delta` skips an empty
+                // delta so no backend append happens. Advancing the hot-cache
+                // journal seq without a matching append desyncs it from the
+                // backend append log, and a later mutation's rows/reservations
+                // land one seq ahead of the real append — a subsequent active-lock
+                // DELETE then collides with a stale reserved row and is dropped on
+                // crash recovery (#6263). Keep the hot cache current at the SAME
+                // seq and return.
+                if persist_delta.is_empty() {
+                    let next_state =
+                        RowSnapshotState::new(new_snapshot, store, current_journal_seq)?;
+                    *guard = Some(next_state);
+                    return Ok(RowApplyOutcome::Ready(value));
+                }
                 let reservation_seq = current_journal_seq.next();
                 let next_state = RowSnapshotState::new(new_snapshot, store, reservation_seq)?;
                 let (run_row_reservations, active_lock_reservations) = match self
@@ -1567,17 +1628,6 @@ where
         }
     }
 
-    async fn apply_cached_delta(&self, delta: SnapshotDelta) -> Result<(), TurnError> {
-        if delta.is_empty() {
-            return Ok(());
-        }
-        let mut guard = self.snapshot_state.lock().await;
-        if let Some(state) = guard.as_mut() {
-            state.apply_delta(delta, state.journal_seq)?;
-        }
-        Ok(())
-    }
-
     async fn apply_with_targeted_delta<T, A, Fut, D>(
         &self,
         overlay: RunnerLeaseOverlay,
@@ -1597,7 +1647,6 @@ where
         T: Send,
     {
         let critical = async {
-            let _commit_guard = self.commit_gate.lock().await;
             let mut guard = self.snapshot_state.lock().await;
             let mut build_delta = Some(build_delta);
             let mut refreshed_after_stale_error = false;
@@ -1620,19 +1669,9 @@ where
                         overlay_run,
                     )
                 };
-                let store = if let Some(baseline) = overlay_baseline {
-                    let (overlaid_snapshot, _) = self
-                        .runner_lease_store()
-                        .overlay((baseline, None), overlay)
-                        .await?;
-                    Arc::new(self.build_in_memory_store(overlaid_snapshot)?)
-                } else {
-                    if let Some(run) = overlay_run {
-                        let overlaid = self.runner_lease_store().overlay_run_record(run).await?;
-                        cached_store.overlay_runner_lease_record(overlaid)?;
-                    }
-                    cached_store
-                };
+                let store = self
+                    .acquire_overlaid_store(cached_store, overlay_baseline, overlay_run, overlay)
+                    .await?;
                 let outcome = apply(Arc::clone(&store)).await;
                 let value = match outcome {
                     Ok(value) => value,
@@ -1671,6 +1710,33 @@ where
                         state.journal_seq.next(),
                     )
                 };
+                // A no-op or in-memory-only mutation whose DURABLE delta is empty
+                // must NOT consume a reservation sequence. `enqueue_delta` skips an
+                // empty delta (no backend append happens), so advancing the
+                // hot-cache journal seq here would desync it from the backend
+                // append log: the next mutation's rows — and its pre-append
+                // reservations — would be written one sequence ahead of the real
+                // append, and a later active-lock DELETE (materialized at the real
+                // seq) would then collide with the stale reserved row and be
+                // dropped, leaking the lock across a crash (#6263). Apply the
+                // hot-cache delta at the CURRENT seq (no advance), enqueue nothing,
+                // and return.
+                if persist_delta.is_empty() {
+                    if let Some(state) = guard.as_mut() {
+                        let current_seq = state.journal_seq;
+                        if let Err(error) = state.apply_delta(delta, current_seq) {
+                            *guard = None;
+                            return Err(error);
+                        }
+                        state.store = store;
+                    }
+                    return Ok(PendingRowCommit {
+                        value,
+                        ack: None,
+                        active_lock_reservations: Vec::new(),
+                        run_row_reservations: Vec::new(),
+                    });
+                }
                 let (run_row_reservations, active_lock_reservations) =
                     if let Some(baseline) = reservation_baseline.as_ref() {
                         match self

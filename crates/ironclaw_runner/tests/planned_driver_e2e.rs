@@ -22,17 +22,16 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopDriver, AgentLoopDriverError, AgentLoopHostError, AgentLoopHostErrorKind,
         AppendCapabilityResultRef, BeginAssistantDraft, CapabilityBatchInvocation,
-        CapabilityBatchOutcome, CapabilityInvocation, CapabilityOutcome, FinalizeAssistantMessage,
-        LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCancelReasonKind,
-        LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome,
-        LoopCompactionPort, LoopCompactionRequest, LoopContextBundle, LoopContextPort,
-        LoopContextRequest, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
-        LoopInputPort, LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent,
-        LoopProgressPort, LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort,
-        LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, RunProfileResolver,
-        StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        CapabilityInvocation, FinalizeAssistantMessage, LoadCheckpointPayloadRequest,
+        LoadedCheckpointPayload, LoopCancelReasonKind, LoopCancellationPort,
+        LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest,
+        LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
+        LoopCompactionRequest, LoopContextBundle, LoopContextPort, LoopContextRequest, LoopInput,
+        LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort, LoopModelPort,
+        LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
+        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
+        LoopTranscriptPort, RunProfileResolver, StageCheckpointPayloadRequest,
+        UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 
@@ -476,14 +475,14 @@ impl LoopCapabilityPort for ForbiddenResumeHost {
     async fn invoke_capability(
         &self,
         _request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
         Err(self.forbidden_call("invoke_capability"))
     }
 
     async fn invoke_capability_batch(
         &self,
         _request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+    ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
         Err(self.forbidden_call("invoke_capability_batch"))
     }
 }

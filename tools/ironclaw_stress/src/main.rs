@@ -615,6 +615,11 @@ pub(crate) enum TurnStateBackend {
     /// Durable typed append-log deltas with one hot in-process store per
     /// tenant/user. Candidate filesystem fix for the blob growth curve.
     FilesystemRow,
+    /// The row store over an in-memory `RootFilesystem` backend — the proposed
+    /// replacement for the direct `InMemoryTurnStateStore` authority in the
+    /// `inmemory-turn-state` profile. Measures the row-store mechanism's
+    /// overhead with the durable backend cost removed.
+    RowMemory,
     /// One shared in-process `InMemoryTurnStateStore` authority — coordination
     /// in memory, no per-step CAS. Prototype for the runtime-wedge fix.
     Memory,
@@ -631,6 +636,7 @@ impl TurnStateBackend {
         match self {
             Self::Filesystem => "filesystem",
             Self::FilesystemRow => "filesystem-row",
+            Self::RowMemory => "row-memory",
             Self::Memory => "memory",
             Self::MemoryPersistOnBlock => "memory-persist-on-block",
         }

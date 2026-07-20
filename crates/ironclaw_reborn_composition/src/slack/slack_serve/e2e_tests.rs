@@ -3392,7 +3392,6 @@ async fn build_harness_for_auth_fanout_test(
     (harness, observer)
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 #[tokio::test]
 async fn auth_prompt_is_posted_exactly_once_when_auth_resolution_ack_races_live_delivery_loop() {
     // Long max_wait keeps L1 alive (polling) when the auth-resolution ack arrives.

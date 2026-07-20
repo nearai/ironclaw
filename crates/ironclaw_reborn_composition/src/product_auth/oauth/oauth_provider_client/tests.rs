@@ -407,7 +407,6 @@ fn fake_digest(value: &str) -> String {
 }
 
 #[test]
-#[cfg(feature = "slack-v2-host-beta")]
 fn slack_authed_user_token_response_extracts_user_token_and_scopes() {
     use secrecy::ExposeSecret;
     let body = br#"{"ok":true,"access_token":"xoxb-bot-token","app_id":"A123","team":{"id":"T123"},"enterprise":{"id":"E123"},"authed_user":{"id":"U1","access_token":"xoxp-user-token","scope":"search:read,users:read","token_type":"user"}}"#;
@@ -427,7 +426,6 @@ fn slack_authed_user_token_response_extracts_user_token_and_scopes() {
 }
 
 #[test]
-#[cfg(feature = "slack-v2-host-beta")]
 fn slack_token_response_rejects_ok_false() {
     let body = br#"{"ok":false,"error":"invalid_code"}"#;
     let error = parse_token_response(body, TokenResponseShape::SlackAuthedUser)
@@ -439,7 +437,6 @@ fn slack_token_response_rejects_ok_false() {
 }
 
 #[test]
-#[cfg(feature = "slack-v2-host-beta")]
 fn slack_token_response_rejects_missing_authed_user() {
     let body = br#"{"ok":true,"access_token":"xoxb-bot-only"}"#;
     let error = parse_token_response(body, TokenResponseShape::SlackAuthedUser)

@@ -63,7 +63,6 @@ pub(super) fn capability_invocation_from_auth_resume_candidate(
                     correlation_id: pa.correlation_id,
                 }
             }),
-            replay: pending_auth.replay.clone(),
         });
     CapabilityInvocation {
         activity_id: call.activity_id,
@@ -831,7 +830,6 @@ mod tests {
             resume_token: None,
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             prior_approval: None,
-            replay: None,
             disposition: None,
         };
         let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
@@ -878,7 +876,6 @@ mod tests {
                 approval_request_id,
                 correlation_id,
             }),
-            replay: None,
             disposition: None,
         };
         let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
@@ -945,7 +942,6 @@ mod tests {
             resume_token: None, // no prior approval — the key precondition
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             prior_approval: None,
-            replay: None,
             disposition: None,
         };
         let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();

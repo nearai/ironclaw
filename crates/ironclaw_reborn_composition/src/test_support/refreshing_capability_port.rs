@@ -39,7 +39,7 @@ pub struct RefreshingCapabilityPortTestParts {
     pub result_writer: std::sync::Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
     pub milestone_sink: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopHostMilestoneSink>,
     /// Opaque handle built by
-    /// `test_support::build_local_dev_skill_context_source_for_test`. Wraps
+    /// `test_support::build_skill_context_source_for_test`. Wraps
     /// the crate-private `ComposedSelectableSkillContextSource` so it never
     /// appears in this (public, `test-support`-gated) struct's field types;
     /// the private type is recovered internally via
@@ -53,7 +53,7 @@ pub struct RefreshingCapabilityPortTestParts {
     /// (`local_dev.rs` `create_capability_port`).
     pub thread_service: std::sync::Arc<dyn ironclaw_threads::SessionThreadService>,
     /// Opaque handle built by
-    /// [`build_local_dev_extension_management_for_test`]. Wraps the
+    /// [`build_extension_management_for_test`]. Wraps the
     /// crate-private (`pub(crate)`) `RebornLocalExtensionManagementPort` so it
     /// never appears in this (public, `test-support`-gated) struct's field
     /// types; mirrors `skill_activation_source` above. Active-extension
@@ -81,6 +81,14 @@ pub struct RefreshingCapabilityPortTestParts {
         std::sync::Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore>,
     pub approval_requests: std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
     pub capability_leases: std::sync::Arc<dyn ironclaw_authorization::CapabilityLeaseStore>,
+    /// Durable model-visible gate-record store the built capability port persists
+    /// pending-gate records into (§5.2.9).
+    pub gate_record_store: std::sync::Arc<dyn ironclaw_run_state::GateRecordStore>,
+    /// Durable host-private replay-payload store the built capability port
+    /// persists gate/auth replay payloads into and reconstitutes on resume
+    /// (§5.3 Stage 2a-i). Must be shared across the harness's turns/threads so a
+    /// resume finds the payload its raise persisted.
+    pub replay_payload_store: std::sync::Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
     /// Test-only config extension (empty = production behavior). See
     /// `RefreshingCapabilityPortConfig::capability_execution_mount_overrides`.
     pub capability_execution_mount_overrides:
@@ -142,7 +150,7 @@ impl ExtensionManagementTestHandle {
 /// install/activate an extension can also just omit this call and leave the
 /// field `None` for the same no-op surface.
 #[cfg(feature = "test-support")]
-pub fn build_local_dev_extension_management_for_test(
+pub fn build_extension_management_for_test(
     services: &crate::RebornServices,
 ) -> Option<ExtensionManagementTestHandle> {
     let extension_management = services

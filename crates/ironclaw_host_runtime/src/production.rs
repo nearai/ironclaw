@@ -2119,13 +2119,20 @@ fn stable_auth_gate_id(
     let mut requirements = credential_requirements
         .iter()
         .map(|requirement| {
-            let mut scopes = requirement.provider_scopes.clone();
-            scopes.sort();
+            // `setup` MUST be part of the fingerprint (#6299 IronLoop): two
+            // requirements that agree on provider/extension/provider_scopes but
+            // differ in `setup` (e.g. a ManualToken record vs a later OAuth or
+            // Pairing record, or differing OAuth setup scopes) are DIFFERENT auth
+            // requirements. Omitting it lets them derive the same deterministic
+            // `for_auth_gate` key; the write-once store then reports
+            // `GateRecordAlreadyExists` and silently keeps the stale record, so
+            // the runner reloads and renders the wrong authentication flow.
             format!(
-                "credential={}:{}:{}",
+                "credential={}:{}:setup={}:{}",
                 requirement.provider.as_str(),
                 requirement.requester_extension.as_str(),
-                scopes.join(",")
+                stable_setup_token(&requirement.setup),
+                canonical_scope_list(&requirement.provider_scopes),
             )
         })
         .collect::<Vec<_>>();
@@ -2136,6 +2143,38 @@ fn stable_auth_gate_id(
     let suffix = digest.strip_prefix("sha256:").unwrap_or(&digest);
     RuntimeGateId::from_stable_suffix(&format!("auth-{suffix}"))
         .unwrap_or_else(|_| RuntimeGateId::new())
+}
+
+/// Canonical, deterministic fingerprint token for a credential-account setup,
+/// so [`stable_auth_gate_id`] distinguishes auth requirements that differ only
+/// in their setup flow (#6299 IronLoop). Exhaustive by design: a new
+/// `RuntimeCredentialAccountSetup` variant fails the build here rather than
+/// silently hashing to an existing token. OAuth setup scopes use the same
+/// injective [`canonical_scope_list`] encoding as `provider_scopes`.
+fn stable_setup_token(setup: &ironclaw_host_api::RuntimeCredentialAccountSetup) -> String {
+    use ironclaw_host_api::RuntimeCredentialAccountSetup as Setup;
+    match setup {
+        Setup::ManualToken => "manual_token".to_string(),
+        Setup::OAuth { scopes } => format!("oauth:{}", canonical_scope_list(scopes)),
+        Setup::Pairing => "pairing".to_string(),
+        Setup::Retired => "retired".to_string(),
+    }
+}
+
+/// Injective canonical encoding of a scope list for the auth-gate fingerprint
+/// (#6299 IronLoop). Scopes are not validated to exclude a join delimiter, so a
+/// plain `join(",")` is ambiguous — `["a,b"]` and `["a", "b"]` would collide and
+/// derive the same write-once gate key. Sort (a scope set is order-independent),
+/// then length-prefix each element (`<byte_len>:<scope>`) so distinct sets can
+/// never share an encoding regardless of which characters the scopes contain.
+fn canonical_scope_list(scopes: &[String]) -> String {
+    let mut sorted = scopes.to_vec();
+    sorted.sort();
+    sorted
+        .iter()
+        .map(|scope| format!("{}:{scope}", scope.len()))
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 fn spawned_process_outcome_from(
@@ -2605,6 +2644,93 @@ output_schema_ref = "schemas/test.output.json"
             panic!("expected auth gate");
         };
         assert_ne!(first_gate.gate_id, second_gate.gate_id);
+    }
+
+    #[test]
+    fn auth_required_outcome_changes_gate_when_only_setup_changes() {
+        // Regression (#6299 IronLoop): two requirements identical in provider,
+        // requester, and `provider_scopes` but differing ONLY in `setup` are
+        // DIFFERENT auth flows and must NOT collide on the deterministic
+        // `for_auth_gate` key. Before the fix `setup` was omitted from the
+        // fingerprint, so e.g. a ManualToken record and a later OAuth/Pairing
+        // record produced the same gate id; the write-once gate-record store
+        // then reported `GateRecordAlreadyExists`, kept the stale record, and
+        // the runner reloaded and rendered the wrong authentication flow.
+        use ironclaw_host_api::RuntimeCredentialAccountSetup as Setup;
+        let requirement_with = |setup: Setup| RuntimeCredentialAuthRequirement {
+            provider: RuntimeCredentialAccountProviderId::new("notion").unwrap(),
+            setup,
+            requester_extension: ExtensionId::new("notion").unwrap(),
+            provider_scopes: vec!["read".to_string()],
+        };
+        let gate_id = |setup: Setup| {
+            let RuntimeCapabilityOutcome::AuthRequired(gate) =
+                auth_required_outcome(cap(), Vec::new(), vec![requirement_with(setup)])
+            else {
+                panic!("expected auth gate");
+            };
+            gate.gate_id
+        };
+
+        let manual = gate_id(Setup::ManualToken);
+        let oauth = gate_id(Setup::OAuth {
+            scopes: vec!["read".to_string()],
+        });
+        let pairing = gate_id(Setup::Pairing);
+        // Distinct setup KINDS never collide (all `provider_scopes` equal).
+        assert_ne!(manual, oauth, "ManualToken vs OAuth must not collide");
+        assert_ne!(manual, pairing, "ManualToken vs Pairing must not collide");
+        assert_ne!(oauth, pairing, "OAuth vs Pairing must not collide");
+
+        // OAuth setups differing ONLY in their setup scopes are distinct flows
+        // too (`provider_scopes` held fixed at ["read"] above and here).
+        let oauth_readwrite = gate_id(Setup::OAuth {
+            scopes: vec!["read".to_string(), "write".to_string()],
+        });
+        assert_ne!(
+            oauth, oauth_readwrite,
+            "OAuth setups with different setup scopes must not collide"
+        );
+
+        // Injective encoding: a single scope containing the old `,` join
+        // delimiter must not collide with two scopes that join to the same
+        // string — `["a,b"]` and `["a", "b"]` are DIFFERENT scope sets. Before
+        // the length-prefixed `canonical_scope_list`, both encoded to "a,b".
+        let one_comma_scope = gate_id(Setup::OAuth {
+            scopes: vec!["a,b".to_string()],
+        });
+        let two_scopes = gate_id(Setup::OAuth {
+            scopes: vec!["a".to_string(), "b".to_string()],
+        });
+        assert_ne!(
+            one_comma_scope, two_scopes,
+            "OAuth setup scopes must encode injectively: [\"a,b\"] != [\"a\", \"b\"]",
+        );
+
+        // The same injective guarantee must hold for the per-requirement
+        // `provider_scopes` list, not only OAuth setup scopes — otherwise a
+        // revert of the `provider_scopes` encoding alone would go uncaught (the
+        // cases above hold `provider_scopes` fixed). Fixed ManualToken setup,
+        // `provider_scopes` `["a,b"]` vs `["a", "b"]`.
+        let provider_scopes_gate = |scopes: Vec<String>| {
+            let requirement = RuntimeCredentialAuthRequirement {
+                provider: RuntimeCredentialAccountProviderId::new("notion").unwrap(),
+                setup: Setup::ManualToken,
+                requester_extension: ExtensionId::new("notion").unwrap(),
+                provider_scopes: scopes,
+            };
+            let RuntimeCapabilityOutcome::AuthRequired(gate) =
+                auth_required_outcome(cap(), Vec::new(), vec![requirement])
+            else {
+                panic!("expected auth gate");
+            };
+            gate.gate_id
+        };
+        assert_ne!(
+            provider_scopes_gate(vec!["a,b".to_string()]),
+            provider_scopes_gate(vec!["a".to_string(), "b".to_string()]),
+            "provider_scopes must encode injectively: [\"a,b\"] != [\"a\", \"b\"]",
+        );
     }
 
     #[test]

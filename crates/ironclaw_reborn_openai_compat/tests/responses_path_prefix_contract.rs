@@ -1,5 +1,3 @@
-#![cfg(feature = "openai-compat-beta")]
-
 //! Regression tests for the OpenAI Responses API route prefix
 //! (see ironclaw#2201).
 //!

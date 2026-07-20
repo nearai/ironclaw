@@ -16,7 +16,7 @@ use ironclaw_hooks::middleware::{
     HookedLoopCapabilityPort, HookedLoopCheckpointPort, HookedLoopModelPort, HookedLoopPromptPort,
     HookedLoopTranscriptPort,
 };
-use ironclaw_host_api::{CapabilityId, ExtensionId};
+use ironclaw_host_api::{CapabilityId, ExtensionId, Resolution, ResolutionBatch};
 use ironclaw_loop_host::{
     ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT, CapabilityResolveError, CapabilitySurfaceProfileFilter,
     CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, EmptyUserProfileSource,
@@ -113,21 +113,20 @@ use ironclaw_turns::{
     TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
-        CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityInvocation, CapabilityOutcome,
-        CommunicationContextProvider, FinalizeAssistantMessage, HookMilestoneSink,
-        HostManagedLoopModelPort, HostManagedLoopPromptPort,
-        InMemoryInstructionMaterializationStore, InstructionBundleMaterializedMessage,
-        InstructionMaterializationStore, InstructionSafetyContext, LoadCheckpointPayloadRequest,
-        LoadedCheckpointPayload, LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort,
-        LoopCheckpointPort, LoopCheckpointRequest, LoopCompactionError, LoopCompactionOutcome,
-        LoopCompactionPort, LoopCompactionRequest, LoopContextBundle, LoopContextPort,
-        LoopContextRequest, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
-        LoopInputCursor, LoopInputPort, LoopModelBudgetAccountant, LoopModelGateway,
-        LoopModelPolicyGuard, LoopModelPort, LoopModelRequest, LoopModelResponse,
-        LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
-        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopRunInfoPort,
-        LoopRuntimeContext, LoopTranscriptPort, NoOpBudgetAccountant, NoOpPolicyGuard,
-        ProviderToolCall, ProviderToolDefinition, RegisterProviderToolCallRequest,
+        CapabilityBatchInvocation, CapabilityInvocation, CommunicationContextProvider,
+        FinalizeAssistantMessage, HookMilestoneSink, HostManagedLoopModelPort,
+        HostManagedLoopPromptPort, InMemoryInstructionMaterializationStore,
+        InstructionBundleMaterializedMessage, InstructionMaterializationStore,
+        InstructionSafetyContext, LoadCheckpointPayloadRequest, LoadedCheckpointPayload,
+        LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort,
+        LoopCheckpointRequest, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
+        LoopCompactionRequest, LoopContextBundle, LoopContextPort, LoopContextRequest,
+        LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort,
+        LoopModelBudgetAccountant, LoopModelGateway, LoopModelPolicyGuard, LoopModelPort,
+        LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
+        LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+        LoopRunInfoPort, LoopRuntimeContext, LoopTranscriptPort, NoOpBudgetAccountant,
+        NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition, RegisterProviderToolCallRequest,
         RunScopedHookMilestoneSink, StageCheckpointPayloadRequest, SystemInferencePort,
         UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
@@ -302,28 +301,28 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         let may_change_surface = capability_may_change_visible_surface(&request.capability_id);
-        let outcome = self.inner.invoke_capability(request).await?;
+        let resolution = self.inner.invoke_capability(request).await?;
         if may_change_surface {
             self.surface_state.clear_current()?;
         }
-        Ok(outcome)
+        Ok(resolution)
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
         let may_change_surface = request
             .invocations
             .iter()
             .any(|invocation| capability_may_change_visible_surface(&invocation.capability_id));
-        let outcome = self.inner.invoke_capability_batch(request).await?;
+        let resolution = self.inner.invoke_capability_batch(request).await?;
         if may_change_surface {
             self.surface_state.clear_current()?;
         }
-        Ok(outcome)
+        Ok(resolution)
     }
 }
 
@@ -2148,14 +2147,14 @@ impl LoopCapabilityPort for RebornLoopDriverHost {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         self.capabilities.invoke_capability(request).await
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
         self.capabilities.invoke_capability_batch(request).await
     }
 }

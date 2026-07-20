@@ -1,7 +1,7 @@
 """Dedicated Reborn WebChat v2 smoke E2E.
 
 This proves the *new* Reborn surface end-to-end: the `ironclaw-reborn serve`
-binary (built with the `webui-v2-beta` feature) boots, serves the React SPA
+binary boots, serves the React SPA
 at `/`, authenticates a bearer caller, and runs one text turn through the
 `/api/webchat/v2/*` endpoints against the deterministic mock LLM.
 
@@ -13,8 +13,8 @@ exercises the legacy `ironclaw` web channel (`/api/chat/*`) under ENGINE_V2 —
 NOT the `ironclaw-reborn` binary or the v2 webUI.
 
 Wiring confirmed manually before this test existed:
-- The v2 SPA + `serve` subcommand are gated behind `webui-v2-beta` (transitively
-  enables `libsql`); the binary is `ironclaw-reborn`.
+- The v2 SPA + `serve` subcommand are compiled in unconditionally; the binary
+  is `ironclaw-reborn`.
 - LLM is selected via `$IRONCLAW_REBORN_HOME/config.toml` `[llm.default]`; the
   built-in `openai` provider (OpenAI `/v1/chat/completions`) is pointed at the
   mock with a `base_url` override and `api_key_env`.

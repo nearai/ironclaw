@@ -46,7 +46,7 @@ impl SkillActivationTestSource {
 /// composed. Mirrors `build_user_profile_source_for_test` (E-SKILL seam).
 /// Tests only.
 #[cfg(feature = "test-support")]
-pub fn build_local_dev_skill_context_source_for_test(
+pub fn build_skill_context_source_for_test(
     services: &crate::RebornServices,
     tenant_id: &ironclaw_host_api::TenantId,
     regex_skill_activation_enabled: bool,

@@ -221,7 +221,7 @@ jobs:
         run: |
           cargo build --release \
             --package ironclaw_reborn_cli \
-            --features webui-v2-beta,postgres,inmemory-turn-state \
+            --features postgres,inmemory-turn-state \
             --bin ironclaw
           cargo build --release --package ironclaw_stress
 

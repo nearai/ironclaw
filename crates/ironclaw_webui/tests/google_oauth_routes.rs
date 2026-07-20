@@ -9,11 +9,11 @@
 //! end-of-pipeline; testing the Google provider's `exchange_code`
 //! alone wouldn't catch a wrapper that drops the verifier.
 //!
-//! Gated on `dev-in-memory-session` because the test wires
+//! Gated on `test-support` because the test wires
 //! `InMemorySessionStore` + `EmailUserDirectory`, both of which only
 //! exist behind that feature. Matches `session_round_trip.rs`.
 
-#![cfg(feature = "dev-in-memory-session")]
+#![cfg(feature = "test-support")]
 
 use std::sync::Arc;
 

@@ -4129,20 +4129,16 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
     async fn invoke_capability(
         &self,
         _request: ironclaw_turns::run_profile::CapabilityInvocation,
-    ) -> Result<
-        ironclaw_turns::run_profile::CapabilityOutcome,
-        ironclaw_turns::run_profile::AgentLoopHostError,
-    > {
+    ) -> Result<ironclaw_host_api::Resolution, ironclaw_turns::run_profile::AgentLoopHostError>
+    {
         panic!("gateway tests do not invoke capabilities")
     }
 
     async fn invoke_capability_batch(
         &self,
         _request: ironclaw_turns::run_profile::CapabilityBatchInvocation,
-    ) -> Result<
-        ironclaw_turns::run_profile::CapabilityBatchOutcome,
-        ironclaw_turns::run_profile::AgentLoopHostError,
-    > {
+    ) -> Result<ironclaw_host_api::ResolutionBatch, ironclaw_turns::run_profile::AgentLoopHostError>
+    {
         panic!("gateway tests do not invoke capability batches")
     }
 }
