@@ -672,7 +672,15 @@ the seven Reborn binary archives and checksums; no installers, WASM bundles, or
 images are published. The independent manual and hourly entry points in
 `docker.yml` remain available.
 
-Current `dist plan --output-format=json` with `crates/ironclaw_reborn_cli` marked `dist = false` emits only the root legacy package artifacts (`ironclaw` package, `ironclaw-legacy` executable). Removing `dist = false` alone is not enough to ship the canonical Reborn `ironclaw` executable through cargo-dist because that plan is shaped around the root `ironclaw` package tag. The direct archives above do not resolve the remaining crate-version/tag alignment or cargo-dist WiX/installer contract; in particular, the CLI package version is not yet asserted to equal the `ironclaw-v*` tag.
+The checked-in
+[`reborn_cargo_dist_stays_disabled_until_package_and_installer_contracts_align`](../crates/ironclaw_reborn_cli/tests/smoke.rs)
+contract anchors the current cargo-dist blockers. It verifies that the
+release tag pattern remains `ironclaw-v*`, that the root package is `ironclaw`,
+and that the `ironclaw_reborn_cli` package version is different. It also checks
+that only the root has WiX metadata even though the workspace installer set
+includes MSI, and keeps the generated cargo-dist plan behind the disabled
+rollback guard. The direct archives above deliberately do not claim that
+version, tag, WiX, or installer alignment.
 
 The remaining Reborn version and installer packaging work is outside this
 temporary release path.
@@ -685,4 +693,7 @@ dist = false
 ```
 
 in `crates/ironclaw_reborn_cli/Cargo.toml` so cargo-dist does not claim Reborn
-packages or installers before the version and WiX contracts are aligned.
+packages or installers before the version and WiX contracts are aligned. When
+that ownership changes, update the contract with the intended Reborn package
+and installer assertions and validate a newly generated `dist plan` before
+enabling the legacy plan path.

@@ -387,6 +387,62 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
 }
 
 #[test]
+fn reborn_cargo_dist_stays_disabled_until_package_and_installer_contracts_align() {
+    fn package_value<'a>(manifest: &'a str, key: &str) -> &'a str {
+        let package = manifest
+            .split_once("[package]\n")
+            .map(|(_, rest)| rest)
+            .expect("manifest should contain a package section")
+            .split("\n[")
+            .next()
+            .expect("package section should have content");
+        let prefix = format!("{key} = \"");
+        package
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix)?.strip_suffix('"'))
+            .unwrap_or_else(|| panic!("package section should contain {key}"))
+    }
+
+    let root = workspace_root();
+    let workspace_manifest = std::fs::read_to_string(root.join("Cargo.toml"))
+        .expect("workspace manifest")
+        .replace("\r\n", "\n");
+    let cli_manifest = std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/Cargo.toml"))
+        .expect("Reborn CLI manifest")
+        .replace("\r\n", "\n");
+    let release_workflow = std::fs::read_to_string(root.join(".github/workflows/release.yml"))
+        .expect("release workflow")
+        .replace("\r\n", "\n");
+    let legacy_plan_job = release_workflow
+        .split_once("\n  plan:\n")
+        .and_then(|(_, jobs)| jobs.split_once("\n  build-local-artifacts:\n"))
+        .map(|(plan, _)| plan)
+        .expect("release workflow should retain the legacy cargo-dist plan job");
+
+    assert_eq!(package_value(&workspace_manifest, "name"), "ironclaw");
+    assert_eq!(package_value(&cli_manifest, "name"), "ironclaw_reborn_cli");
+    assert_ne!(
+        package_value(&workspace_manifest, "version"),
+        package_value(&cli_manifest, "version"),
+        "cargo-dist must remain disabled until the tag-owning root and Reborn package versions are aligned"
+    );
+    assert!(
+        cli_manifest.contains("[package.metadata.dist]\ndist = false")
+            && !cli_manifest.contains("[package.metadata.wix]")
+            && workspace_manifest.contains("[package.metadata.wix]")
+            && workspace_manifest
+                .contains("installers = [\"shell\", \"powershell\", \"npm\", \"msi\"]"),
+        "Reborn must not claim the workspace installer set before it owns an aligned WiX contract"
+    );
+    assert!(
+        release_workflow.contains("      - 'ironclaw-v[0-9]+.[0-9]+.[0-9]+*'")
+            && legacy_plan_job.contains("    if: github.repository == ''")
+            && legacy_plan_job.contains("dist plan --output-format=json"),
+        "the ironclaw-v* cargo-dist plan must remain a disabled rollback path while Reborn publishes directly"
+    );
+}
+
+#[test]
 fn dockerfile_reborn_ships_extension_ownership_migration() {
     let dockerfile = std::fs::read_to_string(workspace_root().join("Dockerfile.reborn"))
         .expect("Dockerfile.reborn");
