@@ -1,11 +1,12 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 
 use super::host::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilitySurfaceVersion, LoopContextPort,
-    LoopContextRequest, LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRef,
-    LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, PromptMode, VisibleCapabilitySurface,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilitySurfaceVersion, LoopContextBundle,
+    LoopContextPort, LoopContextRequest, LoopPromptBundle, LoopPromptBundleAuthority,
+    LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, PromptMode,
+    VisibleCapabilitySurface,
 };
 use super::instruction_bundle::{
     InstructionBundleBuilder, InstructionBundleRequest, InstructionMaterializationStore,
@@ -22,6 +23,30 @@ type CurrentSurfaceVersionLookup =
     dyn Fn() -> Result<Option<CapabilitySurfaceVersion>, AgentLoopHostError> + Send + Sync;
 type CurrentSurfaceLookup =
     dyn Fn() -> Result<Option<VisibleCapabilitySurface>, AgentLoopHostError> + Send + Sync;
+
+fn trace_prompt_latency_ok(
+    operation: &'static str,
+    context: &LoopRunContext,
+    started_at: Option<Instant>,
+    message_limit: usize,
+    message_count: usize,
+) {
+    ironclaw_observability::live_latency_trace_ok!(
+        "loop_prompt_port",
+        operation,
+        started_at,
+        tenant_id = %context.scope.tenant_id,
+        agent_id = context.scope.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        project_id = context.scope.project_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        thread_id = %context.thread_id,
+        owner_user_id = context.scope.explicit_owner_user_id().map(|id| id.as_str()).unwrap_or(""),
+        run_id = %context.run_id,
+        turn_id = %context.turn_id,
+        message_limit = message_limit as u64,
+        message_count = message_count as u64,
+        "loop prompt port operation completed",
+    );
+}
 
 /// Text-only host-managed prompt bundle port.
 ///
@@ -207,10 +232,11 @@ where
             ));
         }
 
-        if matches!(request.max_messages, Some(0)) {
+        if matches!(request.max_messages, Some(0)) && !is_inline_only_context_free_request(request)
+        {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::BudgetExceeded,
-                "prompt message limit must be greater than zero",
+                "prompt message limit must be greater than zero unless the request is inline-only",
             ));
         }
 
@@ -222,7 +248,7 @@ where
             .max_messages
             .map(|messages| messages as usize)
             .unwrap_or(self.default_message_limit)
-            .clamp(1, MAX_TEXT_ONLY_MESSAGE_LIMIT)
+            .clamp(0, MAX_TEXT_ONLY_MESSAGE_LIMIT)
     }
 
     fn instruction_builder(&self) -> InstructionBundleBuilder {
@@ -247,16 +273,31 @@ where
                 "instruction materialization store is required for this prompt bundle",
             ));
         }
-        let context = self
-            .context_port
-            .load_loop_context(LoopContextRequest {
-                after: request.context_cursor.clone(),
-                limit: self.message_limit(&request),
-                mode: request.mode,
-            })
-            .await?;
+        let message_limit = self.message_limit(&request);
+        let context = if message_limit == 0 {
+            LoopContextBundle::default()
+        } else {
+            let started_at = ironclaw_observability::live_latency_started_at();
+            let context = self
+                .context_port
+                .load_loop_context(LoopContextRequest {
+                    after: request.context_cursor.clone(),
+                    limit: message_limit,
+                    mode: request.mode,
+                })
+                .await?;
+            trace_prompt_latency_ok(
+                "load_loop_context",
+                &self.context,
+                started_at,
+                message_limit,
+                context.messages.len(),
+            );
+            context
+        };
         let identity_message_count = context.identity_messages.len() as u32;
         let instruction_snippet_count = context.instruction_snippets.len() as u32;
+        let started_at = ironclaw_observability::live_latency_started_at();
         let visible_surface = if request.surface_version.is_some() {
             match self.current_surface.as_ref() {
                 Some(current_surface) => {
@@ -279,6 +320,17 @@ where
         } else {
             None
         };
+        trace_prompt_latency_ok(
+            "visible_surface",
+            &self.context,
+            started_at,
+            message_limit,
+            visible_surface
+                .as_ref()
+                .map(|surface| surface.descriptors.len())
+                .unwrap_or_default(),
+        );
+        let started_at = ironclaw_observability::live_latency_started_at();
         let compaction_message_index = if context.compaction_message_index.is_empty() {
             context
                 .messages
@@ -288,6 +340,14 @@ where
         } else {
             context.compaction_message_index.clone()
         };
+        trace_prompt_latency_ok(
+            "compaction_index",
+            &self.context,
+            started_at,
+            message_limit,
+            compaction_message_index.len(),
+        );
+        let started_at = ironclaw_observability::live_latency_started_at();
         let instruction_bundle = self.instruction_builder().build(InstructionBundleRequest {
             context_bundle: context,
             visible_surface,
@@ -295,6 +355,14 @@ where
             inline_messages: request.inline_messages.clone(),
             runtime_context: self.runtime_context.clone(),
         })?;
+        trace_prompt_latency_ok(
+            "instruction_bundle_build",
+            &self.context,
+            started_at,
+            message_limit,
+            instruction_bundle.messages.len(),
+        );
+        let started_at = ironclaw_observability::live_latency_started_at();
         if let Some(store) = self.instruction_materialization_store.as_ref() {
             store.put_materialized_messages(
                 &self.context,
@@ -306,6 +374,13 @@ where
                 "instruction materialization store is required for this prompt bundle",
             ));
         }
+        trace_prompt_latency_ok(
+            "materialize_messages",
+            &self.context,
+            started_at,
+            message_limit,
+            instruction_bundle.materialized_messages.len(),
+        );
         let bundle = LoopPromptBundle {
             bundle_ref: LoopPromptBundleRef::fresh_for_run(&self.context),
             messages: instruction_bundle.messages,
@@ -315,7 +390,16 @@ where
             identity_message_count,
             instruction_snippet_count,
         };
+        let started_at = ironclaw_observability::live_latency_started_at();
         self.prompt_authority.issue_bundle(&self.context, &bundle)?;
+        trace_prompt_latency_ok(
+            "issue_bundle",
+            &self.context,
+            started_at,
+            message_limit,
+            bundle.messages.len(),
+        );
+        let started_at = ironclaw_observability::live_latency_started_at();
         self.milestones
             .prompt_bundle_built(
                 bundle.bundle_ref.clone(),
@@ -325,8 +409,23 @@ where
                 instruction_bundle.skill_context,
             )
             .await?;
+        trace_prompt_latency_ok(
+            "prompt_bundle_built_milestone",
+            &self.context,
+            started_at,
+            message_limit,
+            bundle.messages.len(),
+        );
         Ok(bundle)
     }
+}
+
+fn is_inline_only_context_free_request(request: &LoopPromptBundleRequest) -> bool {
+    !request.inline_messages.is_empty()
+        && request.context_cursor.is_none()
+        && request.surface_version.is_none()
+        && request.capability_view.is_none()
+        && request.checkpoint_state_ref.is_none()
 }
 
 #[cfg(test)]
@@ -357,6 +456,21 @@ mod tests {
             _request: LoopContextRequest,
         ) -> Result<LoopContextBundle, AgentLoopHostError> {
             Ok(LoopContextBundle::default())
+        }
+    }
+
+    struct UnavailableContextPort;
+
+    #[async_trait]
+    impl LoopContextPort for UnavailableContextPort {
+        async fn load_loop_context(
+            &self,
+            _request: LoopContextRequest,
+        ) -> Result<LoopContextBundle, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "context should not be loaded for inline-only prompt",
+            ))
         }
     }
 
@@ -394,6 +508,50 @@ mod tests {
             .expect("inline message should materialize");
         assert_eq!(materialized.role, "user");
         assert_eq!(materialized.model_content, "safe inline nudge");
+    }
+
+    #[tokio::test]
+    async fn inline_only_zero_message_prompt_skips_context_loading() {
+        let context = test_context();
+        let store = Arc::new(InMemoryInstructionMaterializationStore::default());
+        let port = HostManagedLoopPromptPort::new(
+            context.clone(),
+            Arc::new(UnavailableContextPort),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        )
+        .with_instruction_materialization_store(store.clone());
+
+        let bundle = port
+            .build_prompt_bundle(LoopPromptBundleRequest {
+                mode: PromptMode::TextOnly,
+                context_cursor: None,
+                surface_version: None,
+                checkpoint_state_ref: None,
+                max_messages: Some(0),
+                capability_view: None,
+                inline_messages: vec![LoopInlineMessage {
+                    role: LoopInlineMessageRole::System,
+                    safe_body: LoopInlineMessageBody::new(
+                        "safe failure explanation context".to_string(),
+                    )
+                    .unwrap(),
+                }],
+            })
+            .await
+            .expect("inline-only prompt should not ask context port");
+
+        assert_eq!(bundle.identity_message_count, 0);
+        assert_eq!(bundle.instruction_snippet_count, 0);
+        assert_eq!(bundle.compaction_message_index, Vec::new());
+        let inline_ref = &bundle.messages[0].content_ref;
+        let materialized = store
+            .get_materialized_message(&context, inline_ref)
+            .unwrap()
+            .expect("inline message should materialize");
+        assert_eq!(
+            materialized.model_content,
+            "safe failure explanation context"
+        );
     }
 
     /// A context port that returns configurable identity and body messages.

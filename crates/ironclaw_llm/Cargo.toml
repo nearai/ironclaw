@@ -10,6 +10,9 @@ homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "substrates"
+
 [package.metadata.dist]
 dist = false
 
@@ -20,7 +23,7 @@ bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types
 # provider resolution and do not want v1 SessionManager plumbing.
 registry-provider-factory = []
 # Opt-in StubLlm + credentials helpers for downstream test code.
-testing = []
+test-support = []
 
 [dependencies]
 ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }

@@ -118,7 +118,7 @@ The visible CX win is gated on **Step 1 only** (compaction). Steps 2–5 (durabl
 
 Three intertwined gaps surfaced from the past two days of triage:
 
-1. **Background subagents are disabled.** `SpawnSubagentMode::Background` exists in the type system but `TryFrom<SpawnSubagentWireArgs>` returns `Err(background_subagents_disabled())` for any background request (rejection call-sites at `crates/ironclaw_loop_support/src/subagent_spawn_port.rs:183–188`, checking both `run_in_background: true` and `mode == Some(Background)`; the helper itself is defined at `:1223`). Users cannot fan out asynchronous work.
+1. **Background subagents are disabled.** `SpawnSubagentMode::Background` exists in the type system but `TryFrom<SpawnSubagentWireArgs>` returns `Err(background_subagents_disabled())` for any background request (rejection call-sites at `crates/ironclaw_loop_host/src/subagent_spawn_port.rs:183–188`, checking both `run_in_background: true` and `mode == Some(Background)`; the helper itself is defined at `:1223`). Users cannot fan out asynchronous work.
 
 2. **Subagent runs are invisible to the parent UI.** `TurnRunRecord` already carries `parent_run_id`, `subagent_depth`, and `spawn_tree_root_run_id` (`crates/ironclaw_turns/src/store.rs:189–193`), but that lineage lives in the turn-store, **not in the event log**. The `RuntimeEvent` stream carries only `parent_invocation_id` (one hop) and the WebUI projection (`RunStatusProjection`) drops even that. The browser cannot render subagent runs nested under the parent.
 
@@ -317,8 +317,8 @@ Alternative seams (inside CapabilityStage, before PromptStage, on `DefaultPlanne
 - `crates/ironclaw_agent_loop/src/state/slots.rs:21` — `force_compact_on_next_iteration` (exists)
 - `crates/ironclaw_agent_loop/src/strategies/compaction.rs:42,76` — `DEFAULT_CONTEXT_LIMIT_TOKENS`, `should_compact`; Responsibility 1 threshold table per `capability_id`
 - `crates/ironclaw_agent_loop/src/executor/prompt.rs:303` — `PromptCompactionStep::run()` (compaction decision)
-- `crates/ironclaw_loop_support/src/subagent_spawn_port.rs:183` — re-enable Background mode in `TryFrom`; `:207` `SubagentDefinition`
-- `crates/ironclaw_reborn/src/subagent/completion_observer.rs:180` — Background branch (exists); `:516` `write_terminal_result`
+- `crates/ironclaw_loop_host/src/subagent_spawn_port.rs:183` — re-enable Background mode in `TryFrom`; `:207` `SubagentDefinition`
+- `crates/ironclaw_runner/src/subagent/completion_observer.rs:180` — Background branch (exists); `:516` `write_terminal_result`
 - `crates/ironclaw_turns/src/run_profile/host.rs:2057` — add `LoopBackgroundChildPort` to `AgentLoopDriverHost`
 - `crates/ironclaw_turns/src/store.rs:189` — `TurnRunRecord` parent/depth/tree fields (source of truth)
 - `crates/ironclaw_events/src/runtime_event.rs:80` — `RuntimeEvent`; add depth + tree-root fields

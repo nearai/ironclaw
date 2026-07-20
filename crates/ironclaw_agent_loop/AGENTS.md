@@ -6,8 +6,8 @@
 - Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these neighboring contracts before changing cross-crate behavior:
   - `crates/ironclaw_turns/AGENTS.md`
-  - `crates/ironclaw_loop_support/CLAUDE.md`
-  - `crates/ironclaw_reborn/CLAUDE.md`
+  - `crates/ironclaw_loop_host/CLAUDE.md`
+  - `crates/ironclaw_runner/CLAUDE.md`
 
 ## What This Crate Owns
 
@@ -20,7 +20,7 @@
 ## Do Not Move In Here
 
 - Product-specific logic, product adapters, transport behavior, or Reborn app composition.
-- `AgentLoopDriver` / `PlannedDriver` host wiring; that bridge belongs in `ironclaw_reborn`.
+- `AgentLoopDriver` / `PlannedDriver` host wiring; that bridge belongs in `ironclaw_runner`.
 - Runtime lanes, host-runtime services, provider auth, network/secrets, or UI concerns.
 - Raw prompts, raw assistant content, tool input JSON, secrets, host paths, or backend diagnostics in state.
 
@@ -28,7 +28,7 @@
 
 - Fast local check: `cargo test -p ironclaw_agent_loop`
 - Boundary check after dependency/API changes: `cargo test -p ironclaw_architecture`
-- Run `cargo test -p ironclaw_reborn` when changes affect drivers or loop-host integration.
+- Run `cargo test -p ironclaw_runner` when changes affect drivers or loop-host integration.
 
 ## Agent Notes
 

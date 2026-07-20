@@ -16,10 +16,11 @@ use uuid::Uuid;
 
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
-    AcceptedInboundMessageReplay, AdapterInstallationId, AdapterKind,
+    AcceptedInboundMessageReplay, AdapterInstallationId, AdapterKind, ConditionalUnpairOutcome,
     ConversationActorPairingService, ConversationBindingResolution, ConversationBindingService,
-    ConversationRouteKind, ExternalActorRef, ExternalConversationIdentity, ExternalConversationRef,
-    InboundTurnError, LinkConversationRequest, LinkedConversationBinding, MessageIdempotencyStatus,
+    ConversationRouteKind, ExpectedExternalActorOwner, ExternalActorBindingEpoch, ExternalActorRef,
+    ExternalConversationIdentity, ExternalConversationRef, InboundTurnError,
+    LinkConversationRequest, LinkedConversationBinding, MessageIdempotencyStatus,
     ReplyTargetBinding, ResolveConversationRequest, SessionThreadService, ThreadAccessDecision,
     ThreadMessageRecord, ValidateReplyTargetRequest,
 };
@@ -117,20 +118,71 @@ impl InMemoryConversationServices {
         external_actor_ref: ExternalActorRef,
         user_id: UserId,
     ) -> Result<(), InboundTurnError> {
+        self.try_pair_external_actor_inner(
+            tenant_id,
+            adapter_kind,
+            adapter_installation_id,
+            external_actor_ref,
+            user_id,
+            None,
+        )
+        .await
+    }
+
+    pub async fn pair_external_actor_with_epoch(
+        &self,
+        tenant_id: TenantId,
+        adapter_kind: AdapterKind,
+        adapter_installation_id: AdapterInstallationId,
+        external_actor_ref: ExternalActorRef,
+        user_id: UserId,
+        binding_epoch: ExternalActorBindingEpoch,
+    ) -> Result<(), InboundTurnError> {
+        self.try_pair_external_actor_inner(
+            tenant_id,
+            adapter_kind,
+            adapter_installation_id,
+            external_actor_ref,
+            user_id,
+            Some(binding_epoch),
+        )
+        .await
+    }
+
+    async fn try_pair_external_actor_inner(
+        &self,
+        tenant_id: TenantId,
+        adapter_kind: AdapterKind,
+        adapter_installation_id: AdapterInstallationId,
+        external_actor_ref: ExternalActorRef,
+        user_id: UserId,
+        binding_epoch: Option<ExternalActorBindingEpoch>,
+    ) -> Result<(), InboundTurnError> {
         let _mutation = self.mutation_lock.lock().await;
         self.refresh_state_from_repository().await?;
         let old_state = self.lock_state()?.clone();
         let snapshot = {
             let mut state = self.lock_state()?;
-            state.pairings.insert(
-                ActorKey::new(
-                    &tenant_id,
-                    &adapter_kind,
-                    &adapter_installation_id,
-                    &external_actor_ref,
-                ),
-                user_id,
+            let actor_key = ActorKey::new(
+                &tenant_id,
+                &adapter_kind,
+                &adapter_installation_id,
+                &external_actor_ref,
             );
+            if state.pairings.get(&actor_key) == Some(&user_id)
+                && state.pairing_epochs.get(&actor_key) == binding_epoch.as_ref()
+            {
+                return Ok(());
+            }
+            state.pairings.insert(actor_key.clone(), user_id);
+            match binding_epoch {
+                Some(binding_epoch) => {
+                    state.pairing_epochs.insert(actor_key, binding_epoch);
+                }
+                None => {
+                    state.pairing_epochs.remove(&actor_key);
+                }
+            }
             state.clone()
         };
         self.persist_state(old_state, snapshot).await
@@ -172,15 +224,54 @@ impl InMemoryConversationServices {
         let old_state = self.lock_state()?.clone();
         let snapshot = {
             let mut state = self.lock_state()?;
-            state.pairings.remove(&ActorKey::new(
+            let actor_key = ActorKey::new(
                 tenant_id,
                 adapter_kind,
                 adapter_installation_id,
                 external_actor_ref,
-            ));
+            );
+            state.pairings.remove(&actor_key);
+            state.pairing_epochs.remove(&actor_key);
+            state.revoke_direct_bindings_for_actor(&actor_key);
             state.clone()
         };
         self.persist_state(old_state, snapshot).await
+    }
+
+    pub async fn unpair_external_actor_if_owned_by(
+        &self,
+        tenant_id: &TenantId,
+        adapter_kind: &AdapterKind,
+        adapter_installation_id: &AdapterInstallationId,
+        external_actor_ref: &ExternalActorRef,
+        expected: &ExpectedExternalActorOwner,
+    ) -> Result<ConditionalUnpairOutcome, InboundTurnError> {
+        let _mutation = self.mutation_lock.lock().await;
+        self.refresh_state_from_repository().await?;
+        let old_state = self.lock_state()?.clone();
+        let actor_key = ActorKey::new(
+            tenant_id,
+            adapter_kind,
+            adapter_installation_id,
+            external_actor_ref,
+        );
+        let snapshot = {
+            let mut state = self.lock_state()?;
+            let Some(current_user_id) = state.pairings.get(&actor_key) else {
+                return Ok(ConditionalUnpairOutcome::AlreadyAbsent);
+            };
+            if current_user_id != &expected.user_id
+                || state.pairing_epochs.get(&actor_key) != expected.binding_epoch.as_ref()
+            {
+                return Ok(ConditionalUnpairOutcome::OwnerChanged);
+            }
+            state.pairings.remove(&actor_key);
+            state.pairing_epochs.remove(&actor_key);
+            state.revoke_direct_bindings_for_actor(&actor_key);
+            state.clone()
+        };
+        self.persist_state(old_state, snapshot).await?;
+        Ok(ConditionalUnpairOutcome::Unpaired)
     }
 
     pub async fn add_thread_participant(
@@ -223,6 +314,62 @@ impl ConversationActorPairingService for InMemoryConversationServices {
             adapter_installation_id,
             external_actor_ref,
             user_id,
+        )
+        .await
+    }
+
+    async fn pair_external_actor_with_epoch(
+        &self,
+        tenant_id: TenantId,
+        adapter_kind: AdapterKind,
+        adapter_installation_id: AdapterInstallationId,
+        external_actor_ref: ExternalActorRef,
+        user_id: UserId,
+        binding_epoch: ExternalActorBindingEpoch,
+    ) -> Result<(), InboundTurnError> {
+        InMemoryConversationServices::pair_external_actor_with_epoch(
+            self,
+            tenant_id,
+            adapter_kind,
+            adapter_installation_id,
+            external_actor_ref,
+            user_id,
+            binding_epoch,
+        )
+        .await
+    }
+
+    async fn unpair_external_actor(
+        &self,
+        tenant_id: TenantId,
+        adapter_kind: AdapterKind,
+        adapter_installation_id: AdapterInstallationId,
+        external_actor_ref: ExternalActorRef,
+    ) -> Result<(), InboundTurnError> {
+        self.try_unpair_external_actor(
+            &tenant_id,
+            &adapter_kind,
+            &adapter_installation_id,
+            &external_actor_ref,
+        )
+        .await
+    }
+
+    async fn unpair_external_actor_if_owned_by(
+        &self,
+        tenant_id: &TenantId,
+        adapter_kind: &AdapterKind,
+        adapter_installation_id: &AdapterInstallationId,
+        external_actor_ref: &ExternalActorRef,
+        expected: &ExpectedExternalActorOwner,
+    ) -> Result<ConditionalUnpairOutcome, InboundTurnError> {
+        InMemoryConversationServices::unpair_external_actor_if_owned_by(
+            self,
+            tenant_id,
+            adapter_kind,
+            adapter_installation_id,
+            external_actor_ref,
+            expected,
         )
         .await
     }
@@ -283,6 +430,7 @@ impl ConversationBindingService for InMemoryConversationServices {
             &request.adapter_installation_id,
             &request.external_actor_ref,
         );
+        let binding_epoch = state.pairing_epochs.get(&route_actor_key).cloned();
         let binding = state.bindings.get(&binding_key).cloned().ok_or_else(|| {
             InboundTurnError::BindingRequired {
                 adapter_kind: request.adapter_kind.as_str().to_string(),
@@ -299,7 +447,7 @@ impl ConversationBindingService for InMemoryConversationServices {
                 thread_id: binding.thread_id.to_string(),
             });
         }
-        Ok(binding.resolution(actor_user_id, request.tenant_id))
+        Ok(binding.resolution(actor_user_id, binding_epoch, request.tenant_id))
     }
 
     async fn link_conversation_to_thread(
@@ -496,6 +644,7 @@ impl InMemoryConversationServices {
                 &request.adapter_installation_id,
                 &request.external_actor_ref,
             );
+            let binding_epoch = state.pairing_epochs.get(&route_actor_key).cloned();
 
             if state.bindings.contains_key(&binding_key) {
                 let binding = state
@@ -539,7 +688,8 @@ impl InMemoryConversationServices {
                     .get(&binding_key)
                     .cloned()
                     .ok_or(InboundTurnError::StatePoisoned)?;
-                let resolution = binding.resolution(actor_user_id, request.tenant_id);
+                let resolution =
+                    binding.resolution(actor_user_id, binding_epoch, request.tenant_id);
                 (resolution, state.clone())
             } else {
                 let thread_id = ThreadId::new(Uuid::new_v4().to_string()).map_err(|error| {
@@ -568,8 +718,11 @@ impl InMemoryConversationServices {
                         trusted_owner_user_id,
                     ),
                 )?;
-                let resolution =
-                    binding.resolution(actor_user_id.clone(), request.tenant_id.clone());
+                let resolution = binding.resolution(
+                    actor_user_id.clone(),
+                    binding_epoch,
+                    request.tenant_id.clone(),
+                );
                 state.store_binding(binding_key, binding);
                 state.record_external_event_route(
                     &request.tenant_id,
@@ -611,18 +764,20 @@ impl SessionThreadService for InMemoryConversationServices {
                 });
             }
             state.ensure_participant(&request.tenant_id, &paired_user_id, &request.thread_id)?;
+            let route_actor_key = ActorKey::new(
+                &request.tenant_id,
+                &request.adapter_kind,
+                &request.adapter_installation_id,
+                &request.external_actor_ref,
+            );
+            let binding_epoch = state.pairing_epochs.get(&route_actor_key).cloned();
             state.ensure_binding_refs_match(BindingRefValidation {
                 tenant_id: &request.tenant_id,
                 thread_id: &request.thread_id,
                 source_binding_ref: request.source_binding_ref.as_str(),
                 reply_target_binding_ref: request.reply_target_binding_ref.as_str(),
                 actor_user_id: &request.actor.user_id,
-                route_actor_key: &ActorKey::new(
-                    &request.tenant_id,
-                    &request.adapter_kind,
-                    &request.adapter_installation_id,
-                    &request.external_actor_ref,
-                ),
+                route_actor_key: &route_actor_key,
                 route_kind: request.route_kind,
             })?;
             let source_binding = state
@@ -712,6 +867,7 @@ impl SessionThreadService for InMemoryConversationServices {
                         replay: AcceptedInboundMessageReplay {
                             resolution: source_binding.resolution(
                                 accepted.actor.user_id.clone(),
+                                binding_epoch,
                                 accepted.tenant_id.clone(),
                             ),
                             accepted_message: accepted.clone(),
@@ -850,6 +1006,8 @@ pub(crate) struct InMemoryState {
     #[serde(default, skip)]
     pub(crate) persistence_revision: i64,
     pub(crate) pairings: HashMap<ActorKey, UserId>,
+    #[serde(default)]
+    pub(crate) pairing_epochs: HashMap<ActorKey, ExternalActorBindingEpoch>,
     pub(crate) bindings: HashMap<BindingKey, BindingRecord>,
     pub(crate) source_bindings: HashMap<String, BindingRecord>,
     pub(crate) reply_targets: HashMap<String, ReplyTargetRecord>,
@@ -873,6 +1031,35 @@ impl InMemoryState {
             ReplyTargetRecord::from_binding(&binding, binding.external_conversation_ref.clone()),
         );
         self.bindings.insert(binding_key, binding);
+    }
+
+    fn revoke_direct_bindings_for_actor(&mut self, actor_key: &ActorKey) {
+        let removed_binding_keys: Vec<_> = self
+            .bindings
+            .iter()
+            .filter(|(_, binding)| binding.route_access.is_direct_owner(actor_key))
+            .map(|(binding_key, _)| binding_key.clone())
+            .collect();
+        let mut removed_conversations = std::collections::HashSet::new();
+        for binding_key in removed_binding_keys {
+            if let Some(binding) = self.bindings.remove(&binding_key) {
+                removed_conversations.insert(binding.external_conversation_identity.clone());
+                self.source_bindings
+                    .remove(binding.source_binding_ref.as_str());
+                self.reply_targets
+                    .remove(binding.reply_target_binding_ref.as_str());
+            }
+        }
+        self.source_bindings
+            .retain(|_, binding| !binding.route_access.is_direct_owner(actor_key));
+        self.reply_targets
+            .retain(|_, binding| !binding.route_access.is_direct_owner(actor_key));
+        self.external_event_routes.retain(|route_key, identity| {
+            route_key.tenant_id != actor_key.tenant_id
+                || route_key.adapter_kind != actor_key.adapter_kind
+                || route_key.adapter_installation_id != actor_key.adapter_installation_id
+                || !removed_conversations.contains(identity)
+        });
     }
 
     fn widen_binding_route_access(
@@ -1205,6 +1392,10 @@ impl ReplyRouteAccess {
         self.owner_actor_key == *actor_key
             || (self.shared && route_kind == ConversationRouteKind::Shared)
     }
+
+    fn is_direct_owner(&self, actor_key: &ActorKey) -> bool {
+        self.owner_actor_key == *actor_key && !self.shared
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1329,6 +1520,7 @@ impl BindingRecord {
     fn resolution(
         &self,
         actor_user_id: UserId,
+        binding_epoch: Option<ExternalActorBindingEpoch>,
         tenant_id: TenantId,
     ) -> ConversationBindingResolution {
         let turn_scope = match self.owner_user_id.clone() {
@@ -1349,6 +1541,7 @@ impl BindingRecord {
         ConversationBindingResolution {
             tenant_id,
             actor: TurnActor::new(actor_user_id),
+            binding_epoch,
             turn_scope,
             source_binding_ref: self.source_binding_ref.clone(),
             reply_target_binding_ref: self.reply_target_binding_ref.clone(),

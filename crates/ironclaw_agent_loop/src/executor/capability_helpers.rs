@@ -63,7 +63,6 @@ pub(super) fn capability_invocation_from_auth_resume_candidate(
                     correlation_id: pa.correlation_id,
                 }
             }),
-            replay: pending_auth.replay.clone(),
         });
     CapabilityInvocation {
         activity_id: call.activity_id,
@@ -255,11 +254,37 @@ pub(super) async fn append_capability_result_ref(
         result_ref: result.result_ref.clone(),
         safe_summary: result.safe_summary.clone(),
         provider_call: provider_tool_call_reference(call),
-        model_observation: None,
+        model_observation: result
+            .model_observation
+            .clone()
+            .or_else(|| model_visible_capability_success_observation(call, result)),
     })
     .await
     .map_err(capability_host_error)?;
     Ok(())
+}
+
+fn model_visible_capability_success_observation(
+    call: &CapabilityCallCandidate,
+    result: &CapabilityResultMessage,
+) -> Option<ModelVisibleToolObservation> {
+    call.provider_replay.as_ref()?;
+    // "none" is the static sentinel for successful capability observations and
+    // satisfies CapabilityFailureKind's validation invariants.
+    let failure_kind = CapabilityFailureKind::unknown("none")
+        .expect("static success observation failure kind must be valid"); // safety: static valid sentinel
+    Some(ModelVisibleToolObservation {
+        schema_version: ironclaw_turns::run_profile::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+        status: ToolObservationStatus::Success,
+        summary: result.safe_summary.clone(),
+        detail: ToolObservationDetail::GenericFailure {
+            failure_kind,
+            detail: None,
+        },
+        artifacts: Vec::new(),
+        recovery: None,
+        trust: ObservationTrust::UntrustedToolOutput,
+    })
 }
 
 pub(super) fn provider_tool_call_reference(
@@ -336,19 +361,42 @@ pub(super) fn model_visible_capability_failure_observation(
         Some(CapabilityFailureDetail::InvalidInput { issues }) => {
             invalid_input_observation(bounded_input_issues(issues))
         }
-        _ => ModelVisibleToolObservation {
-            schema_version:
-                ironclaw_turns::run_profile::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
-            status: ToolObservationStatus::Error,
-            summary: model_visible_failure_summary(&failure.error_kind),
-            detail: ToolObservationDetail::GenericFailure {
-                failure_kind: failure.error_kind.clone(),
-            },
-            artifacts: Vec::new(),
-            recovery: Some(generic_failure_recovery(&failure.error_kind)),
-            trust: ObservationTrust::UntrustedToolOutput,
-        },
+        detail => {
+            let diagnostic = match detail {
+                Some(CapabilityFailureDetail::Diagnostic { text }) => {
+                    Some(bounded_diagnostic_detail(text))
+                }
+                _ => None,
+            };
+            ModelVisibleToolObservation {
+                schema_version:
+                    ironclaw_turns::run_profile::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+                status: ToolObservationStatus::Error,
+                summary: model_visible_failure_summary(&failure.error_kind),
+                detail: ToolObservationDetail::GenericFailure {
+                    failure_kind: failure.error_kind.clone(),
+                    detail: diagnostic,
+                },
+                artifacts: Vec::new(),
+                recovery: Some(generic_failure_recovery(&failure.error_kind)),
+                trust: ObservationTrust::UntrustedToolOutput,
+            }
+        }
     }
+}
+
+/// Bound a free-text diagnostic to the model-visible detail cap, truncating on
+/// a UTF-8 boundary. The diagnostic is already secret-scrubbed by the producer.
+fn bounded_diagnostic_detail(value: &str) -> String {
+    const MAX: usize = ironclaw_turns::run_profile::MODEL_OBSERVATION_DETAIL_MAX_BYTES;
+    if value.len() <= MAX {
+        return value.to_string();
+    }
+    let mut end = MAX;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string() // safety: `end` reduced to a valid UTF-8 boundary.
 }
 
 fn model_visible_failure_summary(error_kind: &CapabilityFailureKind) -> String {
@@ -430,7 +478,6 @@ fn generic_failure_recovery(error_kind: &CapabilityFailureKind) -> ToolRecoveryO
         | CapabilityFailureKind::Resource
         | CapabilityFailureKind::Internal
         | CapabilityFailureKind::Unknown(_) => SameCallRetryConstraint::Allowed,
-        _ => SameCallRetryConstraint::Allowed,
     };
     ToolRecoveryObservation {
         same_call_retry,
@@ -623,6 +670,7 @@ mod tests {
             terminate_hint: false,
             byte_len: 1000,
             output_digest: None,
+            model_observation: None,
         };
         let result_a2 = CapabilityResultMessage {
             result_ref: ironclaw_turns::LoopResultRef::new("result:a2".to_string()).unwrap(),
@@ -631,6 +679,7 @@ mod tests {
             terminate_hint: false,
             byte_len: 500,
             output_digest: None,
+            model_observation: None,
         };
         let result_b = CapabilityResultMessage {
             result_ref: ironclaw_turns::LoopResultRef::new("result:b".to_string()).unwrap(),
@@ -639,6 +688,7 @@ mod tests {
             terminate_hint: false,
             byte_len: 2000,
             output_digest: None,
+            model_observation: None,
         };
         push_completed_result(&mut state, &cap_a, result_a1);
         push_completed_result(&mut state, &cap_a, result_a2);
@@ -724,6 +774,46 @@ mod tests {
     }
 
     #[test]
+    fn generic_failure_observation_carries_diagnostic_detail_to_model() {
+        let path = "missing input_schema_ref at /system/extensions/google-calendar/schemas/google-calendar/list_calendars.input.v1.json";
+        let failure = CapabilityFailure {
+            error_kind: CapabilityFailureKind::MissingRuntime,
+            safe_summary: "capability invocation failed".to_string(),
+            detail: Some(CapabilityFailureDetail::Diagnostic {
+                text: path.to_string(),
+            }),
+        };
+
+        let observation = model_visible_capability_failure_observation(&failure);
+        observation
+            .validate()
+            .expect("observation with path-bearing diagnostic must validate");
+
+        let ToolObservationDetail::GenericFailure { detail, .. } = &observation.detail else {
+            panic!("expected a generic failure detail");
+        };
+        assert_eq!(
+            detail.as_deref(),
+            Some(path),
+            "the raw path-bearing cause must reach the model-visible observation"
+        );
+    }
+
+    #[test]
+    fn generic_failure_observation_without_diagnostic_has_no_detail() {
+        let failure = CapabilityFailure {
+            error_kind: CapabilityFailureKind::Backend,
+            safe_summary: "capability invocation failed".to_string(),
+            detail: None,
+        };
+        let observation = model_visible_capability_failure_observation(&failure);
+        let ToolObservationDetail::GenericFailure { detail, .. } = &observation.detail else {
+            panic!("expected a generic failure detail");
+        };
+        assert_eq!(detail.as_deref(), None);
+    }
+
+    #[test]
     fn pending_auth_resume_candidate_carries_non_empty_effective_capability_ids() {
         use crate::state::PendingAuthResume;
         use ironclaw_turns::run_profile::{CapabilityInputRef, CapabilitySurfaceVersion};
@@ -740,7 +830,6 @@ mod tests {
             resume_token: None,
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             prior_approval: None,
-            replay: None,
             disposition: None,
         };
         let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
@@ -787,7 +876,6 @@ mod tests {
                 approval_request_id,
                 correlation_id,
             }),
-            replay: None,
             disposition: None,
         };
         let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();
@@ -854,7 +942,6 @@ mod tests {
             resume_token: None, // no prior approval — the key precondition
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             prior_approval: None,
-            replay: None,
             disposition: None,
         };
         let surface_version = CapabilitySurfaceVersion::new("surface:v1").unwrap();

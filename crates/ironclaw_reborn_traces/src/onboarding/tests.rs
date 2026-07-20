@@ -833,3 +833,98 @@ async fn fake_sink_403_invite_not_valid_discards_pending() {
         "pending key must be discarded on InviteNotValid through the sink"
     );
 }
+
+/// Verify that the instance-level onboarding path writes the policy to the
+/// scope-None location (no `users/<hash>` segment) under an isolated base.
+///
+/// Uses `onboard_at_dir_with_sink` targeting `tempdir/trace_contributions/`
+/// — the equivalent of `trace_contribution_dir_for_scope(None)` under an
+/// arbitrary base — so the test never touches the real `~/.ironclaw/` tree.
+/// The tempdir drops automatically; no manual cleanup is required.
+#[tokio::test]
+async fn instance_onboard_writes_instance_level_policy() {
+    let base = tempfile::tempdir().expect("tempdir");
+    // scope=None → trace_contributions/ directly under the base (no users/<hash>)
+    let instance_dir = base.path().join("trace_contributions");
+
+    // Use a loopback-shaped invite URL so origin anchoring passes; no server is
+    // bound — the FakeSink returns a canned response without touching the network.
+    let invite_url = "http://127.0.0.1:7/onboard#INVINST01";
+    // Stage the pending key at the instance dir so canned_ok_body derives the
+    // correct device_key_id that the client will cross-check.
+    let body = canned_ok_body(&instance_dir, invite_url);
+    let sink = FakeSink {
+        status: 200,
+        body,
+        posted_url: Arc::new(Mutex::new(None)),
+    };
+
+    let outcome =
+        onboard_at_dir_with_sink(&instance_dir, invite_url, OnboardConsents::default(), &sink)
+            .await
+            .expect("instance onboard succeeds");
+
+    assert_eq!(outcome.tenant_id, "tenant-fake");
+
+    // The policy must land at the scope-None location (no users/<hash> segment).
+    let raw = std::fs::read_to_string(instance_dir.join("policy.json")).expect("policy written");
+    let policy: StandingTraceContributionPolicy =
+        serde_json::from_str(&raw).expect("policy parses");
+    assert!(policy.enabled);
+    assert_eq!(
+        policy.device_key_id.as_deref(),
+        Some(outcome.device_key_id.as_str()),
+        "policy device_key_id must match outcome"
+    );
+    // tempdir drops automatically — no manual cleanup needed
+}
+
+/// The admin CLI entry point: enrollment via `onboard_instance_at_base` must
+/// land the policy + device key at the INSTANCE location
+/// (`<base>/trace_contributions/`, scope `None`) — not a `users/<hash>/`
+/// scope dir — so every non-personally-enrolled user inherits it via
+/// `resolve_trace_credentials` (inheritance itself is pinned by the resolver
+/// tests in `contribution.rs`).
+#[tokio::test]
+async fn onboard_instance_at_base_targets_the_instance_dir() {
+    let base = tempfile::tempdir().unwrap();
+    let mock = spawn_mock_issuer(
+        |addr| ok_response(addr, "https://ingest.example.com"),
+        axum::http::StatusCode::OK,
+    )
+    .await;
+    let invite_url = format!("http://127.0.0.1:{}/onboard#INVADMIN1", mock.addr.port());
+    let consents = OnboardConsents {
+        include_message_text: false,
+        include_tool_payloads: false,
+    };
+
+    let outcome = onboard_instance_at_base(base.path(), &invite_url, consents)
+        .await
+        .expect("instance onboard succeeds");
+    assert_eq!(outcome.tenant_id, "tenant-a");
+
+    let instance_dir = base.path().join("trace_contributions");
+    let policy_path = instance_dir.join("policy.json");
+    assert!(
+        policy_path.exists(),
+        "policy must land at the instance (scope-None) location"
+    );
+    assert!(
+        !base.path().join("trace_contributions/users").exists(),
+        "instance enrollment must not create any per-user scope dir"
+    );
+    let policy: StandingTraceContributionPolicy =
+        serde_json::from_str(&std::fs::read_to_string(&policy_path).unwrap()).unwrap();
+    assert!(policy.enabled);
+    assert_eq!(policy.auth_mode, TraceUploadAuthMode::DeviceKey);
+    assert!(!policy.include_message_text);
+    assert!(!policy.include_tool_payloads);
+
+    // Promoted instance device key exists at the instance dir.
+    let tenant_key = instance_dir.join(format!(
+        "device_keys/{}.json",
+        device_key::tenant_hash("tenant-a")
+    ));
+    assert!(tenant_key.exists(), "instance device key must be promoted");
+}

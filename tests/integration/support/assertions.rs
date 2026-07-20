@@ -17,8 +17,10 @@
 // Module-level allow matches `builder.rs`/`reply.rs`/`http_matcher.rs`.
 #![allow(dead_code)]
 
+use ironclaw_events::{SecurityBoundary, SecurityDecision};
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::ResourceGovernor;
+use ironclaw_turns::run_profile::LoopHostMilestoneKind;
 use rust_decimal::Decimal;
 
 use super::builder::RebornIntegrationHarness;
@@ -73,6 +75,19 @@ impl RebornIntegrationHarness {
             return Ok(());
         }
         Err(format!("expected {expected} captured network egress request(s), saw {actual}").into())
+    }
+
+    /// S1 seam: assert exactly `expected` requests reached the
+    /// real-egress-pipeline's wire-level transport recorder
+    /// (`.with_real_egress_pipeline()`) — the true edge below real
+    /// network-policy enforcement and leak scan. `0` proves policy denied the
+    /// call before the transport; `>0` proves the request cleared policy.
+    pub async fn assert_real_egress_transport_count(&self, expected: usize) -> HarnessResult<()> {
+        let actual = self.real_egress_transport_requests().len();
+        if actual == expected {
+            return Ok(());
+        }
+        Err(format!("expected {expected} real-egress transport request(s), saw {actual}").into())
     }
 
     /// Assert the captured egress URLs, IN CALL ORDER, each contain the matching
@@ -315,6 +330,62 @@ impl RebornIntegrationHarness {
         Ok(())
     }
 
+    /// Harness-port-seam Change 4: assert the LATEST captured `tools` argument
+    /// carries a definition named `name` whose `description` contains
+    /// `needle` — pins `wrap_surface_disclosure`'s scoped-roots note
+    /// mutation (`HostSurfaceDisclosure::apply_to_surface_fields`), which
+    /// mutates `ProviderToolDefinition::description`/`parameters`, not tool
+    /// presence/absence.
+    pub async fn assert_model_tool_description_contains(
+        &self,
+        name: &str,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        let definitions = self.scripted_llm.captured_tool_definitions();
+        let Some(latest) = definitions.last() else {
+            return Err("no tool definitions captured for any request".into());
+        };
+        let Some(definition) = latest.iter().find(|definition| definition.name == name) else {
+            let seen: Vec<&str> = latest.iter().map(|d| d.name.as_str()).collect();
+            return Err(format!("no captured tool definition named {name:?}; saw {seen:?}").into());
+        };
+        if !definition.description.contains(needle) {
+            return Err(format!(
+                "tool {name:?} description did not contain {needle:?}: {:?}",
+                definition.description
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    /// Inverse of [`assert_model_tool_description_contains`]: the definition
+    /// exists but its description does NOT contain `needle` — the negative
+    /// control proving the note is conditional on a confirmed host mount,
+    /// not always appended.
+    pub async fn assert_model_tool_description_excludes(
+        &self,
+        name: &str,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        let definitions = self.scripted_llm.captured_tool_definitions();
+        let Some(latest) = definitions.last() else {
+            return Err("no tool definitions captured for any request".into());
+        };
+        let Some(definition) = latest.iter().find(|definition| definition.name == name) else {
+            let seen: Vec<&str> = latest.iter().map(|d| d.name.as_str()).collect();
+            return Err(format!("no captured tool definition named {name:?}; saw {seen:?}").into());
+        };
+        if definition.description.contains(needle) {
+            return Err(format!(
+                "tool {name:?} description unexpectedly contained {needle:?}: {:?}",
+                definition.description
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     /// Collects the persisted `safe_summary` field of every `ToolResultReference`
     /// message on this thread's FULL history (not baseline-sliced — safe only
     /// for single-turn harnesses today). Shared collector for
@@ -371,6 +442,69 @@ impl RebornIntegrationHarness {
         }
         let seen: Vec<_> = events.iter().map(|event| &event.kind).collect();
         Err(format!("no recorded turn event of kind {kind:?}; saw {seen:?}").into())
+    }
+
+    /// Assert the always-wired security-audit recorder captured an event with
+    /// the expected stable boundary/decision/code tuple.
+    pub async fn assert_security_audit_event_recorded(
+        &self,
+        boundary: SecurityBoundary,
+        decision: SecurityDecision,
+        code: &'static str,
+    ) -> HarnessResult<()> {
+        let events = self.recorded_security_audit_events();
+        if events.iter().any(|event| {
+            event.boundary == boundary && event.decision == decision && event.code == code
+        }) {
+            return Ok(());
+        }
+        let seen: Vec<_> = events
+            .iter()
+            .map(|event| (event.boundary.as_str(), event.decision.as_str(), event.code))
+            .collect();
+        Err(format!(
+            "no recorded security-audit event ({}, {}, {code}); saw {seen:?}",
+            boundary.as_str(),
+            decision.as_str()
+        )
+        .into())
+    }
+
+    /// Assert a `LoopHostMilestoneKind::CompactionFailed` milestone was
+    /// recorded whose `reason_kind` equals `reason_kind`, scoped to the
+    /// milestones recorded SINCE `baseline` (a value from
+    /// [`RebornIntegrationHarness::milestone_len`] captured at the start of
+    /// the turn under test) — proves forced compaction failed safety
+    /// validation for that turn specifically, not a stale milestone from an
+    /// earlier turn on a multi-turn harness (mirrors the `_since` pattern
+    /// used by the tool-error and history assertions).
+    pub async fn assert_compaction_failed_since(
+        &self,
+        baseline: usize,
+        reason_kind: &str,
+    ) -> HarnessResult<()> {
+        let milestones = self.loop_milestones();
+        let Some(since) = milestones.get(baseline..) else {
+            return Err(format!(
+                "milestone baseline {baseline} exceeds current milestone count {} — stale baseline",
+                milestones.len()
+            )
+            .into());
+        };
+        if since.iter().any(|milestone| {
+            matches!(
+                &milestone.kind,
+                LoopHostMilestoneKind::CompactionFailed { reason_kind: actual, .. }
+                    if actual.as_str() == reason_kind
+            )
+        }) {
+            return Ok(());
+        }
+        let seen: Vec<_> = since.iter().map(|milestone| &milestone.kind).collect();
+        Err(format!(
+            "no CompactionFailed milestone with reason_kind {reason_kind:?} since baseline {baseline}; saw {seen:?}"
+        )
+        .into())
     }
 
     /// Assert a captured model request carried a multimodal `data:` image part
@@ -485,6 +619,107 @@ impl RebornIntegrationHarness {
             format!("no persisted tool-error summary containing {text:?}; saw {summaries:?}")
                 .into(),
         )
+    }
+
+    /// Every persisted `ToolResultReference`'s `(safe_summary,
+    /// observation_status)` pair, where `observation_status` is the envelope's
+    /// parsed `model_observation.status` (`"success"` / `"error"`) when an
+    /// observation is present. Shared collector for the error-SHAPE negative
+    /// assertions below; same fail-loud decode contract as
+    /// `persisted_tool_error_summaries`.
+    async fn persisted_tool_result_reference_shapes(
+        &self,
+    ) -> HarnessResult<Vec<(String, Option<String>)>> {
+        let history = self
+            .thread_harness
+            .history(self.binding.thread_id.clone())
+            .await?;
+        history
+            .iter()
+            .filter(|message| message.kind == ironclaw_threads::MessageKind::ToolResultReference)
+            .map(|message| {
+                let Some(content) = message.content.as_deref() else {
+                    return Err("ToolResultReference message missing content".into());
+                };
+                serde_json::from_str::<ironclaw_threads::ToolResultReferenceEnvelope>(content)
+                    .map(|envelope| {
+                        let status = envelope
+                            .model_observation
+                            .as_ref()
+                            .and_then(|observation| observation.get("status"))
+                            .and_then(|status| status.as_str())
+                            .map(str::to_string);
+                        (envelope.safe_summary.as_str().to_string(), status)
+                    })
+                    .map_err(|err| {
+                        let truncated = match content.char_indices().nth(200) {
+                            Some((cutoff, _)) => format!("{}...[truncated]", &content[..cutoff]),
+                            None => content.to_string(),
+                        };
+                        format!(
+                            "failed to decode ToolResultReferenceEnvelope: {err}; raw: {truncated}"
+                        )
+                        .into()
+                    })
+            })
+            .collect()
+    }
+
+    /// Assert NO persisted `ToolResultReference` is ERROR-SHAPED — where
+    /// error-shaped means EITHER the envelope's `model_observation.status` is
+    /// `"error"` (the structural marker
+    /// `model_visible_capability_failure_observation` attaches to Failed and
+    /// Denied outcomes) OR its `safe_summary` starts with a
+    /// [`ToolErrorClass`] prefix.
+    ///
+    /// Strictly stronger than `assert_no_tool_error(class, "")` for a
+    /// "surfaced EXCLUSIVELY as the gate" pin (#5878/#6105 T2): that prefix
+    /// filter is blind to the OTHER class's prefix and to executor-synthesized
+    /// raw planner summaries (e.g. the gate-declined "auth gate denied by
+    /// user"), which persist with no class prefix — the bypass
+    /// `short_circuit_denied_resume`'s own test documents. Residual gap
+    /// (accepted): an error persisted with no observation AND a novel
+    /// unprefixed summary evades both arms.
+    ///
+    /// Scans the full thread history (not baseline-sliced) — single-turn
+    /// threads only, like [`assert_tool_error`].
+    ///
+    /// [`assert_tool_error`]: Self::assert_tool_error
+    pub async fn assert_no_error_shaped_tool_result(&self) -> HarnessResult<()> {
+        self.assert_no_error_shaped_tool_result_except(&[]).await
+    }
+
+    /// [`Self::assert_no_error_shaped_tool_result`], allowing error-shaped
+    /// references whose summary contains one of `allowed_substrings` — for
+    /// post-resume checks where one deliberate error IS the contract (a
+    /// denied gate persists its planner summary) but nothing else
+    /// error-shaped may exist.
+    pub async fn assert_no_error_shaped_tool_result_except(
+        &self,
+        allowed_substrings: &[&str],
+    ) -> HarnessResult<()> {
+        let shapes = self.persisted_tool_result_reference_shapes().await?;
+        let offending: Vec<&(String, Option<String>)> = shapes
+            .iter()
+            .filter(|(summary, status)| {
+                status.as_deref() == Some("error")
+                    || summary.starts_with(ToolErrorClass::Failed.summary_prefix())
+                    || summary.starts_with(ToolErrorClass::Denied.summary_prefix())
+            })
+            .filter(|(summary, _)| {
+                !allowed_substrings
+                    .iter()
+                    .any(|allowed| summary.contains(allowed))
+            })
+            .collect();
+        if offending.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "expected no error-shaped ToolResultReference beyond {allowed_substrings:?}; \
+             found (summary, observation-status) pairs {offending:?}"
+        )
+        .into())
     }
 
     /// Assert that any captured **network** egress request whose URL
@@ -697,6 +932,57 @@ impl RebornIntegrationHarness {
         Ok(self.persisted_history().await?.len())
     }
 
+    /// The MOST RECENT persisted `ToolResultReference` message (highest
+    /// `sequence`), for durable tool-result projection scenarios (issue
+    /// #5838) that need to script a dependent `result_read` call with a
+    /// server-minted value (`result_ref`, `next_offset`) `push_script`
+    /// couldn't know ahead of time. Errors when no such message exists.
+    async fn latest_tool_result_reference_message(
+        &self,
+    ) -> HarnessResult<ironclaw_threads::ThreadMessageRecord> {
+        let history = self.persisted_history().await?;
+        history
+            .into_iter()
+            .filter(|message| message.kind == ironclaw_threads::MessageKind::ToolResultReference)
+            .max_by_key(|message| message.sequence)
+            .ok_or_else(|| "no persisted ToolResultReference message".into())
+    }
+
+    /// The `result_ref` of the most recent persisted `ToolResultReference`
+    /// message. See [`latest_tool_result_reference_message`].
+    ///
+    /// [`latest_tool_result_reference_message`]: Self::latest_tool_result_reference_message
+    pub async fn latest_tool_result_ref(&self) -> HarnessResult<String> {
+        self.latest_tool_result_reference_message()
+            .await?
+            .tool_result_ref
+            .ok_or_else(|| "latest ToolResultReference message has no result_ref".into())
+    }
+
+    /// The `model_observation.detail.next_offset` of the most recent
+    /// persisted `ToolResultReference` message's `ResultReference`
+    /// observation — the server-computed continuation offset a `result_read`
+    /// script must use, since the preview's char-boundary floor can move it
+    /// off a fixed byte constant when the payload contains multi-byte UTF-8.
+    /// Errors when the message has no observation or no `next_offset` (i.e.
+    /// the preview already covered the whole payload).
+    pub async fn latest_tool_result_next_offset(&self) -> HarnessResult<u64> {
+        let message = self.latest_tool_result_reference_message().await?;
+        let content = message
+            .content
+            .ok_or("latest ToolResultReference message has no content")?;
+        let envelope: serde_json::Value = serde_json::from_str(&content).map_err(|error| {
+            format!("latest ToolResultReference content is not valid JSON: {error}")
+        })?;
+        envelope["model_observation"]["detail"]["next_offset"]
+            .as_u64()
+            .ok_or_else(|| {
+                "latest ToolResultReference observation has no next_offset (preview may cover \
+                 the whole payload)"
+                    .into()
+            })
+    }
+
     /// Slice `history[baseline..]`, failing loud on an out-of-range `baseline` —
     /// a baseline greater than the current history length is always a caller bug
     /// (a stale or foreign-thread value; history never shrinks). Degrading it to
@@ -895,6 +1181,20 @@ impl RebornIntegrationHarness {
         needle: &str,
     ) -> HarnessResult<()> {
         self.conversation_history_contains_impl(0, Some(kind), needle)
+            .await
+    }
+
+    /// [`assert_conversation_history_role_contains`], scoped to the
+    /// `[baseline..]` slice (a [`history_len`] value from the start of the
+    /// turn under test) — the multi-turn variant, mirroring
+    /// [`assert_conversation_history_contains_since`].
+    pub async fn assert_conversation_history_role_contains_since(
+        &self,
+        baseline: usize,
+        kind: ironclaw_threads::MessageKind,
+        needle: &str,
+    ) -> HarnessResult<()> {
+        self.conversation_history_contains_impl(baseline, Some(kind), needle)
             .await
     }
 }

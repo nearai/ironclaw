@@ -5,27 +5,29 @@ use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use clap::Args;
-#[cfg(feature = "openai-compat-beta")]
 use ironclaw_reborn_composition::build_openai_compat_route_mount;
-#[cfg(not(feature = "slack-v2-host-beta"))]
-use ironclaw_reborn_composition::build_webui_services;
-use ironclaw_reborn_composition::host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_reborn_composition::build_telegram_host_runtime_mounts;
+use ironclaw_reborn_composition::build_webui_services_with_slack_and_telegram_host_mounts;
+use ironclaw_reborn_composition::host_api::{
+    AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
+};
 use ironclaw_reborn_composition::{
     GoogleOAuthRouteConfig, LocalTriggerAccessReconciliation, LocalTriggerAccessRole,
     LocalTriggerAccessSource, LocalTriggerAccessStore, RebornBuildInput, RebornReadiness,
-    RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle, WebuiAuthenticator,
-    WebuiServeConfig, build_reborn_runtime, local_trigger_access_fire_checker,
-    webui_v2_app_with_lifecycle,
+    RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle, build_reborn_runtime,
+    local_trigger_access_fire_checker,
 };
-#[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_reborn_composition::{
     SlackOperatorRouteVisibility, build_slack_host_beta_runtime_mounts,
     build_webui_services_with_slack_host_beta_mounts,
 };
-use ironclaw_reborn_config::{IdentitySection, seed_default_config_file_if_missing};
-use ironclaw_reborn_webui_ingress::{
+use ironclaw_reborn_config::{
+    IdentitySection, RebornConfigFile, seed_default_config_file_if_missing,
+};
+use ironclaw_webui::{
     DeferredWebuiRouterHandle, EnvBearerAuthenticator, RebornWebuiServeError,
-    RebornWebuiServeOptions, deferred_webui_v2_startup_router, serve_webui_v2,
+    RebornWebuiServeOptions, WebuiAuthenticator, WebuiServeConfig,
+    deferred_webui_v2_startup_router, serve_webui_v2, webui_v2_app_with_lifecycle,
 };
 use secrecy::SecretString;
 
@@ -35,10 +37,66 @@ use crate::runtime::{
     resolve_google_oauth_config_from_env,
 };
 
-const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
-const DEFAULT_SERVE_PORT: u16 = 3000;
-const DEFAULT_ENV_TOKEN_VAR: &str = "IRONCLAW_REBORN_WEBUI_TOKEN";
+// pub(crate): reused by onboard's finale login-link print (same default host:port).
+pub(crate) const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
+pub(crate) const DEFAULT_SERVE_PORT: u16 = 3000;
+// pub(crate): reused by onboard/status for `env_token_is_active` (webui_token.rs).
+pub(crate) const DEFAULT_ENV_TOKEN_VAR: &str = "IRONCLAW_REBORN_WEBUI_TOKEN";
 const DEFAULT_ENV_USER_ID_VAR: &str = "IRONCLAW_REBORN_WEBUI_USER_ID";
+/// Lifetime of the one-time API bearer minted when an admin creates a user. A
+/// year: this is a long-lived programmatic credential, not a browser session.
+const ADMIN_API_TOKEN_LIFETIME_DAYS: i64 = 365;
+
+/// Read an env var, distinguishing "unset" from "set but not valid UTF-8".
+///
+/// `std::env::var(name).ok()` collapses both `VarError::NotPresent` and
+/// `VarError::NotUnicode` to `None` — which for the WebChat v2 bearer
+/// token env var is dangerous: an operator whose token value got mangled
+/// into invalid UTF-8 (a shell/CI export bug, a truncated byte sequence)
+/// would silently fall through to the `<reborn_home>/webui-token` file
+/// credential instead of failing loudly. Only `NotPresent` means "treat
+/// as unset"; `NotUnicode` is a real configuration error and must
+/// propagate with context naming the variable.
+///
+/// pub(crate): shared with `webui_token::env_token_is_active` so both
+/// checks (token source vs. login-link gating) never drift.
+pub(crate) fn present_unicode_env_var(name: &str) -> anyhow::Result<Option<String>> {
+    match env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(raw)) => Err(anyhow!(
+            "{name} is set but is not valid UTF-8 ({} raw bytes); refusing to silently treat it \
+             as unset, which would otherwise fall through to the WebChat v2 token file credential.",
+            raw.as_encoded_bytes().len()
+        )),
+    }
+}
+
+/// Mints the admin-created-user API bearer over a signed session store. The
+/// store is deterministic in its signing key (operator secret + tenant), so a
+/// token minted here validates under the SSO login surface's own store.
+struct SignedSessionTokenMinter {
+    session_store: Arc<dyn ironclaw_webui::SessionStore>,
+}
+
+#[async_trait::async_trait]
+impl ironclaw_reborn_composition::AdminApiTokenMinter for SignedSessionTokenMinter {
+    async fn mint(&self, tenant: &TenantId, user_id: &UserId) -> Result<SecretString, String> {
+        // `false`: this session is for the admin-created `user_id`, not the
+        // operator. Stamping `true` would let any admin-created user (even
+        // Member-role) bypass `require_operator_webui_config` — a distinct
+        // per-user RBAC axis from the single-box operator capability.
+        self.session_store
+            .create_session(
+                tenant.clone(),
+                user_id.clone(),
+                chrono::Duration::days(ADMIN_API_TOKEN_LIFETIME_DAYS),
+                false,
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
 
 #[derive(Debug, Args)]
 pub(crate) struct ServeCommand {
@@ -75,13 +133,15 @@ impl ServeCommand {
         // the local-dev-yolo host-access disclosure gate fires before any
         // WebUI env-var resolution below; the owner is aligned to the
         // authenticated WebUI user once it is resolved (see `with_owner_id`).
-        let runtime_input = crate::runtime::build_runtime_input_with_options(
+        let built = crate::runtime::build_runtime_input_with_options(
             context.boot_config(),
             crate::runtime::RuntimeInputCaller::Serve,
             RuntimeInputOptions {
                 confirm_host_access: self.confirm_host_access,
             },
         )?;
+        let slack_personal_lazy_slot = built.slack_personal_lazy_slot;
+        let runtime_input = built.inner;
         let boot_config = context.boot_config();
         let config_file =
             ironclaw_reborn_config::RebornConfigFile::load(&boot_config.home().config_file_path())
@@ -110,30 +170,33 @@ impl ServeCommand {
             .and_then(|section| section.env_user_id_var.as_deref())
             .unwrap_or(DEFAULT_ENV_USER_ID_VAR);
 
-        let token_value = env::var(env_token_var).map_err(|_| {
-            anyhow!(
-                "{env_token_var} must be set to the WebChat v2 bearer token. \
-                 Override the variable name via `[webui].env_token_var` in {}.",
-                boot_config.home().config_file_path().display(),
-            )
-        })?;
-        let user_id_raw = env::var(env_user_id_var).map_err(|_| {
-            anyhow!(
-                "{env_user_id_var} must be set to the UserId an env-bearer-authenticated caller maps to. \
-                 Override the variable name via `[webui].env_user_id_var` in {}.",
-                boot_config.home().config_file_path().display(),
-            )
-        })?;
+        // Precedence: `env_token_var` (if set and non-empty), else
+        // `<reborn_home>/webui-token` (the `onboard`-provisioned fallback a
+        // service-installed serve, whose unit environment carries only
+        // HOME/PROFILE, still needs — see `serve_invocation.rs`). Also
+        // enforces the >=32-byte entropy floor (this token doubles as the
+        // session-signing HMAC key — see the comment near
+        // `session_signing_secret` below) so a weak or missing token fails
+        // closed here rather than starting the server and having it reject
+        // the value opaquely.
+        let resolved_token = crate::webui_token::resolve_webui_token(
+            env_token_var,
+            present_unicode_env_var(env_token_var)?.as_deref(),
+            boot_config.home().path(),
+        )?;
+        let webui_token_source = resolved_token.source;
+        let token_value = resolved_token.value;
+        let user_id_raw = resolve_webui_user_id_raw(env_user_id_var, config_file.as_ref())?;
         let user_id = UserId::new(&user_id_raw)
             .map_err(|err| anyhow!("{env_user_id_var} value `{user_id_raw}` is invalid: {err}"))?;
 
         // Keep a copy of the operator secret to key the SSO session-token
         // HMAC before the value is moved into the env-bearer authenticator.
         // Held as `SecretString` so it is redacted in `Debug`/logs and
-        // zeroed on drop — it doubles as the session-signing key. Capture
-        // its byte length first (for the SSO entropy floor below) since the
-        // value is consumed here.
-        let token_byte_len = token_value.len();
+        // zeroed on drop — it doubles as the session-signing key.
+        // `resolve_webui_token` above already enforced the >=32-byte
+        // entropy floor this key needs, regardless of which of its two
+        // sources (env var or `<reborn_home>/webui-token`) produced it.
         let session_signing_secret = SecretString::from(token_value.clone());
         let env_authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(EnvBearerAuthenticator::new(
             SecretString::from(token_value),
@@ -157,7 +220,6 @@ impl ServeCommand {
         let mut runtime_input = runtime_input.with_owner_id(runtime_owner);
         // Carry the boot config so the WebUI facade can compose the operator
         // LLM-config settings service over `providers.json` / `config.toml`.
-        #[cfg(feature = "root-llm-provider")]
         {
             runtime_input = runtime_input.with_boot_config(boot_config.clone());
         }
@@ -174,16 +236,35 @@ impl ServeCommand {
         if let Some(project_id) = default_project_id.clone() {
             runtime_input = runtime_input.with_default_project_id(project_id);
         }
-        let slack_host_beta_config = crate::commands::serve_slack::resolve_slack_config_for_serve(
-            config_file.as_ref().and_then(|file| file.slack.as_ref()),
+        // Admin user-management: mint the one-time API bearer on user create via
+        // a signed session store built from the same operator secret + tenant as
+        // the SSO login surface. The store is stateless and deterministic in its
+        // signing key, so this sibling instance (built before the login surface)
+        // mints tokens that validate under the login surface's own store.
+        let admin_session_store =
+            ironclaw_webui::signed_session_store(&session_signing_secret, &tenant_id);
+        // Cloned for the CLI-token-login mount, built later once `sso_enabled`
+        // is known — same operator secret + tenant, so it validates identically.
+        let cli_login_session_store = admin_session_store.clone();
+        runtime_input =
+            runtime_input.with_admin_api_token_minter(Arc::new(SignedSessionTokenMinter {
+                session_store: admin_session_store,
+            }));
+        let slack_host_beta_config = resolve_slack_host_beta_config_for_serve_command(
+            config_file.as_ref(),
             &tenant_id,
             &default_agent_id,
             default_project_id.as_ref(),
             &user_id,
             &boot_config.home().config_file_path(),
         )?;
-        #[cfg(not(feature = "slack-v2-host-beta"))]
-        let _ = slack_host_beta_config;
+        let telegram_host_config = resolve_telegram_host_config_for_serve_command(
+            config_file.as_ref(),
+            &tenant_id,
+            &default_agent_id,
+            default_project_id.as_ref(),
+            &user_id,
+        )?;
 
         // Resolve listen address with explicit precedence:
         //   CLI flag (Some(...)) > config file > compile-time default.
@@ -270,29 +351,30 @@ impl ServeCommand {
         // the login wiring are assembled inside the async runtime below,
         // because opening the libSQL user store is async.
         let sso_startup = crate::commands::serve_sso::sso_startup_config_from_env(listen_addr)?;
-        // When SSO is enabled this same token keys the stateless session
-        // HMAC, so a weak value becomes an OFFLINE forgery target: an
-        // attacker who completes one legitimate login holds a
-        // `{payload}.{hmac}` pair and can brute-force a low-entropy key
-        // locally, then mint a session for any user/tenant. Pre-SSO the
-        // token only ever gated an online, rate-limited bearer guess.
-        // Require real entropy; fail closed rather than warn.
-        if sso_startup.is_some() && token_byte_len < 32 {
-            return Err(anyhow!(
-                "{env_token_var} is also the WebChat SSO session-signing key and must be at \
-                 least 32 bytes of high-entropy random material when an SSO provider is \
-                 configured (it signs stateless, user-visible session tokens). The current \
-                 value is {token_byte_len} bytes — generate one with e.g. `openssl rand -hex 32`."
-            ));
-        }
+        // This token keys the stateless session HMAC, so a weak value would be
+        // an OFFLINE forgery target: an attacker who obtains one legitimate
+        // `{payload}.{hmac}` session pair could brute-force a low-entropy key
+        // locally, then mint a session for any user/tenant. Two paths mint
+        // such user-visible session tokens, so the entropy floor is
+        // unconditional:
+        //   - SSO login (`sso_startup`) signs a session on every login, and
+        //   - admin user-management (wired above via
+        //     `with_admin_api_token_minter`) mints a one-time session bearer
+        //     on `POST /admin/users`.
+        // The admin minter is always installed, so a signed session token can
+        // always be produced regardless of whether SSO is configured.
+        // `crate::webui_token::resolve_webui_token` already enforced the
+        // >=32-byte floor when `token_value` was resolved above, so no
+        // separate check is needed here.
         // Sidecar DB used by the local-runtime trigger-fire access checker. It
         // backs the local trigger-fire
         // access store used to seed default-user and SSO-user trigger access;
         // canonical identity itself lives on the runtime's scoped filesystem,
         // not in this file.
         let profile = crate::runtime::effective_profile(boot_config, config_file.as_ref())?;
-        let user_store_path = crate::runtime::local_runtime_storage_root(boot_config, profile)
-            .join("reborn-local-dev.db");
+        let user_store_path = ironclaw_reborn_composition::local_dev_db_path(
+            &crate::runtime::local_runtime_storage_root(boot_config, profile),
+        );
         // CORS allow-origin list. Empty = fail-closed on every
         // cross-origin preflight; operators MUST opt in to the
         // specific origins the host installation actually serves.
@@ -341,6 +423,17 @@ impl ServeCommand {
         }
         seed_default_config_file_if_missing(&context.boot_config().home().config_file_path())
             .map_err(anyhow::Error::from)?;
+        // Resolved synchronously, before `rt.block_on` below: `config_file`
+        // is borrowed by several `let`s above and by `async move` capture
+        // rules would otherwise need to be moved whole into the future,
+        // conflicting with those borrows. `resolve_google_oauth_config_from_env`
+        // is itself synchronous (it opens the secret store via its own
+        // internal `block_on_cli`, which already handles being called from
+        // inside a live tokio runtime — see its doc), so there is no reason
+        // to defer this into the async block at all.
+        let google_oauth_config =
+            resolve_google_oauth_config_from_env(boot_config, config_file.as_ref())
+                .context("failed to resolve Google OAuth setup config for WebUI")?;
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             // The agent loop executes a deep async dispatch chain (turn runner ->
@@ -389,13 +482,45 @@ impl ServeCommand {
             let runtime = build_reborn_runtime(runtime_input)
                 .await
                 .context("failed to assemble Reborn runtime for `serve`")?;
-            #[cfg(feature = "slack-v2-host-beta")]
+
+            // Tenant-shared tool credentials from the environment (#5459):
+            // `IRONCLAW_REBORN_DEV_SECRET__<handle>=<value>` pairs, parsed by
+            // `dev_secret_seeds_from_env` (see its doc for the contract), are
+            // written into the tenant-shared admin-managed scope so a keyed
+            // tool (network + `use_secret`) resolves its `InjectSecretOnce`
+            // obligation for EVERY user of the tenant — including SSO users
+            // who never provisioned it — from one operator-set key. Inert
+            // unless the operator sets one; ops/dev path, not per-user setup.
+            for (shared_scope, handle, value) in dev_secret_seeds_from_env(
+                std::env::vars(),
+                &tenant_id,
+                &user_id,
+                &default_agent_id,
+                default_project_id.as_ref(),
+            )? {
+                let handle_name = handle.as_str().to_string();
+                runtime
+                    .seed_local_dev_secret(shared_scope, handle, value)
+                    .await
+                    .map_err(|err| anyhow!("failed to seed dev secret `{handle_name}`: {err}"))?;
+                tracing::warn!(
+                    target: "ironclaw::reborn::cli",
+                    secret_handle = %handle_name,
+                    "seeded IRONCLAW_REBORN_DEV_SECRET__ tool credential at the tenant-shared scope"
+                );
+            }
+
             let slack_mounts = if let Some(slack_config) = slack_host_beta_config {
                 match build_slack_host_beta_runtime_mounts(&runtime, slack_config)
                     .await
                     .context("failed to compose Slack host-beta routes")
                 {
-                    Ok(mounts) => Some(mounts),
+                    Ok(mounts) => {
+                        if let Some(slot) = &slack_personal_lazy_slot {
+                            mounts.fill_slack_personal_oauth_slot(slot);
+                        }
+                        Some(mounts)
+                    }
                     Err(error) => {
                         let shutdown_result = runtime.shutdown().await;
                         if let Err(shutdown_error) = shutdown_result {
@@ -409,19 +534,44 @@ impl ServeCommand {
             } else {
                 None
             };
-            #[cfg(feature = "slack-v2-host-beta")]
+            // Telegram host mounts, after Slack's: same fail-closed shutdown
+            // path when route composition fails.
+            let telegram_mounts = if let Some(telegram_config) = telegram_host_config {
+                match build_telegram_host_runtime_mounts(&runtime, telegram_config)
+                    .await
+                    .context("failed to compose Telegram host routes")
+                {
+                    Ok(mounts) => Some(mounts),
+                    Err(error) => {
+                        let shutdown_result = runtime.shutdown().await;
+                        if let Err(shutdown_error) = shutdown_result {
+                            return Err(error.context(format!(
+                                "runtime shutdown after Telegram route composition failure also failed: {shutdown_error}"
+                            )));
+                        }
+                        return Err(error);
+                    }
+                }
+            } else {
+                None
+            };
             let operator_route_visibility =
                 slack_operator_route_visibility_for_authenticator(env_authenticator.as_ref());
-            #[cfg(feature = "slack-v2-host-beta")]
-            let bundle: RebornWebuiBundle = build_webui_services_with_slack_host_beta_mounts(
-                &runtime,
-                None,
-                slack_mounts.as_ref(),
-                operator_route_visibility,
-            )?;
-            #[cfg(not(feature = "slack-v2-host-beta"))]
-            let bundle: RebornWebuiBundle = build_webui_services(&runtime, None)?;
-            #[cfg(feature = "openai-compat-beta")]
+            let bundle: RebornWebuiBundle = match telegram_mounts.as_ref() {
+                Some(telegram_mounts) => build_webui_services_with_slack_and_telegram_host_mounts(
+                    &runtime,
+                    None,
+                    slack_mounts.as_ref(),
+                    operator_route_visibility,
+                    telegram_mounts,
+                )?,
+                None => build_webui_services_with_slack_host_beta_mounts(
+                    &runtime,
+                    None,
+                    slack_mounts.as_ref(),
+                    operator_route_visibility,
+                )?,
+            };
             let openai_compat_mount = build_openai_compat_route_mount(
                 &runtime,
                 tenant_id.clone(),
@@ -449,6 +599,13 @@ impl ServeCommand {
                 None
             };
 
+            // Cloned before the moves below: the CLI-token-login mount (built
+            // after `build_webui_auth_surface`) needs its own tenant id and
+            // bearer authenticator, but the originals are moved into the
+            // auth-surface call immediately below.
+            let cli_login_tenant_id = tenant_id.clone();
+            let cli_login_authenticator = Arc::clone(&env_authenticator);
+
             // Assemble the WebChat v2 auth surface (authenticator + optional
             // public login mount). The auth/identity module owns the
             // signed-session wiring; `serve` supplies host config, the
@@ -475,6 +632,30 @@ impl ServeCommand {
             )
             .await?;
 
+            // CLI-token-login mount (`GET /login?token=`, printed by `onboard`
+            // at setup end) — only when SSO is off AND the token came from
+            // the FILE, not env:
+            // - `build_cli_token_login` mounts its own `POST
+            //   /auth/session/exchange` unconditionally; mounting it while
+            //   SSO is on would double-register that path and panic at
+            //   router-merge time (no shared-ticket-store knob exists).
+            // - env-sourced tokens (e.g. Railway-style `IRONCLAW_REBORN_WEBUI_TOKEN`)
+            //   must not appear in this route's query string, which flows
+            //   through edge/proxy access logs.
+            let cli_login_mount = if sso_enabled
+                || webui_token_source != crate::webui_token::WebuiTokenSource::File
+            {
+                None
+            } else {
+                Some(ironclaw_webui::build_cli_token_login(
+                    ironclaw_webui::CliTokenLoginConfig::new(
+                        cli_login_tenant_id,
+                        cli_login_authenticator,
+                        cli_login_session_store,
+                    ),
+                ))
+            };
+
             print_serve_banner(
                 listen_addr,
                 env_token_var,
@@ -488,13 +669,10 @@ impl ServeCommand {
             if let Some(project_id) = default_project_id.clone() {
                 serve_config = serve_config.with_default_project_id(project_id);
             }
-            #[cfg(feature = "openai-compat-beta")]
             {
                 serve_config = serve_config.with_protected_route_mount(openai_compat_mount);
             }
-            if let Some(google_oauth) = resolve_google_oauth_config_from_env()
-                .context("failed to resolve Google OAuth setup config for WebUI")?
-            {
+            if let Some(google_oauth) = google_oauth_config {
                 let mut route_config = GoogleOAuthRouteConfig::new(
                     google_oauth.client.client_id.as_str(),
                     google_oauth.client.redirect_uri.as_str(),
@@ -507,6 +685,11 @@ impl ServeCommand {
                 }
                 serve_config = serve_config.with_google_oauth(route_config);
             }
+            {
+                if let Some(slot) = slack_personal_lazy_slot {
+                    serve_config = serve_config.with_slack_personal_oauth(slot);
+                }
+            }
             if let Some(value) = csp_override {
                 serve_config = serve_config
                     .with_csp_header_str(value)
@@ -518,22 +701,31 @@ impl ServeCommand {
             if let Some(host) = canonical_host {
                 serve_config = serve_config.with_canonical_host(host);
             }
-            #[cfg(feature = "slack-v2-host-beta")]
             if let Some(slack_mounts) = slack_mounts {
+                let slack_personal_oauth_binding = slack_mounts.personal_oauth_binding_config();
                 serve_config = serve_config
                     .with_public_route_mount(slack_mounts.events)
-                    .with_public_route_mount(slack_mounts.commands)
-                    .with_slack_personal_binding_pairing(slack_mounts.personal_binding_pairing)
+                    .with_slack_personal_oauth_binding(slack_personal_oauth_binding)
                     .with_slack_channel_routes(slack_mounts.channel_routes);
+            }
+            if let Some(telegram_mounts) = telegram_mounts {
+                // Bearer-authed setup/pairing routes ride the generic
+                // protected-route seam; the updates webhook is public.
+                let telegram_protected_routes = telegram_mounts.protected_routes();
+                serve_config = serve_config
+                    .with_public_route_mount(telegram_mounts.events)
+                    .with_protected_route_mount(telegram_protected_routes);
             }
             // Public NEAR AI login callback route (token redirect target). Built
             // from the runtime's LLM seam; absent when no LLM was wired.
-            #[cfg(feature = "root-llm-provider")]
             if let Some(nearai_mount) = runtime.nearai_login_callback_mount() {
                 serve_config = serve_config.with_public_route_mount(nearai_mount);
             }
             if let Some(mount) = public_mount {
                 serve_config = serve_config.with_public_route_mount(mount);
+            }
+            if let Some(cli_login_mount) = cli_login_mount {
+                serve_config = serve_config.with_public_route_mount(cli_login_mount);
             }
             let webui_app = webui_v2_app_with_lifecycle(bundle, serve_config)
                 .context("failed to compose v2 Router")?;
@@ -575,6 +767,48 @@ impl ServeCommand {
 
         Ok(())
     }
+}
+
+fn resolve_slack_host_beta_config_for_serve_command(
+    config_file: Option<&RebornConfigFile>,
+    tenant_id: &TenantId,
+    default_agent_id: &AgentId,
+    default_project_id: Option<&ProjectId>,
+    default_user_id: &UserId,
+    config_path: &std::path::Path,
+) -> anyhow::Result<Option<ironclaw_reborn_composition::SlackHostBetaRuntimeConfig>> {
+    crate::commands::serve_slack::resolve_slack_config_for_serve(
+        config_file.and_then(|file| file.slack.as_ref()),
+        tenant_id,
+        default_agent_id,
+        default_project_id,
+        default_user_id,
+        config_path,
+    )
+}
+
+fn resolve_telegram_host_config_for_serve_command(
+    config_file: Option<&RebornConfigFile>,
+    tenant_id: &TenantId,
+    default_agent_id: &AgentId,
+    default_project_id: Option<&ProjectId>,
+    default_user_id: &UserId,
+) -> anyhow::Result<Option<ironclaw_reborn_composition::TelegramHostRuntimeConfig>> {
+    // Reuse the deployment public origin the hosted OAuth surface derives its
+    // redirect URIs from (`IRONCLAW_REBORN_WEBUI_BASE_URL`): the same origin
+    // is where Telegram must reach the updates webhook. When unset (e.g.
+    // loopback-only dev), setup derivation fails closed and the admin supplies
+    // an explicit webhook URL override through the WebUI setup surface.
+    let public_base_url = crate::commands::serve_sso::webui_public_base_url_from_env()
+        .context("invalid hosted WebUI base URL from IRONCLAW_REBORN_WEBUI_BASE_URL")?;
+    crate::commands::serve_telegram::resolve_telegram_config_for_serve(
+        config_file.and_then(|file| file.telegram.as_ref()),
+        tenant_id,
+        default_agent_id,
+        default_project_id,
+        default_user_id,
+        public_base_url,
+    )
 }
 
 struct StartupServe {
@@ -671,7 +905,7 @@ fn reject_non_loopback_privileged_local_runtime(
     }
 
     anyhow::bail!(
-        "`ironclaw-reborn serve` refuses non-loopback listener {host} because the selected \
+        "`ironclaw serve` refuses non-loopback listener {host} because the selected \
          runtime policy grants trusted-laptop host access (host-home filesystem, local host \
          process, direct network, inherited environment). Bind to a loopback host such as \
          127.0.0.1 or ::1, or choose a less privileged profile."
@@ -817,6 +1051,26 @@ fn resolve_webui_default_agent(
         .unwrap_or_else(|| runtime_identity.agent_id.clone())
 }
 
+/// Resolution: `env_user_id_var` (non-empty) → config `[identity].default_owner`
+/// → `"reborn-cli"` (via `crate::runtime::default_owner_id`).
+///
+/// A service-installed serve with only HOME/PROFILE in its unit env (no
+/// per-operator var) must still boot bound to a stable identity rather than
+/// hard-failing — see `resolve_webui_runtime_owner` below, same fallback.
+///
+/// Uses `present_unicode_env_var` so a non-UTF-8 value for `env_user_id_var`
+/// propagates as a startup error instead of being silently treated as
+/// unset (the same `NotPresent`-vs-`NotUnicode` distinction documented on
+/// `present_unicode_env_var`).
+fn resolve_webui_user_id_raw(
+    env_user_id_var: &str,
+    config_file: Option<&RebornConfigFile>,
+) -> anyhow::Result<String> {
+    Ok(present_unicode_env_var(env_user_id_var)?
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| crate::runtime::default_owner_id(config_file).to_string()))
+}
+
 /// Resolve the owner the Reborn runtime must run under for the WebChat v2
 /// serve path.
 ///
@@ -850,7 +1104,6 @@ fn resolve_webui_runtime_owner(
     Ok(webui_user_id.to_string())
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 fn slack_operator_route_visibility_for_authenticator(
     authenticator: &dyn WebuiAuthenticator,
 ) -> SlackOperatorRouteVisibility {
@@ -868,8 +1121,8 @@ fn print_serve_banner(
     allowed_origins: &[String],
     readiness: &RebornReadiness,
 ) {
-    eprintln!("ironclaw-reborn: WebChat v2 listener");
-    eprintln!("  binary    : ironclaw-reborn");
+    eprintln!("ironclaw: WebChat v2 listener");
+    eprintln!("  binary    : ironclaw");
     eprintln!("  version   : {}", env!("CARGO_PKG_VERSION"));
     eprintln!("  listen    : http://{listen_addr}");
     eprintln!("  auth      : env-bearer (token ${env_token_var}, user ${env_user_id_var})");
@@ -886,16 +1139,206 @@ fn print_serve_banner(
     eprintln!();
 }
 
+/// Parse `IRONCLAW_REBORN_DEV_SECRET__<handle>=<value>` pairs from an
+/// environment snapshot into the `(scope, handle, value)` seeds `serve` writes
+/// through `RebornRuntime::seed_local_dev_secret` (#5459 tenant-shared tool
+/// credentials). The contract, pinned by the unit tests below:
+/// - only names carrying the exact `IRONCLAW_REBORN_DEV_SECRET__` prefix
+///   participate; every other env var is ignored;
+/// - empty values are skipped (an exported-but-blank var is not a secret);
+/// - the suffix IS the [`SecretHandle`] and must be handle-legal (lowercase
+///   ASCII); an invalid handle — e.g. a conventionally ALL-CAPS suffix — is a
+///   hard startup error, never a silent skip;
+/// - every seed targets the caller identity's tenant-shared, admin-managed
+///   scope (`tenant_shared_managed_scope`), never the caller's own scope.
+///
+/// Takes the environment as an iterator parameter so tests never read or
+/// mutate process-global env.
+fn dev_secret_seeds_from_env(
+    vars: impl IntoIterator<Item = (String, String)>,
+    tenant_id: &TenantId,
+    user_id: &UserId,
+    default_agent_id: &AgentId,
+    default_project_id: Option<&ProjectId>,
+) -> anyhow::Result<Vec<(ResourceScope, SecretHandle, String)>> {
+    const DEV_SECRET_PREFIX: &str = "IRONCLAW_REBORN_DEV_SECRET__";
+    let mut seeds = Vec::new();
+    for (name, value) in vars {
+        let Some(handle_raw) = name.strip_prefix(DEV_SECRET_PREFIX) else {
+            continue;
+        };
+        if value.is_empty() {
+            continue;
+        }
+        let handle = SecretHandle::new(handle_raw)
+            .map_err(|err| anyhow!("{name}: invalid secret handle `{handle_raw}`: {err}"))?;
+        // The caller invocation owner alias (tenant/user/agent/project),
+        // mapped to the tenant-shared scope the runtime's InjectSecretOnce
+        // resolution falls back to (caller-first, then tenant-shared).
+        let owner = ResourceScope {
+            tenant_id: tenant_id.clone(),
+            user_id: user_id.clone(),
+            agent_id: Some(default_agent_id.clone()),
+            project_id: default_project_id.cloned(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        seeds.push((owner.tenant_shared_managed_scope(), handle, value));
+    }
+    Ok(seeds)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const WEBUI_BASE_URL_ENV: &str = "IRONCLAW_REBORN_WEBUI_BASE_URL";
 
+    #[test]
+    fn present_unicode_env_var_treats_unset_as_none() {
+        let _guard = crate::runtime::test_env::lock_runtime_env();
+        const VAR: &str = "IRONCLAW_REBORN_CLI_TEST_ABSENT_VAR";
+        // SAFETY: serialized by `lock_runtime_env`; no other thread touches
+        // this test-local var name.
+        unsafe { std::env::remove_var(VAR) };
+        assert_eq!(
+            present_unicode_env_var(VAR).expect("unset is not an error"),
+            None
+        );
+    }
+
+    #[test]
+    fn present_unicode_env_var_returns_a_present_value() {
+        let _guard = crate::runtime::test_env::lock_runtime_env();
+        const VAR: &str = "IRONCLAW_REBORN_CLI_TEST_PRESENT_VAR";
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var(VAR, "a-token-value") };
+        let result = present_unicode_env_var(VAR);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe { std::env::remove_var(VAR) };
+        assert_eq!(
+            result.expect("present unicode value is not an error"),
+            Some("a-token-value".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn present_unicode_env_var_propagates_not_unicode_instead_of_treating_it_as_unset() {
+        // Before this fix, `env::var(name).ok()` collapsed `NotUnicode`
+        // (a real configuration error — the bearer token env var got
+        // mangled into invalid UTF-8) into `None`, silently falling
+        // through to the WebChat v2 token file credential instead of
+        // failing loudly at startup.
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let _guard = crate::runtime::test_env::lock_runtime_env();
+        const VAR: &str = "IRONCLAW_REBORN_CLI_TEST_NON_UNICODE_VAR";
+        let invalid_utf8 = std::ffi::OsString::from_vec(vec![0xFF, 0xFE, 0xFD]);
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var(VAR, &invalid_utf8) };
+        let result = present_unicode_env_var(VAR);
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe { std::env::remove_var(VAR) };
+
+        let error = result.expect_err("non-UTF-8 env value must be a real error, not `Ok(None)`");
+        let message = error.to_string();
+        assert!(
+            message.contains(VAR),
+            "error must name the variable: {message}"
+        );
+        assert!(
+            message.contains("not valid UTF-8"),
+            "error must explain why: {message}"
+        );
+    }
+
     fn clear_webui_env() {
-        // SAFETY: tests are serialized by `WEBUI_BASE_URL_ENV_LOCK`; no other
+        // SAFETY: tests are serialized by `the shared crate process-env lock`; no other
         // thread reads or writes this env var while the guard is held.
         unsafe { std::env::remove_var(WEBUI_BASE_URL_ENV) };
+    }
+
+    fn dev_secret_identity() -> (TenantId, UserId, AgentId) {
+        (
+            TenantId::new("tenant-a").expect("tenant"),
+            UserId::new("user-a").expect("user"),
+            AgentId::new("agent-a").expect("agent"),
+        )
+    }
+
+    /// #5499 review finding #5: the `IRONCLAW_REBORN_DEV_SECRET__` serve
+    /// bridge itself was untested — a typo'd prefix, a mis-parsed handle, a
+    /// non-skipped empty value, or seeding at the caller's own scope instead
+    /// of the tenant-shared one would all reach production unseen. The env
+    /// snapshot is an iterator parameter, so no process env is touched.
+    #[test]
+    fn dev_secret_seeds_parse_prefix_skip_empty_and_target_tenant_shared_scope() {
+        let (tenant, user, agent) = dev_secret_identity();
+        let vars = vec![
+            (
+                "IRONCLAW_REBORN_DEV_SECRET__market_data_api_key".to_string(),
+                "shared-key".to_string(),
+            ),
+            // Exported-but-blank must be skipped, not seeded as "".
+            (
+                "IRONCLAW_REBORN_DEV_SECRET__blank_value".to_string(),
+                String::new(),
+            ),
+            // Non-secret env noise must be ignored, including near-misses
+            // that share a shorter IRONCLAW_REBORN_ prefix.
+            (
+                "IRONCLAW_REBORN_WEBUI_BASE_URL".to_string(),
+                "http://localhost:8080".to_string(),
+            ),
+            ("PATH".to_string(), "/usr/bin".to_string()),
+        ];
+
+        let seeds =
+            dev_secret_seeds_from_env(vars, &tenant, &user, &agent, None).expect("seeds parse");
+
+        assert_eq!(seeds.len(), 1, "exactly the one prefixed non-empty var");
+        let (scope, handle, value) = &seeds[0];
+        assert_eq!(handle.as_str(), "market_data_api_key");
+        assert_eq!(value, "shared-key");
+        // The seed targets the tenant-shared admin-managed scope: tenant
+        // preserved, user replaced by the wire-stable shared-owner sentinel
+        // (hardcoded here as a tripwire — persisted scopes depend on it),
+        // sub-user axes dropped. Seeding at the caller's own scope would
+        // make the secret invisible to every other user of the tenant.
+        assert_eq!(scope.tenant_id, tenant);
+        assert_eq!(scope.user_id.as_str(), "__ironclaw_tenant_shared_admin__");
+        assert!(
+            scope.agent_id.is_none(),
+            "shared scope drops the agent axis"
+        );
+        assert!(
+            scope.project_id.is_none(),
+            "shared scope drops the project axis"
+        );
+    }
+
+    /// The env-var suffix IS the secret handle, and handles are
+    /// lowercase-only — an ALL-CAPS suffix (the conventional env style) must
+    /// fail serve startup loudly instead of silently skipping the seed and
+    /// leaving every tenant user gating on AuthRequired.
+    #[test]
+    fn dev_secret_invalid_handle_is_a_startup_error() {
+        let (tenant, user, agent) = dev_secret_identity();
+        let vars = vec![(
+            "IRONCLAW_REBORN_DEV_SECRET__MARKET_DATA_API_KEY".to_string(),
+            "shared-key".to_string(),
+        )];
+
+        let error = dev_secret_seeds_from_env(vars, &tenant, &user, &agent, None)
+            .expect_err("an invalid handle suffix must be a startup error");
+
+        let message = format!("{error}");
+        assert!(
+            message.contains("invalid secret handle") && message.contains("MARKET_DATA_API_KEY"),
+            "error must name the offending variable: {message}"
+        );
     }
 
     #[test]
@@ -911,14 +1354,122 @@ mod tests {
     #[test]
     fn webui_default_agent_uses_config_override() {
         let runtime_identity = RebornRuntimeIdentity::reborn_cli();
-        let identity = IdentitySection {
-            default_agent: Some("configured-agent".to_string()),
-            ..IdentitySection::default()
-        };
+        let identity = IdentitySection::default().set_default_agent("configured-agent");
 
         assert_eq!(
             resolve_webui_default_agent(Some(&identity), &runtime_identity),
             "configured-agent"
+        );
+    }
+
+    const WEBUI_USER_ID_TEST_ENV: &str = "IRONCLAW_REBORN_SERVE_TEST_USER_ID_RAW";
+
+    #[test]
+    fn webui_user_id_raw_prefers_a_set_nonempty_env_var() {
+        let _guard = crate::runtime::test_env::lock_runtime_env();
+        // SAFETY: serialized by the shared crate process-env lock; cleaned up
+        // before the guard drops.
+        unsafe { std::env::set_var(WEBUI_USER_ID_TEST_ENV, "env-user") };
+
+        let config_file = RebornConfigFile {
+            identity: Some(IdentitySection::default().set_default_owner("config-user")),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolve_webui_user_id_raw(WEBUI_USER_ID_TEST_ENV, Some(&config_file))
+                .expect("valid unicode env value is not an error"),
+            "env-user"
+        );
+
+        // SAFETY: see above.
+        unsafe { std::env::remove_var(WEBUI_USER_ID_TEST_ENV) };
+    }
+
+    #[test]
+    fn webui_user_id_raw_falls_back_to_config_default_owner_when_env_absent() {
+        let _guard = crate::runtime::test_env::lock_runtime_env();
+        // SAFETY: serialized by the shared crate process-env lock.
+        unsafe { std::env::remove_var(WEBUI_USER_ID_TEST_ENV) };
+
+        let config_file = RebornConfigFile {
+            identity: Some(IdentitySection::default().set_default_owner("config-user")),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolve_webui_user_id_raw(WEBUI_USER_ID_TEST_ENV, Some(&config_file))
+                .expect("absent env value is not an error"),
+            "config-user"
+        );
+    }
+
+    #[test]
+    fn webui_user_id_raw_treats_empty_env_var_as_absent() {
+        let _guard = crate::runtime::test_env::lock_runtime_env();
+        // SAFETY: serialized by the shared crate process-env lock; cleaned up
+        // before the guard drops.
+        unsafe { std::env::set_var(WEBUI_USER_ID_TEST_ENV, "") };
+
+        let config_file = RebornConfigFile {
+            identity: Some(IdentitySection::default().set_default_owner("config-user")),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolve_webui_user_id_raw(WEBUI_USER_ID_TEST_ENV, Some(&config_file))
+                .expect("empty env value is not an error"),
+            "config-user"
+        );
+
+        // SAFETY: see above.
+        unsafe { std::env::remove_var(WEBUI_USER_ID_TEST_ENV) };
+    }
+
+    #[test]
+    fn webui_user_id_raw_defaults_to_reborn_cli_when_no_config_or_env() {
+        let _guard = crate::runtime::test_env::lock_runtime_env();
+        // SAFETY: serialized by the shared crate process-env lock.
+        unsafe { std::env::remove_var(WEBUI_USER_ID_TEST_ENV) };
+
+        assert_eq!(
+            resolve_webui_user_id_raw(WEBUI_USER_ID_TEST_ENV, None)
+                .expect("no config or env is not an error"),
+            "reborn-cli"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn webui_user_id_raw_propagates_not_unicode_instead_of_treating_it_as_unset() {
+        // Mirrors `present_unicode_env_var_propagates_not_unicode_instead_of_treating_it_as_unset`:
+        // before this fix, `resolve_webui_user_id_raw` read the env var with
+        // `env::var(..).ok()`, which collapsed `VarError::NotUnicode` (a real
+        // misconfiguration — the user-id env var got mangled into invalid
+        // UTF-8) into `None`, silently falling through to the config/default
+        // owner instead of failing loudly at startup.
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let _guard = crate::runtime::test_env::lock_runtime_env();
+        let invalid_utf8 = std::ffi::OsString::from_vec(vec![0xFF, 0xFE, 0xFD]);
+        // SAFETY: serialized by `lock_runtime_env`; restored below.
+        unsafe { std::env::set_var(WEBUI_USER_ID_TEST_ENV, &invalid_utf8) };
+
+        let result = resolve_webui_user_id_raw(WEBUI_USER_ID_TEST_ENV, None);
+
+        // SAFETY: serialized by `lock_runtime_env`.
+        unsafe { std::env::remove_var(WEBUI_USER_ID_TEST_ENV) };
+
+        let error =
+            result.expect_err("non-UTF-8 env value must be a real error, not a silent fallback");
+        let message = error.to_string();
+        assert!(
+            message.contains(WEBUI_USER_ID_TEST_ENV),
+            "error must name the variable: {message}"
+        );
+        assert!(
+            message.contains("not valid UTF-8"),
+            "error must explain why: {message}"
         );
     }
 
@@ -935,10 +1486,7 @@ mod tests {
 
     #[test]
     fn webui_runtime_owner_accepts_matching_config_owner() {
-        let identity = IdentitySection {
-            default_owner: Some("local-user".to_string()),
-            ..IdentitySection::default()
-        };
+        let identity = IdentitySection::default().set_default_owner("local-user");
 
         assert_eq!(
             resolve_webui_runtime_owner(Some(&identity), "local-user").unwrap(),
@@ -952,10 +1500,7 @@ mod tests {
         // the bug class that silently made every thread invisible: the facade
         // writes under `owners/local-user` while the loop host reads under
         // `owners/reborn-cli`. Fail loud at startup instead.
-        let identity = IdentitySection {
-            default_owner: Some("reborn-cli".to_string()),
-            ..IdentitySection::default()
-        };
+        let identity = IdentitySection::default().set_default_owner("reborn-cli");
 
         let error = resolve_webui_runtime_owner(Some(&identity), "local-user")
             .expect_err("divergent owner must be rejected");
@@ -964,7 +1509,46 @@ mod tests {
         assert!(message.contains("local-user"), "message: {message}");
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
+    fn serve_startup_rejects_loaded_config_with_legacy_slack_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+api_version = "ironclaw.runtime/v1"
+
+[slack]
+enabled = true
+slack_user_id = "U123"
+"#,
+        )
+        .expect("write config");
+        let config_file = RebornConfigFile::load(&config_path)
+            .expect("config file loads")
+            .expect("config exists");
+
+        let error = resolve_slack_host_beta_config_for_serve_command(
+            Some(&config_file),
+            &TenantId::new("serve-slack-tenant").expect("tenant id"),
+            &AgentId::new("serve-slack-agent").expect("agent id"),
+            None,
+            &UserId::new("serve-slack-user").expect("user id"),
+            &config_path,
+        )
+        .expect_err("serve startup must reject legacy Slack config fields");
+        let message = error.to_string();
+
+        assert!(
+            message.contains("[slack].slack_user_id"),
+            "message: {message}"
+        );
+        assert!(
+            message.contains(&config_path.display().to_string()),
+            "message: {message}"
+        );
+    }
+
     #[test]
     fn slack_operator_route_visibility_follows_authenticator_route_mount_capability() {
         struct HiddenAuth;
@@ -974,7 +1558,7 @@ mod tests {
             async fn authenticate(
                 &self,
                 _token: &str,
-            ) -> Option<ironclaw_reborn_composition::WebuiAuthentication> {
+            ) -> Option<ironclaw_webui::WebuiAuthentication> {
                 None
             }
         }
@@ -986,7 +1570,7 @@ mod tests {
             async fn authenticate(
                 &self,
                 _token: &str,
-            ) -> Option<ironclaw_reborn_composition::WebuiAuthentication> {
+            ) -> Option<ironclaw_webui::WebuiAuthentication> {
                 None
             }
 
@@ -1390,11 +1974,9 @@ mod tests {
     #[tokio::test]
     async fn webui_serve_wires_notion_dcr_with_public_base_url_env_origin() {
         let callback_origin = {
-            let _guard = crate::commands::serve_sso::WEBUI_BASE_URL_ENV_LOCK
-                .lock()
-                .expect("env lock");
+            let _guard = crate::runtime::test_env::lock_runtime_env();
             clear_webui_env();
-            // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleaned up before the guard drops.
+            // SAFETY: serialized by the shared crate process-env lock; cleaned up before the guard drops.
             unsafe {
                 std::env::set_var(WEBUI_BASE_URL_ENV, " https://configured.example/ ");
             }
@@ -1430,11 +2012,9 @@ mod tests {
 
     #[test]
     fn webui_notion_dcr_callback_origin_rejects_slash_only_public_base_url_env() {
-        let _guard = crate::commands::serve_sso::WEBUI_BASE_URL_ENV_LOCK
-            .lock()
-            .expect("env lock");
+        let _guard = crate::runtime::test_env::lock_runtime_env();
         clear_webui_env();
-        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleaned up before the guard drops.
+        // SAFETY: serialized by the shared crate process-env lock; cleaned up before the guard drops.
         unsafe {
             std::env::set_var(WEBUI_BASE_URL_ENV, "/");
         }
@@ -1451,11 +2031,9 @@ mod tests {
 
     #[test]
     fn webui_notion_dcr_callback_origin_rejects_public_cleartext_base_url_env() {
-        let _guard = crate::commands::serve_sso::WEBUI_BASE_URL_ENV_LOCK
-            .lock()
-            .expect("env lock");
+        let _guard = crate::runtime::test_env::lock_runtime_env();
         clear_webui_env();
-        // SAFETY: serialized by WEBUI_BASE_URL_ENV_LOCK; cleaned up before the guard drops.
+        // SAFETY: serialized by the shared crate process-env lock; cleaned up before the guard drops.
         unsafe {
             std::env::set_var(WEBUI_BASE_URL_ENV, "http://configured.example");
         }

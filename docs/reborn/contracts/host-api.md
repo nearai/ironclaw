@@ -481,6 +481,7 @@ pub struct ExecutionContext {
 
     pub tenant_id: TenantId,
     pub user_id: UserId,
+    pub authenticated_actor_user_id: Option<UserId>,
     pub agent_id: Option<AgentId>,
     pub project_id: Option<ProjectId>,
     pub mission_id: Option<MissionId>,
@@ -501,6 +502,8 @@ Rules:
 - `resource_scope.invocation_id == invocation_id`
 - `resource_scope.tenant_id == tenant_id`
 - `resource_scope.user_id == user_id`
+- `authenticated_actor_user_id` is the trusted ingress actor and is independent from the subject in `user_id`/`resource_scope.user_id`; callers must not infer one from the other
+- trusted ingress/loop orchestration may seal `authenticated_actor_user_id`; local and legacy contexts may leave it absent
 - `resource_scope.agent_id == agent_id`
 - `resource_scope.project_id == project_id`
 - `process_id` may be absent for pure host calls or WASM invocations that are not process-backed
@@ -700,6 +703,7 @@ pub struct SandboxQuota {
 pub struct CapabilityDispatchRequest {
     pub capability_id: CapabilityId,
     pub scope: ResourceScope,
+    pub authenticated_actor_user_id: Option<UserId>,
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
     pub resource_reservation: Option<ResourceReservation>,
@@ -715,6 +719,7 @@ pub enum RuntimeDispatchErrorKind;
 Rules:
 
 - `CapabilityDispatchRequest` is already authorized; grant checks and approvals happen before this boundary. Optional `mounts` and `resource_reservation` fields are prepared obligation effects, not new authority grants.
+- `authenticated_actor_user_id` is forwarded unchanged from the authorized execution context. The dispatcher and runtime adapters must not replace it with `scope.user_id` because the actor and subject may intentionally differ.
 - `CapabilityDispatchResult` exposes normalized host facts: capability ID, provider, runtime, output, optional display-preview metadata, usage, and resource receipt.
 - `CapabilityDisplayOutputPreview` is a display-only side channel for renderer-ready output such as unified diffs. It must not change model-visible capability output, grant authority, or carry backend-private paths/secrets.
 - `DispatchError` uses stable control-plane variants for registry/routing failures and `RuntimeDispatchErrorKind` for WASM/Script/MCP failures.
@@ -1071,6 +1076,7 @@ The first `ironclaw_host_api` implementation is not accepted without tests for:
 
 - `ExecutionContext` validation rejects mismatched `resource_scope.invocation_id`
 - `ExecutionContext` validation rejects mismatched tenant/user between context and resource scope
+- `ExecutionContext` permits an authenticated actor distinct from the resource-scope subject and preserves it through dispatch
 - child resource scope preserves tenant/user from parent
 
 ### Action/decision serialization
@@ -1220,6 +1226,7 @@ pub struct ResourceScope {
 pub struct ExecutionContext {
     pub tenant_id: TenantId,
     pub user_id: UserId,
+    pub authenticated_actor_user_id: Option<UserId>,
     pub project_id: Option<ProjectId>,
     pub agent_id: Option<AgentId>,
     pub mission_id: Option<MissionId>,

@@ -2,7 +2,7 @@
 //!
 //! Extension authors who don't need full programmatic control express their
 //! hook as a typed predicate. The host's predicate evaluator (lives in
-//! `ironclaw_reborn` follow-up) executes the predicate without invoking any
+//! `ironclaw_runner` follow-up) executes the predicate without invoking any
 //! extension code at hook-time, which is both cheaper and structurally safer
 //! than running WASM for every capability call.
 //!

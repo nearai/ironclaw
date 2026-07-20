@@ -3,6 +3,7 @@ use std::{collections::HashSet, path::Path};
 use ironclaw_host_api::{
     HostApiError, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, VirtualPath,
 };
+use ironclaw_memory::MemoryDocumentScope;
 
 pub(crate) const WORKSPACE_ALIAS: &str = "/workspace";
 const WORKSPACE_TARGET: &str = "/projects/workspace";
@@ -138,15 +139,30 @@ pub(crate) fn system_extensions_lifecycle_mount_view() -> Result<MountView, Host
 /// [`BROWSE_MEMORY_ALIAS`]/[`WORKSPACE_ALIAS`].
 pub(crate) const BROWSE_MEMORY_ALIAS: &str = MEMORY_ALIAS;
 
-pub(crate) fn browse_mount_view() -> Result<MountView, HostApiError> {
+pub(crate) fn scoped_browse_mount_view(scope: &ResourceScope) -> Result<MountView, HostApiError> {
+    let memory_target = scoped_memory_target(scope)?;
     MountView::new(vec![
         grant(
             WORKSPACE_ALIAS,
             WORKSPACE_TARGET,
             MountPermissions::read_only(),
         )?,
-        grant(MEMORY_ALIAS, MEMORY_TARGET, MountPermissions::read_only())?,
+        grant(
+            MEMORY_ALIAS,
+            memory_target.as_str(),
+            MountPermissions::read_only(),
+        )?,
     ])
+}
+
+fn scoped_memory_target(scope: &ResourceScope) -> Result<VirtualPath, HostApiError> {
+    MemoryDocumentScope::new_with_agent(
+        scope.tenant_id.as_str(),
+        scope.user_id.as_str(),
+        scope.agent_id.as_ref().map(|id| id.as_str()),
+        scope.project_id.as_ref().map(|id| id.as_str()),
+    )?
+    .virtual_prefix()
 }
 
 fn grant(

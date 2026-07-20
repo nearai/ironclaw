@@ -218,6 +218,7 @@ where
             .reserve(request.scope.clone(), request.estimate.clone())
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
+                safe_summary: None,
             })?,
     };
     // Hold the reservation in an RAII guard from here on. The guard is carried
@@ -228,6 +229,7 @@ where
     let guard = ReservationGuard::new(request.governor, reservation.id);
     let wasm_resource_error = || DispatchError::Wasm {
         kind: RuntimeDispatchErrorKind::Resource,
+        safe_summary: None,
     };
     let input_json = match serde_json::to_string(&request.input) {
         Ok(json) => json,
@@ -235,6 +237,7 @@ where
             // Dropping `guard` releases the reservation.
             return Err(DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::InputEncode,
+                safe_summary: None,
             });
         }
     };
@@ -267,6 +270,7 @@ where
             )?;
             return Err(DispatchError::Wasm {
                 kind: wasm_error_kind(&error),
+                safe_summary: None,
             });
         }
     };
@@ -279,6 +283,7 @@ where
         guard.account_failed(Some(&execution.usage), wasm_resource_error)?;
         return Err(DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::InvalidResult,
+            safe_summary: None,
         });
     };
     let output = match serde_json::from_str(&output_json) {
@@ -287,6 +292,7 @@ where
             guard.account_failed(Some(&execution.usage), wasm_resource_error)?;
             return Err(DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::OutputDecode,
+                safe_summary: None,
             });
         }
     };
@@ -402,8 +408,33 @@ fn wasm_guest_dispatch_error(error: &str, capability: &CapabilityId) -> Dispatch
             required_secrets: Vec::new(),
             credential_requirements: Vec::new(),
         },
-        WasmGuestErrorKind::Runtime(kind) => DispatchError::Wasm { kind },
+        WasmGuestErrorKind::Runtime(kind) => DispatchError::Wasm {
+            kind,
+            safe_summary: wasm_guest_error_code(error)
+                .map(|code| format!("provider error code: {code}")),
+        },
     }
+}
+
+/// Extract the stable error `code` from a structured guest error payload so
+/// the model-visible failure keeps its actionable cause (e.g. a Slack
+/// `channel_not_found`) instead of collapsing to the kind's generic sentence.
+///
+/// Guests are sandboxed but not trusted with free text on this channel: the
+/// code is reduced to a short `[A-Za-z0-9_.-]` identifier, and the composed
+/// summary is still re-validated downstream (`LoopSafeSummary`) before it
+/// reaches the model. Returns `None` for legacy plain-string guest errors.
+fn wasm_guest_error_code(error: &str) -> Option<String> {
+    let payload = serde_json::from_str::<StructuredWasmGuestError>(error).ok()?;
+    let code: String = payload
+        .code
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+        })
+        .take(64)
+        .collect();
+    (!code.is_empty()).then_some(code)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -426,7 +457,6 @@ enum StructuredWasmGuestErrorKind {
 
 #[derive(Debug, Deserialize)]
 struct StructuredWasmGuestError {
-    #[allow(dead_code)]
     code: String,
     kind: StructuredWasmGuestErrorKind,
 }
@@ -605,10 +635,7 @@ mod tests {
     }
 
     fn accountable_usage() -> ResourceUsage {
-        ResourceUsage {
-            output_bytes: 32,
-            ..ResourceUsage::default()
-        }
+        ResourceUsage::default().set_output_bytes(32)
     }
 
     #[test]
@@ -639,6 +666,7 @@ mod tests {
         let receipt = guard
             .reconcile(accountable_usage(), || DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
+                safe_summary: None,
             })
             .expect("reconcile must succeed");
         assert_eq!(receipt.status, ReservationStatus::Reconciled);
@@ -659,6 +687,7 @@ mod tests {
         guard
             .account_failed(Some(&accountable_usage()), || DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
+                safe_summary: None,
             })
             .expect("account_failed with accountable usage must reconcile");
         assert_eq!(governor.reconcile_calls(), 1);
@@ -678,6 +707,7 @@ mod tests {
         guard
             .account_failed(None, || DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
+                safe_summary: None,
             })
             .expect("account_failed with no usage releases and returns Ok");
         assert_eq!(
@@ -1427,6 +1457,40 @@ mod tests {
 
         for (error, expected) in cases {
             assert_eq!(wasm_guest_error_kind(error), expected);
+        }
+    }
+
+    /// A structured guest error's `code` must ride the dispatch error as a
+    /// sanitized safe summary so the model sees the actionable cause (e.g.
+    /// `channel_not_found`), while hostile codes are reduced to identifier
+    /// characters and legacy plain-string errors stay summary-less.
+    #[test]
+    fn wasm_guest_dispatch_error_carries_sanitized_structured_code() {
+        let capability = CapabilityId::new("slack.get_conversation_history").unwrap();
+        match wasm_guest_dispatch_error(
+            r#"{"code":"channel_not_found","kind":"input"}"#,
+            &capability,
+        ) {
+            DispatchError::Wasm { kind, safe_summary } => {
+                assert_eq!(kind, RuntimeDispatchErrorKind::InputEncode);
+                assert_eq!(
+                    safe_summary.as_deref(),
+                    Some("provider error code: channel_not_found")
+                );
+            }
+            other => panic!("expected Wasm dispatch error, got {other:?}"),
+        }
+
+        // Hostile codes are reduced to identifier characters, never free text.
+        assert_eq!(
+            wasm_guest_error_code(r#"{"code":"bad {} `code` <script>","kind":"input"}"#).as_deref(),
+            Some("badcodescript")
+        );
+        // Legacy plain-string guest errors carry no structured code.
+        assert_eq!(wasm_guest_error_code("invalid_parameters"), None);
+        match wasm_guest_dispatch_error("invalid_parameters", &capability) {
+            DispatchError::Wasm { safe_summary, .. } => assert_eq!(safe_summary, None),
+            other => panic!("expected Wasm dispatch error, got {other:?}"),
         }
     }
 }

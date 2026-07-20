@@ -1,8 +1,9 @@
+// arch-exempt: large_file, mechanical LocalFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
 use ironclaw_capabilities::{
     CapabilityObligationHandler, CapabilityObligationPhase, CapabilityObligationRequest,
 };
 use ironclaw_events::InMemoryAuditSink;
-use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     AgentId, CapabilityHostHttpRequest, CapabilityId, CapabilitySet, CredentialStageError,
     ExecutionContext, ExtensionId, InvocationId, MountAlias, MountGrant, MountPermissions,
@@ -28,7 +29,7 @@ use ironclaw_network::{
 };
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_scripts::ScriptRuntimeHttpAdapter;
-use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
+use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
 use ironclaw_wasm::{
     WasmHostHttp, WasmHttpRequest, WasmRuntimeHttpAdapter, WasmStagedRuntimeCredential,
     WasmStagedRuntimeCredentials,
@@ -351,7 +352,7 @@ async fn host_http_egress_consumes_secret_staged_by_builtin_obligation_handler()
         },
     });
     let network_recorder = network.requests.clone();
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
         secret_store.clone(),
@@ -1737,10 +1738,17 @@ async fn host_http_egress_forwards_timeout_to_network() {
 }
 
 #[tokio::test]
-async fn host_http_egress_with_reqwest_transport_returns_redirect_without_following() {
-    let (url, server) = single_response_server(
-        "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:9/followed\r\nContent-Length: 0\r\n\r\n",
-    );
+async fn host_http_egress_with_reqwest_transport_follows_redirect_host_mediated() {
+    // Redirect following is host-mediated: the reqwest client is pinned to
+    // `Policy::none()`, so the host egress (not the HTTP client) follows each
+    // hop, re-authorizing the destination against the caller's network policy.
+    // `github.get_job_logs` depends on this — GitHub 302-redirects the logs
+    // endpoint to a short-lived blob-storage URL that the host must follow.
+    let (final_url, final_server) =
+        single_response_server("HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nfollowed!");
+    let (start_url, redirect_server) = single_response_server_owned(format!(
+        "HTTP/1.1 302 Found\r\nLocation: {final_url}\r\nContent-Length: 0\r\n\r\n"
+    ));
     let network =
         PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::new(Duration::from_secs(2)));
     let service = request_policy_staging_egress(network);
@@ -1751,7 +1759,7 @@ async fn host_http_egress_with_reqwest_transport_returns_redirect_without_follow
             scope: sample_scope(),
             capability_id: sample_capability_id(),
             method: NetworkMethod::Get,
-            url,
+            url: start_url,
             headers: vec![],
             body: Vec::new(),
             network_policy: local_http_policy(),
@@ -1761,17 +1769,54 @@ async fn host_http_egress_with_reqwest_transport_returns_redirect_without_follow
             timeout_ms: None,
         })
         .await
-        .expect("redirect responses should be returned to the caller, not followed");
-    server.join().unwrap();
+        .expect("host egress should follow the redirect to the allowed host");
+    redirect_server.join().unwrap();
+    final_server.join().unwrap();
 
-    assert_eq!(response.status, 302);
-    assert_eq!(
-        response
-            .headers
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("location"))
-            .map(|(_, value)| value.as_str()),
-        Some("http://127.0.0.1:9/followed")
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, b"followed!");
+}
+
+#[tokio::test]
+async fn host_http_egress_blocks_redirect_to_policy_denied_host() {
+    // SSRF guarantee: a redirect `Location` pointing at a host the caller's
+    // network policy does not allow is re-authorized and rejected before any
+    // connection to it — the untrusted redirect target is never reached.
+    // `local_http_policy` only allows `127.0.0.1`, so a redirect to `10.0.0.1`
+    // is denied on the second hop.
+    let (start_url, redirect_server) = single_response_server_owned(
+        "HTTP/1.1 302 Found\r\nLocation: http://10.0.0.1/blocked\r\nContent-Length: 0\r\n\r\n"
+            .to_string(),
+    );
+    let network =
+        PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::new(Duration::from_secs(2)));
+    let service = request_policy_staging_egress(network);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Get,
+            url: start_url,
+            headers: vec![],
+            body: Vec::new(),
+            network_policy: local_http_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(1024),
+            save_body_to: None,
+            timeout_ms: None,
+        })
+        .await
+        .expect_err("a redirect to a policy-denied host must not be followed");
+    redirect_server.join().unwrap();
+
+    assert!(
+        matches!(
+            &error,
+            RuntimeHttpEgressError::Network { reason, .. } if reason == "policy_denied"
+        ),
+        "expected policy_denied, got {error:?}"
     );
 }
 
@@ -2610,7 +2655,11 @@ async fn mcp_http_client_cannot_use_direct_secret_store_lease_with_production_eg
         .await
         .expect_err("production MCP egress must require staged credentials");
 
-    assert_eq!(error.stable_reason(), "request_denied");
+    // Per-cause MCP denial tokens: the SecretStoreLease guard now names its
+    // cause instead of the flat "request_denied" (see
+    // `McpRequestDeniedCause::DeniedCredentialSource`). The boundary is
+    // unchanged — denied before any transport, asserted below.
+    assert_eq!(error.stable_reason(), "mcp_denied_credential_source");
     let requests = network_recorder.lock().unwrap();
     assert_eq!(
         requests.len(),
@@ -3637,7 +3686,7 @@ async fn host_http_egress_fails_closed_when_real_scoped_filesystem_write_fails()
         },
     });
     let temp = tempdir().unwrap();
-    let mut root = LocalFilesystem::new();
+    let mut root = DiskFilesystem::new();
     root.mount_local(
         VirtualPath::new("/projects/workspace").unwrap(),
         ironclaw_host_api::HostPath::from_path_buf(temp.path().to_path_buf()),
@@ -3847,6 +3896,171 @@ async fn host_http_egress_blocks_credential_shaped_response_body() {
     assert!(!error.to_string().contains("sk-proj-test"));
     assert_eq!(error.request_bytes(), 5);
     assert_eq!(error.response_bytes(), 43);
+}
+
+/// Caller-level regression for the credential-exchange egress path (audit MJ5).
+///
+/// `execute_credential_exchange` is the only unsanitized response path, used
+/// solely by the host OAuth provider client: a Slack `oauth.v2.access` response
+/// legitimately carries an `xoxp-` user token that the host auth system stores
+/// as a secret handle. Nearly every egress fake inherits the trait's default
+/// forward to `execute`, so before this test the skip-sanitization branch was
+/// exercised by no caller-level test. This drives the real host pipeline and
+/// pins both halves of the contract with an identical token-shaped body:
+/// `execute_credential_exchange` passes it through un-sanitized (token
+/// preserved, no redaction), while the default `execute` blocks it as a leak.
+#[tokio::test]
+async fn credential_exchange_passes_token_body_that_default_execute_blocks() {
+    const SLACK_USER_TOKEN: &str = "xoxp-1234567890-9876543210-abcdefghijklmnopqrstuvwxyz";
+    let token_body = format!(
+        r#"{{"ok":true,"app_id":"A0123456789","authed_user":{{"id":"U0123456789","access_token":"{SLACK_USER_TOKEN}","scope":"chat:write","token_type":"user"}},"team":{{"id":"T0123456789"}}}}"#
+    )
+    .into_bytes();
+
+    // The OAuth provider client POSTs a benign form body; the credential lives
+    // in the *response*. The same request shape drives both egress entry points.
+    let oauth_token_request =
+        |scope: ResourceScope, capability_id: CapabilityId| RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::System,
+            scope,
+            capability_id,
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/api/oauth.v2.access".to_string(),
+            headers: vec![],
+            body: b"grant_type=authorization_code&code=stub-auth-code".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        };
+    let token_response = |body: Vec<u8>| NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: body.len() as u64,
+            resolved_ip: None,
+        },
+        body,
+    };
+
+    // Credential-exchange path: the token must reach the host auth caller intact.
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    let service =
+        services.host_http_egress(RecordingNetwork::ok(token_response(token_body.clone())));
+
+    let response = service
+        .execute_credential_exchange(oauth_token_request(scope, capability_id))
+        .await
+        .expect("credential exchange must deliver the token body to the host auth system");
+
+    assert_eq!(response.status, 200);
+    assert!(
+        !response.redaction_applied,
+        "credential-exchange responses must not be sanitized/redacted"
+    );
+    assert_eq!(
+        response.body, token_body,
+        "the token body must be delivered byte-for-byte"
+    );
+    assert!(
+        String::from_utf8_lossy(&response.body).contains(SLACK_USER_TOKEN),
+        "the xoxp- user token must survive the credential-exchange path"
+    );
+
+    // Default (sanitized) path: the identical token body is blocked as a leak.
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    let service =
+        services.host_http_egress(RecordingNetwork::ok(token_response(token_body.clone())));
+
+    let error = service
+        .execute(oauth_token_request(scope, capability_id))
+        .await
+        .expect_err("default execute must block a credential-shaped response body");
+
+    assert!(
+        matches!(
+            error,
+            RuntimeHttpEgressError::Response { ref reason, .. } if reason == "response_leak_blocked"
+        ),
+        "expected response_leak_blocked, got {error:?}"
+    );
+    assert!(
+        !error.to_string().contains(SLACK_USER_TOKEN),
+        "the blocked-leak error must not echo the token"
+    );
+}
+
+/// The skip-sanitization contract of `execute_credential_exchange` is only safe
+/// because token-exchange requests carry no injected credentials to redact (the
+/// response sanitizer is the layer that would scrub them from the body). A
+/// request that *does* carry injections on this path is a contract violation by
+/// the caller, so the pipeline fails closed before any credential staging or
+/// network dispatch instead of trusting the doc comment.
+#[tokio::test]
+async fn credential_exchange_rejects_requests_carrying_credential_injections() {
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let requests = Arc::clone(&network.requests);
+    let service = services.host_http_egress(network);
+
+    let error = service
+        .execute_credential_exchange(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::System,
+            scope,
+            capability_id: capability_id.clone(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/api/oauth.v2.access".to_string(),
+            headers: vec![],
+            body: b"grant_type=authorization_code&code=stub-auth-code".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle: SecretHandle::new("stub-cred").expect("secret handle"),
+                source: RuntimeCredentialSource::StagedObligation { capability_id },
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        })
+        .await
+        .expect_err("credential exchange must reject requests carrying credential injections");
+
+    assert!(
+        matches!(
+            error,
+            RuntimeHttpEgressError::Request { ref reason, .. }
+                if reason == "credential_exchange_injections_unsupported"
+        ),
+        "expected credential_exchange_injections_unsupported, got {error:?}"
+    );
+    assert!(
+        requests.lock().unwrap().is_empty(),
+        "the rejected exchange must never reach the network transport"
+    );
 }
 
 #[tokio::test]
@@ -4473,7 +4687,7 @@ fn block_on_test_runtime<T>(future: impl std::future::Future<Output = T>) -> T {
 fn test_obligation_services() -> BuiltinObligationServices {
     BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
-        Arc::new(InMemorySecretStore::new()),
+        Arc::new(FilesystemSecretStore::ephemeral()),
         Arc::new(InMemoryResourceGovernor::new()),
     )
 }
@@ -4515,6 +4729,22 @@ impl RuntimeHttpEgress for RequestPolicyStagingEgress {
             request.network_policy.clone(),
         );
         self.inner.execute(request).await
+    }
+
+    // Forward the exchange entry point too: without this, an exchange routed
+    // through the staging helper would silently take the trait default (the
+    // SANITIZING path) and green-light against the wrong pipeline.
+    async fn execute_credential_exchange(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        stage_policy_sync(
+            &self.services,
+            &request.scope,
+            &request.capability_id,
+            request.network_policy.clone(),
+        );
+        self.inner.execute_credential_exchange(request).await
     }
 }
 
@@ -4715,6 +4945,10 @@ fn local_http_policy() -> NetworkPolicy {
 }
 
 fn single_response_server(response: &'static str) -> (String, std::thread::JoinHandle<()>) {
+    single_response_server_owned(response.to_string())
+}
+
+fn single_response_server_owned(response: String) -> (String, std::thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let handle = std::thread::spawn(move || {

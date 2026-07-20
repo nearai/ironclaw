@@ -20,10 +20,9 @@ mod support;
 
 use std::sync::Arc;
 
-use chrono::Utc;
-use ironclaw_authorization::{GrantAuthorizer, InMemoryCapabilityLeaseStore};
+use ironclaw_authorization::{GrantAuthorizer, in_memory_backed_capability_lease_store};
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeError, HostRuntimeServices,
@@ -31,12 +30,8 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_run_state::{InMemoryApprovalRequestStore, InMemoryRunStateStore};
-use ironclaw_secrets::InMemorySecretStore;
-use ironclaw_trust::{
-    AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
-    HostTrustPolicy, TrustDecision, TrustProvenance,
-};
+use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
+use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use serde_json::json;
 use support::legacy_capability_fixture_to_v2;
 
@@ -156,18 +151,6 @@ fn local_manifest_trust_policy(
     .unwrap()
 }
 
-fn trust_decision_with_dispatch_authority() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::Default,
-        evaluated_at: Utc::now(),
-    }
-}
-
 // ─── Test A-regression: ProductAuthAccount must NOT trip pre-flight ──────────
 
 /// A required `ProductAuthAccount`-source credential must not trip the
@@ -185,10 +168,13 @@ fn trust_decision_with_dispatch_authority() -> TrustDecision {
 /// the flow proceeds to the approval gate.
 #[tokio::test]
 async fn product_auth_account_credential_does_not_trip_preflight() {
-    let run_state = Arc::new(InMemoryRunStateStore::new());
-    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
-    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let fs = ironclaw_run_state::in_memory_backed_run_state_filesystem();
+    let run_state = Arc::new(ironclaw_run_state::FilesystemRunStateStore::new(
+        std::sync::Arc::clone(&fs),
+    ));
+    let approval_requests = Arc::new(ironclaw_run_state::FilesystemApprovalRequestStore::new(fs));
+    let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     // Deliberately do NOT seed any secret under "google_oauth_token".
     // The secret store is empty. If the pre-flight incorrectly probes the
     // product-auth slot, it will return AuthRequired — which is the bug this
@@ -196,7 +182,7 @@ async fn product_auth_account_credential_does_not_trip_preflight() {
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_WITH_PRODUCT_AUTH_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ProcessServices::in_memory(),
@@ -221,7 +207,6 @@ async fn product_auth_account_credential_does_not_trip_preflight() {
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -243,15 +228,18 @@ async fn product_auth_account_credential_does_not_trip_preflight() {
 /// for SecretHandle credentials.
 #[tokio::test]
 async fn secret_handle_credential_absent_still_trips_preflight() {
-    let run_state = Arc::new(InMemoryRunStateStore::new());
-    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
-    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let fs = ironclaw_run_state::in_memory_backed_run_state_filesystem();
+    let run_state = Arc::new(ironclaw_run_state::FilesystemRunStateStore::new(
+        std::sync::Arc::clone(&fs),
+    ));
+    let approval_requests = Arc::new(ironclaw_run_state::FilesystemApprovalRequestStore::new(fs));
+    let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     // No secret seeded — the SecretHandle pre-flight must fire.
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_WITH_SECRET_HANDLE_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ProcessServices::in_memory(),
@@ -276,7 +264,6 @@ async fn secret_handle_credential_absent_still_trips_preflight() {
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -294,6 +281,74 @@ async fn secret_handle_credential_absent_still_trips_preflight() {
     }
 }
 
+/// Tenant-shared credentials satisfy the pre-flight (#5459): a required
+/// `SecretHandle` credential the caller never provisioned must NOT return
+/// `AuthRequired` when an admin seeded it at the tenant-shared managed scope
+/// (the `IRONCLAW_REBORN_DEV_SECRET__<handle>` env-provisioning path in
+/// `serve`). This drives the full `invoke_capability` caller so the
+/// caller-scope→tenant-shared fallback is exercised through
+/// `credential_preflight_check`, not just the `secret_owner_scope` helper.
+#[tokio::test]
+async fn tenant_shared_secret_satisfies_credential_preflight() {
+    let fs = ironclaw_run_state::in_memory_backed_run_state_filesystem();
+    let run_state = Arc::new(ironclaw_run_state::FilesystemRunStateStore::new(
+        std::sync::Arc::clone(&fs),
+    ));
+    let approval_requests = Arc::new(ironclaw_run_state::FilesystemApprovalRequestStore::new(fs));
+    let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_WITH_SECRET_HANDLE_MANIFEST)),
+        Arc::new(DiskFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
+    )))
+    .with_run_state(Arc::clone(&run_state))
+    .with_approval_requests(Arc::clone(&approval_requests))
+    .with_capability_leases(Arc::clone(&capability_leases))
+    .with_secret_store(Arc::clone(&secret_store));
+    let runtime = services.host_runtime_for_local_testing();
+    let context = execution_context_without_grants();
+
+    // Admin set the key ONLY at the tenant-shared scope; the caller's own
+    // scope has nothing. The baseline test above proves this exact setup
+    // WITHOUT the shared secret returns AuthRequired.
+    secret_store
+        .put(
+            context.resource_scope.tenant_shared_managed_scope(),
+            SecretHandle::new("script_api_token").unwrap(),
+            SecretMaterial::from("shared-admin-key"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "tenant-shared key present"});
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context,
+            script_capability_id(),
+            estimate,
+            input,
+        ))
+        .await
+        .unwrap();
+
+    assert!(
+        !matches!(outcome, RuntimeCapabilityOutcome::AuthRequired(_)),
+        "tenant-shared admin key must satisfy the credential pre-flight for every caller in the tenant; got {outcome:?}"
+    );
+}
+
 // ─── Test B-regression: forged scope rejected before secret-store probe ──────
 
 /// An `invoke_capability` call with a mismatched `resource_scope` (i.e. the
@@ -305,11 +360,11 @@ async fn secret_handle_credential_absent_still_trips_preflight() {
 /// `InvocationId`) and swapping the `resource_scope` from one onto the other.
 #[tokio::test]
 async fn invoke_capability_forged_scope_fails_before_preflight() {
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_WITH_SECRET_HANDLE_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ProcessServices::in_memory(),
@@ -330,6 +385,7 @@ async fn invoke_capability_forged_scope_fails_before_preflight() {
     // fields. The invocation_id in the scope will not match context_a's
     // invocation_id.
     let forged_context = ExecutionContext {
+        run_id: None,
         resource_scope: context_b.resource_scope.clone(), // mismatched scope
         ..context_a
     };
@@ -349,7 +405,6 @@ async fn invoke_capability_forged_scope_fails_before_preflight() {
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await;
 
@@ -370,11 +425,11 @@ async fn invoke_capability_forged_scope_fails_before_preflight() {
 /// Same forged-scope test through the `spawn_capability` path.
 #[tokio::test]
 async fn spawn_capability_forged_scope_fails_before_preflight() {
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_WITH_SECRET_HANDLE_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ProcessServices::in_memory(),
@@ -391,6 +446,7 @@ async fn spawn_capability_forged_scope_fails_before_preflight() {
     let context_b = execution_context_without_grants();
 
     let forged_context = ExecutionContext {
+        run_id: None,
         resource_scope: context_b.resource_scope.clone(),
         ..context_a
     };
@@ -409,7 +465,6 @@ async fn spawn_capability_forged_scope_fails_before_preflight() {
             script_capability_id(),
             estimate,
             input,
-            trust_decision_with_dispatch_authority(),
         ))
         .await;
 

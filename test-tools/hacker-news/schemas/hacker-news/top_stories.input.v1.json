@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "hacker-news.top_stories input",
+  "type": "object",
+  "properties": {
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10,
+      "description": "How many stories to return (1-10). Defaults to 5."
+    }
+  },
+  "additionalProperties": false
+}

@@ -95,7 +95,7 @@ If a task needs to change one of those answers, it is not implementation work; i
 - [`triggers.md`](triggers.md)
 - [`migration-compatibility.md`](migration-compatibility.md)
 - [`product-adapters.md`](product-adapters.md) (issue #3269 first-slice)
-- [`telegram-v2.md`](telegram-v2.md) (issue #3285 first-slice)
+- [`telegram-v2.md`](telegram-v2.md) (Telegram channel host, single `telegram` extension; supersedes the issue #3285 first-slice tracer)
 - [`communication-delivery-resolution.md`](communication-delivery-resolution.md)
 - [`trust-boundary-hardening.md`](trust-boundary-hardening.md)
 

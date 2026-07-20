@@ -82,10 +82,7 @@ pub(super) async fn dispatch(
     let wall_clock_ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
     Ok(FirstPartyCapabilityResult::new(
         output,
-        ResourceUsage {
-            wall_clock_ms,
-            ..ResourceUsage::default()
-        },
+        ResourceUsage::default().set_wall_clock_ms(wall_clock_ms),
     ))
 }
 
@@ -505,7 +502,7 @@ mod tests {
     };
 
     use crate::memory_binding::MEMORY_DISABLED_BINDING_SENTINEL;
-    use crate::{FirstPartyCapabilityRequest, InvocationServices, LocalHostProcessPort};
+    use crate::{FirstPartyCapabilityRequest, HostProcessPort, InvocationServices};
 
     use super::*;
 
@@ -560,18 +557,22 @@ mod tests {
 
     fn memory_request(capability_id: &'static str, input: Value) -> FirstPartyCapabilityRequest {
         FirstPartyCapabilityRequest {
+            run_id: None,
             capability_id: CapabilityId::new(capability_id).unwrap(),
             scope: sample_scope(),
+            authenticated_actor_user_id: None,
             estimate: ironclaw_host_api::ResourceEstimate::default(),
             mounts: Some(memory_mount()),
             services: InvocationServices {
                 filesystem: Arc::new(InMemoryBackend::new()),
                 runtime_http_egress: None,
                 tool_call_http_egress: None,
-                process: Arc::new(LocalHostProcessPort::new()),
+                runtime_secret_material_stager: None,
+                process: Arc::new(HostProcessPort::new()),
                 secret_store: None,
                 audit_sink: None,
                 unsafe_raw_diagnostics_allowed: false,
+                post_edit_check: None,
             },
             input,
         }

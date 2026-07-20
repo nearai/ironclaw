@@ -293,18 +293,37 @@ mod tests {
 
     #[test]
     fn section_layer_overrides_compiled() {
-        let section = BudgetSection {
-            user_daily_usd: Some(10.0),
-            warn_at: Some(0.6),
-            pause_at: Some(0.8),
-            ..Default::default()
-        };
+        let section = BudgetSection::default()
+            .set_user_daily_usd(10.0)
+            .set_project_daily_usd(4.0)
+            .set_mission_per_tick_usd(0.75)
+            .set_heartbeat_per_tick_usd(0.07)
+            .set_routine_lightweight_usd(0.03)
+            .set_routine_standard_usd(0.12)
+            .set_background_job_default_usd(1.25)
+            .set_default_tz("America/Los_Angeles")
+            .set_warn_at(0.6)
+            .set_pause_at(0.8)
+            .set_overestimate_factor(1.5);
         let d = BudgetDefaults::compiled_defaults().with_section(&section);
         assert_eq!(d.user_daily_usd, 10.0);
+        assert_eq!(d.project_daily_usd, 4.0);
+        assert_eq!(d.mission_per_tick_usd, 0.75);
+        assert_eq!(d.heartbeat_per_tick_usd, 0.07);
+        assert_eq!(d.routine_lightweight_usd, 0.03);
+        assert_eq!(d.routine_standard_usd, 0.12);
+        assert_eq!(d.background_job_default_usd, 1.25);
+        assert_eq!(d.default_tz, "America/Los_Angeles");
         assert_eq!(d.warn_at, 0.6);
         assert_eq!(d.pause_at, 0.8);
-        // Untouched defaults remain.
-        assert_eq!(d.heartbeat_per_tick_usd, 0.05);
+        assert_eq!(d.overestimate_factor, 1.5);
+
+        let sparse_section = BudgetSection::default().set_user_daily_usd(12.0);
+        let sparse = BudgetDefaults::compiled_defaults().with_section(&sparse_section);
+        assert_eq!(sparse.user_daily_usd, 12.0);
+        assert_eq!(sparse.heartbeat_per_tick_usd, 0.05);
+        assert_eq!(sparse.default_tz, "UTC");
+        assert_eq!(sparse.overestimate_factor, 1.20);
     }
 
     // Process env is global state; serialize env-mutating tests behind a
@@ -361,12 +380,10 @@ mod tests {
     fn env_layer_overrides_section_and_rejects_invalid_f64() {
         let _lock = env_lock();
         // Establish a section override that env should win against.
-        let section = BudgetSection {
-            user_daily_usd: Some(10.0),
-            warn_at: Some(0.60),
-            pause_at: Some(0.80),
-            ..Default::default()
-        };
+        let section = BudgetSection::default()
+            .set_user_daily_usd(10.0)
+            .set_warn_at(0.60)
+            .set_pause_at(0.80);
 
         // Valid env override path.
         {

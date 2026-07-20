@@ -1,0 +1,11 @@
+pub(crate) mod active_model;
+pub(crate) mod llm_catalog;
+pub(crate) mod llm_config_service;
+pub(crate) mod llm_key_store;
+pub(crate) mod llm_reload;
+pub(crate) mod nearai_login_serve;
+pub(crate) mod nearai_mcp;
+pub(crate) mod openai_compat_serve;
+pub(crate) mod provider_admin;
+pub(crate) mod provider_admin_product_command;
+pub(crate) mod provider_repo;

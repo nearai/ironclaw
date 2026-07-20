@@ -1,5 +1,3 @@
-#![cfg(feature = "openai-compat-beta")]
-
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -849,6 +847,7 @@ fn projection_text_envelope(cursor: &str, text: &str) -> ProductOutboundEnvelope
                 "thread-a",
                 vec![ProductProjectionItem::Text {
                     id: format!("text-{cursor}"),
+                    run_id: None,
                     body: text.to_string(),
                 }],
             )
@@ -879,6 +878,7 @@ fn run_status_envelope(cursor: &str, status: &str) -> ProductOutboundEnvelope {
                     status: status.to_string(),
                     failure_category: None,
                     failure_summary: None,
+                    retryable: None,
                 }],
             )
             .expect("projection state"),
@@ -933,6 +933,8 @@ fn completed_response(public_id: OpenAiResponseId, text: &str) -> OpenAiResponse
             input_tokens: 1,
             output_tokens: text.len() as u32,
             total_tokens: 1 + text.len() as u32,
+            input_tokens_details: None,
+            cost: None,
         }),
     }
 }

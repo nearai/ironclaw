@@ -27,7 +27,7 @@ This repo can be indexed into a **codebase knowledge graph** (the `codebase-memo
 
 ## Where to Build — Reborn-First
 
-**New feature work targets the Reborn stack in `crates/`, not the v1 `src/` monolith.** A Reborn feature crosses `product_workflow → composition → webui_v2 → runtime/serve → frontend`; the binary entry point is `crates/ironclaw_reborn_cli` (binary name `ironclaw-reborn`), **not** `src/main.rs`. Start from the `reborn-feature` skill — it maps those layers so you wire a feature in one pass instead of layer-by-layer.
+**New feature work targets the Reborn stack in `crates/`, not the v1 `src/` monolith.** A Reborn feature crosses `product_workflow → composition → webui_v2 → runtime/serve → frontend`; the binary entry point is `crates/ironclaw_reborn_cli` (binary name `ironclaw`), **not** `src/main.rs`. Start from the `reborn-feature` skill — it maps those layers so you wire a feature in one pass instead of layer-by-layer.
 
 `src/` is the **v1 monolith**, being retired under the roadmap's "Clean up old architecture." Maintain existing v1 behavior there when a bug requires it, but **do not build new features into `src/`** — they belong Reborn-side. The detailed `src/` layout in "Project Structure" below documents v1 for maintenance, not as the default place to add code.
 
@@ -42,6 +42,17 @@ RUST_LOG=ironclaw=debug cargo run                            # run with logging
 ```
 
 E2E tests: see `tests/e2e/CLAUDE.md`.
+
+### Cargo features are a last resort
+
+A feature is a second build of the workspace that must be compiled,
+linted, and tested forever. Add one only for a heavy optional dependency,
+a build shape something actually ships with it OFF, a CI lane selector, a
+dev-only seam (always named `test-support`), or a privilege boundary — and
+say which in the manifest comment. Deployment shape belongs in
+`DeploymentConfig` and `[storage]`, not `#[cfg]`. Full bar, the
+delete-checklist, and the feature-gated-dead-code trap:
+`.claude/rules/cargo-features.md`.
 
 ## Testing Discipline
 
@@ -58,6 +69,12 @@ Two rules are non-negotiable for **all** tests:
    stand up a redundant new "extensive" test that overloads the suite.
    Add a new test only for a genuinely distinct scenario, and say why an
    existing one couldn't absorb it.
+3. **Integration-first coverage.** Production-wired Reborn behavior
+   ships with a test in `tests/integration/`, driven through the
+   harness and asserting at a seam — never `wait_for_status(Completed)`
+   alone. Crate-tier is the fallback only when that tier can't reach
+   the path (say why in the PR). Full decision rule:
+   `.claude/rules/testing.md`.
 
 Where to look: hard rules (tiers, test-through-the-caller,
 regression-with-every-fix) in `.claude/rules/testing.md`; **Reborn
@@ -74,7 +91,7 @@ Python/Playwright suite in `tests/e2e/CLAUDE.md`.
 - Prefer strong types over strings (enums, newtypes)
 - Keep functions focused, extract helpers when logic is reused
 - Comments for non-obvious logic only
-- **Prompt templates live in files, not Rust code**: Multi-line prompt strings (mission goals, system prompts, preambles) go in a `prompts/*.md` file **inside the crate that owns the behavior** and are loaded via `include_str!()`. Reborn examples: `crates/ironclaw_loop_support`, `crates/ironclaw_turns`, `crates/ironclaw_skill_learning`. Never inline large prompt templates as Rust string constants — they're hard to read, review, and iterate on. Single-line format strings are fine inline.
+- **Prompt templates live in files, not Rust code**: Multi-line prompt strings (mission goals, system prompts, preambles) go in a `prompts/*.md` file **inside the crate that owns the behavior** and are loaded via `include_str!()`. Reborn examples: `crates/ironclaw_loop_host`, `crates/ironclaw_turns`, `crates/ironclaw_skill_learning`. Never inline large prompt templates as Rust string constants — they're hard to read, review, and iterate on. Single-line format strings are fine inline.
 - **Logging levels matter for REPL/TUI**: `info!` and `warn!` output appears in the REPL and corrupts the terminal UI. Use `debug!` for internal diagnostics (trace analysis, reflection results, engine internals). Reserve `info!` for user-facing status that the REPL intentionally renders. Background tasks (reflection, trace analysis) must NEVER use `info!` — it breaks the interactive display.
 - **Test through the caller, not just the helper**: When a predicate/classifier/transform helper gates a side effect (HTTP, DB write, OAuth, UI mutation, tool execution) and has any wrapper or computed input between it and that side effect, a unit test on the helper alone is *not* sufficient regression coverage. Add a test that drives the call site — typically a `*_handler`, `factory::create_*`, or `manager::*` — at the integration tier (`cargo test --features integration`) or higher. The same applies to test mocks: if you mock a multi-arg runtime API like `window.open(url, target, features)`, the mock must capture every argument the production caller passes. See `.claude/rules/testing.md` ("Test Through the Caller, Not Just the Helper") for the full rule and the bug examples that motivated it.
 
@@ -283,7 +300,7 @@ When modifying a module with a spec, read the spec first. Code follows spec; spe
 | `src/setup/` | `src/setup/README.md` |
 | `src/tools/` | `src/tools/README.md` |
 | `src/workspace/` | `src/workspace/README.md` |
-| `crates/ironclaw_reborn_webui_ingress/` | `crates/ironclaw_reborn_webui_ingress/CLAUDE.md` |
+| `crates/ironclaw_webui/` | `crates/ironclaw_webui/CLAUDE.md` |
 | `crates/ironclaw_reborn_identity/` | `crates/ironclaw_reborn_identity/CONTRACT.md` |
 | `tests/integration/` | `tests/integration/CLAUDE.md` |
 | `tests/support/reborn_parity_qa/` | `tests/support/reborn_parity_qa/CLAUDE.md` |

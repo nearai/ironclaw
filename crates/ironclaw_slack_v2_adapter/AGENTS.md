@@ -19,7 +19,7 @@
 
 ## Do Not Move In Here
 
-- Legacy v1 `Channel` lifecycle, channel relay state, or Slack pairing flow.
+- Legacy v1 `Channel` lifecycle, channel relay state, or host-side Slack setup/OAuth flows.
 - Host auth verification, canonical conversation/thread binding, or turn coordination.
 - Network clients, raw Slack bot tokens/signing secrets, direct DB/filesystem access, or approval-run state.
 

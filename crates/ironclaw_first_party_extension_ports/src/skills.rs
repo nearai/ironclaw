@@ -3,7 +3,7 @@ use std::sync::atomic::AtomicBool;
 
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{ScopedPath, TenantId};
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     FilesystemSkillBundleRoot, FilesystemSkillBundleSource, HostSkillContextSource,
 };
 
@@ -301,7 +301,7 @@ mod tests {
         AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId, UserId,
         VirtualPath,
     };
-    use ironclaw_loop_support::{
+    use ironclaw_loop_host::{
         SkillBundleContextSource, SkillBundleSource, build_skill_run_snapshot,
     };
     use ironclaw_skills::SkillTrust;

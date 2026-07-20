@@ -67,13 +67,18 @@ jobs:
           key: e2e-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Build
-        run: cargo build --no-default-features --features libsql
+        run: >-
+          cargo build
+          -p ironclaw
+          --bin ironclaw-legacy
+          --no-default-features
+          --features libsql
 
       - name: Upload binary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ironclaw-e2e-binary
-          path: target/debug/ironclaw
+          path: target/debug/ironclaw-legacy
           retention-days: 1
 
   test:
@@ -98,7 +103,7 @@ jobs:
           path: target/debug/
 
       - name: Make binary executable
-        run: chmod +x target/debug/ironclaw
+        run: chmod +x target/debug/ironclaw-legacy
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:

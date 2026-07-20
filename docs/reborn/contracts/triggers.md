@@ -453,8 +453,8 @@ The trigger system must expose `trigger_create`, `trigger_list`, `trigger_remove
   profile, not the interactive default. That profile's capability surface
   denies `trigger_create`, `trigger_remove`, `trigger_pause`, and
   `trigger_resume` via a host-level per-surface-profile deny decorator
-  (`PerSurfaceCapabilityDenyDecorator` in `ironclaw_loop_support`, composed in
-  `ironclaw_reborn::runtime`). Read-only `trigger_list` remains visible and
+  (`PerSurfaceCapabilityDenyDecorator` in `ironclaw_loop_host`, composed in
+  `ironclaw_runner::runtime`). Read-only `trigger_list` remains visible and
   callable during a fire, so a routine can still inspect triggers. This
   prevents a fired trigger's own run from creating or mutating the trigger
   fleet — a malformed or self-referential routine prompt could otherwise
@@ -518,3 +518,55 @@ V1 acceptance does not require external delivery. A valid V1 trigger fire is one
   trigger and slot.
 - Unit tests must prove trigger fire identity derivation is collision-safe for
   delimiter-like or prefix-overlapping component values.
+- Caller-level tests must prove `active_hold` (§11) is present on both
+  `list_automations` and `trigger_list` while a fire is gate-parked, and absent
+  once the fire reaches a terminal outcome — already covered by
+  `tests/integration/group_triggers/scenario_triggered_gate_hold_visible.rs`.
+
+---
+
+## 11. Active-hold read-time projection (#5886)
+
+`active_hold` is a **derived, non-persisted, read-time-only** projection
+surfaced by product read paths. It adds nothing to `TriggerRunHistoryStatus`,
+`TriggerRunStatus`, or any other persisted status enum, and it does not change
+poller behavior: the poller still skips a due fire while a previous fire is
+active (§5) and never delivers outbound messages itself. This is a
+read-surface addition only — it does not relax the §7 constraint that
+`ApprovalBlocked`/`TimedOut` must not enter the V1 persisted status model, and
+it does not relax the §7/§9 constraint that later lifecycle/notification work
+must define notification paths without making the trigger poller deliver
+outbound messages directly.
+
+- `active_hold` appears on both `RebornAutomationProductFacade::list_automations`
+  (WebUI automations panel) and the model-visible `trigger_list` capability
+  (§8). Both surfaces use the same reason vocabulary because both compute it
+  through the same shared `ironclaw_triggers::worker::ports` derivation
+  (`active_hold_projection` / `active_holds_for_records`); the two read paths
+  cannot drift from each other.
+- Reason vocabulary (`RebornAutomationHoldReason` / `ActiveHoldReason`):
+  - `approval` — the held run is parked on an approval gate.
+  - `auth` — the held run is parked on an auth gate.
+  - `in_progress` — the previous run is still executing and is not gate-parked.
+  - `other` — any other blocked/held state, including the window between
+    `claim_due_fire` and `mark_fire_accepted` where `active_fire_slot` is set
+    but `active_run_ref` is not yet populated.
+- `since` is the held fire's claimed slot timestamp (`TriggerRecord.active_fire_slot`);
+  may be absent.
+- `elapsed_occurrences` is the count of scheduled occurrences that have
+  elapsed since `since`, computed from the schedule between `since` and now,
+  capped at `ACTIVE_HOLD_ELAPSED_OCCURRENCES_CAP` (99). At the cap,
+  `elapsed_occurrences_capped = true` signals truncation — the value must
+  never be presented as an exact count above the cap. This is **not** a count
+  of runs the poller attempted or skipped: it is derived purely from
+  wall-clock cron slots, so it keeps accruing while the trigger is paused or
+  whenever the poller isn't running at all.
+- Omission rule: `active_hold` is absent entirely when the active run resolves
+  to `Terminal` or `Missing` (nothing to report), or when the active-run
+  lookup itself fails or times out. A schedule-slot derivation failure
+  (malformed persisted schedule) does **not** omit the hold — it degrades
+  only `elapsed_occurrences` to absent (with `elapsed_occurrences_capped =
+  false`) while the hold itself, including `reason` and `since`, is still
+  returned. This is a display-only projection and must never fail the read;
+  any lookup or derivation problem degrades gracefully rather than
+  surfacing an error.

@@ -61,7 +61,7 @@ Verdicts: **KEEP** (as-is) · **INTERNAL** (decompose/repair inside the crate) �
 | ironclaw_hooks | 25 | 22.6k | KEEP; internal OK (21 mods, biggest 5.0k) |
 | ironclaw_reborn_event_store | 25 | 3.0k | KEEP |
 | ironclaw_host_runtime | 24 | 35.2k | KEEP boundary; internal OK (21 mods, biggest 2.9k) |
-| ironclaw_loop_support | 24 | 29.6k | KEEP; **INTERNAL:** `capability_port.rs` (8.2k) is a god-file — split by capability family when next touched (JIT) |
+| ironclaw_loop_host | 24 | 29.6k | KEEP; **INTERNAL:** `capability_port.rs` (8.2k) is a god-file — split by capability family when next touched (JIT) |
 | ironclaw_product_workflow | 24 | 23.8k | KEEP; **INTERNAL/JIT:** `reborn_services.rs` (6.0k) holds the 70-method `RebornServicesApi` god interface — split by domain (threads/turns/gates/extensions/llm/…) as features demand slices; storage fold-in from tail (below) |
 | ironclaw_reborn_traces | 24 | 17.7k | KEEP; **INTERNAL:** `contribution.rs` = **14.5k lines in one file** — worst god-file in the workspace after composition; dissect into submodules |
 | ironclaw_approvals | 24 | 3.2k | KEEP |
@@ -71,7 +71,7 @@ Verdicts: **KEEP** (as-is) · **INTERNAL** (decompose/repair inside the crate) �
 
 triggers (19), secrets (19), auth (19), extractors (19), prompt_envelope (15),
 dispatcher (15), attachments (15), outbound (15), product_context (15), reborn_config (14),
-network (14), runtime_policy (14), first_party_extensions (14), ironclaw_reborn (14 —
+network (14), runtime_policy (14), first_party_extensions (14), ironclaw_runner (14 —
 internal OK: 21 mods, biggest 4.7k), mcp (13), memory_native (10), conversations (10),
 capabilities (10), reborn_openai_compat (10), process_sandbox (10), scripts (10),
 product_adapter_registry (10), wasm_limiter (10), wasm (9).
@@ -86,7 +86,7 @@ slack_v2_adapter, telegram_v2_adapter, wasm_product_adapters,
 first_party_extension_ports, event_streams, reborn_identity, hooks_postgres,
 hooks_libsql (dual-backend rule — keep both).
 
-**ironclaw_agent_loop (fan-in 5, 25.5k) → MERGE into `ironclaw_loop_support`** — the one
+**ironclaw_agent_loop (fan-in 5, 25.5k) → MERGE into `ironclaw_loop_host`** — the one
 clean substrate merge: siblings (neither depends on the other), tiny blast radius.
 Optional; schedule when loop work next opens both crates anyway.
 
@@ -98,7 +98,7 @@ Optional; schedule when loop work next opens both crates anyway.
 | ironclaw_skill_learning | 356 | ironclaw_skills (or consumer) |
 | ironclaw_wasm_sandbox_core | 357 | ironclaw_wasm |
 | ironclaw_reborn_openai_compat_storage | 673 | ironclaw_reborn_openai_compat |
-| ironclaw_projects | 842 | consumer |
+| ironclaw_projects | 842 | **KEEP in W2**; substrate entity/repository. If revisited later, the only acceptable consumer-side target is `ironclaw_product_workflow`, never composition. |
 | ironclaw_product_workflow_storage | 946 | ironclaw_product_workflow |
 
 ### 2.5 Zero fan-in — KEEP all (correction: none are dead)

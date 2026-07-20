@@ -1,9 +1,6 @@
 """Legacy Responses API coverage ported to standalone Reborn."""
 
 import asyncio
-import os
-import subprocess
-from pathlib import Path
 
 import httpx
 import pytest
@@ -13,38 +10,6 @@ from reborn_webui_harness import (
     reborn_bearer_headers,
     start_reborn_webui_v2_server,
 )
-
-
-ROOT = Path(__file__).resolve().parents[3]
-
-
-def _cargo_target_dir() -> Path:
-    env_target = os.environ.get("CARGO_TARGET_DIR")
-    if env_target:
-        return Path(env_target)
-    return ROOT / "target"
-
-
-@pytest.fixture(scope="session")
-def ironclaw_reborn_openai_compat_binary():
-    """Build Reborn with the OpenAI-compatible Responses route mounted."""
-    subprocess.run(
-        [
-            "cargo",
-            "build",
-            "-p",
-            "ironclaw_reborn_cli",
-            "--features",
-            "openai-compat-beta",
-        ],
-        cwd=ROOT,
-        check=True,
-        timeout=900,
-    )
-    binary = _cargo_target_dir() / "debug" / "ironclaw-reborn"
-    assert binary.exists(), f"Binary not found at {binary}"
-    return str(binary)
-
 
 @pytest.fixture(scope="module")
 async def reborn_openai_compat_server(

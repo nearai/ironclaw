@@ -118,11 +118,15 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
   harness (`RecordingTestCapabilityPort`, `RecordingHostRuntime`,
   `RecordingRuntimeHttpEgress`, `RecordingNetworkHttpEgress`,
   `RecordingApprovalRequestStore`, `RecordingCapabilityResultWriter`,
+  `RecordingSecurityAuditSink`, `UnavailableProjectService`,
   `GithubHarnessAuthorizer`, `StaticSecretStore`,
   `StaticCapabilitySurfaceProfileResolver`,
   `FixedRuntimeCredentialAccountResolver`, `EmptyIdentityContextSource`,
-  `HarnessCapabilityPortFactory`, `HostRuntimeHarnessCapabilityPortFactory`),
-  re-exported from `doubles/mod.rs`.
+  `HarnessCapabilityPortFactory`, `HostRuntimeHarnessCapabilityPortFactory`,
+  `ParkingCapabilityGate`/`ParkingHostRuntime` — the tool-path analog of
+  `ParkingModelGate`/`ParkingLlm`; parks a `HostRuntime` capability dispatch
+  until released, used by `lease_wedge.rs`), re-exported from
+  `doubles/mod.rs`.
 - `group_constructors.rs` — the per-capability `RebornIntegrationGroup` /
   `RebornIntegrationGroupBuilder` preset constructors (`live_approvals`,
   `builtin_tools`, `extension_lifecycle`, `skill_management_tools`, etc.), a
@@ -133,7 +137,7 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
   `CommandExecutionRequest.command` and returns exit 0 / empty output without
   spawning any OS process. Injected by default when `with_builtin_http_tools()` is
   used; the `.with_live_shell()` opt-in skips injection so the real
-  `LocalHostProcessPort` executes instead.
+  `HostProcessPort` executes instead.
 - `http_matcher.rs` — `ScriptedHttpResponse`, the URL/method/capability-keyed
   HTTP scripting layer over `RecordingRuntimeHttpEgress` (install via
   `.with_keyed_http_responses([..])`).
@@ -253,7 +257,7 @@ spawning any OS process.
 - `assert_shell_ran_through_inert_port()` — at least one shell command was recorded by the inert port (proves no real OS process ran).
 
 **`.with_live_shell()`** — opt-in; skips recording-port injection so the real
-`LocalHostProcessPort` executes instead. Use only for hermetic commands
+`HostProcessPort` executes instead. Use only for hermetic commands
 (no network, no external state, reproducible on any machine).
 Implies `.with_builtin_http_tools()`.
 
@@ -372,9 +376,16 @@ On a harness built from a `live_approvals` group:
 
 `ironclaw_reborn_composition::test_support` exposes:
 
-- `build_local_dev_secret_store_for_test(root, scoped)` — constructs the `LocalDevSecretStore` used by production local-dev composition; for store read-back in secrets tests.
+- `build_secret_store_for_test(root, scoped)` — constructs the `LocalDevSecretStore` used by production local-dev composition; for store read-back in secrets tests.
 
-Both are zero-byte in production builds (gated on the `test-support` feature).
+`RebornServices` (returned by `build_reborn_services`/exposed via `RebornRuntime::services()`, methods defined in `crates/ironclaw_reborn_composition/src/runtime/test_support.rs`) exposes:
+
+- `local_dev_approval_interaction_service_for_test(turn_coordinator)` — real `DefaultApprovalInteractionService` wired like `build_reborn_runtime`. `None` without a local-dev runtime.
+- `local_dev_auth_interaction_service_for_test(turn_coordinator)` — WebUI auth-interaction service via the same `build_webui_auth_interaction_service` helper production uses. `None` only without a local-dev runtime; falls back to `UnavailableAuthInteractionService` when `product_auth` has no flow-record source.
+
+Both take `turn_coordinator: Arc<dyn TurnCoordinator>` explicitly rather than reading `self.turn_coordinator` — a `RebornServices` from `build_reborn_services` alone carries a different coordinator instance than a caller-built planned runtime; pass the coordinator your harness's turns actually run against.
+
+All of the above are zero-byte in production builds (gated on the `test-support` feature).
 
 ## Group tests
 

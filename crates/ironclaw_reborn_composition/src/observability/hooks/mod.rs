@@ -78,10 +78,10 @@ mod tests;
 /// fresh [`HookDispatcherBuilder`] (no pre-attached milestone sink — the host
 /// factory wires a run-scoped one).
 ///
-/// Re-exported from `ironclaw_reborn` so the type is identical to the one
+/// Re-exported from `ironclaw_runner` so the type is identical to the one
 /// `DefaultPlannedRuntimeParts::hook_dispatcher_builder_factory` accepts; this
 /// crate just gives it a local name at its public surface.
-pub use ironclaw_reborn::loop_driver_host::HookDispatcherBuilderFactory;
+pub use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
 
 // Public surface of the activation path (consumed by `crate::runtime`).
 pub use factory::{

@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle};
+use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle, UserId};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 use tokio::sync::RwLock;
@@ -37,6 +37,107 @@ impl<'de> Deserialize<'de> for ManifestHash {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ExtensionRemovalCleanupAdapterId(String);
+
+impl ExtensionRemovalCleanupAdapterId {
+    pub fn new(value: impl Into<String>) -> Result<Self, ExtensionInstallationError> {
+        validate_cleanup_id(value.into(), "cleanup adapter").map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl AsRef<str> for ExtensionRemovalCleanupAdapterId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ExtensionRemovalCleanupAdapterId {
+    type Error = ExtensionInstallationError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<ExtensionRemovalCleanupAdapterId> for String {
+    fn from(value: ExtensionRemovalCleanupAdapterId) -> Self {
+        value.into_inner()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ExtensionRemovalChannelId(String);
+
+impl ExtensionRemovalChannelId {
+    pub fn new(value: impl Into<String>) -> Result<Self, ExtensionInstallationError> {
+        validate_cleanup_id(value.into(), "cleanup channel").map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl AsRef<str> for ExtensionRemovalChannelId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ExtensionRemovalChannelId {
+    type Error = ExtensionInstallationError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<ExtensionRemovalChannelId> for String {
+    fn from(value: ExtensionRemovalChannelId) -> Self {
+        value.into_inner()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub enum ExtensionRemovalCleanupBinding {
+    ChannelConnection { channel: ExtensionRemovalChannelId },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionRemovalCleanupRequirement {
+    pub adapter_id: ExtensionRemovalCleanupAdapterId,
+    pub binding: ExtensionRemovalCleanupBinding,
+}
+
+impl ExtensionRemovalCleanupRequirement {
+    pub fn channel_connection(
+        adapter_id: ExtensionRemovalCleanupAdapterId,
+        channel: ExtensionRemovalChannelId,
+    ) -> Self {
+        Self {
+            adapter_id,
+            binding: ExtensionRemovalCleanupBinding::ChannelConnection { channel },
+        }
+    }
+}
+
 /// Product-agnostic extension manifest record.
 ///
 /// Domain crates can project their own host-api sections from `raw_toml` and
@@ -46,6 +147,7 @@ pub struct ExtensionManifestRecord {
     raw_toml: String,
     manifest: ExtensionManifestV2,
     manifest_hash: Option<ManifestHash>,
+    removal_cleanup_requirements: Vec<ExtensionRemovalCleanupRequirement>,
 }
 
 impl ExtensionManifestRecord {
@@ -83,7 +185,19 @@ impl ExtensionManifestRecord {
             raw_toml,
             manifest,
             manifest_hash,
+            removal_cleanup_requirements: Vec::new(),
         })
+    }
+
+    /// Attach host-trusted declarative cleanup metadata to the persisted
+    /// manifest record. These requirements are never parsed from extension
+    /// supplied TOML; catalog construction is the only production writer.
+    pub fn with_removal_cleanup_requirements(
+        mut self,
+        requirements: Vec<ExtensionRemovalCleanupRequirement>,
+    ) -> Self {
+        self.removal_cleanup_requirements = requirements;
+        self
     }
 
     pub fn manifest(&self) -> &ExtensionManifestV2 {
@@ -100,6 +214,10 @@ impl ExtensionManifestRecord {
 
     pub fn manifest_hash(&self) -> Option<&ManifestHash> {
         self.manifest_hash.as_ref()
+    }
+
+    pub fn removal_cleanup_requirements(&self) -> &[ExtensionRemovalCleanupRequirement] {
+        &self.removal_cleanup_requirements
     }
 }
 
@@ -315,6 +433,121 @@ impl ExtensionHealthSnapshot {
     }
 }
 
+/// Who an installation belongs to (#5459 P1 — shared vs member installs,
+/// membership model per the 2026-07-08 pivot in
+/// `docs/plans/2026-07-01-private-tool-installs.md`).
+///
+/// `Tenant` = installed for the whole tenant (the historical behavior, and
+/// what an operator install produces): every user sees and can dispatch the
+/// extension's capabilities. `Users` = held by a set of members: any number
+/// of users can independently install the same tool; only members see it,
+/// only members get grants minted for it.
+///
+/// Legacy persisted records predate this field and deserialize as `Tenant`
+/// via `#[serde(default)]` — no migration required, no behavior change for
+/// existing installs. Rows written by the slot iteration of this feature
+/// (`{"kind": "user", "user_id": …}`) deserialize as a singleton member set.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum InstallationOwner {
+    #[default]
+    Tenant,
+    Users {
+        user_ids: BTreeSet<UserId>,
+    },
+}
+
+impl InstallationOwner {
+    /// Singleton member set — what a single member's install produces.
+    pub fn user(user_id: UserId) -> Self {
+        Self::Users {
+            user_ids: BTreeSet::from([user_id]),
+        }
+    }
+
+    /// Member set; rejects an empty set (an installation must belong to the
+    /// tenant or to at least one member — an empty set would be a row nobody
+    /// can see, operate, or remove).
+    pub fn users(user_ids: BTreeSet<UserId>) -> Result<Self, ExtensionInstallationError> {
+        if user_ids.is_empty() {
+            return Err(ExtensionInstallationError::EmptyOwnerMembers);
+        }
+        Ok(Self::Users { user_ids })
+    }
+
+    pub fn is_tenant(&self) -> bool {
+        matches!(self, Self::Tenant)
+    }
+
+    /// The member set, if the installation is member-held.
+    pub fn members(&self) -> Option<&BTreeSet<UserId>> {
+        match self {
+            Self::Users { user_ids } => Some(user_ids),
+            Self::Tenant => None,
+        }
+    }
+
+    /// Whether `caller` may see/use this installation: tenant-wide entries
+    /// are visible to everyone, member-held entries only to their members.
+    pub fn visible_to(&self, caller: &UserId) -> bool {
+        match self {
+            Self::Tenant => true,
+            Self::Users { user_ids } => user_ids.contains(caller),
+        }
+    }
+}
+
+impl Serialize for InstallationOwner {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        InstallationOwnerWire::from(self.clone()).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for InstallationOwner {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        InstallationOwnerWire::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Wire shape of [`InstallationOwner`]. `user` is the read-only legacy kind
+/// written by the slot iteration of #5459 P1 (a single owning user); it folds
+/// into a singleton member set on load and is never written back.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum InstallationOwnerWire {
+    Tenant,
+    User { user_id: UserId },
+    Users { user_ids: BTreeSet<UserId> },
+}
+
+impl From<InstallationOwner> for InstallationOwnerWire {
+    fn from(owner: InstallationOwner) -> Self {
+        match owner {
+            InstallationOwner::Tenant => Self::Tenant,
+            InstallationOwner::Users { user_ids } => Self::Users { user_ids },
+        }
+    }
+}
+
+impl TryFrom<InstallationOwnerWire> for InstallationOwner {
+    type Error = ExtensionInstallationError;
+
+    fn try_from(wire: InstallationOwnerWire) -> Result<Self, Self::Error> {
+        match wire {
+            InstallationOwnerWire::Tenant => Ok(Self::Tenant),
+            InstallationOwnerWire::User { user_id } => Ok(Self::user(user_id)),
+            InstallationOwnerWire::Users { user_ids } => Self::users(user_ids),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExtensionInstallation {
     installation_id: ExtensionInstallationId,
@@ -324,6 +557,27 @@ pub struct ExtensionInstallation {
     credential_bindings: Vec<ExtensionCredentialBinding>,
     health: ExtensionHealthSnapshot,
     updated_at: DateTime<Utc>,
+    // Tenant-owned rows serialize WITHOUT the field so they keep the exact
+    // pre-#5459 byte shape: a rollback to an older binary (whose wire struct
+    // uses `deny_unknown_fields`) still loads a state.json that contains no
+    // private installs. Only user-private rows carry the field — the one
+    // shape an older binary genuinely cannot represent.
+    #[serde(default, skip_serializing_if = "InstallationOwner::is_tenant")]
+    owner: InstallationOwner,
+}
+
+/// All persisted fields needed to reconstruct an installation without
+/// inventing fresh health or timestamp state.
+#[derive(Debug)]
+pub struct ExtensionInstallationPersistedParts {
+    pub installation_id: ExtensionInstallationId,
+    pub extension_id: ExtensionId,
+    pub activation_state: ExtensionActivationState,
+    pub manifest_ref: ExtensionManifestRef,
+    pub credential_bindings: Vec<ExtensionCredentialBinding>,
+    pub health: ExtensionHealthSnapshot,
+    pub updated_at: DateTime<Utc>,
+    pub owner: InstallationOwner,
 }
 
 impl ExtensionInstallation {
@@ -334,15 +588,9 @@ impl ExtensionInstallation {
         manifest_ref: ExtensionManifestRef,
         credential_bindings: Vec<ExtensionCredentialBinding>,
         updated_at: DateTime<Utc>,
+        owner: InstallationOwner,
     ) -> Result<Self, ExtensionInstallationError> {
-        if manifest_ref.extension_id() != &extension_id {
-            return Err(ExtensionInstallationError::ManifestExtensionMismatch {
-                extension_id,
-                manifest_extension_id: manifest_ref.extension_id().clone(),
-            });
-        }
-        validate_bindings_unique(&credential_bindings)?;
-        Ok(Self {
+        Self::from_persisted_parts(ExtensionInstallationPersistedParts {
             installation_id,
             extension_id,
             activation_state,
@@ -350,6 +598,35 @@ impl ExtensionInstallation {
             credential_bindings,
             health: ExtensionHealthSnapshot::new(ExtensionHealthStatus::Healthy, None, updated_at),
             updated_at,
+            owner,
+        })
+    }
+
+    /// Reconstruct an installation with all state read from persistence.
+    ///
+    /// The ordinary [`Self::new`] constructor starts a fresh installation with
+    /// a healthy snapshot. Persistence adapters use this neutral constructor
+    /// when they need to preserve an existing health snapshot and timestamp
+    /// while changing the canonical installation identity.
+    pub fn from_persisted_parts(
+        parts: ExtensionInstallationPersistedParts,
+    ) -> Result<Self, ExtensionInstallationError> {
+        if parts.manifest_ref.extension_id() != &parts.extension_id {
+            return Err(ExtensionInstallationError::ManifestExtensionMismatch {
+                extension_id: parts.extension_id,
+                manifest_extension_id: parts.manifest_ref.extension_id().clone(),
+            });
+        }
+        validate_bindings_unique(&parts.credential_bindings)?;
+        Ok(Self {
+            installation_id: parts.installation_id,
+            extension_id: parts.extension_id,
+            activation_state: parts.activation_state,
+            manifest_ref: parts.manifest_ref,
+            credential_bindings: parts.credential_bindings,
+            health: parts.health,
+            updated_at: parts.updated_at,
+            owner: parts.owner,
         })
     }
 
@@ -381,6 +658,19 @@ impl ExtensionInstallation {
         self.updated_at
     }
 
+    pub fn owner(&self) -> &InstallationOwner {
+        &self.owner
+    }
+
+    /// Same installation with a replaced owner (membership join/leave and
+    /// operator eviction-to-tenant are single row rewrites); refreshes
+    /// `updated_at` like every other row mutation.
+    pub fn with_owner(mut self, owner: InstallationOwner) -> Self {
+        self.owner = owner;
+        self.updated_at = Utc::now();
+        self
+    }
+
     fn set_activation_state(&mut self, state: ExtensionActivationState) {
         self.activation_state = state;
         self.updated_at = Utc::now();
@@ -407,6 +697,10 @@ impl<'de> Deserialize<'de> for ExtensionInstallation {
             credential_bindings: Vec<ExtensionCredentialBinding>,
             health: ExtensionHealthSnapshot,
             updated_at: DateTime<Utc>,
+            // Legacy records predate the owner field; they were all
+            // tenant-visible, so absent == Tenant is behavior-preserving.
+            #[serde(default)]
+            owner: InstallationOwner,
         }
         let wire = Wire::deserialize(deserializer)?;
         if wire.manifest_ref.extension_id() != &wire.extension_id {
@@ -426,6 +720,7 @@ impl<'de> Deserialize<'de> for ExtensionInstallation {
             credential_bindings: wire.credential_bindings,
             health: wire.health,
             updated_at: wire.updated_at,
+            owner: wire.owner,
         })
     }
 }
@@ -797,6 +1092,48 @@ mod tests {
     use super::*;
     use crate::ManifestSource;
 
+    #[test]
+    fn removal_cleanup_ids_validate_and_round_trip_their_canonical_wire_values() {
+        let adapter = ExtensionRemovalCleanupAdapterId::new("slack.personal")
+            .expect("canonical cleanup adapter");
+        assert_eq!(adapter.as_str(), "slack.personal");
+        assert_eq!(adapter.as_ref(), "slack.personal");
+        assert_eq!(adapter.clone().into_inner(), "slack.personal");
+        assert_eq!(String::from(adapter.clone()), "slack.personal");
+        assert_eq!(
+            serde_json::from_str::<ExtensionRemovalCleanupAdapterId>(
+                &serde_json::to_string(&adapter).expect("serialize adapter")
+            )
+            .expect("deserialize adapter"),
+            adapter
+        );
+
+        let channel = ExtensionRemovalChannelId::new("slack").expect("canonical cleanup channel");
+        assert_eq!(channel.as_str(), "slack");
+        assert_eq!(channel.as_ref(), "slack");
+        assert_eq!(channel.clone().into_inner(), "slack");
+        assert_eq!(String::from(channel.clone()), "slack");
+        assert_eq!(
+            serde_json::from_str::<ExtensionRemovalChannelId>(
+                &serde_json::to_string(&channel).expect("serialize channel")
+            )
+            .expect("deserialize channel"),
+            channel
+        );
+
+        for invalid in ["", "Slack", "slack/connection", "-slack", "slack-"] {
+            let wire = serde_json::to_string(invalid).expect("serialize invalid cleanup id");
+            assert!(
+                serde_json::from_str::<ExtensionRemovalCleanupAdapterId>(&wire).is_err(),
+                "invalid cleanup adapter must be rejected: {invalid}"
+            );
+            assert!(
+                serde_json::from_str::<ExtensionRemovalChannelId>(&wire).is_err(),
+                "invalid cleanup channel must be rejected: {invalid}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn delete_manifest_rejects_active_installations() {
         let store = InMemoryExtensionInstallationStore::default();
@@ -846,8 +1183,78 @@ mod tests {
             ),
             Vec::new(),
             Utc::now(),
+            InstallationOwner::Tenant,
         )
         .expect("installation")
+    }
+
+    /// #5459 P1: legacy persisted rows predate the `owner` field and were all
+    /// tenant-visible; a record without it MUST deserialize as `Tenant` (no
+    /// migration). The inverse also holds: a TENANT-owned record serializes
+    /// WITHOUT the field, keeping the exact pre-#5459 byte shape so a rollback
+    /// to an older binary (`deny_unknown_fields` wire struct) still loads a
+    /// state.json holding no private installs. A user-owned record must
+    /// round-trip its owner.
+    #[test]
+    fn installation_owner_defaults_to_tenant_for_legacy_rows_and_round_trips() {
+        let current = installation("fixture", Some("hash-1"));
+        let json = serde_json::to_value(&current).expect("serialize installation");
+        assert!(
+            json.get("owner").is_none(),
+            "tenant-owned rows must keep the pre-#5459 shape (rollback compat): {json}"
+        );
+        let legacy: ExtensionInstallation =
+            serde_json::from_value(json).expect("legacy row without owner deserializes");
+        assert_eq!(legacy.owner(), &InstallationOwner::Tenant);
+
+        let alice = ironclaw_host_api::UserId::new("alice").expect("user id");
+        let private = ExtensionInstallation::new(
+            ExtensionInstallationId::new("fixture".to_string()).expect("installation id"),
+            ExtensionId::new("fixture".to_string()).expect("extension id"),
+            ExtensionActivationState::Installed,
+            ExtensionManifestRef::new(ExtensionId::new("fixture".to_string()).unwrap(), None),
+            Vec::new(),
+            Utc::now(),
+            InstallationOwner::user(alice.clone()),
+        )
+        .expect("installation");
+        let json = serde_json::to_string(&private).expect("serialize");
+        assert!(
+            json.contains(r#""kind":"users""#),
+            "member-held rows serialize the set shape: {json}"
+        );
+        let restored: ExtensionInstallation = serde_json::from_str(&json).expect("round-trip");
+        assert!(restored.owner().visible_to(&alice));
+        assert_eq!(
+            restored.owner().members().map(BTreeSet::len),
+            Some(1),
+            "singleton member set round-trips"
+        );
+    }
+
+    /// Membership pivot (2026-07-08): rows written by the slot iteration
+    /// carry `{"kind": "user", "user_id": …}` — they MUST keep loading, as a
+    /// singleton member set; an empty member set is rejected on the wire and
+    /// at construction (a row nobody could see, operate, or remove).
+    #[test]
+    fn slot_iteration_user_owner_rows_load_as_singleton_member_set() {
+        let alice = ironclaw_host_api::UserId::new("alice").expect("user id");
+        let bob = ironclaw_host_api::UserId::new("bob").expect("user id");
+        let legacy: InstallationOwner =
+            serde_json::from_str(r#"{"kind":"user","user_id":"alice"}"#)
+                .expect("slot-iteration owner row loads");
+        assert!(legacy.visible_to(&alice));
+        assert!(!legacy.visible_to(&bob));
+        assert_eq!(legacy, InstallationOwner::user(alice.clone()));
+
+        let set: InstallationOwner =
+            serde_json::from_str(r#"{"kind":"users","user_ids":["alice","bob"]}"#)
+                .expect("member set loads");
+        assert!(set.visible_to(&alice) && set.visible_to(&bob));
+
+        serde_json::from_str::<InstallationOwner>(r#"{"kind":"users","user_ids":[]}"#)
+            .expect_err("empty member set is rejected on the wire");
+        InstallationOwner::users(BTreeSet::new()).expect_err("empty member set is unconstructable");
     }
 
     fn manifest_toml(extension_id: &str) -> String {
@@ -883,6 +1290,8 @@ pub enum ExtensionInstallationError {
     Manifest(#[from] ManifestV2Error),
     #[error("invalid {field}: {reason}")]
     InvalidValue { field: &'static str, reason: String },
+    #[error("installation owner member set must not be empty")]
+    EmptyOwnerMembers,
     #[error("installation references unknown extension manifest {extension_id}")]
     UnknownManifest { extension_id: ExtensionId },
     #[error(
@@ -906,6 +1315,13 @@ pub enum ExtensionInstallationError {
     InvalidInstallation { reason: String },
     #[error("duplicate credential binding {handle}")]
     DuplicateCredentialBinding { handle: ExtensionCredentialHandle },
+    #[error("conflicting manifest references for extension {extension_id}")]
+    ConflictingManifestReference { extension_id: ExtensionId },
+    #[error("conflicting credential bindings for extension {extension_id} and handle {handle}")]
+    ConflictingCredentialBinding {
+        extension_id: ExtensionId,
+        handle: ExtensionCredentialHandle,
+    },
 }
 
 fn validate_installation_against_manifest(
@@ -980,4 +1396,31 @@ fn validate_nonempty_noncontrol(
         });
     }
     Ok(())
+}
+
+fn validate_cleanup_id(
+    value: String,
+    label: &'static str,
+) -> Result<String, ExtensionInstallationError> {
+    let valid = !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+        })
+        && value
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && value
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_alphanumeric);
+    if valid {
+        Ok(value)
+    } else {
+        Err(ExtensionInstallationError::InvalidValue {
+            field: label,
+            reason: "must be a bounded lowercase identifier".to_string(),
+        })
+    }
 }

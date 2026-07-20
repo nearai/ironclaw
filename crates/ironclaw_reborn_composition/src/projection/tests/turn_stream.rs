@@ -107,6 +107,8 @@ async fn webui_event_stream_resumes_mixed_batch_without_skipping_turn_event() {
                     credential_requirements: Vec::new(),
                 }),
                 sanitized_reason: Some("GitHub authentication required".to_string()),
+                detail: None,
+                retryable: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {
@@ -207,7 +209,7 @@ async fn webui_event_stream_offers_always_for_typed_approval_gate() {
     );
     let approval_request_id = ApprovalRequestId::new();
     let gate_ref = GateRef::new(format!("gate:approval-{approval_request_id}")).unwrap();
-    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     let capability = CapabilityId::new("builtin.http").unwrap();
     let blocked_invocation = InvocationId::new();
     approval_requests
@@ -225,10 +227,7 @@ async fn webui_event_stream_offers_always_for_typed_approval_gate() {
                 requested_by: Principal::Extension(ExtensionId::new("builtin").unwrap()),
                 action: Box::new(Action::Dispatch {
                     capability: capability.clone(),
-                    estimated_resources: ResourceEstimate {
-                        network_egress_bytes: Some(4096),
-                        ..ResourceEstimate::default()
-                    },
+                    estimated_resources: ResourceEstimate::default().set_network_egress_bytes(4096),
                 }),
                 invocation_fingerprint: None,
                 reason: "raw path /Users/firatsertgoz/.ssh/id_rsa and token sk-secret".to_string(),
@@ -262,6 +261,8 @@ async fn webui_event_stream_offers_always_for_typed_approval_gate() {
                     credential_requirements: Vec::new(),
                 }),
                 sanitized_reason: Some("capability requires approval".to_string()),
+                detail: None,
+                retryable: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {
@@ -344,7 +345,7 @@ async fn webui_event_stream_projects_network_approval_context() {
     let network_run = TurnRunId::new();
     let network_request_id = ApprovalRequestId::new();
     let network_gate_ref = GateRef::new(format!("gate:approval-{network_request_id}")).unwrap();
-    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     let approval_scope = resource_scope(
         &tenant_id,
         &user_id,
@@ -402,6 +403,8 @@ async fn webui_event_stream_projects_network_approval_context() {
                     credential_requirements: Vec::new(),
                 }),
                 sanitized_reason: Some("network requires approval".to_string()),
+                detail: None,
+                retryable: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {
@@ -467,7 +470,7 @@ async fn webui_event_stream_projects_spawn_approval_context() {
     );
     let approval_request_id = ApprovalRequestId::new();
     let gate_ref = GateRef::new(format!("gate:approval-{approval_request_id}")).unwrap();
-    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     approval_requests
         .save_pending(
             resource_scope(
@@ -483,10 +486,7 @@ async fn webui_event_stream_projects_spawn_approval_context() {
                 requested_by: Principal::Extension(ExtensionId::new("builtin").unwrap()),
                 action: Box::new(Action::SpawnCapability {
                     capability: CapabilityId::new("script.shell").unwrap(),
-                    estimated_resources: ResourceEstimate {
-                        process_count: Some(2),
-                        ..ResourceEstimate::default()
-                    },
+                    estimated_resources: ResourceEstimate::default().set_process_count(2),
                 }),
                 invocation_fingerprint: None,
                 reason: "raw spawn reason".to_string(),
@@ -520,6 +520,8 @@ async fn webui_event_stream_projects_spawn_approval_context() {
                     credential_requirements: Vec::new(),
                 }),
                 sanitized_reason: Some("spawn requires approval".to_string()),
+                detail: None,
+                retryable: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {
@@ -559,7 +561,7 @@ async fn webui_event_stream_projects_spawn_approval_context() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_keeps_approval_prompt_when_request_lookup_fails() {
+async fn webui_event_stream_fails_transiently_when_approval_request_lookup_fails() {
     let tenant_id = TenantId::new("webui-events-approval-fallback-tenant").unwrap();
     let user_id = UserId::new("webui-events-approval-fallback-user").unwrap();
     let agent_id = AgentId::new("webui-events-approval-fallback-agent").unwrap();
@@ -597,6 +599,8 @@ async fn webui_event_stream_keeps_approval_prompt_when_request_lookup_fails() {
                     credential_requirements: Vec::new(),
                 }),
                 sanitized_reason: Some("capability requires approval".to_string()),
+                detail: None,
+                retryable: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {
@@ -608,7 +612,7 @@ async fn webui_event_stream_keeps_approval_prompt_when_request_lookup_fails() {
         }),
     );
 
-    let events = services
+    let error = services
         .webui_event_stream()
         .drain(ProjectionSubscriptionRequest {
             actor,
@@ -616,19 +620,14 @@ async fn webui_event_stream_keeps_approval_prompt_when_request_lookup_fails() {
             after_cursor: None,
         })
         .await
-        .unwrap();
+        .expect_err("approval-store outages must not render a contextless actionable prompt");
 
-    let prompt = events
-        .iter()
-        .find_map(|event| match event.payload() {
-            ProductOutboundPayload::GatePrompt(prompt) => Some(prompt),
-            _ => None,
-        })
-        .expect("approval gate prompt");
-
-    assert_eq!(prompt.gate_ref, gate_ref.as_str());
-    assert!(prompt.allow_always);
-    assert!(prompt.approval_context.is_none());
+    assert!(error.is_retryable());
+    assert!(
+        !error
+            .to_string()
+            .contains("injected approval lookup failure")
+    );
 }
 
 #[tokio::test]
@@ -669,6 +668,8 @@ async fn webui_event_stream_fails_closed_for_projection_allow_always_without_pro
                     credential_requirements: Vec::new(),
                 }),
                 sanitized_reason: Some("capability requires approval".to_string()),
+                detail: None,
+                retryable: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {
@@ -753,6 +754,8 @@ async fn webui_event_stream_does_not_offer_always_for_generic_approval_gate() {
                     credential_requirements: Vec::new(),
                 }),
                 sanitized_reason: Some("generic approval required".to_string()),
+                detail: None,
+                retryable: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {
@@ -823,6 +826,8 @@ async fn webui_event_stream_projects_blocked_dependent_run_status() {
                     credential_requirements: Vec::new(),
                 }),
                 sanitized_reason: Some("Waiting for dependent run".to_string()),
+                detail: None,
+                retryable: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {
@@ -1132,6 +1137,8 @@ async fn webui_event_stream_emits_keepalive_when_only_turn_cursor_advances() {
                 kind: TurnEventKind::RunnerHeartbeat,
                 blocked_gate: None,
                 sanitized_reason: None,
+                detail: None,
+                retryable: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {
@@ -1190,6 +1197,8 @@ async fn webui_event_stream_reads_past_filtered_turn_event_pages() {
             kind: TurnEventKind::RunnerHeartbeat,
             blocked_gate: None,
             sanitized_reason: None,
+            detail: None,
+            retryable: None,
         })
         .collect::<Vec<_>>();
     events.push(TurnLifecycleEvent {
@@ -1207,6 +1216,8 @@ async fn webui_event_stream_reads_past_filtered_turn_event_pages() {
             credential_requirements: Vec::new(),
         }),
         sanitized_reason: Some("GitHub authentication required".to_string()),
+        detail: None,
+        retryable: None,
     });
     let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let services = build_reborn_projection_services(
@@ -1303,6 +1314,8 @@ async fn webui_event_stream_does_not_prompt_for_stale_blocked_event() {
                     credential_requirements: Vec::new(),
                 }),
                 sanitized_reason: Some("stale auth gate".to_string()),
+                detail: None,
+                retryable: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator { state }),
@@ -1407,6 +1420,8 @@ async fn webui_event_stream_filters_turn_events_by_owner_user() {
                 kind: TurnEventKind::RunnerClaimed,
                 blocked_gate: None,
                 sanitized_reason: None,
+                detail: None,
+                retryable: None,
             }],
         }),
         Arc::new(FakeTurnCoordinator {

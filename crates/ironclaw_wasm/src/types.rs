@@ -1,5 +1,6 @@
 use ironclaw_host_api::ResourceUsage;
-use ironclaw_wasm_sandbox_core::SandboxLimits;
+
+use crate::wasm_sandbox_core::SandboxLimits;
 
 /// Compiled WIT tool component plus metadata extracted from its WIT exports.
 pub struct PreparedWitTool {

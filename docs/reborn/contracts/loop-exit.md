@@ -52,7 +52,7 @@ The driver-facing variants are fixed for the MVP:
 - `Completed` requires `final_checkpoint_id` only when the resolved run profile/checkpoint policy requires a terminal checkpoint.
 - `Blocked` requires all of: blocked kind, durable `gate_ref`, `checkpoint_id`, and opaque `state_ref`, and the host/runner must verify the gate/checkpoint evidence before mapping to a trusted blocked outcome. The blocked kind is limited to approval, auth, and resource for MVP.
 - `Cancelled` is accepted only when the host cancellation/interrupt input was observed by the runner/host policy. Host-initiated cancellation may preempt the driver before a final checkpoint exists, so cancellation validation does not require a missing final checkpoint to become a protocol violation. During application, terminal cancellation is still gated by durable run state in one transition-port operation: if the run is already `CancelRequested`, it becomes `Cancelled`; if an interrupt is observed before that durable state exists, the exit maps to recovery instead of terminal cancellation.
-- `Failed` uses stable sanitized failure kinds such as `iteration_limit`, `model_error`, `context_build_failed`, or `driver_bug`, and the host/runner must verify the failure evidence is safe to terminalize before mapping to a trusted failed outcome.
+- `Failed` uses stable sanitized failure kinds such as `iteration_limit`, `model_error`, `context_build_failed`, or `driver_bug`, and the host/runner must verify the failure evidence is safe to terminalize before mapping to a trusted failed outcome. Failed exits may also carry bounded `explanation_message_refs` and an optional sanitized `safe_summary`; validated failed outcomes surface only host-verified explanation refs, prefer `safe_summary` over the generic failure kind, and carry a resume checkpoint id only when the checkpoint policy admits it.
 - Ref lists are bounded and duplicate-free so a driver cannot force unbounded evidence verification work.
 - Usage/cost truth remains in host accounting/projection stores; `LoopExit` may carry only usage-summary refs.
 
@@ -86,7 +86,7 @@ Later slices may add validation against transcript draft state, checkpoint fresh
 - bounded durable reference types for loop exit/message/result/usage/diagnostic refs;
 - `LoopExitEvidencePort` and evidence request DTOs for host-owned validation inputs;
 - crate-private `LoopExitValidationPolicy` construction plus public `LoopExitValidationDecision`;
-- one-way mapping to `TurnRunnerOutcome` (invalid exits always map to Failed; `LoopExitMapping::RecoveryRequired` is a backward-compat shim);
+- one-way mapping to `TurnRunnerOutcome` (invalid exits always map to Failed; valid failed outcomes may carry verified explanation refs and a retry checkpoint id; `LoopExitMapping::RecoveryRequired` is a backward-compat shim);
 - `LoopExitApplier`, which derives validation policy from host-owned evidence and invokes the trusted `TurnRunTransitionPort` with an already-validated `LoopExitMapping`.
 
 `ApplyValidatedLoopExitRequest` remains the transition-port DTO for already-validated mappings. Driver-facing code must not be able to supply `LoopExitValidationPolicy` directly.

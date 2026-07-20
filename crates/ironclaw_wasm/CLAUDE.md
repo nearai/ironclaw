@@ -7,6 +7,7 @@ Owns the Reborn WASM component runtime lane.
 - Load, compile, validate, meter, and execute already-selected WASM components for Reborn.
 - Use the canonical WIT/component-model ABI from `wit/tool.wit` and later `wit/channel.wit`.
 - Provide thin host-import adapters for workspace, time, logging, secret-existence checks, tool invocation, and HTTP egress.
+- Provide the folded `wasm_sandbox_core` module for domain-free Wasmtime/WASI sandbox primitives shared by runtime crates.
 - Fail closed by default for host capabilities that are not explicitly wired by the Reborn composition root.
 
 ## Non-responsibilities
@@ -15,6 +16,7 @@ Owns the Reborn WASM component runtime lane.
 - Do not own authorization, approvals, trust policy, dispatcher routing, run-state, or `CapabilityHost` orchestration.
 - Do not perform direct production HTTP or secret retrieval; route those through injected host seams. Production HTTP egress belongs to the shared runtime egress service tracked by #3085.
 - Do not modify or depend on V1 `src/tools/wasm/*` or `src/channels/wasm/*`; those are compatibility references only.
+- Do not put ProductAdapter, tool, channel, workflow, dispatcher, secret, network, filesystem, host-runtime, or app composition dependencies in `wasm_sandbox_core`.
 
 ## Safety rules
 

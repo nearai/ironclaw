@@ -31,7 +31,7 @@ default is fail-closed (henrypark133 Critical #3).
 ## Likely surface
 
 ```rust
-// in ironclaw_reborn (or a new crate if approval lives elsewhere)
+// in ironclaw_runner (or a new crate if approval lives elsewhere)
 pub struct RouterBackedHookGateRefFactory {
     run_context: LoopRunContext,
     approval_gateway: Arc<dyn ApprovalGateway>,

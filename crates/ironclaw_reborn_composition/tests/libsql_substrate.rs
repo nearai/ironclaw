@@ -102,6 +102,7 @@ async fn libsql_substrate_builder_rejects_invalid_secret_master_key() {
             path_or_url: events_db_path.display().to_string(),
             auth_token: None,
         },
+        process_local_resource_governor_singleton: true,
         secret_master_key: Some(SecretString::from("too-short")),
         trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
         runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
@@ -146,6 +147,7 @@ async fn libsql_substrate_builder_rejects_weak_env_secret_master_key() {
             path_or_url: events_db_path.display().to_string(),
             auth_token: None,
         },
+        process_local_resource_governor_singleton: true,
         secret_master_key: None,
         trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
         runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
@@ -164,6 +166,45 @@ async fn libsql_substrate_builder_rejects_weak_env_secret_master_key() {
         Err(RebornCompositionError::Secret(
             ironclaw_secrets::SecretError::InvalidMasterKey
         ))
+    ));
+}
+
+#[tokio::test]
+async fn libsql_substrate_builder_rejects_without_singleton_resource_governor_authority() {
+    let dir = tempdir().expect("create temporary directory for libSQL test databases");
+    let state_db_path = dir.path().join("state.db");
+    let events_db_path = dir.path().join("events.db");
+    let database = Arc::new(
+        libsql::Builder::new_local(state_db_path.display().to_string())
+            .build()
+            .await
+            .expect("build local libSQL state database"),
+    );
+
+    let result = build_libsql_production_host_runtime_services(LibSqlProductionSubstrateConfig {
+        database,
+        event_store: RebornEventStoreConfig::Libsql {
+            path_or_url: events_db_path.display().to_string(),
+            auth_token: None,
+        },
+        process_local_resource_governor_singleton: false,
+        secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
+        trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
+        runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(
+            production_runtime_policy(),
+            sandbox_process_port(),
+        )
+        .expect("create production runtime policy with tenant sandbox process port"),
+        turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
+        surface_version: CapabilitySurfaceVersion::new("test-surface")
+            .expect("create test capability surface version"),
+    })
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(RebornCompositionError::InvalidConfig { reason })
+            if reason.contains("libSQL production FilesystemResourceGovernor uses process-local tallies")
     ));
 }
 
@@ -231,6 +272,7 @@ async fn build_libsql_test_services() -> LibSqlTestServices {
             path_or_url: events_db_path.display().to_string(),
             auth_token: None,
         },
+        process_local_resource_governor_singleton: true,
         secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
         trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
         runtime_policy: RebornProductionRuntimePolicy::with_tenant_sandbox_process_port(

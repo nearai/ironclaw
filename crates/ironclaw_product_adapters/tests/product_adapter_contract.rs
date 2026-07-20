@@ -524,6 +524,7 @@ fn projection_state_is_renderable() {
         "thread-1",
         vec![ProductProjectionItem::Text {
             id: "message-1".into(),
+            run_id: None,
             body: "hello".into(),
         }],
     )

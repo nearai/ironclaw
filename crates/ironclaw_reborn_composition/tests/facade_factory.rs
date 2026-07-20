@@ -1,3 +1,11 @@
+// arch-exempt: large_file, pre-existing ~1.9K-line facade test suite; this change is a net-zero rename of build_local_dev_secret_store_for_test call sites with no cases added, plan #6168
+//
+// Decomposition of this suite travels with the composition god-crate shrink
+// (#6168); do not add unrelated cases here.
+#[cfg(feature = "postgres")]
+#[path = "support/postgres.rs"]
+mod postgres_support;
+
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -7,7 +15,7 @@ use chrono::Utc;
 use deadpool_postgres::tokio_postgres;
 #[cfg(feature = "libsql")]
 use ironclaw_auth::{OAuthClientId, OAuthRedirectUri};
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+#[cfg(feature = "postgres")]
 use ironclaw_host_api::{AgentId, ProjectId, TenantId};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{
@@ -27,13 +35,8 @@ use ironclaw_host_runtime::{
     VisibleCapabilityRequest,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_host_runtime::{
-    SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
-    TurnRunSchedulerConfig, TurnRunSchedulerHandle,
-};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn_composition::RebornRuntimeProcessBinding;
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+#[cfg(feature = "postgres")]
 use ironclaw_reborn_composition::{
     LocalTriggerAccessRole, LocalTriggerAccessSeed, LocalTriggerAccessSource,
 };
@@ -48,8 +51,13 @@ use ironclaw_reborn_composition::{
     RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
     RebornReadinessDiagnosticStatus,
 };
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+#[cfg(feature = "postgres")]
 use ironclaw_reborn_config::{RebornConfigFile, StorageBackend, StorageSection};
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_runner::turn_scheduler::{
+    SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
+    TurnRunSchedulerConfig, TurnRunSchedulerHandle,
+};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_secrets::SecretMaterial;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -61,6 +69,8 @@ use ironclaw_turns::{
     InMemoryTurnStateStore,
     runner::{ClaimedTurnRun, TurnRunTransitionPort},
 };
+#[cfg(feature = "postgres")]
+use postgres_support::assert_postgres_accepts_connections;
 use secrecy::SecretString;
 #[cfg(feature = "libsql")]
 use serde_json::Value;
@@ -72,7 +82,7 @@ use tokio::sync::Mutex;
 #[cfg(feature = "libsql")]
 static SECRETS_MASTER_KEY_ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+#[cfg(feature = "postgres")]
 static HOSTED_TRIGGER_ACCESS_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(feature = "libsql")]
@@ -108,13 +118,13 @@ impl Drop for EnvVarGuard {
     }
 }
 
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+#[cfg(feature = "postgres")]
 struct PostgresEnvVarGuard {
     key: &'static str,
     previous: Option<std::ffi::OsString>,
 }
 
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+#[cfg(feature = "postgres")]
 impl PostgresEnvVarGuard {
     fn set(key: &'static str, value: &str) -> Self {
         let previous = std::env::var_os(key);
@@ -137,7 +147,7 @@ impl PostgresEnvVarGuard {
     }
 }
 
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+#[cfg(feature = "postgres")]
 impl Drop for PostgresEnvVarGuard {
     fn drop(&mut self) {
         // SAFETY: PostgresEnvVarGuard is only constructed while
@@ -434,7 +444,6 @@ async fn assert_process_capabilities_unavailable_for_processless_runtime(
             CapabilityId::new(SHELL_CAPABILITY_ID).unwrap(),
             ResourceEstimate::default(),
             json!({"command": "echo should-not-run"}),
-            production_builtin_trust_decision(),
         ))
         .await
         .expect("shell invocation returns an outcome");
@@ -451,7 +460,6 @@ async fn assert_process_capabilities_unavailable_for_processless_runtime(
             CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
             ResourceEstimate::default(),
             json!({}),
-            production_builtin_trust_decision(),
         ))
         .await
         .expect("spawn_subagent invocation returns an outcome");
@@ -494,7 +502,6 @@ async fn invoke_trigger_management(
             CapabilityId::new(capability).unwrap(),
             ResourceEstimate::default(),
             input,
-            trigger_management_trust_decision(),
         ))
         .await
         .expect("trigger management capability invoke");
@@ -531,19 +538,6 @@ fn trigger_management_execution_context() -> ExecutionContext {
         MountView::default(),
     )
     .unwrap()
-}
-
-#[cfg(feature = "libsql")]
-fn trigger_management_trust_decision() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::AdminConfig,
-        evaluated_at: Utc::now(),
-    }
 }
 
 #[cfg(feature = "libsql")]
@@ -618,6 +612,7 @@ async fn postgres_pool_or_skip() -> Option<(
     String,
 )> {
     let (container, database_url) = start_postgres_container().await?;
+    assert_postgres_accepts_connections(&database_url).await;
     let config: tokio_postgres::Config = database_url
         .parse()
         .expect("testcontainer database URL must parse");
@@ -626,10 +621,6 @@ async fn postgres_pool_or_skip() -> Option<(
         .max_size(4)
         .build()
         .expect("Postgres pool must build");
-    let _connection = pool
-        .get()
-        .await
-        .expect("Postgres testcontainer must accept connections");
     Some((container, pool, database_url))
 }
 
@@ -1286,6 +1277,66 @@ async fn production_libsql_resolved_secret_master_key_rejects_invalid_env_key() 
     ));
 }
 
+/// With no cached dotfile and no `SECRETS_MASTER_KEY` env var,
+/// `resolve_local_dev_secret_master_key` (`src/factory.rs`) tries the OS
+/// keychain before generating a fresh key.
+///
+/// - Under `IRONCLAW_DISABLE_OS_KEYCHAIN` the keychain lookup returns
+///   `NotFound`, so the resolver must fall through to "generate + persist a
+///   dotfile"; a second open over the same root must read that cached
+///   dotfile rather than re-generating.
+/// - Lives here, not as a `factory.rs` inline unit test: proving the
+///   fallthrough needs the real process env var `IRONCLAW_DISABLE_OS_KEYCHAIN`
+///   set (`keychain` reads raw `std::env`), and `set_var` is `unsafe` under
+///   edition 2024 — `ironclaw_reborn_composition` is `#![forbid(unsafe_code)]`,
+///   which even `#[cfg(test)]` can't locally downgrade. This `tests/*.rs`
+///   binary is a separate crate the `forbid` doesn't reach, and already uses
+///   the `EnvVarGuard`/`SECRETS_MASTER_KEY_ENV_LOCK` convention for this.
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn local_dev_secret_store_falls_through_suppressed_keychain_to_dotfile() {
+    let _guard = SECRETS_MASTER_KEY_ENV_LOCK.lock().await;
+    let _env = EnvVarGuard::set("IRONCLAW_DISABLE_OS_KEYCHAIN", "1");
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let key_path = root.join(".reborn-local-dev-secrets-master-key");
+    assert!(
+        !key_path.exists(),
+        "precondition: no cached dotfile before the first open"
+    );
+
+    let mut composite = ironclaw_filesystem::CompositeRootFilesystem::new();
+    ironclaw_reborn_composition::test_support::build_default_local_dev_database_roots_for_test(
+        root,
+        &mut composite,
+    )
+    .await
+    .expect("build default local-dev db roots");
+    let composite = std::sync::Arc::new(composite);
+    let scoped = ironclaw_reborn_composition::wrap_scoped(std::sync::Arc::clone(&composite));
+
+    ironclaw_reborn_composition::test_support::build_secret_store_for_test(
+        root,
+        std::sync::Arc::clone(&scoped),
+    )
+    .await
+    .expect("first store build must fall through the suppressed keychain to a dotfile");
+    assert!(
+        key_path.exists(),
+        "the fallthrough must persist a dotfile so subsequent boots don't hit the keychain again"
+    );
+    let cached = std::fs::read_to_string(&key_path).expect("read generated dotfile");
+
+    ironclaw_reborn_composition::test_support::build_secret_store_for_test(root, scoped)
+        .await
+        .expect("second store build must read the now-cached dotfile idempotently");
+    assert_eq!(
+        std::fs::read_to_string(&key_path).expect("read dotfile again"),
+        cached,
+        "the cached dotfile must not be rewritten on the idempotent second open"
+    );
+}
+
 #[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_libsql_services_wire_first_party_runtime_http_egress() {
@@ -1481,7 +1532,7 @@ async fn production_postgres_services_migrate_trigger_repository_before_runtime_
     assert_eq!(count, 0);
 }
 
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn hosted_single_tenant_trigger_access_store_persists_across_reopen() {
     let Some((_container, _pool, database_url)) = postgres_pool_or_skip().await else {
@@ -1494,6 +1545,10 @@ async fn hosted_single_tenant_trigger_access_store_persists_across_reopen() {
         "01234567890123456789012345678901",
     );
     let _pool_max_size = PostgresEnvVarGuard::set("IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE", "1");
+    let _resource_governor_singleton = PostgresEnvVarGuard::set(
+        "IRONCLAW_REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON",
+        "true",
+    );
     let _allow_cleartext =
         PostgresEnvVarGuard::set("IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT", "true");
     let _ssl_mode = PostgresEnvVarGuard::clear("DATABASE_SSLMODE");

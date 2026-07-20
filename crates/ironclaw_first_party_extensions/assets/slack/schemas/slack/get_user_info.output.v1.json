@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Slack get_user_info output",
+  "type": "object",
+  "properties": {
+    "ok": { "type": "boolean" },
+    "user": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Raw Slack user ID." },
+        "name": { "type": "string", "description": "Slack handle (legacy username)." },
+        "real_name": { "type": "string" },
+        "display_name": { "type": "string" },
+        "is_bot": { "type": "boolean" },
+        "tz": { "type": "string", "description": "IANA timezone, e.g. America/New_York. Absent when Slack omits it." },
+        "tz_label": { "type": "string", "description": "Human-readable timezone label." },
+        "title": { "type": "string", "description": "Job title from the profile. Absent when unset." },
+        "status_text": { "type": "string", "description": "Slack status text, e.g. \"On vacation until July 20\". Absent when no status is set." },
+        "status_emoji": { "type": "string", "description": "Slack status emoji, e.g. :palm_tree:." },
+        "status_expiration": { "type": "integer", "description": "Unix timestamp when the status expires. Absent when there is no status or it does not expire." }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

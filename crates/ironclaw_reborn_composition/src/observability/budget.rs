@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use ironclaw_loop_support::{BudgetSeedingPolicy, GovernorBackedAccountant, ModelCostTable};
+use ironclaw_loop_host::{BudgetSeedingPolicy, GovernorBackedAccountant, ModelCostTable};
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::{
     BudgetEventSink, BudgetGateStore, BudgetPeriod, BudgetThresholds, ResourceGovernor,
@@ -23,8 +23,8 @@ use rust_decimal::Decimal;
 ///
 /// The accountant gets:
 ///
-/// 1. The caller's `ResourceGovernor` (in-memory for local-dev,
-///    `PersistentResourceGovernor` for libsql / postgres production).
+/// 1. The caller's `ResourceGovernor` (in-memory for non-durable local-dev,
+///    `FilesystemResourceGovernor` for libsql / postgres production).
 /// 2. The caller's `ModelCostTable` (typically derived from
 ///    `LlmModelProfilePolicy::build_cost_table()` at startup).
 /// 3. A `BudgetGateStore` (in-memory for local-dev,
@@ -86,10 +86,9 @@ pub fn build_default_budget_accountant(
 mod tests {
     use super::*;
     use ironclaw_host_api::{InvocationId, ResourceEstimate, ResourceScope, TenantId, UserId};
-    use ironclaw_loop_support::ZeroCostTable;
-    use ironclaw_resources::{
-        InMemoryBudgetEventSink, InMemoryBudgetGateStore, InMemoryResourceGovernor, ResourceAccount,
-    };
+    use ironclaw_loop_host::ZeroCostTable;
+    use ironclaw_resources::test_support::in_memory_backed_budget_gate_store;
+    use ironclaw_resources::{InMemoryBudgetEventSink, InMemoryResourceGovernor, ResourceAccount};
     use rust_decimal_macros::dec;
 
     /// The helper installs the compiled-default $5 user cap on the
@@ -100,7 +99,7 @@ mod tests {
     #[tokio::test]
     async fn seeds_compiled_default_user_cap_on_first_touch() {
         let governor: Arc<dyn ResourceGovernor> = Arc::new(InMemoryResourceGovernor::new());
-        let gate_store: Arc<dyn BudgetGateStore> = Arc::new(InMemoryBudgetGateStore::new());
+        let gate_store: Arc<dyn BudgetGateStore> = Arc::new(in_memory_backed_budget_gate_store());
         let cost_table: Arc<dyn ModelCostTable> = Arc::new(ZeroCostTable);
         let event_sink: Arc<dyn BudgetEventSink> = Arc::new(InMemoryBudgetEventSink::new());
         let defaults = BudgetDefaults::compiled_defaults();
@@ -116,6 +115,7 @@ mod tests {
         // Drive one `pre_model_call` to fire the seeding policy.
         let context = test_run_context("tenant-shared-helper", "alice-shared-helper");
         let request = ironclaw_turns::run_profile::LoopModelRequest {
+            inline_messages: Vec::new(),
             messages: vec![],
             surface_version: None,
             model_preference: None,

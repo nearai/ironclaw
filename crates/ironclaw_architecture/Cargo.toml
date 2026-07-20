@@ -4,5 +4,8 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "app"
+
 [dev-dependencies]
 serde_json = "1"

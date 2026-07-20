@@ -7,14 +7,15 @@ use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
     AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest, ContextMessages,
-    ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest,
-    FinalizedAssistantMessageByRunRequest, LatestThreadMessageRequest, ListThreadsForScopeRequest,
-    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
-    MessageContent, RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
-    SessionThreadRecord, SummaryArtifact, ThreadGoal, ThreadHistory, ThreadHistoryRequest,
-    ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord,
-    ThreadScope, UpdateAssistantDraftRequest, UpdateThreadGoalRequest,
-    UpdateToolResultReferenceRequest,
+    ContextWindow, CreateSummaryArtifactRequest, DeleteToolResultRecordRequest,
+    EnsureThreadRequest, FinalizedAssistantMessageByRunRequest, LatestThreadMessageRequest,
+    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
+    LoadContextWindowRequest, MessageContent, PutToolResultRecordRequest,
+    ReadToolResultRecordRequest, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
+    SessionThreadError, SessionThreadRecord, SummaryArtifact, ThreadGoal, ThreadHistory,
+    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest,
+    ThreadMessageRecord, ThreadScope, ToolResultRecordChunk, UpdateAssistantDraftRequest,
+    UpdateThreadGoalRequest, UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
 };
 
 /// Canonical Reborn session thread and transcript boundary.
@@ -92,6 +93,46 @@ pub trait SessionThreadService: Send + Sync {
         &self,
         request: UpdateToolResultReferenceRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError>;
+
+    async fn put_tool_result_record(
+        &self,
+        _request: PutToolResultRecordRequest,
+    ) -> Result<(), SessionThreadError> {
+        Err(SessionThreadError::Backend(
+            "tool result records are not implemented by this SessionThreadService backend"
+                .to_string(),
+        ))
+    }
+
+    async fn read_tool_result_record(
+        &self,
+        _request: ReadToolResultRecordRequest,
+    ) -> Result<Option<ToolResultRecordChunk>, SessionThreadError> {
+        Err(SessionThreadError::Backend(
+            "tool result records are not implemented by this SessionThreadService backend"
+                .to_string(),
+        ))
+    }
+
+    async fn update_tool_result_record(
+        &self,
+        _request: UpdateToolResultRecordRequest,
+    ) -> Result<(), SessionThreadError> {
+        Err(SessionThreadError::Backend(
+            "tool result records are not implemented by this SessionThreadService backend"
+                .to_string(),
+        ))
+    }
+
+    async fn delete_tool_result_record(
+        &self,
+        _request: DeleteToolResultRecordRequest,
+    ) -> Result<(), SessionThreadError> {
+        Err(SessionThreadError::Backend(
+            "tool result records are not implemented by this SessionThreadService backend"
+                .to_string(),
+        ))
+    }
 
     async fn update_assistant_draft(
         &self,
@@ -374,6 +415,34 @@ where
         request: UpdateToolResultReferenceRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         self.as_ref().update_tool_result_reference(request).await
+    }
+
+    async fn put_tool_result_record(
+        &self,
+        request: PutToolResultRecordRequest,
+    ) -> Result<(), SessionThreadError> {
+        self.as_ref().put_tool_result_record(request).await
+    }
+
+    async fn read_tool_result_record(
+        &self,
+        request: ReadToolResultRecordRequest,
+    ) -> Result<Option<ToolResultRecordChunk>, SessionThreadError> {
+        self.as_ref().read_tool_result_record(request).await
+    }
+
+    async fn update_tool_result_record(
+        &self,
+        request: UpdateToolResultRecordRequest,
+    ) -> Result<(), SessionThreadError> {
+        self.as_ref().update_tool_result_record(request).await
+    }
+
+    async fn delete_tool_result_record(
+        &self,
+        request: DeleteToolResultRecordRequest,
+    ) -> Result<(), SessionThreadError> {
+        self.as_ref().delete_tool_result_record(request).await
     }
 
     async fn update_assistant_draft(

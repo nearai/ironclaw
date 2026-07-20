@@ -361,4 +361,3 @@ Raw run artifacts live in this directory:
 - `mixed-user-c12-120s.trace.jsonl`
 - `reserve-reconcile-c12-60s.summary.json`
 - `reserve-reconcile-c12-60s.trace.jsonl`
-

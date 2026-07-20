@@ -1,6 +1,6 @@
 use std::sync::{Arc, OnceLock};
 
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
     CapabilitySurfaceProfileResolver, CapabilityWriteResult, HostIdentityContextBuildError,
     HostIdentityContextCandidate, HostIdentityContextSource, LoopCapabilityInputResolver,

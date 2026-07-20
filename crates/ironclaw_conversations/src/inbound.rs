@@ -243,6 +243,7 @@ where
         let turn_submission_result = self
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
+                requested_model: None,
                 scope: resolution.turn_scope.clone(),
                 actor: accepted_message.actor.clone(),
                 accepted_message_ref: accepted_message.message_ref.clone(),
@@ -400,7 +401,7 @@ fn trusted_inbound_request_from_trigger(
             received_at,
             // Issue #5505: a trusted trigger fire must run under the
             // dedicated scheduled_trigger profile so the host deny-map
-            // (ironclaw_reborn runtime.rs) strips the trigger mutator
+            // (ironclaw_runner runtime.rs) strips the trigger mutator
             // capabilities from the fire's model-visible surface — a fire
             // must not be able to create/remove/pause/resume triggers.
             requested_run_profile: Some(
@@ -442,6 +443,7 @@ fn should_rotate_submit_key(error: &TurnError) -> bool {
         | TurnError::InvalidRequest { .. }
         | TurnError::CapacityExceeded { .. }
         | TurnError::Conflict { .. }
+        | TurnError::RunNotRetryable { .. }
         | TurnError::InvalidTransition { .. }
         | TurnError::LeaseMismatch
         | TurnError::InvalidRunOriginAdapter => false,
@@ -542,10 +544,10 @@ mod tests {
     use ironclaw_turns::{
         AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
         CancelRunResponse, EventCursor, GetRunStateRequest, ReplyTargetBindingRef,
-        ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileRequest, RunProfileVersion,
-        SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnCapacityResource,
-        TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState, TurnScope,
-        TurnStatus, TurnSurfaceType,
+        ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, RunProfileId,
+        RunProfileRequest, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
+        SubmitTurnResponse, ThreadBusy, TurnCapacityResource, TurnCoordinator, TurnError, TurnId,
+        TurnOriginKind, TurnRunId, TurnRunState, TurnScope, TurnStatus, TurnSurfaceType,
     };
 
     use super::{
@@ -812,6 +814,7 @@ mod tests {
             agent_id: Some(agent()),
             project_id: Some(project()),
             prompt: "test trigger prompt".to_string(),
+            delivery_target: None,
         };
         let content_ref =
             TriggerInboundContentRef::new("content:test-trigger-creator").expect("content ref");
@@ -833,7 +836,7 @@ mod tests {
             "submit_trusted_trigger_fire must surface the creator as explicit turn-scope owner"
         );
         // Issue #5505: a trusted trigger fire must request the dedicated
-        // scheduled_trigger run profile so the host deny-map (ironclaw_reborn
+        // scheduled_trigger run profile so the host deny-map (ironclaw_runner
         // runtime.rs) strips the trigger mutator capabilities from the fire's
         // model-visible surface. Assert through the same recording
         // coordinator already used above, on the SubmitTurnRequest that
@@ -1060,6 +1063,7 @@ mod tests {
             resolution: ConversationBindingResolution {
                 tenant_id: tenant_id.clone(),
                 actor: actor.clone(),
+                binding_epoch: None,
                 turn_scope: TurnScope::new(
                     tenant_id.clone(),
                     Some(agent()),
@@ -1389,6 +1393,13 @@ mod tests {
             unimplemented!("not used by inbound facade tests")
         }
 
+        async fn retry_turn(
+            &self,
+            _request: RetryTurnRequest,
+        ) -> Result<RetryTurnResponse, TurnError> {
+            unimplemented!("not used by inbound facade tests")
+        }
+
         async fn cancel_run(
             &self,
             _request: CancelRunRequest,
@@ -1522,6 +1533,13 @@ mod tests {
             &self,
             _request: ResumeTurnRequest,
         ) -> Result<ResumeTurnResponse, TurnError> {
+            unimplemented!("not used by submit-key rotation tests")
+        }
+
+        async fn retry_turn(
+            &self,
+            _request: RetryTurnRequest,
+        ) -> Result<RetryTurnResponse, TurnError> {
             unimplemented!("not used by submit-key rotation tests")
         }
 

@@ -259,6 +259,8 @@ pub(super) fn blocked_event_with(
             credential_requirements: Vec::new(),
         }),
         sanitized_reason: Some("approval_required".to_string()),
+        retryable: None,
+        detail: None,
     }
 }
 
@@ -279,6 +281,8 @@ pub(super) fn lifecycle_event(
         kind,
         blocked_gate: None,
         sanitized_reason: None,
+        retryable: None,
+        detail: None,
     }
 }
 

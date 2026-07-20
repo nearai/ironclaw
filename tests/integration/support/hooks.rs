@@ -20,7 +20,7 @@ use ironclaw_hooks::registry::{HookPointSpec, HookRegistry};
 use ironclaw_hooks::sink::{
     ObserverHook, ObserverSink, PrivilegedBeforeCapabilityHook, PrivilegedGateSink,
 };
-use ironclaw_reborn::loop_driver_host::{HookDispatcherBuilderFactory, RebornLoopDriverHostError};
+use ironclaw_runner::loop_driver_host::{HookDispatcherBuilderFactory, RebornLoopDriverHostError};
 
 /// Distinct identity paths so a `BeforeCapability` hook and an `AfterModel`
 /// observer can coexist in one dispatcher.

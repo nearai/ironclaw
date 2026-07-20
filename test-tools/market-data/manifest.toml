@@ -1,0 +1,46 @@
+schema_version = "reborn.extension_manifest.v2"
+id = "market-data"
+name = "Market Data"
+version = "0.1.0"
+# Test fixture — the network + WITH key case: an admin installs it, provides
+# the shared `market_data_api_key`, and every user can use it.
+description = "Get a canned S&P 500 (SPX) index snapshot. Data is canned, not live market data."
+# Uploaded bundles are validated as ManifestSource::InstalledLocal, which
+# forbids first_party/system trust claims and legacy top-level [[capabilities]];
+# installed manifests declare third_party trust and the capability_provider
+# host_api shape.
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/market_data_tool.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+# Networked tool WITH a key: declares the `network` and
+# `use_secret` effects plus a runtime credential. The credential's `audience`
+# populates the egress allowlist AND its handle triggers an `InjectSecretOnce`
+# obligation — so this capability gets BOTH `ApplyNetworkPolicy` (scoped to
+# api.marketdata.example) and a secret injection. The fake `market_data_api_key`
+# is injected as the `x-api-key` header on egress. (The fixture returns canned
+# data and never actually calls out, so the injected key is never sent.)
+[[capability_provider.tools.capabilities]]
+id = "market-data.snp500"
+description = "Get the current S&P 500 (SPX) index snapshot — level, daily change, and percent change. Takes no arguments."
+effects = ["dispatch_capability", "network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/market-data/snp500.input.v1.json"
+output_schema_ref = "schemas/market-data/snp500.output.v1.json"
+prompt_doc_ref = "prompts/market-data/snp500.md"
+
+[[capability_provider.tools.capabilities.runtime_credentials]]
+handle = "market_data_api_key"
+source = { type = "secret_handle" }
+audience = { scheme = "https", host_pattern = "api.marketdata.example" }
+target = { type = "header", name = "x-api-key" }
+required = true

@@ -1,0 +1,8 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Slack whoami",
+  "description": "Resolve who the connected Slack account is. Takes no parameters.",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

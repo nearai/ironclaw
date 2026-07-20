@@ -24,6 +24,7 @@
 //! persisted record shapes live in [`record`], path construction in [`paths`],
 //! and the behavioral matrix in the `tests` submodule.
 
+mod directory;
 mod paths;
 mod record;
 #[cfg(test)]
@@ -48,8 +49,11 @@ use crate::{
     ExternalIdentityKey, RebornIdentityError, RebornIdentityResolver, ResolveExternalIdentity,
     SurfaceKind,
 };
-use paths::{identity_path, user_path, verified_email_path};
-use record::{StoredExternalIdentity, StoredUser, StoredVerifiedEmailIndex};
+use paths::{identity_path, user_path, user_tombstone_path, verified_email_path};
+use record::{
+    StoredExternalIdentity, StoredUser, StoredUserRole, StoredUserStatus, StoredUserTombstone,
+    StoredVerifiedEmailIndex,
+};
 
 /// Canonical identity store backed by a host scoped filesystem.
 pub struct FilesystemRebornIdentityStore<F>
@@ -146,6 +150,62 @@ where
             .map(|_version| ())
     }
 
+    /// Gate a resolved existing user before a session is minted for it.
+    ///
+    /// Two concerns ride the one record read every existing-identity
+    /// resolution already implies:
+    ///
+    ///  1. **Suspended accounts fail closed.** A suspended user must not mint a
+    ///     fresh session, so resolving their external identity returns
+    ///     [`RebornIdentityError::UserSuspended`] — the SSO adapter maps it to a
+    ///     403, never a 503. New-user creation is unaffected (a freshly minted
+    ///     account is always `Active`).
+    ///  2. **Legacy tenantless records migrate forward.** Records written before
+    ///     the admin surface existed carry `tenant_id: None` and are otherwise
+    ///     visible to every tenant's admin listing. On the owning user's next
+    ///     login we backfill the resolving tenant so the record stops being
+    ///     globally visible. Idempotent — only fires while `tenant_id` is None.
+    ///
+    /// A resolved identity that points at a missing user record is a backend
+    /// inconsistency (the identity record is always written after the user
+    /// record); rather than block the login, the id passes through unchanged,
+    /// preserving the prior behavior of the read-only fast path.
+    async fn gate_resolved_user(
+        &self,
+        user_id: UserId,
+        tenant: &str,
+    ) -> Result<UserId, RebornIdentityError> {
+        let path = user_path(user_id.as_str())?;
+        let Some(user) = self.read_record::<StoredUser>(&path).await? else {
+            return Ok(user_id);
+        };
+        if user.status == StoredUserStatus::Suspended {
+            return Err(RebornIdentityError::UserSuspended(
+                user_id.as_str().to_string(),
+            ));
+        }
+        if user.tenant_id.is_none() {
+            let tenant_owned = tenant.to_string();
+            self.mutate_user(&user_id, move |record| {
+                if record.tenant_id.is_none() {
+                    record.tenant_id = Some(tenant_owned.clone());
+                }
+            })
+            .await?;
+        }
+        Ok(user_id)
+    }
+
+    /// Whether a user is mid-delete (has a live tombstone). Used by
+    /// `resolve_or_create` to refuse re-linking an external identity onto a
+    /// user whose delete cascade is in flight.
+    async fn is_tombstoned(&self, user_id: &UserId) -> Result<bool, RebornIdentityError> {
+        Ok(self
+            .read_record::<StoredUserTombstone>(&user_tombstone_path(user_id.as_str())?)
+            .await?
+            .is_some())
+    }
+
     /// Read the user already bound to an external identity, or `None`.
     async fn identity_user(
         &self,
@@ -226,7 +286,9 @@ where
 
         // Fast path: a returning external identity resolves with a read only.
         if let Some(record) = self.read_record::<StoredExternalIdentity>(&id_path).await? {
-            return to_user_id(record.user_id);
+            return self
+                .gate_resolved_user(to_user_id(record.user_id)?, tenant)
+                .await;
         }
 
         let lower_email = verified_email_key(&identity);
@@ -246,7 +308,9 @@ where
         // for the same key may have created it between the read above and the
         // lock, so the create path below must not mint a second user.
         if let Some(record) = self.read_record::<StoredExternalIdentity>(&id_path).await? {
-            return to_user_id(record.user_id);
+            return self
+                .gate_resolved_user(to_user_id(record.user_id)?, tenant)
+                .await;
         }
 
         let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
@@ -259,9 +323,22 @@ where
                 .await?
             {
                 let user_id = to_user_id(index.user_id)?;
+                // If the indexed user is mid-delete, re-linking a fresh identity
+                // record to it would resurrect a live login for an id about to
+                // vanish (a ghost). Fail closed with a retryable error: the
+                // delete cascade removes this index shortly, after which a retry
+                // mints a fresh user instead.
+                if self.is_tombstoned(&user_id).await? {
+                    return Err(RebornIdentityError::Backend(
+                        "verified-email index points at a user being deleted; retry".to_string(),
+                    ));
+                }
                 self.put_identity_reconciling(&id_path, &user_id, &identity, &now)
                     .await?;
-                return Ok(user_id);
+                // The identity link is legitimate even for a suspended account;
+                // we still refuse to mint a session for one. Gating after the
+                // link write means a later unsuspend fast-paths cleanly.
+                return self.gate_resolved_user(user_id, tenant).await;
             }
         }
 
@@ -290,6 +367,15 @@ where
                 display_name: identity.display_name.clone(),
                 created_at: now.clone(),
                 updated_at: now.clone(),
+                // A plain SSO login mints an active, non-admin member. The
+                // tenant is carried so admin enumeration can filter without a
+                // per-tenant path partition on user records.
+                status: StoredUserStatus::default(),
+                role: StoredUserRole::default(),
+                created_by: None,
+                last_login_at: None,
+                tenant_id: Some(tenant.to_string()),
+                metadata: std::collections::BTreeMap::new(),
             },
             CasExpectation::Absent,
         )
@@ -333,7 +419,16 @@ where
                                 "verified-email index vanished after CAS conflict".to_string(),
                             ));
                         };
-                        to_user_id(winner.user_id)?
+                        let winner_id = to_user_id(winner.user_id)?;
+                        // Same guard as the direct link path: never adopt (and
+                        // then bind an identity to) a user being deleted.
+                        if self.is_tombstoned(&winner_id).await? {
+                            return Err(RebornIdentityError::Backend(
+                                "verified-email index winner is a user being deleted; retry"
+                                    .to_string(),
+                            ));
+                        }
+                        winner_id
                     }
                     Err(error) => return Err(backend(error)),
                 }

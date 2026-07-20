@@ -1,18 +1,17 @@
 use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
-use ironclaw_host_api::InvocationId;
-use ironclaw_loop_support::CapabilityResultWrite;
+use ironclaw_host_api::{InvocationId, Resolution};
+use ironclaw_loop_host::{CapabilityResultWrite, DurablePersistence};
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailure, CapabilityFailureKind,
-    CapabilityOutcome, CapabilityResultMessage, ConcurrencyHint,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureKind, ConcurrencyHint, resolution,
 };
 
 use crate::runtime::{
-    LocalDevSelectableSkillContextSource,
+    ComposedSelectableSkillContextSource,
     local_dev::synthetic_capability::{
-        LocalDevSyntheticCapability, LocalDevSyntheticCapabilityDescriptor,
-        LocalDevSyntheticCapabilityHandler, LocalDevSyntheticCapabilityInvocation,
+        SyntheticCapability, SyntheticCapabilityDescriptor, SyntheticCapabilityHandler,
+        SyntheticCapabilityInvocation,
     },
 };
 
@@ -22,37 +21,11 @@ const SKILL_ACTIVATE_DESCRIPTION: &str =
     "Activate one or more listed Reborn skills for the current loop run";
 const MAX_SKILL_ACTIVATE_NAMES: usize = 16;
 
-/// Test-only bridge (E-SKILL seam): wrap `inner` with just the `skill_activate`
-/// local-dev synthetic capability, so the Reborn integration-test harness can
-/// inject it onto its host-runtime capability port the same way production does
-/// (`RefreshingLocalDevCapabilityPort::build_inner`). Reuses the real
-/// `skill_activation_capability` + `wrap_local_dev_synthetic_capabilities`, so the
-/// test path never hand-mirrors the production wrap. Mirrors
-/// `wrap_project_create_capability_for_test`. Tests only.
-#[cfg(feature = "test-support")]
-pub(crate) fn wrap_skill_activation_capability_for_test(
-    inner: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    skill_activation_source: Arc<LocalDevSelectableSkillContextSource>,
-    run_context: ironclaw_turns::run_profile::LoopRunContext,
-    input_resolver: Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
-    result_writer: Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
-) -> Result<Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>, AgentLoopHostError> {
-    super::synthetic_capability::wrap_local_dev_synthetic_capabilities(
-        inner,
-        vec![skill_activation_capability(skill_activation_source)?],
-        run_context,
-        input_resolver,
-        result_writer,
-        // trajectory_observer: None — not wired in the integration-test harness.
-        None,
-    )
-}
-
 pub(super) fn skill_activation_capability(
-    skill_activation_source: Arc<LocalDevSelectableSkillContextSource>,
-) -> Result<LocalDevSyntheticCapability, AgentLoopHostError> {
-    Ok(LocalDevSyntheticCapability::new(
-        LocalDevSyntheticCapabilityDescriptor::new(
+    skill_activation_source: Arc<ComposedSelectableSkillContextSource>,
+) -> Result<SyntheticCapability, AgentLoopHostError> {
+    Ok(SyntheticCapability::new(
+        SyntheticCapabilityDescriptor::new(
             SKILL_ACTIVATE_CAPABILITY_ID,
             SKILL_ACTIVATE_PROVIDER_TOOL_NAME,
             SKILL_ACTIVATE_DESCRIPTION,
@@ -66,11 +39,11 @@ pub(super) fn skill_activation_capability(
 }
 
 struct SkillActivationHandler {
-    skill_activation_source: Arc<LocalDevSelectableSkillContextSource>,
+    skill_activation_source: Arc<ComposedSelectableSkillContextSource>,
 }
 
 #[async_trait]
-impl LocalDevSyntheticCapabilityHandler for SkillActivationHandler {
+impl SyntheticCapabilityHandler for SkillActivationHandler {
     fn validate_provider_arguments(
         &self,
         arguments: &serde_json::Value,
@@ -80,8 +53,8 @@ impl LocalDevSyntheticCapabilityHandler for SkillActivationHandler {
 
     async fn invoke(
         &self,
-        invocation: LocalDevSyntheticCapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        invocation: SyntheticCapabilityInvocation,
+    ) -> Result<Resolution, AgentLoopHostError> {
         // Normalise to lowercase at the parse boundary so that `names` (passed
         // to `activate_skills_for_run`) and the response-filter set both use the
         // same canonical form. `activate_skills_for_run` matches with
@@ -130,16 +103,18 @@ impl LocalDevSyntheticCapabilityHandler for SkillActivationHandler {
                 capability_id: &invocation.request.capability_id,
                 output,
                 display_preview: None,
+                durable_persistence: DurablePersistence::Persist,
             })
             .await?;
-        Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
-            result_ref: write_result.result_ref,
-            safe_summary: format!("activated {} skill(s)", activated.len()),
-            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-            terminate_hint: false,
-            byte_len: write_result.byte_len,
-            output_digest: write_result.output_digest,
-        }))
+        Ok(resolution::completed(
+            write_result.result_ref,
+            format!("activated {} skill(s)", activated.len()),
+            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            false,
+            write_result.byte_len,
+            write_result.output_digest,
+            write_result.model_observation,
+        ))
     }
 }
 
@@ -224,7 +199,7 @@ fn skill_activation_host_error(
             AgentLoopHostErrorKind::Internal
         }
     };
-    ironclaw_loop_support::raw_agent_loop_host_error(
+    ironclaw_loop_host::raw_agent_loop_host_error(
         "local_dev_skill_activate",
         "activate",
         kind,
@@ -250,20 +225,19 @@ fn skill_activation_host_error(
 ///   adjusting its request.
 fn skill_activation_selection_outcome(
     error: ironclaw_first_party_extension_ports::SkillActivationSelectionError,
-) -> Result<CapabilityOutcome, AgentLoopHostError> {
+) -> Result<Resolution, AgentLoopHostError> {
     use ironclaw_first_party_extension_ports::SkillActivationSelectionError as SelectionError;
     match error {
-        SelectionError::ContextBudgetExceeded => Ok(CapabilityOutcome::Failed(CapabilityFailure {
-            error_kind: CapabilityFailureKind::InvalidInput,
-            safe_summary: "skill activation exceeds the per-run skill context budget; activate fewer or smaller skills".to_string(),
-            detail: None,
-        })),
-        SelectionError::AmbiguousSkill { .. } => Ok(CapabilityOutcome::Failed(CapabilityFailure {
-            error_kind: CapabilityFailureKind::InvalidInput,
-            safe_summary: "ambiguous skill name; specify a single unique skill to activate"
-                .to_string(),
-            detail: None,
-        })),
+        SelectionError::ContextBudgetExceeded => Ok(resolution::failed(
+            CapabilityFailureKind::InvalidInput,
+            "skill activation exceeds the per-run skill context budget; activate fewer or smaller skills".to_string(),
+            None,
+        )),
+        SelectionError::AmbiguousSkill { .. } => Ok(resolution::failed(
+            CapabilityFailureKind::InvalidInput,
+            "ambiguous skill name; specify a single unique skill to activate".to_string(),
+            None,
+        )),
         other => Err(skill_activation_host_error(other)),
     }
 }
@@ -313,12 +287,7 @@ mod tests {
         )
         .expect("budget-exceeded must be a model-visible failure, not a terminal host error");
 
-        match outcome {
-            CapabilityOutcome::Failed(failure) => {
-                assert_eq!(failure.error_kind, CapabilityFailureKind::InvalidInput);
-            }
-            other => panic!("expected CapabilityOutcome::Failed, got {other:?}"),
-        }
+        assert_recoverable_invalid_input(&outcome);
     }
 
     #[test]
@@ -331,11 +300,21 @@ mod tests {
         )
         .expect("ambiguous skill must be a model-visible failure, not a terminal host error");
 
-        match outcome {
-            CapabilityOutcome::Failed(failure) => {
-                assert_eq!(failure.error_kind, CapabilityFailureKind::InvalidInput);
-            }
-            other => panic!("expected CapabilityOutcome::Failed, got {other:?}"),
+        assert_recoverable_invalid_input(&outcome);
+    }
+
+    /// A recoverable model-visible failure is `Resolution::Done` carrying a
+    /// `RecoverableFailure(InvalidInput)` verdict (the §5.3 collapse of the old
+    /// `CapabilityOutcome::Failed { InvalidInput }`).
+    fn assert_recoverable_invalid_input(resolution: &ironclaw_host_api::Resolution) {
+        match resolution {
+            ironclaw_host_api::Resolution::Done(outcome) => assert_eq!(
+                outcome.verdict,
+                ironclaw_host_api::ToolVerdict::recoverable_failure(
+                    ironclaw_host_api::FailureKind::InvalidInput
+                )
+            ),
+            other => panic!("expected Resolution::Done recoverable failure, got {other:?}"),
         }
     }
 

@@ -21,11 +21,11 @@ canonical executor, loop execution state, and executor test support.
 ## Boundaries
 
 - This crate depends upward on neutral contracts in `ironclaw_turns`.
-- This crate must not depend on `ironclaw_reborn`, host runtime crates, product
+- This crate must not depend on `ironclaw_runner`, host runtime crates, product
   adapters, dispatcher, capability host, filesystem, network, secrets, or DB
   backends.
 - The framework never sees `AgentLoopDriver`; `PlannedDriver` in
-  `ironclaw_reborn` adapts runner-facing driver calls to this crate's executor.
+  `ironclaw_runner` adapts runner-facing driver calls to this crate's executor.
 - State stores refs, cursors, counters, versions, and safe summaries only. Do
   not store raw prompts, raw model output, tool args, secrets, host paths,
   provider errors, or stack traces in state or strategy slots.

@@ -246,7 +246,7 @@ async fn invoke_json_preserves_non_empty_credential_requirements_from_dispatcher
 
 #[tokio::test]
 async fn auth_resume_json_enriches_auth_required_credential_requirements_from_obligations() {
-    use ironclaw_run_state::{InMemoryRunStateStore, RunStateStore, RunStatus};
+    use ironclaw_run_state::{RunStateStore, RunStatus};
 
     // A dispatcher that returns AuthRequired with an empty credential_requirements
     // list on every call (simulating a WASM adapter at both invoke and resume time).
@@ -276,7 +276,7 @@ async fn auth_resume_json_enriches_auth_required_credential_requirements_from_ob
     };
     let dispatcher = AlwaysAuthRequiredDispatcher;
     let handler = PassthroughObligationHandler;
-    let run_state = InMemoryRunStateStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
 
     let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
         .with_obligation_handler(&handler)

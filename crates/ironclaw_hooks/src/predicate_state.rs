@@ -271,6 +271,8 @@ impl PredicateEventId {
             // std::fmt::Write for String is infallible; discard the
             // Result rather than `.expect()` so this stays out of the
             // "no panics in production code" CI check.
+            #[allow(clippy::let_underscore_must_use)]
+            // writing to an in-memory String is infallible
             let _ = write!(s, "{byte:02x}");
         }
         // Synth output is always a 64-char hex digest — no NUL, never
@@ -947,10 +949,10 @@ fn evict_lru_value(history: &mut HashMap<ValueKey, ValueBucket>, evictions: &Ato
 /// the proof that the harness shape works with one backend before the
 /// durable impls land.
 ///
-/// Gated on `any(test, feature = "contract-tests")` so out-of-crate
+/// Gated on `any(test, feature = "test-support")` so out-of-crate
 /// durable backends can depend on `ironclaw_hooks` with the
-/// `contract-tests` feature and run the same suite against their impl.
-#[cfg(any(test, feature = "contract-tests"))]
+/// `test-support` feature and run the same suite against their impl.
+#[cfg(any(test, feature = "test-support"))]
 pub mod contract {
     use super::*;
 

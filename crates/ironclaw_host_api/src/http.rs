@@ -462,6 +462,33 @@ pub trait RuntimeHttpEgress: Send + Sync {
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>;
+
+    /// Egress for a **host OAuth token exchange** — an OAuth/OIDC token
+    /// endpoint such as Slack `oauth.v2.access`. This entry point is reserved
+    /// for the host auth system's OAuth provider client; no tool, plugin, or
+    /// general runtime caller may use it.
+    ///
+    /// Unlike [`RuntimeHttpEgress::execute`], the response is intentionally
+    /// **not** leak-sanitized. A token-endpoint response legitimately carries
+    /// credential material (e.g. `xoxp-`/`xoxb-` tokens) that the host auth
+    /// system consumes directly — parsed and re-stored as a secret handle — and
+    /// never surfaces to the model. Running the response sanitizer here would
+    /// redact or hard-block the very token this call exists to retrieve.
+    /// Request-side leak validation and host credential injection still apply,
+    /// exactly as on [`RuntimeHttpEgress::execute`]; only the response
+    /// sanitizer is bypassed, and only because such requests carry no injected
+    /// credentials to redact.
+    ///
+    /// The default forwards to [`RuntimeHttpEgress::execute`], which is correct
+    /// for implementations that never sanitize responses (e.g. test fakes).
+    /// The production host egress service overrides this to run the transport
+    /// pipeline with the response sanitizer skipped.
+    async fn execute_credential_exchange(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        self.execute(request).await
+    }
 }
 
 #[async_trait]
@@ -474,6 +501,13 @@ where
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         self.as_ref().execute(request).await
+    }
+
+    async fn execute_credential_exchange(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        self.as_ref().execute_credential_exchange(request).await
     }
 }
 

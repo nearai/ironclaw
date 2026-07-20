@@ -15,9 +15,9 @@ pub use store::PairingStore;
 
 /// Typed wrapper for the external actor ID returned by pairing approval.
 ///
-/// Represents a channel-specific external identifier (e.g. a Telegram user ID,
-/// Discord user ID, Slack member ID). Prevents bare `String` confusion with
-/// other string-typed identifiers like `owner_id` or `user_id`.
+/// Represents a channel-specific external identifier (e.g. a Telegram user ID
+/// or Discord user ID). Prevents bare `String` confusion with other
+/// string-typed identifiers like `owner_id` or `user_id`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalId(String);
 
@@ -41,8 +41,8 @@ impl std::fmt::Display for ExternalId {
 
 /// Canonical channel identifier used for pairing persistence and cache keys.
 ///
-/// Channel names are internal ASCII-ish identifiers (`telegram`, `slack`,
-/// etc.), so lowercasing keeps storage, cache, and lookup semantics aligned.
+/// Channel names are internal ASCII-ish identifiers such as `telegram`, so
+/// lowercasing keeps storage, cache, and lookup semantics aligned.
 pub(crate) fn normalize_channel_name(channel: &str) -> String {
     channel.to_ascii_lowercase()
 }

@@ -13,15 +13,12 @@
 //! override store: it lives as a persistent approval grant so there is a single
 //! source of truth for auto-run authority.
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{
-    CasExpectation, FilesystemError, RecordVersion, RootFilesystem, ScopedFilesystem,
+    CasExpectation, FileType, FilesystemError, RecordVersion, RootFilesystem, ScopedFilesystem,
     VersionedEntry,
 };
 use ironclaw_host_api::{
@@ -190,73 +187,23 @@ pub trait CapabilityPermissionOverrideStore: Send + Sync {
         key: &CapabilityPermissionOverrideKey,
     ) -> Result<Option<CapabilityPermissionOverrideRecord>, CapabilityPermissionStoreError>;
 
+    fn supports_scope_listing(&self) -> bool {
+        false
+    }
+
+    async fn list_for_scope(
+        &self,
+        _scope: &ResourceScope,
+    ) -> Result<Vec<CapabilityPermissionOverrideRecord>, CapabilityPermissionStoreError> {
+        Ok(Vec::new())
+    }
+
     /// Remove the explicit override, reverting the capability to its default.
     /// Idempotent: clearing an absent override is a no-op.
     async fn clear(
         &self,
         key: &CapabilityPermissionOverrideKey,
     ) -> Result<(), CapabilityPermissionStoreError>;
-}
-
-#[derive(Debug, Default)]
-pub struct InMemoryCapabilityPermissionOverrideStore {
-    overrides: RwLock<HashMap<CapabilityPermissionOverrideKey, CapabilityPermissionOverrideRecord>>,
-}
-
-impl InMemoryCapabilityPermissionOverrideStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-#[async_trait]
-impl CapabilityPermissionOverrideStore for InMemoryCapabilityPermissionOverrideStore {
-    async fn set(
-        &self,
-        input: CapabilityPermissionOverrideInput,
-    ) -> Result<CapabilityPermissionOverrideRecord, CapabilityPermissionStoreError> {
-        let key = CapabilityPermissionOverrideKey::new(&input.scope, input.capability_id);
-        let mut overrides = self
-            .overrides
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let now = Utc::now();
-        let created_at = overrides
-            .get(&key)
-            .map_or(now, |existing| existing.created_at);
-        let record = CapabilityPermissionOverrideRecord {
-            key: key.clone(),
-            state: input.state,
-            updated_by: input.updated_by,
-            created_at,
-            updated_at: now,
-        };
-        overrides.insert(key, record.clone());
-        Ok(record)
-    }
-
-    async fn get(
-        &self,
-        key: &CapabilityPermissionOverrideKey,
-    ) -> Result<Option<CapabilityPermissionOverrideRecord>, CapabilityPermissionStoreError> {
-        Ok(self
-            .overrides
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(key)
-            .cloned())
-    }
-
-    async fn clear(
-        &self,
-        key: &CapabilityPermissionOverrideKey,
-    ) -> Result<(), CapabilityPermissionStoreError> {
-        self.overrides
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(key);
-        Ok(())
-    }
 }
 
 pub struct FilesystemCapabilityPermissionOverrideStore<F>
@@ -329,6 +276,48 @@ where
             .lookup_versioned(key)
             .await?
             .and_then(|(record, _version)| record.into_active()))
+    }
+
+    fn supports_scope_listing(&self) -> bool {
+        true
+    }
+
+    async fn list_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<CapabilityPermissionOverrideRecord>, CapabilityPermissionStoreError> {
+        let target_scope = PersistentApprovalScope::from_resource_scope(scope);
+        let root = override_scope_path(&target_scope)?;
+        let entries = match self.records.filesystem.list_dir(scope, &root).await {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. }) => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+
+        let mut records = Vec::new();
+        for entry in entries {
+            if entry.file_type != FileType::File || !entry.name.ends_with(".json") {
+                continue;
+            }
+            let path = scoped_child_path(&root, &entry.name)?;
+            let Some(versioned) = self.records.get(scope, &path).await? else {
+                continue;
+            };
+            let stored =
+                deserialize::<StoredCapabilityPermissionOverrideRecord>(&versioned.entry.body)?;
+            if stored.key.scope != target_scope {
+                tracing::error!(
+                    stored = ?stored.key.scope,
+                    expected = ?target_scope,
+                    "capability permission override scope mismatch while listing"
+                );
+                continue;
+            }
+            if let Some(active) = stored.into_active() {
+                records.push(active);
+            }
+        }
+        Ok(records)
     }
 
     async fn clear(
@@ -438,6 +427,17 @@ fn override_path(
     .map_err(invalid_path)
 }
 
+fn override_scope_path(
+    scope: &PersistentApprovalScope,
+) -> Result<ScopedPath, CapabilityPermissionStoreError> {
+    ScopedPath::new(format!(
+        "{}/{}",
+        OVERRIDE_PREFIX,
+        within_tenant_scope(scope)
+    ))
+    .map_err(invalid_path)
+}
+
 fn within_tenant_scope(scope: &PersistentApprovalScope) -> String {
     let mut segments = Vec::new();
     if let Some(agent_id) = &scope.agent_id {
@@ -451,6 +451,18 @@ fn within_tenant_scope(scope: &PersistentApprovalScope) -> String {
     } else {
         segments.join("/")
     }
+}
+
+fn scoped_child_path(
+    parent: &ScopedPath,
+    child: &str,
+) -> Result<ScopedPath, CapabilityPermissionStoreError> {
+    ScopedPath::new(format!(
+        "{}/{}",
+        parent.as_str().trim_end_matches('/'),
+        child
+    ))
+    .map_err(invalid_path)
 }
 
 fn override_digest(
@@ -554,6 +566,17 @@ mod tests {
         )])
         .unwrap();
         Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
+    }
+
+    // The single production store, exercised over the in-memory filesystem
+    // backend — the seam that replaced the deleted
+    // `InMemoryCapabilityPermissionOverrideStore`.
+    fn memory_store() -> FilesystemCapabilityPermissionOverrideStore<InMemoryBackend> {
+        FilesystemCapabilityPermissionOverrideStore::new(scoped_fs(
+            Arc::new(InMemoryBackend::new()),
+            "tenant-a",
+            "alice",
+        ))
     }
 
     struct VersionMismatchOnceBackend {
@@ -787,8 +810,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn in_memory_set_get_clear_roundtrip() {
-        let store = InMemoryCapabilityPermissionOverrideStore::new();
+    async fn set_get_clear_roundtrip() {
+        let store = memory_store();
         let scope = scope(None, Some("thread-a"));
         let key = key_for(&scope);
 
@@ -976,6 +999,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filesystem_list_for_scope_returns_only_active_matching_scope_records() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let scoped = scoped_fs(Arc::clone(&backend), "tenant-a", "alice");
+        let store = FilesystemCapabilityPermissionOverrideStore::new(Arc::clone(&scoped));
+        let project_a_thread_1 = scope(Some("project-a"), Some("thread-1"));
+        let project_a_thread_2 = scope(Some("project-a"), Some("thread-2"));
+        let project_b = scope(Some("project-b"), Some("thread-1"));
+        let tenant_b_scoped = scoped_fs(backend, "tenant-b", "alice");
+        let tenant_b_store = FilesystemCapabilityPermissionOverrideStore::new(tenant_b_scoped);
+        let tenant_b_scope = ResourceScope {
+            tenant_id: TenantId::new("tenant-b").unwrap(),
+            ..scope(Some("project-a"), Some("thread-1"))
+        };
+
+        let project_a_record = store
+            .set(input(
+                project_a_thread_1.clone(),
+                CapabilityPermissionOverride::Disabled,
+            ))
+            .await
+            .unwrap();
+        store
+            .set(input(project_b, CapabilityPermissionOverride::AskEachTime))
+            .await
+            .unwrap();
+        tenant_b_store
+            .set(input(
+                tenant_b_scope,
+                CapabilityPermissionOverride::Disabled,
+            ))
+            .await
+            .unwrap();
+
+        let listed = store.list_for_scope(&project_a_thread_2).await.unwrap();
+
+        assert_eq!(listed, vec![project_a_record]);
+
+        store.clear(&key_for(&project_a_thread_1)).await.unwrap();
+        assert!(
+            store
+                .list_for_scope(&project_a_thread_2)
+                .await
+                .unwrap()
+                .is_empty(),
+            "scope listing must skip tombstoned records"
+        );
+    }
+
+    #[tokio::test]
     async fn filesystem_get_returns_serialization_error_for_corrupt_override_record() {
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = scoped_fs(backend, "tenant-a", "alice");
@@ -1071,7 +1143,7 @@ mod tests {
 
     #[tokio::test]
     async fn override_scope_isolates_users() {
-        let store = InMemoryCapabilityPermissionOverrideStore::new();
+        let store = memory_store();
         let alice = scope(None, Some("thread-a"));
         let bob = ResourceScope {
             user_id: UserId::new("bob").unwrap(),
@@ -1090,7 +1162,7 @@ mod tests {
     #[tokio::test]
     async fn override_scope_is_thread_agnostic() {
         // Mirrors persistent-approval scoping: thread id is not part of the key.
-        let store = InMemoryCapabilityPermissionOverrideStore::new();
+        let store = memory_store();
         let thread_a = scope(None, Some("thread-a"));
         let thread_b = scope(None, Some("thread-b"));
 

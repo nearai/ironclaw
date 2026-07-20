@@ -167,6 +167,33 @@ impl RootFilesystem for InMemoryBackend {
         Ok(())
     }
 
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        // Deliberately not `check_cas`: its Version arm collapses an absent
+        // row into VersionMismatch{found: None}, but delete callers must see
+        // absent as NotFound (already gone) vs present-at-another-version as
+        // VersionMismatch (gone stale). Single-key: no subtree/log sweep.
+        let mut state = self.state.lock().await;
+        let Some(current) = state.entries.get(path).map(|stored| stored.version) else {
+            return Err(FilesystemError::NotFound {
+                path: path.clone(),
+                operation: FilesystemOperation::Delete,
+            });
+        };
+        if expected_version != current {
+            return Err(FilesystemError::VersionMismatch {
+                path: path.clone(),
+                expected: Some(expected_version),
+                found: Some(current),
+            });
+        }
+        state.entries.remove(path);
+        Ok(())
+    }
+
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
         let state = self.state.lock().await;
         let prefix = with_trailing_slash(path.as_str());
@@ -779,6 +806,107 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, FilesystemError::VersionMismatch { .. }));
+    }
+
+    #[tokio::test]
+    async fn delete_if_version_distinguishes_missing_stale_and_current() {
+        let fs = InMemoryBackend::new();
+        let path = vpath("/secrets/leases/cas-delete");
+
+        // Missing path is NotFound (already gone), never VersionMismatch.
+        let err = fs
+            .delete_if_version(&path, RecordVersion::from_backend(1))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FilesystemError::NotFound {
+                operation: FilesystemOperation::Delete,
+                ..
+            }
+        ));
+
+        // Simulates the state a concurrent writer would leave behind (this
+        // is a sequential script, not a real race — see
+        // concurrent_cas_storm.rs for genuine parallel coverage): the
+        // version the deleter read (v1) is bumped by a put before the
+        // delete lands. The stale delete loses with the observed version
+        // and the entry survives at v2.
+        let v1 = fs
+            .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+        let log_seq = fs.append(&path, b"kept".to_vec()).await.unwrap();
+        let v2 = fs
+            .put(&path, Entry::bytes(vec![2]), CasExpectation::Version(v1))
+            .await
+            .unwrap();
+        let err = fs.delete_if_version(&path, v1).await.unwrap_err();
+        match err {
+            FilesystemError::VersionMismatch {
+                expected, found, ..
+            } => {
+                assert_eq!(expected, Some(v1));
+                assert_eq!(found, Some(v2));
+            }
+            other => panic!("expected VersionMismatch, got {other:?}"),
+        }
+        let got = fs.get(&path).await.unwrap().unwrap();
+        assert_eq!(got.version, v2);
+        assert_eq!(got.entry.body, vec![2]);
+
+        // Correct version deletes exactly the entry — single-key, so the
+        // event log at the same path survives (blind delete would sweep it).
+        fs.delete_if_version(&path, v2).await.unwrap();
+        assert!(fs.get(&path).await.unwrap().is_none());
+        let log = fs.tail(&path, SeqNo::ZERO).await.unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].seq, log_seq);
+    }
+
+    /// Pins the ABA hazard `delete_if_version`'s doc comment warns about:
+    /// version tokens are not generation-stable, so a version captured
+    /// before a delete+recreate cycle can match a *different* incarnation
+    /// of the same path. This is documented, known behavior — not a bug —
+    /// but was previously asserted only in prose. Round-A review finding
+    /// (PR #5749): pin it with a real assertion so a future change to this
+    /// contract (e.g. generation-stable versions) breaks a test loudly
+    /// instead of silently.
+    #[tokio::test]
+    async fn delete_if_version_is_vulnerable_to_aba_across_delete_recreate_cycles() {
+        let fs = InMemoryBackend::new();
+        let path = vpath("/secrets/leases/cas-delete-aba");
+
+        // First incarnation: created and fully deleted.
+        let v1_first = fs
+            .put(&path, Entry::bytes(vec![1]), CasExpectation::Absent)
+            .await
+            .unwrap();
+        fs.delete_if_version(&path, v1_first).await.unwrap();
+        assert!(fs.get(&path).await.unwrap().is_none());
+
+        // Second incarnation restarts the version counter at the same raw
+        // value as the first (version is not generation-stable).
+        let v1_second = fs
+            .put(&path, Entry::bytes(vec![2]), CasExpectation::Absent)
+            .await
+            .unwrap();
+        assert_eq!(
+            v1_first, v1_second,
+            "version must restart after a full delete, or this ABA hazard doesn't apply"
+        );
+
+        // The stale `v1_first` token — captured against the first
+        // incarnation — incorrectly authorizes deleting the second
+        // incarnation's live data. This is the documented hazard, not a
+        // regression: callers that recreate paths must pair every
+        // successful delete with an unconditional postcondition recheck,
+        // per the trait doc comment.
+        fs.delete_if_version(&path, v1_first).await.unwrap();
+        assert!(
+            fs.get(&path).await.unwrap().is_none(),
+            "stale version token wrongly matched and deleted the second incarnation"
+        );
     }
 
     #[tokio::test]

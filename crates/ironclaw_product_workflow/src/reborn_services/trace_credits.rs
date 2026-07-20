@@ -8,8 +8,11 @@
 //! [`ironclaw_reborn_traces::contribution::trace_scope_key`]).
 
 use chrono::{DateTime, Utc};
+use ironclaw_host_api::{TenantId, UserId};
 use ironclaw_reborn_traces::contribution::{
-    authorize_manual_review_hold_for_scope, read_trace_policy_for_scope, scoped_credit_view,
+    AccountLoginLinkError, authorize_manual_review_hold_for_scope, fetch_account_traces,
+    mint_account_login_link, read_trace_policy_for_scope, resolve_trace_credentials,
+    scoped_credit_view,
 };
 use serde::{Deserialize, Serialize};
 
@@ -64,6 +67,32 @@ pub struct RebornTraceHold {
     pub reason: String,
 }
 
+/// One submitted trace record as returned by the Trace Commons server.
+/// Carries only the fields the UI needs; unknown server fields are ignored.
+#[derive(Debug, Clone, Serialize)]
+pub struct RebornAccountTrace {
+    pub submission_id: String,
+    pub status: String,
+    pub pending_credit: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_credit: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub received_at: Option<String>,
+}
+
+/// Read-only list of the caller's submitted Trace Commons traces.
+///
+/// `enrolled` mirrors the caller's contribution-policy enrollment status
+/// (same semantics as [`RebornTraceCreditsResponse::enrolled`]).
+/// `traces` is the server-returned list in reverse-chronological order;
+/// an empty list is normal for an enrolled user who has not yet submitted
+/// any traces.
+#[derive(Debug, Clone, Serialize)]
+pub struct RebornAccountTracesResponse {
+    pub enrolled: bool,
+    pub traces: Vec<RebornAccountTrace>,
+}
+
 /// Result of authorizing a held trace for submission.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RebornTraceHoldAuthorizeResponse {
@@ -71,6 +100,118 @@ pub struct RebornTraceHoldAuthorizeResponse {
     /// authorized for submission; false when there was no such held trace
     /// (already authorized, already submitted, or never held).
     pub authorized: bool,
+}
+
+/// One-time Trace Commons browser login link, minted for the authenticated
+/// caller. SECURITY: the `url` is a code-bearing account-access credential.
+/// It is delivered ONLY over the authenticated WebUI response to the caller's
+/// own browser — it must never be logged, persisted, or placed on any
+/// model-visible surface.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RebornAccountLoginLinkResponse {
+    /// Whether a link was minted. `false` with `enrolled: false` is the
+    /// unenrolled zero-state, not an error.
+    pub minted: bool,
+    pub enrolled: bool,
+    /// The one-time login URL (present iff `minted`). Expires shortly and is
+    /// single-use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+/// Typed failure for [`account_login_link_for_user`]. Mirrors
+/// [`AccountTracesError`]: the operation is named and the cause chain is
+/// preserved for a diagnosable (but sanitized at the wire) 500.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum AccountLoginLinkMintError {
+    /// Minting the link failed (policy read, claim mint, transport, issuer).
+    #[error("mint account login link: {0}")]
+    Mint(String),
+}
+
+/// Mint a one-time Trace Commons browser login link for the caller.
+///
+/// Uses the crate-local pinned direct client (no host-egress sink) — the same
+/// network lane as [`account_traces_for_user`]. An unenrolled caller gets the
+/// zero-state (`minted: false, enrolled: false`), never an error; hosted
+/// multi-tenant users have no host-file access, so the authenticated response
+/// is the only delivery channel for the link.
+pub(super) async fn account_login_link_for_user(
+    tenant_id: &TenantId,
+    user_id: &UserId,
+) -> Result<RebornAccountLoginLinkResponse, AccountLoginLinkMintError> {
+    match mint_account_login_link(tenant_id, user_id).await {
+        Ok(link) => Ok(RebornAccountLoginLinkResponse {
+            minted: true,
+            enrolled: true,
+            url: Some(link.url),
+        }),
+        Err(AccountLoginLinkError::NotEnrolled) => Ok(RebornAccountLoginLinkResponse {
+            minted: false,
+            enrolled: false,
+            url: None,
+        }),
+        Err(error) => Err(AccountLoginLinkMintError::Mint(format!("{error:#}"))),
+    }
+}
+
+/// Typed failure for [`account_traces_for_user`]. Each variant names the backend
+/// operation that failed and carries the full cause chain (`{:#}`) so the WebUI
+/// boundary keeps a diagnosable cause instead of an undiscriminated `String`.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum AccountTracesError {
+    /// `resolve_trace_credentials` failed to read local enrollment state.
+    #[error("resolve trace credentials: {0}")]
+    ResolveCredentials(String),
+    /// `fetch_account_traces` failed (transport / server / decode).
+    #[error("fetch account traces: {0}")]
+    Fetch(String),
+}
+
+/// Fetch the caller-scoped submitted traces from the Trace Commons server.
+///
+/// Uses the crate-local hardened reqwest path (no host-egress sink) — the same
+/// network lane as the rest of the WebUI / facade surface. The `enrolled` flag
+/// is set from `resolve_trace_credentials`; a user who is not enrolled gets the
+/// unenrolled zero-state (`enrolled: false`, empty list) rather than an error.
+/// Transport failures surface as a typed `Err` (the operation is named and the
+/// cause chain preserved) so the caller can return a sanitized, diagnosable 500.
+pub(super) async fn account_traces_for_user(
+    tenant_id: &TenantId,
+    user_id: &UserId,
+) -> Result<RebornAccountTracesResponse, AccountTracesError> {
+    // Identity stays typed inside this crate; only cross to `&str` at the
+    // `ironclaw_reborn_traces` boundary, which is stringly-typed.
+    let enrolled = resolve_trace_credentials(tenant_id, user_id)
+        .map_err(|e| AccountTracesError::ResolveCredentials(format!("{e:#}")))?
+        .is_some();
+    if !enrolled {
+        return Ok(RebornAccountTracesResponse {
+            enrolled: false,
+            traces: vec![],
+        });
+    }
+    // `None` is not unbounded: `fetch_account_traces` defaults a missing limit to
+    // ACCOUNT_TRACES_DEFAULT_LIMIT (200), clamps any explicit value to
+    // [1, ACCOUNT_TRACES_MAX_LIMIT], and caps the buffered response bytes — so
+    // the initial settings-page slice can never scale with total account age.
+    let items = fetch_account_traces(tenant_id.as_str(), user_id.as_str(), None)
+        .await
+        .map_err(|e| AccountTracesError::Fetch(format!("{e:#}")))?;
+    let traces = items
+        .into_iter()
+        .map(|item| RebornAccountTrace {
+            submission_id: item.submission_id,
+            status: item.status,
+            pending_credit: item.credit_points_pending,
+            final_credit: item.credit_points_final,
+            received_at: item.received_at,
+        })
+        .collect();
+    Ok(RebornAccountTracesResponse {
+        enrolled: true,
+        traces,
+    })
 }
 
 /// Authorize the caller-scoped held manual-review trace for submission.
@@ -192,10 +333,7 @@ mod tests {
     fn enabled_policy_reports_enrolled_with_zero_aggregates() {
         let scope = unique_scope("pw-trace-credits-enrolled");
         let _cleanup = ScopeCleanup(scope.clone());
-        let policy = StandingTraceContributionPolicy {
-            enabled: true,
-            ..StandingTraceContributionPolicy::default()
-        };
+        let policy = StandingTraceContributionPolicy::default().set_enabled(true);
         write_trace_policy_for_scope(Some(scope.as_str()), &policy).expect("write policy");
 
         let response = local_trace_credits_for_user(&scope).expect("local credits read");

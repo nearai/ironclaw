@@ -60,7 +60,7 @@ actually fire in prod. This PR:
      deferred).
 2. Pass the accountant into `RebornLoopDriverHostFactory` via the
    existing `with_model_budget_accountant` builder
-   (`crates/ironclaw_reborn/src/runtime.rs:346-348`).
+   (`crates/ironclaw_runner/src/runtime.rs:346-348`).
 3. Wire the same factory parameter through the
    `RebornRuntimeLoopParts` struct so non-production callers can still
    pass `None` and get `NoOpBudgetAccountant`.
@@ -112,7 +112,7 @@ Approach: a `ReservationGuard` RAII struct that:
   before returning.
 
 This replaces the manual `in_flight.remove` + `release` pair. The
-guard lives in `crates/ironclaw_loop_support/src/budget_accountant.rs`
+guard lives in `crates/ironclaw_loop_host/src/budget_accountant.rs`
 (near the in-flight map) so the contract stays in one file.
 
 Acceptance: drop-in regression test that cancels a `stream_model`
@@ -121,10 +121,10 @@ returns to zero within one tokio tick.
 
 ### PR 4 — E1: kill the dead inner accountant
 
-`ThreadBackedLoopModelPort` (`crates/ironclaw_loop_support/src/lib.rs:731-1004`)
+`ThreadBackedLoopModelPort` (`crates/ironclaw_loop_host/src/lib.rs:731-1004`)
 carries an `Option<Arc<dyn LoopModelBudgetAccountant>>` and a
 `with_budget_accountant` builder, but the production wiring at
-`crates/ironclaw_reborn/src/loop_driver_host.rs:598-617` never sets
+`crates/ironclaw_runner/src/loop_driver_host.rs:598-617` never sets
 it — accountant work lives in the outer `HostManagedLoopModelPort`.
 This is exactly the "optional Arc that is required in production"
 smell in `.claude/rules/architecture.md` (#2), except inverted: the
@@ -135,7 +135,7 @@ builder, and the dead branches in `stream_model`. Update the inner
 tests to drop the now-unused setup. (Collapsing the two wrappers
 entirely is a larger refactor; not in scope for this follow-up.)
 
-Acceptance: `clippy::dead_code` clean; the `crates/ironclaw_loop_support`
+Acceptance: `clippy::dead_code` clean; the `crates/ironclaw_loop_host`
 unit + contract tests still pass; only the outer port runs accountant
 hooks.
 
@@ -217,7 +217,7 @@ Touchpoints:
 - All `LoopModelGateway` implementations: have them fill the fields
   when the provider returns them. For providers that don't (NEAR AI
   local, Ollama free), leave `None` and fall back to the estimate.
-- `crates/ironclaw_loop_support/src/budget_accountant.rs::usage_for_response`:
+- `crates/ironclaw_loop_host/src/budget_accountant.rs::usage_for_response`:
   prefer response-provided numbers; fall back to estimate only when
   `None`.
 
@@ -305,11 +305,11 @@ contract in:
 
 | # | Test(s) |
 |---|------|
-| C2 | `ironclaw_loop_support::budget_accountant::tests::post_model_call_reconciles_provider_usage_when_response_threads_real_tokens` + e2e `c1_provider_tokens_reconcile_to_actual_usd` |
+| C2 | `ironclaw_loop_host::budget_accountant::tests::post_model_call_reconciles_provider_usage_when_response_threads_real_tokens` + e2e `c1_provider_tokens_reconcile_to_actual_usd` |
 | D1 | `ironclaw_resources::tests::limit_exceeded_carries_warnings_from_other_dimensions` + e2e `d1_agent_deny_preserves_user_warn_event` |
-| C1 | `ironclaw_loop_support::budget_accountant::tests::release_in_flight_drains_orphan_reservation_on_cancellation` |
+| C1 | `ironclaw_loop_host::budget_accountant::tests::release_in_flight_drains_orphan_reservation_on_cancellation` |
 | E1 | Covered by removing the dead field + 14 pre-existing accountant tests; `clippy::dead_code` clean. |
-| Cost table | `ironclaw_reborn::model_gateway::LlmModelProfilePolicy::build_cost_table` exercised by the A1 wiring + e2e `c2_unknown_model_in_cost_table_uses_default_cost_fallback`. |
+| Cost table | `ironclaw_runner::model_gateway::LlmModelProfilePolicy::build_cost_table` exercised by the A1 wiring + e2e `c2_unknown_model_in_cost_table_uses_default_cost_fallback`. |
 | B1 | `ironclaw_resources::filesystem_gate_store::tests::pending_gate_survives_restart_via_fresh_handle` + `list_pending_does_not_leak_across_tenants` + `terminal_gates_older_than_retention_are_pruned_on_next_write` (review feedback High #1 + Medium #7). |
 | A1 | `ironclaw_reborn_composition::factory` exposes `local_runtime.{resource_governor, budget_event_sink, budget_gate_store, broadcast_budget_event_sink}`; production-shape helper `build_default_budget_accountant` wires the seeding policy + overestimate factor + gate store; unit test `seeds_compiled_default_user_cap_on_first_touch` + e2e `d3_seeding_policy_installs_default_cap_on_first_touch`. |
 | A2 | `ironclaw_resources::tests::governor_emits_budget_events_through_event_sink` + composition e2e `broadcast_sink_publishes_events_to_subscribers` + bridge unit tests (`account_label_handles_every_cascade_level`, `sse_user_id_resolves_for_user_scoped_events`, `sse_user_id_is_none_for_tenant_scoped_events`, `budget_event_to_app_event_warn_carries_dimension_and_utilization`). The SSE projection ships under `src/bridge/budget_events.rs::spawn_budget_event_projection`; the binary spawns the task against `RebornRuntime::broadcast_budget_event_sink()` at startup. |
@@ -320,7 +320,7 @@ Two pre-existing test failures are deliberately not in this list: the
 legacy `ironclaw cli::completion::tests::test_run_generates_output`
 debug-build stack overflow (passes with `RUST_MIN_STACK=16777216`, present
 on `main`), and the `parameters_schema` fixture parse error in
-`ironclaw_capabilities` / `ironclaw_reborn` / `ironclaw_processes`
+`ironclaw_capabilities` / `ironclaw_runner` / `ironclaw_processes`
 test data (present on `main`). Neither shares a code path with this work.
 
 ### Review-feedback fixes layered on top

@@ -1,51 +1,20 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{InvocationId, UserId};
-use ironclaw_loop_support::CapabilityResultWrite;
+use ironclaw_host_api::{InvocationId, Resolution, UserId};
+use ironclaw_loop_host::{CapabilityResultWrite, DurablePersistence};
 use ironclaw_product_workflow::{
     ProjectCaller, ProjectService, ProjectServiceError, RebornCreateProjectRequest,
 };
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailure, CapabilityFailureKind,
-    CapabilityOutcome, CapabilityProgress, CapabilityResultMessage, ConcurrencyHint,
-    LoopRunContext,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureKind, CapabilityProgress,
+    ConcurrencyHint, LoopRunContext, resolution,
 };
 
 use crate::runtime::local_dev::synthetic_capability::{
-    LocalDevSyntheticCapability, LocalDevSyntheticCapabilityDescriptor,
-    LocalDevSyntheticCapabilityHandler, LocalDevSyntheticCapabilityInvocation,
+    SyntheticCapability, SyntheticCapabilityDescriptor, SyntheticCapabilityHandler,
+    SyntheticCapabilityInvocation,
 };
-
-/// Test-only bridge (E-PROJ seam): wrap `inner` with just the `project_create`
-/// local-dev synthetic capability, so the Reborn integration-test harness can
-/// inject it onto its host-runtime capability port the same way production does
-/// (`RefreshingLocalDevCapabilityPort::build_inner`). Reuses the real
-/// `project_create_capability` + `wrap_local_dev_synthetic_capabilities`, so the
-/// test path never hand-mirrors the production wrap. Co-located with the
-/// capability it wraps; re-exported from `local_dev` for the caller in `runtime`.
-#[cfg(feature = "test-support")]
-pub(crate) fn wrap_project_create_capability_for_test(
-    inner: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    project_service: Arc<dyn ProjectService>,
-    fallback_user_id: UserId,
-    run_context: LoopRunContext,
-    input_resolver: Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
-    result_writer: Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
-) -> Result<Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>, AgentLoopHostError> {
-    super::synthetic_capability::wrap_local_dev_synthetic_capabilities(
-        inner,
-        vec![project_create_capability(
-            project_service,
-            fallback_user_id,
-        )?],
-        run_context,
-        input_resolver,
-        result_writer,
-        // trajectory_observer: None — not wired in the integration-test harness.
-        None,
-    )
-}
 
 pub(crate) const PROJECT_CREATE_CAPABILITY_ID: &str = "builtin.project_create";
 const PROJECT_CREATE_PROVIDER_TOOL_NAME: &str = "builtin__project_create";
@@ -59,9 +28,9 @@ const MAX_PROJECT_NAME_BYTES: usize = 200;
 pub(super) fn project_create_capability(
     project_service: Arc<dyn ProjectService>,
     fallback_user_id: UserId,
-) -> Result<LocalDevSyntheticCapability, AgentLoopHostError> {
-    Ok(LocalDevSyntheticCapability::new(
-        LocalDevSyntheticCapabilityDescriptor::new(
+) -> Result<SyntheticCapability, AgentLoopHostError> {
+    Ok(SyntheticCapability::new(
+        SyntheticCapabilityDescriptor::new(
             PROJECT_CREATE_CAPABILITY_ID,
             PROJECT_CREATE_PROVIDER_TOOL_NAME,
             PROJECT_CREATE_DESCRIPTION,
@@ -81,7 +50,7 @@ struct ProjectCreateHandler {
 }
 
 #[async_trait]
-impl LocalDevSyntheticCapabilityHandler for ProjectCreateHandler {
+impl SyntheticCapabilityHandler for ProjectCreateHandler {
     fn validate_provider_arguments(
         &self,
         arguments: &serde_json::Value,
@@ -91,8 +60,8 @@ impl LocalDevSyntheticCapabilityHandler for ProjectCreateHandler {
 
     async fn invoke(
         &self,
-        invocation: LocalDevSyntheticCapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        invocation: SyntheticCapabilityInvocation,
+    ) -> Result<Resolution, AgentLoopHostError> {
         let input = parse_project_create_input(&invocation.input)?;
         // Identity is authority-bearing: the caller is derived from the trusted
         // run scope, never from the model's arguments. The capability accepts
@@ -136,16 +105,18 @@ impl LocalDevSyntheticCapabilityHandler for ProjectCreateHandler {
                 capability_id: &invocation.request.capability_id,
                 output,
                 display_preview: None,
+                durable_persistence: DurablePersistence::Persist,
             })
             .await?;
-        Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
-            result_ref: write_result.result_ref,
+        Ok(resolution::completed(
+            write_result.result_ref,
             safe_summary,
-            progress: CapabilityProgress::MadeProgress,
-            terminate_hint: false,
-            byte_len: write_result.byte_len,
-            output_digest: write_result.output_digest,
-        }))
+            CapabilityProgress::MadeProgress,
+            false,
+            write_result.byte_len,
+            write_result.output_digest,
+            write_result.model_observation,
+        ))
     }
 }
 
@@ -215,9 +186,7 @@ fn project_create_input_schema() -> serde_json::Value {
 /// genuine internal bug stays terminal — invalid input, conflicts, denials, and
 /// transient unavailability are all surfaced to the model instead of killing
 /// the turn.
-fn project_service_outcome(
-    error: ProjectServiceError,
-) -> Result<CapabilityOutcome, AgentLoopHostError> {
+fn project_service_outcome(error: ProjectServiceError) -> Result<Resolution, AgentLoopHostError> {
     let (error_kind, safe_summary) = match error {
         // Keep the safe summary fixed and host-authored — `field` is a
         // free-form `String` and could carry a forbidden delimiter/marker
@@ -252,11 +221,7 @@ fn project_service_outcome(
             ));
         }
     };
-    Ok(CapabilityOutcome::Failed(CapabilityFailure {
-        error_kind,
-        safe_summary,
-        detail: None,
-    }))
+    Ok(resolution::failed(error_kind, safe_summary, None))
 }
 
 /// Resolve the user the run acts on behalf of: the explicit thread owner, else
@@ -280,6 +245,7 @@ fn effective_user_id(run_context: &LoopRunContext, fallback_user_id: &UserId) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::local_dev::assert_recoverable_failure;
 
     #[test]
     fn parse_project_create_input_rejects_missing_name() {
@@ -321,12 +287,7 @@ mod tests {
         })
         .expect("invalid input must be a model-visible failure, not terminal");
 
-        match outcome {
-            CapabilityOutcome::Failed(failure) => {
-                assert_eq!(failure.error_kind, CapabilityFailureKind::InvalidInput);
-            }
-            other => panic!("expected CapabilityOutcome::Failed, got {other:?}"),
-        }
+        assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::InvalidInput);
     }
 
     #[test]
@@ -334,12 +295,7 @@ mod tests {
         let outcome = project_service_outcome(ProjectServiceError::Unavailable)
             .expect("transient unavailability must not kill the run");
 
-        match outcome {
-            CapabilityOutcome::Failed(failure) => {
-                assert_eq!(failure.error_kind, CapabilityFailureKind::Unavailable);
-            }
-            other => panic!("expected CapabilityOutcome::Failed, got {other:?}"),
-        }
+        assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::Unavailable);
     }
 
     #[test]

@@ -262,6 +262,9 @@ fn stage_probe(name: &str) -> String {
         "accept_inbound" | "append_assistant" | "complete_run" | "load_context" => {
             format!("Run the same scenario with higher --users and compare {name}; this is likely storage read/write latency.")
         }
+        "list_threads_cold" | "list_threads_warm" => {
+            "Run thread-list with larger --thread-list-threads and compare cold versus warm pagination latency.".to_string()
+        }
         "model_wait" => "Sweep --model-latency-ms and --model-latency-profile to isolate model wait from storage overhead.".to_string(),
         "tool_wait" => "Sweep --tool-latency-ms and --tool-calls-per-turn to isolate tool wait from transcript write overhead.".to_string(),
         "resource_reserve" | "resource_reconcile" | "resource_release" => {
@@ -598,14 +601,19 @@ fn aggregate_failure_causes(summaries: &[RunSummary]) -> BTreeMap<String, Failur
     failure_causes
 }
 
-fn stage_rows(stages: &UserTurnStageLatencySummary) -> [(&'static str, &StageLatencySummary); 18] {
+fn stage_rows(stages: &UserTurnStageLatencySummary) -> [(&'static str, &StageLatencySummary); 23] {
     [
         ("ensure_thread", &stages.ensure_thread),
         ("accept_inbound", &stages.accept_inbound),
         ("submit_turn", &stages.submit_turn),
         ("mark_submitted", &stages.mark_submitted),
         ("mark_rejected_busy", &stages.mark_rejected_busy),
+        ("list_threads_cold", &stages.list_threads_cold),
+        ("list_threads_warm", &stages.list_threads_warm),
         ("claim_run", &stages.claim_run),
+        ("block_run", &stages.block_run),
+        ("resume_turn", &stages.resume_turn),
+        ("reclaim_run", &stages.reclaim_run),
         ("append_assistant", &stages.append_assistant),
         ("finalize_assistant", &stages.finalize_assistant),
         ("complete_run", &stages.complete_run),

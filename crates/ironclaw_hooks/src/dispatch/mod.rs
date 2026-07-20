@@ -4,7 +4,7 @@
 //!
 //! This crate ships the dispatcher contract; the Reborn-side middleware that
 //! wires it into `LoopCapabilityPort` / `LoopPromptPort` / etc. lives in
-//! `ironclaw_reborn::loop_driver_host` and lands in a follow-up slice.
+//! `ironclaw_runner::loop_driver_host` and lands in a follow-up slice.
 
 use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
@@ -1280,7 +1280,7 @@ impl HookDispatcher {
     /// Dispatch event-triggered observer hooks for a durable runtime event.
     ///
     /// This path is intentionally separate from `dispatch_observer_at`: event
-    /// hooks are fed by durable event-log replay in `ironclaw_reborn`, not by
+    /// hooks are fed by durable event-log replay in `ironclaw_runner`, not by
     /// the inline loop tick. The hook sink is observer-only, so a hook can
     /// record audit facts but cannot gate or patch already-completed work.
     pub async fn dispatch_event_triggered_at(
@@ -3466,7 +3466,7 @@ mod tests {
     /// pair a wrong-tier impl with a binding.
     ///
     /// What the type system **does not** enforce is *origin*: if a loader in
-    /// `ironclaw_reborn` reads a registry-sourced extension hook and
+    /// `ironclaw_runner` reads a registry-sourced extension hook and
     /// accidentally routes it through `install_builtin_before_capability`,
     /// the dispatcher will install it as a Builtin. That trust-class ↔ source
     /// pairing is the loader's contractual responsibility — see the
@@ -4761,6 +4761,8 @@ mod tests {
         // on a thread that owns a clone of the dispatcher Arc. `Mutex::lock`
         // returns Err(PoisonError) on subsequent locks until cleared.
         let poisoner = Arc::clone(&dispatcher);
+        #[allow(clippy::let_underscore_must_use)]
+        // thread panics intentionally to poison the mutex; join Err is expected and discarded
         let _ = std::thread::spawn(move || {
             let _guard = poisoner.registry.lock().expect("first lock ok");
             panic!("intentional poison");
@@ -4876,6 +4878,8 @@ mod tests {
         let dispatcher = Arc::new(HookDispatcher::new(registry));
 
         let poisoner = Arc::clone(&dispatcher);
+        #[allow(clippy::let_underscore_must_use)]
+        // thread panics intentionally to poison the mutex; join Err is expected and discarded
         let _ = std::thread::spawn(move || {
             let _guard = poisoner.registry.lock().expect("first lock ok");
             panic!("intentional poison");

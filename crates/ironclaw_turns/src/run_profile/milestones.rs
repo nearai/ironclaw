@@ -86,6 +86,9 @@ pub enum LoopHostMilestoneKind {
     ModelReasoningDelta {
         safe_delta: String,
     },
+    ModelTextDelta {
+        safe_text: String,
+    },
     ModelFailed {
         reason_kind: AgentLoopHostErrorKind,
     },
@@ -252,6 +255,7 @@ impl LoopHostMilestoneKind {
             Self::ModelStarted { .. } => "model_started",
             Self::ModelCompleted { .. } => "model_completed",
             Self::ModelReasoningDelta { .. } => "model_reasoning_delta",
+            Self::ModelTextDelta { .. } => "model_text_delta",
             Self::ModelFailed { .. } => "model_failed",
             Self::CapabilityInvoked { .. } => "capability_invoked",
             Self::CapabilityCompleted { .. } => "capability_completed",
@@ -289,7 +293,7 @@ pub trait LoopHostMilestoneSink: Send + Sync {
 /// that does not own a `LoopRunContext`. It therefore cannot construct a full
 /// [`LoopHostMilestone`] on its own. Instead, the dispatcher emits the
 /// hook-specific *kind* into a [`HookMilestoneSink`], and host composition in
-/// `ironclaw_reborn` wraps the real [`LoopHostMilestoneSink`] in an adapter
+/// `ironclaw_runner` wraps the real [`LoopHostMilestoneSink`] in an adapter
 /// that injects the active run's context before forwarding.
 ///
 /// The kinds emitted through this sink are always one of:
@@ -391,13 +395,24 @@ impl HookMilestoneSink for InMemoryHookMilestoneSink {
     }
 }
 
-#[derive(Clone)]
 pub struct LoopHostMilestoneEmitter<S>
 where
     S: LoopHostMilestoneSink + ?Sized,
 {
     context: LoopRunContext,
     sink: Arc<S>,
+}
+
+impl<S> Clone for LoopHostMilestoneEmitter<S>
+where
+    S: LoopHostMilestoneSink + ?Sized,
+{
+    fn clone(&self) -> Self {
+        Self {
+            context: self.context.clone(),
+            sink: Arc::clone(&self.sink),
+        }
+    }
 }
 
 impl<S> LoopHostMilestoneEmitter<S>
@@ -456,6 +471,11 @@ where
         safe_delta: String,
     ) -> Result<(), AgentLoopHostError> {
         self.publish(LoopHostMilestoneKind::ModelReasoningDelta { safe_delta })
+            .await
+    }
+
+    pub async fn model_text_delta(&self, safe_text: String) -> Result<(), AgentLoopHostError> {
+        self.publish(LoopHostMilestoneKind::ModelTextDelta { safe_text })
             .await
     }
 

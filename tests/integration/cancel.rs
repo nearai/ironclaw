@@ -139,8 +139,10 @@ async fn busy_reject_when_thread_already_has_an_active_run() {
 
 /// A raw provider `Err` classified non-retryable by `ironclaw_llm`
 /// (`LlmError::ContextLengthExceeded`, excluded from `is_retryable`) must
-/// reach `TurnStatus::Failed` categorized `"model_error"`, not retry forever
-/// or surface as a different category.
+/// reach `TurnStatus::Failed` after bounded context-shrink recovery is
+/// exhausted, categorized `"model_context_overflow"` by the batch-2 provider
+/// fidelity mapping (not the generic `"model_error"`), and must not retry
+/// forever.
 #[tokio::test]
 async fn mid_turn_provider_error_reaches_failed_with_model_error_category() {
     let harness = RebornIntegrationHarness::test_default()
@@ -163,8 +165,8 @@ async fn mid_turn_provider_error_reaches_failed_with_model_error_category() {
         .expect("a Failed run must carry a failure detail");
     assert_eq!(
         failure.category(),
-        "model_error",
-        "expected LoopFailureKind::ModelError, got {failure:?}"
+        "model_context_overflow",
+        "expected the context-overflow fidelity category (ContextLengthExceeded), got {failure:?}"
     );
 }
 
@@ -175,7 +177,7 @@ async fn mid_turn_provider_error_reaches_failed_with_model_error_category() {
 /// permit/reservation bugs) — a leak would make a second submit on the SAME
 /// thread come back `RejectedBusy`.
 ///
-/// The second turn also fails (same `"model_error"` category), not
+/// The second turn also fails (same `"model_context_overflow"` category), not
 /// completes: `fail_model()` swaps in `ErrLlm` as the thread's entire raw
 /// model provider permanently (no per-call counting), and there is no
 /// builder seam to swap in a fresh script for a second turn on the same
@@ -230,7 +232,7 @@ async fn failed_run_does_not_block_a_second_turn_on_the_same_thread() {
         .expect("a Failed run must carry a failure detail");
     assert_eq!(
         failure.category(),
-        "model_error",
-        "expected LoopFailureKind::ModelError on the second run too, got {failure:?}"
+        "model_context_overflow",
+        "expected the context-overflow fidelity category on the second run too, got {failure:?}"
     );
 }

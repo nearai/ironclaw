@@ -69,7 +69,7 @@ mod live_tests {
         assert!(!responses.is_empty(), "Expected at least one response");
 
         let text: Vec<String> = responses.iter().map(|r| r.content.clone()).collect();
-        let tools = rig.tool_calls_started();
+        let tools = rig.tool_call_display_names();
 
         // Log diagnostics before asserting.
         eprintln!("[ZizmorScan] Tools used: {tools:?}");
@@ -79,8 +79,8 @@ mod live_tests {
         );
 
         // The agent should have used the shell tool to install/run zizmor.
-        // Tool events now carry args (e.g. `"shell(cmd)"`) via
-        // `format_action_display_name` in `src/bridge/router.rs`, so match both
+        // Tool events carry args (e.g. `"shell(cmd)"`) via `tool_call_detail`,
+        // surfaced by the harness's `tool_call_display_names`, so match both
         // the bare name and the argument-prefixed form.
         assert!(
             used_shell(&tools),
@@ -157,7 +157,7 @@ mod live_tests {
         assert!(!responses.is_empty(), "Expected at least one response");
 
         let text: Vec<String> = responses.iter().map(|r| r.content.clone()).collect();
-        let tools = rig.tool_calls_started();
+        let tools = rig.tool_call_display_names();
 
         eprintln!("[ZizmorScanV2] Tools used: {tools:?}");
         eprintln!(
@@ -170,8 +170,9 @@ mod live_tests {
         // V2 without auto-approve hits an approval gate for shell/tool_install.
         // The response may be the approval prompt itself rather than agent output.
         // Verify the agent at least attempted a relevant action. Tool events
-        // carry args (e.g. `"shell(cmd)"`) via `format_action_display_name`, so
-        // accept either the bare name or the argument-prefixed form.
+        // carry args (e.g. `"shell(cmd)"`) via `tool_call_detail`, surfaced by
+        // the harness's `tool_call_display_names`, so accept either the bare
+        // name or the argument-prefixed form.
         let attempted_relevant_tool = tools.iter().any(|t| {
             tool_name_matches(t, "shell")
                 || tool_name_matches(t, "tool_install")

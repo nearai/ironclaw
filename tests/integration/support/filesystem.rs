@@ -7,8 +7,8 @@ use ironclaw_product_workflow::ResolvedBinding;
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{
-    BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError, Filter,
-    IndexSpec, LocalFilesystem, Page, RecordVersion, RootFilesystem, VersionedEntry,
+    BackendCapabilities, CasExpectation, DirEntry, DiskFilesystem, Entry, FileStat,
+    FilesystemError, Filter, IndexSpec, Page, RecordVersion, RootFilesystem, VersionedEntry,
 };
 use ironclaw_host_api::{HostPath, VirtualPath};
 
@@ -41,8 +41,8 @@ pub fn turns_scope_path(root_prefix: &str, binding: &ResolvedBinding) -> String 
     }
 }
 
-pub fn local_filesystem(root: &Path) -> Result<LocalFilesystem, FilesystemError> {
-    let mut fs = LocalFilesystem::new();
+pub fn local_filesystem(root: &Path) -> Result<DiskFilesystem, FilesystemError> {
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/engine").expect("valid test virtual path"),
         HostPath::from_path_buf(root.to_path_buf()),

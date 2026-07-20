@@ -146,6 +146,10 @@ that Reborn home on the mounted volume and does not require
 `IRONCLAW_REBORN_POSTGRES_URL`. The container workdir is `/workspace` so the
 workspace root stays separate from Reborn's state and skill roots.
 
+The image includes `sqlite3` and `psql` for terminal inspection from Railway
+shells. Use `sqlite3` for mounted-volume libSQL/SQLite state and `psql` for
+`IRONCLAW_REBORN_POSTGRES_URL` deployments.
+
 To seed a custom config instead of the bundled default, mount it under
 `/opt/ironclaw/` and set `IRONCLAW_REBORN_DEFAULT_CONFIG` to that path. On first
 start, the entrypoint copies that file into `$IRONCLAW_REBORN_HOME/config.toml`;

@@ -1,3 +1,4 @@
+// arch-exempt: large_file, broad turn-coordinator contract suite; #6284 lease-recovery contract update touches a few recovery cases, plan #6263
 use std::{
     sync::{
         Arc, Mutex,
@@ -16,16 +17,16 @@ use ironclaw_turns::{
     DefaultTurnLifecycleEventBus, GateRef, GetRunStateRequest, IdempotencyKey,
     InMemoryRunProfileResolver, InMemoryTurnEventSink, InMemoryTurnStateStore,
     InMemoryTurnStateStoreLimits, LifecyclePublicationErrorPort, LifecyclePublishingTurnStateStore,
-    LoopBlockedKind, LoopCheckpointStateRef, LoopExitMapping, LoopGateRef, LoopResultRef,
-    ProductTurnContext, ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest,
-    RunOriginAdapter, RunProfileId, RunProfileRequest, RunProfileResolutionError,
-    RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion, SanitizedCancelReason,
-    SanitizedFailure, SourceBindingRef, StaticTurnAdmissionLimitProvider, SubmitChildRunRequest,
-    SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor, TurnAdmissionAxisKind,
-    TurnAdmissionBucketKind, TurnAdmissionBucketScope, TurnAdmissionCapacityDenial,
-    TurnAdmissionClass, TurnAdmissionPolicy, TurnCapacityResource, TurnCheckpointId,
-    TurnCommittedEventObserver, TurnCoordinator, TurnError, TurnErrorCategory, TurnEventKind,
-    TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
+    LoopBlockedKind, LoopCheckpointStateRef, LoopExitMapping, LoopGateRef, ProductTurnContext,
+    ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest, RetryTurnRequest,
+    RetryTurnResponse, RunOriginAdapter, RunProfileId, RunProfileRequest,
+    RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
+    SanitizedCancelReason, SanitizedFailure, SourceBindingRef, StaticTurnAdmissionLimitProvider,
+    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
+    TurnAdmissionAxisKind, TurnAdmissionBucketKind, TurnAdmissionBucketScope,
+    TurnAdmissionCapacityDenial, TurnAdmissionClass, TurnAdmissionPolicy, TurnCapacityResource,
+    TurnCheckpointId, TurnCommittedEventObserver, TurnCoordinator, TurnError, TurnErrorCategory,
+    TurnEventKind, TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
     TurnEventProjectionService, TurnEventSink, TurnIdempotencyErrorReplay,
     TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyRecord,
     TurnIdempotencyReplay, TurnLeaseToken, TurnLifecycleEvent, TurnLifecycleEventBus,
@@ -34,7 +35,7 @@ use ironclaw_turns::{
     TurnSpawnTreePort, TurnSpawnTreeStateStore, TurnStateBlockPersistence, TurnStateStore,
     TurnStatus, TurnSurfaceType,
     events::EventCursor,
-    run_profile::{CapabilityOutcome, LoopGateKind, LoopModelRouteSnapshot},
+    run_profile::{LoopGateKind, LoopModelRouteSnapshot, LoopModelUsage},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
@@ -54,6 +55,7 @@ where
     P: TurnRunTransitionPort + ?Sized,
 {
     port.apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+        model_usage: None,
         run_id,
         runner_id,
         lease_token,
@@ -146,101 +148,74 @@ fn turn_scope_agent_id_is_optional() {
 }
 
 #[test]
-fn subagent_capability_outcomes_round_trip_with_suspension_semantics() {
-    let child_run_id = TurnRunId::new();
-    let result_ref = LoopResultRef::new("result:child").unwrap();
-    let spawned = CapabilityOutcome::SpawnedChildRun {
-        child_run_id,
-        result_ref: result_ref.clone(),
-        safe_summary: "spawned in background".to_string(),
-        byte_len: 0,
+fn retry_turn_request_wire_shape_matches_resume_without_gate_resolution() {
+    let run_id = TurnRunId::new();
+    let request = RetryTurnRequest {
+        scope: scope("thread-retry-wire"),
+        actor: actor(),
+        run_id,
+        source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
+        idempotency_key: IdempotencyKey::new("idem-retry-wire").unwrap(),
     };
-    let spawned_json = serde_json::to_value(&spawned).unwrap();
-    // #[serde(default)] ensures legacy wire payloads (without byte_len) decode
-    // cleanly with byte_len = 0. Non-zero values must always round-trip through
-    // serialize→deserialize since byte_len has no skip_serializing_if attribute
-    // (so 0 is also always present on the wire, as this assertion verifies).
-    assert_eq!(
-        spawned_json,
-        serde_json::json!({
-            "spawned_child_run": {
-                "child_run_id": child_run_id,
-                "result_ref": result_ref,
-                "safe_summary": "spawned in background",
-                "byte_len": 0
-            }
-        })
-    );
-    assert!(!spawned.is_suspension());
-    assert_eq!(
-        serde_json::from_value::<CapabilityOutcome>(spawned_json).unwrap(),
-        spawned
-    );
 
-    let gate_ref = LoopGateRef::new("gate:dependent-run").unwrap();
-    let result_ref = LoopResultRef::new("result:dependent-run").unwrap();
-    let awaiting = CapabilityOutcome::AwaitDependentRun {
-        gate_ref: gate_ref.clone(),
-        result_ref: result_ref.clone(),
-        safe_summary: "waiting on child".to_string(),
-        byte_len: 0,
-    };
-    let awaiting_json = serde_json::to_value(&awaiting).unwrap();
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(value["run_id"], serde_json::to_value(run_id).unwrap());
+    assert!(value.get("gate_resolution_ref").is_none());
     assert_eq!(
-        awaiting_json,
-        serde_json::json!({
-            "await_dependent_run": {
-                "gate_ref": gate_ref,
-                "result_ref": result_ref,
-                "safe_summary": "waiting on child",
-                "byte_len": 0
-            }
-        })
-    );
-    assert!(awaiting.is_suspension());
-    assert_eq!(
-        serde_json::from_value::<CapabilityOutcome>(awaiting_json).unwrap(),
-        awaiting
+        serde_json::from_value::<RetryTurnRequest>(value).unwrap(),
+        request
     );
 }
 
-#[test]
-fn subagent_capability_outcomes_round_trip_with_non_zero_byte_len() {
-    // Verify byte_len survives serde round-trip for BOTH AwaitDependentRun
-    // and SpawnedChildRun (each variant). A regression that silently
-    // decoded byte_len: 0 from the wire would defeat ByteCapStrategy for
-    // exactly these paths.
-    let gate_ref = LoopGateRef::new("gate:test-bytes").expect("valid");
-    let result_ref = LoopResultRef::new("result:test-bytes").expect("valid");
-    let await_dep = CapabilityOutcome::AwaitDependentRun {
-        gate_ref,
-        result_ref,
-        safe_summary: "await large".to_string(),
-        byte_len: 48_500,
+#[tokio::test]
+async fn retry_turn_delegates_to_store_and_wakes_requeued_run() {
+    let response = RetryTurnResponse {
+        run_id: TurnRunId::new(),
+        status: TurnStatus::Queued,
+        event_cursor: EventCursor(17),
     };
-    let json = serde_json::to_value(&await_dep).expect("serialize");
-    let decoded: CapabilityOutcome = serde_json::from_value(json).expect("decode");
-    if let CapabilityOutcome::AwaitDependentRun { byte_len, .. } = decoded {
-        assert_eq!(byte_len, 48_500);
-    } else {
-        panic!("expected AwaitDependentRun variant");
-    }
+    let store = Arc::new(RetryOnlyStore::new(Ok(response.clone())));
+    let wake_notifier = Arc::new(RecordingWakeNotifier::default());
+    let coordinator =
+        DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(wake_notifier.clone());
+    let request = retry_request(
+        "thread-retry-delegate",
+        response.run_id,
+        "idem-retry-delegate",
+    );
 
-    let child_run_id = TurnRunId::new();
-    let result_ref = LoopResultRef::new("result:child-bytes").expect("valid");
-    let spawn = CapabilityOutcome::SpawnedChildRun {
-        child_run_id,
-        result_ref,
-        safe_summary: "spawn large".to_string(),
-        byte_len: 60_000,
-    };
-    let json = serde_json::to_value(&spawn).expect("serialize");
-    let decoded: CapabilityOutcome = serde_json::from_value(json).expect("decode");
-    if let CapabilityOutcome::SpawnedChildRun { byte_len, .. } = decoded {
-        assert_eq!(byte_len, 60_000);
-    } else {
-        panic!("expected SpawnedChildRun variant");
-    }
+    let actual = coordinator.retry_turn(request.clone()).await.unwrap();
+
+    assert_eq!(actual, response);
+    assert_eq!(store.retry_requests(), vec![request.clone()]);
+    assert_eq!(
+        wake_notifier.wakes(),
+        vec![TurnRunWake {
+            scope: request.scope,
+            run_id: response.run_id,
+            status: TurnStatus::Queued,
+            event_cursor: EventCursor(17),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn retry_turn_surfaces_not_retryable_without_wake() {
+    let run_id = TurnRunId::new();
+    let store = Arc::new(RetryOnlyStore::new(Err(TurnError::RunNotRetryable {
+        run_id,
+    })));
+    let wake_notifier = Arc::new(RecordingWakeNotifier::default());
+    let coordinator =
+        DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(wake_notifier.clone());
+    let request = retry_request("thread-retry-not-retryable", run_id, "idem-retry-denied");
+
+    let err = coordinator.retry_turn(request.clone()).await.unwrap_err();
+
+    assert_eq!(err, TurnError::RunNotRetryable { run_id });
+    assert_eq!(store.retry_requests(), vec![request]);
+    assert!(wake_notifier.wakes().is_empty());
 }
 
 #[test]
@@ -348,6 +323,51 @@ async fn prepare_turn_mints_ids_without_side_effects_and_submit_binds_requested_
 }
 
 #[tokio::test]
+async fn submit_turn_records_advisory_model_route_from_requested_model() {
+    let (coordinator, _store) = coordinator();
+    let mut request = submit_request("thread-model-select", "idem-model-select");
+    request.requested_model = Some("gpt-4o".to_string());
+
+    let run_id = accepted_run_id(&coordinator.submit_turn(request).await.unwrap());
+
+    let state = coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: scope("thread-model-select"),
+            run_id,
+        })
+        .await
+        .unwrap();
+    let route = state
+        .resolved_model_route
+        .expect("advisory model route recorded from requested_model");
+    assert_eq!(route.model_id, "gpt-4o");
+    assert!(
+        route.is_advisory(),
+        "a caller-requested model is an advisory route, not an operator-resolved one"
+    );
+}
+
+#[tokio::test]
+async fn submit_turn_without_requested_model_records_no_route() {
+    let (coordinator, _store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-no-model", "idem-no-model"))
+            .await
+            .unwrap(),
+    );
+
+    let state = coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: scope("thread-no-model"),
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert!(state.resolved_model_route.is_none());
+}
+
+#[tokio::test]
 async fn children_of_get_run_record_and_tree_reservation_are_scope_checked() {
     let (coordinator, store) = coordinator();
     let parent = accepted_run_id(
@@ -446,7 +466,7 @@ async fn children_of_get_run_record_and_tree_reservation_are_scope_checked() {
     ));
     assert!(matches!(
         store
-            .release_tree_descendants(&child_scope, child_a_id, 1)
+            .release_tree_descendants(&child_scope, child_a_id, 1, child_a_id)
             .await,
         Err(TurnError::InvalidRequest { .. })
     ));
@@ -467,7 +487,7 @@ async fn children_of_get_run_record_and_tree_reservation_are_scope_checked() {
         Err(TurnError::CapacityExceeded { .. })
     ));
     store
-        .release_tree_descendants(&scope("thread-parent"), parent, 1)
+        .release_tree_descendants(&scope("thread-parent"), parent, 1, parent)
         .await
         .unwrap();
     assert_eq!(
@@ -1101,6 +1121,118 @@ async fn blocked_run_persists_to_sink_and_rehydrates_across_restart() {
     assert_eq!(restored_terminal_run.status, TurnStatus::Completed);
 }
 
+/// A block→resume→complete sequence must report the run's cumulative token
+/// usage once, not double-count the pre-block legs. The loop carries the running
+/// per-run total in its execution state across the resume, so it reports the
+/// whole run at every validated exit; the store must therefore *replace* the
+/// stored total on each exit rather than accumulate. Regression for the
+/// `2*leg1 + leg2` double-count.
+#[tokio::test]
+async fn block_resume_complete_reports_cumulative_usage_without_double_counting() {
+    let (coordinator, store) = coordinator();
+
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-usage", "idem-usage"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-usage")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Leg 1 accumulates 100 input / 50 output, then blocks on an approval gate.
+    // The loop reports its cumulative-so-far (leg 1).
+    let gate_ref = LoopGateRef::new("gate:usage").unwrap();
+    let leg1 = LoopModelUsage {
+        input_tokens: 100,
+        output_tokens: 50,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+    };
+    store
+        .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            model_usage: Some(leg1),
+            run_id,
+            runner_id,
+            lease_token,
+            mapping: approval_blocked_mapping(
+                TurnCheckpointId::new(),
+                block_state_ref(),
+                &gate_ref,
+            ),
+        })
+        .await
+        .unwrap();
+
+    // Resume the approval gate; the run re-queues for a fresh claim.
+    coordinator
+        .resume_turn(ResumeTurnRequest {
+            scope: scope("thread-usage"),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: GateRef::new(gate_ref.as_str()).unwrap(),
+            source_binding_ref: SourceBindingRef::new("source-usage-resumed").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-usage-resumed").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-usage-resume").unwrap(),
+            precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedApprovalGate,
+            resume_disposition: None,
+        })
+        .await
+        .unwrap();
+
+    let resumed_runner_id = TurnRunnerId::new();
+    let resumed_lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: resumed_runner_id,
+            lease_token: resumed_lease_token,
+            scope_filter: Some(scope("thread-usage")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Leg 2 adds 40 input / 20 output. Because the loop's execution state carried
+    // leg 1 forward across the resume, the completing exit reports the *run
+    // cumulative* (leg1 + leg2), not just the delta.
+    let cumulative = LoopModelUsage {
+        input_tokens: 140,
+        output_tokens: 70,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+    };
+    store
+        .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            model_usage: Some(cumulative),
+            run_id,
+            runner_id: resumed_runner_id,
+            lease_token: resumed_lease_token,
+            mapping: completed_mapping(),
+        })
+        .await
+        .unwrap();
+
+    let state = coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: scope("thread-usage"),
+            run_id,
+        })
+        .await
+        .unwrap();
+    // The terminal total is the run cumulative (leg1 + leg2), NOT
+    // leg1 + (leg1 + leg2) = 2*leg1 + leg2.
+    assert_eq!(state.model_usage, Some(cumulative));
+}
+
 /// A run recovered *from a restart snapshot* while blocked must still receive a
 /// durable terminal-convergence write when it later resumes and completes —
 /// otherwise the next restart would resurrect the finished run as live. This
@@ -1630,7 +1762,10 @@ async fn event_publishing_transition_port_publishes_blocked_and_terminal_events(
 
 #[tokio::test]
 async fn event_publishing_transition_port_publishes_expired_lease_terminal_events() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    // Crash-retry bound 0 so a checkpoint-less abandoned lease terminal-fails
+    // (crash_retry_exhausted) instead of re-queuing (#6284) — the terminal
+    // recovery event this test asserts the publisher emits.
+    let store = store_no_crash_retries();
     let sink = Arc::new(InMemoryTurnEventSink::default());
     let transition_port = lifecycle_publishing_store(store, None, Some(sink.clone()));
     let coordinator = DefaultTurnCoordinator::new(transition_port.clone());
@@ -1691,7 +1826,7 @@ async fn event_publishing_transition_port_publishes_expired_lease_terminal_event
         .iter()
         .filter(|event| {
             event.kind == TurnEventKind::Failed
-                && event.sanitized_reason.as_deref() == Some("lease_expired")
+                && event.sanitized_reason.as_deref() == Some("crash_retry_exhausted")
         })
         .collect::<Vec<_>>();
     assert_eq!(recovered_events.len(), 2);
@@ -1817,8 +1952,11 @@ async fn event_publishing_transition_port_returns_committed_claim_after_required
 }
 
 #[tokio::test]
-async fn event_publishing_transition_port_preserves_lease_expired_recovery_reason() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+async fn event_publishing_transition_port_preserves_terminal_recovery_reason() {
+    // Crash-retry bound 0: a checkpoint-less abandoned lease terminal-fails with
+    // crash_retry_exhausted (#6284). This test asserts the terminal recovery's
+    // failure reason is preserved in the published event.
+    let store = store_no_crash_retries();
     let sink = Arc::new(InMemoryTurnEventSink::default());
     let transition_port = lifecycle_publishing_store(store.clone(), None, Some(sink.clone()));
     let coordinator = DefaultTurnCoordinator::new(transition_port.clone());
@@ -1857,7 +1995,7 @@ async fn event_publishing_transition_port_preserves_lease_expired_recovery_reaso
     assert!(sink.events().iter().any(|event| {
         event.run_id == run_id
             && event.kind == TurnEventKind::Failed
-            && event.sanitized_reason.as_deref() == Some("lease_expired")
+            && event.sanitized_reason.as_deref() == Some("crash_retry_exhausted")
     }));
 }
 
@@ -1926,7 +2064,10 @@ async fn event_publishing_transition_port_attempts_all_expired_lease_events_afte
 
 #[tokio::test]
 async fn event_publishing_transition_port_attempts_all_expired_lease_events_after_observer_error() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    // Crash-retry bound 0: checkpoint-less abandoned leases terminal-fail
+    // (crash_retry_exhausted, a `Failed` status) instead of re-queuing (#6284),
+    // so the observer that fails on the first `Failed` event is exercised.
+    let store = store_no_crash_retries();
     let observer = Arc::new(FailFirstRecordingCommittedEventObserver::failing_on(
         TurnStatus::Failed,
     ));
@@ -2709,10 +2850,7 @@ async fn turn_lifecycle_projection_replays_cancelled_terminal_without_raw_refs()
 #[tokio::test]
 async fn turn_lifecycle_projection_requires_rebase_for_pruned_or_fabricated_cursors() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
-            max_events: 2,
-            ..InMemoryTurnStateStoreLimits::default()
-        },
+        InMemoryTurnStateStoreLimits::default().set_max_events(2),
     ));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let mut request = submit_request("thread-turn-gap", "idem-turn-gap-submit");
@@ -3874,10 +4012,7 @@ async fn record_model_route_snapshot_is_idempotent_and_rejects_route_changes() {
 #[tokio::test]
 async fn terminal_record_pruning_bounds_released_admission_reservations() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
-            max_terminal_records: 1,
-            ..InMemoryTurnStateStoreLimits::default()
-        },
+        InMemoryTurnStateStoreLimits::default().set_max_terminal_records(1),
     ));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let first_run_id = accepted_run_id(
@@ -3946,10 +4081,7 @@ async fn terminal_record_pruning_bounds_released_admission_reservations() {
 #[tokio::test]
 async fn terminal_root_with_tree_reservation_survives_terminal_pruning() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
-            max_terminal_records: 1,
-            ..InMemoryTurnStateStoreLimits::default()
-        },
+        InMemoryTurnStateStoreLimits::default().set_max_terminal_records(1),
     ));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let parent_scope = scope("thread-tree-root-pruned");
@@ -4010,10 +4142,7 @@ async fn terminal_root_with_tree_reservation_survives_terminal_pruning() {
 #[tokio::test]
 async fn terminal_root_release_does_not_duplicate_pruning_queue() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
-            max_terminal_records: 1,
-            ..InMemoryTurnStateStoreLimits::default()
-        },
+        InMemoryTurnStateStoreLimits::default().set_max_terminal_records(1),
     ));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let parent_scope = scope("thread-tree-root-release");
@@ -4033,7 +4162,7 @@ async fn terminal_root_release_does_not_duplicate_pruning_queue() {
         .unwrap();
     complete_queued_run(&store, parent_run_id, "thread-tree-root-release").await;
     store
-        .release_tree_descendants(&parent_scope, parent_run_id, 1)
+        .release_tree_descendants(&parent_scope, parent_run_id, 1, parent_run_id)
         .await
         .unwrap();
 
@@ -4050,10 +4179,7 @@ async fn terminal_root_release_does_not_duplicate_pruning_queue() {
 #[tokio::test]
 async fn releasing_old_reserved_terminal_root_keeps_newer_terminal_record() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
-            max_terminal_records: 1,
-            ..InMemoryTurnStateStoreLimits::default()
-        },
+        InMemoryTurnStateStoreLimits::default().set_max_terminal_records(1),
     ));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let parent_scope = scope("thread-tree-root-release-after-churn");
@@ -4098,7 +4224,7 @@ async fn releasing_old_reserved_terminal_root_keeps_newer_terminal_record() {
     );
 
     store
-        .release_tree_descendants(&parent_scope, parent_run_id, 1)
+        .release_tree_descendants(&parent_scope, parent_run_id, 1, parent_run_id)
         .await
         .unwrap();
 
@@ -4961,10 +5087,7 @@ fn capacity_exceeded_idempotency_replay_preserves_resource_and_cap() {
 #[tokio::test]
 async fn idempotency_persistence_snapshot_retains_each_operation_kind_capacity() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
-            max_idempotency_records: 1,
-            ..InMemoryTurnStateStoreLimits::default()
-        },
+        InMemoryTurnStateStoreLimits::default().set_max_idempotency_records(1),
     ));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let run_id = accepted_run_id(
@@ -5036,10 +5159,7 @@ async fn idempotency_persistence_snapshot_retains_each_operation_kind_capacity()
 #[tokio::test]
 async fn idempotency_persistence_snapshot_drops_records_when_replay_cache_prunes_them() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
-            max_idempotency_records: 1,
-            ..InMemoryTurnStateStoreLimits::default()
-        },
+        InMemoryTurnStateStoreLimits::default().set_max_idempotency_records(1),
     ));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
 
@@ -5151,10 +5271,7 @@ async fn idempotency_replay_helpers_require_matching_operation_kind() {
 #[tokio::test]
 async fn idempotency_retention_keeps_the_newest_result_when_pruned() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
-            max_idempotency_records: 2,
-            ..InMemoryTurnStateStoreLimits::default()
-        },
+        InMemoryTurnStateStoreLimits::default().set_max_idempotency_records(2),
     ));
     let coordinator = DefaultTurnCoordinator::new(store);
 
@@ -5389,10 +5506,8 @@ async fn runner_claims_queued_run_with_lease_and_heartbeat_requires_matching_lea
 
 #[tokio::test]
 async fn cancel_requested_runner_heartbeat_does_not_extend_lease() {
-    let limits = InMemoryTurnStateStoreLimits {
-        runner_lease_ttl: ChronoDuration::milliseconds(40),
-        ..InMemoryTurnStateStoreLimits::default()
-    };
+    let limits = InMemoryTurnStateStoreLimits::default()
+        .set_runner_lease_ttl(ChronoDuration::milliseconds(40));
     let store = Arc::new(InMemoryTurnStateStore::with_limits(limits));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let request = submit_request("thread-cancel-heartbeat", "idem-submit-cancel-heartbeat");
@@ -5450,10 +5565,8 @@ async fn cancel_requested_runner_heartbeat_does_not_extend_lease() {
 
 #[tokio::test]
 async fn expired_runner_lease_rejects_heartbeat_and_terminal_completion_before_recovery_sweep() {
-    let limits = InMemoryTurnStateStoreLimits {
-        runner_lease_ttl: ChronoDuration::milliseconds(-1),
-        ..InMemoryTurnStateStoreLimits::default()
-    };
+    let limits = InMemoryTurnStateStoreLimits::default()
+        .set_runner_lease_ttl(ChronoDuration::milliseconds(-1));
     let store = Arc::new(InMemoryTurnStateStore::with_limits(limits));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let run_id = accepted_run_id(
@@ -5516,10 +5629,8 @@ async fn expired_runner_lease_rejects_heartbeat_and_terminal_completion_before_r
 
 #[tokio::test]
 async fn expired_runner_lease_rejects_fail_and_runner_side_cancel_before_recovery_sweep() {
-    let limits = InMemoryTurnStateStoreLimits {
-        runner_lease_ttl: ChronoDuration::milliseconds(-1),
-        ..InMemoryTurnStateStoreLimits::default()
-    };
+    let limits = InMemoryTurnStateStoreLimits::default()
+        .set_runner_lease_ttl(ChronoDuration::milliseconds(-1));
     let store = Arc::new(InMemoryTurnStateStore::with_limits(limits));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
 
@@ -5657,7 +5768,10 @@ async fn runner_claim_and_heartbeat_persist_lease_expiry() {
 
 #[tokio::test]
 async fn expired_running_lease_fails_and_releases_thread_lock() {
-    let (coordinator, store) = coordinator();
+    // Crash-retry bound 0: a checkpoint-less abandoned `Running` lease
+    // terminal-fails (crash_retry_exhausted) and releases the thread lock rather
+    // than re-queuing (#6284) — the terminal path this test asserts.
+    let (coordinator, store) = coordinator_no_crash_retries();
     let run_id = accepted_run_id(
         &coordinator
             .submit_turn(submit_request("thread-a", "idem-submit-a"))
@@ -5709,7 +5823,7 @@ async fn expired_running_lease_fails_and_releases_thread_lock() {
         assert_eq!(run.status, TurnStatus::Failed);
         assert_eq!(
             run.failure.as_ref().map(SanitizedFailure::category),
-            Some("lease_expired")
+            Some("crash_retry_exhausted")
         );
     }
     assert!(
@@ -5727,7 +5841,7 @@ async fn expired_running_lease_fails_and_releases_thread_lock() {
     assert!(store.events().iter().any(|event| {
         event.run_id == run_id
             && event.kind == TurnEventKind::Failed
-            && event.sanitized_reason.as_deref() == Some("lease_expired")
+            && event.sanitized_reason.as_deref() == Some("crash_retry_exhausted")
     }));
 }
 
@@ -5795,7 +5909,10 @@ async fn expired_cancel_requested_lease_cancels_and_releases_thread_lock() {
 
 #[tokio::test]
 async fn cancel_after_expired_failed_run_reports_already_terminal_and_allows_new_submit() {
-    let (coordinator, store) = coordinator();
+    // Crash-retry bound 0: a checkpoint-less abandoned lease terminal-fails
+    // (crash_retry_exhausted) instead of re-queuing (#6284), so a subsequent
+    // cancel of the now-terminal run reports `already_terminal`.
+    let (coordinator, store) = coordinator_no_crash_retries();
     let run_id = accepted_run_id(
         &coordinator
             .submit_turn(submit_request("thread-a", "idem-submit-a"))
@@ -6436,6 +6553,8 @@ async fn in_memory_event_sink_retains_a_bounded_tail() {
             kind: TurnEventKind::Submitted,
             blocked_gate: None,
             sanitized_reason: None,
+            retryable: None,
+            detail: None,
         })
         .await
         .unwrap();
@@ -6648,7 +6767,7 @@ async fn release_tree_descendants_rejects_over_release() {
         .unwrap();
 
     let err = store
-        .release_tree_descendants(&owner_scope, root, 3)
+        .release_tree_descendants(&owner_scope, root, 3, root)
         .await
         .unwrap_err();
     match err {
@@ -6657,6 +6776,142 @@ async fn release_tree_descendants_rejects_over_release() {
         }
         other => panic!("expected InvalidRequest, got {other:?}"),
     }
+}
+
+/// §5.5 round-5/6: a retried `release_tree_descendants` call for the same
+/// child (`idempotency_key`) must be a no-op, not a second decrement — this
+/// is what makes recovery re-driving an edge stuck at
+/// `ReservationReleaseState::Claimed`, or a rollback retry, safe to repeat.
+/// Deleting the dedup check would silently over-release capacity: this test
+/// pins that a repeated call for the *same* child does not free capacity
+/// twice, while a *different* child's release still counts normally.
+#[tokio::test]
+async fn release_tree_descendants_dedups_repeated_call_for_same_child() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+
+    let root = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-tree-root-dedup",
+                "idem-tree-root-dedup",
+            ))
+            .await
+            .unwrap(),
+    );
+    let owner_scope = scope("thread-tree-root-dedup");
+    let child_a = TurnRunId::new();
+    let child_b = TurnRunId::new();
+
+    // Reserve 2 descendant slots against a cap with no spare headroom (cap
+    // == the reservation), so a double-release is the only way a later
+    // 2-slot reserve could succeed.
+    store
+        .reserve_tree_descendants(&owner_scope, root, 2, 2)
+        .await
+        .unwrap();
+
+    // Release child_a's slot, then retry the *exact same* release call
+    // (simulating recovery re-driving a `Claimed`-stuck edge). The retry
+    // must not free a second slot.
+    store
+        .release_tree_descendants(&owner_scope, root, 1, child_a)
+        .await
+        .unwrap();
+    store
+        .release_tree_descendants(&owner_scope, root, 1, child_a)
+        .await
+        .unwrap();
+
+    // Only 1 slot was actually freed (child_a's) — 1 remains occupied, so
+    // reserving 2 more against the same cap=2 must be rejected. If the
+    // retry had double-released instead, 0 would remain occupied and this
+    // would incorrectly succeed.
+    let over_cap = store
+        .reserve_tree_descendants(&owner_scope, root, 2, 2)
+        .await;
+    assert!(
+        matches!(over_cap, Err(TurnError::CapacityExceeded { .. })),
+        "expected the retried release to be a no-op leaving 1 slot still occupied, got {over_cap:?}"
+    );
+
+    // A *different* child's release still counts normally, confirming the
+    // dedup is keyed per-child, not a blanket no-op — freeing child_b's slot
+    // too now allows a fresh 2-slot reservation against the same cap.
+    store
+        .release_tree_descendants(&owner_scope, root, 1, child_b)
+        .await
+        .unwrap();
+    let after_second_child = store
+        .reserve_tree_descendants(&owner_scope, root, 2, 2)
+        .await
+        .unwrap();
+    assert_eq!(after_second_child.descendant_count, 2);
+}
+
+/// §5.5 round-7: `prune_released_child` must remove a child's dedup entry
+/// from `released_children` (called strictly before the edge's delete,
+/// §4.0(a)) -- otherwise the set grows for the tree's whole cumulative
+/// lifetime instead of staying bounded by the live descendant cap. There is
+/// no direct observable for the set's contents, so this pins the
+/// *behavioral* meaning of pruning instead: a repeated release call for the
+/// same idempotency_key is a no-op only while the entry is present
+/// (`release_tree_descendants_dedups_repeated_call_for_same_child` above),
+/// so after pruning, a repeated call for the *same* key must decrement
+/// again, not no-op.
+#[tokio::test]
+async fn prune_released_child_allows_idempotency_key_reuse_after_prune() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+
+    let root = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-tree-root-prune",
+                "idem-tree-root-prune",
+            ))
+            .await
+            .unwrap(),
+    );
+    let owner_scope = scope("thread-tree-root-prune");
+    let child_a = TurnRunId::new();
+
+    store
+        .reserve_tree_descendants(&owner_scope, root, 2, 2)
+        .await
+        .unwrap();
+
+    // Release child_a's slot (count 2 -> 1, released_children = {child_a}).
+    store
+        .release_tree_descendants(&owner_scope, root, 1, child_a)
+        .await
+        .unwrap();
+
+    // Prune the dedup entry for child_a -- the close-path cleanup that keeps
+    // `released_children` bounded to currently-open-or-in-flight edges.
+    store
+        .prune_released_child(&owner_scope, root, child_a)
+        .await
+        .unwrap();
+
+    // With the entry pruned, a release call reusing the *same*
+    // idempotency_key must decrement again rather than no-op -- if the
+    // prune were a no-op, this call would find child_a already recorded and
+    // silently skip the decrement instead.
+    store
+        .release_tree_descendants(&owner_scope, root, 1, child_a)
+        .await
+        .unwrap();
+
+    // Full capacity must be free again: 2 slots total freed (one per
+    // release call), against a reservation cap of 2. If the prune had been
+    // a no-op, only 1 slot would ever have been freed and this would fail
+    // with CapacityExceeded.
+    let after_prune_reserve = store
+        .reserve_tree_descendants(&owner_scope, root, 2, 2)
+        .await
+        .unwrap();
+    assert_eq!(after_prune_reserve.descendant_count, 2);
 }
 
 #[tokio::test]
@@ -6701,6 +6956,26 @@ fn coordinator() -> (
     (DefaultTurnCoordinator::new(store.clone()), store)
 }
 
+/// A store that never re-drives a crashed checkpoint-less run (#6284): with the
+/// crash-retry bound at 0, lease expiry of a checkpoint-less `Running` run
+/// terminal-fails immediately with the genuine-invariant reason
+/// `crash_retry_exhausted`. Recovery tests that assert the terminal-recovery
+/// publishing/locking path use this, since the default (re-driving) config
+/// re-queues such a run on first expiry instead of terminating it.
+fn store_no_crash_retries() -> Arc<InMemoryTurnStateStore> {
+    Arc::new(InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits::default().set_max_crash_recovery_reclaims(0),
+    ))
+}
+
+fn coordinator_no_crash_retries() -> (
+    DefaultTurnCoordinator<InMemoryTurnStateStore>,
+    Arc<InMemoryTurnStateStore>,
+) {
+    let store = store_no_crash_retries();
+    (DefaultTurnCoordinator::new(store.clone()), store)
+}
+
 fn lifecycle_publishing_store(
     store: Arc<InMemoryTurnStateStore>,
     required_observer: Option<Arc<dyn TurnCommittedEventObserver>>,
@@ -6740,6 +7015,7 @@ async fn complete_queued_run(store: &InMemoryTurnStateStore, run_id: TurnRunId, 
 
 fn submit_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest {
     SubmitTurnRequest {
+        requested_model: None,
         scope: scope(thread),
         actor: actor(),
         accepted_message_ref: AcceptedMessageRef::new(format!("message-{thread}")).unwrap(),
@@ -6794,6 +7070,17 @@ fn cancel_request(thread: &str, run_id: TurnRunId, idempotency_key: &str) -> Can
     }
 }
 
+fn retry_request(thread: &str, run_id: TurnRunId, idempotency_key: &str) -> RetryTurnRequest {
+    RetryTurnRequest {
+        scope: scope(thread),
+        actor: actor(),
+        run_id,
+        source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
+        idempotency_key: IdempotencyKey::new(idempotency_key).unwrap(),
+    }
+}
+
 fn accepted_run_id(response: &SubmitTurnResponse) -> TurnRunId {
     let SubmitTurnResponse::Accepted { run_id, .. } = response;
     *run_id
@@ -6835,6 +7122,67 @@ impl TurnRunWakeNotifier for RecordingWakeNotifier {
     fn notify_queued_run(&self, wake: TurnRunWake) -> Result<(), TurnRunWakeNotifyError> {
         self.wakes.lock().unwrap().push(wake);
         Ok(())
+    }
+}
+
+struct RetryOnlyStore {
+    retry_response: Mutex<Result<RetryTurnResponse, TurnError>>,
+    retry_requests: Mutex<Vec<RetryTurnRequest>>,
+}
+
+impl RetryOnlyStore {
+    fn new(retry_response: Result<RetryTurnResponse, TurnError>) -> Self {
+        Self {
+            retry_response: Mutex::new(retry_response),
+            retry_requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn retry_requests(&self) -> Vec<RetryTurnRequest> {
+        self.retry_requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl TurnStateStore for RetryOnlyStore {
+    async fn submit_turn(
+        &self,
+        _request: SubmitTurnRequest,
+        _admission_policy: &dyn TurnAdmissionPolicy,
+        _run_profile_resolver: &dyn RunProfileResolver,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "test store only implements retry_turn".to_string(),
+        })
+    }
+
+    async fn resume_turn(
+        &self,
+        _request: ResumeTurnRequest,
+    ) -> Result<ironclaw_turns::ResumeTurnResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "test store only implements retry_turn".to_string(),
+        })
+    }
+
+    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
+        self.retry_requests.lock().unwrap().push(request);
+        self.retry_response.lock().unwrap().clone()
+    }
+
+    async fn request_cancel(
+        &self,
+        _request: CancelRunRequest,
+    ) -> Result<CancelRunResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "test store only implements retry_turn".to_string(),
+        })
+    }
+
+    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "test store only implements retry_turn".to_string(),
+        })
     }
 }
 
@@ -7139,6 +7487,7 @@ impl TurnRunTransitionPort for AtomicLoopExitPort {
             resolved_run_profile_id: RunProfileId::new("default").unwrap(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             resolved_model_route: None,
+            model_usage: None,
             received_at: received_at(),
             checkpoint_id: None,
             gate_ref: None,
@@ -7702,6 +8051,7 @@ async fn cancel_on_legacy_recovery_required_run_reports_already_terminal() {
     // a RecoveryRequired mapping (the compat shim).
     let rr_state = store
         .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            model_usage: None,
             run_id,
             runner_id,
             lease_token,

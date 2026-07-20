@@ -11,16 +11,16 @@ from helpers import (
 )
 
 
-def google_headers() -> dict[str, str]:
-    return {"Authorization": f"Bearer {EMULATE_GOOGLE_BEARER}"}
+def google_headers(token: str = EMULATE_GOOGLE_BEARER) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
 
 
-def slack_headers() -> dict[str, str]:
-    return {"Authorization": f"Bearer {EMULATE_SLACK_BEARER}"}
+def slack_headers(token: str = EMULATE_SLACK_BEARER) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
 
 
-def github_headers() -> dict[str, str]:
-    return {"Authorization": f"Bearer {EMULATE_GITHUB_BEARER}"}
+def github_headers(token: str = EMULATE_GITHUB_BEARER) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
 
 
 def gmail_header(message: dict, name: str) -> str | None:
@@ -46,15 +46,19 @@ async def slack_post(
     base_url: str,
     method: str,
     payload: dict | None = None,
+    *,
+    token: str = EMULATE_SLACK_BEARER,
+    expect_ok: bool = True,
 ) -> dict:
     response = await client.post(
         f"{base_url}/api/{method}",
-        headers=slack_headers(),
+        headers=slack_headers(token),
         json=payload or {},
     )
     response.raise_for_status()
     body = response.json()
-    assert body.get("ok") is True, f"Slack {method} failed: {body}"
+    if expect_ok:
+        assert body.get("ok") is True, f"Slack {method} failed: {body}"
     return body
 
 
@@ -67,11 +71,12 @@ async def github_json(
     payload: dict | None = None,
     params: dict | None = None,
     expected_status: int = 200,
+    token: str = EMULATE_GITHUB_BEARER,
 ) -> dict | list:
     response = await client.request(
         method,
         f"{base_url}{path}",
-        headers=github_headers(),
+        headers=github_headers(token),
         json=payload,
         params=params,
     )

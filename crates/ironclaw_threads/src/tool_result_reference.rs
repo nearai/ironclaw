@@ -10,7 +10,25 @@ use serde::{Deserialize, Serialize};
 // ASCII letters, digits, `_`, `-`, or `.`.
 const MAX_TOOL_RESULT_REF_BYTES: usize = 256;
 const MAX_TOOL_RESULT_SUMMARY_BYTES: usize = 512;
-const MAX_MODEL_OBSERVATION_BYTES: usize = 4096;
+/// Whole-envelope cap for a `model_observation` JSON blob (preview text plus
+/// surrounding schema fields). Derived as 2x
+/// `crate::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES` (the largest raw
+/// preview/chunk this crate will ever embed): a preview of ordinary tool
+/// output (text/JSON) grows only slightly under JSON-string escaping, so 2x
+/// leaves ample room for the preview plus the fixed envelope fields (summary,
+/// result_ref, artifacts). A pathological all-`"`/all-control preview that
+/// would exceed the cap degrades gracefully to `safe_summary` rather than
+/// corrupting the transcript. Keep this DERIVED from the preview cap, never a
+/// second independent literal -- when the two drift apart (an oversized
+/// preview that can't fit the envelope) the observation is dropped to a bare
+/// stub on replay and the model loses the content, exactly the retention
+/// failure behind the #5902 regression.
+const MAX_MODEL_OBSERVATION_BYTES: usize = crate::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES * 2;
+// Keep the observation envelope large enough for the largest result-read
+// preview. This is compile-time because both bounds are compile-time contract
+// constants; a drift must fail the build rather than rely on a runtime test.
+const _: [(); 1] = [(); (MAX_MODEL_OBSERVATION_BYTES
+    >= crate::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES) as usize];
 const MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION: u64 = 1;
 const MODEL_OBSERVATION_SUMMARY_MAX_BYTES: usize = 512;
 const MODEL_OBSERVATION_ARTIFACTS_MAX: usize = 16;
@@ -18,25 +36,20 @@ const MODEL_OBSERVATION_REPAIRS_MAX: usize = 16;
 const MODEL_OBSERVATION_INPUT_ISSUES_MAX: usize = 16;
 const MODEL_OBSERVATION_TEXT_MAX_BYTES: usize = 512;
 const RAW_PAYLOAD_OR_PATH_DELIMITERS: [char; 9] = ['{', '}', '[', ']', '`', '<', '>', '/', '\\'];
-const SENSITIVE_SUMMARY_MARKERS: [&str; 18] = [
+// Only credential markers are banned. Descriptive error vocabulary
+// ("provider error", "stack trace", "tool input", "traceback", "host path",
+// "raw runtime") is allowed — the raw cause rides the model-visible detail
+// channel, which redacts secret VALUES rather than banning ordinary words.
+const SENSITIVE_SUMMARY_MARKERS: [&str; 9] = [
     "access token",
     "api key",
     "api_key",
     "apikey",
     "authorization:",
     "bearer ",
-    "host path",
-    "invalid api key",
-    "invalid_api_key",
     "password",
     "passwd",
-    "provider error",
-    "raw runtime",
     "secret",
-    "stack trace",
-    "tool input",
-    "tool_input",
-    "traceback",
 ];
 const SENSITIVE_OBSERVATION_MARKERS: [&str; 20] = [
     "access token",
@@ -149,6 +162,11 @@ impl ProviderToolCallReferenceEnvelope {
 }
 
 impl ToolResultReferenceEnvelope {
+    /// Validate an opaque result reference before it is used as a storage key.
+    pub fn validate_result_ref(value: &str) -> Result<(), String> {
+        validate_tool_result_ref(value)
+    }
+
     pub fn new(
         result_ref: impl Into<String>,
         safe_summary: ToolResultSafeSummary,
@@ -188,25 +206,13 @@ impl ToolResultReferenceEnvelope {
             return Ok(envelope);
         };
 
-        match validate_model_observation(&model_observation) {
-            Ok(()) => {
-                let model_observation_content =
-                    serde_json::to_string(&model_observation).unwrap_or_default();
-                log_model_observation_constructed(&envelope.result_ref, &model_observation_content);
-                envelope.model_observation = Some(model_observation);
-            }
-            Err(error) => {
-                tracing::debug!(
-                    reason = %error,
-                    result_ref = %envelope.result_ref,
-                    "model-visible tool observation validation failed; preserving safe summary"
-                );
-                tracing::warn!(
-                    reason = %error,
-                    result_ref = %envelope.result_ref,
-                    "dropping invalid model-visible tool observation and preserving safe summary"
-                );
-            }
+        if let Some(model_observation) =
+            normalized_model_observation(&envelope.result_ref, model_observation)
+        {
+            let model_observation_content =
+                serde_json::to_string(&model_observation).unwrap_or_default();
+            log_model_observation_constructed(&envelope.result_ref, &model_observation_content);
+            envelope.model_observation = Some(model_observation);
         }
         Ok(envelope)
     }
@@ -320,6 +326,101 @@ impl ToolResultReferenceEnvelope {
     }
 }
 
+fn normalized_model_observation(
+    result_ref: &str,
+    mut model_observation: serde_json::Value,
+) -> Option<serde_json::Value> {
+    match validate_model_observation(&model_observation) {
+        Ok(()) => Some(model_observation),
+        Err(error) => {
+            let repaired = strip_unsafe_result_reference_preview(&mut model_observation)
+                || strip_unsafe_invalid_input_issue_text(&mut model_observation);
+            if repaired && validate_model_observation(&model_observation).is_ok() {
+                tracing::debug!(
+                    reason = %error,
+                    result_ref = %result_ref,
+                    "scrubbed unsafe model-observation fields while preserving the observation"
+                );
+                Some(model_observation)
+            } else {
+                tracing::debug!(
+                    reason = %error,
+                    "model-visible tool observation validation failed; preserving safe summary"
+                );
+                tracing::warn!(
+                    reason = %error,
+                    result_ref = %result_ref,
+                    "dropping invalid model-visible tool observation and preserving safe summary"
+                );
+                None
+            }
+        }
+    }
+}
+
+fn observation_detail_of_kind<'a>(
+    observation: &'a mut serde_json::Value,
+    kind: &str,
+) -> Option<&'a mut serde_json::Map<String, serde_json::Value>> {
+    observation
+        .as_object_mut()
+        .and_then(|observation| observation.get_mut("detail"))
+        .and_then(serde_json::Value::as_object_mut)
+        .filter(|detail| detail.get("kind").and_then(serde_json::Value::as_str) == Some(kind))
+}
+
+fn strip_unsafe_result_reference_preview(observation: &mut serde_json::Value) -> bool {
+    observation_detail_of_kind(observation, "result_reference")
+        .and_then(|detail| detail.remove("preview"))
+        .is_some()
+}
+
+/// Whether an issue-text field needs repair: either the content scan rejects
+/// it, or it's too long for the retry's own length check to accept even once
+/// content-clean.
+fn observation_text_needs_repair(text: &str) -> bool {
+    text.len() > MODEL_OBSERVATION_TEXT_MAX_BYTES || validate_model_observation_text(text).is_err()
+}
+
+/// Scrubs untrusted echoed text out of `invalid_input` issues: an unsafe
+/// `received` is dropped (it is optional), an unsafe `path` is replaced with
+/// a fixed placeholder (it is required), so the structured repair guidance
+/// survives instead of the whole observation being dropped.
+fn strip_unsafe_invalid_input_issue_text(observation: &mut serde_json::Value) -> bool {
+    let Some(issues) = observation_detail_of_kind(observation, "invalid_input")
+        .and_then(|detail| detail.get_mut("issues"))
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return false;
+    };
+    let mut changed = false;
+    for issue in issues {
+        let Some(issue) = issue.as_object_mut() else {
+            continue;
+        };
+        let received_needs_repair = issue
+            .get("received")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(observation_text_needs_repair);
+        if received_needs_repair {
+            issue.remove("received");
+            changed = true;
+        }
+        let path_needs_repair = issue
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(observation_text_needs_repair);
+        if path_needs_repair {
+            issue.insert(
+                "path".to_string(),
+                serde_json::Value::String("unexpected_field".to_string()),
+            );
+            changed = true;
+        }
+    }
+    changed
+}
+
 fn validate_tool_result_ref(value: &str) -> Result<(), String> {
     let Some(suffix) = value.strip_prefix("result:") else {
         return Err("tool result ref must start with result:".to_string());
@@ -382,7 +483,7 @@ fn validate_tool_result_safe_summary(value: String) -> Result<String, String> {
 
     let lower = value.to_ascii_lowercase();
     for forbidden in SENSITIVE_SUMMARY_MARKERS {
-        if lower.contains(forbidden) {
+        if contains_marker_at_word_boundary(&lower, forbidden) {
             return Err(format!(
                 "tool result summary must not contain sensitive marker `{forbidden}`"
             ));
@@ -456,14 +557,14 @@ fn validate_model_observation_text(value: &str) -> Result<(), String> {
     }
     let lower = value.to_ascii_lowercase();
     for forbidden in SENSITIVE_OBSERVATION_MARKERS {
-        if lower.contains(forbidden) {
+        if contains_marker_at_word_boundary(&lower, forbidden) {
             return Err(format!(
                 "model observation must not contain sensitive marker `{forbidden}`"
             ));
         }
     }
     for forbidden in PROMPT_INJECTION_OBSERVATION_MARKERS {
-        if lower.contains(forbidden) {
+        if contains_marker_at_word_boundary(&lower, forbidden) {
             return Err(format!(
                 "model observation must not contain instruction marker `{forbidden}`"
             ));
@@ -476,6 +577,35 @@ fn validate_model_observation_text(value: &str) -> Result<(), String> {
         return Err("model observation must not contain API-key-like tokens".to_string());
     }
     Ok(())
+}
+
+/// True if `marker` occurs in `haystack` (already lowercased) as a standalone
+/// token rather than embedded inside a larger alphanumeric word. Prevents
+/// false positives like the marker `secret` matching the ordinary word
+/// `secretary` (e.g. "Secretary of the Treasury"), which would otherwise scrub
+/// legitimate tool output from the replayed transcript and force the model to
+/// re-fetch it every turn. Markers that begin/end with a non-alphanumeric
+/// delimiter (e.g. `bearer `, `authorization:`) already carry their own
+/// boundary and keep matching exactly as before.
+fn contains_marker_at_word_boundary(haystack: &str, marker: &str) -> bool {
+    if marker.is_empty() {
+        return false;
+    }
+    let starts_alnum = marker.starts_with(|c: char| c.is_ascii_alphanumeric());
+    let ends_alnum = marker.ends_with(|c: char| c.is_ascii_alphanumeric());
+    for (start, _) in haystack.match_indices(marker) {
+        let end = start + marker.len();
+        let before_ok = !starts_alnum
+            || start == 0
+            || !haystack[..start].ends_with(|c: char| c.is_ascii_alphanumeric());
+        let after_ok = !ends_alnum
+            || end >= haystack.len()
+            || !haystack[end..].starts_with(|c: char| c.is_ascii_alphanumeric());
+        if before_ok && after_ok {
+            return true;
+        }
+    }
+    false
 }
 
 fn validate_model_visible_tool_observation_schema(value: &serde_json::Value) -> Result<(), String> {
@@ -538,14 +668,60 @@ fn validate_model_observation_detail(value: &serde_json::Value) -> Result<(), St
         "generic_failure" => {
             validate_object_keys(
                 object,
-                &["kind", "failure_kind"],
+                &["kind", "failure_kind", "detail"],
                 "model observation detail",
             )?;
             validate_model_observation_identifier(
                 required_string(object, "failure_kind", "model observation detail")?,
                 "model observation failure kind",
                 128,
+            )?;
+            validate_optional_observation_text_len(
+                optional_string(object, "detail", "model observation detail")?,
+                "model observation failure detail",
+                MAX_MODEL_OBSERVATION_BYTES,
             )
+        }
+        "result_reference" => {
+            validate_object_keys(
+                object,
+                &[
+                    "kind",
+                    "result_ref",
+                    "byte_len",
+                    "preview",
+                    "total_bytes",
+                    "next_offset",
+                    "item_count",
+                ],
+                "model observation detail",
+            )?;
+            validate_required_observation_text(
+                required_string(object, "result_ref", "model observation detail")?,
+                "model observation result ref",
+                MODEL_OBSERVATION_TEXT_MAX_BYTES,
+            )?;
+            required_u64(object, "byte_len", "model observation detail")?;
+            for field in ["total_bytes", "next_offset", "item_count"] {
+                if let Some(value) = object.get(field)
+                    && value.as_u64().is_none()
+                {
+                    return Err(format!(
+                        "model observation detail field `{field}` must be a u64"
+                    ));
+                }
+            }
+            if let Some(preview) = optional_string(object, "preview", "model observation detail")? {
+                validate_model_observation_text(preview)?;
+            }
+            if object.contains_key("item_count")
+                && (!object.contains_key("preview") || !object.contains_key("next_offset"))
+            {
+                return Err(
+                    "model observation item_count requires preview and next_offset".to_string(),
+                );
+            }
+            Ok(())
         }
         other => Err(format!(
             "model observation detail kind `{other}` is unsupported"
@@ -804,8 +980,16 @@ fn validate_optional_observation_text(
     value: Option<&str>,
     label: &'static str,
 ) -> Result<(), String> {
+    validate_optional_observation_text_len(value, label, MODEL_OBSERVATION_TEXT_MAX_BYTES)
+}
+
+fn validate_optional_observation_text_len(
+    value: Option<&str>,
+    label: &'static str,
+    max_bytes: usize,
+) -> Result<(), String> {
     if let Some(value) = value {
-        validate_observation_text_len(value, label, MODEL_OBSERVATION_TEXT_MAX_BYTES)?;
+        validate_observation_text_len(value, label, max_bytes)?;
     }
     Ok(())
 }
@@ -875,6 +1059,169 @@ mod tests {
     };
 
     #[test]
+    fn sensitive_markers_match_on_word_boundary_not_substring() {
+        use super::{contains_marker_at_word_boundary, validate_model_observation_text};
+        // Regression (#5902): a tool result containing "Secretary of the
+        // Treasury" must NOT be scrubbed by the `secret` marker — that false
+        // positive evicted document reads from the replayed transcript and
+        // sent the model into a re-fetch loop.
+        assert!(!contains_marker_at_word_boundary(
+            "secretary of the treasury",
+            "secret"
+        ));
+        // Continuing past a non-match must stay on a UTF-8 character boundary,
+        // including if a future marker itself begins with a multibyte character.
+        assert!(contains_marker_at_word_boundary("éxy éx", "éx"));
+        assert!(validate_model_observation_text("Report by the Secretary of the Treasury").is_ok());
+        // Standalone credential markers must still be rejected.
+        assert!(contains_marker_at_word_boundary(
+            "here is the client secret value",
+            "secret"
+        ));
+        assert!(validate_model_observation_text("the api secret is xyz").is_err());
+        // Delimiter-bounded markers keep matching as before.
+        assert!(contains_marker_at_word_boundary(
+            "authorization: bearer abc",
+            "bearer "
+        ));
+    }
+
+    /// Regression (#5902): a tool-result preview of ordinary document content
+    /// — here containing "Secretary of the Treasury", which used to trip the
+    /// `secret` substring marker — must be RETAINED on replay, not scrubbed to
+    /// a bare safe-summary stub. Losing it every turn is what evicted document
+    /// reads from context and drove the re-fetch loop.
+    #[test]
+    fn document_content_preview_is_retained_on_replay_not_scrubbed() {
+        // ~8 KB of Treasury-bulletin-like text — well past the old 4 KB
+        // envelope cap, so this also guards the cap-sizing regression.
+        let preview =
+            "Table FD-1. Federal Debt reported by the Secretary of the Treasury. ".repeat(120);
+        assert!(
+            preview.len() > 4096,
+            "fixture must exceed the pre-fix 4 KB envelope cap"
+        );
+        let observation = serde_json::json!({
+            "schema_version": 1,
+            "status": "success",
+            "summary": "Tool completed; preview truncated, use result_read for more output.",
+            "detail": {
+                "kind": "result_reference",
+                "result_ref": "result:treasury-doc",
+                "byte_len": preview.len(),
+                "preview": preview,
+                "total_bytes": preview.len() * 4,
+                "next_offset": preview.len(),
+            },
+            "trust": "untrusted_tool_output"
+        });
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            "result:treasury-doc",
+            ToolResultSafeSummary::new("read of treasury_bulletin").expect("summary"),
+            Some(observation),
+        )
+        .expect("envelope construction is fail-open");
+
+        assert!(
+            envelope.model_observation.is_some(),
+            "document content must be retained, not dropped to a stub"
+        );
+        let replayed = envelope.model_visible_content_or_safe_summary();
+        assert!(
+            replayed.contains("Secretary of the Treasury"),
+            "replayed observation must carry the document content, not the safe-summary stub"
+        );
+    }
+
+    /// A preview filled to the full preview cap must still fit the envelope and
+    /// survive replay — the envelope has to have room for a max-size preview
+    /// plus the surrounding schema fields, or the largest reads silently stub.
+    #[test]
+    fn full_cap_preview_survives_replay() {
+        let cap = crate::contract::TOOL_RESULT_RECORD_READ_MAX_BYTES;
+        let unit = "Bureau of the Fiscal Service data table row entry value ";
+        let mut preview = unit.repeat(cap / unit.len() + 1);
+        preview.truncate(cap);
+        if let Some(idx) = preview.rfind(' ') {
+            preview.truncate(idx); // avoid a partial trailing token
+        }
+        let observation = serde_json::json!({
+            "schema_version": 1,
+            "status": "success",
+            "summary": "Tool completed; preview contains the full result.",
+            "detail": {
+                "kind": "result_reference",
+                "result_ref": "result:full-cap-doc",
+                "byte_len": preview.len(),
+                "preview": preview,
+            },
+            "trust": "untrusted_tool_output"
+        });
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            "result:full-cap-doc",
+            ToolResultSafeSummary::new("full read").expect("summary"),
+            Some(observation),
+        )
+        .expect("envelope construction is fail-open");
+
+        assert!(
+            envelope.model_observation.is_some(),
+            "a full-cap preview must fit the envelope and be retained on replay"
+        );
+    }
+
+    /// Airtight guard for the paged-`result_read` retention path (the "issues
+    /// #1/#2" a caller might frame separately): a `result_read` CHUNK
+    /// observation — same shape `result_read_observation` emits, a
+    /// ResultReference whose `preview` is a paged content chunk plus a
+    /// `next_offset` — must ALSO survive replay when it contains marker-like
+    /// document words ("Secretary of the Treasury"). Before the word-boundary
+    /// fix this chunk was scrubbed to a stub exactly like the first-look
+    /// preview, so paged content "vanished" and the model re-paged/re-fetched
+    /// in a loop. Chunk observations flow through the same
+    /// `normalized_model_observation` scrub as first-look previews, so fixing
+    /// the matcher fixes both — this pins that they stay coupled.
+    #[test]
+    fn result_read_chunk_observation_with_document_content_is_retained() {
+        let chunk = "Ownership of Federal Securities. Secretary of the Treasury. ".repeat(60);
+        let observation = serde_json::json!({
+            "schema_version": 1,
+            "status": "success",
+            "summary": "Requested tool-result chunk returned.",
+            "detail": {
+                "kind": "result_reference",
+                "result_ref": "result:paged-chunk",
+                "byte_len": chunk.len(),
+                "preview": chunk,
+                "total_bytes": chunk.len() * 3,
+                "next_offset": chunk.len() * 2,
+            },
+            "artifacts": [{
+                "artifact_ref": "result:paged-chunk",
+                "summary": "Stored result-read response"
+            }],
+            "trust": "untrusted_tool_output"
+        });
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            "result:paged-chunk",
+            ToolResultSafeSummary::new("Requested tool-result chunk returned.").expect("summary"),
+            Some(observation),
+        )
+        .expect("envelope construction is fail-open");
+
+        assert!(
+            envelope.model_observation.is_some(),
+            "a result_read chunk of document content must be retained, not evicted to a stub"
+        );
+        assert!(
+            envelope
+                .model_visible_content_or_safe_summary()
+                .contains("Secretary of the Treasury"),
+            "the paged chunk's content must survive replay so the model does not re-fetch it"
+        );
+    }
+
+    #[test]
     fn collapse_to_repeated_error_marker_produces_valid_observation() {
         let error_obs = serde_json::json!({
             "schema_version": 1,
@@ -910,6 +1257,47 @@ mod tests {
                 .and_then(|detail| detail.get("failure_kind"))
                 .and_then(serde_json::Value::as_str),
             Some("repeated_error_elided")
+        );
+    }
+
+    #[test]
+    fn generic_failure_observation_accepts_diagnostic_detail() {
+        let diagnostic = "missing input_schema_ref at /system/extensions/google-calendar/schemas/google-calendar/list_calendars.input.v1.json";
+        let error_obs = serde_json::json!({
+            "schema_version": 1,
+            "status": "error",
+            "summary": "Capability failed with missing_runtime.",
+            "detail": {
+                "kind": "generic_failure",
+                "failure_kind": "missing_runtime",
+                "detail": diagnostic,
+            },
+            "recovery": {
+                "same_call_retry": "not_useful",
+                "repairs": [],
+                "recovery_hint": "respect_failure_constraint",
+            },
+            "trust": "untrusted_tool_output",
+        });
+
+        let envelope = ToolResultReferenceEnvelope::with_model_observation(
+            "result:tool-output_1.4",
+            ToolResultSafeSummary::new("tool failed").expect("summary"),
+            error_obs,
+        )
+        .expect("diagnostic observation envelope");
+
+        envelope
+            .validate()
+            .expect("diagnostic observation validates");
+        assert_eq!(
+            envelope
+                .model_observation
+                .as_ref()
+                .and_then(|observation| observation.get("detail"))
+                .and_then(|detail| detail.get("detail"))
+                .and_then(serde_json::Value::as_str),
+            Some(diagnostic)
         );
     }
 
@@ -955,8 +1343,43 @@ mod tests {
         let summary = ToolResultSafeSummary::new(INPUT_ENCODE_HUMAN_SUMMARY)
             .expect("fixed host-authored input encode summary is safe");
         assert_eq!(summary.as_str(), INPUT_ENCODE_HUMAN_SUMMARY);
+    }
 
-        assert!(ToolResultSafeSummary::new("tool input contained raw payload").is_err());
+    #[test]
+    fn safe_summary_accepts_ordinary_error_vocabulary() {
+        for accepted in [
+            "provider error occurred during the call",
+            "stack trace was captured for diagnosis",
+            "the tool input was malformed",
+            "a traceback is available for review",
+            "host path resolution did not complete",
+            "raw runtime returned an unexpected status",
+        ] {
+            ToolResultSafeSummary::new(accepted)
+                .unwrap_or_else(|error| panic!("`{accepted}` should be accepted: {error}"));
+        }
+    }
+
+    #[test]
+    fn safe_summary_still_rejects_credentials_and_delimiters() {
+        assert!(
+            ToolResultSafeSummary::new("Secretary of the Treasury").is_ok(),
+            "ordinary words containing a marker prefix must remain valid summaries"
+        );
+        for rejected in [
+            "secret",
+            "leaked sk-LIVEsecretvalue token",
+            "authorization header bearer abc123",
+            "the api key was exposed",
+            "user password was logged",
+            "a secret slipped into the message",
+            "missing schema at /system/extensions",
+        ] {
+            assert!(
+                ToolResultSafeSummary::new(rejected).is_err(),
+                "`{rejected}` must still be rejected"
+            );
+        }
     }
 
     #[test]
@@ -1102,6 +1525,206 @@ mod tests {
             envelope.model_visible_content_or_safe_summary(),
             "tool failed"
         );
+    }
+
+    /// `item_count` is allowlisted on `result_reference` details, but only as
+    /// a u64 — a malformed value must drop the observation through the
+    /// best-effort constructor and fall back to the safe summary.
+    #[test]
+    fn best_effort_observation_drops_non_u64_item_count() {
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            "result:malformed-item-count",
+            ToolResultSafeSummary::new("tool completed").expect("summary"),
+            Some(serde_json::json!({
+                "schema_version": 1,
+                "status": "success",
+                "summary": "Tool completed; preview truncated.",
+                "detail": {
+                    "kind": "result_reference",
+                    "result_ref": "result:malformed-item-count",
+                    "byte_len": 4096,
+                    "total_bytes": 4096,
+                    "next_offset": 2048,
+                    "item_count": "lots"
+                },
+                "trust": "untrusted_tool_output"
+            })),
+        )
+        .expect("envelope construction is fail-open");
+
+        assert!(
+            envelope.model_observation.is_none(),
+            "a non-u64 item_count must drop the observation, not persist it"
+        );
+        assert_eq!(
+            envelope.model_visible_content_or_safe_summary(),
+            "tool completed"
+        );
+    }
+
+    /// `item_count` is only meaningful alongside a truncated preview -- an
+    /// observation carrying `item_count` without `preview`/`next_offset`
+    /// must drop through the best-effort constructor and fall back to the
+    /// safe summary, mirroring the malformed-type case above.
+    #[test]
+    fn best_effort_observation_drops_item_count_without_preview() {
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            "result:item-count-without-preview",
+            ToolResultSafeSummary::new("tool completed").expect("summary"),
+            Some(serde_json::json!({
+                "schema_version": 1,
+                "status": "success",
+                "summary": "Tool completed.",
+                "detail": {
+                    "kind": "result_reference",
+                    "result_ref": "result:item-count-without-preview",
+                    "byte_len": 4096,
+                    "item_count": 600
+                },
+                "trust": "untrusted_tool_output"
+            })),
+        )
+        .expect("envelope construction is fail-open");
+
+        assert!(
+            envelope.model_observation.is_none(),
+            "item_count without preview/next_offset must drop the observation, not persist it"
+        );
+        assert_eq!(
+            envelope.model_visible_content_or_safe_summary(),
+            "tool completed"
+        );
+    }
+
+    fn invalid_input_observation_with_issue(issue: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "status": "error",
+            "summary": "Tool input failed schema validation.",
+            "detail": {
+                "kind": "invalid_input",
+                "issues": [issue]
+            },
+            "trust": "untrusted_tool_output"
+        })
+    }
+
+    /// A control character in an issue's `received` echo must be repaired by
+    /// dropping just that field — the structured repair guidance
+    /// (path/code/expected) survives instead of the whole observation
+    /// falling back to the safe summary.
+    #[test]
+    fn best_effort_observation_repairs_control_char_issue_received() {
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            "result:control-char-received",
+            ToolResultSafeSummary::new("tool failed").expect("summary"),
+            Some(invalid_input_observation_with_issue(serde_json::json!({
+                "path": "result_ref",
+                "code": "invalid_value",
+                "expected": "valid result reference format",
+                "received": "bad\u{0}ref",
+                "schema_path": "properties/result_ref"
+            }))),
+        )
+        .expect("envelope construction is fail-open");
+
+        let observation = envelope
+            .model_observation
+            .expect("repaired observation is retained, not dropped whole");
+        let issue = &observation["detail"]["issues"][0];
+        assert!(
+            issue.get("received").is_none(),
+            "unsafe received is dropped"
+        );
+        assert_eq!(issue["path"], "result_ref");
+        assert_eq!(issue["code"], "invalid_value");
+        assert_eq!(issue["expected"], "valid result reference format");
+    }
+
+    /// An oversized-but-content-clean `received` passes the content scan but
+    /// still fails the retry's length check, so it must also count as
+    /// needing repair — otherwise the whole observation still drops.
+    #[test]
+    fn best_effort_observation_repairs_oversized_issue_received() {
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            "result:oversized-received",
+            ToolResultSafeSummary::new("tool failed").expect("summary"),
+            Some(invalid_input_observation_with_issue(serde_json::json!({
+                "path": "result_ref",
+                "code": "invalid_value",
+                "expected": "valid result reference format",
+                "received": "a".repeat(600),
+                "schema_path": "properties/result_ref"
+            }))),
+        )
+        .expect("envelope construction is fail-open");
+
+        let observation = envelope
+            .model_observation
+            .expect("repaired observation is retained, not dropped whole");
+        let issue = &observation["detail"]["issues"][0];
+        assert!(
+            issue.get("received").is_none(),
+            "oversized received is dropped"
+        );
+        assert_eq!(issue["path"], "result_ref");
+        assert_eq!(issue["code"], "invalid_value");
+        assert_eq!(issue["expected"], "valid result reference format");
+    }
+
+    /// Same repair for sensitive marker phrases the token-based producer
+    /// sanitizer cannot redact (e.g. "api key" across two tokens).
+    #[test]
+    fn best_effort_observation_repairs_marker_phrase_issue_received() {
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            "result:marker-received",
+            ToolResultSafeSummary::new("tool failed").expect("summary"),
+            Some(invalid_input_observation_with_issue(serde_json::json!({
+                "path": "result_ref",
+                "code": "invalid_value",
+                "expected": "valid result reference format",
+                "received": "please share the api key",
+                "schema_path": "properties/result_ref"
+            }))),
+        )
+        .expect("envelope construction is fail-open");
+
+        let observation = envelope
+            .model_observation
+            .expect("repaired observation is retained, not dropped whole");
+        let issue = &observation["detail"]["issues"][0];
+        assert!(
+            issue.get("received").is_none(),
+            "unsafe received is dropped"
+        );
+        assert_eq!(issue["code"], "invalid_value");
+        assert_eq!(issue["expected"], "valid result reference format");
+    }
+
+    /// An unsafe `path` (a model-authored field name) is replaced with a
+    /// fixed placeholder rather than dropped — `path` is required.
+    #[test]
+    fn best_effort_observation_replaces_unsafe_issue_path() {
+        let envelope = ToolResultReferenceEnvelope::new_best_effort_model_observation(
+            "result:unsafe-path",
+            ToolResultSafeSummary::new("tool failed").expect("summary"),
+            Some(invalid_input_observation_with_issue(serde_json::json!({
+                "path": "system prompt",
+                "code": "unexpected_field",
+                "expected": "declared field",
+                "received": "unexpected field",
+                "schema_path": "additionalProperties"
+            }))),
+        )
+        .expect("envelope construction is fail-open");
+
+        let observation = envelope
+            .model_observation
+            .expect("repaired observation is retained, not dropped whole");
+        let issue = &observation["detail"]["issues"][0];
+        assert_eq!(issue["path"], "unexpected_field");
+        assert_eq!(issue["code"], "unexpected_field");
+        assert_eq!(issue["received"], "unexpected field");
     }
 
     #[test]

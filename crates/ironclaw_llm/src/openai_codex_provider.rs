@@ -226,6 +226,13 @@ impl OpenAiCodexProvider {
                     retry_after,
                 });
             }
+            // Context-overflow (HTTP 413, or a 400 whose body names a
+            // context-length error) must surface as ContextLengthExceeded so
+            // the loop's context-shrink recovery fires instead of a generic
+            // RequestFailed.
+            if let Some(error) = crate::error::context_length_error(status.as_u16(), &body_text) {
+                return Err(error);
+            }
             return Err(LlmError::RequestFailed {
                 provider: "openai_codex".to_string(),
                 reason: format!("HTTP {status}: {body_text}"),
@@ -579,6 +586,11 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
     let mut active_function_calls: std::collections::HashMap<String, FunctionCallState> =
         std::collections::HashMap::new();
     let mut response_status: Option<String> = None;
+    // Whether a terminal `response.completed` event was observed. A stream
+    // that ends without it (mid-stream disconnect) is truncated and must not
+    // be reported as a successful `Stop` — see the truncated-stream guard
+    // after the loop.
+    let mut saw_completed = false;
 
     for line in body.lines() {
         let line = line.trim();
@@ -741,6 +753,7 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
 
             // Response completed
             "response.completed" => {
+                saw_completed = true;
                 if let Some(response) = event.data.get("response") {
                     // Extract usage
                     if let Some(usage) = response.get("usage") {
@@ -770,6 +783,13 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                     .and_then(|e| e.get("message"))
                     .and_then(|m| m.as_str())
                     .unwrap_or("Unknown error");
+                // Prefer ContextLengthExceeded for context-overflow failures
+                // so the loop's context-shrink recovery fires.
+                if crate::error::is_context_length_error_message(&reason.to_ascii_lowercase()) {
+                    let (used, limit) =
+                        crate::error::parse_context_token_counts(&reason.to_ascii_lowercase());
+                    return Err(LlmError::ContextLengthExceeded { used, limit });
+                }
                 return Err(LlmError::RequestFailed {
                     provider: "openai_codex".to_string(),
                     reason: format!("Response failed: {reason}"),
@@ -788,6 +808,14 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                     .get("message")
                     .and_then(|m| m.as_str())
                     .unwrap_or("Unknown error");
+                // A context-overflow surfaced as an SSE error must become
+                // ContextLengthExceeded so the loop's context-shrink recovery
+                // fires instead of a generic failure.
+                if crate::error::is_context_length_error_message(&message.to_ascii_lowercase()) {
+                    let (used, limit) =
+                        crate::error::parse_context_token_counts(&message.to_ascii_lowercase());
+                    return Err(LlmError::ContextLengthExceeded { used, limit });
+                }
                 return Err(LlmError::RequestFailed {
                     provider: "openai_codex".to_string(),
                     reason: format!("Error {code}: {message}"),
@@ -815,6 +843,25 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                 arguments_parse_error: None,
             });
         }
+    }
+
+    // Truncated-stream guard: the Responses API always emits a terminal
+    // `response.completed` (errors return early above). If the stream ended
+    // without one, the connection was dropped mid-response. Returning the
+    // partial content as a successful `Stop` would let a dropped connection
+    // masquerade as a normal completion, so surface a RETRYABLE error
+    // instead. `EmptyResponse` when nothing was produced; `InvalidResponse`
+    // when partial content/tool calls were captured.
+    if !saw_completed {
+        if text_content.is_empty() && tool_calls.is_empty() {
+            return Err(LlmError::EmptyResponse {
+                provider: "openai_codex".to_string(),
+            });
+        }
+        return Err(LlmError::InvalidResponse {
+            provider: "openai_codex".to_string(),
+            reason: "stream ended before response.completed".to_string(),
+        });
     }
 
     // Map status to finish reason (matching OpenClaw's mapStopReason)
@@ -1125,9 +1172,39 @@ data: {"type":"response.completed","response":{"status":"incomplete","usage":{"i
         assert_eq!(parsed.finish_reason, FinishReason::Length);
     }
 
+    /// `[DONE]` stops parsing (events after it are ignored), but on its own
+    /// it is NOT a completion signal — the Responses API always emits
+    /// `response.completed` before the SSE terminator. A `[DONE]` that arrives
+    /// without a preceding `response.completed` is a truncated stream and must
+    /// surface as a retryable error rather than a successful `Stop`.
     #[test]
-    fn test_parse_sse_done_marker() {
+    fn test_parse_sse_done_marker_without_completed_is_truncated() {
         let sse_body = r#"data: {"type":"response.output_text.delta","delta":"hello"}
+
+data: [DONE]
+
+data: {"type":"response.output_text.delta","delta":" ignored"}
+
+"#;
+        let result = parse_sse_response(sse_body);
+        assert!(
+            result.is_err(),
+            "[DONE] without response.completed is truncated"
+        );
+        assert!(matches!(
+            result.unwrap_err(),
+            LlmError::InvalidResponse { .. }
+        ));
+    }
+
+    /// `[DONE]` after a proper `response.completed` is the normal terminator:
+    /// parsing stops, later events are ignored, and the completed response is
+    /// returned successfully.
+    #[test]
+    fn test_parse_sse_completed_then_done_marker() {
+        let sse_body = r#"data: {"type":"response.output_text.delta","delta":"hello"}
+
+data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}
 
 data: [DONE]
 
@@ -1138,6 +1215,105 @@ data: {"type":"response.output_text.delta","delta":" ignored"}
         assert!(result.is_ok());
         let parsed = result.unwrap();
         assert_eq!(parsed.text_content, "hello");
+    }
+
+    /// Regression: a stream that ends WITHOUT a terminal `response.completed`
+    /// event (mid-stream disconnect) must NOT be reported as a successful
+    /// `Stop`. Partial content that ends abruptly is a truncated stream and
+    /// must surface as a retryable `InvalidResponse` so the loop retries.
+    #[test]
+    fn test_parse_sse_truncated_stream_with_partial_text_is_error() {
+        let sse_body = r#"data: {"type":"response.output_item.added","item":{"type":"message","role":"assistant","id":"msg_1"}}
+
+data: {"type":"response.output_text.delta","delta":"partial answer that got cut"}
+
+"#;
+        let result = parse_sse_response(sse_body);
+        assert!(
+            result.is_err(),
+            "truncated stream must not be reported as success"
+        );
+        match result.unwrap_err() {
+            LlmError::InvalidResponse { reason, .. } => {
+                assert!(
+                    reason.contains("response.completed"),
+                    "reason should explain the missing terminal event: {reason}"
+                );
+            }
+            other => panic!("expected InvalidResponse, got {other:?}"),
+        }
+    }
+
+    /// Regression: a stream with no events at all (no content, no terminal
+    /// completion) must surface as `EmptyResponse` so the caller can retry.
+    #[test]
+    fn test_parse_sse_truncated_stream_empty_is_error() {
+        let sse_body = ":keepalive\n\n";
+        let result = parse_sse_response(sse_body);
+        assert!(
+            result.is_err(),
+            "empty truncated stream must not be reported as success"
+        );
+        assert!(matches!(
+            result.unwrap_err(),
+            LlmError::EmptyResponse { .. }
+        ));
+    }
+
+    /// A stream that produced tool calls but ended WITHOUT a terminal
+    /// `response.completed` is still truncated and must surface as a retryable
+    /// error, not a successful `ToolUse`.
+    #[test]
+    fn test_parse_sse_truncated_stream_with_tool_calls_is_error() {
+        let sse_body = r#"data: {"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_abc","name":"search"}}
+
+data: {"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1","call_id":"call_abc","name":"search","arguments":"{\"query\":\"test\"}"}}
+
+"#;
+        let result = parse_sse_response(sse_body);
+        assert!(
+            result.is_err(),
+            "truncated stream with tool calls must not be reported as success"
+        );
+        assert!(matches!(
+            result.unwrap_err(),
+            LlmError::InvalidResponse { .. }
+        ));
+    }
+
+    /// An SSE `error` event whose message is a context-overflow error must map
+    /// to `ContextLengthExceeded` (not generic `RequestFailed`) so the loop's
+    /// context-shrink recovery fires.
+    #[test]
+    fn test_parse_sse_error_context_length_maps_to_context_exceeded() {
+        let sse_body = r#"data: {"type":"error","code":"context_length_exceeded","message":"This model's maximum context length is 128000 tokens. However, your messages resulted in 150000 tokens."}
+
+"#;
+        let result = parse_sse_response(sse_body);
+        match result {
+            Err(LlmError::ContextLengthExceeded { used, limit }) => {
+                assert_eq!(used, 150000);
+                assert_eq!(limit, 128000);
+            }
+            other => panic!("expected ContextLengthExceeded, got {other:?}"),
+        }
+    }
+
+    /// A `response.failed` event whose error message is a context-overflow
+    /// error must also map to `ContextLengthExceeded`.
+    #[test]
+    fn test_parse_sse_failed_context_length_maps_to_context_exceeded() {
+        let sse_body = r#"data: {"type":"response.failed","response":{"status":"failed","status_details":{"error":{"message":"prompt is too long: 200000 tokens > 128000 maximum"}}}}
+
+"#;
+        let result = parse_sse_response(sse_body);
+        match result {
+            Err(LlmError::ContextLengthExceeded { used, limit }) => {
+                assert_eq!(used, 200000);
+                assert_eq!(limit, 128000);
+            }
+            other => panic!("expected ContextLengthExceeded, got {other:?}"),
+        }
     }
 
     #[tokio::test]

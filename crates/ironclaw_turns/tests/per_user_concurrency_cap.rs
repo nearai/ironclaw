@@ -57,6 +57,7 @@ fn actor_for(user: &UserId) -> TurnActor {
 fn submit_request_for(scope: TurnScope, key: &str) -> SubmitTurnRequest {
     let actor = actor_for(scope.explicit_owner_user_id().unwrap());
     SubmitTurnRequest {
+        requested_model: None,
         actor,
         accepted_message_ref: AcceptedMessageRef::new(format!("message-{key}")).unwrap(),
         source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
@@ -91,10 +92,10 @@ fn make_store() -> InMemoryTurnStateStore {
 }
 
 fn make_capped_store(cap: u32) -> InMemoryTurnStateStore {
-    InMemoryTurnStateStore::with_limits(InMemoryTurnStateStoreLimits {
-        max_concurrent_runs_per_user: std::num::NonZeroU32::new(cap),
-        ..InMemoryTurnStateStoreLimits::default()
-    })
+    InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits::default()
+            .set_max_concurrent_runs_per_user(std::num::NonZeroU32::new(cap).expect("nonzero cap")),
+    )
 }
 
 fn resolver() -> InMemoryRunProfileResolver {
@@ -280,7 +281,8 @@ async fn running_counter_decrements_on_cancel_completion() {
     assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 0);
 }
 
-/// Lease expiry: Running → Failed (lease expired). Counter should drop to 0.
+/// Lease expiry of a checkpoint-less run: Running → Queued (re-drivable, #6284).
+/// Leaving `Running` releases the concurrency slot, so the counter drops to 0.
 #[tokio::test]
 async fn running_counter_decrements_on_lease_expiry() {
     let store = make_store();
@@ -351,6 +353,7 @@ async fn running_counter_decrements_via_apply_validated_loop_exit_completed() {
 
     store
         .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            model_usage: None,
             run_id,
             runner_id,
             lease_token,
@@ -389,6 +392,7 @@ async fn running_counter_decrements_via_apply_validated_loop_exit_cancelled() {
     // which calls cancel_claimed_record (CancelRequested → Cancelled).
     store
         .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            model_usage: None,
             run_id,
             runner_id,
             lease_token,
@@ -581,6 +585,7 @@ async fn ownerless_runs_are_not_counted_against_cap() {
     );
 
     let make_req = |scope: TurnScope, key: &'static str| SubmitTurnRequest {
+        requested_model: None,
         scope,
         actor: actor.clone(),
         accepted_message_ref: AcceptedMessageRef::new(format!("msg-{key}")).unwrap(),
@@ -681,6 +686,7 @@ async fn actor_fallback_runs_are_capped_under_actor_user_id() {
     );
 
     let make_req = |scope: TurnScope, actor: TurnActor, key: &'static str| SubmitTurnRequest {
+        requested_model: None,
         scope,
         actor,
         accepted_message_ref: AcceptedMessageRef::new(format!("msg-{key}")).unwrap(),
@@ -845,10 +851,8 @@ async fn snapshot_rebuild_restores_nonzero_running_counter() {
     // already be 1 without claiming again.
     let restored = InMemoryTurnStateStore::from_persistence_snapshot(
         snapshot,
-        InMemoryTurnStateStoreLimits {
-            max_concurrent_runs_per_user: std::num::NonZeroU32::new(10),
-            ..InMemoryTurnStateStoreLimits::default()
-        },
+        InMemoryTurnStateStoreLimits::default()
+            .set_max_concurrent_runs_per_user(std::num::NonZeroU32::new(10).expect("nonzero cap")),
     )
     .unwrap();
     assert_eq!(

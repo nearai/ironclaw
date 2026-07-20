@@ -1,0 +1,1538 @@
+//! Durable Slack installation setup and secret boundary.
+//!
+//! The Reborn Slack host-beta path is enabled at boot, but the Slack app
+//! installation is operator-managed at runtime. This module owns the only
+//! place where WebUI-submitted Slack secrets are written to the shared
+//! `SecretStore` and the only place where Slack runtime code resolves those
+//! handles back to material.
+
+// arch-exempt: large_file, Slack setup secret boundary and lifecycle slot tests, plan #5905
+
+use std::fmt;
+use std::sync::{Arc, OnceLock};
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use ironclaw_auth::{OAuthClientId, OAuthRedirectUri};
+use ironclaw_common::hashing::sha256_hex;
+use ironclaw_host_api::{
+    AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
+};
+use ironclaw_product_adapters::AdapterInstallationId;
+use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStoreError};
+use secrecy::{ExposeSecret, SecretString};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use tokio::sync::Mutex;
+
+use crate::slack::slack_serve::{SlackApiAppId, SlackTeamId};
+
+const SLACK_BOT_TOKEN_HANDLE_PREFIX: &str = "slack_bot_token";
+const SLACK_SIGNING_SECRET_HANDLE_PREFIX: &str = "slack_signing_secret";
+const SLACK_OAUTH_CLIENT_SECRET_HANDLE_PREFIX: &str = "slack_oauth_client_secret";
+const INSTALLATION_HANDLE_HASH_LEN: usize = 24;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SlackInstallationSetup {
+    pub(crate) installation_id: String,
+    pub(crate) team_id: String,
+    pub(crate) api_app_id: String,
+    pub(crate) user_id: String,
+    pub(crate) shared_subject_user_id: Option<String>,
+    pub(crate) bot_token_handle: SecretHandle,
+    pub(crate) signing_secret_handle: SecretHandle,
+    pub(crate) oauth_client_id: Option<String>,
+    pub(crate) oauth_client_secret_handle: Option<SecretHandle>,
+    pub(crate) revision: u64,
+    pub(crate) updated_at: DateTime<Utc>,
+}
+
+impl SlackInstallationSetup {
+    pub(crate) fn installation_id(&self) -> Result<AdapterInstallationId, SlackSetupError> {
+        AdapterInstallationId::new(self.installation_id.clone()).map_err(|reason| {
+            SlackSetupError::InvalidField {
+                field: "installation_id",
+                reason: reason.to_string(),
+            }
+        })
+    }
+
+    pub(crate) fn team_id(&self) -> SlackTeamId {
+        SlackTeamId::new(self.team_id.clone())
+    }
+
+    pub(crate) fn user_id(&self) -> Result<UserId, SlackSetupError> {
+        UserId::new(self.user_id.clone()).map_err(|reason| SlackSetupError::InvalidField {
+            field: "user_id",
+            reason: reason.to_string(),
+        })
+    }
+
+    pub(crate) fn shared_subject_user_id(&self) -> Result<Option<UserId>, SlackSetupError> {
+        self.shared_subject_user_id
+            .as_ref()
+            .map(|raw| {
+                UserId::new(raw.clone()).map_err(|reason| SlackSetupError::InvalidField {
+                    field: "shared_subject_user_id",
+                    reason: reason.to_string(),
+                })
+            })
+            .transpose()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SlackInstallationSetupUpdate {
+    pub(crate) installation_id: String,
+    pub(crate) team_id: String,
+    pub(crate) api_app_id: String,
+    pub(crate) user_id: Option<String>,
+    pub(crate) shared_subject_user_id: Option<String>,
+    pub(crate) bot_token: Option<SecretString>,
+    pub(crate) signing_secret: Option<SecretString>,
+    pub(crate) oauth_client_id: Option<String>,
+    pub(crate) oauth_client_secret: Option<SecretString>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct SlackInstallationSetupStatus {
+    pub(crate) configured: bool,
+    pub(crate) installation_id: Option<String>,
+    pub(crate) team_id: Option<String>,
+    pub(crate) api_app_id: Option<String>,
+    pub(crate) user_id: Option<String>,
+    pub(crate) shared_subject_user_id: Option<String>,
+    pub(crate) bot_token_configured: bool,
+    pub(crate) signing_secret_configured: bool,
+    pub(crate) oauth_client_id: Option<String>,
+    pub(crate) oauth_client_id_configured: bool,
+    pub(crate) oauth_client_secret_configured: bool,
+    /// True only when BOTH the personal-OAuth client id and client secret are
+    /// configured — i.e. the Slack personal-OAuth *start* can actually run.
+    /// Distinct from [`configured`](Self::configured), which reports only
+    /// bot-token + signing-secret (the event-ingestion / entrypoint readiness
+    /// the WebUI already depends on). Additive signal: a setup with bot creds
+    /// but no OAuth client id/secret reports `configured = true` yet
+    /// `personal_oauth_ready = false`, so the UI can distinguish "Slack
+    /// receiving events" from "personal OAuth ready" instead of showing Slack
+    /// fully configured while OAuth start cannot work.
+    pub(crate) personal_oauth_ready: bool,
+    pub(crate) revision: Option<u64>,
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum SlackSetupError {
+    #[error("invalid Slack setup field {field}: {reason}")]
+    InvalidField { field: &'static str, reason: String },
+    #[error("Slack setup requires {field}")]
+    MissingField { field: &'static str },
+    #[error("Slack setup store unavailable")]
+    StoreUnavailable,
+    #[error("Slack secret store unavailable: {reason}")]
+    SecretStoreUnavailable { reason: &'static str },
+    #[error("Slack personal OAuth client credentials not configured")]
+    OAuthClientNotConfigured,
+}
+
+#[async_trait]
+pub(crate) trait SlackInstallationSetupStore: Send + Sync + std::fmt::Debug {
+    async fn get_slack_installation_setup(
+        &self,
+    ) -> Result<Option<SlackInstallationSetup>, SlackSetupError>;
+
+    async fn put_slack_installation_setup(
+        &self,
+        setup: &SlackInstallationSetup,
+    ) -> Result<(), SlackSetupError>;
+
+    async fn delete_slack_installation_setup(&self) -> Result<(), SlackSetupError>;
+}
+
+#[derive(Clone)]
+pub(crate) struct SlackSetupService {
+    tenant_id: TenantId,
+    agent_id: AgentId,
+    project_id: Option<ProjectId>,
+    operator_user_id: UserId,
+    store: Arc<dyn SlackInstallationSetupStore>,
+    secret_store: Arc<dyn SecretStore>,
+    save_lock: Arc<Mutex<()>>,
+}
+
+impl SlackSetupService {
+    pub(crate) fn new(
+        tenant_id: TenantId,
+        agent_id: AgentId,
+        project_id: Option<ProjectId>,
+        operator_user_id: UserId,
+        store: Arc<dyn SlackInstallationSetupStore>,
+        secret_store: Arc<dyn SecretStore>,
+    ) -> Self {
+        Self {
+            tenant_id,
+            agent_id,
+            project_id,
+            operator_user_id,
+            store,
+            secret_store,
+            save_lock: Arc::new(Mutex::new(())),
+        }
+    }
+
+    pub(crate) fn tenant_id(&self) -> &TenantId {
+        &self.tenant_id
+    }
+
+    pub(crate) fn agent_id(&self) -> &AgentId {
+        &self.agent_id
+    }
+
+    pub(crate) fn project_id(&self) -> Option<&ProjectId> {
+        self.project_id.as_ref()
+    }
+
+    pub(crate) fn operator_user_id(&self) -> &UserId {
+        &self.operator_user_id
+    }
+
+    pub(crate) async fn current_setup(
+        &self,
+    ) -> Result<Option<SlackInstallationSetup>, SlackSetupError> {
+        self.store.get_slack_installation_setup().await
+    }
+
+    pub(crate) async fn status(&self) -> Result<SlackInstallationSetupStatus, SlackSetupError> {
+        let Some(setup) = self.current_setup().await? else {
+            return Ok(SlackInstallationSetupStatus {
+                configured: false,
+                installation_id: None,
+                team_id: None,
+                api_app_id: None,
+                user_id: None,
+                shared_subject_user_id: None,
+                bot_token_configured: false,
+                signing_secret_configured: false,
+                oauth_client_id: None,
+                oauth_client_id_configured: false,
+                oauth_client_secret_configured: false,
+                personal_oauth_ready: false,
+                revision: None,
+            });
+        };
+        let scope = self.secret_scope();
+        let bot_token_configured = self
+            .secret_store
+            .metadata(&scope, &setup.bot_token_handle)
+            .await
+            .map_err(map_secret_error)?
+            .is_some();
+        let signing_secret_configured = self
+            .secret_store
+            .metadata(&scope, &setup.signing_secret_handle)
+            .await
+            .map_err(map_secret_error)?
+            .is_some();
+        let oauth_client_id_configured = setup.oauth_client_id.is_some();
+        let oauth_client_secret_configured = match &setup.oauth_client_secret_handle {
+            Some(handle) => self
+                .secret_store
+                .metadata(&scope, handle)
+                .await
+                .map_err(map_secret_error)?
+                .is_some(),
+            None => false,
+        };
+        Ok(SlackInstallationSetupStatus {
+            configured: bot_token_configured && signing_secret_configured,
+            installation_id: Some(setup.installation_id),
+            team_id: Some(setup.team_id),
+            api_app_id: Some(setup.api_app_id),
+            user_id: Some(setup.user_id),
+            shared_subject_user_id: setup.shared_subject_user_id,
+            bot_token_configured,
+            signing_secret_configured,
+            oauth_client_id: setup.oauth_client_id,
+            oauth_client_id_configured,
+            oauth_client_secret_configured,
+            personal_oauth_ready: oauth_client_id_configured && oauth_client_secret_configured,
+            revision: Some(setup.revision),
+        })
+    }
+
+    pub(crate) async fn save(
+        &self,
+        update: SlackInstallationSetupUpdate,
+    ) -> Result<SlackInstallationSetup, SlackSetupError> {
+        let (_, setup) = self.save_with_previous(update).await?;
+        Ok(setup)
+    }
+
+    pub(crate) async fn save_with_previous(
+        &self,
+        update: SlackInstallationSetupUpdate,
+    ) -> Result<(Option<SlackInstallationSetup>, SlackInstallationSetup), SlackSetupError> {
+        let _save_guard = self.save_lock.lock().await;
+        let previous = self.current_setup().await?;
+        let revision = previous
+            .as_ref()
+            .map(|setup| setup.revision.saturating_add(1))
+            .unwrap_or(1);
+        let setup = self.validated_setup(update, previous.as_ref(), revision)?;
+
+        if setup.pending_bot_token.is_none() {
+            self.ensure_existing_secret("bot_token", &setup.record.bot_token_handle)
+                .await?;
+        }
+        if setup.pending_signing_secret.is_none() {
+            self.ensure_existing_secret("signing_secret", &setup.record.signing_secret_handle)
+                .await?;
+        }
+        if setup.pending_oauth_client_secret.is_none()
+            && let Some(handle) = &setup.record.oauth_client_secret_handle
+        {
+            self.ensure_existing_secret("oauth_client_secret", handle)
+                .await?;
+        }
+
+        if let Some(bot_token) = setup.pending_bot_token.as_ref() {
+            self.put_secret(setup.record.bot_token_handle.clone(), bot_token.clone())
+                .await?;
+        }
+        if let Some(signing_secret) = setup.pending_signing_secret.as_ref() {
+            self.put_secret(
+                setup.record.signing_secret_handle.clone(),
+                signing_secret.clone(),
+            )
+            .await?;
+        }
+        if let (Some(secret), Some(handle)) = (
+            setup.pending_oauth_client_secret.as_ref(),
+            setup.record.oauth_client_secret_handle.clone(),
+        ) {
+            self.put_secret(handle, secret.clone()).await?;
+        }
+        self.store
+            .put_slack_installation_setup(&setup.record)
+            .await?;
+        Ok((previous, setup.record))
+    }
+
+    pub(crate) async fn rollback_failed_activation_save(
+        &self,
+        saved: &SlackInstallationSetup,
+        previous: Option<&SlackInstallationSetup>,
+    ) -> Result<(), SlackSetupError> {
+        let _save_guard = self.save_lock.lock().await;
+        let current = self.current_setup().await?;
+        let current_changed = current.as_ref() != Some(saved);
+        if current_changed {
+            tracing::warn!(
+                "skipping Slack setup activation rollback because setup changed after failed save"
+            );
+        } else {
+            match previous {
+                Some(previous) => {
+                    self.store.put_slack_installation_setup(previous).await?;
+                }
+                None => {
+                    self.store.delete_slack_installation_setup().await?;
+                }
+            }
+        }
+
+        let protected_current = current_changed.then_some(current.as_ref()).flatten();
+        self.delete_secret_if_unreferenced(
+            &saved.bot_token_handle,
+            previous.map(|setup| &setup.bot_token_handle),
+            protected_current.map(|setup| &setup.bot_token_handle),
+        )
+        .await?;
+        self.delete_secret_if_unreferenced(
+            &saved.signing_secret_handle,
+            previous.map(|setup| &setup.signing_secret_handle),
+            protected_current.map(|setup| &setup.signing_secret_handle),
+        )
+        .await?;
+        if let Some(saved_oauth_handle) = &saved.oauth_client_secret_handle {
+            self.delete_secret_if_unreferenced(
+                saved_oauth_handle,
+                previous.and_then(|setup| setup.oauth_client_secret_handle.as_ref()),
+                protected_current.and_then(|setup| setup.oauth_client_secret_handle.as_ref()),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn signing_secret(
+        &self,
+        setup: &SlackInstallationSetup,
+    ) -> Result<SecretMaterial, SlackSetupError> {
+        self.secret_material(&setup.signing_secret_handle).await
+    }
+
+    pub(crate) async fn bot_token(
+        &self,
+        setup: &SlackInstallationSetup,
+    ) -> Result<SecretMaterial, SlackSetupError> {
+        self.secret_material(&setup.bot_token_handle).await
+    }
+
+    /// Returns `(client_id, client_secret)` for Slack personal OAuth.
+    /// Fails with `OAuthClientNotConfigured` when the operator has not yet
+    /// saved OAuth credentials via the setup UI.
+    pub(crate) async fn oauth_credentials(
+        &self,
+    ) -> Result<(OAuthClientId, SecretString), SlackSetupError> {
+        let setup = self
+            .current_setup()
+            .await?
+            .ok_or(SlackSetupError::OAuthClientNotConfigured)?;
+        let client_id_raw = setup
+            .oauth_client_id
+            .ok_or(SlackSetupError::OAuthClientNotConfigured)?;
+        let client_id =
+            OAuthClientId::new(client_id_raw).map_err(|reason| SlackSetupError::InvalidField {
+                field: "oauth_client_id",
+                reason: reason.to_string(),
+            })?;
+        let secret_handle = setup
+            .oauth_client_secret_handle
+            .ok_or(SlackSetupError::OAuthClientNotConfigured)?;
+        let client_secret = self.secret_material(&secret_handle).await?;
+        Ok((client_id, client_secret))
+    }
+
+    fn validated_setup(
+        &self,
+        update: SlackInstallationSetupUpdate,
+        previous: Option<&SlackInstallationSetup>,
+        revision: u64,
+    ) -> Result<ValidatedSlackSetup, SlackSetupError> {
+        let installation_id = validate_required("installation_id", update.installation_id)?;
+        AdapterInstallationId::new(installation_id.clone()).map_err(|reason| {
+            SlackSetupError::InvalidField {
+                field: "installation_id",
+                reason: reason.to_string(),
+            }
+        })?;
+        let team_id = validate_required("team_id", update.team_id)?;
+        SlackTeamId::new(team_id.clone());
+        let api_app_id = validate_required("api_app_id", update.api_app_id)?;
+        SlackApiAppId::new(api_app_id.clone());
+        let user_id = match validate_optional_user("user_id", update.user_id)? {
+            Some(user_id) => user_id,
+            None => self.operator_user_id.clone(),
+        };
+        let shared_subject_user_id =
+            validate_optional_user("shared_subject_user_id", update.shared_subject_user_id)?;
+        let installation_identity_changed = previous
+            .map(|setup| {
+                setup.installation_id != installation_id
+                    || setup.team_id != team_id
+                    || setup.api_app_id != api_app_id
+            })
+            .unwrap_or(false);
+
+        let bot_token = normalize_secret(update.bot_token);
+        let signing_secret = normalize_secret(update.signing_secret);
+        let oauth_client_secret = normalize_secret(update.oauth_client_secret);
+
+        let (bot_token_handle, pending_bot_token) = match bot_token {
+            Some(secret) => (
+                bot_token_handle(&self.tenant_id, &installation_id, revision)?,
+                Some(secret),
+            ),
+            _ => {
+                let previous =
+                    previous.ok_or(SlackSetupError::MissingField { field: "bot_token" })?;
+                if installation_identity_changed {
+                    return Err(SlackSetupError::MissingField { field: "bot_token" });
+                }
+                (previous.bot_token_handle.clone(), None)
+            }
+        };
+        let (signing_secret_handle, pending_signing_secret) = match signing_secret {
+            Some(secret) => (
+                signing_secret_handle(&self.tenant_id, &installation_id, revision)?,
+                Some(secret),
+            ),
+            _ => {
+                let previous = previous.ok_or(SlackSetupError::MissingField {
+                    field: "signing_secret",
+                })?;
+                if installation_identity_changed {
+                    return Err(SlackSetupError::MissingField {
+                        field: "signing_secret",
+                    });
+                }
+                (previous.signing_secret_handle.clone(), None)
+            }
+        };
+
+        let oauth_client_id = normalize_string(update.oauth_client_id)
+            .or_else(|| previous.and_then(|p| p.oauth_client_id.clone()));
+        let (oauth_client_secret_handle, pending_oauth_client_secret) = match oauth_client_secret {
+            Some(secret) => (
+                Some(oauth_client_secret_handle(
+                    &self.tenant_id,
+                    &installation_id,
+                    revision,
+                )?),
+                Some(secret),
+            ),
+            None => {
+                let handle = previous.and_then(|p| p.oauth_client_secret_handle.clone());
+                (handle, None)
+            }
+        };
+
+        Ok(ValidatedSlackSetup {
+            record: SlackInstallationSetup {
+                installation_id,
+                team_id,
+                api_app_id,
+                user_id: user_id.to_string(),
+                shared_subject_user_id: shared_subject_user_id.map(|user_id| user_id.to_string()),
+                bot_token_handle,
+                signing_secret_handle,
+                oauth_client_id,
+                oauth_client_secret_handle,
+                revision,
+                updated_at: Utc::now(),
+            },
+            pending_bot_token,
+            pending_signing_secret,
+            pending_oauth_client_secret,
+        })
+    }
+
+    async fn put_secret(
+        &self,
+        handle: SecretHandle,
+        material: SecretString,
+    ) -> Result<(), SlackSetupError> {
+        self.secret_store
+            .put(
+                self.secret_scope(),
+                handle,
+                SecretMaterial::from(material.expose_secret().to_string()),
+                None,
+            )
+            .await
+            .map_err(map_secret_error)?;
+        Ok(())
+    }
+
+    async fn delete_secret_if_unreferenced(
+        &self,
+        handle: &SecretHandle,
+        previous_handle: Option<&SecretHandle>,
+        current_handle: Option<&SecretHandle>,
+    ) -> Result<(), SlackSetupError> {
+        if previous_handle == Some(handle) || current_handle == Some(handle) {
+            return Ok(());
+        }
+        self.secret_store
+            .delete(&self.secret_scope(), handle)
+            .await
+            .map_err(map_secret_error)?;
+        Ok(())
+    }
+
+    async fn ensure_existing_secret(
+        &self,
+        field: &'static str,
+        handle: &SecretHandle,
+    ) -> Result<(), SlackSetupError> {
+        if self
+            .secret_store
+            .metadata(&self.secret_scope(), handle)
+            .await
+            .map_err(map_secret_error)?
+            .is_none()
+        {
+            return Err(SlackSetupError::MissingField { field });
+        }
+        Ok(())
+    }
+
+    async fn secret_material(
+        &self,
+        handle: &SecretHandle,
+    ) -> Result<SecretMaterial, SlackSetupError> {
+        let scope = self.secret_scope();
+        let lease = self
+            .secret_store
+            .lease_once(&scope, handle)
+            .await
+            .map_err(map_secret_error)?;
+        self.secret_store
+            .consume(&scope, lease.id)
+            .await
+            .map_err(map_secret_error)
+    }
+
+    fn secret_scope(&self) -> ResourceScope {
+        ResourceScope {
+            tenant_id: self.tenant_id.clone(),
+            user_id: self.operator_user_id.clone(),
+            agent_id: Some(self.agent_id.clone()),
+            project_id: self.project_id.clone(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
+    }
+}
+
+struct ValidatedSlackSetup {
+    record: SlackInstallationSetup,
+    pending_bot_token: Option<SecretString>,
+    pending_signing_secret: Option<SecretString>,
+    pending_oauth_client_secret: Option<SecretString>,
+}
+
+fn validate_required(field: &'static str, value: String) -> Result<String, SlackSetupError> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return Err(SlackSetupError::MissingField { field });
+    }
+    Ok(value)
+}
+
+fn validate_optional_user(
+    field: &'static str,
+    value: Option<String>,
+) -> Result<Option<UserId>, SlackSetupError> {
+    value
+        .map(|raw| {
+            let raw = validate_required(field, raw)?;
+            UserId::new(raw).map_err(|reason| SlackSetupError::InvalidField {
+                field,
+                reason: reason.to_string(),
+            })
+        })
+        .transpose()
+}
+
+fn normalize_secret(value: Option<SecretString>) -> Option<SecretString> {
+    let secret = value?;
+    let trimmed = secret.expose_secret().trim();
+    (!trimmed.is_empty()).then(|| SecretString::from(trimmed.to_string()))
+}
+
+fn normalize_string(value: Option<String>) -> Option<String> {
+    let s = value?;
+    let trimmed = s.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn bot_token_handle(
+    tenant_id: &TenantId,
+    installation_id: &str,
+    revision: u64,
+) -> Result<SecretHandle, SlackSetupError> {
+    secret_handle_for_installation(
+        SLACK_BOT_TOKEN_HANDLE_PREFIX,
+        tenant_id,
+        installation_id,
+        revision,
+    )
+    .map_err(|reason| SlackSetupError::InvalidField {
+        field: "bot_token",
+        reason: reason.to_string(),
+    })
+}
+
+fn signing_secret_handle(
+    tenant_id: &TenantId,
+    installation_id: &str,
+    revision: u64,
+) -> Result<SecretHandle, SlackSetupError> {
+    secret_handle_for_installation(
+        SLACK_SIGNING_SECRET_HANDLE_PREFIX,
+        tenant_id,
+        installation_id,
+        revision,
+    )
+    .map_err(|reason| SlackSetupError::InvalidField {
+        field: "signing_secret",
+        reason: reason.to_string(),
+    })
+}
+
+fn oauth_client_secret_handle(
+    tenant_id: &TenantId,
+    installation_id: &str,
+    revision: u64,
+) -> Result<SecretHandle, SlackSetupError> {
+    secret_handle_for_installation(
+        SLACK_OAUTH_CLIENT_SECRET_HANDLE_PREFIX,
+        tenant_id,
+        installation_id,
+        revision,
+    )
+    .map_err(|reason| SlackSetupError::InvalidField {
+        field: "oauth_client_secret",
+        reason: reason.to_string(),
+    })
+}
+
+fn secret_handle_for_installation(
+    prefix: &str,
+    tenant_id: &TenantId,
+    installation_id: &str,
+    revision: u64,
+) -> Result<SecretHandle, ironclaw_host_api::HostApiError> {
+    let digest = sha256_hex(&secret_handle_key_material(tenant_id, installation_id));
+    SecretHandle::new(format!(
+        "{prefix}_{}_v{revision}",
+        &digest[..INSTALLATION_HANDLE_HASH_LEN]
+    ))
+}
+
+fn secret_handle_key_material(tenant_id: &TenantId, installation_id: &str) -> Vec<u8> {
+    let mut key = b"slack-installation-secret:v1".to_vec();
+    append_length_prefixed(&mut key, tenant_id.as_str().as_bytes());
+    append_length_prefixed(&mut key, installation_id.as_bytes());
+    key
+}
+
+fn append_length_prefixed(key: &mut Vec<u8>, value: &[u8]) {
+    key.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    key.extend_from_slice(value);
+}
+
+fn map_secret_error(error: SecretStoreError) -> SlackSetupError {
+    SlackSetupError::SecretStoreUnavailable {
+        reason: error.stable_reason(),
+    }
+}
+
+/// Deferred pointer to [`SlackSetupService`] for the Slack personal OAuth
+/// providers. Created at runtime-build time (before `SlackSetupService`
+/// exists) and filled after `build_slack_host_beta_runtime_mounts` has
+/// constructed the service.
+#[derive(Clone)]
+pub struct SlackPersonalSetupServiceSlot {
+    slot: Arc<OnceLock<Arc<SlackSetupService>>>,
+    gate_lifecycle:
+        Arc<OnceLock<crate::slack::slack_personal_oauth::SlackPersonalOAuthGateLifecycle>>,
+    redirect_uri: OAuthRedirectUri,
+}
+
+impl SlackPersonalSetupServiceSlot {
+    pub fn new(redirect_uri: OAuthRedirectUri) -> Self {
+        Self {
+            slot: Arc::new(OnceLock::new()),
+            gate_lifecycle: Arc::new(OnceLock::new()),
+            redirect_uri,
+        }
+    }
+
+    pub(crate) fn fill(&self, service: Arc<SlackSetupService>) {
+        let _ = self.slot.set(service);
+    }
+
+    pub(crate) fn get(&self) -> Option<Arc<SlackSetupService>> {
+        self.slot.get().cloned()
+    }
+
+    pub(crate) fn fill_gate_lifecycle(
+        &self,
+        lifecycle: crate::slack::slack_personal_oauth::SlackPersonalOAuthGateLifecycle,
+    ) {
+        let _ = self.gate_lifecycle.set(lifecycle);
+    }
+
+    pub(crate) fn gate_lifecycle(
+        &self,
+    ) -> Option<crate::slack::slack_personal_oauth::SlackPersonalOAuthGateLifecycle> {
+        self.gate_lifecycle.get().cloned()
+    }
+
+    pub fn redirect_uri(&self) -> &OAuthRedirectUri {
+        &self.redirect_uri
+    }
+}
+
+impl fmt::Debug for SlackPersonalSetupServiceSlot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SlackPersonalSetupServiceSlot")
+            .field("filled", &self.slot.get().is_some())
+            .field(
+                "gate_lifecycle_filled",
+                &self.gate_lifecycle.get().is_some(),
+            )
+            .field("redirect_uri", &self.redirect_uri)
+            .finish()
+    }
+}
+
+/// Minimal in-memory [`SlackInstallationSetupStore`] backing the tests-only
+/// filled-slot seam below.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Default)]
+struct InMemorySlackSetupStore {
+    setup: std::sync::Mutex<Option<SlackInstallationSetup>>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[async_trait]
+impl SlackInstallationSetupStore for InMemorySlackSetupStore {
+    async fn get_slack_installation_setup(
+        &self,
+    ) -> Result<Option<SlackInstallationSetup>, SlackSetupError> {
+        Ok(self.setup.lock().expect("setup lock").clone())
+    }
+
+    async fn put_slack_installation_setup(
+        &self,
+        setup: &SlackInstallationSetup,
+    ) -> Result<(), SlackSetupError> {
+        *self.setup.lock().expect("setup lock") = Some(setup.clone());
+        Ok(())
+    }
+
+    async fn delete_slack_installation_setup(&self) -> Result<(), SlackSetupError> {
+        *self.setup.lock().expect("setup lock") = None;
+        Ok(())
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl SlackPersonalSetupServiceSlot {
+    /// Tests-only filled slot mirroring the production fill path
+    /// (`SlackHostBetaMounts::fill_slack_personal_oauth_slot`, driven by the
+    /// `ironclaw-reborn serve` wiring): an in-memory [`SlackSetupService`]
+    /// seeded with bot credentials plus the given personal-OAuth client
+    /// id/secret. Exists so caller-level serve tests can drive the composed
+    /// router's Slack OAuth start route; ships zero bytes in production
+    /// binaries.
+    pub async fn filled_with_in_memory_setup_for_tests(
+        redirect_uri: OAuthRedirectUri,
+        oauth_client_id: &str,
+        oauth_client_secret: &str,
+    ) -> Self {
+        let slot = Self::new(redirect_uri);
+        let service = Arc::new(SlackSetupService::new(
+            TenantId::new("tenant:test").expect("valid test tenant"),
+            AgentId::new("agent:test").expect("valid test agent"),
+            None,
+            UserId::new("user:operator").expect("valid test operator"),
+            Arc::new(InMemorySlackSetupStore::default()),
+            Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
+        ));
+        service
+            .save(SlackInstallationSetupUpdate {
+                installation_id: "install-test".to_string(),
+                team_id: "T-test".to_string(),
+                api_app_id: "A-test".to_string(),
+                user_id: Some("user:operator".to_string()),
+                shared_subject_user_id: None,
+                bot_token: Some(SecretString::from("xoxb-test")),
+                signing_secret: Some(SecretString::from("signing-test")),
+                oauth_client_id: Some(oauth_client_id.to_string()),
+                oauth_client_secret: Some(SecretString::from(oauth_client_secret.to_string())),
+            })
+            .await
+            .expect("seed in-memory Slack setup");
+        slot.fill(service);
+        slot
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_secrets::FilesystemSecretStore;
+
+    #[derive(Debug, Default)]
+    struct MemorySetupStore {
+        setup: Mutex<Option<SlackInstallationSetup>>,
+    }
+
+    #[async_trait]
+    impl SlackInstallationSetupStore for MemorySetupStore {
+        async fn get_slack_installation_setup(
+            &self,
+        ) -> Result<Option<SlackInstallationSetup>, SlackSetupError> {
+            Ok(self.setup.lock().await.clone())
+        }
+
+        async fn put_slack_installation_setup(
+            &self,
+            setup: &SlackInstallationSetup,
+        ) -> Result<(), SlackSetupError> {
+            *self.setup.lock().await = Some(setup.clone());
+            Ok(())
+        }
+
+        async fn delete_slack_installation_setup(&self) -> Result<(), SlackSetupError> {
+            *self.setup.lock().await = None;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn save_stores_slack_credentials_in_operator_scope_only() {
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+        let service = SlackSetupService::new(
+            TenantId::new("tenant:test").expect("tenant"),
+            AgentId::new("agent:test").expect("agent"),
+            Some(ProjectId::new("project:test").expect("project")),
+            UserId::new("user:operator").expect("user"),
+            Arc::new(MemorySetupStore::default()),
+            secret_store.clone(),
+        );
+
+        let setup = service
+            .save(SlackInstallationSetupUpdate {
+                installation_id: "install_runtime".to_string(),
+                team_id: "T0RUNTIME".to_string(),
+                api_app_id: "A0RUNTIME".to_string(),
+                user_id: None,
+                shared_subject_user_id: None,
+                bot_token: Some(SecretString::from("xoxb-secret")),
+                signing_secret: Some(SecretString::from("slack-signing-secret")),
+                oauth_client_id: None,
+                oauth_client_secret: None,
+            })
+            .await
+            .expect("save setup");
+
+        assert!(
+            setup
+                .bot_token_handle
+                .as_str()
+                .starts_with("slack_bot_token_")
+        );
+        assert!(setup.bot_token_handle.as_str().ends_with("_v1"));
+        assert!(!setup.bot_token_handle.as_str().contains("install_runtime"));
+        assert!(
+            setup
+                .signing_secret_handle
+                .as_str()
+                .starts_with("slack_signing_secret_")
+        );
+        assert!(setup.signing_secret_handle.as_str().ends_with("_v1"));
+        assert!(
+            !setup
+                .signing_secret_handle
+                .as_str()
+                .contains("install_runtime")
+        );
+
+        let operator_runtime_scope = ResourceScope {
+            tenant_id: service.tenant_id().clone(),
+            user_id: UserId::new("user:operator").expect("user"),
+            agent_id: Some(service.agent_id().clone()),
+            project_id: service.project_id().cloned(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        assert!(
+            secret_store
+                .metadata(&operator_runtime_scope, &setup.bot_token_handle)
+                .await
+                .expect("operator metadata")
+                .is_some()
+        );
+        assert!(
+            secret_store
+                .metadata(&ResourceScope::system(), &setup.bot_token_handle)
+                .await
+                .expect("system metadata")
+                .is_none()
+        );
+
+        let bot_token = service.bot_token(&setup).await.expect("bot token");
+        assert_eq!(bot_token.expose_secret(), "xoxb-secret");
+    }
+
+    #[tokio::test]
+    async fn status_reports_entrypoint_ready_but_personal_oauth_not_ready_without_client_creds() {
+        // F-008: bot token + signing secret make Slack event ingestion (the
+        // "entrypoint") ready, but Slack personal-OAuth *start* additionally
+        // needs the OAuth client id + secret. `configured` (event readiness the
+        // WebUI depends on) must stay true while `personal_oauth_ready` stays
+        // false, so the UI cannot show Slack fully configured while OAuth start
+        // cannot run. Driven through `status()` (the caller the route handler
+        // serializes), exercising the real secret-store metadata reads.
+        let service = SlackSetupService::new(
+            TenantId::new("tenant:test").expect("tenant"),
+            AgentId::new("agent:test").expect("agent"),
+            Some(ProjectId::new("project:test").expect("project")),
+            UserId::new("user:operator").expect("user"),
+            Arc::new(MemorySetupStore::default()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
+        );
+
+        service
+            .save(SlackInstallationSetupUpdate {
+                installation_id: "install_runtime".to_string(),
+                team_id: "T0RUNTIME".to_string(),
+                api_app_id: "A0RUNTIME".to_string(),
+                user_id: None,
+                shared_subject_user_id: None,
+                bot_token: Some(SecretString::from("xoxb-secret")),
+                signing_secret: Some(SecretString::from("slack-signing-secret")),
+                oauth_client_id: None,
+                oauth_client_secret: None,
+            })
+            .await
+            .expect("save bot creds only");
+
+        let status = service.status().await.expect("status without oauth creds");
+        assert!(
+            status.configured,
+            "bot token + signing secret must report entrypoint-ready"
+        );
+        assert!(!status.oauth_client_id_configured);
+        assert!(!status.oauth_client_secret_configured);
+        assert!(
+            !status.personal_oauth_ready,
+            "personal OAuth must not be ready without client id + secret"
+        );
+
+        // Adding the personal-OAuth client credentials flips
+        // `personal_oauth_ready` to true while `configured` stays true
+        // (additive, non-regressing).
+        service
+            .save(SlackInstallationSetupUpdate {
+                installation_id: "install_runtime".to_string(),
+                team_id: "T0RUNTIME".to_string(),
+                api_app_id: "A0RUNTIME".to_string(),
+                user_id: None,
+                shared_subject_user_id: None,
+                bot_token: None,
+                signing_secret: None,
+                oauth_client_id: Some("slack-oauth-client-id".to_string()),
+                oauth_client_secret: Some(SecretString::from("slack-oauth-client-secret")),
+            })
+            .await
+            .expect("save oauth client creds");
+
+        let status = service.status().await.expect("status after oauth creds");
+        assert!(status.configured);
+        assert!(status.oauth_client_id_configured);
+        assert!(status.oauth_client_secret_configured);
+        assert!(
+            status.personal_oauth_ready,
+            "personal OAuth must be ready once client id + secret are configured"
+        );
+    }
+
+    #[tokio::test]
+    async fn save_namespaces_operator_scope_slack_credentials_by_tenant() {
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+        let service_a = SlackSetupService::new(
+            TenantId::new("tenant:a").expect("tenant"),
+            AgentId::new("agent:test").expect("agent"),
+            Some(ProjectId::new("project:test").expect("project")),
+            UserId::new("user:operator").expect("user"),
+            Arc::new(MemorySetupStore::default()),
+            secret_store.clone(),
+        );
+        let service_b = SlackSetupService::new(
+            TenantId::new("tenant:b").expect("tenant"),
+            AgentId::new("agent:test").expect("agent"),
+            Some(ProjectId::new("project:test").expect("project")),
+            UserId::new("user:operator").expect("user"),
+            Arc::new(MemorySetupStore::default()),
+            secret_store,
+        );
+
+        let setup_a = service_a
+            .save(SlackInstallationSetupUpdate {
+                installation_id: "shared_install".to_string(),
+                team_id: "T0RUNTIME".to_string(),
+                api_app_id: "A0RUNTIME".to_string(),
+                user_id: None,
+                shared_subject_user_id: None,
+                bot_token: Some(SecretString::from("xoxb-tenant-a")),
+                signing_secret: Some(SecretString::from("slack-signing-secret-a")),
+                oauth_client_id: None,
+                oauth_client_secret: None,
+            })
+            .await
+            .expect("save tenant a");
+        let setup_b = service_b
+            .save(SlackInstallationSetupUpdate {
+                installation_id: "shared_install".to_string(),
+                team_id: "T0RUNTIME".to_string(),
+                api_app_id: "A0RUNTIME".to_string(),
+                user_id: None,
+                shared_subject_user_id: None,
+                bot_token: Some(SecretString::from("xoxb-tenant-b")),
+                signing_secret: Some(SecretString::from("slack-signing-secret-b")),
+                oauth_client_id: None,
+                oauth_client_secret: None,
+            })
+            .await
+            .expect("save tenant b");
+
+        assert_ne!(setup_a.bot_token_handle, setup_b.bot_token_handle);
+        assert_ne!(setup_a.signing_secret_handle, setup_b.signing_secret_handle);
+        assert_eq!(
+            service_a
+                .bot_token(&setup_a)
+                .await
+                .expect("tenant a token")
+                .expose_secret(),
+            "xoxb-tenant-a"
+        );
+        assert_eq!(
+            service_b
+                .bot_token(&setup_b)
+                .await
+                .expect("tenant b token")
+                .expose_secret(),
+            "xoxb-tenant-b"
+        );
+    }
+
+    #[test]
+    fn secret_handle_key_material_is_length_prefixed() {
+        let tenant_with_separator = TenantId::from_trusted("tenant:a\ninstallation:b".to_string());
+        let tenant = TenantId::new("tenant:a").expect("tenant");
+
+        assert_ne!(
+            secret_handle_key_material(&tenant_with_separator, "c"),
+            secret_handle_key_material(&tenant, "b\ninstallation:c")
+        );
+    }
+
+    #[tokio::test]
+    async fn save_rejects_installation_identity_change_without_fresh_secrets() {
+        let setup_store = Arc::new(MemorySetupStore::default());
+        let service = SlackSetupService::new(
+            TenantId::new("tenant:test").expect("tenant"),
+            AgentId::new("agent:test").expect("agent"),
+            Some(ProjectId::new("project:test").expect("project")),
+            UserId::new("user:operator").expect("user"),
+            setup_store.clone(),
+            Arc::new(FilesystemSecretStore::ephemeral()),
+        );
+        let original = service
+            .save(SlackInstallationSetupUpdate {
+                installation_id: "install_runtime".to_string(),
+                team_id: "T0RUNTIME".to_string(),
+                api_app_id: "A0RUNTIME".to_string(),
+                user_id: None,
+                shared_subject_user_id: None,
+                bot_token: Some(SecretString::from("xoxb-original")),
+                signing_secret: Some(SecretString::from("slack-signing-original")),
+                oauth_client_id: None,
+                oauth_client_secret: None,
+            })
+            .await
+            .expect("save original");
+
+        let error = service
+            .save(SlackInstallationSetupUpdate {
+                installation_id: "install_changed".to_string(),
+                team_id: "T0RUNTIME".to_string(),
+                api_app_id: "A0RUNTIME".to_string(),
+                user_id: None,
+                shared_subject_user_id: None,
+                bot_token: None,
+                signing_secret: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+            })
+            .await
+            .expect_err("identity change requires fresh secrets");
+
+        assert!(matches!(
+            error,
+            SlackSetupError::MissingField { field: "bot_token" }
+        ));
+        assert_eq!(
+            setup_store
+                .get_slack_installation_setup()
+                .await
+                .expect("setup")
+                .expect("stored"),
+            original
+        );
+    }
+
+    #[tokio::test]
+    async fn save_rejects_whitespace_only_fresh_secrets() {
+        let service = SlackSetupService::new(
+            TenantId::new("tenant:test").expect("tenant"),
+            AgentId::new("agent:test").expect("agent"),
+            Some(ProjectId::new("project:test").expect("project")),
+            UserId::new("user:operator").expect("user"),
+            Arc::new(MemorySetupStore::default()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
+        );
+
+        let error = service
+            .save(SlackInstallationSetupUpdate {
+                installation_id: "install_runtime".to_string(),
+                team_id: "T0RUNTIME".to_string(),
+                api_app_id: "A0RUNTIME".to_string(),
+                user_id: None,
+                shared_subject_user_id: None,
+                bot_token: Some(SecretString::from("   ")),
+                signing_secret: Some(SecretString::from("slack-signing-secret")),
+                oauth_client_id: None,
+                oauth_client_secret: None,
+            })
+            .await
+            .expect_err("whitespace-only bot token is missing");
+
+        assert!(matches!(
+            error,
+            SlackSetupError::MissingField { field: "bot_token" }
+        ));
+    }
+
+    #[tokio::test]
+    async fn save_reuses_secret_handles_for_non_installation_metadata_update() {
+        let service = SlackSetupService::new(
+            TenantId::new("tenant:test").expect("tenant"),
+            AgentId::new("agent:test").expect("agent"),
+            Some(ProjectId::new("project:test").expect("project")),
+            UserId::new("user:operator").expect("user"),
+            Arc::new(MemorySetupStore::default()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
+        );
+        let original = service
+            .save(SlackInstallationSetupUpdate {
+                installation_id: "install_runtime".to_string(),
+                team_id: "T0RUNTIME".to_string(),
+                api_app_id: "A0RUNTIME".to_string(),
+                user_id: None,
+                shared_subject_user_id: None,
+                bot_token: Some(SecretString::from("xoxb-original")),
+                signing_secret: Some(SecretString::from("slack-signing-original")),
+                oauth_client_id: None,
+                oauth_client_secret: None,
+            })
+            .await
+            .expect("save original");
+
+        let updated = service
+            .save(SlackInstallationSetupUpdate {
+                installation_id: "install_runtime".to_string(),
+                team_id: "T0RUNTIME".to_string(),
+                api_app_id: "A0RUNTIME".to_string(),
+                user_id: Some("user:slack-operator".to_string()),
+                shared_subject_user_id: Some("user:shared-agent".to_string()),
+                bot_token: None,
+                signing_secret: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+            })
+            .await
+            .expect("save metadata update");
+
+        assert_eq!(updated.bot_token_handle, original.bot_token_handle);
+        assert_eq!(
+            updated.signing_secret_handle,
+            original.signing_secret_handle
+        );
+        assert_eq!(updated.revision, 2);
+        assert_eq!(updated.user_id, "user:slack-operator");
+        assert_eq!(
+            updated.shared_subject_user_id.as_deref(),
+            Some("user:shared-agent")
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_failed_activation_save_deletes_superseded_secret_handles() {
+        let setup_store = Arc::new(MemorySetupStore::default());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+        let service = SlackSetupService::new(
+            TenantId::new("tenant:test").expect("tenant"),
+            AgentId::new("agent:test").expect("agent"),
+            Some(ProjectId::new("project:test").expect("project")),
+            UserId::new("user:operator").expect("user"),
+            setup_store.clone(),
+            secret_store.clone(),
+        );
+        let _original = service
+            .save(SlackInstallationSetupUpdate {
+                installation_id: "install_runtime".to_string(),
+                team_id: "T0RUNTIME".to_string(),
+                api_app_id: "A0RUNTIME".to_string(),
+                user_id: None,
+                shared_subject_user_id: None,
+                bot_token: Some(SecretString::from("xoxb-original")),
+                signing_secret: Some(SecretString::from("slack-signing-original")),
+                oauth_client_id: None,
+                oauth_client_secret: None,
+            })
+            .await
+            .expect("save original");
+        let (previous, failed_save) = service
+            .save_with_previous(SlackInstallationSetupUpdate {
+                installation_id: "install_runtime".to_string(),
+                team_id: "T0RUNTIME".to_string(),
+                api_app_id: "A0RUNTIME".to_string(),
+                user_id: None,
+                shared_subject_user_id: None,
+                bot_token: Some(SecretString::from("xoxb-first-retry")),
+                signing_secret: Some(SecretString::from("slack-signing-first-retry")),
+                oauth_client_id: Some("client-first-retry".to_string()),
+                oauth_client_secret: Some(SecretString::from("oauth-secret-first-retry")),
+            })
+            .await
+            .expect("save first retry");
+        let second_save = service
+            .save(SlackInstallationSetupUpdate {
+                installation_id: "install_runtime".to_string(),
+                team_id: "T0RUNTIME".to_string(),
+                api_app_id: "A0RUNTIME".to_string(),
+                user_id: None,
+                shared_subject_user_id: None,
+                bot_token: Some(SecretString::from("xoxb-second-retry")),
+                signing_secret: Some(SecretString::from("slack-signing-second-retry")),
+                oauth_client_id: Some("client-second-retry".to_string()),
+                oauth_client_secret: Some(SecretString::from("oauth-secret-second-retry")),
+            })
+            .await
+            .expect("save second retry");
+
+        service
+            .rollback_failed_activation_save(&failed_save, previous.as_ref())
+            .await
+            .expect("rollback failed first activation");
+
+        assert_eq!(
+            setup_store
+                .get_slack_installation_setup()
+                .await
+                .expect("setup")
+                .expect("stored"),
+            second_save,
+            "rollback must not clobber a newer setup save"
+        );
+        let scope = service.secret_scope();
+        assert!(
+            secret_store
+                .metadata(&scope, &failed_save.bot_token_handle)
+                .await
+                .expect("first bot token metadata")
+                .is_none()
+        );
+        assert!(
+            secret_store
+                .metadata(&scope, &failed_save.signing_secret_handle)
+                .await
+                .expect("first signing metadata")
+                .is_none()
+        );
+        assert!(
+            secret_store
+                .metadata(&scope, &second_save.bot_token_handle)
+                .await
+                .expect("second bot token metadata")
+                .is_some()
+        );
+        assert!(
+            secret_store
+                .metadata(&scope, &second_save.signing_secret_handle)
+                .await
+                .expect("second signing metadata")
+                .is_some()
+        );
+        let failed_oauth_handle = failed_save
+            .oauth_client_secret_handle
+            .as_ref()
+            .expect("failed save minted an oauth secret handle");
+        assert!(
+            secret_store
+                .metadata(&scope, failed_oauth_handle)
+                .await
+                .expect("first oauth metadata")
+                .is_none(),
+            "rollback must delete the failed save's fresh oauth client secret"
+        );
+        assert!(
+            secret_store
+                .metadata(
+                    &scope,
+                    second_save
+                        .oauth_client_secret_handle
+                        .as_ref()
+                        .expect("second save oauth handle")
+                )
+                .await
+                .expect("second oauth metadata")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_preserves_inherited_oauth_secret_handle() {
+        let setup_store = Arc::new(MemorySetupStore::default());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+        let service = SlackSetupService::new(
+            TenantId::new("tenant:test").expect("tenant"),
+            AgentId::new("agent:test").expect("agent"),
+            Some(ProjectId::new("project:test").expect("project")),
+            UserId::new("user:operator").expect("user"),
+            setup_store.clone(),
+            secret_store.clone(),
+        );
+        let original = service
+            .save(SlackInstallationSetupUpdate {
+                installation_id: "install_runtime".to_string(),
+                team_id: "T0RUNTIME".to_string(),
+                api_app_id: "A0RUNTIME".to_string(),
+                user_id: None,
+                shared_subject_user_id: None,
+                bot_token: Some(SecretString::from("xoxb-original")),
+                signing_secret: Some(SecretString::from("slack-signing-original")),
+                oauth_client_id: Some("client-original".to_string()),
+                oauth_client_secret: Some(SecretString::from("oauth-secret-original")),
+            })
+            .await
+            .expect("save original");
+        let (previous, failed_save) = service
+            .save_with_previous(SlackInstallationSetupUpdate {
+                installation_id: "install_runtime".to_string(),
+                team_id: "T0RUNTIME".to_string(),
+                api_app_id: "A0RUNTIME".to_string(),
+                user_id: Some("user:slack-operator".to_string()),
+                shared_subject_user_id: None,
+                bot_token: None,
+                signing_secret: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+            })
+            .await
+            .expect("metadata-only retry inherits handles");
+        assert_eq!(
+            failed_save.oauth_client_secret_handle, original.oauth_client_secret_handle,
+            "no fresh oauth secret means the handle is inherited"
+        );
+
+        service
+            .rollback_failed_activation_save(&failed_save, previous.as_ref())
+            .await
+            .expect("rollback inherited-handle save");
+
+        let scope = service.secret_scope();
+        assert!(
+            secret_store
+                .metadata(
+                    &scope,
+                    original
+                        .oauth_client_secret_handle
+                        .as_ref()
+                        .expect("original oauth handle")
+                )
+                .await
+                .expect("original oauth metadata")
+                .is_some(),
+            "rollback must not delete an oauth secret handle still referenced by previous"
+        );
+        assert_eq!(
+            setup_store
+                .get_slack_installation_setup()
+                .await
+                .expect("setup")
+                .expect("stored"),
+            original,
+            "rollback restores the previous setup"
+        );
+    }
+
+    #[tokio::test]
+    async fn save_rejects_reusing_missing_secret_handles() {
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+        let service = SlackSetupService::new(
+            TenantId::new("tenant:test").expect("tenant"),
+            AgentId::new("agent:test").expect("agent"),
+            Some(ProjectId::new("project:test").expect("project")),
+            UserId::new("user:operator").expect("user"),
+            Arc::new(MemorySetupStore::default()),
+            secret_store.clone(),
+        );
+        let original = service
+            .save(SlackInstallationSetupUpdate {
+                installation_id: "install_runtime".to_string(),
+                team_id: "T0RUNTIME".to_string(),
+                api_app_id: "A0RUNTIME".to_string(),
+                user_id: None,
+                shared_subject_user_id: None,
+                bot_token: Some(SecretString::from("xoxb-original")),
+                signing_secret: Some(SecretString::from("slack-signing-original")),
+                oauth_client_id: None,
+                oauth_client_secret: None,
+            })
+            .await
+            .expect("save original");
+        let scope = service.secret_scope();
+
+        assert!(
+            secret_store
+                .delete(&scope, &original.bot_token_handle)
+                .await
+                .expect("delete bot token")
+        );
+        let error = service
+            .save(SlackInstallationSetupUpdate {
+                installation_id: "install_runtime".to_string(),
+                team_id: "T0RUNTIME".to_string(),
+                api_app_id: "A0RUNTIME".to_string(),
+                user_id: None,
+                shared_subject_user_id: None,
+                bot_token: None,
+                signing_secret: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+            })
+            .await
+            .expect_err("missing bot token prevents handle reuse");
+        assert!(matches!(
+            error,
+            SlackSetupError::MissingField { field: "bot_token" }
+        ));
+
+        secret_store
+            .put(
+                scope.clone(),
+                original.bot_token_handle.clone(),
+                SecretMaterial::from("xoxb-original".to_string()),
+                None,
+            )
+            .await
+            .expect("restore bot token");
+        assert!(
+            secret_store
+                .delete(&scope, &original.signing_secret_handle)
+                .await
+                .expect("delete signing secret")
+        );
+        let error = service
+            .save(SlackInstallationSetupUpdate {
+                installation_id: "install_runtime".to_string(),
+                team_id: "T0RUNTIME".to_string(),
+                api_app_id: "A0RUNTIME".to_string(),
+                user_id: None,
+                shared_subject_user_id: None,
+                bot_token: None,
+                signing_secret: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+            })
+            .await
+            .expect_err("missing signing secret prevents handle reuse");
+        assert!(matches!(
+            error,
+            SlackSetupError::MissingField {
+                field: "signing_secret"
+            }
+        ));
+    }
+}

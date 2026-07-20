@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "market-data.snp500 output",
+  "type": "object",
+  "properties": {
+    "symbol": { "type": "string" },
+    "name": { "type": "string" },
+    "price": { "type": "number" },
+    "change": { "type": "number" },
+    "change_percent": { "type": "number" },
+    "previous_close": { "type": "number" },
+    "day_high": { "type": "number" },
+    "day_low": { "type": "number" },
+    "as_of": { "type": "string" },
+    "data_source": { "type": "string" }
+  },
+  "required": ["symbol", "price", "change", "change_percent", "as_of"],
+  "additionalProperties": false
+}

@@ -1,9 +1,9 @@
 //! Reborn integration-test framework local-dev boot accessors.
 //!
-//! `build_local_dev_approval_gate_evidence_for_test`,
+//! `build_approval_gate_evidence_for_test`,
 //! `build_default_local_dev_database_roots_for_test`,
 //! `mount_local_dev_database_roots_for_test`,
-//! `build_local_dev_secret_store_for_test` — mirror the production local-dev
+//! `build_secret_store_for_test` — mirror the production local-dev
 //! boot sequence so the integration-test harness (`tests/support/reborn/`)
 //! drives the real local-dev composition paths without duplicating the wiring
 //! logic.
@@ -15,7 +15,7 @@
 pub const LOCAL_DEV_DB_FILENAME: &str = crate::factory::LOCAL_DEV_DB_FILENAME;
 
 /// Test-only accessor mirroring the full local-dev database-roots boot path
-/// (`build_local_dev_root_filesystem` → `build_default_local_dev_database_roots`).
+/// (`build_local_runtime_root_filesystem` → `build_default_local_dev_database_roots`).
 ///
 /// Constructs the durable database backend and mounts it across the
 /// control-plane roots (`/tenants`, `/memory`, `/events`) of `composite`,
@@ -26,7 +26,7 @@ pub const LOCAL_DEV_DB_FILENAME: &str = crate::factory::LOCAL_DEV_DB_FILENAME;
 /// Called by the Reborn integration-test framework's `StorageMode::LibSql`
 /// builder arm (`tests/support/reborn/builder.rs:build_storage_composite`) so
 /// the 4-step libSQL setup sequence lives once (production call site:
-/// `build_local_dev_root_filesystem` → `build_default_local_dev_database_roots`).
+/// `build_local_runtime_root_filesystem` → `build_default_local_dev_database_roots`).
 /// For tests only — gated behind `test-support`, ships zero bytes in production.
 #[cfg(feature = "test-support")]
 pub async fn build_default_local_dev_database_roots_for_test(
@@ -37,7 +37,7 @@ pub async fn build_default_local_dev_database_roots_for_test(
 }
 
 /// Test-only accessor mirroring the production local-dev boot path
-/// (`build_local_dev_root_filesystem` → `mount_local_dev_database_roots`).
+/// (`build_local_runtime_root_filesystem` → `mount_local_dev_database_roots`).
 ///
 /// Mounts `database` across the control-plane roots (`/tenants`, `/memory`,
 /// `/events`) of `root` exactly as the libSQL local-dev boot path does, so
@@ -62,7 +62,7 @@ where
 /// Reborn runtime assembly.
 ///
 /// Mirrors the production wiring in `build_local_runtime` where
-/// `build_local_dev_secret_store` is called with the scoped filesystem and a
+/// `build_secret_store` is called with the scoped filesystem and a
 /// master key resolved from the environment or the root directory's cached key
 /// file. Tests that need a real `FilesystemSecretStore` — for example, to
 /// verify `put` + `lease_once` + `consume` round-trips against an in-process
@@ -76,19 +76,22 @@ where
 /// secret written by the first. For tests only — zero bytes shipped in
 /// production builds.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-pub fn build_local_dev_secret_store_for_test<F>(
+pub async fn build_secret_store_for_test<F>(
     root: &std::path::Path,
     scoped: std::sync::Arc<ironclaw_filesystem::ScopedFilesystem<F>>,
 ) -> Result<std::sync::Arc<ironclaw_secrets::FilesystemSecretStore<F>>, crate::RebornBuildError>
 where
     F: ironclaw_filesystem::RootFilesystem + 'static,
 {
-    crate::factory::build_local_dev_secret_store(root, scoped, None)
+    // `build_secret_store` also returns the crypto (for the admin
+    // secret provisioner); this test helper only needs the store.
+    let (store, _crypto) = crate::factory::build_secret_store(root, scoped, None).await?;
+    Ok(store)
 }
 
 /// Mirrors the production approval-gate evidence wiring done by
 /// `build_local_runtime` (runtime.rs ~line 2799) — returns the REAL
-/// `LocalDevApprovalGateEvidence` so the gate-evidence lookup logic
+/// `ApprovalRequestGateEvidence` so the gate-evidence lookup logic
 /// (the `gate:approval-` prefix parse + `ApprovalStatus::Pending` check)
 /// never drifts from production. Tests only.
 ///
@@ -99,8 +102,8 @@ where
 /// request at loop exit and genuinely pauses — mirrors the production
 /// `runtime.rs` path with the real type, never a hand-mirrored copy.
 #[cfg(feature = "test-support")]
-pub fn build_local_dev_approval_gate_evidence_for_test(
+pub fn build_approval_gate_evidence_for_test(
     approval_requests: std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
-) -> std::sync::Arc<dyn ironclaw_reborn::loop_exit_applier::ApprovalGateEvidenceStore> {
-    crate::runtime::build_local_dev_approval_gate_evidence_for_test(approval_requests)
+) -> std::sync::Arc<dyn ironclaw_runner::loop_exit_applier::ApprovalGateEvidenceStore> {
+    crate::runtime::build_approval_gate_evidence_for_test(approval_requests)
 }

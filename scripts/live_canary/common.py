@@ -84,11 +84,34 @@ def install_playwright(python: Path, mode: str) -> None:
     if resolved == "with-deps":
         cmd.append("--with-deps")
     cmd.append("chromium")
-    run(cmd, cwd=E2E_DIR)
+    try:
+        run(cmd, cwd=E2E_DIR)
+    except subprocess.CalledProcessError:
+        if resolved != "with-deps":
+            raise
+        print(
+            "[live-canary] playwright install --with-deps failed; "
+            "retrying browser-only install",
+            flush=True,
+        )
+        run([str(python), "-m", "playwright", "install", "chromium"], cwd=E2E_DIR)
 
 
 def cargo_build() -> None:
-    run(["cargo", "build", "--no-default-features", "--features", "libsql"], cwd=ROOT)
+    run(
+        [
+            "cargo",
+            "build",
+            "-p",
+            "ironclaw",
+            "--bin",
+            "ironclaw-legacy",
+            "--no-default-features",
+            "--features",
+            "libsql",
+        ],
+        cwd=ROOT,
+    )
 
 
 def env_str(name: str, default: str | None = None) -> str | None:
@@ -485,7 +508,7 @@ async def start_gateway_stack(
             extra_env=extra_gateway_env,
         )
         gateway_proc = subprocess.Popen(
-            [str(ROOT / "target" / "debug" / "ironclaw"), "--no-onboard"],
+            [str(ROOT / "target" / "debug" / "ironclaw-legacy"), "--no-onboard"],
             cwd=ROOT,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,

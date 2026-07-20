@@ -168,6 +168,24 @@ assert_precommit_allows_with_unstaged() {
     fi
 }
 
+# Rust commonly keeps large unit-test modules in a sibling `*_tests.rs` file
+# that is included by a `#[cfg(test)] mod ...;` declaration. Those files are
+# test-only even though they do not live under a `tests/` directory.
+assert_precommit_allows "PANIC: sibling *_tests.rs files are test-only" \
+    "src/auth_tests.rs" \
+    "fn existing_test() {}\n" \
+    "fn existing_test() {}\n#[test]\nfn new_test() { Result::<(), &str>::Ok(()).expect(\"fixture\"); }\n"
+
+assert_precommit_allows "PANIC: sibling test_*.rs files are test-only" \
+    "src/test_auth.rs" \
+    "fn existing_test() {}\n" \
+    "fn existing_test() {}\n#[test]\nfn new_test() { Result::<(), &str>::Ok(()).expect(\"fixture\"); }\n"
+
+assert_precommit_allows "PANIC: sibling *_test.rs files are test-only" \
+    "src/auth_test.rs" \
+    "fn existing_test() {}\n" \
+    "fn existing_test() {}\n#[test]\nfn new_test() { Result::<(), &str>::Ok(()).expect(\"fixture\"); }\n"
+
 assert_precommit_allows_unstaged_diff() {
     local label="$1" path="$2" base_content="$3" changed_content="$4"
     local tmp output status

@@ -4,8 +4,9 @@ use ironclaw_turns::{LoopExit, LoopFailureKind};
 use crate::state::{CheckpointKind, LoopExecutionState};
 
 use super::{
-    AgentLoopExecutorError, CheckpointStage, ExecutorStage, PendingInputAck, StageContext,
-    completed_exit, failed_exit, loop_exit::try_final_answer_nudge,
+    AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, FailedExitDetails,
+    PendingInputAck, StageContext, attach_failure_explanation, completed_exit, failed_exit,
+    loop_exit::try_final_answer_nudge,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -58,6 +59,17 @@ impl ExecutorStage<BudgetInput> for BudgetStage {
             )?));
         }
 
+        // The nudge did not yield a reply: fall back to explained failure.
+        let mut state = match CheckpointStage
+            .cancel_if_requested_after_pending_input_ack(ctx, state, &mut pending_input_ack)
+            .await?
+        {
+            CancelCheck::Continue(state) => *state,
+            CancelCheck::Exit(exit) => return Ok(BudgetStep::Exit(exit)),
+        };
+        let explanation_message_ref =
+            attach_failure_explanation(ctx, &mut state, LoopFailureKind::IterationLimit).await?;
+
         let checked = CheckpointStage
             .write(ctx, state, CheckpointKind::Final)
             .await?;
@@ -67,6 +79,11 @@ impl ExecutorStage<BudgetInput> for BudgetStage {
             checked.state,
             LoopFailureKind::IterationLimit,
             Some(checked.checkpoint_id),
+            FailedExitDetails {
+                diagnostic_ref: None,
+                safe_summary: None,
+                explanation_message_ref,
+            },
         )?))
     }
 }

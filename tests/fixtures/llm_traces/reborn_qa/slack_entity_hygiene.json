@@ -1,0 +1,154 @@
+{
+  "model_name": "synthetic-q10i-slack-entity-hygiene",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "Find CANARY_ENTITY_MESSAGE in Slack conversation D0CANARY and name the mentioned person by display name."
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_entity_extension_search",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "Slack"
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_entity_extension_install",
+            "name": "builtin__extension_install",
+            "arguments": {
+              "extension_id": "slack"
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_entity_extension_activate",
+            "name": "builtin__extension_activate",
+            "arguments": {
+              "extension_id": "slack"
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_entity_search_conversation",
+            "name": "slack.search_messages",
+            "arguments": {
+              "count": 1,
+              "query": "CANARY_ENTITY_MESSAGE in:D0CANARY",
+              "sort": "timestamp"
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_entity_search_marker",
+            "name": "slack.search_messages",
+            "arguments": {
+              "count": 20,
+              "query": "CANARY_ENTITY_MESSAGE",
+              "sort": "timestamp"
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_entity_search_marker_fragment",
+            "name": "slack.search_messages",
+            "arguments": {
+              "count": 20,
+              "query": "CANARY_ENTITY",
+              "sort": "timestamp"
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_entity_get_history",
+            "name": "slack.get_conversation_history",
+            "arguments": {
+              "channel": "D0CANARY",
+              "limit": 100
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_entity_get_user_info",
+            "name": "slack.get_user_info",
+            "arguments": {
+              "user_id": "U0CANARY"
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "The synthetic message asks to sync with Canary User",
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    }
+  ]
+}

@@ -230,7 +230,7 @@ mod tests {
         assert!(
             output_str.is_ok(),
             "output should be valid UTF-8, got bytes: {:?}",
-            &*output
+            *output
         );
         let s = output_str.unwrap();
         assert!(
@@ -329,7 +329,7 @@ mod tests {
 
         let output = sink.lock().unwrap();
         let s = String::from_utf8(output.clone());
-        assert!(s.is_ok(), "output must be valid UTF-8, got: {:?}", &*output);
+        assert!(s.is_ok(), "output must be valid UTF-8, got: {:?}", *output);
         let s = s.unwrap();
         // Should back up to byte 2 (just "AB"), since bytes 2..5 are all part of 𝄞
         assert!(s.starts_with("AB"), "expected 'AB', got: {}", s);

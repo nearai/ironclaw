@@ -4,11 +4,14 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "kernel"
+
 [features]
 default = []
 test-support = []
-postgres = ["dep:deadpool-postgres", "ironclaw_filesystem/postgres", "ironclaw_resources/postgres", "ironclaw_run_state/postgres"]
-libsql = ["dep:libsql", "ironclaw_filesystem/libsql", "ironclaw_resources/libsql", "ironclaw_run_state/libsql"]
+postgres = ["dep:deadpool-postgres", "ironclaw_filesystem/postgres"]
+libsql = ["dep:libsql", "ironclaw_filesystem/libsql"]
 
 [dependencies]
 async-trait = "0.1"
@@ -37,7 +40,6 @@ ironclaw_mcp = { path = "../ironclaw_mcp" }
 ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_observability = { path = "../ironclaw_observability" }
 ironclaw_processes = { path = "../ironclaw_processes" }
-ironclaw_product_adapter_registry = { path = "../ironclaw_product_adapter_registry" }
 ironclaw_prompt_envelope = { path = "../ironclaw_prompt_envelope" }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces" }
@@ -72,7 +74,15 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 [dev-dependencies]
 axum = { version = "0.8", features = ["json"] }
 hex = "0.4"
+# Enables the in-memory-backed approval store constructors for tests only.
+ironclaw_approvals = { path = "../ironclaw_approvals", features = ["test-support"] }
+# Enables the in-memory-backed capability-lease store constructor for tests only.
+ironclaw_authorization = { path = "../ironclaw_authorization", features = ["test-support"] }
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
+# Enables the in-memory-backed process store constructors for tests only.
+ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support"] }
+# Enables the in-memory-backed run-state/approval store constructors for tests only.
+ironclaw_run_state = { path = "../ironclaw_run_state", features = ["test-support"] }
 sha2 = "0.11"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }

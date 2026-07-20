@@ -59,6 +59,14 @@ async fn skill_activate_dispatches_and_injects_skill_context() {
         .await
         .expect("skill_activate reported one skill activated");
 
+    // Model-invoked skill discovery: before activation the skill advertises
+    // itself as a one-line `- name: description` listing entry (the first
+    // model request is built before `skill_activate` runs).
+    harness
+        .assert_model_request_contains("- greet: greets the user warmly")
+        .await
+        .expect("discovered skill must appear as a one-line listing entry");
+
     // Half B: the activated skill's instructions reached a later model request
     // through the wired `skill_context_source`.
     harness
@@ -112,6 +120,19 @@ async fn skill_criteria_auto_activation_stays_off_on_coordinator_path() {
         "expected the intended \"not found\" assertion failure, got a different harness error: {err}"
     );
 
+    // Listing-mode discovery (default `IRONCLAW_REBORN_SKILL_INJECTION=listing`):
+    // the non-activated skill still ADVERTISES itself as a one-line
+    // `- name: description` entry under the skill_activate header, so the
+    // model can choose to activate it — its body stays out (asserted above).
+    harness
+        .assert_model_request_contains("- greet: greets the user warmly")
+        .await
+        .expect("non-activated skill must appear as a one-line listing entry");
+    harness
+        .assert_model_request_contains("builtin.skill_activate when it matches the task")
+        .await
+        .expect("listing header must explain model-invoked activation");
+
     // And the explicit capability was never dispatched either.
     assert!(
         harness
@@ -127,55 +148,63 @@ async fn skill_criteria_auto_activation_stays_off_on_coordinator_path() {
 /// error. An oversized system skill (~10k tokens, over
 /// `DEFAULT_MAX_SKILL_CONTEXT_TOKENS = 4000`) drives the real selection path
 /// (`reserve_skill_budget` → `ContextBudgetExceeded` → `Failed`).
-#[tokio::test]
-async fn skill_activate_over_budget_surfaces_recoverable_failed() {
-    let group = RebornIntegrationGroup::skill_activation_tools()
-        .await
-        .expect("skill-activation group builds");
-    let capability_harness = group
-        .capability_harness()
-        .expect("skill-activation group has a host-runtime capability harness");
-    let oversized_prompt = "BLOAT_SKILL_FILLER ".repeat(2200); // ~41.8k chars ≈ 10k tokens > 4000 budget
-    capability_harness
-        .seed_system_skill_for_test("bloat", "an oversized skill", &oversized_prompt)
-        .expect("oversized system skill seeds");
+#[test]
+fn skill_activate_over_budget_surfaces_recoverable_failed() {
+    run_async_test_with_stack(
+        "skill_activate_over_budget_surfaces_recoverable_failed",
+        || async {
+            let group = RebornIntegrationGroup::skill_activation_tools()
+                .await
+                .expect("skill-activation group builds");
+            let capability_harness = group
+                .capability_harness()
+                .expect("skill-activation group has a host-runtime capability harness");
+            let oversized_prompt = "BLOAT_SKILL_FILLER ".repeat(2200); // ~41.8k chars ≈ 10k tokens > 4000 budget
+            capability_harness
+                .seed_system_skill_for_test("bloat", "an oversized skill", &oversized_prompt)
+                .expect("oversized system skill seeds");
 
-    let harness = group
-        .thread("conv-skill-activate-over-budget")
-        .script([
-            RebornScriptedReply::tool_call("builtin.skill_activate", json!({"names": ["bloat"]})),
-            RebornScriptedReply::text("could not activate"),
-        ])
-        .build()
-        .await
-        .expect("thread builds");
+            let harness = group
+                .thread("conv-skill-activate-over-budget")
+                .script([
+                    RebornScriptedReply::tool_call(
+                        "builtin.skill_activate",
+                        json!({"names": ["bloat"]}),
+                    ),
+                    RebornScriptedReply::text("could not activate"),
+                ])
+                .build()
+                .await
+                .expect("thread builds");
 
-    harness
-        .submit_turn("activate the big one")
-        .await
-        .expect("turn completes despite the failed activation");
+            harness
+                .submit_turn("activate the big one")
+                .await
+                .expect("turn completes despite the failed activation");
 
-    // Model-visible Failed, not a terminal driver_unavailable.
-    harness
-        .assert_tool_error(ToolErrorClass::Failed, "skill context budget")
-        .await
-        .expect("over-budget activation surfaced as a recoverable Failed tool error");
-    harness
-        .assert_reply_contains("could not activate")
-        .await
-        .expect("run recovered and finalized");
-    // Specific error check (not generic `is_err()`): `assert_model_request_contains`
-    // has a second, unrelated `Err` path (JSON serialization failure of the
-    // captured request) — asserting the exact "not found" message text rules
-    // that out, so an infra-level failure can't masquerade as proof the
-    // skill's instructions were absent.
-    let err = harness
-        .assert_model_request_contains("BLOAT_SKILL_FILLER")
-        .await
-        .expect_err("a failed activation must not inject the skill's instructions");
-    assert!(
-        err.to_string().starts_with("no model request contained"),
-        "expected the intended \"not found\" assertion failure, got a different harness error: {err}"
+            // Model-visible Failed, not a terminal driver_unavailable.
+            harness
+                .assert_tool_error(ToolErrorClass::Failed, "skill context budget")
+                .await
+                .expect("over-budget activation surfaced as a recoverable Failed tool error");
+            harness
+                .assert_reply_contains("could not activate")
+                .await
+                .expect("run recovered and finalized");
+            // Specific error check (not generic `is_err()`): `assert_model_request_contains`
+            // has a second, unrelated `Err` path (JSON serialization failure of the
+            // captured request) — asserting the exact "not found" message text rules
+            // that out, so an infra-level failure can't masquerade as proof the
+            // skill's instructions were absent.
+            let err = harness
+                .assert_model_request_contains("BLOAT_SKILL_FILLER")
+                .await
+                .expect_err("a failed activation must not inject the skill's instructions");
+            assert!(
+                err.to_string().starts_with("no model request contained"),
+                "expected the intended \"not found\" assertion failure, got a different harness error: {err}"
+            );
+        },
     );
 }
 
@@ -185,74 +214,102 @@ async fn skill_activate_over_budget_surfaces_recoverable_failed() {
 /// (`AmbiguousSkill` → `Failed(InvalidInput)`), distinct from the
 /// `ContextBudgetExceeded` arm above. Proves neither candidate's instructions
 /// leak into a later model request despite the name matching both.
-#[tokio::test]
-async fn skill_activate_ambiguous_name_surfaces_recoverable_failed() {
-    let group = RebornIntegrationGroup::skill_activation_tools()
-        .await
-        .expect("skill-activation group builds");
-    let capability_harness = group
-        .capability_harness()
-        .expect("skill-activation group has a host-runtime capability harness");
-    capability_harness
-        .seed_system_skill_for_test(
-            "duplicate",
-            "a system-scoped skill",
-            "SYSTEM_DUPLICATE_SKILL_SENTINEL",
-        )
-        .expect("system-scoped duplicate skill seeds");
+#[test]
+fn skill_activate_ambiguous_name_surfaces_recoverable_failed() {
+    run_async_test_with_stack(
+        "skill_activate_ambiguous_name_surfaces_recoverable_failed",
+        || async {
+            let group = RebornIntegrationGroup::skill_activation_tools()
+                .await
+                .expect("skill-activation group builds");
+            let capability_harness = group
+                .capability_harness()
+                .expect("skill-activation group has a host-runtime capability harness");
+            capability_harness
+                .seed_system_skill_for_test(
+                    "duplicate",
+                    "a system-scoped skill",
+                    "SYSTEM_DUPLICATE_SKILL_SENTINEL",
+                )
+                .expect("system-scoped duplicate skill seeds");
 
-    let harness = group
-        .thread("conv-skill-activate-ambiguous")
-        .script([
-            RebornScriptedReply::tool_call(
-                "builtin.skill_activate",
-                json!({"names": ["duplicate"]}),
-            ),
-            RebornScriptedReply::text("that name is ambiguous"),
-        ])
-        .build()
-        .await
-        .expect("thread builds");
-    // The user-scoped root is seeded under the SAME (tenant, actor) the built
-    // thread's run resolves under (`harness.binding`) — only then does the
-    // user `/skills` mount the run actually reads from contain this file.
-    capability_harness
-        .seed_user_skill_for_test(
-            &harness.binding.tenant_id,
-            &harness.binding.actor_user_id,
-            "duplicate",
-            "a user-scoped skill",
-            "USER_DUPLICATE_SKILL_SENTINEL",
-        )
-        .expect("user-scoped duplicate skill seeds");
+            let harness = group
+                .thread("conv-skill-activate-ambiguous")
+                .script([
+                    RebornScriptedReply::tool_call(
+                        "builtin.skill_activate",
+                        json!({"names": ["duplicate"]}),
+                    ),
+                    RebornScriptedReply::text("that name is ambiguous"),
+                ])
+                .build()
+                .await
+                .expect("thread builds");
+            // The user-scoped root is seeded under the SAME (tenant, actor) the built
+            // thread's run resolves under (`harness.binding`) — only then does the
+            // user `/skills` mount the run actually reads from contain this file.
+            capability_harness
+                .seed_user_skill_for_test(
+                    &harness.binding.tenant_id,
+                    &harness.binding.actor_user_id,
+                    "duplicate",
+                    "a user-scoped skill",
+                    "USER_DUPLICATE_SKILL_SENTINEL",
+                )
+                .expect("user-scoped duplicate skill seeds");
 
-    harness
-        .submit_turn("activate the duplicate skill")
-        .await
-        .expect("turn completes despite the ambiguous activation");
+            harness
+                .submit_turn("activate the duplicate skill")
+                .await
+                .expect("turn completes despite the ambiguous activation");
 
-    // Model-visible Failed, not a terminal driver_unavailable.
-    harness
-        .assert_tool_error(ToolErrorClass::Failed, "ambiguous skill")
-        .await
-        .expect("ambiguous skill name surfaced as a recoverable Failed tool error");
-    harness
-        .assert_reply_contains("that name is ambiguous")
-        .await
-        .expect("run recovered and finalized");
-    // Neither candidate's instructions may leak into a later model request —
-    // an ambiguous selection activates nothing.
-    for sentinel in [
-        "SYSTEM_DUPLICATE_SKILL_SENTINEL",
-        "USER_DUPLICATE_SKILL_SENTINEL",
-    ] {
-        let err = harness
-            .assert_model_request_contains(sentinel)
-            .await
-            .expect_err("an ambiguous activation must not inject either candidate's instructions");
-        assert!(
-            err.to_string().starts_with("no model request contained"),
-            "expected the intended \"not found\" assertion failure, got a different harness error: {err}"
-        );
+            // Model-visible Failed, not a terminal driver_unavailable.
+            harness
+                .assert_tool_error(ToolErrorClass::Failed, "ambiguous skill")
+                .await
+                .expect("ambiguous skill name surfaced as a recoverable Failed tool error");
+            harness
+                .assert_reply_contains("that name is ambiguous")
+                .await
+                .expect("run recovered and finalized");
+            // Neither candidate's instructions may leak into a later model request —
+            // an ambiguous selection activates nothing.
+            for sentinel in [
+                "SYSTEM_DUPLICATE_SKILL_SENTINEL",
+                "USER_DUPLICATE_SKILL_SENTINEL",
+            ] {
+                let err = harness
+                    .assert_model_request_contains(sentinel)
+                    .await
+                    .expect_err(
+                        "an ambiguous activation must not inject either candidate's instructions",
+                    );
+                assert!(
+                    err.to_string().starts_with("no model request contained"),
+                    "expected the intended \"not found\" assertion failure, got a different harness error: {err}"
+                );
+            }
+        },
+    );
+}
+
+fn run_async_test_with_stack<F, Fut>(name: &'static str, test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio test runtime")
+                .block_on(test());
+        })
+        .expect("spawn stack-sized test thread");
+    if let Err(panic) = handle.join() {
+        std::panic::resume_unwind(panic);
     }
 }

@@ -131,7 +131,7 @@ emit_audit.summary = "polymarket hook failed"
   gives at-least-once replay; exact-once acknowledgement is deferred.
 - Hook dispatch receives the durable `RuntimeEvent` directly. `ironclaw_hooks`
   depends on `ironclaw_events` as of PR #3640 — the milestone projection in
-  PR #3573 covered `ironclaw_reborn`'s milestone wiring, but the hook crate
+  PR #3573 covered `ironclaw_runner`'s milestone wiring, but the hook crate
   itself did not gain the dep until the event-triggered consumer landed. The
   hook crate still does not depend on host runtime, dispatcher, secrets,
   network, WASM, or Reborn internals; the `ironclaw_architecture` boundary

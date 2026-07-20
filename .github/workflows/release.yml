@@ -12,6 +12,10 @@
 #
 # Note that the GitHub Release will be created with a generated
 # title/body based on your changelogs.
+#
+# Temporary #6160 policy: only the Reborn compile preflight below runs;
+# the generated cargo-dist/WASM/GitHub Release and Docker jobs stay defined
+# for rollback but are skipped.
 
 name: Release
 permissions:
@@ -44,8 +48,20 @@ on:
       - 'ironclaw-v[0-9]+.[0-9]+.[0-9]+*'
 
 jobs:
-  # Run 'dist plan' (or host) to determine what tasks we need to do
+  # Compile the shipping Reborn binary on every supported release target.
+  # This is intentionally separate from cargo-dist until #3483 resolves the
+  # Reborn package/tag/installer contract.
+  reborn-binary-compile:
+    name: Reborn binary compile
+    uses: ./.github/workflows/reborn-release-compile.yml
+    with:
+      ref: ${{ github.sha }}
+
+  # Keep the legacy cargo-dist/WASM/GitHub Release chain visible for rollback,
+  # but disable its root while #6160 makes this workflow Reborn-compile-only.
+  # The Reborn compile matrix above remains the only active release path.
   plan:
+    if: github.repository == ''
     runs-on: "ubuntu-22.04"
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
@@ -402,8 +418,10 @@ jobs:
       - build-local-artifacts
       - build-global-artifacts
       - build-wasm-extensions
-    # Only run if we're "publishing", and only if plan, local, global, and wasm didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.build-wasm-extensions.result == 'skipped' || needs.build-wasm-extensions.result == 'success') }}
+      - reborn-binary-compile
+    # Only publish after the explicit Reborn target matrix succeeds. Existing
+    # cargo-dist jobs may still be skipped, but a failed Reborn compile is fatal.
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.build-wasm-extensions.result == 'skipped' || needs.build-wasm-extensions.result == 'success') && needs.reborn-binary-compile.result == 'success' }}
     permissions:
       contents: write
     env:
@@ -470,10 +488,12 @@ jobs:
           # shellcheck disable=SC2086  # PRERELEASE_FLAG is '--prerelease' or empty
           gh release create "$RELEASE_TAG" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
-  # Build and push Docker Hub images (:version, :latest, :sha-*) after the GitHub Release exists.
+  # Keep release-path Docker build/publish explicitly disabled for #6160 even
+  # though the legacy host chain is also gated. The reusable Docker workflow
+  # remains available through manual and scheduled triggers.
   docker-image:
     needs: host
-    if: ${{ always() && needs.host.result == 'success' }}
+    if: github.repository == ''
     permissions:
       contents: read
       packages: read

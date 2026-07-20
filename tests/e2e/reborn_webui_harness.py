@@ -2,12 +2,13 @@
 
 The legacy Playwright suite has mature shared fixtures in ``conftest.py`` for
 the ``ironclaw`` gateway. Reborn WebUI v2 is a different product surface: it
-boots ``ironclaw-reborn serve``, serves the React SPA under ``/v2/``, and uses
+boots ``ironclaw-reborn serve``, serves the React SPA at the root path, and uses
 ``/api/webchat/v2/*`` endpoints. Keep that setup here so browser and served API
 scenarios exercise the real Reborn binary without duplicating process plumbing.
 """
 
 import asyncio
+import json
 import os
 import signal
 import socket
@@ -25,6 +26,12 @@ YOLO_PROFILE = "local-dev-yolo"
 DEFAULT_MODEL = "mock-model"
 VISION_MODEL = "gpt-4o"
 ACCEPTED_SEND_OUTCOMES = {"submitted", "already_submitted"}
+
+# Shared tenant secret for the test-tools/market-data fixture (test-tools/README.md).
+# `IRONCLAW_REBORN_DEV_SECRET__<handle>` is read once at `serve` boot, so it must
+# be present in the process env before start — see
+# reborn_v2_private_installs_yolo_server below.
+MARKET_DATA_DEV_SECRET = "e2e-market-data-shared-key"
 
 
 def find_free_port() -> int:
@@ -138,7 +145,7 @@ async def start_reborn_webui_v2_server(
             "MOCK_LLM_API_KEY": "mock-api-key",
             "NO_PROXY": "127.0.0.1,localhost,::1",
             "no_proxy": "127.0.0.1,localhost,::1",
-            "RUST_LOG": "ironclaw=warn,ironclaw_reborn=warn",
+            "RUST_LOG": "ironclaw=warn,ironclaw_runner=warn",
             "RUST_BACKTRACE": "1",
         }
         if extra_env:
@@ -189,6 +196,16 @@ async def close_reborn_server(proc) -> None:
             await stop_process(proc, sig=signal.SIGTERM, timeout=5)
 
 
+async def kill_reborn_server(proc) -> None:
+    """Hard-kill (SIGKILL) the reborn process, skipping graceful shutdown entirely.
+
+    Used by durability scenarios that need to prove on-disk state survives an
+    unclean process death, as opposed to `close_reborn_server`'s SIGINT/SIGTERM path.
+    """
+    if proc is not None and proc.returncode is None:
+        await stop_process(proc, sig=signal.SIGKILL, timeout=5)
+
+
 async def enable_reborn_global_auto_approve(base_url: str) -> None:
     """Enable the Tools settings global auto-approve switch for this test user."""
     async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
@@ -234,11 +251,43 @@ async def reborn_v2_yolo_server(ironclaw_reborn_binary, mock_llm_server, tmp_pat
         await close_reborn_server(proc)
 
 
+@pytest.fixture(scope="module")
+async def reborn_v2_private_installs_yolo_server(
+    ironclaw_reborn_binary, mock_llm_server, tmp_path_factory
+):
+    """Yolo-profile server with the market-data tenant-shared dev secret seeded.
+
+    Used by the private-tool-installs scenario (#5459 P1): auto-approve so
+    installed third-party WASM capabilities dispatch without an approval
+    gate, plus the market-data fixture's shared API key present at boot.
+    """
+    home_dir = tmp_path_factory.mktemp("ironclaw-reborn-v2-private-installs-home")
+    proc, base_url = await start_reborn_webui_v2_server(
+        ironclaw_reborn_binary=ironclaw_reborn_binary,
+        mock_llm_server=mock_llm_server,
+        home_dir=home_dir,
+        profile=YOLO_PROFILE,
+        log_prefix="reborn-v2-private-installs-yolo",
+        extra_env={"IRONCLAW_REBORN_DEV_SECRET__market_data_api_key": MARKET_DATA_DEV_SECRET},
+    )
+    await enable_reborn_global_auto_approve(base_url)
+    try:
+        yield base_url
+    finally:
+        await close_reborn_server(proc)
+
+
 @pytest.fixture
 async def reborn_v2_restartable_server(
     ironclaw_reborn_binary, mock_llm_server, tmp_path_factory
 ):
-    """Start/stop Reborn against one persistent home directory."""
+    """Start/stop Reborn against one persistent home directory.
+
+    `stop(hard=True)` SIGKILLs the process instead of shutting it down
+    gracefully, for durability scenarios that need to prove on-disk state
+    survives an unclean death — the caller can read the killed PID off
+    `state["proc"].pid` beforehand for a post-kill leak check.
+    """
     home_dir = tmp_path_factory.mktemp("ironclaw-reborn-v2-restartable-home")
     state = {"proc": None, "base_url": None}
 
@@ -254,8 +303,11 @@ async def reborn_v2_restartable_server(
         state["base_url"] = base_url
         return base_url
 
-    async def stop() -> None:
-        await close_reborn_server(state["proc"])
+    async def stop(*, hard: bool = False) -> None:
+        if hard:
+            await kill_reborn_server(state["proc"])
+        else:
+            await close_reborn_server(state["proc"])
         state["proc"] = None
 
     await start()
@@ -359,7 +411,7 @@ async def reborn_v2_vision_page(reborn_v2_vision_server, reborn_v2_browser):
     await context.close()
 
 
-async def open_reborn_v2_page(page, base_url: str, path: str = "/v2/") -> None:
+async def open_reborn_v2_page(page, base_url: str, path: str = "/") -> None:
     separator = "&" if "?" in path else "?"
     await page.goto(f"{base_url}{path}{separator}token={REBORN_V2_AUTH_TOKEN}")
     await page.wait_for_selector(SEL_V2["chat_composer"], timeout=15000)
@@ -444,6 +496,52 @@ async def wait_for_assistant_message(
 
     raise AssertionError(
         f"Timed out waiting for a finalized assistant message in thread {thread_id}. "
+        f"Last timeline: {last_timeline}"
+    )
+
+
+def capability_preview_payload(message: dict) -> dict | None:
+    """Parse a `capability_display_preview` timeline message's JSON content.
+
+    Returns `None` for any other message kind.
+    """
+    if message.get("kind") != "capability_display_preview":
+        return None
+    content = message.get("content")
+    assert isinstance(content, str), f"preview content must be a string: {message!r}"
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError as error:
+        raise AssertionError(f"preview content is not valid JSON: {content!r}") from error
+
+
+async def wait_for_capability_preview(
+    client: httpx.AsyncClient,
+    base_url: str,
+    thread_id: str,
+    capability_id: str,
+    *,
+    output_fragment: str | None = None,
+    timeout: float = 45.0,
+) -> dict:
+    """Poll the timeline until a `capability_display_preview` for `capability_id`
+    appears (optionally containing `output_fragment` in its output)."""
+    last_timeline: dict = {}
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        last_timeline = await fetch_timeline(client, base_url, thread_id)
+        for message in last_timeline.get("messages", []):
+            preview = capability_preview_payload(message)
+            if not preview or preview.get("capability_id") != capability_id:
+                continue
+            output = preview.get("output_preview") or preview.get("output_summary") or ""
+            if output_fragment and output_fragment.lower() not in output.lower():
+                continue
+            return preview
+        await asyncio.sleep(0.25)
+
+    raise AssertionError(
+        f"Timed out waiting for {capability_id!r} preview in thread {thread_id}. "
         f"Last timeline: {last_timeline}"
     )
 

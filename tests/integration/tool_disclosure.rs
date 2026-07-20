@@ -2,7 +2,7 @@
 //!
 //! Proves `.with_tool_disclosure_bridged()` reaches production's
 //! `ToolDisclosureCapabilityDecorator` wiring
-//! (`ironclaw_reborn::runtime::build_default_planned_runtime_inner`, gated on
+//! (`ironclaw_runner::runtime::build_default_planned_runtime_inner`, gated on
 //! `DefaultPlannedRuntimeConfig::tool_disclosure.is_bridged()`) — the same
 //! lower-level factory this harness's group assembly already calls.
 //!
@@ -18,7 +18,7 @@
 //! 2. **Threshold gate**: `Bridged` mode alone does NOT defer — deferral is
 //!    additionally gated on the catalog exceeding `DisclosureCaps::default()`
 //!    (`max_tools: 32` / ~12k estimated schema tokens; `select_active_set`,
-//!    `crates/ironclaw_reborn/src/tool_disclosure.rs`). The
+//!    `crates/ironclaw_runner/src/tool_disclosure.rs`). The
 //!    `GithubIssueTools` backend surfaces all 48 `github.*` manifest
 //!    capabilities (`github_support::capability_ids()`), none of which is
 //!    Core-tier (`CORE_TOOL_NAMES` suffix-match misses every github id), so
@@ -44,7 +44,7 @@ use reborn_support::reply::RebornScriptedReply;
 
 /// Bridge meta-tool names (`tool_disclosure.rs`'s `TOOL_SEARCH_NAME`/
 /// `TOOL_DESCRIBE_NAME`/`TOOL_CALL_NAME`), hardcoded as literals: the
-/// constants are `pub(crate)` inside `ironclaw_reborn` and not part of the
+/// constants are `pub(crate)` inside `ironclaw_runner` and not part of the
 /// crate's public surface for a test-tree import. Only `tool_search` is
 /// ADVERTISED (`advertised_bridge_tool_definitions`); `tool_describe`/
 /// `tool_call` are retained internally for describe-first routing and must

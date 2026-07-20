@@ -10,6 +10,9 @@ homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "loops"
+
 [dependencies]
 async-trait = "0.1"
 base64 = "0.22.1"
@@ -35,5 +38,8 @@ unicode-normalization = "0.1"
 url = "2"
 
 [dev-dependencies]
+# Dev-only: coding-tool tests re-run the loop-boundary safe-summary validator
+# (`LoopSafeSummary`) to pin that dispatch failure reasons survive it.
+ironclaw_turns = { path = "../ironclaw_turns" }
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt", "time"] }

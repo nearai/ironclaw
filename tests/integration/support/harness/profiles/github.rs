@@ -8,7 +8,6 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID};
 use ironclaw_network::NetworkHttpEgress;
-use ironclaw_reborn_composition::ProductLiveCapabilityIo;
 
 use super::super::super::github as github_support;
 use super::super::options::{HostRuntimeHarnessOptions, ToolsProfile};
@@ -146,12 +145,17 @@ fn github_issue_tools_with_credential_result(
         credential_account_result,
     )?;
     let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
+    let (io, result_writer_io) = super::super::default_capability_io_pair();
     Ok(HostRuntimeCapabilityHarness {
-        runtime,
+        runtime: Mutex::new(runtime),
         approval_parts: None,
+        gate_record_store: super::super::fresh_in_memory_gate_record_store(),
         auto_approve_settings: None,
         pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
-        io: Arc::new(ProductLiveCapabilityIo::default()),
+        io: Mutex::new(io),
+        result_writer_io: Mutex::new(result_writer_io),
+        durable_capability_io_thread_service: Mutex::new(None),
+        durable_capability_io_requested: false,
         root,
         workspace_root,
         mounts,
@@ -168,14 +172,20 @@ fn github_issue_tools_with_credential_result(
         results: Arc::new(Mutex::new(Vec::new())),
         http_egress: Some(runtime_http_egress),
         network_egress: Some(network_egress),
+        real_egress_transport: None,
         process_port: None,
         profile_filesystem: None,
         project_service: None,
         skill_activation_source: None,
         attachment_test_support: None,
+        inbound_attachment_reader: None,
         outbound_target_tools: None,
         scope_capability_by_run_owner: false,
         product_auth: None,
         tool_permission_overrides: None,
+        persistent_approval_policies: None,
+        trigger_repository: None,
+        reborn_services: None,
+        trigger_active_run_lookup_requested: false,
     })
 }

@@ -292,6 +292,7 @@ fn dispatch_errors_preserve_typed_failure_kind() {
     assert_eq!(
         DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Guest,
+            safe_summary: None,
         }
         .failure_kind(),
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest)
@@ -784,11 +785,9 @@ fn principal_agent_serializes_as_first_class_principal() {
 fn invocation_fingerprint_is_stable_and_input_hashed() {
     let ctx = sample_context();
     let capability = CapabilityId::new("echo.say").unwrap();
-    let estimate = ResourceEstimate {
-        concurrency_slots: Some(1),
-        output_bytes: Some(10_000),
-        ..ResourceEstimate::default()
-    };
+    let estimate = ResourceEstimate::default()
+        .set_concurrency_slots(1)
+        .set_output_bytes(10_000);
     let input = json!({"message": "secret payload"});
     let mut reordered = serde_json::Map::new();
     reordered.insert("z".to_string(), json!(1));
@@ -916,20 +915,14 @@ fn invocation_fingerprint_changes_when_authorized_invocation_changes() {
 fn actions_and_decisions_serialize_with_stable_snake_case_tags() {
     let action = Action::Dispatch {
         capability: CapabilityId::new("github.search_issues").unwrap(),
-        estimated_resources: ResourceEstimate {
-            usd: Some(dec!(0.01)),
-            ..ResourceEstimate::default()
-        },
+        estimated_resources: ResourceEstimate::default().set_usd(dec!(0.01)),
     };
     let json = serde_json::to_value(&action).unwrap();
     assert_eq!(json["type"], "dispatch");
 
     let spawn = Action::SpawnCapability {
         capability: CapabilityId::new("github.watch_issues").unwrap(),
-        estimated_resources: ResourceEstimate {
-            concurrency_slots: Some(1),
-            ..ResourceEstimate::default()
-        },
+        estimated_resources: ResourceEstimate::default().set_concurrency_slots(1),
     };
     let json = serde_json::to_value(&spawn).unwrap();
     assert_eq!(json["type"], "spawn_capability");
@@ -1668,12 +1661,14 @@ fn sample_context() -> ExecutionContext {
     let project_id = ProjectId::new("project1").unwrap();
 
     ExecutionContext {
+        run_id: None,
         invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
         parent_process_id: None,
         tenant_id: tenant_id.clone(),
         user_id: user_id.clone(),
+        authenticated_actor_user_id: None,
         agent_id: None,
         project_id: Some(project_id.clone()),
         mission_id: None,

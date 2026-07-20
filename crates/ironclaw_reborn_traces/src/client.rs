@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use crate::ConversationMessage;
 use crate::contribution::{
-    self as trace, LocalTraceSubmissionRecord, OutcomeMetadata, RawTraceCaptureTurn,
+    self as trace, NodeTraceSubmissionRecord, OutcomeMetadata, RawTraceCaptureTurn,
     TraceContributionEnvelope, TraceFailureMode, TraceQueueFlushReport, TraceQueueWorkerReport,
 };
 use anyhow::Context;
@@ -269,13 +269,11 @@ impl TraceClientHost {
     pub fn read_local_records_for_scope(
         &self,
         scope: &TraceClientScope,
-    ) -> anyhow::Result<Vec<LocalTraceSubmissionRecord>> {
+    ) -> anyhow::Result<Vec<NodeTraceSubmissionRecord>> {
         trace::read_local_trace_records_for_scope(Some(scope.as_str()))
     }
 
-    pub fn read_local_records_for_default(
-        &self,
-    ) -> anyhow::Result<Vec<LocalTraceSubmissionRecord>> {
+    pub fn read_local_records_for_default(&self) -> anyhow::Result<Vec<NodeTraceSubmissionRecord>> {
         trace::read_local_trace_records_for_scope(None)
     }
 }
@@ -420,16 +418,14 @@ mod tests {
     }
 
     fn enabled_policy() -> StandingTraceContributionPolicy {
-        StandingTraceContributionPolicy {
-            enabled: true,
-            ingestion_endpoint: Some("https://trace.example.test/v1/traces".to_string()),
-            include_message_text: true,
-            include_tool_payloads: true,
-            require_manual_approval_when_pii_detected: false,
-            min_submission_score: 0.0,
-            default_scope: ConsentScope::DebuggingEvaluation,
-            ..StandingTraceContributionPolicy::default()
-        }
+        StandingTraceContributionPolicy::default()
+            .set_enabled(true)
+            .set_ingestion_endpoint("https://trace.example.test/v1/traces")
+            .set_include_message_text(true)
+            .set_include_tool_payloads(true)
+            .set_require_manual_approval_when_pii_detected(false)
+            .set_min_submission_score(0.0)
+            .set_default_scope(ConsentScope::DebuggingEvaluation)
     }
 
     #[test]
@@ -543,11 +539,9 @@ mod tests {
 
     #[tokio::test]
     async fn autonomous_capture_reports_policy_hold_without_queueing() {
-        let policy = StandingTraceContributionPolicy {
-            auto_submit_failed_traces: false,
-            auto_submit_high_value_traces: false,
-            ..enabled_policy()
-        };
+        let policy = enabled_policy()
+            .set_auto_submit_failed_traces(false)
+            .set_auto_submit_high_value_traces(false);
         let messages = vec![msg("user", "hello"), msg("assistant", "hi")];
 
         let outcome = TraceClientHost

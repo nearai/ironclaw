@@ -216,14 +216,13 @@ mod tests {
         let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
         let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
 
-        let section = TriggerPollerConfigSection {
-            enabled: Some(true),
-            poll_interval_secs: Some(15),
-            fires_per_tick: Some(50),
-            max_concurrent_fires_per_trigger: Some(1),
-            startup_jitter_max_secs: Some(3),
-            tick_jitter_max_secs: Some(7),
-        };
+        let section = TriggerPollerConfigSection::default()
+            .set_enabled(true)
+            .set_poll_interval_secs(15)
+            .set_fires_per_tick(50)
+            .set_max_concurrent_fires_per_trigger(1)
+            .set_startup_jitter_max_secs(3)
+            .set_tick_jitter_max_secs(7);
         let config = make_config_with_trigger_poller(section);
 
         let settings = trigger_poller_settings(Some(&config), RuntimeInputCaller::Run)
@@ -239,11 +238,9 @@ mod tests {
 
     #[test]
     fn trigger_poller_settings_max_concurrent_fires_greater_than_1_is_error() {
-        let section = TriggerPollerConfigSection {
-            enabled: Some(true),
-            max_concurrent_fires_per_trigger: Some(2),
-            ..Default::default()
-        };
+        let section = TriggerPollerConfigSection::default()
+            .set_enabled(true)
+            .set_max_concurrent_fires_per_trigger(2);
         let config = make_config_with_trigger_poller(section);
 
         let err = trigger_poller_settings(Some(&config), RuntimeInputCaller::Run)
@@ -257,11 +254,9 @@ mod tests {
 
     #[test]
     fn trigger_poller_settings_config_poll_interval_zero_is_error() {
-        let section = TriggerPollerConfigSection {
-            enabled: Some(true),
-            poll_interval_secs: Some(0),
-            ..Default::default()
-        };
+        let section = TriggerPollerConfigSection::default()
+            .set_enabled(true)
+            .set_poll_interval_secs(0);
         let config = make_config_with_trigger_poller(section);
 
         let err = trigger_poller_settings(Some(&config), RuntimeInputCaller::Run)
@@ -280,10 +275,7 @@ mod tests {
         let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
         let _enabled = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_ENABLED", "true");
 
-        let section = TriggerPollerConfigSection {
-            enabled: Some(false),
-            ..Default::default()
-        };
+        let section = TriggerPollerConfigSection::default().set_enabled(false);
         let config = make_config_with_trigger_poller(section);
 
         let settings = trigger_poller_settings(Some(&config), RuntimeInputCaller::Run)
@@ -301,10 +293,7 @@ mod tests {
         let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
         let _enabled = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_ENABLED", "false");
 
-        let section = TriggerPollerConfigSection {
-            enabled: Some(true),
-            ..Default::default()
-        };
+        let section = TriggerPollerConfigSection::default().set_enabled(true);
         let config = make_config_with_trigger_poller(section);
 
         let settings = trigger_poller_settings(Some(&config), RuntimeInputCaller::Run)
@@ -321,11 +310,9 @@ mod tests {
         let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
         let _interval = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS", "45");
 
-        let section = TriggerPollerConfigSection {
-            enabled: Some(true),
-            poll_interval_secs: Some(15),
-            ..Default::default()
-        };
+        let section = TriggerPollerConfigSection::default()
+            .set_enabled(true)
+            .set_poll_interval_secs(15);
         let config = make_config_with_trigger_poller(section);
 
         let settings = trigger_poller_settings(Some(&config), RuntimeInputCaller::Run)
@@ -387,11 +374,9 @@ mod tests {
 
     #[test]
     fn trigger_poller_settings_config_fires_per_tick_zero_is_error() {
-        let section = TriggerPollerConfigSection {
-            enabled: Some(true),
-            fires_per_tick: Some(0),
-            ..Default::default()
-        };
+        let section = TriggerPollerConfigSection::default()
+            .set_enabled(true)
+            .set_fires_per_tick(0);
         let config = make_config_with_trigger_poller(section);
 
         let err = trigger_poller_settings(Some(&config), RuntimeInputCaller::Run)
@@ -407,11 +392,9 @@ mod tests {
     fn trigger_poller_settings_config_poll_interval_above_cap_is_error() {
         // 86_400 secs = 1 day = far above the 3600s cap. Models the
         // common typo class of writing a millisecond value (e.g. 86_400_000).
-        let section = TriggerPollerConfigSection {
-            enabled: Some(true),
-            poll_interval_secs: Some(86_400),
-            ..Default::default()
-        };
+        let section = TriggerPollerConfigSection::default()
+            .set_enabled(true)
+            .set_poll_interval_secs(86_400);
         let config = make_config_with_trigger_poller(section);
 
         let err = trigger_poller_settings(Some(&config), RuntimeInputCaller::Run)
@@ -426,11 +409,9 @@ mod tests {
 
     #[test]
     fn trigger_poller_settings_config_fires_per_tick_above_cap_is_error() {
-        let section = TriggerPollerConfigSection {
-            enabled: Some(true),
-            fires_per_tick: Some(10_000),
-            ..Default::default()
-        };
+        let section = TriggerPollerConfigSection::default()
+            .set_enabled(true)
+            .set_fires_per_tick(10_000);
         let config = make_config_with_trigger_poller(section);
 
         let err = trigger_poller_settings(Some(&config), RuntimeInputCaller::Run)
@@ -445,11 +426,9 @@ mod tests {
 
     #[test]
     fn trigger_poller_settings_config_startup_jitter_above_cap_is_error() {
-        let section = TriggerPollerConfigSection {
-            enabled: Some(true),
-            startup_jitter_max_secs: Some(3601),
-            ..Default::default()
-        };
+        let section = TriggerPollerConfigSection::default()
+            .set_enabled(true)
+            .set_startup_jitter_max_secs(3601);
         let config = make_config_with_trigger_poller(section);
 
         let err = trigger_poller_settings(Some(&config), RuntimeInputCaller::Run)
@@ -463,11 +442,9 @@ mod tests {
 
     #[test]
     fn trigger_poller_settings_config_tick_jitter_above_cap_is_error() {
-        let section = TriggerPollerConfigSection {
-            enabled: Some(true),
-            tick_jitter_max_secs: Some(3601),
-            ..Default::default()
-        };
+        let section = TriggerPollerConfigSection::default()
+            .set_enabled(true)
+            .set_tick_jitter_max_secs(3601);
         let config = make_config_with_trigger_poller(section);
 
         let err = trigger_poller_settings(Some(&config), RuntimeInputCaller::Run)
@@ -518,11 +495,9 @@ mod tests {
         let _lock = lock_runtime_env();
         let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
         let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
-        let section = TriggerPollerConfigSection {
-            enabled: Some(true),
-            poll_interval_secs: Some(3600),
-            ..Default::default()
-        };
+        let section = TriggerPollerConfigSection::default()
+            .set_enabled(true)
+            .set_poll_interval_secs(3600);
         let config = make_config_with_trigger_poller(section);
 
         let settings = trigger_poller_settings(Some(&config), RuntimeInputCaller::Run)
@@ -535,11 +510,9 @@ mod tests {
         let _lock = lock_runtime_env();
         let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
         let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
-        let section = TriggerPollerConfigSection {
-            enabled: Some(true),
-            fires_per_tick: Some(1000),
-            ..Default::default()
-        };
+        let section = TriggerPollerConfigSection::default()
+            .set_enabled(true)
+            .set_fires_per_tick(1000);
         let config = make_config_with_trigger_poller(section);
 
         let settings = trigger_poller_settings(Some(&config), RuntimeInputCaller::Run)
@@ -552,12 +525,10 @@ mod tests {
         let _lock = lock_runtime_env();
         let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
         let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
-        let section = TriggerPollerConfigSection {
-            enabled: Some(true),
-            startup_jitter_max_secs: Some(3600),
-            tick_jitter_max_secs: Some(3600),
-            ..Default::default()
-        };
+        let section = TriggerPollerConfigSection::default()
+            .set_enabled(true)
+            .set_startup_jitter_max_secs(3600)
+            .set_tick_jitter_max_secs(3600);
         let config = make_config_with_trigger_poller(section);
 
         let settings = trigger_poller_settings(Some(&config), RuntimeInputCaller::Run)
@@ -570,11 +541,9 @@ mod tests {
     fn trigger_poller_settings_max_concurrent_fires_zero_is_error() {
         // 0 has distinct semantic meaning in some systems (unlimited
         // concurrency); confirm the V1 guard rejects it explicitly.
-        let section = TriggerPollerConfigSection {
-            enabled: Some(true),
-            max_concurrent_fires_per_trigger: Some(0),
-            ..Default::default()
-        };
+        let section = TriggerPollerConfigSection::default()
+            .set_enabled(true)
+            .set_max_concurrent_fires_per_trigger(0);
         let config = make_config_with_trigger_poller(section);
 
         let err = trigger_poller_settings(Some(&config), RuntimeInputCaller::Run)
@@ -605,10 +574,7 @@ mod tests {
         let _enabled = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_ENABLED", "0");
         let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
 
-        let section = TriggerPollerConfigSection {
-            enabled: Some(true),
-            ..Default::default()
-        };
+        let section = TriggerPollerConfigSection::default().set_enabled(true);
         let config = make_config_with_trigger_poller(section);
 
         let settings = trigger_poller_settings(Some(&config), RuntimeInputCaller::Run)
@@ -653,10 +619,7 @@ mod tests {
         let _enabled = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_ENABLED", "");
         let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
 
-        let section = TriggerPollerConfigSection {
-            enabled: Some(true),
-            ..Default::default()
-        };
+        let section = TriggerPollerConfigSection::default().set_enabled(true);
         let config = make_config_with_trigger_poller(section);
 
         let err = trigger_poller_settings(Some(&config), RuntimeInputCaller::Run).expect_err(

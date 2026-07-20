@@ -1,0 +1,33 @@
+[package]
+name = "ironclaw_latency_runner"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+async-trait = "0.1"
+axum = "0.8"
+deadpool-postgres = "0.14"
+ironclaw_filesystem = { path = "../../../crates/ironclaw_filesystem", features = ["libsql", "postgres"] }
+ironclaw_host_runtime = { path = "../../../crates/ironclaw_host_runtime", features = ["libsql", "postgres"] }
+ironclaw_host_api = { path = "../../../crates/ironclaw_host_api" }
+ironclaw_reborn_composition = { path = "../../../crates/ironclaw_reborn_composition", features = ["libsql", "postgres"] }
+ironclaw_reborn_event_store = { path = "../../../crates/ironclaw_reborn_event_store", features = ["libsql", "postgres"] }
+ironclaw_resources = { path = "../../../crates/ironclaw_resources" }
+ironclaw_run_state = { path = "../../../crates/ironclaw_run_state" }
+ironclaw_secrets = { path = "../../../crates/ironclaw_secrets" }
+ironclaw_triggers = { path = "../../../crates/ironclaw_triggers", features = ["libsql", "postgres"] }
+ironclaw_trust = { path = "../../../crates/ironclaw_trust" }
+ironclaw_turns = { path = "../../../crates/ironclaw_turns" }
+chrono = "0.4"
+libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
+secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
+tower = { version = "0.5", features = ["util"] }
+uuid = { version = "1", features = ["v4"] }

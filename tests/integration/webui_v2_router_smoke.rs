@@ -1,8 +1,8 @@
-//! `ironclaw_webui_v2` on the int-tier coverage lane (enabler (a)).
+//! `ironclaw_webui` on the int-tier coverage lane (enabler (a)).
 //!
 //! First scenario crossing an enumerated `--test` binary into the WebChat v2
 //! route surface: the crate's own 5,801-line contract suite
-//! (`crates/ironclaw_webui_v2/tests/webui_v2_handlers_contract.rs`) never
+//! (`crates/ironclaw_webui/tests/webui_v2_handlers_contract.rs`) never
 //! runs under the coverage-lane invocation, which passes only the root-tree
 //! suite names.
 //!
@@ -11,7 +11,7 @@
 //! wrapper needs the heavier `build_reborn_runtime` tier (named follow-on).
 //! Composition deliberately does not re-export the bare router/state
 //! (facade-only rule), so this suite carries the root DEV-dependency on
-//! `ironclaw_webui_v2` itself — production binaries are unaffected.
+//! `ironclaw_webui` itself — production binaries are unaffected.
 //!
 //! `MinimalWebuiServices` duplicates the role of the contract suite's
 //! `StubServices`; extraction of a shared in-crate `test_support` module was
@@ -37,17 +37,17 @@ use ironclaw_product_workflow::{
     RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornGetRunStateRequest,
     RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
+    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesApi, RebornServicesError,
     RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
     RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
     RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
     RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    rejecting_reborn_services_error,
+    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest, rejecting_reborn_services_error,
 };
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
-use ironclaw_webui_v2::{
+use ironclaw_webui::webui_v2::{
     DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State, webui_v2_router,
 };
 use serde_json::Value;
@@ -134,6 +134,14 @@ impl RebornServicesApi for MinimalWebuiServices {
         _caller: WebUiAuthenticatedCaller,
         _request: WebUiResolveGateRequest,
     ) -> Result<RebornResolveGateResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn retry_run(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: WebUiRetryRunRequest,
+    ) -> Result<RebornRetryRunResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
 

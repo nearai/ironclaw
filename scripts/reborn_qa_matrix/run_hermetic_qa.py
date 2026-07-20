@@ -35,7 +35,6 @@ REMOVED_CI_OWNED_CASES = {
     "slack_host_beta_serve_mount_regression",
     "slack_outbound_delivery_rendering_regression",
     "slack_personal_oauth_binding_regression",
-    "slack_personal_pairing_regression",
     "support_substrate_product_workflow_regression",
     "webui_v2_auth_surface_composition_regression",
     "webui_v2_automations_trace_outbound_channel_api_regression",

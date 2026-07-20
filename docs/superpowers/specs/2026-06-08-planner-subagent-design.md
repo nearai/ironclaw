@@ -52,7 +52,7 @@ persistence, nested spawning, and live todo widgets are deferred (Scope B/C).
 
 ## Architecture changes
 
-### Flavor registry (`crates/ironclaw_reborn/src/subagent/flavors.rs`)
+### Flavor registry (`crates/ironclaw_runner/src/subagent/flavors.rs`)
 
 Final registry: `general`, `explorer`, `coder`, **`planner`**.
 
@@ -86,7 +86,7 @@ pub fn builtin_flavor_catalog() -> Vec<FlavorDescriptor> { ... }
 `FlavorDescriptor::summary` is a one-line human prose hint of what the flavor
 does + its tool surface, used by the schema description builder.
 
-### Direction prompt (`crates/ironclaw_reborn/src/subagent/directions/planner.md`)
+### Direction prompt (`crates/ironclaw_runner/src/subagent/directions/planner.md`)
 
 New file. Content:
 
@@ -158,16 +158,16 @@ Return ONLY this Markdown. No preamble, no postscript.
   guess.
 ```
 
-Drop `crates/ironclaw_reborn/src/subagent/directions/researcher.md`.
+Drop `crates/ironclaw_runner/src/subagent/directions/researcher.md`.
 
-Update `crates/ironclaw_reborn/src/subagent/directions/mod.rs`:
+Update `crates/ironclaw_runner/src/subagent/directions/mod.rs`:
 
 ```rust
 const PLANNER_DIRECTION: &str = include_str!("planner.md");
 // drop: const RESEARCHER_DIRECTION: &str = include_str!("researcher.md");
 ```
 
-### Tool schema (`crates/ironclaw_loop_support/src/subagent_spawn_port.rs`)
+### Tool schema (`crates/ironclaw_loop_host/src/subagent_spawn_port.rs`)
 
 `SpawnSubagentArgs` — wire rename with backwards-compatible alias:
 
@@ -217,7 +217,7 @@ hand to a `coder`. Pick `subagent_type` based on what the child needs:
 exploration, planning, or code changes.
 ```
 
-### Wire-up (`crates/ironclaw_reborn/src/model_gateway.rs`)
+### Wire-up (`crates/ironclaw_runner/src/model_gateway.rs`)
 
 Single-line change: pass `flavors::builtin_flavor_catalog()` into the existing
 `SubagentSpawnCapabilityPort::new(...)` call site.
@@ -226,13 +226,13 @@ Single-line change: pass `flavors::builtin_flavor_catalog()` into the existing
 
 | File | Change |
 |------|--------|
-| `crates/ironclaw_reborn/src/subagent/flavors.rs` | drop Researcher, add Planner variant + entry; export `builtin_flavor_catalog()` + `FlavorDescriptor` |
-| `crates/ironclaw_reborn/src/subagent/directions/mod.rs` | drop `RESEARCHER_DIRECTION`, add `PLANNER_DIRECTION` |
-| `crates/ironclaw_reborn/src/subagent/directions/researcher.md` | DELETE |
-| `crates/ironclaw_reborn/src/subagent/directions/planner.md` | NEW |
-| `crates/ironclaw_loop_support/src/subagent_spawn_port.rs` | wire rename + alias, port `new` takes catalog, dynamic schema, description rewrite |
-| `crates/ironclaw_reborn/src/model_gateway.rs` | pass catalog into constructor |
-| `crates/ironclaw_reborn/src/subagent/capability_surface.rs` | verify `http` capability resolves for planner allowlist (no behavior change expected) |
+| `crates/ironclaw_runner/src/subagent/flavors.rs` | drop Researcher, add Planner variant + entry; export `builtin_flavor_catalog()` + `FlavorDescriptor` |
+| `crates/ironclaw_runner/src/subagent/directions/mod.rs` | drop `RESEARCHER_DIRECTION`, add `PLANNER_DIRECTION` |
+| `crates/ironclaw_runner/src/subagent/directions/researcher.md` | DELETE |
+| `crates/ironclaw_runner/src/subagent/directions/planner.md` | NEW |
+| `crates/ironclaw_loop_host/src/subagent_spawn_port.rs` | wire rename + alias, port `new` takes catalog, dynamic schema, description rewrite |
+| `crates/ironclaw_runner/src/model_gateway.rs` | pass catalog into constructor |
+| `crates/ironclaw_runner/src/subagent/capability_surface.rs` | verify `http` capability resolves for planner allowlist (no behavior change expected) |
 
 ## Test plan
 
@@ -257,7 +257,7 @@ Single-line change: pass `flavors::builtin_flavor_catalog()` into the existing
 5. **Integration**: existing subagent E2E tests pass; substitute `planner` for
    `researcher` in fixtures.
 
-Commands: `cargo test -p ironclaw_reborn -p ironclaw_loop_support` +
+Commands: `cargo test -p ironclaw_runner -p ironclaw_loop_host` +
 `cargo clippy --all --tests`.
 
 ## Risks + mitigations

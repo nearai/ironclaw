@@ -1,0 +1,14 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Slack get_conversation_history",
+  "description": "Read message history from a channel or DM. Results are newest-first; when the result's has_more is true, fetch older messages by calling again with latest set to the oldest returned ts.",
+  "type": "object",
+  "required": ["channel"],
+  "properties": {
+    "channel": { "type": "string", "description": "Conversation ID (C... for a channel, D... for a DM)." },
+    "limit": { "type": "integer", "minimum": 1, "maximum": 999, "description": "Maximum messages to return (default 50, max 999 — Slack rejects 1000)." },
+    "latest": { "type": "string", "description": "Only return messages before this timestamp. For older pages, pass the oldest returned ts." },
+    "oldest": { "type": "string", "description": "Only return messages after this timestamp." }
+  },
+  "additionalProperties": false
+}

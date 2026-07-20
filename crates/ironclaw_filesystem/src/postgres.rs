@@ -1,4 +1,6 @@
 use std::{collections::BTreeMap, error::Error, time::Duration};
+#[cfg(feature = "postgres")]
+use std::{collections::HashSet, sync::OnceLock};
 
 use async_trait::async_trait;
 use ironclaw_host_api::VirtualPath;
@@ -33,6 +35,11 @@ const POSTGRES_MIGRATION_CONNECT_DEFAULT_MAX_WAIT: Duration = Duration::from_sec
 const POSTGRES_MIGRATION_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 #[cfg(feature = "postgres")]
 const POSTGRES_MIGRATION_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(10);
+#[cfg(feature = "postgres")]
+const POSTGRES_ROOT_FILESYSTEM_MIGRATION_ADVISORY_LOCK: i64 = 824_917_203;
+#[cfg(feature = "postgres")]
+static POSTGRES_ROOT_FILESYSTEM_MIGRATED_SCHEMAS: OnceLock<tokio::sync::Mutex<HashSet<String>>> =
+    OnceLock::new();
 
 #[cfg(feature = "postgres")]
 impl PostgresRootFilesystem {
@@ -41,11 +48,36 @@ impl PostgresRootFilesystem {
     }
 
     pub async fn run_migrations(&self) -> Result<(), FilesystemError> {
-        let client = self.migration_client_with_retry().await?;
-        client
+        let mut client = self.migration_client_with_retry().await?;
+        let migration_key = postgres_root_filesystem_migration_key(&client).await?;
+        let registry = POSTGRES_ROOT_FILESYSTEM_MIGRATED_SCHEMAS
+            .get_or_init(|| tokio::sync::Mutex::new(HashSet::new()));
+        let mut migrated_schemas = registry.lock().await;
+        if migrated_schemas.contains(&migration_key) {
+            return Ok(());
+        }
+        let transaction = client
+            .transaction()
+            .await
+            .map_err(|error| infrastructure_pg_error(FilesystemOperation::CreateDirAll, error))?;
+        transaction
+            .execute(
+                "SELECT pg_advisory_xact_lock($1)",
+                &[&POSTGRES_ROOT_FILESYSTEM_MIGRATION_ADVISORY_LOCK],
+            )
+            .await
+            .map_err(|error| infrastructure_pg_error(FilesystemOperation::CreateDirAll, error))?;
+        transaction
             .batch_execute(POSTGRES_ROOT_FILESYSTEM_SCHEMA)
             .await
-            .map_err(|error| infrastructure_pg_error(FilesystemOperation::CreateDirAll, error))
+            .map_err(|error| infrastructure_pg_error(FilesystemOperation::CreateDirAll, error))?;
+        drop_legacy_projection_indexes(&transaction).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| infrastructure_pg_error(FilesystemOperation::CreateDirAll, error))?;
+        migrated_schemas.insert(migration_key);
+        Ok(())
     }
 
     async fn migration_client_with_retry(
@@ -94,6 +126,69 @@ impl PostgresRootFilesystem {
             }
         })
     }
+}
+
+#[cfg(feature = "postgres")]
+async fn drop_legacy_projection_indexes(
+    transaction: &tokio_postgres::Transaction<'_>,
+) -> Result<(), FilesystemError> {
+    let rows = transaction
+        .query(
+            "SELECT indexname \
+             FROM pg_indexes \
+             WHERE schemaname = current_schema() \
+               AND tablename = 'root_filesystem_entries' \
+               AND indexname LIKE 'idx_rfs_%' \
+               AND indexname NOT LIKE 'idx_rfs_shared_%' \
+               AND indexdef LIKE '%btree (((indexed ->>%'",
+            &[],
+        )
+        .await
+        .map_err(|error| infrastructure_pg_error(FilesystemOperation::CreateDirAll, error))?;
+    for row in rows {
+        let index_name: String = row.get(0);
+        let quoted = quote_postgres_identifier(&index_name);
+        transaction
+            .batch_execute(&format!("DROP INDEX IF EXISTS {quoted}"))
+            .await
+            .map_err(|error| infrastructure_pg_error(FilesystemOperation::CreateDirAll, error))?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "postgres")]
+fn quote_postgres_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+#[cfg(feature = "postgres")]
+async fn postgres_root_filesystem_migration_key(
+    client: &deadpool_postgres::Object,
+) -> Result<String, FilesystemError> {
+    // `inet_server_addr()` / `inet_server_port()` can collapse to the same
+    // value across isolated Docker testcontainers. The postmaster start time
+    // distinguishes those server instances while still letting a live process
+    // skip repeat migrations against the same running database.
+    let row = client
+        .query_one(
+            "SELECT \
+                current_database(), \
+                current_schema(), \
+                COALESCE(inet_server_addr()::text, 'local'), \
+                COALESCE(inet_server_port()::text, 'local'), \
+                pg_postmaster_start_time()::text",
+            &[],
+        )
+        .await
+        .map_err(|error| infrastructure_pg_error(FilesystemOperation::Connect, error))?;
+    let database: String = row.get(0);
+    let schema: String = row.get(1);
+    let host: String = row.get(2);
+    let port: String = row.get(3);
+    let postmaster_started_at: String = row.get(4);
+    Ok(format!(
+        "{host}:{port}/{database}/{schema}@{postmaster_started_at}"
+    ))
 }
 
 #[cfg(feature = "postgres")]
@@ -248,14 +343,17 @@ impl RootFilesystem for PostgresRootFilesystem {
         let index_name = sql_index_name(path.as_str(), spec.name.as_str());
         match &spec.kind {
             IndexKind::Exact | IndexKind::Prefix => {
+                let index_name = postgres_shared_projection_index_name(spec);
                 let expressions: Vec<String> = spec
                     .keys
                     .iter()
                     .map(|k| format!("((indexed->>'{}'))", k.as_str()))
                     .collect();
+                let mut columns = expressions;
+                columns.push("path".to_string());
                 let ddl = format!(
                     "CREATE INDEX IF NOT EXISTS {index_name} ON root_filesystem_entries ({})",
-                    expressions.join(", ")
+                    columns.join(", ")
                 );
                 client.batch_execute(&ddl).await.map_err(|error| {
                     db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
@@ -373,8 +471,12 @@ impl RootFilesystem for PostgresRootFilesystem {
         let client = self.client().await?;
         let params_ref: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
             params.iter().map(|p| p.as_ref() as _).collect();
+        let statement = client
+            .prepare_cached(sql.as_str())
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::Query, error))?;
         let rows = client
-            .query(sql.as_str(), &params_ref[..])
+            .query(&statement, &params_ref[..])
             .await
             .map_err(|error| db_error(path.clone(), FilesystemOperation::Query, error))?;
         rows.into_iter()
@@ -564,32 +666,27 @@ impl RootFilesystem for PostgresRootFilesystem {
 
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         let client = self.client().await?;
-        if let Some((len, file_type, modified)) =
-            self.exact_entry_with_client(&client, path).await?
-        {
-            return Ok(FileStat {
-                path: path.clone(),
-                file_type,
-                len,
-                modified,
-                sensitive: false,
-            });
-        }
-        if self.has_child_entry_with_client(&client, path).await? {
-            return Ok(FileStat {
-                path: path.clone(),
-                file_type: FileType::Directory,
-                len: 0,
-                modified: None,
-                sensitive: false,
-            });
-        }
-        Err(not_found(path.clone(), FilesystemOperation::Stat))
+        postgres_stat_with_client(&client, path).await
     }
 
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         let client = self.client().await?;
         postgres_delete_with_client(&client, path).await
+    }
+
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        // Round-B review: validate `expected_version` before taking the
+        // pool checkout, mirroring the libsql backend's Round-A fix — an
+        // out-of-range version can never match a real row, so failing
+        // closed here avoids holding a contended pool connection for a
+        // call destined to error.
+        let expected_raw = record_version_to_i64(path, expected_version)?;
+        let client = self.client().await?;
+        postgres_delete_if_version_with_client(&client, path, expected_version, expected_raw).await
     }
 
     async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
@@ -750,22 +847,7 @@ impl RootFilesystem for PostgresRootFilesystem {
 
     async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
         let client = self.client().await?;
-        let row = cached_query_one(
-            &client,
-            r#"
-                INSERT INTO root_filesystem_sequences (path, next_seq, updated_at)
-                VALUES ($1, 2, NOW())
-                ON CONFLICT (path) DO UPDATE SET
-                    next_seq = root_filesystem_sequences.next_seq + 1,
-                    updated_at = NOW()
-                RETURNING next_seq - 1 AS reserved
-                "#,
-            &[&path.as_str()],
-        )
-        .await
-        .map_err(|error| db_error(path.clone(), FilesystemOperation::ReserveSeq, error))?;
-        let reserved: i64 = row.get("reserved");
-        seq_no_from_i64(path, reserved, FilesystemOperation::ReserveSeq)
+        postgres_reserve_sequence_with_client(&client, path).await
     }
 
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
@@ -1052,6 +1134,11 @@ impl StorageTxn for PostgresStorageTxn {
         postgres_delete_with_client(self.client()?, path).await
     }
 
+    async fn reserve_sequence(&mut self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        self.check_path(path)?;
+        postgres_reserve_sequence_with_client(self.client()?, path).await
+    }
+
     async fn commit(mut self: Box<Self>) -> Result<(), FilesystemError> {
         let client = self.client.take().ok_or_else(|| FilesystemError::Backend {
             path: self.prefix.clone(),
@@ -1083,6 +1170,29 @@ impl StorageTxn for PostgresStorageTxn {
 }
 
 #[cfg(feature = "postgres")]
+async fn postgres_reserve_sequence_with_client(
+    client: &deadpool_postgres::Object,
+    path: &VirtualPath,
+) -> Result<SeqNo, FilesystemError> {
+    let row = cached_query_one(
+        client,
+        r#"
+            INSERT INTO root_filesystem_sequences (path, next_seq, updated_at)
+            VALUES ($1, 2, NOW())
+            ON CONFLICT (path) DO UPDATE SET
+                next_seq = root_filesystem_sequences.next_seq + 1,
+                updated_at = NOW()
+            RETURNING next_seq - 1 AS reserved
+            "#,
+        &[&path.as_str()],
+    )
+    .await
+    .map_err(|error| db_error(path.clone(), FilesystemOperation::ReserveSeq, error))?;
+    let reserved: i64 = row.get("reserved");
+    seq_no_from_i64(path, reserved, FilesystemOperation::ReserveSeq)
+}
+
+#[cfg(feature = "postgres")]
 impl Drop for PostgresStorageTxn {
     fn drop(&mut self) {
         if !self.active {
@@ -1105,10 +1215,12 @@ impl Drop for PostgresStorageTxn {
 /// what keeps the small hosted pool from starving the heartbeat/webui and
 /// wedging the runner lease.
 ///
-/// Only use these with *static* SQL — dynamic SQL would grow the cache
-/// unbounded, so the filter `query` and index DDL paths stay on the uncached
-/// `tokio_postgres` calls. The error type stays `tokio_postgres::Error` so
-/// existing `db_error` mapping at call sites is unchanged.
+/// Prefer these with static or low-cardinality query-shape SQL. Filesystem
+/// `query` SQL is generated from the filter shape and indexed key names while
+/// paths and values stay bound parameters, so it uses `prepare_cached` directly
+/// at the call site. Index DDL remains uncached. The error type stays
+/// `tokio_postgres::Error` so existing `db_error` mapping at call sites is
+/// unchanged.
 #[cfg(feature = "postgres")]
 async fn cached_query_opt(
     client: &deadpool_postgres::Object,
@@ -1415,6 +1527,74 @@ async fn postgres_get_with_client(
 }
 
 #[cfg(feature = "postgres")]
+async fn postgres_stat_with_client(
+    client: &deadpool_postgres::Object,
+    path: &VirtualPath,
+) -> Result<FileStat, FilesystemError> {
+    let (prefix_lower, prefix_upper) = descendant_path_range(path);
+    let row = cached_query_opt(
+        client,
+        r#"
+            WITH exact AS (
+                SELECT OCTET_LENGTH(contents)::bigint AS len,
+                       is_dir,
+                       EXTRACT(EPOCH FROM updated_at)::bigint AS updated_at_epoch
+                FROM root_filesystem_entries
+                WHERE path = $1
+            ),
+            child AS (
+                SELECT 1
+                FROM root_filesystem_entries
+                WHERE path >= $2 AND path < $3
+                LIMIT 1
+            )
+            SELECT len, is_dir, updated_at_epoch, TRUE AS exact_match
+            FROM exact
+            UNION ALL
+            SELECT NULL::bigint AS len, TRUE AS is_dir, NULL::bigint AS updated_at_epoch,
+                   FALSE AS exact_match
+            FROM child
+            WHERE NOT EXISTS (SELECT 1 FROM exact)
+            LIMIT 1
+            "#,
+        &[&path.as_str(), &prefix_lower, &prefix_upper],
+    )
+    .await
+    .map_err(|error| db_error(path.clone(), FilesystemOperation::Stat, error))?;
+    let Some(row) = row else {
+        return Err(not_found(path.clone(), FilesystemOperation::Stat));
+    };
+    let exact_match: bool = row.get("exact_match");
+    if !exact_match {
+        return Ok(FileStat {
+            path: path.clone(),
+            file_type: FileType::Directory,
+            len: 0,
+            modified: None,
+            sensitive: false,
+        });
+    }
+    let len: Option<i64> = row.get("len");
+    let is_dir: bool = row.get("is_dir");
+    let updated_at_epoch: Option<i64> = row.get("updated_at_epoch");
+    Ok(FileStat {
+        path: path.clone(),
+        file_type: if is_dir {
+            FileType::Directory
+        } else {
+            FileType::File
+        },
+        len: if is_dir {
+            0
+        } else {
+            len.unwrap_or_default().max(0) as u64
+        },
+        modified: updated_at_epoch.and_then(system_time_from_unix_seconds),
+        sensitive: false,
+    })
+}
+
+#[cfg(feature = "postgres")]
 async fn postgres_delete_with_client(
     client: &deadpool_postgres::Object,
     path: &VirtualPath,
@@ -1452,6 +1632,133 @@ async fn postgres_delete_with_client(
     .await
     .map_err(|error| db_error(path.clone(), FilesystemOperation::Delete, error))?;
     Ok(())
+}
+
+/// Guarded delete: remove the single file row at `path` only when it still
+/// holds the expected version. Single-key by design — no subtree band,
+/// unlike blind delete's `path = $1 OR (path >= $2 ...)`.
+///
+/// Review fix (PR #5749): the conditional DELETE and the zero-rows
+/// diagnosis run as ONE statement (one round trip), not two. Two separate
+/// statements left a window between them in which an external transaction
+/// could commit a full delete-then-recreate on the same path; the second
+/// statement (a fresh READ COMMITTED snapshot) would then observe the *new*
+/// incarnation and misclassify the outcome.
+///
+/// The `candidate` and `candidate_state` CTEs are deliberately
+/// `MATERIALIZED`: they record the row/version visible at statement start
+/// before `locked` waits on a contended tuple. Under READ COMMITTED,
+/// `SELECT ... FOR UPDATE` can follow a concurrent delete+recreate to the
+/// new path row after waiting. Comparing the current row's `created_at` with
+/// the initial candidate prevents the DELETE from removing that replacement,
+/// even when its per-incarnation version restarted at the expected value. The
+/// Rust classifier then treats "expected row was deleted and a later
+/// incarnation now exists" as NotFound, while still reporting
+/// VersionMismatch for ordinary updates that preserve `created_at`. This
+/// relies on `created_at` being immutable after row creation; if a future
+/// writer mutates it on update, replacement detection would classify that
+/// update as a new incarnation.
+#[cfg(feature = "postgres")]
+const DELETE_IF_VERSION_ATOMIC_SQL: &str = r#"
+    WITH candidate AS MATERIALIZED (
+        SELECT version, created_at
+        FROM root_filesystem_entries
+        WHERE path = $1
+          AND is_dir = FALSE
+    ),
+    candidate_state AS MATERIALIZED (
+        SELECT
+            MAX(version) AS candidate_version,
+            MAX(created_at) AS candidate_created_at,
+            COUNT(*) AS candidate_rows
+        FROM candidate
+    ),
+    locked AS (
+        SELECT
+            locked_row.path,
+            locked_row.version,
+            locked_row.created_at,
+            candidate_state.candidate_version,
+            candidate_state.candidate_created_at
+        FROM candidate_state
+        -- `candidate_state` is materialized and always one row, so this
+        -- carries the statement-start snapshot alongside the post-lock row
+        -- without multiplying rows. The lateral dependency forces that state
+        -- to be available before the lock wait begins.
+        LEFT JOIN LATERAL (
+            SELECT path, version, created_at
+            FROM root_filesystem_entries AS entry
+            WHERE path = $1
+              AND is_dir = FALSE
+              -- Intentional tautology: keep the LATERAL subquery correlated
+              -- to `candidate_state` so it cannot run before that state is
+              -- materialized.
+              AND candidate_state.candidate_rows >= 0
+            FOR UPDATE OF entry
+        ) AS locked_row ON TRUE
+    ),
+    deleted AS (
+        DELETE FROM root_filesystem_entries
+        WHERE path = $1
+          AND is_dir = FALSE
+          AND version = $2
+          AND path IN (
+              SELECT path
+              FROM locked
+              WHERE candidate_version = $2
+                AND candidate_created_at IS NOT DISTINCT FROM created_at
+          )
+        RETURNING TRUE AS ok
+    )
+    SELECT
+        EXISTS (SELECT 1 FROM deleted) AS was_deleted,
+        (SELECT version FROM locked) AS locked_version,
+        EXISTS (
+            SELECT 1
+            FROM locked
+            WHERE candidate_version = $2
+              AND candidate_created_at IS DISTINCT FROM created_at
+        ) AS expected_incarnation_was_replaced
+    "#;
+
+/// CAS delete for the Postgres backend: one statement, one round trip,
+/// mirroring the put round-trip budget. Classifies from the same query that
+/// performed the delete attempt: no row at `path` → NotFound (already gone,
+/// benign); row present at another version → VersionMismatch (gone stale).
+/// `diagnose_put_failure` / `postgres_current_version_with_client` are
+/// deliberately not reused here: reusing them would require a second
+/// statement, reopening the race this fix closes.
+#[cfg(feature = "postgres")]
+async fn postgres_delete_if_version_with_client(
+    client: &deadpool_postgres::Object,
+    path: &VirtualPath,
+    expected_version: RecordVersion,
+    expected_raw: i64,
+) -> Result<(), FilesystemError> {
+    let row = cached_query_one(
+        client,
+        DELETE_IF_VERSION_ATOMIC_SQL,
+        &[&path.as_str(), &expected_raw],
+    )
+    .await
+    .map_err(|error| db_error(path.clone(), FilesystemOperation::Delete, error))?;
+    let was_deleted: bool = row.get("was_deleted");
+    if was_deleted {
+        return Ok(());
+    }
+    let expected_incarnation_was_replaced: bool = row.get("expected_incarnation_was_replaced");
+    if expected_incarnation_was_replaced {
+        return Err(not_found(path.clone(), FilesystemOperation::Delete));
+    }
+    let locked_version: Option<i64> = row.get("locked_version");
+    if let Some(raw) = locked_version {
+        return Err(FilesystemError::VersionMismatch {
+            path: path.clone(),
+            expected: Some(expected_version),
+            found: Some(record_version_from_i64(path, raw)?),
+        });
+    }
+    Err(not_found(path.clone(), FilesystemOperation::Delete))
 }
 
 #[cfg(feature = "postgres")]
@@ -1516,6 +1823,26 @@ fn descendant_path_range(path: &VirtualPath) -> (String, String) {
     // exclusive upper bound "{prefix}0" works because '/' sorts before '0'
     // in the normalized virtual path alphabet used by these storage paths.
     (format!("{prefix}/"), format!("{prefix}0"))
+}
+
+#[cfg(feature = "postgres")]
+fn postgres_shared_projection_index_name(spec: &IndexSpec) -> String {
+    let kind = match &spec.kind {
+        IndexKind::Exact => "exact",
+        IndexKind::Prefix => "prefix",
+        IndexKind::Fts => "fts",
+        IndexKind::Vector { .. } => "vector",
+    };
+    let mut keys = postgres_projection_index_component(kind);
+    for key in &spec.keys {
+        keys.push_str(&postgres_projection_index_component(key.as_str()));
+    }
+    sql_index_name(&format!("/shared/{kind}/{keys}"), spec.name.as_str())
+}
+
+#[cfg(feature = "postgres")]
+fn postgres_projection_index_component(value: &str) -> String {
+    format!("{}:{value}", value.len())
 }
 
 /// Translate a [`Filter`] tree into a postgres WHERE-clause fragment.
@@ -1861,6 +2188,86 @@ mod tests {
         assert!(PUT_ANY_SQL.contains("is_dir = FALSE"));
     }
 
+    /// `delete_if_version` must stay one single-key statement: one round-trip
+    /// on the happy path (matching the put budget), scoped to the record plane
+    /// (`is_dir = FALSE`), and with no `OR`-joined subtree band — re-adding
+    /// blind delete's sweep would let a version guard on one path silently
+    /// cascade to unguarded descendants.
+    ///
+    /// Review fix (PR #5749): also pins the atomicity fix — the conditional
+    /// delete and the zero-rows diagnosis must be ONE statement (`locked`
+    /// CTE + `FOR UPDATE`, `deleted` CTE depending on it), not two separate
+    /// round trips. Two statements reopens the race where an external
+    /// delete+recreate commits in the gap between them.
+    #[test]
+    fn delete_if_version_statements_are_single_round_trip_and_single_key() {
+        let sql = DELETE_IF_VERSION_ATOMIC_SQL;
+        assert_eq!(
+            top_level_statement_count(sql),
+            1,
+            "delete_if_version must be a single statement. Got: {sql}"
+        );
+        assert!(
+            !sql.contains(" OR "),
+            "delete_if_version must stay single-key (no subtree band): {sql}"
+        );
+        assert!(sql.contains("is_dir = FALSE"));
+        assert!(sql.contains("version = $2"));
+        assert!(
+            sql.contains("FOR UPDATE"),
+            "delete_if_version must lock the row before deciding NotFound vs \
+             VersionMismatch, or a concurrent delete+recreate can race the \
+             classification: {sql}"
+        );
+        assert!(
+            sql.contains("candidate AS MATERIALIZED"),
+            "delete_if_version must materialize the statement-start \
+             candidate before FOR UPDATE waits, or a concurrent \
+             delete+recreate can be mistaken for the new incarnation: {sql}"
+        );
+        assert!(
+            sql.contains("expected_incarnation_was_replaced"),
+            "delete_if_version must classify a replaced expected \
+             incarnation as NotFound rather than VersionMismatch against \
+             the replacement row: {sql}"
+        );
+        assert!(
+            sql.contains("candidate_created_at IS NOT DISTINCT FROM created_at"),
+            "delete_if_version must not delete a replacement incarnation \
+             whose version happens to equal the expected version: {sql}"
+        );
+        assert!(
+            sql.contains("FROM locked\n              WHERE candidate_version = $2"),
+            "the delete CTE must depend on the locked CTE so Postgres \
+             sequences lock-then-incarnation-check-then-delete instead of \
+             running them independently: {sql}"
+        );
+        // Round-C review: a bare `contains("FOR UPDATE")` / `contains("version
+        // = $2")` check is fooled by two concrete, semantically-broken
+        // mutants that keep those substrings intact. Guard against both
+        // directly instead of relying on substring presence alone.
+        assert!(
+            !sql.contains("SKIP LOCKED"),
+            "delete_if_version's FOR UPDATE must block on a contending row, \
+             not skip it — `FOR UPDATE SKIP LOCKED` still satisfies a bare \
+             `contains(\"FOR UPDATE\")` check but would let a concurrent \
+             delete+recreate slip past the lock entirely, reopening the \
+             atomicity race this fix closes: {sql}"
+        );
+        let locked_clause_end = sql
+            .find("deleted AS (")
+            .expect("SQL must have a deleted CTE");
+        assert!(
+            !sql[..locked_clause_end].contains("version = $2"),
+            "the version guard must live in the `deleted` CTE's WHERE \
+             clause, not `locked`'s — moving it there still satisfies a \
+             bare `contains(\"version = $2\")` check, but would make \
+             `locked` (and thus the whole statement) find no row at all for \
+             a present-but-stale-version path, misclassifying a stale \
+             version as NotFound instead of VersionMismatch: {sql}"
+        );
+    }
+
     /// The descendant range is the half-open `[prefix/, prefix0)` band that the
     /// folded `NOT EXISTS` child guard scans. A wrong bound would silently
     /// mis-scope the directory invariant, so pin the exact bytes and the
@@ -1878,5 +2285,78 @@ mod tests {
         assert!("/secrets/a/b/child" >= lower && "/secrets/a/b/child" < upper);
         assert!("/secrets/a/b" < lower); // the path itself is excluded
         assert!("/secrets/a/bb" >= upper); // prefix-sharing sibling excluded
+    }
+
+    #[test]
+    fn shared_projection_index_name_ignores_prefix_specific_declarations() {
+        let spec = IndexSpec::new(
+            crate::IndexName::new("bucket_exact").unwrap(),
+            vec![crate::IndexKey::new("bucket").unwrap()],
+            IndexKind::Exact,
+        );
+        let first = postgres_shared_projection_index_name(&spec);
+        let second = postgres_shared_projection_index_name(&spec);
+        assert_eq!(first, second);
+        assert!(first.contains("shared"));
+        assert!(first.contains("bucket_exact"));
+        assert!(first.len() <= 62);
+    }
+
+    #[test]
+    fn shared_projection_index_name_separates_kind_and_keys() {
+        let exact_bucket = IndexSpec::new(
+            crate::IndexName::new("bucket_exact").unwrap(),
+            vec![crate::IndexKey::new("bucket").unwrap()],
+            IndexKind::Exact,
+        );
+        let prefix_bucket = IndexSpec::new(
+            crate::IndexName::new("bucket_exact").unwrap(),
+            vec![crate::IndexKey::new("bucket").unwrap()],
+            IndexKind::Prefix,
+        );
+        let exact_tenant = IndexSpec::new(
+            crate::IndexName::new("bucket_exact").unwrap(),
+            vec![crate::IndexKey::new("tenant_id").unwrap()],
+            IndexKind::Exact,
+        );
+        assert_ne!(
+            postgres_shared_projection_index_name(&exact_bucket),
+            postgres_shared_projection_index_name(&prefix_bucket)
+        );
+        assert_ne!(
+            postgres_shared_projection_index_name(&exact_bucket),
+            postgres_shared_projection_index_name(&exact_tenant)
+        );
+    }
+
+    #[test]
+    fn shared_projection_index_name_uses_injective_key_encoding() {
+        let split_keys = IndexSpec::new(
+            crate::IndexName::new("bucket_exact").unwrap(),
+            vec![
+                crate::IndexKey::new("a").unwrap(),
+                crate::IndexKey::new("b").unwrap(),
+            ],
+            IndexKind::Exact,
+        );
+        let joined_key = IndexSpec::new(
+            crate::IndexName::new("bucket_exact").unwrap(),
+            vec![crate::IndexKey::new("a_b").unwrap()],
+            IndexKind::Exact,
+        );
+
+        assert_ne!(
+            postgres_shared_projection_index_name(&split_keys),
+            postgres_shared_projection_index_name(&joined_key)
+        );
+    }
+
+    #[test]
+    fn quote_postgres_identifier_doubles_embedded_quotes() {
+        assert_eq!(quote_postgres_identifier("idx_simple"), "\"idx_simple\"");
+        assert_eq!(
+            quote_postgres_identifier("idx_\"quoted\""),
+            "\"idx_\"\"quoted\"\"\""
+        );
     }
 }

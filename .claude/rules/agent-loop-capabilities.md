@@ -1,9 +1,9 @@
 ---
 paths:
   - "crates/ironclaw_reborn_composition/**/*.rs"
-  - "crates/ironclaw_loop_support/**/*.rs"
+  - "crates/ironclaw_loop_host/**/*.rs"
   - "crates/ironclaw_agent_loop/**/*.rs"
-  - "crates/ironclaw_reborn/**/*.rs"
+  - "crates/ironclaw_runner/**/*.rs"
 ---
 # Agent-Loop Capability Handlers — Don't Kill the Whole Run
 
@@ -14,8 +14,8 @@ source but produced the identical run-ending log signature:
 
 ```
 WARN ironclaw_agent_loop::executor::mapping: capability host error mapped to HostUnavailable kind="…" safe_summary="…"
-WARN ironclaw_reborn::planned_driver: planned driver executor returned sanitized error error=HostUnavailable { stage: Capability }
-WARN ironclaw_reborn::turn_runner: driver invocation failed, recording terminal failure … error=driver error: agent loop driver is unavailable: Capability: unavailable
+WARN ironclaw_runner::planned_driver: planned driver executor returned sanitized error error=HostUnavailable { stage: Capability }
+WARN ironclaw_runner::turn_runner: driver invocation failed, recording terminal failure … error=driver error: agent loop driver is unavailable: Capability: unavailable
 ```
 
 **If you see `Capability: unavailable` killing a turn, a capability
@@ -61,7 +61,7 @@ therefore worth ending the run).
 
 `CapabilityResultMessage.safe_summary` (and any host safe-summary) is
 validated before the result ref is written —
-`append_capability_result_ref` (`crates/ironclaw_loop_support/src/lib.rs`)
+`append_capability_result_ref` (`crates/ironclaw_loop_host/src/lib.rs`)
 → `validate_loop_safe_summary`
 (`crates/ironclaw_turns/src/run_profile/host.rs`) + `ToolResultSafeSummary`
 (`crates/ironclaw_threads/src/tool_result_reference.rs`). Validation
@@ -115,7 +115,7 @@ past the helper:
   (`capability_host_error`).
 - Recoverable handler: `crates/ironclaw_agent_loop/src/executor/capabilities.rs`
   (`handle_capability_error`).
-- Safe-summary validation: `crates/ironclaw_loop_support/src/lib.rs`
+- Safe-summary validation: `crates/ironclaw_loop_host/src/lib.rs`
   (`append_capability_result_ref`),
   `crates/ironclaw_threads/src/tool_result_reference.rs`.
 - Exemplar handlers: `crates/ironclaw_reborn_composition/src/runtime/local_dev/{skill_activation,project_create,outbound_delivery}.rs`.

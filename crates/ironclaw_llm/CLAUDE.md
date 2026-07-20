@@ -23,7 +23,7 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `retry.rs` | Exponential backoff retry wrapper; `is_retryable()` classification |
 | `failover.rs` | `FailoverProvider` — tries providers in order with per-provider cooldown |
 | `response_cache.rs` | In-memory LLM response cache with TTL and LRU eviction (keyed by SHA-256) |
-| `costs.rs` | Static per-model cost table (OpenAI, Anthropic, local/Ollama heuristics) |
+| (cost table moved) | The per-model cost table + usage pricing now lives in `ironclaw_common::llm_costs` (shared by every surface that reports cost). Providers import it as `use ironclaw_common::llm_costs as costs;`. |
 | `rig_adapter.rs` | Adapter bridging rig-core `CompletionModel` → `LlmProvider`; used by OpenAI, Anthropic, Ollama, Tinfoil |
 | `smart_routing.rs` | `SmartRoutingProvider` — 13-dimension complexity scorer routes cheap vs primary model |
 | `recording.rs` | `RecordingLlm` — trace capture for E2E replay testing (`IRONCLAW_RECORD_TRACE`) |
@@ -254,9 +254,18 @@ Raw provider
 - `SILENT_REPLY_TOKEN` (`"NO_REPLY"`) and `is_silent_reply()` — used by the dispatcher to suppress empty responses in group chats
 - Thinking-tag stripping — regex-based removal of `<thinking>`, `<reflection>`, `<scratchpad>`, `<|think|>`, `<final>`, etc. from model responses before returning to the user
 
-## costs.rs Details
+## Cost table (moved to `ironclaw_common::llm_costs`)
 
-`costs.rs` provides a static lookup table (`model_cost(model_id)`) returning `(input_cost, output_cost)` per token as `rust_decimal::Decimal`. Provider prefixes like `"openai/gpt-4o"` are stripped before lookup. Returns `None` for unknown models — callers should fall back to `default_cost()` (roughly GPT-4o pricing). Local model heuristic (`is_local_model()`) returns zero cost for Ollama-style identifiers (llama*, mistral*, `:latest`, `:instruct`, etc.).
+The static per-model cost table moved to `crates/ironclaw_common/src/llm_costs.rs`
+so surfaces above `ironclaw_llm` (product workflow, WebChat v2) can price a run's
+usage without depending on this whole crate. It provides `model_cost(model_id)`
+→ `(input_cost, output_cost)` per token as `rust_decimal::Decimal` (provider
+prefixes like `"openai/gpt-4o"` stripped; `None` for unknowns → `default_cost()`
+≈ GPT-4o; Ollama-style ids price at zero), plus `price_usage(...)` /
+`RunCost::from_usage(...)` — the single shared source for per-run USD pricing.
+Providers in this crate import it as `use ironclaw_common::llm_costs as costs;`
+(a plain import alias, **not** a re-export — see the relocation note in
+`.claude/rules/type-placement.md`).
 
 ## rig_adapter.rs Details
 
@@ -270,7 +279,7 @@ Raw provider
 
 ## Streaming Support
 
-No streaming support. All providers use non-streaming (blocking) Chat Completions requests. The `complete()` and `complete_with_tools()` methods return only after the full response is available.
+`LlmProvider` exposes `complete_streaming()` and `complete_with_tools_streaming()` for provider text deltas. Providers that do not override these methods inherit the blocking `complete()` / `complete_with_tools()` fallback, so callers must treat streaming as opportunistic. The NEAR AI chat provider currently implements OpenAI-compatible SSE streaming for live assistant text; the final response remains authoritative for finish reason, tool calls, and usage accounting.
 
 ## Trace Recording
 

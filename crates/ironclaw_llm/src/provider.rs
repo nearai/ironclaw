@@ -1,5 +1,7 @@
 //! LLM provider trait and types.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -626,11 +628,33 @@ pub trait LlmProvider: Send + Sync {
     /// Complete a chat conversation.
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError>;
 
+    /// Complete a chat conversation while publishing provider text deltas as
+    /// they arrive. Providers that do not support streaming inherit the normal
+    /// request/response implementation.
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        _sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        self.complete(request).await
+    }
+
     /// Complete with tool use support.
     async fn complete_with_tools(
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError>;
+
+    /// Complete a tool-capable chat conversation while publishing provider text
+    /// deltas as they arrive. The final response remains authoritative for tool
+    /// calls, finish reason, and usage accounting.
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        _sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.complete_with_tools(request).await
+    }
 
     /// List available models from the provider.
     /// Default implementation returns empty list.
@@ -695,6 +719,11 @@ pub trait LlmProvider: Send + Sync {
     fn cache_read_discount(&self) -> Decimal {
         Decimal::ONE
     }
+}
+
+#[async_trait]
+pub trait CompletionStreamSink: Send + Sync {
+    async fn text_delta(&self, delta: String);
 }
 
 #[cfg(test)]

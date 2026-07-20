@@ -11,7 +11,7 @@ use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::{
     BackendCapabilities, BackendId, BackendKind, CompositeRootFilesystem, ContentKind,
-    InMemoryBackend, IndexPolicy, LocalFilesystem, MountDescriptor, RootFilesystem, StorageClass,
+    DiskFilesystem, InMemoryBackend, IndexPolicy, MountDescriptor, RootFilesystem, StorageClass,
 };
 use ironclaw_host_api::{
     CapabilityId, CredentialStageError, EffectKind, ExtensionId, HostPath, MountAlias, MountGrant,
@@ -21,19 +21,36 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     BUILTIN_FIRST_PARTY_PROVIDER, CapabilitySurfaceVersion as HostRuntimeCapabilitySurfaceVersion,
     HostRuntime, HostRuntimeServices, NATIVE_MEMORY_FIRST_PARTY_PROVIDER, RuntimeProcessPort,
-    builtin_first_party_handlers, builtin_first_party_package, native_memory_first_party_package,
+    TriggerCreateHook, builtin_first_party_handlers,
+    builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
+    native_memory_first_party_package,
 };
 use ironclaw_network::{PolicyNetworkHttpEgress, ReqwestNetworkTransport};
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_secrets::{InMemorySecretStore, SecretMaterial};
+use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial};
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use ironclaw_wasm::{WitToolHost, WitToolRuntimeConfig};
 
 use super::super::doubles::{
     FixedRuntimeCredentialAccountResolver, GithubHarnessAuthorizer, RecordingNetworkHttpEgress,
-    RecordingRuntimeHttpEgress, StaticSecretStore,
+    RecordingNetworkHttpTransport, RecordingRuntimeHttpEgress, StaticNetworkResolver,
+    StaticSecretStore,
 };
 use super::HarnessResult;
+
+/// Default capability-io pair: the ephemeral `ProductLiveCapabilityIo` test
+/// double, coerced into ONE shared object's two trait-object roles (input
+/// resolver + result writer). Every `HostRuntimeCapabilityHarness`
+/// constructor that does not opt into `.with_durable_capability_io()`
+/// (issue #5838) uses this so both roles keep sharing one underlying object,
+/// matching production's `StagedCapabilityIo` invariant.
+pub(crate) fn default_capability_io_pair() -> (
+    Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
+    Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
+) {
+    let capability_io = Arc::new(ironclaw_reborn_composition::ProductLiveCapabilityIo::default());
+    (capability_io.clone(), capability_io)
+}
 
 pub(crate) fn local_dev_host_runtime_with_http_egress(
     storage_root: PathBuf,
@@ -87,12 +104,67 @@ pub(crate) fn local_dev_host_runtime_with_registry_and_runtime_http_egress(
     .with_first_party_http_egress(egress)
     .with_trust_policy(Arc::new(first_party_trust_policy()?));
     // Inject the recording process port when provided; `None` defaults to
-    // `LocalHostProcessPort` (real execution).
+    // `HostProcessPort` (real execution).
     if let Some(port) = process_port {
         services = services.with_runtime_process_port_dyn(port);
     }
 
     Ok(Arc::new(services.host_runtime_for_local_testing()))
+}
+
+/// #5886: a minimal `HostRuntime` whose ONLY first-party handlers are the
+/// trigger-management verbs, built with a caller-supplied (real)
+/// `TriggerActiveRunLookup` instead of the bare `builtin_first_party_handlers`
+/// default (which always resolves `Missing`). Used to give
+/// `builtin.trigger_list` a correct `active_hold` projection when the calling
+/// harness's OWN baked-in lookup is scoped to a turn-state store the caller's
+/// real runs never write to — see
+/// `HostRuntimeCapabilityHarness::install_trigger_active_run_lookup_for_test`,
+/// which wraps this runtime with `TriggerActiveRunLookupHostRuntime` so only
+/// `builtin.trigger_list` dispatch routes here.
+pub(crate) fn local_dev_trigger_only_host_runtime(
+    storage_root: PathBuf,
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup>,
+) -> HarnessResult<Arc<dyn HostRuntime>> {
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(builtin_first_party_package()?)?;
+    let services = HostRuntimeServices::new(
+        Arc::new(registry),
+        local_dev_root_filesystem(storage_root, LocalDevRootMounts::core_builtins())?,
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
+    )
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers_with_trigger_create_hook(
+            trigger_repository,
+            Arc::new(NoopTestTriggerCreateHook),
+            active_run_lookup,
+        )?,
+    ))
+    .with_trust_policy(Arc::new(first_party_trust_policy()?));
+
+    Ok(Arc::new(services.host_runtime_for_local_testing()))
+}
+
+/// Test-only `TriggerCreateHook`: this runtime never dispatches
+/// `builtin.trigger_create` (only `builtin.trigger_list` is ever routed to
+/// it — see `local_dev_trigger_only_host_runtime`'s doc), so the hook body is
+/// never exercised. Required only to satisfy
+/// `builtin_first_party_handlers_with_trigger_create_hook`'s signature.
+#[derive(Debug)]
+struct NoopTestTriggerCreateHook;
+
+#[async_trait::async_trait]
+impl TriggerCreateHook for NoopTestTriggerCreateHook {
+    async fn after_trigger_persisted(
+        &self,
+        _record: &ironclaw_triggers::TriggerRecord,
+    ) -> Result<(), ironclaw_triggers::TriggerError> {
+        Ok(())
+    }
 }
 
 pub(crate) fn local_dev_host_runtime_with_registry_and_egress(
@@ -147,7 +219,7 @@ pub(crate) fn local_dev_host_runtime_with_live_http_egress(
         ironclaw_processes::ProcessServices::in_memory(),
         HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
-    .with_secret_store(Arc::new(InMemorySecretStore::new()))
+    .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers(Arc::new(
         ironclaw_triggers::InMemoryTriggerRepository::default(),
     ))?))
@@ -164,11 +236,58 @@ pub(crate) fn local_dev_host_runtime_with_live_http_egress(
     Ok(Arc::new(services.host_runtime_for_local_testing()))
 }
 
+/// S1 seam: wires the REAL production egress pipeline —
+/// `PolicyNetworkHttpEgress` (network-policy enforcement + DNS/private-IP
+/// checks) over `HostHttpEgressService` (leak scan) — with only the
+/// wire-level transport swapped for `RecordingNetworkHttpTransport`. Mirrors
+/// [`local_dev_host_runtime_with_live_http_egress`] exactly, but the
+/// transport records instead of making a real network call, and DNS
+/// resolution is faked via `StaticNetworkResolver` so the pipeline stays
+/// hermetic.
+pub(crate) fn local_dev_host_runtime_with_real_egress_pipeline(
+    storage_root: PathBuf,
+    network_transport: RecordingNetworkHttpTransport,
+    process_port: Option<Arc<dyn RuntimeProcessPort>>,
+) -> HarnessResult<Arc<dyn HostRuntime>> {
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(builtin_first_party_package()?)?;
+
+    let mut services = HostRuntimeServices::new(
+        Arc::new(registry),
+        local_dev_root_filesystem(storage_root, LocalDevRootMounts::core_builtins())?,
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
+    )
+    .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers(Arc::new(
+        ironclaw_triggers::InMemoryTriggerRepository::default(),
+    ))?))
+    .try_with_host_http_egress(PolicyNetworkHttpEgress::new_with_resolver(
+        network_transport,
+        StaticNetworkResolver,
+    ))
+    .map_err(|report| {
+        std::io::Error::other(format!(
+            "real egress pipeline production wiring failed: {report:?}"
+        ))
+    })?
+    .with_trust_policy(Arc::new(first_party_trust_policy()?));
+    // Inject the recording process port when provided; `None` defaults to
+    // `HostProcessPort` (real execution).
+    if let Some(port) = process_port {
+        services = services.with_runtime_process_port_dyn(port);
+    }
+
+    Ok(Arc::new(services.host_runtime_for_local_testing()))
+}
+
 pub(crate) fn local_dev_root_filesystem(
     storage_root: PathBuf,
     mounts: LocalDevRootMounts,
 ) -> HarnessResult<Arc<CompositeRootFilesystem>> {
-    let mut local = LocalFilesystem::new();
+    let mut local = DiskFilesystem::new();
     local.mount_local(
         VirtualPath::new("/projects")?,
         HostPath::from_path_buf(storage_root),
@@ -192,7 +311,7 @@ pub(crate) fn local_dev_root_filesystem(
         local_dev_mount_descriptor(
             "/projects",
             "local-dev-projects",
-            BackendKind::LocalFilesystem,
+            BackendKind::DiskFilesystem,
             StorageClass::FileContent,
             ContentKind::ProjectFile,
             IndexPolicy::NotIndexed,
@@ -205,7 +324,7 @@ pub(crate) fn local_dev_root_filesystem(
             local_dev_mount_descriptor(
                 "/system/extensions/github",
                 "local-dev-github-assets",
-                BackendKind::LocalFilesystem,
+                BackendKind::DiskFilesystem,
                 StorageClass::FileContent,
                 ContentKind::ExtensionPackage,
                 IndexPolicy::NotIndexed,
@@ -219,7 +338,7 @@ pub(crate) fn local_dev_root_filesystem(
             local_dev_mount_descriptor(
                 "/system/extensions/web-access",
                 "local-dev-web-access-assets",
-                BackendKind::LocalFilesystem,
+                BackendKind::DiskFilesystem,
                 StorageClass::FileContent,
                 ContentKind::ExtensionPackage,
                 IndexPolicy::NotIndexed,

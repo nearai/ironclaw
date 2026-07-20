@@ -3,9 +3,9 @@
 //! `RebornRuntimeInput` extends `RebornBuildInput` (which is substrate-only)
 //! with the additional knobs needed to assemble a runnable agent:
 //!
-//! - **LLM configuration** (optional, behind the `root-llm-provider` feature).
+//! - **LLM configuration** (optional).
 //!   Used by the composition root to construct an `LlmProviderModelGateway`
-//!   that satisfies the loop-support `HostManagedModelGateway` contract.
+//!   that satisfies the loop-host `HostManagedModelGateway` contract.
 //! - **Turn-runner configuration** — poll/heartbeat intervals for the worker
 //!   loop.
 //! - **Completion polling configuration** — interval/timeout policy for
@@ -18,7 +18,7 @@
 //!   roots.
 //!
 //! The CLI builds this struct from env vars / config; it does not call into
-//! `ironclaw_reborn` or `ironclaw_llm` directly.
+//! `ironclaw_runner` or `ironclaw_llm` directly.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,15 +26,14 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
 #[cfg(any(test, feature = "test-support"))]
-use ironclaw_loop_support::HostManagedModelGateway;
-use ironclaw_loop_support::HostSkillContextSource;
-use ironclaw_reborn::runtime::{
+use ironclaw_loop_host::HostManagedModelGateway;
+use ironclaw_loop_host::HostSkillContextSource;
+use ironclaw_reborn_config::BudgetDefaults;
+use ironclaw_reborn_config::RebornBootConfig;
+use ironclaw_runner::runtime::{
     DEFAULT_MAX_CONCURRENT_RUNS_PER_USER, DEFAULT_MAX_CONCURRENT_TRIGGER_RUNS,
     DEFAULT_TURN_RUNNER_WORKER_COUNT, ToolDisclosureMode,
 };
-use ironclaw_reborn_config::BudgetDefaults;
-#[cfg(feature = "root-llm-provider")]
-use ironclaw_reborn_config::RebornBootConfig;
 use ironclaw_triggers::{TriggerId, TriggerPollerWorkerConfig};
 
 use crate::input::RebornBuildInput;
@@ -126,30 +125,30 @@ pub trait TriggerFireAccessChecker: Send + Sync {
     ) -> Result<TriggerFireAccessDecision, TriggerFireAccessError>;
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[derive(Clone)]
 pub struct ResolvedRebornLlm {
     provider_id: String,
     model: String,
     pub(crate) config: ironclaw_llm::LlmConfig,
-    /// Optional decorator applied to the provider the gateway builds from
-    /// `config`. `config` is always the construction source (so it stays the
-    /// single source of truth for `provider_id`/`model` and budget cost-table
-    /// derivation); the factory only *wraps* the built provider — e.g. a
-    /// benchmark harness layering token/reasoning instrumentation over it.
-    /// When `None` the gateway uses the config-built provider as-is.
+    /// Optional decorator applied over the gateway's *swappable* provider at
+    /// cold boot — e.g. a benchmark harness layering token/reasoning
+    /// instrumentation. `config` stays the construction source (single source of
+    /// truth for `provider_id`/`model` and budget cost-table derivation); the
+    /// factory only *wraps* the swappable, so it survives the boot-time reload
+    /// that swaps a real provider into the placeholder. When `None` the gateway
+    /// drives the swappable directly. Threaded through
+    /// `build_production_model_gateway` → `build_placeholder_llm_gateway` →
+    /// `wrap_swappable_gateway`.
     pub(crate) provider_factory: Option<RebornProviderFactory>,
 }
 
 /// Decorator over the config-built LLM provider. See
 /// [`ResolvedRebornLlm::with_provider_factory`].
-#[cfg(feature = "root-llm-provider")]
 pub type RebornProviderFactory = Arc<
     dyn Fn(Arc<dyn ironclaw_llm::LlmProvider>) -> Arc<dyn ironclaw_llm::LlmProvider> + Send + Sync,
 >;
 
 // `LlmProvider` is not `Debug`, so derive can't see through `provider_override`.
-#[cfg(feature = "root-llm-provider")]
 impl std::fmt::Debug for ResolvedRebornLlm {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ResolvedRebornLlm")
@@ -160,7 +159,6 @@ impl std::fmt::Debug for ResolvedRebornLlm {
     }
 }
 
-#[cfg(feature = "root-llm-provider")]
 impl ResolvedRebornLlm {
     pub fn provider_id(&self) -> &str {
         &self.provider_id
@@ -168,6 +166,12 @@ impl ResolvedRebornLlm {
 
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    /// Base URL of the backend `serve` actually boots with, when the
+    /// backend has one. See [`ironclaw_llm::LlmConfig::active_base_url`].
+    pub fn base_url(&self) -> Option<String> {
+        self.config.active_base_url()
     }
 
     pub fn from_llm_config(config: ironclaw_llm::LlmConfig) -> Self {
@@ -183,13 +187,15 @@ impl ResolvedRebornLlm {
     /// it — e.g. to layer token/reasoning/cost instrumentation over the real
     /// provider.
     ///
-    /// This is the instrumentation seam (feature-gated on `root-llm-provider`).
-    /// The composition still constructs the provider from `config` and hands it
-    /// to the factory, so `config` remains the single source of truth and the
-    /// raw `ironclaw_llm::LlmProvider` substrate handle is never accepted
-    /// wholesale through the facade — the caller only supplies a decorator over
-    /// a provider the composition built. `build_llm_gateway` applies the factory
-    /// and never re-exposes the provider.
+    /// This is the instrumentation seam. The composition still constructs the
+    /// provider from `config` and hands the
+    /// factory the *swappable* wrapper over it, so `config` remains the single
+    /// source of truth and the raw `ironclaw_llm::LlmProvider` substrate handle
+    /// is never accepted wholesale through the facade — the caller only supplies
+    /// a decorator over a provider the composition built.
+    /// `build_placeholder_llm_gateway` applies the factory at cold boot and never
+    /// re-exposes the provider; because it wraps the swappable, the decorator
+    /// stays in the call path across the boot-time (and later) reloads.
     pub fn with_provider_factory(mut self, factory: RebornProviderFactory) -> Self {
         self.provider_factory = Some(factory);
         self
@@ -228,6 +234,31 @@ impl Default for TurnRunnerSettings {
             // `None` = conversations may use every slot not held by triggers.
             max_concurrent_conversation_runs: None,
         }
+    }
+}
+
+impl TurnRunnerSettings {
+    pub fn set_heartbeat_interval(mut self, heartbeat_interval: Duration) -> Self {
+        self.heartbeat_interval = heartbeat_interval;
+        self
+    }
+
+    pub fn set_poll_interval(mut self, poll_interval: Duration) -> Self {
+        self.poll_interval = poll_interval;
+        self
+    }
+
+    pub fn set_worker_count(mut self, worker_count: std::num::NonZeroUsize) -> Self {
+        self.worker_count = Some(worker_count);
+        self
+    }
+
+    pub fn set_max_concurrent_runs_per_user(
+        mut self,
+        max_concurrent_runs_per_user: std::num::NonZeroU32,
+    ) -> Self {
+        self.max_concurrent_runs_per_user = Some(max_concurrent_runs_per_user);
+        self
     }
 }
 
@@ -379,12 +410,9 @@ impl TriggerPollerSettings {
 #[derive(Default)]
 pub struct RebornRuntimeInput {
     pub services: Option<RebornBuildInput>,
-    #[cfg(feature = "root-llm-provider")]
     pub llm: Option<ResolvedRebornLlm>,
-    /// Operator boot config. When present (and `root-llm-provider` is on), the
-    /// WebUI facade composes the LLM-config settings service from it so the
+    /// Operator boot config. When present, the WebUI facade composes the LLM-config settings service from it so the
     /// settings surface can read/write `providers.json` + `config.toml`.
-    #[cfg(feature = "root-llm-provider")]
     pub boot: Option<RebornBootConfig>,
     pub runner: TurnRunnerSettings,
     pub tool_disclosure: Option<ToolDisclosureMode>,
@@ -422,6 +450,10 @@ pub struct RebornRuntimeInput {
     /// run, so a downstream caller can reconstruct the full step-by-step
     /// trajectory (the sealed runtime otherwise exposes only the final reply).
     pub trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
+    /// Mints the one-time API bearer returned when an admin creates a user. The
+    /// serve layer supplies a session-store-backed minter; when unset, the admin
+    /// user-management surface stays unwired (create reports unavailable).
+    pub admin_api_token_minter: Option<Arc<dyn crate::AdminApiTokenMinter>>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) model_gateway_override: Option<Arc<dyn HostManagedModelGateway>>,
     /// Cost table to pair with the model-gateway override. Without this,
@@ -430,7 +462,14 @@ pub struct RebornRuntimeInput {
     /// `LlmModelProfilePolicy::build_cost_table()` which the test
     /// override skips).
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) model_cost_table_override: Option<Arc<dyn ironclaw_loop_support::ModelCostTable>>,
+    pub(crate) model_cost_table_override: Option<Arc<dyn ironclaw_loop_host::ModelCostTable>>,
+    /// Caps availability-class model retries for this runtime. Tests that
+    /// script deliberate provider outages set a small value so a failed run
+    /// reaches `Failed` in seconds instead of riding the production backoff
+    /// budget for minutes. Wins over the
+    /// `IRONCLAW_REBORN_MODEL_AVAILABILITY_RETRY_ATTEMPTS` env override.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) model_availability_retry_attempts_override: Option<std::num::NonZeroU32>,
 }
 
 impl RebornRuntimeInput {
@@ -441,9 +480,7 @@ impl RebornRuntimeInput {
     pub fn from_services(services: RebornBuildInput) -> Self {
         Self {
             services: Some(services),
-            #[cfg(feature = "root-llm-provider")]
             llm: None,
-            #[cfg(feature = "root-llm-provider")]
             boot: None,
             runner: TurnRunnerSettings::default(),
             tool_disclosure: None,
@@ -459,10 +496,13 @@ impl RebornRuntimeInput {
             budget_defaults: None,
             budget_event_observer: None,
             trajectory_observer: None,
+            admin_api_token_minter: None,
             #[cfg(any(test, feature = "test-support"))]
             model_gateway_override: None,
             #[cfg(any(test, feature = "test-support"))]
             model_cost_table_override: None,
+            #[cfg(any(test, feature = "test-support"))]
+            model_availability_retry_attempts_override: None,
         }
     }
 
@@ -487,6 +527,17 @@ impl RebornRuntimeInput {
         observer: Arc<dyn crate::BudgetEventObserver>,
     ) -> Self {
         self.budget_event_observer = Some(observer);
+        self
+    }
+
+    /// Install the admin API-token minter used when an admin creates a user.
+    /// The serve layer builds a session-store-backed minter; without it the
+    /// admin user-management surface stays unwired.
+    pub fn with_admin_api_token_minter(
+        mut self,
+        minter: Arc<dyn crate::AdminApiTokenMinter>,
+    ) -> Self {
+        self.admin_api_token_minter = Some(minter);
         self
     }
 
@@ -538,7 +589,6 @@ impl RebornRuntimeInput {
         self
     }
 
-    #[cfg(feature = "root-llm-provider")]
     pub fn with_resolved_llm(mut self, llm: ResolvedRebornLlm) -> Self {
         self.llm = Some(llm);
         self
@@ -546,7 +596,6 @@ impl RebornRuntimeInput {
 
     /// Supply the operator boot config so the WebUI facade can compose the
     /// LLM-config settings service.
-    #[cfg(feature = "root-llm-provider")]
     pub fn with_boot_config(mut self, boot: RebornBootConfig) -> Self {
         self.boot = Some(boot);
         self
@@ -645,6 +694,17 @@ impl RebornRuntimeInput {
         self
     }
 
+    /// Test-only hook: cap availability-class model retries so scripted
+    /// provider outages reach `Failed` quickly (see the field doc).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_model_availability_retry_attempts(
+        mut self,
+        attempts: std::num::NonZeroU32,
+    ) -> Self {
+        self.model_availability_retry_attempts_override = Some(attempts);
+        self
+    }
+
     /// Test-only hook: pair the model gateway override with a custom
     /// cost table. Without this, gateway overrides produce no
     /// accountant and budget tests cannot assert ledger state — the
@@ -654,7 +714,7 @@ impl RebornRuntimeInput {
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_model_cost_table_override(
         mut self,
-        cost_table: Arc<dyn ironclaw_loop_support::ModelCostTable>,
+        cost_table: Arc<dyn ironclaw_loop_host::ModelCostTable>,
     ) -> Self {
         self.model_cost_table_override = Some(cost_table);
         self

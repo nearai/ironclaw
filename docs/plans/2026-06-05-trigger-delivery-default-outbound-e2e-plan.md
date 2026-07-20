@@ -208,18 +208,17 @@ tracked follow-up.
   metadata, capability flags, current selection, status, and errors; they must
   not encode Automations panel layout, button/copy state, saved/loading UI
   state, or WebUI-only presentation decisions.
-- Do not set a channel default during identity-only pairing flows. For Slack,
-  pairing-code redemption binds identity only and does not have a concrete
-  reply target.
-- After successful pairing, the UI may offer an explicit follow-up action to
-  use the user's Slack DM as the personal default for triggered automation
-  delivery. Accepting that prompt provisions or validates a concrete DM target,
-  then saves its provider-issued `target_id`; pairing success alone never
-  mutates defaults.
+- Do not set a channel default during identity-only setup flows. For Slack,
+  OAuth identity binding does not by itself create a concrete reply target.
+- After successful Slack OAuth setup, the UI may offer an explicit follow-up
+  action to use the user's Slack DM as the personal default for triggered
+  automation delivery. Accepting that prompt provisions or validates a concrete
+  DM target, then saves its provider-issued `target_id`; OAuth setup success
+  alone never mutates defaults.
 - Personal channel defaults require a concrete personal target backed by
   durable provider authority. For Slack this is a DM-capable target, typically
   after a real inbound Slack DM or an explicit DM target provisioning flow.
-  Pairing identity alone is not sufficient authority for a saved personal
+  OAuth identity alone is not sufficient authority for a saved personal
   delivery default.
 - Shared-agent channel defaults use admin-managed shared destinations. For
   Slack this is an admin-managed channel route.
@@ -352,7 +351,7 @@ Slack has two defaultable target families:
 
 Not defaultable in the first E2E:
 
-- pairing-code redemption by itself
+- OAuth identity binding by itself
 - arbitrary Slack channel ID supplied by the client
 - a generic "Slack" channel with no concrete conversation
 - implicit "last Slack conversation" defaults
@@ -376,8 +375,8 @@ Not defaultable in the first E2E:
   - `prepare_and_render_product_outbound` validation-before-render path.
 - `crates/ironclaw_reborn_composition/src/slack_delivery.rs`
   - Slack final-reply observer and observed reply-target authority.
-- `crates/ironclaw_reborn_composition/src/slack_personal_binding_pairing_serve.rs`
-  - pairing-code redeem route; identity-only today.
+- `crates/ironclaw_reborn_composition/src/product_auth_serve/oauth.rs`
+  - Slack OAuth callback binds identity only today.
 - `crates/ironclaw_webui_v2/src/handlers.rs`
   - WebUI handlers must delegate through `RebornServicesApi`.
 - `crates/ironclaw_webui_v2_static/static/js/pages/automations/automations-page.js`
@@ -532,8 +531,8 @@ Current implementation status:
 - PR C2 keeps the Slack reply-target binding formatter inside the Slack
   outbound-target module. Follow up with a shared bounded binding-ref helper
   only if another provider needs the same formatter shape.
-- Slack pairing-code redemption remains identity-only. It must not synthesize a
-  personal default, write preferences, or treat a paired Slack user id as a
+- Slack OAuth identity binding remains identity-only. It must not synthesize a
+  personal default, write preferences, or treat a bound Slack user id as a
   deliverable DM target.
 
 Deliverables:
@@ -654,7 +653,7 @@ If Slack authority exposes unexpected storage gaps, split PR C into:
 
 - PR C1: Slack shared-channel target authority. Active/current slice.
 - PR C2: Slack personal DM target authority. Required follow-up because current
-  pairing persists identity only and does not persist a concrete Slack DM
+  OAuth setup persists identity only and does not persist a concrete Slack DM
   conversation target.
 
 ## Implementation Plan
@@ -709,10 +708,10 @@ Implement Slack target authority in two paths:
   - Slack installation/team/channel metadata matches
   - route is still postable
 - Personal DM:
-  - user is paired
+  - user has a Slack OAuth identity binding
   - DM target authority already exists as a durable concrete target before it
     is listed or saved as a default
-  - explicit post-pairing opt-in can provision the DM target by calling Slack
+  - explicit post-OAuth opt-in can provision the DM target by calling Slack
     `conversations.open(users = slack_user_id)` and storing the returned
     `D...` conversation id as provider authority
   - any DM target provisioning flow is explicit, idempotent across processes,
@@ -720,7 +719,7 @@ Implement Slack target authority in two paths:
     constraint or equivalent insert-if-absent operation
   - target belongs to the same tenant/user
 
-Do not write defaults at pairing-code redemption time. Do not run provider
+Do not write defaults from the OAuth callback. Do not run provider
 network calls while holding preference CAS locks; resolve or provision durable
 target authority first, then write the preference with the scoped compare
 token. If that preference write conflicts during DM provisioning, re-read the
@@ -756,7 +755,7 @@ Add a standalone Delivery panel under Automations:
 - load scoped preferences and targets with React Query
 - show the current default target for the active agent/run ownership scope
 - allow authorized selection or clearing
-- after Slack pairing succeeds, offer a one-click choice to make the paired
+- after Slack OAuth setup succeeds, offer a one-click choice to make the bound
   Slack DM the personal default for triggered automation delivery
 - show the paired Slack DM as a selectable personal target once durable DM
   authority exists
@@ -854,11 +853,11 @@ load preferences or construct validated targets.
 
 - shared Slack channel routes list as shared-agent targets only for authorized
   scopes
-- personal Slack DM target lists only after user pairing/DM authority exists
-- successful Slack pairing can offer, but does not automatically apply, a
+- personal Slack DM target lists only after user OAuth/DM authority exists
+- successful Slack OAuth setup can offer, but does not automatically apply, a
   follow-up action to make Slack DM the personal default for triggered
   automation delivery
-- accepting the post-pairing default prompt provisions or validates the DM
+- accepting the post-OAuth default prompt provisions or validates the DM
   target and saves only the provider-issued `target_id`
 - personal Slack DM target provisioning is explicit, idempotent, durable, and
   does not run inside preference CAS locks
@@ -871,7 +870,7 @@ load preferences or construct validated targets.
 - raw client-supplied Slack team/channel/DM ids cannot become saved defaults
 - generic Slack selections and implicit last-conversation defaults cannot become
   saved defaults
-- pairing-code redemption never writes default targets
+- Slack OAuth callback never writes default targets
 - Slack final reply delivery still sends `chat.postMessage`
 - progress/projection payloads remain deferred
 

@@ -15,7 +15,7 @@ use ironclaw_host_runtime::{
     SKILL_REMOVE_CAPABILITY_ID, TIME_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID,
     TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, HostManagedModelMessageRole, HostManagedModelResponse,
 };
 use ironclaw_turns::TurnStatus;
@@ -1019,9 +1019,7 @@ where
     }
 }
 
-fn model_request_shape_summary(
-    requests: &[ironclaw_loop_support::HostManagedModelRequest],
-) -> String {
+fn model_request_shape_summary(requests: &[ironclaw_loop_host::HostManagedModelRequest]) -> String {
     if requests.is_empty() {
         return "none".to_string();
     }
@@ -1062,7 +1060,7 @@ fn capability_order(
         .collect()
 }
 
-fn tool_result_count(request: &ironclaw_loop_support::HostManagedModelRequest) -> usize {
+fn tool_result_count(request: &ironclaw_loop_host::HostManagedModelRequest) -> usize {
     request
         .messages
         .iter()

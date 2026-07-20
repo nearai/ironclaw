@@ -6,7 +6,7 @@ mod parity_qa_support;
 mod reborn_support;
 mod support;
 
-use ironclaw_loop_support::HostManagedModelResponse;
+use ironclaw_loop_host::HostManagedModelResponse;
 use ironclaw_threads::{MessageKind, MessageStatus, ThreadMessageRecord};
 use ironclaw_turns::TurnStatus;
 use parity_qa_support::binary_e2e::{RebornBinaryE2EHarness, RebornHarnessSharedStorage};

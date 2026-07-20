@@ -361,6 +361,17 @@ impl RootFilesystem for CompositeRootFilesystem {
         self.matching_mount(path)?.backend.delete(path).await
     }
 
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        self.matching_mount(path)?
+            .backend
+            .delete_if_version(path, expected_version)
+            .await
+    }
+
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         self.matching_mount(path)?
             .backend

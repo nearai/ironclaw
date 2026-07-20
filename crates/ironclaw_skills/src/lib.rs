@@ -38,6 +38,7 @@
 
 pub mod gating;
 pub mod install_metadata;
+pub mod learning;
 pub mod management;
 mod parser;
 mod selector;

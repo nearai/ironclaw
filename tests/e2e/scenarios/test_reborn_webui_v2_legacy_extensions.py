@@ -6,7 +6,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from playwright.async_api import expect
 
-from helpers import REBORN_V2_AUTH_TOKEN
+from helpers import REBORN_V2_AUTH_TOKEN, SEL_V2
 from reborn_webui_harness import (
     reborn_v2_browser,  # noqa: F401 - imported fixture
     reborn_v2_server,  # noqa: F401 - imported fixture
@@ -164,6 +164,7 @@ async def _open_mocked_extensions_page(
     oauth_start_responses=None,
     activate_responses=None,
     remove_responses=None,
+    defer_extension_list=False,
 ):
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
@@ -183,6 +184,9 @@ async def _open_mocked_extensions_page(
     oauth_start_requests: list[dict] = []
     extension_list_requests: list[str] = []
     registry_requests: list[str] = []
+    extension_list_gate = asyncio.Event()
+    if not defer_extension_list:
+        extension_list_gate.set()
 
     async def fulfill_json(route, payload, status=200):
         await route.fulfill(
@@ -199,6 +203,7 @@ async def _open_mocked_extensions_page(
 
         if path == "/api/webchat/v2/extensions" and request.method == "GET":
             extension_list_requests.append(request.url)
+            await extension_list_gate.wait()
             await fulfill_json(route, {"extensions": installed_extensions})
             return
 
@@ -390,7 +395,7 @@ async def _open_mocked_extensions_page(
 
     await page.route("**/api/webchat/v2/extensions**", handle_extensions)
     await page.route("**/api/webchat/v2/channels/connectable", handle_connectable_channels)
-    await page.goto(f"{reborn_v2_server}/v2/extensions/{tab}?token={REBORN_V2_AUTH_TOKEN}")
+    await page.goto(f"{reborn_v2_server}/extensions/{tab}?token={REBORN_V2_AUTH_TOKEN}")
     await expect(page.get_by_text("Registry").first).to_be_visible(timeout=15000)
 
     return {
@@ -403,6 +408,7 @@ async def _open_mocked_extensions_page(
         "oauth_start_requests": oauth_start_requests,
         "extension_list_requests": extension_list_requests,
         "registry_requests": registry_requests,
+        "extension_list_gate": extension_list_gate,
     }
 
 
@@ -439,26 +445,32 @@ async def _open_card_menu(card):
     return card.get_by_role("menu")
 
 
-async def _capture_next_confirm(page, *, accept: bool):
-    loop = asyncio.get_running_loop()
-    dialog_future = loop.create_future()
+async def _resolve_remove_confirm(page, *, accept: bool, name: str):
+    """Drive the shared React confirmation modal that replaced the native
+    ``window.confirm`` for destructive extension actions (#6084).
 
-    def handle_dialog(dialog):
-        if not dialog_future.done():
-            dialog_future.set_result({"type": dialog.type, "message": dialog.message})
-        loop.create_task(dialog.accept() if accept else dialog.dismiss())
+    Call this *after* clicking the "Remove" menu item — the modal opens on the
+    click. Asserts the modal names the extension, then confirms or cancels.
+    """
+    confirm_dialog = page.get_by_role("dialog")
+    await expect(confirm_dialog).to_be_visible(timeout=5000)
+    await expect(confirm_dialog).to_contain_text(name)
+    testid = "confirm-dialog-confirm" if accept else "confirm-dialog-cancel"
+    await confirm_dialog.get_by_test_id(testid).click()
+    await expect(confirm_dialog).to_have_count(0)
 
-    page.once("dialog", handle_dialog)
-    return dialog_future
 
-
-async def _wait_for_request_count(requests: list, count: int, *, timeout: float = 5.0):
+async def _wait_for_request_count(
+    requests: list, minimum_count: int, *, timeout: float = 5.0
+):
     deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:
-        if len(requests) > count:
+        if len(requests) >= minimum_count:
             return
         await asyncio.sleep(0.05)
-    raise AssertionError(f"Timed out waiting for request count > {count}; got {len(requests)}")
+    raise AssertionError(
+        f"Timed out waiting for request count >= {minimum_count}; got {len(requests)}"
+    )
 
 
 async def test_reborn_legacy_extensions_registry_search_and_install(
@@ -497,6 +509,27 @@ async def test_reborn_legacy_extensions_registry_search_and_install(
         await harness["context"].close()
 
 
+async def test_reborn_v2_extension_registry_renders_while_installed_list_is_pending(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_extensions_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        registry=[REGISTRY_TOOL],
+        defer_extension_list=True,
+    )
+    try:
+        await _wait_for_request_count(harness["extension_list_requests"], 1)
+        assert harness["extension_list_requests"], "installed list request must be pending"
+        assert not harness["extension_list_gate"].is_set()
+        await harness["page"].locator(
+            SEL_V2["extension_card_for"].format(id="registry-tool")
+        ).wait_for(state="visible", timeout=3000)
+    finally:
+        harness["extension_list_gate"].set()
+        await harness["context"].close()
+
+
 async def test_reborn_legacy_extensions_page_refetches_on_revisit(
     reborn_v2_server, reborn_v2_browser
 ):
@@ -515,7 +548,7 @@ async def test_reborn_legacy_extensions_page_refetches_on_revisit(
 
         await page.get_by_role("link", name="Settings").first.click()
         await page.wait_for_function(
-            "() => location.pathname.startsWith('/v2/settings')",
+            "() => location.pathname.startsWith('/settings')",
             timeout=5000,
         )
 
@@ -524,14 +557,232 @@ async def test_reborn_legacy_extensions_page_refetches_on_revisit(
 
         await _wait_for_request_count(
             harness["extension_list_requests"],
-            first_extension_fetches,
+            first_extension_fetches + 1,
         )
         await _wait_for_request_count(
             harness["registry_requests"],
-            first_registry_fetches,
+            first_registry_fetches + 1,
         )
     finally:
         await harness["context"].close()
+
+
+async def test_reborn_legacy_extensions_catalog_failure_shows_retry(
+    reborn_v2_server, reborn_v2_browser
+):
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+    registry_available = False
+    registry_requests = 0
+
+    async def fulfill_json(route, payload, status=200):
+        await route.fulfill(
+            status=status,
+            content_type="application/json",
+            body=json.dumps(payload),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    async def handle_extensions(route):
+        nonlocal registry_requests
+        path = urlparse(route.request.url).path
+        if path == "/api/webchat/v2/extensions" and route.request.method == "GET":
+            await fulfill_json(route, {"extensions": [CHANNEL_READY]})
+            return
+        if path == "/api/webchat/v2/extensions/registry" and route.request.method == "GET":
+            registry_requests += 1
+            if registry_available:
+                await fulfill_json(route, {"entries": [REGISTRY_TOOL]})
+            else:
+                await fulfill_json(
+                    route,
+                    {"error": "service_unavailable", "kind": "service_unavailable"},
+                    status=503,
+                )
+            return
+        await route.continue_()
+
+    async def handle_connectable_channels(route):
+        await fulfill_json(route, {"channels": []})
+
+    await page.route("**/api/webchat/v2/extensions**", handle_extensions)
+    await page.route("**/api/webchat/v2/channels/connectable", handle_connectable_channels)
+
+    try:
+        await page.goto(
+            f"{reborn_v2_server}/extensions/registry?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        error_banner = page.get_by_role("alert")
+        await expect(error_banner).to_contain_text(
+            "Extension catalog unavailable", timeout=15000
+        )
+        await expect(page.get_by_text("Registry is empty")).to_have_count(0)
+        assert registry_requests >= 1
+
+        await page.goto(
+            f"{reborn_v2_server}/extensions/channels?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        await expect(page.get_by_text("Telegram Channel", exact=True)).to_be_visible(
+            timeout=5000
+        )
+        await expect(error_banner).to_contain_text("Extension catalog unavailable")
+
+        failed_request_count = registry_requests
+        registry_available = True
+        await error_banner.get_by_role("button", name="Retry").click()
+
+        await expect(error_banner).to_have_count(0)
+        await expect(page.get_by_text("Telegram Channel", exact=True)).to_be_visible()
+        await page.goto(
+            f"{reborn_v2_server}/extensions/registry?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        await expect(page.get_by_text("Registry Tool", exact=True)).to_be_visible(
+            timeout=5000
+        )
+        assert registry_requests > failed_request_count
+    finally:
+        await context.close()
+
+
+async def test_reborn_legacy_extensions_enrichment_failure_preserves_registry(
+    reborn_v2_server, reborn_v2_browser
+):
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+    extensions_available = False
+    extension_requests = 0
+
+    async def fulfill_json(route, payload, status=200):
+        await route.fulfill(
+            status=status,
+            content_type="application/json",
+            body=json.dumps(payload),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    async def handle_extensions(route):
+        nonlocal extension_requests
+        path = urlparse(route.request.url).path
+        if path == "/api/webchat/v2/extensions" and route.request.method == "GET":
+            extension_requests += 1
+            if extensions_available:
+                await fulfill_json(route, {"extensions": []})
+            else:
+                await fulfill_json(
+                    route,
+                    {"error": "service_unavailable", "kind": "service_unavailable"},
+                    status=503,
+                )
+            return
+        if path == "/api/webchat/v2/extensions/registry" and route.request.method == "GET":
+            await fulfill_json(route, {"entries": [REGISTRY_TOOL]})
+            return
+        await route.continue_()
+
+    await page.route("**/api/webchat/v2/extensions**", handle_extensions)
+
+    try:
+        await page.goto(
+            f"{reborn_v2_server}/extensions/registry?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        warning_banner = page.get_by_role("alert")
+        await expect(page.get_by_text("Registry Tool", exact=True)).to_be_visible(
+            timeout=15000
+        )
+        await expect(warning_banner).to_contain_text(
+            "Some extension data is unavailable"
+        )
+        await expect(warning_banner).not_to_contain_text("Extension catalog unavailable")
+        assert extension_requests >= 1
+
+        failed_request_count = extension_requests
+        extensions_available = True
+        await warning_banner.get_by_role("button", name="Retry").click()
+
+        await expect(warning_banner).to_have_count(0)
+        await expect(page.get_by_text("Registry Tool", exact=True)).to_be_visible()
+        assert extension_requests > failed_request_count
+    finally:
+        await context.close()
+
+
+async def test_reborn_legacy_extensions_offline_attempts_catalog_requests(
+    reborn_v2_server, reborn_v2_browser
+):
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+    catalog_requests: list[str] = []
+
+    async def handle_llm_providers(route):
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "providers": [
+                        {
+                            "id": "openai",
+                            "description": "OpenAI API",
+                            "adapter": "open_ai_completions",
+                            "base_url": "https://api.openai.test/v1",
+                            "default_model": "mock-model",
+                            "builtin": True,
+                            "api_key_set": True,
+                            "api_key_required": True,
+                            "base_url_required": False,
+                            "accepts_api_key": True,
+                        }
+                    ],
+                    "active": {"provider_id": "openai", "model": "mock-model"},
+                }
+            ),
+        )
+
+    def record_catalog_request(request):
+        path = urlparse(request.url).path
+        if path in {
+            "/api/webchat/v2/extensions",
+            "/api/webchat/v2/extensions/registry",
+        }:
+            catalog_requests.append(path)
+
+    page.on("request", record_catalog_request)
+    await page.route(
+        "**/api/webchat/v2/llm/providers",
+        handle_llm_providers,
+    )
+
+    try:
+        async with page.expect_response("**/api/webchat/v2/llm/providers"):
+            await page.goto(
+                f"{reborn_v2_server}/settings?token={REBORN_V2_AUTH_TOKEN}"
+            )
+        await expect(
+            page.locator(
+                SEL_V2["llm_provider_card_for"].format(provider_id="openai")
+            )
+        ).to_be_visible(timeout=15000)
+        await expect(page.get_by_role("link", name="Extensions").first).to_be_visible(
+            timeout=15000
+        )
+
+        await context.set_offline(True)
+        await page.get_by_role("link", name="Extensions").first.click()
+
+        error_banner = page.get_by_role("alert")
+        await expect(error_banner).to_contain_text(
+            "Extension catalog unavailable", timeout=15000
+        )
+        assert "/api/webchat/v2/extensions" in catalog_requests
+        assert "/api/webchat/v2/extensions/registry" in catalog_requests
+        await expect(page.get_by_text("Registry is empty")).to_have_count(0)
+
+        await context.set_offline(False)
+        await error_banner.get_by_role("button", name="Retry").click()
+        await expect(error_banner).to_have_count(0, timeout=10000)
+    finally:
+        await context.set_offline(False)
+        await context.close()
 
 
 async def test_reborn_legacy_extensions_registry_search_no_match(
@@ -724,7 +975,7 @@ async def test_reborn_legacy_extensions_install_auth_url_requires_https(
         await expect(card).to_be_visible(timeout=5000)
         await card.get_by_role("button", name="Install").click()
 
-        await expect(page.get_by_text("Authentication URL must use HTTPS.")).to_be_visible(
+        await expect(page.get_by_text("Authorization URL must use HTTPS.")).to_be_visible(
             timeout=5000
         )
         assert await page.evaluate("() => window.__openedUrls") == []
@@ -735,7 +986,7 @@ async def test_reborn_legacy_extensions_install_auth_url_requires_https(
         await harness["context"].close()
 
 
-async def test_reborn_legacy_install_setup_required_channel_opens_configure_modal(
+async def test_reborn_legacy_install_setup_required_channel_opens_setup_modal(
     reborn_v2_server, reborn_v2_browser
 ):
     setup_channel = {
@@ -785,9 +1036,14 @@ async def test_reborn_legacy_install_setup_required_channel_opens_configure_moda
         await expect(
             page.get_by_role("heading", name="Configure Slack Channel")
         ).to_be_visible(timeout=5000)
-        await expect(page.get_by_text("Enter the Slack channel token.")).to_be_visible()
-        await expect(page.get_by_text("Slack bot token")).to_be_visible()
-        await expect(page.locator('input[type="password"]')).to_have_count(1)
+        modal = page.get_by_label("Configure Slack Channel")
+        await expect(modal.get_by_text("Enter the Slack channel token.")).to_be_visible()
+        await expect(modal.get_by_text("Slack bot token")).to_be_visible()
+        await expect(modal.locator('input[type="password"]')).to_be_visible()
+        await expect(modal.get_by_text("Save to continue pairing.")).to_be_visible()
+        await expect(modal.get_by_role("button", name="Save")).to_be_visible()
+        await expect(page.get_by_text("Enter the code from the channel")).to_have_count(0)
+        await expect(page.get_by_label("Enter pairing code…")).to_have_count(0)
         assert harness["setup_submit_requests"] == []
     finally:
         await harness["context"].close()
@@ -818,11 +1074,8 @@ async def test_reborn_legacy_extensions_installed_actions(
         assert harness["activate_requests"] == ["inactive-mcp"]
 
         await active_card.get_by_label("More actions").click()
-        dialog_future = await _capture_next_confirm(page, accept=True)
         await page.get_by_role("menuitem", name="Remove").click()
-        dialog = await asyncio.wait_for(dialog_future, timeout=5)
-        assert dialog["type"] == "confirm"
-        assert "Active Tool" in dialog["message"]
+        await _resolve_remove_confirm(page, accept=True, name="Active Tool")
         await expect(page.get_by_text("Active Tool removed")).to_be_visible(timeout=5000)
         assert harness["remove_requests"] == ["active-tool"]
     finally:
@@ -871,11 +1124,8 @@ async def test_reborn_legacy_extensions_remove_cancel_keeps_card(
         await expect(active_card).to_be_visible(timeout=5000)
 
         await active_card.get_by_label("More actions").click()
-        dialog_future = await _capture_next_confirm(page, accept=False)
         await page.get_by_role("menuitem", name="Remove").click()
-        dialog = await asyncio.wait_for(dialog_future, timeout=5)
-        assert dialog["type"] == "confirm"
-        assert "Active Tool" in dialog["message"]
+        await _resolve_remove_confirm(page, accept=False, name="Active Tool")
 
         await expect(active_card).to_be_visible(timeout=5000)
         assert harness["remove_requests"] == []
@@ -906,11 +1156,8 @@ async def test_reborn_legacy_extensions_remove_failure_keeps_card(
         await expect(active_card.get_by_text("active", exact=True)).to_be_visible()
 
         await active_card.get_by_label("More actions").click()
-        dialog_future = await _capture_next_confirm(page, accept=True)
         await page.get_by_role("menuitem", name="Remove").click()
-        dialog = await asyncio.wait_for(dialog_future, timeout=5)
-        assert dialog["type"] == "confirm"
-        assert "Active Tool" in dialog["message"]
+        await _resolve_remove_confirm(page, accept=True, name="Active Tool")
 
         await expect(
             page.get_by_text("Active Tool is still handling an active run.")
@@ -950,11 +1197,8 @@ async def test_reborn_legacy_extensions_remove_clears_installed_state(
         await expect(page.get_by_text("Installed", exact=True)).to_be_visible()
 
         await active_card.get_by_label("More actions").click()
-        dialog_future = await _capture_next_confirm(page, accept=True)
         await page.get_by_role("menuitem", name="Remove").click()
-        dialog = await asyncio.wait_for(dialog_future, timeout=5)
-        assert dialog["type"] == "confirm"
-        assert "Active Tool" in dialog["message"]
+        await _resolve_remove_confirm(page, accept=True, name="Active Tool")
         await expect(page.get_by_text("Active Tool removed")).to_be_visible(timeout=5000)
         assert harness["remove_requests"] == ["active-tool"]
 
@@ -1000,16 +1244,13 @@ async def test_reborn_legacy_extensions_reinstall_after_remove_requires_setup_ag
             page.get_by_role("menuitem", name="Reconfigure", exact=True)
         ).to_have_count(1)
 
-        dialog_future = await _capture_next_confirm(page, accept=True)
         await page.get_by_role("menuitem", name="Remove").click()
-        dialog = await asyncio.wait_for(dialog_future, timeout=5)
-        assert dialog["type"] == "confirm"
-        assert "Config Tool" in dialog["message"]
+        await _resolve_remove_confirm(page, accept=True, name="Config Tool")
         await expect(page.get_by_text("Config Tool removed")).to_be_visible(timeout=5000)
         assert harness["remove_requests"] == ["config-tool"]
 
         await page.goto(
-            f"{reborn_v2_server}/v2/extensions/registry?token={REBORN_V2_AUTH_TOKEN}"
+            f"{reborn_v2_server}/extensions/registry?token={REBORN_V2_AUTH_TOKEN}"
         )
         available_card = _card_by_title(page, "Config Tool")
         await expect(available_card).to_be_visible(timeout=5000)
@@ -1142,7 +1383,7 @@ async def test_reborn_legacy_activate_auth_url_requires_https(
         await expect(card).to_be_visible(timeout=5000)
         await card.get_by_role("button", name="Activate").click()
 
-        await expect(page.get_by_text("Authentication URL must use HTTPS.")).to_be_visible(
+        await expect(page.get_by_text("Authorization URL must use HTTPS.")).to_be_visible(
             timeout=5000
         )
         assert await page.evaluate("() => window.__openedUrls") == []
@@ -1196,7 +1437,7 @@ async def test_reborn_legacy_activate_auth_url_accepts_uppercase_https(
         await harness["context"].close()
 
 
-async def test_reborn_legacy_channel_config_label_depends_on_authentication(
+async def test_reborn_legacy_channel_connect_label_depends_on_authentication(
     reborn_v2_server, reborn_v2_browser
 ):
     harness = await _open_mocked_extensions_page(
@@ -1225,10 +1466,10 @@ async def test_reborn_legacy_channel_config_label_depends_on_authentication(
         await expect(unauthenticated).to_be_visible(timeout=5000)
         await _open_card_menu(unauthenticated)
         await expect(
-            page.get_by_role("menuitem", name="Configure", exact=True)
+            page.get_by_role("menuitem", name="Connect", exact=True)
         ).to_have_count(1)
         await expect(
-            page.get_by_role("menuitem", name="Reconfigure", exact=True)
+            page.get_by_role("menuitem", name="Reconnect", exact=True)
         ).to_have_count(0)
 
         await page.mouse.click(8, 8)
@@ -1236,16 +1477,16 @@ async def test_reborn_legacy_channel_config_label_depends_on_authentication(
         await expect(authenticated).to_be_visible(timeout=5000)
         await _open_card_menu(authenticated)
         await expect(
-            page.get_by_role("menuitem", name="Reconfigure", exact=True)
+            page.get_by_role("menuitem", name="Reconnect", exact=True)
         ).to_have_count(1)
         await expect(
-            page.get_by_role("menuitem", name="Configure", exact=True)
+            page.get_by_role("menuitem", name="Connect", exact=True)
         ).to_have_count(0)
     finally:
         await harness["context"].close()
 
 
-async def test_reborn_legacy_channel_setup_required_has_single_configure_action(
+async def test_reborn_legacy_channel_setup_required_has_single_connect_action(
     reborn_v2_server, reborn_v2_browser
 ):
     harness = await _open_mocked_extensions_page(
@@ -1265,7 +1506,7 @@ async def test_reborn_legacy_channel_setup_required_has_single_configure_action(
         card = _card_by_title(page, "Label Channel")
         await expect(card).to_be_visible(timeout=5000)
 
-        await expect(card.get_by_role("button", name="Configure")).to_have_count(1)
+        await expect(card.get_by_role("button", name="Connect")).to_have_count(1)
         await _open_card_menu(card)
         await expect(page.get_by_role("menuitem", name="Setup", exact=True)).to_have_count(
             0
@@ -1273,11 +1514,12 @@ async def test_reborn_legacy_channel_setup_required_has_single_configure_action(
         await expect(
             page.get_by_role("menuitem", name="Configure", exact=True)
         ).to_have_count(0)
+        await expect(page.get_by_role("menuitem", name="Connect", exact=True)).to_have_count(0)
     finally:
         await harness["context"].close()
 
 
-async def test_reborn_legacy_channel_reconfigure_opens_modal_without_activate(
+async def test_reborn_legacy_channel_reconnect_opens_setup_modal_without_activate(
     reborn_v2_server, reborn_v2_browser
 ):
     harness = await _open_mocked_extensions_page(
@@ -1318,11 +1560,19 @@ async def test_reborn_legacy_channel_reconfigure_opens_modal_without_activate(
         await expect(card).to_be_visible(timeout=5000)
 
         await _open_card_menu(card)
-        await page.get_by_role("menuitem", name="Reconfigure", exact=True).click()
+        await page.get_by_role("menuitem", name="Reconnect", exact=True).click()
         await expect(page.get_by_role("heading", name="Configure Label Channel")).to_be_visible(
             timeout=5000
         )
-        await expect(page.get_by_text("Bot token")).to_be_visible()
+        modal = page.get_by_role("dialog", name="Configure Label Channel")
+        await expect(modal).to_contain_text("Bot token")
+        await expect(modal).to_contain_text("configured")
+        await expect(
+            modal.get_by_placeholder("••••••• (leave blank to keep)")
+        ).to_be_visible()
+        await expect(modal.get_by_text("Extension is active.")).to_be_visible()
+        await expect(page.get_by_text("Enter the code from the channel")).to_have_count(0)
+        await expect(page.get_by_label("Enter pairing code…")).to_have_count(0)
         assert harness["activate_requests"] == []
     finally:
         await harness["context"].close()
@@ -2043,61 +2293,39 @@ async def test_reborn_legacy_configure_modal_enter_key_submits(
         await harness["context"].close()
 
 
-async def test_reborn_legacy_telegram_token_configure_preserves_token_characters(
+async def test_reborn_legacy_telegram_configure_hosts_pairing_panel(
     reborn_v2_server, reborn_v2_browser
 ):
-    token = "123456789:ABCdef_GHI-jkl_mnop-QRSTuvwxyz"
+    # #6159 retired the per-user Telegram bot-token secret form. The telegram
+    # channel now configures through the WebGeneratedCode pairing panel, which
+    # ConfigureModal hosts directly (design spec §4.2/§5) — never a manual-token
+    # form. Regression: the modal previously rendered a "Telegram Bot Token"
+    # secret entry and submitted it through /setup.
     harness = await _open_mocked_extensions_page(
         reborn_v2_server,
         reborn_v2_browser,
         installed=[TELEGRAM_CHANNEL_SETUP],
-        setup_payloads={
-            "telegram": {
-                "name": "telegram",
-                "kind": "wasm_channel",
-                "secrets": [
-                    {
-                        "name": "telegram_bot_token",
-                        "prompt": "Telegram Bot Token",
-                        "provided": False,
-                        "optional": False,
-                        "auto_generate": False,
-                    }
-                ],
-                "fields": [],
-                "onboarding": None,
-            }
-        },
         tab="channels",
     )
     try:
         page = harness["page"]
+
         card = _card_by_title(page, "Telegram")
         await expect(card).to_be_visible(timeout=5000)
-        await card.get_by_role("button", name="Configure").click()
+        await card.get_by_role("button", name="Connect").click()
 
         await expect(
             page.get_by_role("heading", name="Configure Telegram")
         ).to_be_visible(timeout=5000)
-        await expect(page.get_by_text("Telegram Bot Token")).to_be_visible()
-        await page.locator('input[type="password"]').first.fill(token)
-        await page.get_by_role("button", name="Save").click()
+        modal = page.get_by_label("Configure Telegram")
 
-        await expect(
-            page.get_by_role("heading", name="Configure Telegram")
-        ).to_have_count(0)
-        assert harness["setup_submit_requests"] == [
-            {
-                "package_id": "telegram",
-                "body": {
-                    "action": "submit",
-                    "payload": {
-                        "secrets": {"telegram_bot_token": token},
-                        "fields": {},
-                    },
-                },
-            }
-        ]
+        # The modal hosts the pairing panel, not a bot-token secret form.
+        await expect(modal.get_by_test_id("telegram-pairing-panel")).to_be_visible(
+            timeout=5000
+        )
+        await expect(modal.get_by_text("Telegram Bot Token")).to_have_count(0)
+        await expect(modal.locator('input[type="password"]')).to_have_count(0)
+        assert harness["setup_submit_requests"] == []
     finally:
         await harness["context"].close()
 
@@ -2382,7 +2610,7 @@ async def test_reborn_legacy_extensions_channels_and_mcp_tabs_render(
         await expect(page.get_by_text("Telegram Channel")).to_be_visible()
         await expect(page.get_by_text("Slack Channel")).to_be_visible()
 
-        await page.goto(f"{reborn_v2_server}/v2/extensions/mcp?token={REBORN_V2_AUTH_TOKEN}")
+        await page.goto(f"{reborn_v2_server}/extensions/mcp?token={REBORN_V2_AUTH_TOKEN}")
         await expect(page.get_by_text("Inactive MCP", exact=True)).to_be_visible(timeout=5000)
         await expect(page.get_by_text("Registry MCP Server", exact=True)).to_be_visible()
     finally:

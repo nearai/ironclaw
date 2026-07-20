@@ -34,7 +34,7 @@ pub async fn materialize_trigger_prompt_for_test(
     ),
     ironclaw_triggers::TriggerError,
 > {
-    crate::trigger_poller_trusted_submit::materialize_trigger_prompt_for_test(
+    crate::automation::trigger_poller_trusted_submit::materialize_trigger_prompt_for_test(
         binding_service,
         thread_service,
         default_agent_id,

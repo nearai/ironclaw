@@ -9,6 +9,14 @@ pub(super) fn validate_runtime_request(
     request: &RuntimeHttpEgressRequest,
     leak_detector: &LeakDetector,
 ) -> Result<(), RuntimeHttpEgressError> {
+    // Outbound credentials must flow through the staged credential-injection
+    // path (`credential_injections`), never as raw runtime/model-supplied
+    // headers or `user:pass@` URLs — for ALL runtimes, including FirstParty.
+    // `builtin.http` is FirstParty but takes model-supplied headers, so
+    // exempting FirstParty here would let the model smuggle Authorization /
+    // Cookie / x-api-key headers to allowlisted hosts. Host-minted credentials
+    // (e.g. the Trace Commons bearer) are injected AFTER this guard via the
+    // stager + `apply_credential_injections`, so they are not present here.
     if let Some((_name, _)) = request
         .headers
         .iter()
@@ -206,6 +214,72 @@ pub(super) fn sanitize_runtime_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_host_api::{
+        CapabilityId, InvocationId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeKind,
+        UserId,
+    };
+
+    fn request_with_header(runtime: RuntimeKind, header: (&str, &str)) -> RuntimeHttpEgressRequest {
+        RuntimeHttpEgressRequest {
+            runtime,
+            scope: ResourceScope::local_default(UserId::new("user1").unwrap(), InvocationId::new())
+                .unwrap(),
+            capability_id: CapabilityId::new("builtin.http").unwrap(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![(header.0.to_string(), header.1.to_string())],
+            body: Vec::new(),
+            network_policy: NetworkPolicy {
+                allowed_targets: vec![],
+                deny_private_ip_ranges: true,
+                max_egress_bytes: Some(4096),
+            },
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        }
+    }
+
+    #[test]
+    fn validate_runtime_request_denies_sensitive_header_for_first_party_runtime() {
+        // Regression: FirstParty must NOT be exempt from the sensitive-header
+        // guard. `builtin.http` is FirstParty but takes model-supplied headers,
+        // so exempting it would let the model smuggle Authorization to an
+        // allowlisted host. Host-minted credentials flow through the staged
+        // credential-injection path instead, after this guard.
+        let detector = LeakDetector::new();
+        let request = request_with_header(
+            RuntimeKind::FirstParty,
+            ("authorization", "Bearer attacker"),
+        );
+
+        let error = validate_runtime_request(&request, &detector)
+            .expect_err("first-party sensitive header must be denied");
+
+        assert!(matches!(
+            error,
+            RuntimeHttpEgressError::Request { ref reason, .. }
+                if reason == "sensitive_header_denied"
+        ));
+    }
+
+    #[test]
+    fn validate_runtime_request_denies_manual_url_credentials_for_first_party_runtime() {
+        let detector = LeakDetector::new();
+        let mut request =
+            request_with_header(RuntimeKind::FirstParty, ("accept", "application/json"));
+        request.url = "https://user:pass@api.example.test/v1/run".to_string();
+
+        let error = validate_runtime_request(&request, &detector)
+            .expect_err("first-party manual url credentials must be denied");
+
+        assert!(matches!(
+            error,
+            RuntimeHttpEgressError::Request { ref reason, .. }
+                if reason == "manual_credentials_denied"
+        ));
+    }
 
     #[test]
     fn scan_decoded_url_for_leaks_allows_unparseable_encoded_url() {

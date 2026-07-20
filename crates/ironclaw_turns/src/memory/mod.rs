@@ -1,6 +1,7 @@
+// arch-exempt: large_file, in-memory turn state decomposition, plan #5662
 use async_trait::async_trait;
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     hash::Hash,
     sync::{
         Arc, Mutex, MutexGuard,
@@ -17,24 +18,25 @@ use crate::{
     AllowAllTurnAdmissionLimitProvider, BlockedReason, CancelRunRequest, CancelRunResponse,
     GateRef, GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, LoopCheckpointRecord,
     LoopCheckpointStore, LoopExitMapping, PutLoopCheckpointRequest, ReplyTargetBindingRef,
-    ResumeTurnRequest, ResumeTurnResponse, RunProfileResolutionError, RunProfileResolutionRequest,
-    RunProfileResolver, SanitizedFailure, SourceBindingRef, SpawnTreeReservation,
-    SpawnTreeReservationKey, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse,
-    ThreadBusy, TurnActiveLockKey, TurnActiveLockRecord, TurnActor, TurnAdmissionClass,
-    TurnAdmissionLimitProvider, TurnAdmissionPolicy, TurnAdmissionReservationRecord,
-    TurnCapacityResource, TurnCheckpointId, TurnCheckpointRecord, TurnError, TurnEventKind,
-    TurnIdempotencyErrorReplay, TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind,
-    TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLifecycleEvent, TurnLockVersion,
-    TurnPersistenceSnapshot, TurnRecord, TurnRunId, TurnRunProfile, TurnRunRecord, TurnRunState,
-    TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
+    ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse,
+    RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver, SanitizedFailure,
+    SourceBindingRef, SpawnTreeReservation, SpawnTreeReservationKey, SubmitChildRunRequest,
+    SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActiveLockKey, TurnActiveLockRecord,
+    TurnActor, TurnAdmissionClass, TurnAdmissionLimitProvider, TurnAdmissionPolicy,
+    TurnAdmissionReservationRecord, TurnCapacityResource, TurnCheckpointId, TurnCheckpointRecord,
+    TurnError, TurnEventKind, TurnIdempotencyErrorReplay, TurnIdempotencyOperationKind,
+    TurnIdempotencyOutcomeKind, TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLeaseToken,
+    TurnLifecycleEvent, TurnLockVersion, TurnPersistenceSnapshot, TurnRecord, TurnRunId,
+    TurnRunProfile, TurnRunRecord, TurnRunState, TurnScope, TurnSpawnTreeStateStore,
+    TurnStateStore, TurnStatus,
     admission::{TurnAdmissionBucket, admission_buckets},
     events::{EventCursor, TurnEventPage, TurnEventProjectionSource, project_turn_events},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
-        ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
-        RecoverExpiredLeasesResponse, RelinquishRunRequest, TurnRunTransitionPort,
-        TurnRunnerOutcome,
+        ClaimRunRequest, ClaimRunsRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest,
+        HeartbeatRequest, RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest,
+        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, RelinquishRunRequest,
+        TurnRunTransitionPort, TurnRunnerOutcome,
     },
 };
 
@@ -79,6 +81,18 @@ use run_status_cell::{RunStatusCell, StatusTransition};
 mod concurrency_limiter;
 use concurrency_limiter::{ConcurrencyLimiter, ConcurrencyLimits, OriginClass, RunSlotInfo};
 
+/// Resolve the secret-scrubbed, model-visible detail to attach to a lifecycle
+/// event. Only `Failed` events carry the failure record's detail; every other
+/// event kind has no failure cause and yields `None`.
+fn failure_detail_for_event(
+    kind: &TurnEventKind,
+    failure: Option<&SanitizedFailure>,
+) -> Option<String> {
+    (*kind == TurnEventKind::Failed)
+        .then(|| failure.and_then(|failure| failure.detail().map(str::to_string)))
+        .flatten()
+}
+
 fn holds_running_slot(status: TurnStatus) -> bool {
     matches!(status, TurnStatus::Running | TurnStatus::CancelRequested)
 }
@@ -93,6 +107,18 @@ const MAX_IDEMPOTENCY_RECORDS: usize = 10_000;
 /// a hung provider surfaces as a retryable error before the lease reclaims the
 /// runner mid-flight.
 pub(crate) const DEFAULT_RUNNER_LEASE_TTL_SECONDS: i64 = 90;
+
+/// Default crash-retry bound for lease recovery of a checkpointless run (#6284).
+/// Small and consistent with the crate's other bounded-retry counters — a
+/// checkpointless run may be re-driven a handful of times across crashes before
+/// it is terminal-failed with `crash_retry_exhausted`.
+const DEFAULT_MAX_CRASH_RECOVERY_RECLAIMS: u32 = 5;
+
+/// Default backpressure bound for the row store's async write-behind window.
+/// Sized so a burst of non-critical churn (queued/running/cancel-requested
+/// transitions) can coalesce into batched journal appends without an unbounded
+/// backlog, while keeping the worst-case crash-loss window small.
+const DEFAULT_MAX_PENDING_WRITE_BEHIND_DELTAS: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InMemoryTurnStateStoreLimits {
@@ -115,6 +141,25 @@ pub struct InMemoryTurnStateStoreLimits {
     /// Max runs in `TurnStatus::Running` for `Inbound` or `WebUi` origin.
     /// `None` = unlimited. Runs without `product_context` are never counted.
     pub max_concurrent_conversation_runs: Option<std::num::NonZeroU32>,
+    /// Crash-retry bound for lease recovery of a checkpointless run (#6284).
+    ///
+    /// A run whose lease expires while `Running` with NO resumable loop
+    /// checkpoint crashed BEFORE its first checkpoint (before BeforeModel, before
+    /// any side effect) and is safe to re-drive: `recover_expired_leases`
+    /// re-queues it to a claimable state instead of stranding it terminal
+    /// `Failed`. `claim_count` (incremented on every claim) bounds that loop —
+    /// once it reaches this value the run is instead terminal-failed with the
+    /// genuine-invariant reason `crash_retry_exhausted` (never `lease_expired`),
+    /// so a run that keeps crashing pre-checkpoint cannot re-drive forever.
+    pub max_crash_recovery_reclaims: u32,
+    /// Backpressure bound for the row store's async write-behind mode
+    /// ([`crate::TurnStateDurabilityPolicy::WriteBehind`]). Non-critical
+    /// transitions return `Ok` immediately after enqueue without awaiting the
+    /// durable ack, so the enqueued-but-un-acked delta window is otherwise
+    /// unbounded. When the window reaches this cap, the next non-critical op
+    /// awaits the OLDEST pending ack before returning — bounding both memory and
+    /// the crash-loss window. Unused under `WriteThrough` (every op awaits).
+    pub max_pending_write_behind_deltas: usize,
 }
 
 impl Default for InMemoryTurnStateStoreLimits {
@@ -127,7 +172,83 @@ impl Default for InMemoryTurnStateStoreLimits {
             max_concurrent_runs_per_user: None,
             max_concurrent_trigger_runs: None,
             max_concurrent_conversation_runs: None,
+            max_crash_recovery_reclaims: DEFAULT_MAX_CRASH_RECOVERY_RECLAIMS,
+            max_pending_write_behind_deltas: DEFAULT_MAX_PENDING_WRITE_BEHIND_DELTAS,
         }
+    }
+}
+
+impl InMemoryTurnStateStoreLimits {
+    pub fn set_max_events(mut self, max_events: usize) -> Self {
+        self.max_events = max_events;
+        self
+    }
+
+    pub fn set_max_terminal_records(mut self, max_terminal_records: usize) -> Self {
+        self.max_terminal_records = max_terminal_records;
+        self
+    }
+
+    pub fn set_max_idempotency_records(mut self, max_idempotency_records: usize) -> Self {
+        self.max_idempotency_records = max_idempotency_records;
+        self
+    }
+
+    pub fn set_runner_lease_ttl(mut self, runner_lease_ttl: ChronoDuration) -> Self {
+        self.runner_lease_ttl = runner_lease_ttl;
+        self
+    }
+
+    pub fn set_max_concurrent_runs_per_user(
+        mut self,
+        max_concurrent_runs_per_user: std::num::NonZeroU32,
+    ) -> Self {
+        self.max_concurrent_runs_per_user = Some(max_concurrent_runs_per_user);
+        self
+    }
+
+    pub fn clear_max_concurrent_runs_per_user(mut self) -> Self {
+        self.max_concurrent_runs_per_user = None;
+        self
+    }
+
+    pub fn set_max_concurrent_trigger_runs(
+        mut self,
+        max_concurrent_trigger_runs: std::num::NonZeroU32,
+    ) -> Self {
+        self.max_concurrent_trigger_runs = Some(max_concurrent_trigger_runs);
+        self
+    }
+
+    pub fn clear_max_concurrent_trigger_runs(mut self) -> Self {
+        self.max_concurrent_trigger_runs = None;
+        self
+    }
+
+    pub fn set_max_concurrent_conversation_runs(
+        mut self,
+        max_concurrent_conversation_runs: std::num::NonZeroU32,
+    ) -> Self {
+        self.max_concurrent_conversation_runs = Some(max_concurrent_conversation_runs);
+        self
+    }
+
+    pub fn clear_max_concurrent_conversation_runs(mut self) -> Self {
+        self.max_concurrent_conversation_runs = None;
+        self
+    }
+
+    pub fn set_max_crash_recovery_reclaims(mut self, max_crash_recovery_reclaims: u32) -> Self {
+        self.max_crash_recovery_reclaims = max_crash_recovery_reclaims;
+        self
+    }
+
+    pub fn set_max_pending_write_behind_deltas(
+        mut self,
+        max_pending_write_behind_deltas: usize,
+    ) -> Self {
+        self.max_pending_write_behind_deltas = max_pending_write_behind_deltas;
+        self
     }
 }
 
@@ -172,6 +293,16 @@ impl Default for InMemoryTurnStateStore {
     }
 }
 
+/// In-memory value for `Inner::tree_reservations`. `released_children` is
+/// the durable dedup record `release_tree_descendants`'s `idempotency_key`
+/// checks before decrementing `count` — see `SpawnTreeReservation`'s
+/// doc-comment (store.rs) for the full rationale.
+#[derive(Debug, Clone, Default)]
+struct TreeReservationState {
+    count: u64,
+    released_children: BTreeSet<TurnRunId>,
+}
+
 #[derive(Default)]
 struct Inner {
     cursor: u64,
@@ -185,16 +316,18 @@ struct Inner {
     submit_idempotency: HashMap<SubmitIdempotencyKey, Result<SubmitTurnResponse, TurnError>>,
     submit_idempotency_in_flight: HashSet<SubmitIdempotencyKey>,
     resume_idempotency: HashMap<RunIdempotencyKey, Result<ResumeTurnResponse, TurnError>>,
+    retry_idempotency: HashMap<RunIdempotencyKey, Result<RetryTurnResponse, TurnError>>,
     cancel_idempotency: HashMap<RunIdempotencyKey, Result<CancelRunResponse, TurnError>>,
     idempotency_records: HashMap<PersistedIdempotencyKey, TurnIdempotencyRecord>,
     submit_idempotency_order: VecDeque<SubmitIdempotencyKey>,
     resume_idempotency_order: VecDeque<RunIdempotencyKey>,
+    retry_idempotency_order: VecDeque<RunIdempotencyKey>,
     cancel_idempotency_order: VecDeque<RunIdempotencyKey>,
     idempotency_record_order: VecDeque<PersistedIdempotencyKey>,
     events: Vec<TurnLifecycleEvent>,
     event_retention_floor: EventCursor,
     admission_reservations: HashMap<TurnRunId, TurnAdmissionReservationRecord>,
-    tree_reservations: HashMap<SpawnTreeReservationKey, u64>,
+    tree_reservations: HashMap<SpawnTreeReservationKey, TreeReservationState>,
     limits: InMemoryTurnStateStoreLimits,
     concurrency: ConcurrencyLimiter,
 }
@@ -220,6 +353,7 @@ struct RunRecord {
     status: RunStatusCell,
     profile: TurnRunProfile,
     resolved_model_route: Option<crate::run_profile::LoopModelRouteSnapshot>,
+    model_usage: Option<crate::run_profile::LoopModelUsage>,
     accepted_message_ref: AcceptedMessageRef,
     source_binding_ref: SourceBindingRef,
     reply_target_binding_ref: ReplyTargetBindingRef,
@@ -427,6 +561,144 @@ impl InMemoryTurnStateStore {
         match self.inner.lock() {
             Ok(inner) => inner.events.clone(),
             Err(poisoned) => poisoned.into_inner().events.clone(),
+        }
+    }
+
+    pub(crate) fn events_after(&self, cursor: EventCursor) -> Vec<TurnLifecycleEvent> {
+        match self.inner.lock() {
+            Ok(inner) => inner
+                .events
+                .iter()
+                .filter(|event| event.cursor > cursor)
+                .cloned()
+                .collect(),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .events
+                .iter()
+                .filter(|event| event.cursor > cursor)
+                .cloned()
+                .collect(),
+        }
+    }
+
+    pub(crate) fn event_retention_floor(&self) -> EventCursor {
+        match self.inner.lock() {
+            Ok(inner) => inner.event_retention_floor,
+            Err(poisoned) => poisoned.into_inner().event_retention_floor,
+        }
+    }
+
+    pub(crate) fn turn_record(&self, turn_id: crate::TurnId) -> Option<TurnRecord> {
+        match self.inner.lock() {
+            Ok(inner) => inner.turns.get(&turn_id).cloned(),
+            Err(poisoned) => poisoned.into_inner().turns.get(&turn_id).cloned(),
+        }
+    }
+
+    pub(crate) fn run_record(&self, run_id: TurnRunId) -> Option<TurnRunRecord> {
+        match self.inner.lock() {
+            Ok(inner) => inner
+                .records
+                .get(&run_id)
+                .map(RunRecord::persistence_record),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .records
+                .get(&run_id)
+                .map(RunRecord::persistence_record),
+        }
+    }
+
+    pub(crate) fn overlay_runner_lease_record(
+        &self,
+        overlaid: TurnRunRecord,
+    ) -> Result<(), TurnError> {
+        let mut inner = self.lock_inner()?;
+        let Some(record) = inner.records.get_mut(&overlaid.run_id) else {
+            return Err(TurnError::ScopeNotFound);
+        };
+        if !matches!(
+            record.status.get(),
+            TurnStatus::Running | TurnStatus::CancelRequested
+        ) || record.runner_id != overlaid.runner_id
+            || record.lease_token != overlaid.lease_token
+            || record.runner_id.is_none()
+            || record.lease_token.is_none()
+        {
+            return Ok(());
+        }
+        if let (Some(current), Some(incoming)) =
+            (record.last_heartbeat_at, overlaid.last_heartbeat_at)
+            && incoming < current
+        {
+            return Ok(());
+        }
+        record.last_heartbeat_at = overlaid.last_heartbeat_at;
+        record.lease_expires_at = overlaid.lease_expires_at;
+        Ok(())
+    }
+
+    pub(crate) fn active_lock_record(&self, scope: &TurnScope) -> Option<TurnActiveLockRecord> {
+        let key = TurnActiveLockKey::from(scope);
+        match self.inner.lock() {
+            Ok(inner) => inner.active_locks.get(&key).cloned(),
+            Err(poisoned) => poisoned.into_inner().active_locks.get(&key).cloned(),
+        }
+    }
+
+    pub(crate) fn admission_reservation(
+        &self,
+        run_id: TurnRunId,
+    ) -> Option<TurnAdmissionReservationRecord> {
+        match self.inner.lock() {
+            Ok(inner) => inner.admission_reservations.get(&run_id).cloned(),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .admission_reservations
+                .get(&run_id)
+                .cloned(),
+        }
+    }
+
+    pub(crate) fn checkpoint_record(
+        &self,
+        checkpoint_id: TurnCheckpointId,
+    ) -> Option<TurnCheckpointRecord> {
+        match self.inner.lock() {
+            Ok(inner) => inner
+                .checkpoints
+                .iter()
+                .find(|record| record.checkpoint_id == checkpoint_id)
+                .cloned(),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .checkpoints
+                .iter()
+                .find(|record| record.checkpoint_id == checkpoint_id)
+                .cloned(),
+        }
+    }
+
+    pub(crate) fn idempotency_records_for_run_operation(
+        &self,
+        run_id: TurnRunId,
+        operation: TurnIdempotencyOperationKind,
+    ) -> Vec<TurnIdempotencyRecord> {
+        match self.inner.lock() {
+            Ok(inner) => inner
+                .idempotency_records
+                .values()
+                .filter(|record| record.run_id == Some(run_id) && record.operation == operation)
+                .cloned()
+                .collect(),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .idempotency_records
+                .values()
+                .filter(|record| record.run_id == Some(run_id) && record.operation == operation)
+                .cloned()
+                .collect(),
         }
     }
 
@@ -958,7 +1230,11 @@ impl TurnStateStore for InMemoryTurnStateStore {
             run_id,
             status: RunStatusCell::new(TurnStatus::Queued),
             profile: profile.clone(),
-            resolved_model_route: None,
+            resolved_model_route: request
+                .requested_model
+                .as_deref()
+                .and_then(crate::run_profile::LoopModelRouteSnapshot::advisory),
+            model_usage: None,
             accepted_message_ref: request.accepted_message_ref.clone(),
             source_binding_ref: request.source_binding_ref.clone(),
             reply_target_binding_ref: request.reply_target_binding_ref.clone(),
@@ -994,7 +1270,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
         );
         inner.queued_runs.push_back(run_id);
         inner.records.insert(run_id, record.clone());
-        inner.push_event(&record, TurnEventKind::Submitted, None);
+        inner.push_event(&record, TurnEventKind::Submitted, None, None);
 
         let response = Ok(SubmitTurnResponse::Accepted {
             turn_id,
@@ -1043,6 +1319,21 @@ impl TurnStateStore for InMemoryTurnStateStore {
         if did_resume {
             self.persist_blocked_state().await;
         }
+        result
+    }
+
+    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
+        let mut inner = self.lock_inner()?;
+        let idempotency_key = RunIdempotencyKey {
+            scope: request.scope.clone(),
+            run_id: request.run_id,
+            key: request.idempotency_key.clone(),
+        };
+        if let Some(result) = inner.retry_idempotency.get(&idempotency_key) {
+            return result.clone();
+        }
+        let result = inner.retry_turn_once(&request, self.admission_limit_provider.as_ref());
+        inner.remember_retry_idempotency(idempotency_key, result.clone(), Utc::now());
         result
     }
 
@@ -1144,6 +1435,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
                 return response;
             }
             SubmitTurnRequest {
+                requested_model: None,
                 scope: request.child_scope.clone(),
                 actor: request.actor.clone(),
                 accepted_message_ref: request.accepted_message_ref.clone(),
@@ -1310,7 +1602,12 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
         }
 
         let reservation_key = SpawnTreeReservationKey::new(&request.child_scope, root_run_id);
-        let previous_tree_count = *inner.tree_reservations.get(&reservation_key).unwrap_or(&0);
+        let previous_state = inner
+            .tree_reservations
+            .get(&reservation_key)
+            .cloned()
+            .unwrap_or_default();
+        let previous_tree_count = previous_state.count;
         let next_tree_count = previous_tree_count.checked_add(1).ok_or_else(|| {
             TurnError::capacity_exceeded(
                 TurnCapacityResource::SpawnTreeDescendants,
@@ -1334,9 +1631,13 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
                 return response;
             }
         };
-        inner
-            .tree_reservations
-            .insert(reservation_key.clone(), next_tree_count);
+        inner.tree_reservations.insert(
+            reservation_key.clone(),
+            TreeReservationState {
+                count: next_tree_count,
+                released_children: previous_state.released_children.clone(),
+            },
+        );
 
         let admission_class = profile.admission_class.clone();
         if let Err(rejection) = inner.reserve_admission(
@@ -1351,7 +1652,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
             } else {
                 inner
                     .tree_reservations
-                    .insert(reservation_key, previous_tree_count);
+                    .insert(reservation_key, previous_state);
             }
             let response = Err(TurnError::AdmissionRejected(rejection));
             inner.remember_submit_idempotency(
@@ -1383,6 +1684,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
             status: RunStatusCell::new(TurnStatus::Queued),
             profile: profile.clone(),
             resolved_model_route: None,
+            model_usage: None,
             accepted_message_ref: request.accepted_message_ref.clone(),
             source_binding_ref: request.source_binding_ref.clone(),
             reply_target_binding_ref: request.reply_target_binding_ref.clone(),
@@ -1418,7 +1720,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
         );
         inner.queued_runs.push_back(run_id);
         inner.records.insert(run_id, record.clone());
-        inner.push_event(&record, TurnEventKind::Submitted, None);
+        inner.push_event(&record, TurnEventKind::Submitted, None, None);
 
         let response = Ok(SubmitTurnResponse::Accepted {
             turn_id,
@@ -1503,7 +1805,11 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
             });
         }
         let key = SpawnTreeReservationKey::new(scope, canonical_root_run_id);
-        let current = *inner.tree_reservations.get(&key).unwrap_or(&0);
+        let current = inner
+            .tree_reservations
+            .get(&key)
+            .map(|state| state.count)
+            .unwrap_or(0);
         let next = current.checked_add(u64::from(delta)).ok_or_else(|| {
             TurnError::capacity_exceeded(TurnCapacityResource::SpawnTreeDescendants, u64::from(cap))
         })?;
@@ -1513,11 +1819,23 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
                 u64::from(cap),
             ));
         }
-        inner.tree_reservations.insert(key, next);
+        let released_children = inner
+            .tree_reservations
+            .get(&key)
+            .map(|state| state.released_children.clone())
+            .unwrap_or_default();
+        inner.tree_reservations.insert(
+            key,
+            TreeReservationState {
+                count: next,
+                released_children: released_children.clone(),
+            },
+        );
         Ok(SpawnTreeReservation {
             scope: scope.clone(),
             root_run_id: canonical_root_run_id,
             descendant_count: next,
+            released_children,
         })
     }
 
@@ -1526,6 +1844,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
         scope: &TurnScope,
         root_run_id: TurnRunId,
         delta: u32,
+        idempotency_key: TurnRunId,
     ) -> Result<(), TurnError> {
         let mut inner = self.lock_inner()?;
         let Some(root) = inner.records.get(&root_run_id) else {
@@ -1542,18 +1861,28 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
         }
         let key = SpawnTreeReservationKey::new(scope, canonical_root_run_id);
         let mut released_reservation = false;
-        if let Some(count) = inner.tree_reservations.get_mut(&key) {
-            let previous = *count;
+        if let Some(state) = inner.tree_reservations.get_mut(&key) {
+            // §5.5 round-5/6 idempotency: a release already recorded for
+            // this child is a no-op, not a second decrement — this is what
+            // makes a retried release call (recovery re-driving an edge
+            // stuck at `Claimed`) safe to repeat unconditionally.
+            if !state.released_children.insert(idempotency_key) {
+                return Ok(());
+            }
+            let previous = state.count;
             if previous < u64::from(delta) {
                 // Reject over-release loudly so callers can diagnose
                 // double-release bugs instead of silently zeroing the
-                // reservation and uncapping the spawn tree.
+                // reservation and uncapping the spawn tree. Undo the just-
+                // inserted dedup marker so a legitimate retry after fixing
+                // the caller bug isn't permanently swallowed as a no-op.
+                state.released_children.remove(&idempotency_key);
                 return Err(TurnError::InvalidRequest {
                     reason: "release delta exceeds current reservation count".to_string(),
                 });
             }
-            *count = previous - u64::from(delta);
-            if *count == 0 {
+            state.count = previous - u64::from(delta);
+            if state.count == 0 {
                 inner.tree_reservations.remove(&key);
                 released_reservation = true;
             }
@@ -1575,6 +1904,30 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
         }
         Ok(())
     }
+
+    async fn prune_released_child(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        child_run_id: TurnRunId,
+    ) -> Result<(), TurnError> {
+        let mut inner = self.lock_inner()?;
+        let Some(root) = inner.records.get(&root_run_id) else {
+            // The reservation (and its tree) may already be fully released
+            // and gone — benign, matches `release_tree_descendants`'s own
+            // missing-root handling being the only hard error case there.
+            return Ok(());
+        };
+        if !same_scope_envelope(&root.scope, scope) {
+            return Err(TurnError::Unauthorized);
+        }
+        let canonical_root_run_id = root.spawn_tree_root_run_id.unwrap_or(root.run_id);
+        let key = SpawnTreeReservationKey::new(scope, canonical_root_run_id);
+        if let Some(state) = inner.tree_reservations.get_mut(&key) {
+            state.released_children.remove(&child_run_id);
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -1584,29 +1937,31 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
         request: ClaimRunRequest,
     ) -> Result<Option<ClaimedTurnRun>, TurnError> {
         let mut inner = self.lock_inner()?;
-        let Some(run_id) = inner.pop_matching_queued_run(request.scope_filter.as_ref()) else {
-            return Ok(None);
-        };
-        let mut record = inner.take_record(run_id)?;
-        let now = Utc::now();
-        let transition = record.status.set(TurnStatus::Running);
-        record.runner_id = Some(request.runner_id);
-        record.lease_token = Some(request.lease_token);
-        record.lease_expires_at = Some(inner.next_lease_expiry(now));
-        record.last_heartbeat_at = Some(now);
-        record.claim_count = record.claim_count.saturating_add(1);
-        record.event_cursor = inner.next_cursor();
-        inner.update_active_lock(&record, now);
-        inner.apply_status_transition(transition, &record);
-        let claimed = ClaimedTurnRun {
-            state: record.state(),
-            resolved_run_profile: record.profile.resolved.clone(),
-            runner_id: request.runner_id,
-            lease_token: request.lease_token,
-        };
-        inner.push_event(&record, TurnEventKind::RunnerClaimed, None);
-        inner.records.insert(run_id, record);
-        Ok(Some(claimed))
+        inner.claim_matching_queued_run(
+            request.runner_id,
+            request.lease_token,
+            request.scope_filter.as_ref(),
+        )
+    }
+
+    async fn claim_next_runs(
+        &self,
+        request: ClaimRunsRequest,
+    ) -> Result<Vec<ClaimedTurnRun>, TurnError> {
+        let mut inner = self.lock_inner()?;
+        let mut claimed_runs = Vec::new();
+        for _ in 0..request.max_runs {
+            let Some(claimed) = inner.claim_matching_queued_run(
+                request.runner_id,
+                TurnLeaseToken::new(),
+                request.scope_filter.as_ref(),
+            )?
+            else {
+                break;
+            };
+            claimed_runs.push(claimed);
+        }
+        Ok(claimed_runs)
     }
 
     async fn heartbeat(&self, request: HeartbeatRequest) -> Result<EventCursor, TurnError> {
@@ -1625,7 +1980,7 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
             record.lease_expires_at = Some(inner.next_lease_expiry(now));
             record.event_cursor = inner.next_cursor();
             inner.touch_active_lock(&record, now);
-            inner.push_event(&record, TurnEventKind::RunnerHeartbeat, None);
+            inner.push_event(&record, TurnEventKind::RunnerHeartbeat, None, None);
             Ok(record.event_cursor)
         })();
         inner.records.insert(record.run_id, record);
@@ -1638,6 +1993,16 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
     ) -> Result<RecoverExpiredLeasesResponse, TurnError> {
         let mut inner = self.lock_inner()?;
         Ok(inner.recover_expired_leases(request))
+    }
+
+    async fn latest_resumable_checkpoint(
+        &self,
+        scope: &TurnScope,
+        turn_id: crate::TurnId,
+        run_id: TurnRunId,
+    ) -> Result<Option<TurnCheckpointId>, TurnError> {
+        let inner = self.lock_inner()?;
+        Ok(inner.latest_resumable_loop_checkpoint(scope, turn_id, run_id))
     }
 
     async fn record_model_route_snapshot(
@@ -1708,7 +2073,7 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
                 );
                 inner.update_active_lock(&record, now);
                 let state = record.state();
-                inner.push_event(&record, TurnEventKind::Blocked, None);
+                inner.push_event(&record, TurnEventKind::Blocked, None, None);
                 Ok(state)
             })();
             inner.records.insert(record.run_id, record);
@@ -1821,6 +2186,7 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
                 request.runner_id,
                 request.lease_token,
                 request.mapping,
+                request.model_usage,
             )
         };
         // A validated loop exit can either park a run on a gate or terminate one
@@ -1854,6 +2220,10 @@ impl Inner {
         let mut records = HashMap::new();
         let mut queued_runs = VecDeque::new();
         let mut terminal_runs = VecDeque::new();
+        let mut active_locks = HashMap::new();
+        for lock in snapshot.active_locks {
+            active_locks.insert(lock.key.clone(), lock);
+        }
         for run in snapshot.runs {
             cursor = cursor.max(run.event_cursor.0);
             let actor = turns
@@ -1862,7 +2232,10 @@ impl Inner {
                 .ok_or_else(|| TurnError::Unavailable {
                     reason: "turn run references missing turn record".to_string(),
                 })?;
-            if run.status == TurnStatus::Queued {
+            let has_non_queued_active_lock = active_locks
+                .values()
+                .any(|lock| lock.run_id == run.run_id && lock.status != TurnStatus::Queued);
+            if run.status == TurnStatus::Queued && !has_non_queued_active_lock {
                 queued_runs.push_back(run.run_id);
             }
             if run.status.is_terminal() {
@@ -1878,6 +2251,7 @@ impl Inner {
                     status: RunStatusCell::new(run.status),
                     profile: run.profile,
                     resolved_model_route: run.resolved_model_route,
+                    model_usage: run.model_usage,
                     accepted_message_ref: run.accepted_message_ref,
                     source_binding_ref: run.source_binding_ref,
                     reply_target_binding_ref: run.reply_target_binding_ref,
@@ -1902,17 +2276,14 @@ impl Inner {
             );
         }
 
-        let mut active_locks = HashMap::new();
-        for lock in snapshot.active_locks {
-            active_locks.insert(lock.key.clone(), lock);
-        }
-
         let mut submit_idempotency = HashMap::new();
         let mut resume_idempotency = HashMap::new();
+        let mut retry_idempotency = HashMap::new();
         let mut cancel_idempotency = HashMap::new();
         let mut idempotency_records = HashMap::new();
         let mut submit_idempotency_order = VecDeque::new();
         let mut resume_idempotency_order = VecDeque::new();
+        let mut retry_idempotency_order = VecDeque::new();
         let mut cancel_idempotency_order = VecDeque::new();
         let mut idempotency_record_order = VecDeque::new();
         let mut ordered_idempotency_records = snapshot.idempotency_records;
@@ -1941,6 +2312,26 @@ impl Inner {
                         };
                         resume_idempotency_order.push_back(key.clone());
                         resume_idempotency.insert(key, replay);
+                    } else {
+                        debug_malformed_idempotency_record(&record);
+                    }
+                }
+                TurnIdempotencyOperationKind::Retry => {
+                    if let (Some(run_id), Some(replay)) = (record.run_id, record.replay_retry()) {
+                        let key = RunIdempotencyKey {
+                            scope: record.scope.clone(),
+                            run_id,
+                            key: record.key.clone(),
+                        };
+                        retry_idempotency_order.push_back(key.clone());
+                        retry_idempotency.insert(key, replay);
+                    } else if record.run_id.is_some()
+                        && matches!(record.replay, TurnIdempotencyReplay::RetryThreadBusy(_))
+                    {
+                        // Retry ThreadBusy records are retained in the durable snapshot for
+                        // auditability, but are intentionally not replayable.
+                    } else {
+                        debug_malformed_idempotency_record(&record);
                     }
                 }
                 TurnIdempotencyOperationKind::Cancel => {
@@ -1952,6 +2343,8 @@ impl Inner {
                         };
                         cancel_idempotency_order.push_back(key.clone());
                         cancel_idempotency.insert(key, replay);
+                    } else {
+                        debug_malformed_idempotency_record(&record);
                     }
                 }
             }
@@ -2005,7 +2398,10 @@ impl Inner {
         for reservation in snapshot.spawn_tree_reservations {
             tree_reservations.insert(
                 SpawnTreeReservationKey::new(&reservation.scope, reservation.root_run_id),
-                reservation.descendant_count,
+                TreeReservationState {
+                    count: reservation.descendant_count,
+                    released_children: reservation.released_children,
+                },
             );
         }
 
@@ -2034,10 +2430,12 @@ impl Inner {
             submit_idempotency,
             submit_idempotency_in_flight: HashSet::new(),
             resume_idempotency,
+            retry_idempotency,
             cancel_idempotency,
             idempotency_records,
             submit_idempotency_order,
             resume_idempotency_order,
+            retry_idempotency_order,
             cancel_idempotency_order,
             idempotency_record_order,
             events,
@@ -2064,6 +2462,7 @@ impl Inner {
         record: &RunRecord,
         kind: TurnEventKind,
         sanitized_reason: Option<String>,
+        detail: Option<String>,
     ) {
         let blocked_gate = if kind == TurnEventKind::Blocked {
             record.gate_ref.clone().and_then(|gate_ref| {
@@ -2079,6 +2478,7 @@ impl Inner {
         } else {
             None
         };
+        let retryable = (kind == TurnEventKind::Failed).then(|| record.checkpoint_id.is_some());
         self.events.push(TurnLifecycleEvent {
             cursor: record.event_cursor,
             scope: record.scope.clone(),
@@ -2092,6 +2492,8 @@ impl Inner {
             kind,
             blocked_gate,
             sanitized_reason,
+            retryable,
+            detail,
         });
         if self.events.len() > self.limits.max_events {
             let excess = self.events.len() - self.limits.max_events;
@@ -2140,12 +2542,13 @@ impl Inner {
         let mut spawn_tree_reservations = self
             .tree_reservations
             .iter()
-            .filter_map(|(key, descendant_count)| {
+            .filter_map(|(key, state)| {
                 let root = self.records.get(&key.root_run_id)?;
                 Some(SpawnTreeReservation {
                     scope: root.scope.clone(),
                     root_run_id: key.root_run_id,
-                    descendant_count: *descendant_count,
+                    descendant_count: state.count,
+                    released_children: state.released_children.clone(),
                 })
             })
             .collect::<Vec<_>>();
@@ -2162,6 +2565,53 @@ impl Inner {
             admission_reservations,
             spawn_tree_reservations,
         }
+    }
+
+    /// Decide how an expired-lease run is resolved (#6284).
+    ///
+    /// - `CancelRequested` → terminal `Cancelled`: cancellation IS a genuine
+    ///   invariant, unchanged.
+    /// - `Running` that recorded ANY loop checkpoint → terminal
+    ///   `Failed(lease_expired)` with the latest resumable checkpoint attached
+    ///   (today's behavior, unchanged). The checkpoint means the run already did
+    ///   work (a resumable one re-drives from the checkpoint; a non-resumable
+    ///   `Final`-only one has no re-drive path but must NOT be re-run from
+    ///   scratch — re-drive-from-checkpoint is a separate concern).
+    /// - `Running` that recorded NO loop checkpoint (crashed before BeforeModel =
+    ///   before any side effect, safe to re-drive) → re-queue to a claimable
+    ///   state, UNLESS `claim_count` has reached the crash-retry bound, in which
+    ///   case terminal `Failed(crash_retry_exhausted)` (a genuine invariant,
+    ///   model-visible — NOT `lease_expired`).
+    fn resolve_expired_lease(&self, record: &RunRecord) -> ExpiredLeaseResolution {
+        if record.status.get() == TurnStatus::CancelRequested {
+            return ExpiredLeaseResolution::Terminal {
+                outcome: LeaseExpiredOutcome {
+                    status: TurnStatus::Cancelled,
+                    failure: None,
+                    event_kind: TurnEventKind::Cancelled,
+                    event_detail: None,
+                },
+                attach_checkpoint: false,
+            };
+        }
+        // `Running` with an expired lease. A run that recorded any loop checkpoint
+        // already ran past its first checkpoint (did work); keep today's terminal
+        // `Failed(lease_expired)` (+ latest resumable checkpoint, if any).
+        if self.run_has_loop_checkpoint(&record.scope, record.turn_id, record.run_id) {
+            return ExpiredLeaseResolution::Terminal {
+                outcome: lease_expired_failed_outcome(),
+                attach_checkpoint: true,
+            };
+        }
+        // Checkpoint-less: crashed before any side effect — safe to re-drive,
+        // bounded by `claim_count`.
+        if record.claim_count >= u64::from(self.limits.max_crash_recovery_reclaims) {
+            return ExpiredLeaseResolution::Terminal {
+                outcome: crash_retry_exhausted_outcome(),
+                attach_checkpoint: false,
+            };
+        }
+        ExpiredLeaseResolution::Requeue
     }
 
     fn recover_expired_leases(
@@ -2200,23 +2650,68 @@ impl Inner {
             let Some(mut record) = self.records.remove(&run_id) else {
                 continue;
             };
-            // Running and CancelRequested both hold a runner-claimed lease (incremented at
-            // claim). Decrement for both since the lease expiry terminates the run.
-            let outcome = expired_lease_terminal_outcome(record.status.get());
-            let transition = record.status.set(outcome.status);
-            self.apply_status_transition(transition, &record);
-            record.failure = outcome.failure;
-            record.runner_id = None;
-            record.lease_token = None;
-            record.lease_expires_at = None;
-            record.event_cursor = self.next_cursor();
-            self.release_active_lock(&record);
-            self.remove_queued_run(record.run_id);
-            let state = record.state();
-            self.push_event(&record, outcome.event_kind, outcome.event_detail);
-            self.mark_terminal(record.run_id);
-            recovered.push(state);
-            self.records.insert(run_id, record);
+            match self.resolve_expired_lease(&record) {
+                ExpiredLeaseResolution::Requeue => {
+                    // #6284: a checkpointless `Running` run whose lease expired
+                    // crashed BEFORE its first loop checkpoint (before BeforeModel,
+                    // before any side effect) and is always safe to re-drive. Do
+                    // NOT strand it terminal `Failed(lease_expired)` — re-queue it
+                    // to a claimable `Queued` state so the scheduler re-drives it.
+                    // The same-thread active lock is KEPT (a `Queued` run holds its
+                    // lock for active-run exclusivity); `claim_count` is preserved
+                    // so the crash-retry bound still advances across cycles.
+                    let transition = record.status.set(TurnStatus::Queued);
+                    self.apply_status_transition(transition, &record);
+                    record.runner_id = None;
+                    record.lease_token = None;
+                    record.lease_expires_at = None;
+                    record.event_cursor = self.next_cursor();
+                    self.update_active_lock(&record, request.now);
+                    self.queued_runs.push_back(record.run_id);
+                    let state = record.state();
+                    // Running → Queued mirrors relinquish's lifecycle event
+                    // (`RunnerHeartbeat`); the `LifecyclePublishingTurnStateStore`
+                    // wrapper independently classifies the recovered `Queued`
+                    // state the same way (`event_kind_for_state`), so the internal
+                    // event log and the published stream agree.
+                    self.push_event(&record, TurnEventKind::RunnerHeartbeat, None, None);
+                    recovered.push(state);
+                    self.records.insert(run_id, record);
+                }
+                ExpiredLeaseResolution::Terminal {
+                    outcome,
+                    attach_checkpoint,
+                } => {
+                    let transition = record.status.set(outcome.status);
+                    self.apply_status_transition(transition, &record);
+                    if attach_checkpoint && record.status.get() == TurnStatus::Failed {
+                        record.checkpoint_id = self.latest_resumable_loop_checkpoint(
+                            &record.scope,
+                            record.turn_id,
+                            run_id,
+                        );
+                    }
+                    record.failure = outcome.failure;
+                    record.runner_id = None;
+                    record.lease_token = None;
+                    record.lease_expires_at = None;
+                    record.event_cursor = self.next_cursor();
+                    self.release_active_lock(&record);
+                    self.remove_queued_run(record.run_id);
+                    let state = record.state();
+                    let event_detail =
+                        failure_detail_for_event(&outcome.event_kind, record.failure.as_ref());
+                    self.push_event(
+                        &record,
+                        outcome.event_kind,
+                        outcome.event_detail,
+                        event_detail,
+                    );
+                    self.mark_terminal(record.run_id);
+                    recovered.push(state);
+                    self.records.insert(run_id, record);
+                }
+            }
         }
         self.prune_terminal_records();
         RecoverExpiredLeasesResponse { recovered }
@@ -2264,6 +2759,37 @@ impl Inner {
         );
         for key in removed {
             self.remove_persisted_run_idempotency(TurnIdempotencyOperationKind::Resume, &key);
+        }
+        self.prune_idempotency_records();
+    }
+
+    fn remember_retry_idempotency(
+        &mut self,
+        key: RunIdempotencyKey,
+        result: Result<RetryTurnResponse, TurnError>,
+        created_at: crate::TurnTimestamp,
+    ) {
+        let replayable = !matches!(
+            result,
+            Err(TurnError::ThreadBusy(_) | TurnError::AdmissionRejected(_))
+        );
+        if !matches!(result, Err(TurnError::AdmissionRejected(_))) {
+            let record = retry_idempotency_record(&key, &result, created_at);
+            self.remember_persisted_idempotency(record);
+        }
+        if replayable {
+            if !self.retry_idempotency.contains_key(&key) {
+                self.retry_idempotency_order.push_back(key.clone());
+            }
+            self.retry_idempotency.insert(key, result);
+            let removed = prune_ordered_map(
+                &mut self.retry_idempotency,
+                &mut self.retry_idempotency_order,
+                self.limits.max_idempotency_records,
+            );
+            for key in removed {
+                self.remove_persisted_run_idempotency(TurnIdempotencyOperationKind::Retry, &key);
+            }
         }
         self.prune_idempotency_records();
     }
@@ -2316,7 +2842,7 @@ impl Inner {
         let _removed = prune_ordered_map(
             &mut self.idempotency_records,
             &mut self.idempotency_record_order,
-            self.limits.max_idempotency_records.saturating_mul(3),
+            self.limits.max_idempotency_records.saturating_mul(4),
         );
     }
 
@@ -2354,6 +2880,37 @@ impl Inner {
             self.queued_runs.push_back(run_id);
         }
         None
+    }
+
+    fn claim_matching_queued_run(
+        &mut self,
+        runner_id: crate::TurnRunnerId,
+        lease_token: TurnLeaseToken,
+        scope_filter: Option<&TurnScope>,
+    ) -> Result<Option<ClaimedTurnRun>, TurnError> {
+        let Some(run_id) = self.pop_matching_queued_run(scope_filter) else {
+            return Ok(None);
+        };
+        let mut record = self.take_record(run_id)?;
+        let now = Utc::now();
+        let transition = record.status.set(TurnStatus::Running);
+        record.runner_id = Some(runner_id);
+        record.lease_token = Some(lease_token);
+        record.lease_expires_at = Some(self.next_lease_expiry(now));
+        record.last_heartbeat_at = Some(now);
+        record.claim_count = record.claim_count.saturating_add(1);
+        record.event_cursor = self.next_cursor();
+        self.update_active_lock(&record, now);
+        self.apply_status_transition(transition, &record);
+        let claimed = ClaimedTurnRun {
+            state: record.state(),
+            resolved_run_profile: record.profile.resolved.clone(),
+            runner_id,
+            lease_token,
+        };
+        self.push_event(&record, TurnEventKind::RunnerClaimed, None, None);
+        self.records.insert(run_id, record);
+        Ok(Some(claimed))
     }
 
     fn remove_queued_run(&mut self, run_id: TurnRunId) {
@@ -2409,11 +2966,142 @@ impl Inner {
                 status: record.status.get(),
                 event_cursor: record.event_cursor,
             };
-            self.push_event(&record, TurnEventKind::Resumed, None);
+            self.push_event(&record, TurnEventKind::Resumed, None, None);
             Ok(response)
         })();
         self.records.insert(record.run_id, record);
         result
+    }
+
+    fn retry_turn_once(
+        &mut self,
+        request: &RetryTurnRequest,
+        admission_limit_provider: &dyn TurnAdmissionLimitProvider,
+    ) -> Result<RetryTurnResponse, TurnError> {
+        let (
+            lock_key,
+            source_checkpoint,
+            scope,
+            actor,
+            turn_id,
+            profile,
+            accepted_message_ref,
+            parent_run_id,
+            subagent_depth,
+            spawn_tree_root_run_id,
+            product_context,
+        ) = {
+            let Some(failed) = self.records.get(&request.run_id) else {
+                return Err(TurnError::ScopeNotFound);
+            };
+            if failed.scope != request.scope {
+                return Err(TurnError::ScopeNotFound);
+            }
+            if failed.actor != request.actor {
+                return Err(TurnError::Unauthorized);
+            }
+            if failed.status.get() != TurnStatus::Failed || !self.is_latest_run_for_turn(failed) {
+                return Err(TurnError::RunNotRetryable {
+                    run_id: request.run_id,
+                });
+            }
+            let Some(source_checkpoint_id) = failed.checkpoint_id else {
+                return Err(TurnError::RunNotRetryable {
+                    run_id: request.run_id,
+                });
+            };
+            let Some(source_checkpoint) =
+                self.retryable_loop_checkpoint(failed, source_checkpoint_id)
+            else {
+                return Err(TurnError::RunNotRetryable {
+                    run_id: request.run_id,
+                });
+            };
+            (
+                TurnActiveLockKey::from(&failed.scope),
+                source_checkpoint,
+                failed.scope.clone(),
+                failed.actor.clone(),
+                failed.turn_id,
+                failed.profile.clone(),
+                failed.accepted_message_ref.clone(),
+                failed.parent_run_id,
+                failed.subagent_depth,
+                failed.spawn_tree_root_run_id,
+                failed.product_context.clone(),
+            )
+        };
+        if let Some(response) = self.thread_busy(&lock_key) {
+            return Err(TurnError::ThreadBusy(response));
+        }
+
+        let now = Utc::now();
+        let mut new_run_id = fresh_turn_run_id();
+        while self.records.contains_key(&new_run_id) {
+            new_run_id = fresh_turn_run_id();
+        }
+        let admission_class = profile.admission_class.clone();
+        if let Err(rejection) = self.reserve_admission(
+            new_run_id,
+            admission_class,
+            &scope,
+            &actor,
+            admission_limit_provider,
+        ) {
+            return Err(TurnError::AdmissionRejected(rejection));
+        }
+        let retry_checkpoint_id =
+            self.link_loop_checkpoint_for_retry(&source_checkpoint, new_run_id, now);
+        let event_cursor = self.next_cursor();
+        let record = RunRecord {
+            scope,
+            actor,
+            turn_id,
+            run_id: new_run_id,
+            status: RunStatusCell::new(TurnStatus::Queued),
+            profile,
+            resolved_model_route: None,
+            model_usage: None,
+            accepted_message_ref,
+            source_binding_ref: request.source_binding_ref.clone(),
+            reply_target_binding_ref: request.reply_target_binding_ref.clone(),
+            checkpoint_id: Some(retry_checkpoint_id),
+            gate_ref: None,
+            blocked_activity_id: None,
+            credential_requirements: Vec::new(),
+            failure: None,
+            event_cursor,
+            runner_id: None,
+            lease_token: None,
+            lease_expires_at: None,
+            last_heartbeat_at: None,
+            claim_count: 0,
+            received_at: now,
+            parent_run_id,
+            subagent_depth,
+            spawn_tree_root_run_id,
+            product_context,
+            resume_disposition: None,
+        };
+        self.active_locks.insert(
+            lock_key.clone(),
+            TurnActiveLockRecord {
+                key: lock_key,
+                run_id: new_run_id,
+                status: TurnStatus::Queued,
+                lock_version: TurnLockVersion::new(1),
+                acquired_at: now,
+                updated_at: now,
+            },
+        );
+        self.queued_runs.push_back(new_run_id);
+        self.records.insert(new_run_id, record.clone());
+        self.push_event(&record, TurnEventKind::Resumed, None, None);
+        Ok(RetryTurnResponse {
+            run_id: new_run_id,
+            status: TurnStatus::Queued,
+            event_cursor,
+        })
     }
 
     fn request_cancel_once(
@@ -2480,6 +3168,7 @@ impl Inner {
                 &record,
                 event_kind,
                 Some(request.reason.category().to_string()),
+                None,
             );
             if record.status.get().is_terminal() {
                 self.mark_terminal(record.run_id);
@@ -2518,7 +3207,7 @@ impl Inner {
             self.release_active_lock(&record);
             self.remove_queued_run(record.run_id);
             let state = record.state();
-            self.push_event(&record, TurnEventKind::Cancelled, None);
+            self.push_event(&record, TurnEventKind::Cancelled, None, None);
             self.mark_terminal(record.run_id);
             Ok(state)
         })();
@@ -2551,6 +3240,20 @@ impl Inner {
             // lease); decrement the per-user running counter.
             let transition = record.status.set(status);
             self.apply_status_transition(transition, &record);
+            if status == TurnStatus::Failed {
+                // Preserve retryability: resolve to the latest resumable
+                // checkpoint (BeforeModel/BeforeBlock) so lease-expired and
+                // externally-failed runs can be retried, matching their
+                // user-facing "Retry the run." summary. Resolves to None when
+                // no resumable checkpoint exists, keeping the projected
+                // `retryable` flag consistent with `retry_turn` validation
+                // (both gate on a resumable-kind checkpoint).
+                record.checkpoint_id = self.latest_resumable_loop_checkpoint(
+                    &record.scope,
+                    record.turn_id,
+                    record.run_id,
+                );
+            }
             record.failure = failure.clone();
             record.runner_id = None;
             record.lease_token = None;
@@ -2559,7 +3262,13 @@ impl Inner {
             self.release_active_lock(&record);
             self.remove_queued_run(record.run_id);
             let state = record.state();
-            self.push_event(&record, kind, failure.map(SanitizedFailure::into_category));
+            let event_detail = failure_detail_for_event(&kind, failure.as_ref());
+            self.push_event(
+                &record,
+                kind,
+                failure.map(SanitizedFailure::into_category),
+                event_detail,
+            );
             self.mark_terminal(record.run_id);
             Ok(state)
         })();
@@ -2574,14 +3283,23 @@ impl Inner {
         runner_id: crate::TurnRunnerId,
         lease_token: crate::TurnLeaseToken,
         mapping: LoopExitMapping,
+        model_usage: Option<crate::run_profile::LoopModelUsage>,
     ) -> Result<TurnRunState, TurnError> {
-        let record = self.take_record(run_id)?;
+        let mut record = self.take_record(run_id)?;
         let result = (|| {
             if let Err(error) = ensure_active_lease(&record, runner_id, lease_token, Utc::now()) {
                 return AppliedLoopTransition::Rejected {
                     record: Box::new(record),
                     error,
                 };
+            }
+            // The loop reports its cumulative per-run usage at every exit (the
+            // execution state carries the running total across block/resume
+            // legs), so replace rather than accumulate — a block→resume→complete
+            // sequence would otherwise double-count the pre-block legs. A run
+            // that reported no usage leaves the prior total intact.
+            if let Some(usage) = model_usage {
+                record.model_usage = Some(usage);
             }
             match mapping {
                 LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Completed) => {
@@ -2660,7 +3378,7 @@ impl Inner {
         self.release_active_lock(&record);
         self.remove_queued_run(record.run_id);
         let state = record.state();
-        self.push_event(&record, TurnEventKind::Completed, None);
+        self.push_event(&record, TurnEventKind::Completed, None, None);
         self.mark_terminal(record.run_id);
         AppliedLoopTransition::Applied {
             record: Box::new(record),
@@ -2692,7 +3410,7 @@ impl Inner {
         self.release_active_lock(&record);
         self.remove_queued_run(record.run_id);
         let state = record.state();
-        self.push_event(&record, TurnEventKind::Cancelled, None);
+        self.push_event(&record, TurnEventKind::Cancelled, None, None);
         self.mark_terminal(record.run_id);
         AppliedLoopTransition::Applied {
             record: Box::new(record),
@@ -2740,7 +3458,7 @@ impl Inner {
         );
         self.update_active_lock(&record, now);
         let state = record.state();
-        self.push_event(&record, TurnEventKind::Blocked, None);
+        self.push_event(&record, TurnEventKind::Blocked, None, None);
         AppliedLoopTransition::Applied {
             record: Box::new(record),
             state: Box::new(state),
@@ -2763,9 +3481,12 @@ impl Inner {
                 },
             };
         }
+        let retry_checkpoint_id =
+            self.latest_resumable_loop_checkpoint(&record.scope, record.turn_id, record.run_id);
         // Running → Failed: decrement per-user running counter.
         let transition = record.status.set(TurnStatus::Failed);
         self.apply_status_transition(transition, &record);
+        record.checkpoint_id = retry_checkpoint_id;
         record.failure = Some(failure.clone());
         record.runner_id = None;
         record.lease_token = None;
@@ -2774,10 +3495,12 @@ impl Inner {
         self.release_active_lock(&record);
         self.remove_queued_run(record.run_id);
         let state = record.state();
+        let event_detail = failure.detail().map(str::to_string);
         self.push_event(
             &record,
             TurnEventKind::Failed,
             Some(failure.into_category()),
+            event_detail,
         );
         self.mark_terminal(record.run_id);
         AppliedLoopTransition::Applied {
@@ -2794,7 +3517,12 @@ impl Inner {
     ) -> AppliedLoopTransition {
         let from = record.status.get();
         match from {
-            TurnStatus::Running => self.fail_claimed_record(record, failure),
+            TurnStatus::Running => {
+                // Mirror terminal_transition: a runner-reported failure keeps the
+                // run retryable from its latest resumable checkpoint rather than
+                // discarding it.
+                self.fail_claimed_record(record, failure)
+            }
             TurnStatus::CancelRequested => self.cancel_claimed_record(record),
             _ => AppliedLoopTransition::Rejected {
                 record: Box::new(record),
@@ -2873,7 +3601,7 @@ impl Inner {
                 self.remove_queued_run(record.run_id);
             }
             let state = record.state();
-            self.push_event(&record, event_kind, None);
+            self.push_event(&record, event_kind, None, None);
             if !requeue {
                 self.mark_terminal(record.run_id);
             }
@@ -2924,6 +3652,102 @@ impl Inner {
                 status: record.status.get(),
                 event_cursor: record.event_cursor,
             })
+    }
+
+    fn is_latest_run_for_turn(&self, record: &RunRecord) -> bool {
+        !self.records.values().any(|candidate| {
+            candidate.turn_id == record.turn_id && candidate.event_cursor > record.event_cursor
+        })
+    }
+
+    fn retryable_loop_checkpoint(
+        &self,
+        record: &RunRecord,
+        checkpoint_id: TurnCheckpointId,
+    ) -> Option<LoopCheckpointRecord> {
+        self.loop_checkpoints
+            .get(&checkpoint_id)
+            .filter(|checkpoint| {
+                checkpoint.scope == record.scope
+                    && checkpoint.turn_id == record.turn_id
+                    && checkpoint.run_id == record.run_id
+                    && matches!(
+                        checkpoint.kind,
+                        crate::run_profile::LoopCheckpointKind::BeforeModel
+                            | crate::run_profile::LoopCheckpointKind::BeforeBlock
+                    )
+            })
+            .cloned()
+    }
+
+    fn link_loop_checkpoint_for_retry(
+        &mut self,
+        source: &LoopCheckpointRecord,
+        retry_run_id: TurnRunId,
+        created_at: crate::TurnTimestamp,
+    ) -> TurnCheckpointId {
+        let checkpoint_id = TurnCheckpointId::new();
+        self.loop_checkpoints.insert(
+            checkpoint_id,
+            LoopCheckpointRecord {
+                checkpoint_id,
+                scope: source.scope.clone(),
+                turn_id: source.turn_id,
+                run_id: retry_run_id,
+                state_ref: source.state_ref.clone(),
+                schema_id: source.schema_id.clone(),
+                schema_version: source.schema_version,
+                kind: source.kind,
+                gate_ref: source.gate_ref.clone(),
+                created_at,
+            },
+        );
+        checkpoint_id
+    }
+
+    /// Whether the run recorded ANY loop checkpoint (of any kind). A run with no
+    /// loop checkpoint at all crashed BEFORE its first checkpoint — before
+    /// BeforeModel, before any side effect — which is the precise #6284
+    /// "safe to re-drive from scratch" condition. A run that recorded a
+    /// checkpoint (even a non-resumable `Final` one) already did work and must
+    /// NOT be re-driven from scratch.
+    fn run_has_loop_checkpoint(
+        &self,
+        scope: &TurnScope,
+        turn_id: crate::TurnId,
+        run_id: TurnRunId,
+    ) -> bool {
+        self.loop_checkpoints.values().any(|checkpoint| {
+            checkpoint.scope == *scope
+                && checkpoint.turn_id == turn_id
+                && checkpoint.run_id == run_id
+        })
+    }
+
+    fn latest_resumable_loop_checkpoint(
+        &self,
+        scope: &TurnScope,
+        turn_id: crate::TurnId,
+        run_id: TurnRunId,
+    ) -> Option<TurnCheckpointId> {
+        self.loop_checkpoints
+            .values()
+            .filter(|checkpoint| {
+                checkpoint.scope == *scope
+                    && checkpoint.turn_id == turn_id
+                    && checkpoint.run_id == run_id
+                    && matches!(
+                        checkpoint.kind,
+                        crate::run_profile::LoopCheckpointKind::BeforeModel
+                            | crate::run_profile::LoopCheckpointKind::BeforeBlock
+                    )
+            })
+            .max_by(|a, b| {
+                a.created_at
+                    .cmp(&b.created_at)
+                    .then_with(|| a.checkpoint_id.as_uuid().cmp(&b.checkpoint_id.as_uuid()))
+            })
+            .map(|checkpoint| checkpoint.checkpoint_id)
     }
 
     fn reserve_admission(
@@ -3052,7 +3876,16 @@ impl Inner {
                     .keys()
                     .any(|reservation| reservation.root_run_id == run_id)
             {
-                self.records.remove(&run_id);
+                if let Some(record) = self.records.remove(&run_id) {
+                    let turn_id = record.turn_id;
+                    if !self
+                        .records
+                        .values()
+                        .any(|record| record.turn_id == turn_id)
+                    {
+                        self.turns.remove(&turn_id);
+                    }
+                }
                 self.admission_reservations.remove(&run_id);
             }
         }
@@ -3071,6 +3904,7 @@ impl RunRecord {
             status: self.status.get(),
             profile: self.profile.clone(),
             resolved_model_route: self.resolved_model_route.clone(),
+            model_usage: self.model_usage,
             checkpoint_id: self.checkpoint_id,
             gate_ref: self.gate_ref.clone(),
             blocked_activity_id: self.blocked_activity_id,
@@ -3104,6 +3938,7 @@ impl RunRecord {
             resolved_run_profile_id: self.profile.id.clone(),
             resolved_run_profile_version: self.profile.version,
             resolved_model_route: self.resolved_model_route.clone(),
+            model_usage: self.model_usage,
             received_at: self.received_at,
             checkpoint_id: self.checkpoint_id,
             gate_ref: self.gate_ref.clone(),
@@ -3138,12 +3973,24 @@ fn persisted_key_for_record(record: &TurnIdempotencyRecord) -> PersistedIdempote
         operation: record.operation,
         run_id: match record.operation {
             TurnIdempotencyOperationKind::Submit => None,
-            TurnIdempotencyOperationKind::Resume | TurnIdempotencyOperationKind::Cancel => {
-                record.run_id
-            }
+            TurnIdempotencyOperationKind::Resume
+            | TurnIdempotencyOperationKind::Retry
+            | TurnIdempotencyOperationKind::Cancel => record.run_id,
         },
         key: record.key.clone(),
     }
+}
+
+/// A persisted record whose replay payload no longer matches its operation
+/// kind (or lacks a run id) cannot be rehydrated; the duplicate-request guard
+/// for that key is lost until the operation is re-recorded. Surface it instead
+/// of dropping silently. Logs metadata only — never the replay payload.
+fn debug_malformed_idempotency_record(record: &TurnIdempotencyRecord) {
+    tracing::debug!(
+        operation = ?record.operation,
+        run_id = ?record.run_id,
+        "skipping malformed idempotency record during snapshot load; replay guard lost for this key"
+    );
 }
 
 fn persisted_submit_key(key: &SubmitIdempotencyKey) -> PersistedIdempotencyKey {
@@ -3243,6 +4090,38 @@ fn resume_idempotency_record(
     }
 }
 
+fn retry_idempotency_record(
+    key: &RunIdempotencyKey,
+    result: &Result<RetryTurnResponse, TurnError>,
+    created_at: crate::TurnTimestamp,
+) -> TurnIdempotencyRecord {
+    let (outcome, replay) = match result {
+        Ok(response) => (
+            TurnIdempotencyOutcomeKind::Retried,
+            TurnIdempotencyReplay::RetrySucceeded(response.clone()),
+        ),
+        Err(TurnError::ThreadBusy(busy)) => (
+            TurnIdempotencyOutcomeKind::ThreadBusy,
+            TurnIdempotencyReplay::RetryThreadBusy(busy.clone()),
+        ),
+        Err(error) => (
+            TurnIdempotencyOutcomeKind::from_error(error),
+            TurnIdempotencyReplay::Error(TurnIdempotencyErrorReplay::from_error(error)),
+        ),
+    };
+    TurnIdempotencyRecord {
+        scope: key.scope.clone(),
+        operation: TurnIdempotencyOperationKind::Retry,
+        key: key.key.clone(),
+        turn_id: None,
+        run_id: Some(key.run_id),
+        outcome,
+        replay,
+        created_at,
+        expires_at: None,
+    }
+}
+
 fn cancel_idempotency_record(
     key: &RunIdempotencyKey,
     result: &Result<CancelRunResponse, TurnError>,
@@ -3298,23 +4177,40 @@ struct LeaseExpiredOutcome {
     event_detail: Option<String>,
 }
 
-fn expired_lease_terminal_outcome(status: TurnStatus) -> LeaseExpiredOutcome {
-    match status {
-        TurnStatus::CancelRequested => LeaseExpiredOutcome {
-            status: TurnStatus::Cancelled,
-            failure: None,
-            event_kind: TurnEventKind::Cancelled,
-            event_detail: None,
-        },
-        _ => {
-            let failure = SanitizedFailure::from_trusted_static("lease_expired");
-            LeaseExpiredOutcome {
-                status: TurnStatus::Failed,
-                failure: Some(failure.clone()),
-                event_kind: TurnEventKind::Failed,
-                event_detail: Some(failure.into_category()),
-            }
-        }
+/// Resolution of an expired-lease `Running`/`CancelRequested` run (#6284).
+enum ExpiredLeaseResolution {
+    /// Re-queue to a claimable `Queued` state (checkpointless, safe to re-drive).
+    Requeue,
+    /// Move to a terminal status. `attach_checkpoint` re-attaches the latest
+    /// resumable loop checkpoint when the resulting status is `Failed`.
+    Terminal {
+        outcome: LeaseExpiredOutcome,
+        attach_checkpoint: bool,
+    },
+}
+
+/// Terminal `Failed(lease_expired)` — used only for a checkpointed run whose
+/// re-drive path is the resumable checkpoint. A checkpointless run is never
+/// stranded with this reason (see `crash_retry_exhausted_outcome`).
+fn lease_expired_failed_outcome() -> LeaseExpiredOutcome {
+    let failure = SanitizedFailure::from_trusted_static("lease_expired");
+    LeaseExpiredOutcome {
+        status: TurnStatus::Failed,
+        failure: Some(failure.clone()),
+        event_kind: TurnEventKind::Failed,
+        event_detail: Some(failure.into_category()),
+    }
+}
+
+/// Terminal `Failed(crash_retry_exhausted)` — a genuine invariant for a
+/// checkpointless run that has exhausted its crash-retry budget (#6284).
+fn crash_retry_exhausted_outcome() -> LeaseExpiredOutcome {
+    let failure = SanitizedFailure::from_trusted_static("crash_retry_exhausted");
+    LeaseExpiredOutcome {
+        status: TurnStatus::Failed,
+        failure: Some(failure.clone()),
+        event_kind: TurnEventKind::Failed,
+        event_detail: Some(failure.into_category()),
     }
 }
 
@@ -3340,4 +4236,186 @@ where
         order.pop_front();
     }
     removed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        AllowAllTurnAdmissionPolicy, ResolvedRunProfile, RunProfileId, RunProfileVersion,
+        TurnLeaseToken, TurnRunnerId,
+    };
+    use async_trait::async_trait;
+    use ironclaw_host_api::{AgentId, ProjectId, ThreadId};
+
+    struct TestRunProfileResolver;
+
+    #[async_trait]
+    impl RunProfileResolver for TestRunProfileResolver {
+        async fn resolve_run_profile(
+            &self,
+            _request: RunProfileResolutionRequest,
+        ) -> Result<ResolvedRunProfile, RunProfileResolutionError> {
+            Ok(ResolvedRunProfile::legacy_compatibility(
+                RunProfileId::default_profile(),
+                RunProfileVersion::new(1),
+                false,
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_pruning_removes_orphaned_turn_records() {
+        let limits = InMemoryTurnStateStoreLimits::default().set_max_terminal_records(1);
+        let store = InMemoryTurnStateStore::with_limits(limits);
+        let policy = AllowAllTurnAdmissionPolicy;
+        let resolver = TestRunProfileResolver;
+        let scope = TurnScope::new(
+            TenantId::new("tenant-turn-prune").unwrap(),
+            Some(AgentId::new("agent-turn-prune").unwrap()),
+            Some(ProjectId::new("project-turn-prune").unwrap()),
+            ThreadId::new("thread-turn-prune").unwrap(),
+        );
+
+        for index in 0..2 {
+            let response = store
+                .submit_turn(
+                    SubmitTurnRequest {
+                        requested_model: None,
+                        scope: scope.clone(),
+                        actor: TurnActor::new(UserId::new(format!("user-{index}")).unwrap()),
+                        accepted_message_ref: AcceptedMessageRef::new(format!("accepted-{index}"))
+                            .unwrap(),
+                        source_binding_ref: SourceBindingRef::new(format!("source-{index}"))
+                            .unwrap(),
+                        reply_target_binding_ref: ReplyTargetBindingRef::new(format!(
+                            "reply-{index}"
+                        ))
+                        .unwrap(),
+                        idempotency_key: IdempotencyKey::new(format!("submit-{index}")).unwrap(),
+                        requested_run_profile: None,
+                        requested_run_id: None,
+                        received_at: Utc::now(),
+                        parent_run_id: None,
+                        subagent_depth: 0,
+                        spawn_tree_root_run_id: None,
+                        product_context: None,
+                    },
+                    &policy,
+                    &resolver,
+                )
+                .await
+                .unwrap();
+            let SubmitTurnResponse::Accepted { run_id, .. } = response;
+            let runner_id = TurnRunnerId::new();
+            let lease_token = TurnLeaseToken::new();
+            let claimed = store
+                .claim_next_run(ClaimRunRequest {
+                    runner_id,
+                    lease_token,
+                    scope_filter: Some(scope.clone()),
+                })
+                .await
+                .unwrap()
+                .expect("submitted run should be claimable");
+            assert_eq!(claimed.state.run_id, run_id);
+            store
+                .complete_run(CompleteRunRequest {
+                    run_id,
+                    runner_id,
+                    lease_token,
+                })
+                .await
+                .unwrap();
+        }
+
+        let snapshot = store.persistence_snapshot();
+        assert_eq!(
+            snapshot.runs.len(),
+            1,
+            "terminal run retention cap should prune old terminal runs"
+        );
+        assert_eq!(
+            snapshot.turns.len(),
+            1,
+            "pruning a terminal run must also prune its orphaned turn record"
+        );
+        assert_eq!(
+            snapshot.turns[0].turn_id, snapshot.runs[0].turn_id,
+            "remaining turn record should belong to the retained run"
+        );
+    }
+
+    #[tokio::test]
+    async fn overlay_runner_lease_record_ignores_stale_heartbeat() {
+        let store = InMemoryTurnStateStore::default();
+        let policy = AllowAllTurnAdmissionPolicy;
+        let resolver = TestRunProfileResolver;
+        let scope = TurnScope::new(
+            TenantId::new("tenant-lease-overlay").unwrap(),
+            Some(AgentId::new("agent-lease-overlay").unwrap()),
+            Some(ProjectId::new("project-lease-overlay").unwrap()),
+            ThreadId::new("thread-lease-overlay").unwrap(),
+        );
+        let response = store
+            .submit_turn(
+                SubmitTurnRequest {
+                    requested_model: None,
+                    scope: scope.clone(),
+                    actor: TurnActor::new(UserId::new("user-lease-overlay").unwrap()),
+                    accepted_message_ref: AcceptedMessageRef::new("accepted-lease-overlay")
+                        .unwrap(),
+                    source_binding_ref: SourceBindingRef::new("source-lease-overlay").unwrap(),
+                    reply_target_binding_ref: ReplyTargetBindingRef::new("reply-lease-overlay")
+                        .unwrap(),
+                    idempotency_key: IdempotencyKey::new("submit-lease-overlay").unwrap(),
+                    requested_run_profile: None,
+                    requested_run_id: None,
+                    received_at: Utc::now(),
+                    parent_run_id: None,
+                    subagent_depth: 0,
+                    spawn_tree_root_run_id: None,
+                    product_context: None,
+                },
+                &policy,
+                &resolver,
+            )
+            .await
+            .unwrap();
+        let SubmitTurnResponse::Accepted { run_id, .. } = response;
+        store
+            .claim_next_run(ClaimRunRequest {
+                runner_id: TurnRunnerId::new(),
+                lease_token: TurnLeaseToken::new(),
+                scope_filter: Some(scope),
+            })
+            .await
+            .unwrap()
+            .expect("submitted run should be claimable");
+        let original = store.run_record(run_id).expect("claimed run record");
+        let original_heartbeat = original
+            .last_heartbeat_at
+            .expect("claimed run has heartbeat timestamp");
+        let original_expiry = original
+            .lease_expires_at
+            .expect("claimed run has lease expiry");
+
+        let mut stale = original.clone();
+        stale.last_heartbeat_at = Some(original_heartbeat - ChronoDuration::seconds(1));
+        stale.lease_expires_at = Some(original_expiry - ChronoDuration::seconds(1));
+        store.overlay_runner_lease_record(stale).unwrap();
+        let after_stale = store.run_record(run_id).expect("claimed run record");
+        assert_eq!(after_stale.last_heartbeat_at, Some(original_heartbeat));
+        assert_eq!(after_stale.lease_expires_at, Some(original_expiry));
+
+        let mut newer = original.clone();
+        let newer_heartbeat = original_heartbeat + ChronoDuration::seconds(1);
+        let newer_expiry = original_expiry + ChronoDuration::seconds(1);
+        newer.last_heartbeat_at = Some(newer_heartbeat);
+        newer.lease_expires_at = Some(newer_expiry);
+        store.overlay_runner_lease_record(newer).unwrap();
+        let after_newer = store.run_record(run_id).expect("claimed run record");
+        assert_eq!(after_newer.last_heartbeat_at, Some(newer_heartbeat));
+        assert_eq!(after_newer.lease_expires_at, Some(newer_expiry));
+    }
 }

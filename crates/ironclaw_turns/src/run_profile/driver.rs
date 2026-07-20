@@ -79,7 +79,14 @@ pub enum AgentLoopDriverError {
     #[error("agent loop driver is unavailable: {reason}")]
     Unavailable { reason: String },
     #[error("agent loop driver failed: {reason_kind}")]
-    Failed { reason_kind: String },
+    Failed {
+        reason_kind: String,
+        /// Secret-scrubbed, model-visible raw cause carried from the executor
+        /// diagnostics so the failure explainer can describe the real fault
+        /// instead of only a category. `None` when the driver could not surface
+        /// a distinct cause beyond `reason_kind`.
+        detail: Option<String>,
+    },
 }
 
 /// Userland loop implementation contract.

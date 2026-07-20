@@ -52,6 +52,7 @@ pub mod memory_profiles;
 pub mod memory_provider;
 mod obligations;
 mod planner;
+mod post_edit_check;
 mod process_aliases;
 mod process_output;
 mod process_port;
@@ -59,7 +60,6 @@ mod production;
 mod sandbox_process;
 mod services;
 mod surface;
-mod turn_scheduler;
 mod user_profile_source;
 mod wasm_credentials;
 
@@ -77,7 +77,8 @@ pub use egress::{
 };
 pub use extension_contracts::{
     default_host_api_contract_registry, default_host_port_catalog,
-    discover_extensions_tolerant_bounded, discover_extensions_with_default_host_api_contracts,
+    discover_extensions_tolerant_bounded, discover_extensions_tolerant_bounded_with_contracts,
+    discover_extensions_with_default_host_api_contracts,
     discover_extensions_with_default_host_api_contracts_and_catalog,
 };
 pub use first_party::{
@@ -92,11 +93,12 @@ pub use first_party_tools::{
     NATIVE_MEMORY_FIRST_PARTY_PROVIDER, PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
     SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
     SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, TIME_CAPABILITY_ID,
-    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
-    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
-    TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
-    TriggerCreateHook, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
+    TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
+    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, TriggerCreateHook,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_handlers_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook,
     builtin_first_party_handlers_with_trigger_create_hook_and_memory_resolver,
@@ -119,9 +121,13 @@ pub use obligations::{
     RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver,
 };
 pub use planner::{ExecutionPlan, PlannerError, plan_capability};
+pub use post_edit_check::{
+    POST_EDIT_CHECK_ENV, POST_EDIT_CHECK_TIMEOUT_ENV, PostEditCheckConfig,
+    PostEditCheckConfigError, PostEditCheckService,
+};
 pub use process_output::{SavedCommandOutput, SavedCommandOutputSanitization};
 pub use process_port::{
-    CommandExecutionOutput, CommandExecutionRequest, LocalHostProcessPort, RuntimeProcessError,
+    CommandExecutionOutput, CommandExecutionRequest, HostProcessPort, RuntimeProcessError,
     RuntimeProcessPort, SandboxCommandTransport, TenantSandboxProcessPort,
 };
 pub use production::DefaultHostRuntime;
@@ -137,11 +143,6 @@ pub use services::{
     RegisteredRuntimeHealth,
 };
 pub use surface::{CapabilitySurfacePolicy, VisibleCapability, VisibleCapabilityAccess};
-pub use turn_scheduler::{
-    SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
-    TurnRunSchedulerConfig, TurnRunSchedulerHandle, TurnRunWakeChannel,
-};
-
 /// Stable, validated idempotency key supplied by upper turn/loop services.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IdempotencyKey(String);
@@ -354,24 +355,19 @@ pub struct RuntimeCapabilityRequest {
     /// The host runtime still validates and forwards the key into
     /// observability spans for audit/tracing.
     pub idempotency_key: Option<IdempotencyKey>,
-    /// Legacy caller-supplied trust decision kept for transitional request-shape
-    /// compatibility.
-    ///
-    /// [`DefaultHostRuntime`](crate::DefaultHostRuntime) ignores this value: it
-    /// resolves the capability provider's package identity, evaluates the
-    /// host-owned policy, stamps the resulting effective trust onto the
-    /// execution context, and passes that host-owned decision to the capability
-    /// host. Callers must not rely on this field to widen or narrow authority.
-    pub trust_decision: TrustDecision,
 }
 
 impl RuntimeCapabilityRequest {
+    // Deliberately NO `trust_decision` parameter — do not re-add one. Trust is
+    // host-owned: `DefaultHostRuntime` evaluates it itself, and a caller-supplied
+    // decision would be unvalidated authority input the runtime must ignore
+    // (arch-simplification §1.1).
+    // Removed so it is no longer carried across the capability hops.
     pub fn new(
         context: ExecutionContext,
         capability_id: CapabilityId,
         estimate: ResourceEstimate,
         input: Value,
-        trust_decision: TrustDecision,
     ) -> Self {
         Self {
             context,
@@ -379,7 +375,6 @@ impl RuntimeCapabilityRequest {
             estimate,
             input,
             idempotency_key: None,
-            trust_decision,
         }
     }
 
@@ -392,9 +387,8 @@ impl RuntimeCapabilityRequest {
 /// Request to resume one approval-blocked capability through the composed host runtime.
 ///
 /// The shape mirrors [`RuntimeCapabilityRequest`] but additionally carries the
-/// approval request selected by an upper approval workflow. Like invoke requests,
-/// `trust_decision` is transitional compatibility data: the default host runtime
-/// evaluates provider trust itself before delegating to `CapabilityHost`.
+/// approval request selected by an upper approval workflow. The default host
+/// runtime evaluates provider trust itself before delegating to `CapabilityHost`.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct RuntimeCapabilityResumeRequest {
@@ -404,7 +398,6 @@ pub struct RuntimeCapabilityResumeRequest {
     pub estimate: ResourceEstimate,
     pub input: Value,
     pub idempotency_key: Option<IdempotencyKey>,
-    pub trust_decision: TrustDecision,
 }
 
 impl RuntimeCapabilityResumeRequest {
@@ -414,7 +407,6 @@ impl RuntimeCapabilityResumeRequest {
         capability_id: CapabilityId,
         estimate: ResourceEstimate,
         input: Value,
-        trust_decision: TrustDecision,
     ) -> Self {
         Self {
             context,
@@ -423,7 +415,6 @@ impl RuntimeCapabilityResumeRequest {
             estimate,
             input,
             idempotency_key: None,
-            trust_decision,
         }
     }
 
@@ -447,7 +438,6 @@ pub struct RuntimeCapabilityAuthResumeRequest {
     pub estimate: ResourceEstimate,
     pub input: Value,
     pub idempotency_key: Option<IdempotencyKey>,
-    pub trust_decision: TrustDecision,
     /// Present when the invocation previously passed an approval gate.
     /// Used to locate and claim the matching fingerprinted approval lease
     /// so the re-dispatch does not require a second approval.
@@ -460,7 +450,6 @@ impl RuntimeCapabilityAuthResumeRequest {
         capability_id: CapabilityId,
         estimate: ResourceEstimate,
         input: Value,
-        trust_decision: TrustDecision,
         approval_request_id: Option<ApprovalRequestId>,
     ) -> Self {
         Self {
@@ -469,7 +458,6 @@ impl RuntimeCapabilityAuthResumeRequest {
             estimate,
             input,
             idempotency_key: None,
-            trust_decision,
             approval_request_id,
         }
     }
@@ -702,8 +690,14 @@ mod raw_http_diagnostic_policy_tests {
 }
 
 /// Stable, sanitized failure categories.
+///
+// Deliberately NOT `#[non_exhaustive]`: the `Unknown` variant is the open-set
+// escape hatch for unrecognized runtime failures, so the attribute would only
+// force classifiers to keep a wildcard arm that silently buckets a new named
+// variant. Without it, disposition/classification matches are exhaustive and a
+// new named variant fails to compile until classified. See
+// `docs/plans/2026-06-28-reborn-error-recoverability-audit.md` §6.1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum RuntimeFailureKind {
     Authorization,
     Backend,
@@ -721,7 +715,6 @@ pub enum RuntimeFailureKind {
     Resource,
     Transient,
     Unavailable,
-    Unknown,
 }
 
 impl RuntimeFailureKind {
@@ -744,7 +737,6 @@ impl RuntimeFailureKind {
             Self::Resource => "resource",
             Self::Transient => "transient",
             Self::Unavailable => "unavailable",
-            Self::Unknown => "unknown",
         }
     }
 }

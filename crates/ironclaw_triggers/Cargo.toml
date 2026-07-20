@@ -6,6 +6,9 @@ rust-version.workspace = true
 description = "Scheduled trigger domain and source-provider contracts for IronClaw Reborn"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "substrates"
+
 [features]
 default = []
 libsql = ["dep:libsql"]
@@ -19,6 +22,7 @@ chrono-tz = "0.10"
 cron = "0.17"
 hex = "0.4"
 deadpool-postgres = { version = "0.14", optional = true }
+ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
@@ -26,7 +30,7 @@ tokio-postgres = { version = "0.7", optional = true }
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.11"
 thiserror = "2"
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "time"] }
 tracing = "0.1"
 ulid = { version = "1", features = ["serde"] }
 

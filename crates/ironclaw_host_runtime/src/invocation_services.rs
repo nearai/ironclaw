@@ -28,7 +28,10 @@ use ironclaw_host_api::{
 use ironclaw_secrets::SecretStore;
 use thiserror::Error;
 
-use crate::{ExecutionPlan, RuntimeProcessPort};
+use crate::{
+    ExecutionPlan, PostEditCheckConfig, PostEditCheckService, RuntimeProcessPort,
+    RuntimeSecretMaterialStager,
+};
 
 /// Concrete host API bindings for an already-authorized invocation.
 ///
@@ -40,10 +43,30 @@ pub struct InvocationServices {
     pub filesystem: Arc<dyn RootFilesystem>,
     pub runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub tool_call_http_egress: Option<Arc<dyn ToolCallHttpEgress>>,
+    /// One-shot stager for host-held/host-minted credential material.
+    ///
+    /// First-party handlers that already hold a trusted secret (e.g. a
+    /// host-minted bearer token) stage it through this port and add a
+    /// matching `StagedObligation` credential injection, so the secret flows
+    /// through the egress credential-injection path instead of being written
+    /// into raw request headers. Present only when the invocation may perform
+    /// network egress.
+    pub runtime_secret_material_stager: Option<RuntimeSecretMaterialStager>,
     pub process: Arc<dyn RuntimeProcessPort>,
     pub secret_store: Option<Arc<dyn SecretStore>>,
     pub audit_sink: Option<Arc<dyn AuditSink>>,
     pub unsafe_raw_diagnostics_allowed: bool,
+    /// Operator-configured post-edit check appended to successful
+    /// `builtin.write_file` / `builtin.apply_patch` output, bundled with the
+    /// process port that runs it. Resolved once per invocation; `None` keeps
+    /// the feature off for this invocation. The edit plans declare no process
+    /// effect, so the resolver — the only layer that inspects process backends
+    /// — selects the port matching the plan's process backend (tenant sandbox
+    /// under `HostedMultiTenant`, local host under `LocalSingleUser`) so the
+    /// check runs in the same isolation boundary a declared process effect
+    /// would, rather than escaping onto the shared provider host. `None`
+    /// whenever no backend can run it in isolation. See [`PostEditCheckService`].
+    pub post_edit_check: Option<PostEditCheckService>,
 }
 
 impl fmt::Debug for InvocationServices {
@@ -59,6 +82,13 @@ impl fmt::Debug for InvocationServices {
                 "tool_call_http_egress",
                 &self.tool_call_http_egress.as_ref().map(|_| "[REDACTED]"),
             )
+            .field(
+                "runtime_secret_material_stager",
+                &self
+                    .runtime_secret_material_stager
+                    .as_ref()
+                    .map(|_| "[REDACTED]"),
+            )
             .field("process", &"[REDACTED]")
             .field(
                 "secret_store",
@@ -71,6 +101,10 @@ impl fmt::Debug for InvocationServices {
             .field(
                 "unsafe_raw_diagnostics_allowed",
                 &self.unsafe_raw_diagnostics_allowed,
+            )
+            .field(
+                "post_edit_check",
+                &self.post_edit_check.as_ref().map(|_| "[CONFIGURED]"),
             )
             .finish()
     }
@@ -146,10 +180,12 @@ pub struct LocalInvocationServicesResolver {
     filesystem: Arc<dyn RootFilesystem>,
     runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     tool_call_http_egress: Option<Arc<dyn ToolCallHttpEgress>>,
+    runtime_secret_material_stager: Option<RuntimeSecretMaterialStager>,
     process: Arc<dyn RuntimeProcessPort>,
     tenant_sandbox_process: Option<Arc<dyn RuntimeProcessPort>>,
     secret_store: Option<Arc<dyn SecretStore>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
+    post_edit_check: Option<PostEditCheckConfig>,
 }
 
 impl LocalInvocationServicesResolver {
@@ -163,11 +199,26 @@ impl LocalInvocationServicesResolver {
             filesystem,
             runtime_http_egress,
             tool_call_http_egress: None,
+            runtime_secret_material_stager: None,
             process,
             tenant_sandbox_process: None,
             secret_store,
             audit_sink: None,
+            post_edit_check: None,
         }
+    }
+
+    /// Supplies the one-shot host secret-material stager so first-party
+    /// handlers can deliver host-held/host-minted credentials through the
+    /// egress credential-injection path. Must wrap the same
+    /// `RuntimeSecretInjectionStore` the configured `runtime_http_egress`
+    /// reads from, or staged material will not be found at injection time.
+    pub fn with_runtime_secret_material_stager(
+        mut self,
+        stager: Option<RuntimeSecretMaterialStager>,
+    ) -> Self {
+        self.runtime_secret_material_stager = stager;
+        self
     }
 
     pub fn with_tool_call_http_egress(
@@ -190,6 +241,11 @@ impl LocalInvocationServicesResolver {
         self.audit_sink = Some(audit_sink);
         self
     }
+
+    pub fn with_post_edit_check(mut self, post_edit_check: PostEditCheckConfig) -> Self {
+        self.post_edit_check = Some(post_edit_check);
+        self
+    }
 }
 
 impl InvocationServicesResolver for LocalInvocationServicesResolver {
@@ -201,9 +257,7 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
         let filesystem = self.filesystem_for_plan(plan, request.mounts)?;
         let process = if plan.requires_process {
             match plan.process_backend {
-                ProcessBackendKind::LocalHost
-                    if matches!(plan.deployment, DeploymentMode::LocalSingleUser) =>
-                {
+                ProcessBackendKind::LocalHost if local_host_process_execution_permitted(plan) => {
                     Arc::clone(&self.process)
                 }
                 ProcessBackendKind::TenantSandbox => self.tenant_sandbox_process.clone().ok_or(
@@ -240,6 +294,10 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
                 .requires_network
                 .then(|| self.tool_call_http_egress.clone())
                 .flatten(),
+            runtime_secret_material_stager: plan
+                .requires_network
+                .then(|| self.runtime_secret_material_stager.clone())
+                .flatten(),
             process,
             secret_store: if plan.requires_secret {
                 self.secret_store.clone()
@@ -251,11 +309,48 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
                 plan.deployment,
                 plan.resolved_profile,
             ),
+            // The post-edit check spawns an operator command, but the edit
+            // plans it rides declare no process effect, so `process` above is
+            // the deployment-blind local port. Bundle the check with the port
+            // that matches the plan's process backend instead, so it runs in
+            // the tenant sandbox under hosted multi-tenant rather than escaping
+            // onto the shared provider host; disabled when no backend can run
+            // it in isolation.
+            post_edit_check: self.post_edit_check.clone().and_then(|config| {
+                self.post_edit_check_process(plan)
+                    .map(|process| PostEditCheckService { config, process })
+            }),
         })
     }
 }
 
+/// Whether the plan's process policy resolves process execution to the local
+/// host port for this resolver — the condition under which `resolve` hands
+/// `self.process` to a process-requiring plan such as `builtin.shell`.
+fn local_host_process_execution_permitted(plan: &ExecutionPlan) -> bool {
+    matches!(plan.process_backend, ProcessBackendKind::LocalHost)
+        && matches!(plan.deployment, DeploymentMode::LocalSingleUser)
+}
+
 impl LocalInvocationServicesResolver {
+    /// Select the process port the post-edit check must run through, matching
+    /// the plan's process-isolation boundary: the local host port only when
+    /// local host execution is permitted (`LocalSingleUser` + `LocalHost`), the
+    /// tenant sandbox port under a `TenantSandbox` backend. Returns `None`
+    /// (check disabled for this invocation) when no backend can run it in
+    /// isolation — this mirrors how `resolve` binds `process` for a declared
+    /// process effect, but fails soft because the check is advisory rather than
+    /// erroring like a process-requiring plan would.
+    fn post_edit_check_process(&self, plan: &ExecutionPlan) -> Option<Arc<dyn RuntimeProcessPort>> {
+        match plan.process_backend {
+            ProcessBackendKind::LocalHost if local_host_process_execution_permitted(plan) => {
+                Some(Arc::clone(&self.process))
+            }
+            ProcessBackendKind::TenantSandbox => self.tenant_sandbox_process.clone(),
+            _ => None,
+        }
+    }
+
     fn filesystem_for_plan(
         &self,
         plan: &ExecutionPlan,
@@ -430,6 +525,20 @@ impl RootFilesystem for MountScopedRootFilesystem {
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         let path = self.resolve(path, FilesystemOperation::Delete)?;
         self.root.delete(&path).await
+    }
+
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        // Review fix (PR #5749, round 3): this mount-scoping wrapper advertises
+        // the inner backend's capabilities verbatim (see `capabilities` above),
+        // so a mount that declares CAS delete must actually serve
+        // `delete_if_version` after the same permission resolution as `delete`,
+        // rather than falling through to the trait default `Unsupported`.
+        let path = self.resolve(path, FilesystemOperation::Delete)?;
+        self.root.delete_if_version(&path, expected_version).await
     }
 
     async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {

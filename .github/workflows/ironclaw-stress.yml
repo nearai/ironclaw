@@ -73,6 +73,12 @@ jobs:
 
       - name: Run nightly libsql bottleneck suite
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        # The suite-wide p95 ceiling must clear the model-tail case, which
+        # injects a synthetic 2.0s model wait by design — the previous 1500ms
+        # ceiling was structurally unsatisfiable and failed every nightly scan
+        # (the PR variant of this suite already runs with 3000ms). Per-case
+        # ceilings in ironclaw_stress would be the proper fix if the coarse
+        # global cap keeps biting.
         run: |
           mkdir -p target/ironclaw-stress
           cargo run -p ironclaw_stress --release -- \
@@ -86,7 +92,7 @@ jobs:
             --bottleneck-report \
             --output-jsonl target/ironclaw-stress/nightly-suite.jsonl \
             --max-failure-rate 0.02 \
-            --max-p95-ms 1500 \
+            --max-p95-ms 2500 \
             --max-rss-mb 1024 \
             > target/ironclaw-stress/nightly-suite-summary.json \
             2> target/ironclaw-stress/nightly-suite-report.txt
@@ -150,4 +156,177 @@ jobs:
           path: |
             target/ironclaw-stress/concurrency-ramp-summary.json
             target/ironclaw-stress/concurrency-ramp-report.txt
+          if-no-files-found: ignore
+
+  postgres-api-capacity:
+    name: hosted-single-tenant Postgres API capacity
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ironclaw_stress
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CARGO_PROFILE_RELEASE_DEBUG: 0
+      IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
+      IRONCLAW_REBORN_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/ironclaw_stress
+      IRONCLAW_REBORN_SECRET_MASTER_KEY: stress-ci-secret-master-key-0123456789abcdef
+      IRONCLAW_REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON: "true"
+      IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE: "32"
+      IRONCLAW_REBORN_RUNNER_WORKER_COUNT: "0"
+      IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_RUNS_PER_USER: "0"
+      IRONCLAW_REBORN_RUNNER_MAX_CONCURRENT_TRIGGER_RUNS: "0"
+      IRONCLAW_REBORN_WEBUI_TOKEN: stress-ci-webui-token-0123456789abcdef0123456789abcdef
+      IRONCLAW_REBORN_WEBUI_USER_ID: stress-ci-user
+      LLM_API_KEY: stress-ci-key
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install Node.js for WebUI bundle build
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        with:
+          node-version: "22"
+
+      - name: Enable pnpm
+        run: corepack enable pnpm
+
+      - name: Install WebUI frontend dependencies
+        run: |
+          cd crates/ironclaw_webui/frontend
+          pnpm install --frozen-lockfile
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: ironclaw-stress-postgres-api
+          save-if: ${{ github.event_name == 'schedule' }}
+
+      - name: Build hosted-single-tenant server and stress runner
+        run: |
+          cargo build --release \
+            --package ironclaw_reborn_cli \
+            --features postgres,inmemory-turn-state \
+            --bin ironclaw
+          cargo build --release --package ironclaw_stress
+
+      - name: Run hosted-single-tenant Postgres API capacity workload
+        run: |
+          set -euo pipefail
+          mkdir -p target/ironclaw-stress "$RUNNER_TEMP/ironclaw-reborn-home"
+          cat > "$RUNNER_TEMP/ironclaw-reborn-home/config.toml" <<'EOF'
+          api_version = "ironclaw.runtime/v1"
+
+          [boot]
+          profile = "hosted-single-tenant"
+
+          [identity]
+          default_owner = "stress-ci-user"
+          tenant = "stress-ci"
+          default_agent = "stress-ci-agent"
+
+          [storage]
+          backend = "postgres"
+          url_env = "IRONCLAW_REBORN_POSTGRES_URL"
+          secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
+          pool_max_size = 32
+
+          [runner]
+          worker_count = 0
+          max_concurrent_runs_per_user = 0
+          max_concurrent_trigger_runs = 0
+
+          [llm.default]
+          provider_id = "openai"
+          model = "stress-mock"
+          base_url = "http://127.0.0.1:19090/v1"
+          api_key_env = "LLM_API_KEY"
+          EOF
+
+          IRONCLAW_REBORN_HOME="$RUNNER_TEMP/ironclaw-reborn-home" \
+            target/release/ironclaw serve \
+              --host 127.0.0.1 \
+              --port 18080 \
+              > target/ironclaw-stress/postgres-api-server.log \
+              2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+
+          for _ in $(seq 1 120); do
+            if curl -fsS http://127.0.0.1:18080/api/health >/dev/null; then
+              break
+            fi
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              echo "ironclaw-reborn exited before becoming healthy" >&2
+              cat target/ironclaw-stress/postgres-api-server.log >&2 || true
+              exit 1
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:18080/api/health >/dev/null
+          for _ in $(seq 1 120); do
+            if curl -fsS \
+              -H "Authorization: Bearer $IRONCLAW_REBORN_WEBUI_TOKEN" \
+              http://127.0.0.1:18080/api/webchat/v2/session >/dev/null; then
+              break
+            fi
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              echo "ironclaw-reborn exited before WebUI API readiness" >&2
+              cat target/ironclaw-stress/postgres-api-server.log >&2 || true
+              exit 1
+            fi
+            sleep 1
+          done
+          curl -fsS \
+            -H "Authorization: Bearer $IRONCLAW_REBORN_WEBUI_TOKEN" \
+            http://127.0.0.1:18080/api/webchat/v2/session >/dev/null
+
+          target/release/ironclaw_stress \
+            --backend libsql \
+            --scenario api-user-capacity \
+            --api-base-url http://127.0.0.1:18080 \
+            --api-admin-bearer-token "$IRONCLAW_REBORN_WEBUI_TOKEN" \
+            --api-admin-provisioners 4 \
+            --users 100 \
+            --concurrency 25 \
+            --operations 1 \
+            --api-read-qps-per-user 1 \
+            --api-read-workers 25 \
+            --api-read-mix list_threads=50,timeline=45,session=5 \
+            --mock-llm-bind 127.0.0.1:19090 \
+            --mock-llm-latency-ms 3000 \
+            --progress-interval-seconds 0 \
+            --human-read \
+            --bottleneck-report \
+            --output-jsonl target/ironclaw-stress/postgres-api-capacity.jsonl \
+            --max-failure-rate 0.01 \
+            --max-p95-ms 7000 \
+            > target/ironclaw-stress/postgres-api-capacity-summary.json \
+            2> target/ironclaw-stress/postgres-api-capacity-report.txt
+
+      - name: Upload Postgres API capacity artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ironclaw-stress-postgres-api-capacity
+          path: |
+            target/ironclaw-stress/postgres-api-server.log
+            target/ironclaw-stress/postgres-api-capacity.jsonl
+            target/ironclaw-stress/postgres-api-capacity-summary.json
+            target/ironclaw-stress/postgres-api-capacity-report.txt
           if-no-files-found: ignore

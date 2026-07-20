@@ -307,12 +307,10 @@ where
         };
 
         let output_bytes = output.stdout.len() as u64;
-        let usage = ResourceUsage {
-            wall_clock_ms: output.wall_clock_ms,
-            output_bytes,
-            process_count: 1,
-            ..ResourceUsage::default()
-        };
+        let usage = ResourceUsage::default()
+            .set_wall_clock_ms(output.wall_clock_ms)
+            .set_output_bytes(output_bytes)
+            .set_process_count(1);
         let receipt = governor.reconcile(reservation.id, usage.clone())?;
         Ok(ScriptExecutionResult {
             result: CapabilityHostResult {

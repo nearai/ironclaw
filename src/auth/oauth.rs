@@ -24,11 +24,10 @@ use crate::secrets::{CreateSecretParams, SecretsStore};
 
 // ── Shared callback server ──────────────────────────────────────────────
 
-// Core OAuth callback infrastructure lives in the standalone `ironclaw_oauth`
-// crate so non-LLM OAuth flows (WASM tools, MCP, NEAR AI session login) don't
-// have to depend on `ironclaw_llm` for transport. Re-exported here so existing
-// `crate::auth::oauth::...` call sites continue to compile.
-pub use ironclaw_oauth::{
+// Core OAuth callback infrastructure lives in `ironclaw_auth::oauth` after the
+// W2.1 fold. Re-exported here so existing `crate::auth::oauth::...` call sites
+// continue to compile while v1 remains alive.
+pub use ironclaw_auth::oauth::{
     OAUTH_CALLBACK_PORT, OAuthCallbackError, bind_callback_listener, callback_host, callback_url,
     is_loopback_host, landing_html, wait_for_callback,
 };

@@ -146,6 +146,9 @@ async fn convert_routine(
         source: TriggerSourceKind::Schedule,
         schedule,
         prompt,
+        // v1 routines have no per-trigger delivery routing; migrated triggers
+        // use the creator's outbound delivery preference like before.
+        delivery_target: None,
         state,
         next_run_at: now,
         last_run_at: routine.last_run_at,
@@ -402,6 +405,8 @@ async fn convert_mission(
                             name: mission.name.clone(),
                             source: TriggerSourceKind::Schedule,
                             schedule,
+                            // v1 missions have no per-trigger delivery routing.
+                            delivery_target: None,
                             prompt: if mission.goal.trim().is_empty() {
                                 mission.name.clone()
                             } else {

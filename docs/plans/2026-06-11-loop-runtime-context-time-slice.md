@@ -4,7 +4,7 @@
 **Status:** approved design
 **Parent plan:** `docs/plans/2026-06-01-4149-capability-scoped-runtime-context.md` (PR #4304)
 **Issue:** #4149
-**Scope:** Reborn loop only (`ironclaw_turns` / `ironclaw_agent_loop` / `ironclaw_reborn`)
+**Scope:** Reborn loop only (`ironclaw_turns` / `ironclaw_agent_loop` / `ironclaw_runner`)
 
 ## Goal
 
@@ -107,7 +107,7 @@ tracked separately in issue #4798 rather than folded into this slice.
 - `HostManagedLoopPromptPort` gains `with_runtime_context(LoopRuntimeContext)`
   (same builder-method style as `with_safety_context`). When set, it is
   attached to every `InstructionBundleRequest` the port builds.
-- `crates/ironclaw_reborn/src/loop_driver_host.rs` stamps the context at loop
+- `crates/ironclaw_runner/src/loop_driver_host.rs` stamps the context at loop
   spawn (this is the single place wall-clock is read) and passes it into the
   prompt port. Resume-after-pause restamps — "loop start" means this
   execution, not the original turn submission.
@@ -137,7 +137,7 @@ tracked separately in issue #4798 rather than folded into this slice.
   - Invalid IANA names are rejected at the producer boundary (no runtime fallback test needed; the type prevents construction).
 - `prompt.rs` (`HostManagedLoopPromptPort`) test: `with_runtime_context`
   attaches the section to built bundles.
-- Caller-path test in `ironclaw_reborn` model gateway tests: the final model
+- Caller-path test in `ironclaw_runner` model gateway tests: the final model
   request for a real loop contains the runtime section (parent plan's
   requirement that context is proven through the caller path, not just the
   helper — see `.claude/rules/testing.md`).

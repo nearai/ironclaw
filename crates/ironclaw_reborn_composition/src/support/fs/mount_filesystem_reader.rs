@@ -5,7 +5,7 @@
 //! Files" viewer calls to navigate the agent's internal filesystem (persistent
 //! memory + project working files, which include landed attachments). It reads
 //! through a single read-only [`ScopedFilesystem`] whose mount view spans every
-//! browsable alias (see [`browse_mount_view`](crate::local_dev_mounts)). A
+//! browsable alias (see [`scoped_browse_mount_view`](crate::local_dev_mounts)). A
 //! [`FsMount`] selects which alias to confine to; paths in and out are
 //! mount-relative so neither an alias nor a host path crosses the boundary.
 //!
@@ -249,7 +249,7 @@ mod tests {
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
         AgentId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
-        TenantId, UserId, VirtualPath,
+        ScopedPath, TenantId, UserId, VirtualPath,
     };
 
     fn browse_fs() -> Arc<ScopedFilesystem<InMemoryBackend>> {
@@ -305,6 +305,13 @@ mod tests {
         }
     }
 
+    fn user_scope(user_id: &str) -> ResourceScope {
+        ResourceScope {
+            user_id: UserId::new(user_id).unwrap(),
+            ..scope()
+        }
+    }
+
     #[tokio::test]
     async fn available_mounts_excludes_unwired_skills() {
         let reader = MountScopedFilesystemReader::new(browse_fs());
@@ -346,6 +353,56 @@ mod tests {
         assert_eq!(file.bytes, b"# notes");
         assert_eq!(file.path, "daily/today.md");
         assert_eq!(file.filename.as_deref(), Some("today.md"));
+    }
+
+    #[tokio::test]
+    async fn memory_browse_is_scoped_to_requesting_user() {
+        let root = Arc::new(InMemoryBackend::new());
+        let reader = MountScopedFilesystemReader::new(Arc::new(ScopedFilesystem::new(
+            Arc::clone(&root),
+            crate::local_dev_mounts::scoped_browse_mount_view,
+        )));
+        let alice = user_scope("alice");
+        let bob = user_scope("bob");
+
+        root.write_file(
+            &VirtualPath::new(
+                "/memory/tenants/tenant-test/users/alice/agents/agent-test/projects/_none/private-poem.md",
+            )
+            .unwrap(),
+            b"alice-only poem",
+        )
+        .await
+        .expect("seed alice memory");
+
+        let alice_entries = reader
+            .list_dir(&alice, FsMount::Memory, "")
+            .await
+            .expect("list alice memory");
+        assert!(
+            alice_entries
+                .iter()
+                .any(|entry| entry.name == "private-poem.md"),
+            "Alice should see her own memory document: {alice_entries:?}"
+        );
+
+        let bob_entries = reader
+            .list_dir(&bob, FsMount::Memory, "")
+            .await
+            .expect("list bob memory");
+        assert!(
+            !bob_entries
+                .iter()
+                .any(|entry| entry.name == "private-poem.md"),
+            "Bob must not see Alice's memory document: {bob_entries:?}"
+        );
+        assert_eq!(
+            reader
+                .read_file(&bob, FsMount::Memory, "private-poem.md")
+                .await
+                .expect_err("Bob must not read Alice's memory"),
+            ProjectFsError::NotFound
+        );
     }
 
     #[tokio::test]

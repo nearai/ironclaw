@@ -1,6 +1,10 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -10,8 +14,8 @@ use ironclaw_event_projections::{
     ProjectionScope as EventProjectionScope,
 };
 use ironclaw_event_streams::{
-    InMemoryProjectionUpdateSource, ProductProjectionEnvelope, ThreadLiveProjectionItem,
-    ThreadLiveProjectionUpdate, ThreadLiveWorkSummaryPhase,
+    InMemoryProjectionUpdateSource, ProductProjectionEnvelope, ProjectionStreamError,
+    ThreadLiveProjectionItem, ThreadLiveProjectionUpdate, ThreadLiveWorkSummaryPhase,
 };
 use ironclaw_events::{EventCursor, EventStreamKey, ReadScope, sanitize_error_summary};
 use ironclaw_first_party_extension_ports::{SkillActivationObservedEvent, SkillActivationObserver};
@@ -19,7 +23,8 @@ use ironclaw_host_api::{CapabilityId, ExtensionId, InvocationId, RuntimeKind, Us
 use ironclaw_product_adapters::{
     CapabilityActivityStatusView, CapabilityActivityView, CapabilityActivityViewInput,
     PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
-    PROJECTION_SKILL_NAME_MAX_BYTES, ProductProjectionItem, ProductWorkSummaryPhase,
+    PROJECTION_SKILL_NAME_MAX_BYTES, PROJECTION_TEXT_MAX_BYTES, ProductProjectionItem,
+    ProductWorkSummaryPhase,
 };
 use ironclaw_turns::{
     TurnRunId, TurnScope,
@@ -35,10 +40,12 @@ use ironclaw_turns::{
 // same live broadcast would put low append-log cursors and high synthetic
 // cursors behind the same `last_delivered_cursor` ordering gate.
 const LIVE_PROGRESS_CURSOR_BASE: u64 = 1 << 62;
+const LIVE_TEXT_COALESCE_WINDOW: Duration = Duration::from_millis(75);
 
 pub(super) struct LiveProgressMilestoneSink {
     inner: Arc<dyn LoopHostMilestoneSink>,
     publisher: Arc<LiveProjectionPublisher>,
+    text_coalescer: Arc<LiveTextProjectionCoalescer>,
 }
 
 #[derive(Debug)]
@@ -52,6 +59,31 @@ pub(crate) struct LiveProjectionPublisher {
     // Shared by publishers from the same projection services so live cursors
     // stay monotonic across progress, skill, and other projection updates.
     next_sequence: Arc<AtomicU64>,
+    no_active_subscriber_logged: AtomicBool,
+}
+
+struct LiveTextProjectionCoalescer {
+    publisher: Arc<LiveProjectionPublisher>,
+    next_generation: AtomicU64,
+    // State mutation and channel publication are separate critical sections.
+    // This guard preserves their relative order without holding `states` while
+    // the broadcast source wakes subscribers.
+    publication_order: Mutex<()>,
+    states: Mutex<HashMap<TurnRunId, LiveTextProjectionState>>,
+}
+
+struct LiveTextProjectionState {
+    generation: u64,
+    last_published_at: tokio::time::Instant,
+    pending: Option<PendingTextProjection>,
+    timer_scheduled: bool,
+}
+
+struct PendingTextProjection {
+    owner: Option<UserId>,
+    scope: TurnScope,
+    run_id: TurnRunId,
+    body: String,
 }
 
 impl std::fmt::Debug for LiveProjectionPublisher {
@@ -68,7 +100,11 @@ impl LiveProgressMilestoneSink {
         inner: Arc<dyn LoopHostMilestoneSink>,
         publisher: Arc<LiveProjectionPublisher>,
     ) -> Self {
-        Self { inner, publisher }
+        Self {
+            inner,
+            text_coalescer: Arc::new(LiveTextProjectionCoalescer::new(Arc::clone(&publisher))),
+            publisher,
+        }
     }
 }
 
@@ -88,6 +124,7 @@ impl LiveProjectionPublisher {
             update_source,
             actor_user_id,
             next_sequence,
+            no_active_subscriber_logged: AtomicBool::new(false),
         }
     }
 
@@ -111,14 +148,30 @@ impl LiveProjectionPublisher {
             thread_id: scope.thread_id.clone(),
             items: vec![item],
         };
-        if let Err(error) = self
+        match self
             .update_source
             .publish(ProductProjectionEnvelope::ThreadLiveUpdate(update))
         {
-            tracing::debug!(
-                error = %error,
-                "failed to publish live progress projection"
-            );
+            Ok(_) => {
+                self.no_active_subscriber_logged
+                    .store(false, Ordering::Relaxed);
+            }
+            Err(ProjectionStreamError::Source) => {
+                if !self
+                    .no_active_subscriber_logged
+                    .swap(true, Ordering::Relaxed)
+                {
+                    tracing::debug!(
+                        "live progress projection buffered without an active subscriber"
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::debug!(
+                    error = %error,
+                    "failed to publish live progress projection"
+                );
+            }
         }
     }
 
@@ -128,7 +181,6 @@ impl LiveProjectionPublisher {
     /// the in-run [`SkillActivationObserver`] only fires at prompt-build for
     /// skill *selection*, so a learned-skill notification has no producer
     /// otherwise. Best-effort — drops silently if names/feedback sanitize empty.
-    #[cfg(feature = "root-llm-provider")]
     pub(crate) fn publish_skill_learned(
         &self,
         owner: Option<&UserId>,
@@ -191,6 +243,138 @@ impl LiveProjectionPublisher {
     }
 }
 
+impl LiveTextProjectionCoalescer {
+    fn new(publisher: Arc<LiveProjectionPublisher>) -> Self {
+        Self {
+            publisher,
+            next_generation: AtomicU64::new(0),
+            publication_order: Mutex::new(()),
+            states: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn submit(self: &Arc<Self>, projection: PendingTextProjection) {
+        // ModelTextDelta carries the full cumulative assistant text, so an
+        // intermediate replacement is redundant. Keep this policy here rather
+        // than in the generic stream manager, whose other items are lossless.
+        let run_id = projection.run_id;
+        let mut timer = None;
+        let mut publish_projection = None;
+        {
+            let _publication_order = self.lock_publication_order();
+            {
+                let mut states = self.lock_states();
+                match states.get_mut(&run_id) {
+                    Some(state) => {
+                        state.pending = Some(projection);
+                        if !state.timer_scheduled {
+                            state.timer_scheduled = true;
+                            timer = Some((
+                                state.generation,
+                                state.last_published_at + LIVE_TEXT_COALESCE_WINDOW,
+                            ));
+                        }
+                    }
+                    None => {
+                        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
+                        states.insert(
+                            run_id,
+                            LiveTextProjectionState {
+                                generation,
+                                last_published_at: tokio::time::Instant::now(),
+                                pending: None,
+                                timer_scheduled: false,
+                            },
+                        );
+                        publish_projection = Some(projection);
+                    }
+                }
+            }
+            if let Some(projection) = publish_projection.take() {
+                self.publish(projection);
+            }
+        }
+
+        if let Some((generation, deadline)) = timer {
+            let coalescer = Arc::clone(self);
+            tokio::spawn(async move {
+                tokio::time::sleep_until(deadline).await;
+                coalescer.flush_timer(run_id, generation);
+            });
+        }
+    }
+
+    fn flush_boundary(&self, run_id: TurnRunId) {
+        let _publication_order = self.lock_publication_order();
+        let projection = {
+            let mut states = self.lock_states();
+            states.remove(&run_id).and_then(|state| state.pending)
+        };
+        if let Some(projection) = projection {
+            self.publish(projection);
+        }
+    }
+
+    fn flush_timer(&self, run_id: TurnRunId, generation: u64) {
+        let _publication_order = self.lock_publication_order();
+        let projection = {
+            let mut states = self.lock_states();
+            let Some(state) = states.get_mut(&run_id) else {
+                return;
+            };
+            if state.generation != generation {
+                return;
+            }
+
+            state.timer_scheduled = false;
+            let projection = state.pending.take();
+            if projection.is_some() {
+                state.last_published_at = tokio::time::Instant::now();
+            }
+            projection
+        };
+        if let Some(projection) = projection {
+            self.publish(projection);
+        }
+    }
+
+    fn publish(&self, projection: PendingTextProjection) {
+        let sequence = self.publisher.next_live_sequence();
+        self.publisher.publish_live_item(
+            projection.owner.as_ref(),
+            &projection.scope,
+            sequence,
+            ThreadLiveProjectionItem::Text {
+                id: text_id(projection.run_id),
+                run_id: projection.run_id,
+                body: projection.body,
+            },
+        );
+    }
+
+    fn lock_states(&self) -> MutexGuard<'_, HashMap<TurnRunId, LiveTextProjectionState>> {
+        match self.states.lock() {
+            Ok(states) => states,
+            Err(poisoned) => {
+                tracing::debug!("live text projection coalescer lock recovered after panic");
+                self.states.clear_poison();
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    fn lock_publication_order(&self) -> MutexGuard<'_, ()> {
+        match self.publication_order.lock() {
+            Ok(order) => order,
+            Err(poisoned) => {
+                tracing::debug!("live text projection publication lock recovered after panic");
+                self.publication_order.clear_poison();
+                poisoned.into_inner()
+            }
+        }
+    }
+}
+
 pub(super) fn product_items_for_live_update(
     display_previews: &dyn super::display_preview::CapabilityDisplayPreviewSource,
     update: &ThreadLiveProjectionUpdate,
@@ -199,6 +383,13 @@ pub(super) fn product_items_for_live_update(
         .items
         .iter()
         .filter_map(|item| match item {
+            ThreadLiveProjectionItem::Text { id, run_id, body } => {
+                Some(ProductProjectionItem::Text {
+                    id: id.clone(),
+                    run_id: Some(*run_id),
+                    body: body.clone(),
+                })
+            }
             ThreadLiveProjectionItem::Thinking { id, run_id, body } => {
                 Some(ProductProjectionItem::Thinking {
                     id: id.clone(),
@@ -285,6 +476,21 @@ fn live_work_summary_phase_to_product_phase(
 }
 
 impl LiveProgressMilestoneSink {
+    fn publish_text_delta(&self, milestone: &LoopHostMilestone, safe_text: &str) {
+        // The model port already sanitizes chunks before milestone emission.
+        // Re-sanitize and bound here because this path is browser-facing.
+        let body = sanitize_bounded_projection_text(safe_text, PROJECTION_TEXT_MAX_BYTES);
+        if body.is_empty() {
+            return;
+        }
+        self.text_coalescer.submit(PendingTextProjection {
+            owner: milestone.actor.as_ref().map(|actor| actor.user_id.clone()),
+            scope: milestone.scope.clone(),
+            run_id: milestone.run_id,
+            body,
+        });
+    }
+
     fn publish_reasoning_delta(&self, milestone: &LoopHostMilestone, safe_delta: &str) {
         // The delta is already model-visible sanitized upstream. Re-sanitize at
         // the product projection boundary so this publish path has its own
@@ -417,7 +623,16 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
         milestone: LoopHostMilestone,
     ) -> Result<(), AgentLoopHostError> {
         self.inner.publish_loop_milestone(milestone.clone()).await?;
+        if !matches!(
+            &milestone.kind,
+            LoopHostMilestoneKind::ModelTextDelta { .. }
+        ) {
+            self.text_coalescer.flush_boundary(milestone.run_id);
+        }
         match &milestone.kind {
+            LoopHostMilestoneKind::ModelTextDelta { safe_text } => {
+                self.publish_text_delta(&milestone, safe_text);
+            }
             LoopHostMilestoneKind::ModelReasoningDelta { safe_delta } => {
                 self.publish_reasoning_delta(&milestone, safe_delta);
             }
@@ -521,6 +736,10 @@ fn thinking_id(run_id: TurnRunId, sequence: u64) -> String {
     format!("thinking:{run_id}:{sequence}")
 }
 
+fn text_id(run_id: TurnRunId) -> String {
+    format!("text:{run_id}")
+}
+
 fn work_summary_id(run_id: TurnRunId, sequence: u64) -> String {
     format!("work-summary:{run_id}:{sequence}")
 }
@@ -540,6 +759,18 @@ fn sanitize_bounded_model_visible_text(value: &str, max_bytes: usize) -> String 
         end -= 1;
     }
     trimmed[..end].trim_end().to_string()
+}
+
+fn sanitize_bounded_projection_text(value: &str, max_bytes: usize) -> String {
+    let sanitized = sanitize_model_visible_text(value);
+    if sanitized.len() <= max_bytes {
+        return sanitized;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !sanitized.is_char_boundary(end) {
+        end -= 1;
+    }
+    sanitized[..end].to_string()
 }
 
 fn driver_note_kind_to_live_work_summary_phase(

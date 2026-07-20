@@ -129,11 +129,31 @@ Use `--scenario` for a single workload.
 | `reserve-release` | Resource governor reserve/release pressure. |
 | `reserve-reconcile` | Resource governor reserve/reconcile/release pressure. |
 | `chat-turn` | One realistic user turn with thread writes, turn state, assistant write, and context load. |
+| `turn-lifecycle-churn` | Turn-state-only submit/claim/complete churn for terminal-run cache and RSS checks. |
 | `mixed-user-session` | Realistic user turn with configurable synthetic or provider-backed model latency. |
 | `context-growth` | Sequentially grows history, then loads context to expose context read amplification. |
 | `tool-session` | Realistic turn with synthetic tool calls, tool previews, tool results, and optional tool wait/failure paths. |
+| `api-user-capacity` | End-to-end WebUI API send/read pressure against a running Reborn server. |
 | `cpu-burn` | Process-local CPU pressure control. |
 | `memory-churn` | Process-local allocation/RSS pressure control. |
+
+`api-user-capacity` can use either pre-minted users from `--api-users-jsonl`,
+a shared bearer via `--api-bearer-token`, or real per-user provisioning through
+the WebUI admin surface:
+
+```bash
+cargo run -p ironclaw_stress -- \
+  --backend postgres \
+  --scenario api-user-capacity \
+  --api-base-url http://127.0.0.1:3900 \
+  --api-admin-bearer-token "$IRONCLAW_REBORN_WEBUI_BEARER_TOKEN" \
+  --api-admin-provisioners 4 \
+  --users 100 \
+  --concurrency 100 \
+  --operations 1 \
+  --api-read-qps-per-user 2 \
+  --mock-llm-bind 127.0.0.1:3911
+```
 
 ## Presets
 

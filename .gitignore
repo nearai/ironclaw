@@ -26,6 +26,7 @@ integrations/abound/tests/source_env_vars.sh
 # Sidecar tool data
 .sidecar/
 .todos/
+.tmp/
 
 target/
 
@@ -65,10 +66,6 @@ trace_*.json
 # root they land in ./attachments/. These are user uploads, never source.
 /attachments/
 
-# Generated WebUI v2 bundle. Cargo builds and embeds this from OUT_DIR when
-# `webui-v2-beta` is enabled; the reviewable source lives under static/js/.
-/crates/ironclaw_webui_v2_static/static/dist/
-
 # Python cache
 __pycache__/
 *.pyc
@@ -90,3 +87,15 @@ tests/fixtures/llm_traces/live/*.log
 # Rebuilt from code via the codebase-memory MCP; per-environment, never committed.
 # See CLAUDE.md -> "Code Discovery".
 .codebase-memory/
+
+# test-tools fixture-bundle build artifacts — regenerate with
+# scripts/build-test-tools.sh; only sources/manifests/schemas/prompts are tracked.
+test-tools/*.zip
+test-tools/*/wasm-src/target/
+
+# node_modules must never be committed — vendored JS deps belong to the package
+# manager + lockfile, not git. A bare `node_modules/` (no leading slash) matches
+# a directory of that name at ANY depth, so this catches every frontend
+# (webui_v2, e2e, tooling, …) and stops the recurring accidental adds
+# (#6298/#6305).
+node_modules/

@@ -58,8 +58,8 @@ def _route_keywords(path: str) -> tuple[str, ...]:
 
 
 def browser_routes(repo_root: Path) -> list[Surface]:
-    app_js = repo_root / "crates/ironclaw_webui_v2_static/static/js/app/app.js"
-    route_re = re.compile(r"<\$\{Route\}\s+path=\"([^\"]+)\"")
+    app_js = repo_root / "crates/ironclaw_webui/frontend/src/app/app.tsx"
+    route_re = re.compile(r"<Route\s+path=\"([^\"]+)\"")
     surfaces: list[Surface] = []
     for route in route_re.findall(_read(app_js)):
         if route in {"*", "/"}:
@@ -67,7 +67,7 @@ def browser_routes(repo_root: Path) -> list[Surface]:
         surfaces.append(
             Surface(
                 kind="webui_browser_route",
-                identifier=f"/v2/{route.lstrip('/')}",
+                identifier=f"/{route.lstrip('/')}",
                 source=str(app_js.relative_to(repo_root)),
                 keywords=_route_keywords(route),
             )
@@ -143,7 +143,7 @@ def _api_keywords(name: str, pattern: str) -> tuple[str, ...]:
 def api_surfaces(repo_root: Path) -> list[Surface]:
     return [
         *_descriptor_patterns(
-            repo_root / "crates/ironclaw_webui_v2/src/descriptors.rs",
+            repo_root / "crates/ironclaw_webui/src/webui_v2/descriptors.rs",
             kind="webui_api_pattern",
             repo_root=repo_root,
         ),

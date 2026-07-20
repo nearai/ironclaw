@@ -1,10 +1,10 @@
 //! Durable storage adapters for Reborn OpenAI-compatible refs.
 //!
-//! This crate keeps persistence behind the
+//! This module keeps persistence behind the
 //! [`OpenAiCompatRefStore`](crate::OpenAiCompatRefStore)
-//! port. The OpenAI-compatible contract crate stays side-effect free; Reborn
-//! composition can choose this filesystem-backed adapter when wiring concrete
-//! route behavior.
+//! port. Contract-only consumers keep the default feature set; Reborn
+//! composition enables `storage` when it needs the filesystem-backed adapter for
+//! concrete route behavior.
 
 use std::sync::Arc;
 
@@ -171,8 +171,10 @@ impl FilesystemOpenAiCompatRefStore {
     }
 
     async fn delete_mapping_best_effort(&self, public_id: &OpenAiCompatPublicId) {
-        if let Ok(path) = self.mapping_path(public_id) {
-            let _ = self.filesystem.delete(&path).await;
+        if let Ok(path) = self.mapping_path(public_id)
+            && let Err(error) = self.filesystem.delete(&path).await
+        {
+            tracing::debug!(?error, "best-effort mapping file cleanup failed");
         }
     }
 

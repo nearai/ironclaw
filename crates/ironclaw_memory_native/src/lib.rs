@@ -6,7 +6,7 @@
 
 mod backend;
 mod chunking;
-#[cfg(any(test, feature = "contract-tests"))]
+#[cfg(any(test, feature = "test-support"))]
 pub mod contract_tests;
 mod embedding;
 mod events;

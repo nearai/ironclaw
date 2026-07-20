@@ -6,6 +6,9 @@ rust-version.workspace = true
 description = "First-class Project entity, membership, and access control for IronClaw Reborn"
 publish = false
 
+[package.metadata.ironclaw]
+layer = "substrates"
+
 [dependencies]
 async-trait = "0.1"
 base64 = "0.22"

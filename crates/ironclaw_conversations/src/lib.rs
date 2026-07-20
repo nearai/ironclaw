@@ -37,7 +37,8 @@ pub use traits::{
 };
 pub use types::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
-    AcceptedInboundMessageReplay, ConversationBindingResolution, ConversationRouteKind,
+    AcceptedInboundMessageReplay, ConditionalUnpairOutcome, ConversationBindingResolution,
+    ConversationRouteKind, ExpectedExternalActorOwner, ExternalActorBindingEpoch,
     InboundTurnRequest, InboundTurnResponse, LinkConversationRequest, LinkedConversationBinding,
     MessageIdempotencyStatus, ReplyTargetBinding, ResolveConversationRequest, ThreadAccessDecision,
     ThreadMessageRecord, ValidateReplyTargetRequest,

@@ -5,9 +5,9 @@ hooks across the Reborn loop. It does not own:
 
 - The runner-facing `AgentLoopDriver` trait — that stays in `ironclaw_turns`.
 - The concrete `LoopCapabilityPort` / `LoopPromptPort` / `LoopModelPort` impls —
-  those stay in `ironclaw_loop_support` and `ironclaw_reborn`.
+  those stay in `ironclaw_loop_host` and `ironclaw_runner`.
 - The Reborn-side middleware composition that wraps host ports — that lives in
-  `ironclaw_reborn::loop_driver_host` and consumes types from this crate.
+  `ironclaw_runner::loop_driver_host` and consumes types from this crate.
 - Extension bundle loading and installation. Installed-tier WASM hooks execute
   here once their module bytes are resolved, but the extension installer remains
   the authority for sourcing those bytes.
@@ -17,7 +17,7 @@ hooks across the Reborn loop. It does not own:
 ```
 ironclaw_turns       -> no dependency on ironclaw_hooks
 ironclaw_hooks       -> depends on ironclaw_turns + ironclaw_host_api
-ironclaw_reborn      -> depends on ironclaw_hooks for host composition (follow-up)
+ironclaw_runner      -> depends on ironclaw_hooks for host composition (follow-up)
 ironclaw_engine      -> no hook ownership; optional future driver consumer
 ```
 
@@ -65,7 +65,7 @@ type-level fact that an `Installed`-tier installer cannot accept a
 `PrivilegedBeforeCapabilityHook`.
 
 What the type system **does not** enforce is *origin*. If loader code inside
-`ironclaw_reborn` (or any other internal crate) reads a hook from the
+`ironclaw_runner` (or any other internal crate) reads a hook from the
 extension registry and accidentally routes it through
 `install_builtin_before_capability`, the trust-class ↔ impl-tier pairing at
 the registry-binding boundary breaks — the dispatcher will happily install
@@ -180,7 +180,7 @@ call sites should reach for `with_hook_dispatcher_factory` for real per-run
 isolation.
 
 Cross-run isolation is regression-tested in
-`crates/ironclaw_reborn/tests/hooks_integration.rs`:
+`crates/ironclaw_runner/tests/hooks_integration.rs`:
 `per_build_dispatcher_state_does_not_leak_across_runs` installs a panicking
 hook and proves that the inner port still never receives the call on build
 2 (because the fresh dispatcher's slot is un-poisoned and re-applies the

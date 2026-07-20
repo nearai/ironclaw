@@ -9,11 +9,10 @@ use super::PostgresRootFilesystem;
 use super::{
     ApprovalRequestStore, AuditSink, CapabilityLeaseStore, CoalescingEventSink, DurableAuditLog,
     DurableAuditSink, DurableEventLog, DurableEventSink, EffectiveRuntimePolicy, EventBatchConfig,
-    EventSink, FilesystemApprovalRequestStore, FilesystemResourceGovernorStore,
-    FilesystemRunStateStore, FilesystemTurnStateStore, FirstPartyCapabilityRegistry,
-    HostRuntimeServices, McpExecutor, NetworkHttpEgress, PersistentResourceGovernor,
-    ProcessBackendKind, ProcessExecutor, ProcessObligationLifecycleStore, ProcessResultStore,
-    ProcessStore, ProductionComponentType, ProductionImplementationReadiness,
+    EventSink, FilesystemApprovalRequestStore, FilesystemResourceGovernor, FilesystemRunStateStore,
+    FilesystemTurnStateStore, FirstPartyCapabilityRegistry, HostRuntimeServices, McpExecutor,
+    NetworkHttpEgress, ProcessBackendKind, ProcessExecutor, ProcessObligationLifecycleStore,
+    ProcessResultStore, ProcessStore, ProductionComponentType, ProductionImplementationReadiness,
     ProductionWiringComponent, ProductionWiringIssueKind, ProductionWiringReport,
     RebornEventStoreConfig, RebornEventStoreError, RebornEventStores, RebornProfile,
     ResourceGovernor, RootFilesystem, RunProfileResolver, RunStateApprovalStore, RunStateStore,
@@ -25,7 +24,7 @@ use super::{
     build_reborn_event_stores, production_wiring_report, set_runtime_http_egress,
     set_tool_call_http_egress,
 };
-use crate::LocalHostProcessPort;
+use crate::HostProcessPort;
 use crate::RuntimeHttpBodyStore;
 use crate::http_body::UnsupportedRuntimeHttpBodyStore;
 use crate::wasm_credentials::SharedHostWasmRuntimeCredentials;
@@ -84,6 +83,7 @@ where
             run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
+            post_edit_check,
             mut component_types,
         } = self;
         component_types.filesystem = ProductionComponentType::of::<T>();
@@ -128,6 +128,7 @@ where
             run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
+            post_edit_check,
             component_types,
         }
     }
@@ -193,6 +194,7 @@ where
             run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
+            post_edit_check,
             mut component_types,
         } = self;
         let lifecycle_governor: Arc<dyn ResourceGovernor> = governor.clone();
@@ -247,30 +249,24 @@ where
             run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
+            post_edit_check,
             component_types,
         }
     }
 
-    /// Replace the in-memory governor with a filesystem-backed
-    /// [`PersistentResourceGovernor`] over the supplied
-    /// [`ScopedFilesystem`]. Backend choice (libSQL, Postgres, in-memory,
-    /// local disk) is a property of the underlying
-    /// [`RootFilesystem`](ironclaw_filesystem::RootFilesystem); see
-    /// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+    /// Replace the in-memory governor with the journaled filesystem-backed
+    /// [`FilesystemResourceGovernor`] over the supplied [`ScopedFilesystem`].
+    /// Backend choice (libSQL, Postgres, in-memory, local disk) is a property
+    /// of the underlying [`RootFilesystem`](ironclaw_filesystem::RootFilesystem);
+    /// see `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
     pub fn with_filesystem_resource_governor<FsBackend>(
         self,
         scoped_filesystem: Arc<ScopedFilesystem<FsBackend>>,
-    ) -> HostRuntimeServices<
-        F,
-        PersistentResourceGovernor<FilesystemResourceGovernorStore<FsBackend>>,
-        S,
-        R,
-    >
+    ) -> HostRuntimeServices<F, FilesystemResourceGovernor<FsBackend>, S, R>
     where
         FsBackend: RootFilesystem + 'static,
     {
-        let store = FilesystemResourceGovernorStore::new(scoped_filesystem);
-        self.with_resource_governor(Arc::new(PersistentResourceGovernor::new(store)))
+        self.with_resource_governor(Arc::new(FilesystemResourceGovernor::new(scoped_filesystem)))
     }
 
     pub fn resource_governor(&self) -> Arc<G> {
@@ -736,6 +732,15 @@ where
         self
     }
 
+    /// Configure the operator post-edit check appended to successful
+    /// `builtin.write_file` / `builtin.apply_patch` output. Composition
+    /// resolves the config once (see `PostEditCheckConfig::from_env`) and
+    /// threads it here; the feature stays off when this is never called.
+    pub fn with_post_edit_check(mut self, post_edit_check: crate::PostEditCheckConfig) -> Self {
+        self.post_edit_check = Some(post_edit_check);
+        self
+    }
+
     pub fn with_runtime_process_port_dyn(
         mut self,
         process_port: Arc<dyn RuntimeProcessPort>,
@@ -826,15 +831,15 @@ where
             return;
         }
         self.component_types.runtime_process_port =
-            ProductionComponentType::of::<LocalHostProcessPort>();
+            ProductionComponentType::of::<HostProcessPort>();
         self.process_port = if matches!(policy.secret_mode, SecretMode::InheritedEnv) {
             tracing::warn!(
                 host_access = "full-local",
                 "runtime policy selected inherited local host process environment"
             );
-            Arc::new(LocalHostProcessPort::new_inherited_env())
+            Arc::new(HostProcessPort::new_inherited_env())
         } else {
-            Arc::new(LocalHostProcessPort::new())
+            Arc::new(HostProcessPort::new())
         };
     }
 
