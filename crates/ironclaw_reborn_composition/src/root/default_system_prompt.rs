@@ -5,6 +5,9 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
 use async_trait::async_trait;
 use ironclaw_loop_host::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
@@ -17,6 +20,7 @@ use ironclaw_turns::{
 
 const DEFAULT_SYSTEM_PROMPT_NAME: &str = "SYSTEM.md";
 const DEFAULT_SYSTEM_PROMPT_EMBEDDED: &str = include_str!("../../assets/prompts/default-system.md");
+const DEFAULT_SYSTEM_PROMPT_LANGUAGE_POLICY: &str = "- Respond in the same language as the user's current message unless they explicitly request another language.\n";
 /// Progressive tool-disclosure protocol, appended to the system prompt only when
 /// disclosure is active (bridged mode). A weak model will not adopt the
 /// search/describe/call protocol from the `tool_search` tool description alone —
@@ -117,6 +121,7 @@ pub(crate) fn seed_default_system_prompt(
 ) -> Result<(), DefaultSystemPromptError> {
     if path.symlink_metadata().is_ok() {
         validate_default_system_prompt(storage_root, path)?;
+        migrate_known_prior_default_system_prompt(storage_root, path)?;
         return Ok(());
     }
     if let Some(parent) = path.parent() {
@@ -135,6 +140,7 @@ pub(crate) fn seed_default_system_prompt(
             })?,
         Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
             validate_default_system_prompt(storage_root, path)?;
+            migrate_known_prior_default_system_prompt(storage_root, path)?;
         }
         Err(source) => {
             return Err(DefaultSystemPromptError::Io {
@@ -145,6 +151,41 @@ pub(crate) fn seed_default_system_prompt(
     }
     validate_default_system_prompt(storage_root, path)?;
     Ok(())
+}
+
+fn migrate_known_prior_default_system_prompt(
+    storage_root: &Path,
+    path: &Path,
+) -> Result<(), DefaultSystemPromptError> {
+    let Some((before_policy, after_policy)) =
+        DEFAULT_SYSTEM_PROMPT_EMBEDDED.split_once(DEFAULT_SYSTEM_PROMPT_LANGUAGE_POLICY)
+    else {
+        return Ok(());
+    };
+    let known_prior_default = format!("{before_policy}{after_policy}");
+
+    // Only the byte-identical bundled prompt is safe to upgrade; every other
+    // existing file is a user customization and must be left untouched.
+    if read_default_system_prompt(storage_root, path)? != known_prior_default {
+        return Ok(());
+    }
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).truncate(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW);
+    let mut file = options
+        .open(path)
+        .map_err(|source| DefaultSystemPromptError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    file.write_all(DEFAULT_SYSTEM_PROMPT_EMBEDDED.as_bytes())
+        .map_err(|source| DefaultSystemPromptError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    validate_default_system_prompt(storage_root, path)
 }
 
 fn read_default_system_prompt(
@@ -468,6 +509,33 @@ mod tests {
             .expect("edited content exists");
 
         assert_eq!(content.content, "edited local-dev prompt");
+    }
+
+    #[test]
+    fn default_system_prompt_migrates_known_prior_default_without_overwriting_custom_prompt() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let storage_root = root.path().canonicalize().expect("canonical root");
+        let prompt_path = storage_root.join("system/prompts/default-system.md");
+        std::fs::create_dir_all(prompt_path.parent().expect("prompt parent"))
+            .expect("prompt parent");
+        let (before_policy, after_policy) = DEFAULT_SYSTEM_PROMPT_EMBEDDED
+            .split_once(DEFAULT_SYSTEM_PROMPT_LANGUAGE_POLICY)
+            .expect("embedded prompt contains language policy");
+        let known_prior_default = format!("{before_policy}{after_policy}");
+
+        std::fs::write(&prompt_path, &known_prior_default).expect("prior prompt writes");
+        seed_default_system_prompt(&storage_root, &prompt_path).expect("prior prompt migrates");
+        assert_eq!(
+            std::fs::read_to_string(&prompt_path).expect("migrated prompt reads"),
+            DEFAULT_SYSTEM_PROMPT_EMBEDDED
+        );
+
+        std::fs::write(&prompt_path, "custom edited runtime prompt").expect("custom prompt writes");
+        seed_default_system_prompt(&storage_root, &prompt_path).expect("custom prompt validates");
+        assert_eq!(
+            std::fs::read_to_string(&prompt_path).expect("custom prompt reads"),
+            "custom edited runtime prompt"
+        );
     }
 
     #[cfg(unix)]
