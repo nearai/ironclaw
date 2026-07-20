@@ -11,11 +11,11 @@
 
 use chrono::{DateTime, Duration, Utc};
 use ironclaw_auth::{
-    AuthChallenge, AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowKind, AuthFlowStatus,
-    AuthProductScope, AuthProviderId, AuthSurface, AuthorizationCodeHash, CredentialAccountLabel,
-    CredentialAccountListRequest, CredentialAccountLookupRequest, NewAuthFlow,
-    OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OpaqueStateHash,
-    PkceVerifierHash, PkceVerifierSecret, ProviderScope,
+    AuthChallenge, AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowKind, AuthFlowOutcome,
+    AuthFlowState, AuthProductScope, AuthProviderId, AuthSurface, AuthorizationCodeHash,
+    CredentialAccountLabel, CredentialAccountListRequest, CredentialAccountLookupRequest,
+    NewAuthFlow, OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthProviderCallbackRequest,
+    OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret, ProviderScope,
 };
 use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
 use ironclaw_reborn_composition::{
@@ -319,9 +319,9 @@ async fn expired_flow_callback_rejected_then_fresh_flow_retry_succeeds() {
         .expect("get_flow must not error")
         .expect("the expired flow record must remain readable");
     assert_eq!(
-        record.status,
-        AuthFlowStatus::Expired,
-        "the lapsed flow must be marked terminal Expired, not left pending"
+        record.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Expired),
+        "the lapsed flow must be resolved as Expired, not left open"
     );
     assert_eq!(
         bundle.egress.captured_count(),

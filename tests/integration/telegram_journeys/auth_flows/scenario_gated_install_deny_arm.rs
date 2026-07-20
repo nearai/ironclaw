@@ -1,34 +1,28 @@
-//! Telegram auth-flow journey: install gate denial feedback.
+//! Telegram auth-flow journey: unconfigured-provider recovery feedback.
 
 use super::harness::*;
 use super::reborn_support::reply::RebornScriptedReply;
 use axum::http::StatusCode;
+use ironclaw_turns::TurnStatus;
 use serde_json::json;
-use std::time::Duration;
 
 /// Ben's regression (2026-07-16): a paired user DMed the bot "can you
-/// install slack" and the conversation HUNG — the run parked on slack's
-/// OAuth setup gate, and with `TelegramDeliveryProtocol::post_status_message`
-/// unwired in v1 every host-authored notice (working message, blocked-run
-/// action-needed prompt, busy hints) silently failed, so the DM saw nothing
-/// and follow-up messages produced nothing. This pins the fixed contract:
+/// install slack" and the conversation HUNG. Current provider-readiness
+/// behavior rejects activation before creating an OAuth gate when the operator
+/// has not configured Slack, so the user must receive actionable setup guidance
+/// and the turn must finish instead of parking forever. This pins that contract:
 ///
 /// 1. a paired DM asking for a slack install runs the REAL
 ///    `builtin.extension_install` + `builtin.extension_activate` capabilities;
-///    slack's activation gates on its personal-OAuth credential requirement;
-/// 2. the DM RECEIVES host-authored feedback about the gate (via the wired
-///    `sendMessage` status path — never silence);
-/// 3. the channel is not wedged: a follow-up DM still gets host feedback.
+/// 2. activation's model-visible result names the missing operator settings;
+/// 3. the model explains that configuration is required and the run completes;
+/// 4. the same Telegram thread accepts a normal follow-up DM.
 ///
 /// Covers (docs/qa/telegram-coverage-map.md): the cross-extension in-DM
 /// install/gate rows of qa-telegram Conversations + the deferred-busy
 /// feedback rows of Telegram Failure and Recovery.
 #[tokio::test]
-async fn telegram_dm_slack_install_gates_with_action_needed_notice_not_silence() {
-    // FIFO: the DM turn calls install then activate; activate parks on the
-    // slack OAuth gate, so the post-resume entry and the follow-up-turn entry
-    // may stay unconsumed depending on how the gate resolves — both are
-    // scripted so neither outcome can starve the trace.
+async fn telegram_dm_unconfigured_slack_returns_setup_guidance_and_frees_thread() {
     let stack = build_journey_stack([
         RebornScriptedReply::tool_call(
             "builtin.extension_install",
@@ -38,15 +32,15 @@ async fn telegram_dm_slack_install_gates_with_action_needed_notice_not_silence()
             "builtin.extension_activate",
             json!({"extension_id": "slack"}),
         ),
-        RebornScriptedReply::text("slack is connected"),
+        RebornScriptedReply::text(
+            "Slack is not configured on this IronClaw instance yet. An operator must enable Slack, configure the OAuth redirect URI, restart the service, and then you can ask me again here.",
+        ),
         RebornScriptedReply::text("still here"),
     ])
     .await;
 
     let secret = admin_save(&stack).await;
     pair_via_webhook(&stack, &secret, 1).await;
-    let sends_after_pairing = stack.network.request_bodies_for("/sendMessage").len();
-
     // The regression trigger: a paired DM asking for a slack install.
     let status = stack
         .webhook_dm(&secret, 2, "can you install slack for me?")
@@ -61,57 +55,59 @@ async fn telegram_dm_slack_install_gates_with_action_needed_notice_not_silence()
         .await
         .expect("the DM turn must post the working message, not silence");
 
-    // Slack's activation parks on its personal-OAuth credential requirement.
-    // This stack has no slack OAuth client config, so the challenge is
-    // credential-entry shaped and the observer takes the deny arm: it cancels
-    // the blocked run and posts the host-authored "set this up in the web
-    // app" notice — via the SAME wired status path that used to fail
-    // silently. The OAuth-configured link-prompt arm is pinned separately by
-    // `telegram_dm_gated_install_posts_oauth_authorization_link_not_silence`.
+    // Missing instance-level Slack configuration is surfaced to the model at
+    // the real activation boundary. Pin the exact actionable ingredients so
+    // the scripted final answer cannot hide an empty or generic tool failure.
+    let captured_requests = serde_json::to_string(&stack.model_trace.captured_requests())
+        .expect("captured model requests serialize");
+    for expected in [
+        "config set slack.enabled",
+        "IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI",
+        "service restart",
+    ] {
+        assert!(
+            captured_requests.contains(expected),
+            "activation result must tell the model how to recover; missing {expected:?}: {captured_requests}"
+        );
+    }
+
     let notice = stack
-        .wait_for_dm_send(|text| text.contains("credential-based connections can only be set up"))
+        .wait_for_dm_send(|text| text.contains("not configured on this IronClaw instance"))
         .await
-        .expect("the gated slack install must produce the action-needed DM notice, not silence");
+        .expect("the unconfigured Slack install must produce setup guidance, not silence");
     assert_eq!(notice["chat_id"], TG_CHAT_ID);
     assert!(
         notice["text"]
             .as_str()
             .is_some_and(|text| text.contains("ask me again here")),
-        "the notice tells the user how to recover: {notice}"
+        "the response tells the user how to recover: {notice}"
     );
 
-    // Not wedged: a follow-up DM still produces host feedback (a busy hint
-    // for the parked run, or a fresh reply if the gate auto-resolved).
+    let (turn_scope, run_id) = stack
+        .run_for_dm_message("can you install slack for me?")
+        .await;
+    wait_for_run_status(
+        &stack.runtime.webui_turn_coordinator_for_test(),
+        &turn_scope,
+        run_id,
+        TurnStatus::Completed,
+    )
+    .await
+    .expect("unconfigured provider failure completes instead of parking an impossible auth gate");
+
+    // Not wedged: a follow-up DM starts a normal turn on the same thread.
     let before_follow_up = stack.network.request_bodies_for("/sendMessage").len();
-    assert!(
-        before_follow_up > sends_after_pairing,
-        "the gate notice itself must be a new send"
-    );
     let status = stack.webhook_dm(&secret, 3, "are you still there?").await;
     assert_eq!(status, StatusCode::OK, "follow-up DM webhook acks 200");
-    for _ in 0..200 {
-        if stack.network.request_bodies_for("/sendMessage").len() > before_follow_up {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    let follow_up_sends: Vec<String> = stack.network.request_bodies_for("/sendMessage")
-        [before_follow_up..]
-        .iter()
-        .filter_map(|body| body["text"].as_str().map(str::to_string))
-        .collect();
-    // Two healthy shapes: the deny arm cancelled the parked run, so the
-    // follow-up either starts a fresh turn (consuming the next scripted
-    // entry) or — if the cancel is still settling — draws a busy hint.
+    let follow_up = stack
+        .wait_for_dm_send_after(before_follow_up, |text| text.contains("still here"))
+        .await
+        .expect("the same Telegram thread accepts a normal follow-up turn");
     assert!(
-        follow_up_sends.iter().any(|text| {
-            text.contains("still working on a previous message")
-                || text.contains("waiting on authentication")
-                || text.contains("slack is connected")
-                || text.contains("still here")
-        }),
-        "the follow-up DM must draw recognizable host feedback (busy hint or \
-         a fresh scripted reply) attributable to it, got: {follow_up_sends:?}"
+        follow_up["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("still here")),
+        "follow-up reply is attributable to the new message: {follow_up}"
     );
 
     stack.runtime.shutdown().await.expect("runtime shuts down");

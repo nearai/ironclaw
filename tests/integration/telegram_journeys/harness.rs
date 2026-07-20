@@ -586,7 +586,10 @@ pub(crate) async fn build_journey_stack_with_slack_oauth(
 
     let slot_for_runtime = slot.clone();
     let mut stack = build_journey_stack_customized(replies, move |input| {
-        input.with_slack_personal_oauth_lazy(slot_for_runtime)
+        input
+            .with_slack_host_beta_enabled(true)
+            .with_slack_personal_oauth_redirect_uri_configured(true)
+            .with_slack_personal_oauth_lazy(slot_for_runtime)
     })
     .await;
     let product_auth = stack

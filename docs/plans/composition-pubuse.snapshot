@@ -86,7 +86,7 @@ pub use observability::operator_logs::{
     OperatorLogLayer, capture_tracing_log, operator_log_buffer,
 };
 pub use observability::trajectory_observer::RebornTrajectoryObserver;
-pub use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
+pub use ironclaw_channel_host::auth_continuation::RebornAuthResolutionDispatcher;
 pub use ironclaw_channel_host::identity::{
     RebornUserIdentityLookup, RebornUserIdentityLookupError,
 };

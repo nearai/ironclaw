@@ -38,8 +38,8 @@
 //! `docs/qa/telegram-coverage-map.md`): qa-telegram admin-setup happy path,
 //! unpaired-activation pairing gate, `/start <CODE>` consume + blocked-run
 //! resume, paired-DM turn + outbound render, webhook secret verification on
-//! the live route, and the in-DM extension-install gate feedback regression
-//! (see `telegram_dm_slack_install_gates_with_action_needed_notice_not_silence`).
+//! the live route, and the in-DM unconfigured-provider recovery regression
+//! (see `telegram_dm_unconfigured_slack_returns_setup_guidance_and_frees_thread`).
 //! It also covers the cross-extension Slack OAuth recovery journeys: an
 //! explicit in-chat denial terminally cancels the exact run, while a
 //! provider-popup denial resolves as `ProviderDenied` and resumes the exact

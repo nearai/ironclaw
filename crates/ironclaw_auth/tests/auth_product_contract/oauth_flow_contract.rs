@@ -1214,8 +1214,8 @@ async fn cancel_flow_preserves_terminal_state_and_blocks_callback() {
     let second_cancel = services
         .cancel_flow(&owner, flow.id)
         .await
-        .expect_err("terminal cancel rejected");
-    assert_eq!(second_cancel, AuthProductError::Canceled);
+        .expect("identical terminal cancel is idempotent");
+    assert_eq!(second_cancel, canceled);
 
     let callback = services
         .complete_oauth_callback(

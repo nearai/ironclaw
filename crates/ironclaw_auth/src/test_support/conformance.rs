@@ -376,8 +376,8 @@ async fn expired_flow_rejects_and_marks_expired(
     );
 }
 
-/// A canceled flow rejects completion with the cancel-specific error, and
-/// cancel itself is not silently repeatable.
+/// A canceled flow rejects completion with the cancel-specific error, while
+/// retrying the same terminal cancellation returns the durable winner.
 async fn canceled_flow_rejects_completion_as_canceled(
     flows: &dyn AuthFlowManager,
     scope: &AuthProductScope,
@@ -420,11 +420,11 @@ async fn canceled_flow_rejects_completion_as_canceled(
     let recancel = flows
         .cancel_flow(scope, flow.id)
         .await
-        .expect_err("re-canceling a canceled flow must be rejected");
+        .expect("re-canceling a canceled flow must be idempotent"); // safety: test-only
     assert_eq!(
-        recancel,
-        AuthProductError::Canceled,
-        "[{CASE}] re-cancel rejects as Canceled"
+        recancel.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::UserAborted),
+        "[{CASE}] re-cancel returns the original UserAborted winner"
     );
 }
 

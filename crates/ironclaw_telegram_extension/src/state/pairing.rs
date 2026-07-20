@@ -39,7 +39,7 @@ impl FilesystemTelegramHostState {
                             && completion.chat_id == chat_id
                     })
                     .and_then(|completion| completion.resolution_flow_id)
-                    .unwrap_or_else(AuthFlowId::new);
+                    .unwrap_or_default();
                 let completion = StoredPairingCompletion {
                     installation_id: installation_id.clone(),
                     user_id: user_id.clone(),

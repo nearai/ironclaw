@@ -94,9 +94,6 @@ where
     ) -> Result<AuthFlowRecord, AuthProductError> {
         let claimed = self
             .update_flow_with_cas(scope, request.flow_id, |record| {
-                if matches!(record.state, AuthFlowState::Resolved(_)) {
-                    return Ok(());
-                }
                 match validate_callback_claim(record, scope, &request, Utc::now()) {
                     Ok(()) => {}
                     Err(AuthProductError::UnknownOrExpiredFlow)
@@ -105,6 +102,12 @@ where
                         return Ok(());
                     }
                     Err(error) => return Err(error),
+                }
+                if matches!(
+                    record.state,
+                    AuthFlowState::Resolved(AuthFlowOutcome::Authorized { .. })
+                ) {
+                    return Ok(());
                 }
                 record.state = AuthFlowState::Processing;
                 record.updated_at = Utc::now();
@@ -126,9 +129,6 @@ where
             .read_flow(scope, input.flow_id)
             .await?
             .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
-        if matches!(record.state, AuthFlowState::Resolved(_)) {
-            return Ok(record);
-        }
         let callback =
             match prepare_callback_flow(&mut record, scope, &input.opaque_state_hash, now) {
                 Ok(callback) => callback,
@@ -140,28 +140,7 @@ where
                 }
             };
         let exchange = match input.outcome {
-            ProviderCallbackOutcome::Denied => {
-                let claimed = self
-                    .update_flow_with_cas(scope, input.flow_id, |current| {
-                        if matches!(current.state, AuthFlowState::Open) {
-                            current.state = AuthFlowState::Processing;
-                            current.updated_at = now;
-                        }
-                        Ok(())
-                    })
-                    .await?;
-                if matches!(claimed.state, AuthFlowState::Resolved(_)) {
-                    return Ok(claimed);
-                }
-                return self
-                    .resolve_processing_flow(
-                        scope,
-                        input.flow_id,
-                        AuthFlowOutcome::ProviderDenied,
-                        now,
-                    )
-                    .await;
-            }
+            ProviderCallbackOutcome::Denied => None,
             ProviderCallbackOutcome::Authorized { exchange } => {
                 let exchange = *exchange;
                 if exchange.provider != record.provider {
@@ -174,8 +153,30 @@ where
                 {
                     return Err(AuthProductError::CrossScopeDenied);
                 }
-                exchange
+                Some(exchange)
             }
+        };
+        self.update_flow_with_cas(scope, input.flow_id, |current| {
+            match current.state {
+                AuthFlowState::Open => {
+                    current.state = AuthFlowState::Processing;
+                    current.updated_at = now;
+                }
+                AuthFlowState::Processing => {}
+                AuthFlowState::Resolved(outcome) => {
+                    return Err(match outcome {
+                        AuthFlowOutcome::UserAborted => AuthProductError::Canceled,
+                        _ => AuthProductError::FlowAlreadyTerminal,
+                    });
+                }
+            }
+            Ok(())
+        })
+        .await?;
+        let Some(exchange) = exchange else {
+            return self
+                .resolve_processing_flow(scope, input.flow_id, AuthFlowOutcome::ProviderDenied, now)
+                .await;
         };
         let account_write = self
             .resolve_callback_account(input.flow_id, callback, &exchange)
@@ -456,10 +457,15 @@ where
         flow_id: AuthFlowId,
     ) -> Result<AuthFlowRecord, AuthProductError> {
         self.update_flow_with_cas(scope, flow_id, |record| {
-            if !matches!(record.state, AuthFlowState::Resolved(_)) {
-                record.state = AuthFlowState::Resolved(AuthFlowOutcome::UserAborted);
-                record.updated_at = Utc::now();
+            match record.state {
+                AuthFlowState::Resolved(AuthFlowOutcome::UserAborted) => return Ok(()),
+                AuthFlowState::Resolved(_) => {
+                    return Err(AuthProductError::FlowAlreadyTerminal);
+                }
+                AuthFlowState::Open | AuthFlowState::Processing => {}
             }
+            record.state = AuthFlowState::Resolved(AuthFlowOutcome::UserAborted);
+            record.updated_at = Utc::now();
             Ok(())
         })
         .await

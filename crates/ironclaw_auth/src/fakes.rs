@@ -529,11 +529,10 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         if !scope_matches(scope, &record.scope) {
             return Err(AuthProductError::CrossScopeDenied);
         }
-        if let AuthFlowState::Resolved(outcome) = record.state {
-            return Err(match outcome {
-                AuthFlowOutcome::UserAborted => AuthProductError::Canceled,
-                _ => AuthProductError::FlowAlreadyTerminal,
-            });
+        match record.state {
+            AuthFlowState::Resolved(AuthFlowOutcome::UserAborted) => return Ok(record.clone()),
+            AuthFlowState::Resolved(_) => return Err(AuthProductError::FlowAlreadyTerminal),
+            AuthFlowState::Open | AuthFlowState::Processing => {}
         }
         record.state = AuthFlowState::Resolved(AuthFlowOutcome::UserAborted);
         record.updated_at = now;
