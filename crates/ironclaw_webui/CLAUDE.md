@@ -85,6 +85,7 @@ closed (`500`) if that layer is missing (locked by
 | `webui.v2.send_message` | POST | `/api/webchat/v2/threads/{thread_id}/messages` | — | `TurnCoordinator` |
 | `webui.v2.get_timeline` | GET | `/api/webchat/v2/threads/{thread_id}/timeline` (`?limit&cursor`) | — | `ProjectionOnly` |
 | `webui.v2.get_run_artifact` | GET | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/artifact` | — | `ProjectionOnly` |
+| `webui.v2.get_thread_artifact` | GET | `/api/webchat/v2/threads/{thread_id}/artifact` | — | `ProjectionOnly` |
 | `webui.v2.logs` | GET | `/api/webchat/v2/logs` | — | `ProjectionOnly` |
 | `webui.v2.stream_events` | GET | `/api/webchat/v2/threads/{thread_id}/events` | **SSE** | `ProjectionOnly` |
 | `webui.v2.stream_events_ws` | GET | `/api/webchat/v2/threads/{thread_id}/ws` | **WebSocket** | `ProjectionOnly` |
@@ -111,6 +112,11 @@ and applies deterministic trace redaction before serialization. Its logs are a
 bounded process-local diagnostic sidecar: `logs.complete` is always false and
 availability/truncation are explicit. Deployment-wide logs are not exposed
 through this caller route.
+
+`webui.v2.get_thread_artifact` applies the same caller ownership and redaction
+rules to every replayable message in the thread and queries logs at thread
+scope. Its `ironclaw.thread_artifact.v1` messages retain `run_id`, allowing the
+fixture importer to reconstruct multiple turns without mixing threads.
 
 **Operator-gating.** LLM config, operator setup/config/service-control, and
 extension zip-import routes are operator-wide: `webui_v2_app` mounts them only

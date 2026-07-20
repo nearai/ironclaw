@@ -115,11 +115,38 @@ class RunArtifactImporterTest(unittest.TestCase):
             "messages": messages,
         }
 
+    def test_thread_artifact_becomes_multiple_fixture_turns(self) -> None:
+        artifact = {
+            "schema": MODULE.THREAD_SCHEMA,
+            "thread_id": "thread-1",
+            "logs": {"complete": False},
+            "redaction": {"pipeline": "deterministic-trace-redactor-v1"},
+            "messages": [
+                {"sequence": 1, "run_id": "run-1", "kind": "user", "content": "first"},
+                {"sequence": 2, "run_id": "run-1", "kind": "assistant", "content": "one"},
+                {"sequence": 3, "run_id": "run-2", "kind": "user", "content": "second"},
+                self.tool_message(
+                    4, "turn-b", "call-2", "builtin__two", "two result", run_id="run-2"
+                ),
+                {"sequence": 5, "run_id": "run-2", "kind": "assistant", "content": "two"},
+            ],
+        }
+
+        candidate = MODULE.trace_candidate(artifact, None)
+
+        self.assertEqual([turn["user_input"] for turn in candidate["turns"]], ["first", "second"])
+        self.assertEqual(candidate["_review"]["source_schema"], MODULE.THREAD_SCHEMA)
+        self.assertEqual(candidate["_review"]["source_thread_id"], "thread-1")
     @staticmethod
     def tool_message(
-        sequence: int, provider_turn_id: str, call_id: str, name: str, content: str
+        sequence: int,
+        provider_turn_id: str,
+        call_id: str,
+        name: str,
+        content: str,
+        run_id: str | None = None,
     ) -> dict[str, object]:
-        return {
+        message = {
             "sequence": sequence,
             "kind": "tool_result_reference",
             "content": content,
@@ -131,6 +158,9 @@ class RunArtifactImporterTest(unittest.TestCase):
                 "arguments": {"value": sequence},
             },
         }
+        if run_id:
+            message["run_id"] = run_id
+        return message
 
 
 if __name__ == "__main__":

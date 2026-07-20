@@ -500,6 +500,13 @@ export function fetchRunArtifact({ threadId, runId } = {}) {
   );
 }
 
+export function fetchThreadArtifact({ threadId } = {}) {
+  if (!threadId) {
+    return Promise.reject(new Error("threadId is required"));
+  }
+  return apiFetch(`${V2_BASE}/threads/${encodeURIComponent(threadId)}/artifact`);
+}
+
 // --- Attachments ---
 
 // Path for one landed attachment's bytes. The (thread, message, attachment)

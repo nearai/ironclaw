@@ -75,15 +75,16 @@ use ironclaw_product_workflow::{
     RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServices, RebornServicesApi,
     RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
     RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    RebornViewQuery, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    RebornThreadArtifact, RebornThreadArtifactRequest, RebornTimelineRequest,
+    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewQuery,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SetActiveLlmRequest,
-    StaticConnectableChannelsProductFacade, StaticOperatorStatusService, TriggerRunThreadScope,
-    UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
-    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
-    automation_trigger_thread_metadata_json,
+    StaticConnectableChannelsProductFacade, StaticOperatorStatusService, THREAD_ARTIFACT_VIEW,
+    TriggerRunThreadScope, UpsertLlmProviderRequest, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
+    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest, approval_gate_ref, automation_trigger_thread_metadata_json,
 };
 use ironclaw_product_workflow::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
@@ -6862,6 +6863,122 @@ async fn run_artifact_rejects_another_user_before_querying_logs() {
         )
         .await
         .expect_err("foreign run must not be exported");
+
+    assert_eq!(error.status_code, 404);
+    assert_eq!(error.kind, RebornServicesErrorKind::NotFound);
+    assert!(operator_logs.requests().is_empty());
+}
+
+#[tokio::test]
+async fn thread_artifact_includes_all_owned_runs_and_queries_thread_scoped_logs() {
+    let owner = caller();
+    let thread_scope = thread_scope_for(&owner);
+    let thread_id = ThreadId::new("thread-full-artifact").expect("thread id");
+    let first_run_id = TurnRunId::parse(&run_id_string()).expect("run id");
+    let second_run_id = TurnRunId::new();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: owner.user_id.as_str().to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("thread");
+    seed_submitted_message(
+        &thread_service,
+        &thread_scope,
+        &thread_id,
+        &first_run_id,
+        "first run",
+    )
+    .await;
+    seed_submitted_message(
+        &thread_service,
+        &thread_scope,
+        &thread_id,
+        &second_run_id,
+        "second run",
+    )
+    .await;
+    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_operator_logs_service(operator_logs.clone());
+
+    let page = services
+        .query(
+            owner,
+            RebornViewQuery {
+                view_id: THREAD_ARTIFACT_VIEW.id.to_string(),
+                params: serde_json::to_value(RebornThreadArtifactRequest {
+                    thread_id: thread_id.to_string(),
+                })
+                .expect("artifact params"),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("owned thread artifact");
+    let artifact: RebornThreadArtifact =
+        serde_json::from_value(page.payload).expect("artifact payload");
+
+    assert_eq!(artifact.messages.len(), 2);
+    assert_eq!(artifact.messages[0].content, "first run");
+    assert_eq!(
+        artifact.messages[0].run_id.as_deref(),
+        Some(first_run_id.to_string().as_str())
+    );
+    assert_eq!(artifact.messages[1].content, "second run");
+    assert_eq!(
+        artifact.messages[1].run_id.as_deref(),
+        Some(second_run_id.to_string().as_str())
+    );
+    let requests = operator_logs.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].thread_id.as_deref(),
+        Some("thread-full-artifact")
+    );
+    assert_eq!(requests[0].run_id, None);
+    assert_eq!(requests[0].limit, Some(500));
+}
+
+#[tokio::test]
+async fn thread_artifact_rejects_another_user_before_querying_logs() {
+    let owner = caller_for_user("user-bob");
+    let thread_scope = thread_scope_for(&owner);
+    let thread_id = ThreadId::new("thread-bob-full-artifact").expect("thread id");
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope,
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: owner.user_id.as_str().to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("thread");
+    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_operator_logs_service(operator_logs.clone());
+
+    let error = services
+        .query(
+            caller(),
+            RebornViewQuery {
+                view_id: THREAD_ARTIFACT_VIEW.id.to_string(),
+                params: serde_json::to_value(RebornThreadArtifactRequest {
+                    thread_id: thread_id.to_string(),
+                })
+                .expect("artifact params"),
+                cursor: None,
+            },
+        )
+        .await
+        .expect_err("foreign thread must not be exported");
 
     assert_eq!(error.status_code, 404);
     assert_eq!(error.kind, RebornServicesErrorKind::NotFound);

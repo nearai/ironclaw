@@ -79,6 +79,7 @@ mod log_views;
 mod project_fs;
 mod projects;
 mod run_artifact;
+mod thread_artifact;
 mod trace_credits;
 mod types;
 mod views;
@@ -135,6 +136,9 @@ pub use projects::{
 pub use run_artifact::{
     RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornRunArtifact, RebornRunArtifactRequest,
     RunArtifactLogs, RunArtifactMessage, RunArtifactRedaction, RunArtifactToolCall,
+};
+pub use thread_artifact::{
+    RebornThreadArtifact, RebornThreadArtifactRequest, THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW,
 };
 pub use types::{
     RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationActiveHold,
@@ -3950,6 +3954,17 @@ impl RebornServicesApi for RebornServices {
                 let request = serde_json::from_value(query.params)
                     .map_err(RebornServicesError::internal_from)?;
                 let artifact = self.build_run_artifact(caller, request).await?;
+                let payload =
+                    serde_json::to_value(artifact).map_err(RebornServicesError::internal_from)?;
+                Ok(RebornViewPage {
+                    payload,
+                    next_cursor: None,
+                })
+            }
+            id if id == THREAD_ARTIFACT_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(RebornServicesError::internal_from)?;
+                let artifact = self.build_thread_artifact(caller, request).await?;
                 let payload =
                     serde_json::to_value(artifact).map_err(RebornServicesError::internal_from)?;
                 Ok(RebornViewPage {

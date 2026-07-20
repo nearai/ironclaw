@@ -8,11 +8,12 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
+use ironclaw_host_api::ThreadId;
 use ironclaw_reborn_traces::contribution::DeterministicTraceRedactor;
 use ironclaw_reborn_traces::redaction::redact_sensitive_json;
 use ironclaw_threads::{
     ContextMessage, LoadContextMessagesRequest, MessageKind, MessageStatus, ThreadMessageId,
-    ThreadMessageRecord,
+    ThreadMessageRecord, ThreadScope,
 };
 use serde::{Deserialize, Serialize};
 
@@ -28,7 +29,7 @@ pub const RUN_ARTIFACT_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     id: "run_artifact",
     paginated: false,
 };
-const RUN_ARTIFACT_REDACTION_PIPELINE: &str = "deterministic-trace-redactor-v1";
+pub(super) const ARTIFACT_REDACTION_PIPELINE: &str = "deterministic-trace-redactor-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornRunArtifactRequest {
@@ -51,6 +52,8 @@ pub struct RebornRunArtifact {
 pub struct RunArtifactMessage {
     pub message_id: String,
     pub sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
     pub kind: MessageKind,
     pub status: MessageStatus,
     pub content: String,
@@ -128,33 +131,12 @@ impl RebornServices {
             ));
         }
 
-        // Product history intentionally strips provider replay metadata. Load
-        // the exact selected message ids through the model-context projection,
-        // then merge by stable message id so no adjacent turn can enter the
-        // artifact and tool call arguments/results remain paired.
-        let context = self
-            .thread_service
-            .load_context_messages(LoadContextMessagesRequest {
-                scope: thread_scope,
-                thread_id: thread_id.clone(),
-                message_ids: run_records
-                    .iter()
-                    .map(|message| message.message_id)
-                    .collect(),
-            })
-            .await
-            .map_err(map_thread_error)?;
-        let context_by_id: HashMap<ThreadMessageId, ContextMessage> = context
-            .messages
-            .into_iter()
-            .filter_map(|message| message.message_id.map(|id| (id, message)))
-            .collect();
-
         let redactor = DeterministicTraceRedactor::new(Vec::new());
-        let (messages, message_redaction_applied) =
-            artifact_messages(run_records, &context_by_id, &redactor);
+        let (messages, message_redaction_applied) = self
+            .artifact_messages_for_records(thread_scope, &thread_id, run_records, &redactor)
+            .await?;
         let (logs, log_redaction_applied) = self
-            .artifact_logs(caller, thread_id.to_string(), run_id_text, &redactor)
+            .artifact_logs(caller, thread_id.to_string(), Some(run_id_text), &redactor)
             .await;
 
         Ok(RebornRunArtifact {
@@ -165,23 +147,23 @@ impl RebornServices {
             messages,
             logs,
             redaction: RunArtifactRedaction {
-                pipeline: RUN_ARTIFACT_REDACTION_PIPELINE.to_string(),
+                pipeline: ARTIFACT_REDACTION_PIPELINE.to_string(),
                 applied: message_redaction_applied || log_redaction_applied,
             },
         })
     }
 
-    async fn artifact_logs(
+    pub(super) async fn artifact_logs(
         &self,
         caller: WebUiAuthenticatedCaller,
         thread_id: String,
-        run_id: String,
+        run_id: Option<String>,
         redactor: &DeterministicTraceRedactor,
     ) -> (RunArtifactLogs, bool) {
         let query = bounded_log_query(RebornLogQueryRequest {
             limit: Some(OPERATOR_LOGS_MAX_LIMIT),
             thread_id: Some(thread_id),
-            run_id: Some(run_id),
+            run_id,
             ..RebornLogQueryRequest::default()
         });
         match self.operator_logs.query_logs(caller, query).await {
@@ -229,9 +211,36 @@ impl RebornServices {
             }
         }
     }
+
+    pub(super) async fn artifact_messages_for_records(
+        &self,
+        thread_scope: ThreadScope,
+        thread_id: &ThreadId,
+        records: Vec<ThreadMessageRecord>,
+        redactor: &DeterministicTraceRedactor,
+    ) -> Result<(Vec<RunArtifactMessage>, bool), RebornServicesError> {
+        // Product history intentionally strips provider replay metadata. Load
+        // exactly the selected ids through the model-context projection, then
+        // merge by stable message id so tool calls remain paired with results.
+        let context = self
+            .thread_service
+            .load_context_messages(LoadContextMessagesRequest {
+                scope: thread_scope,
+                thread_id: thread_id.clone(),
+                message_ids: records.iter().map(|message| message.message_id).collect(),
+            })
+            .await
+            .map_err(map_thread_error)?;
+        let context_by_id: HashMap<ThreadMessageId, ContextMessage> = context
+            .messages
+            .into_iter()
+            .filter_map(|message| message.message_id.map(|id| (id, message)))
+            .collect();
+        Ok(artifact_messages(records, &context_by_id, redactor))
+    }
 }
 
-fn artifact_messages(
+pub(super) fn artifact_messages(
     records: Vec<ThreadMessageRecord>,
     context_by_id: &HashMap<ThreadMessageId, ContextMessage>,
     redactor: &DeterministicTraceRedactor,
@@ -281,6 +290,7 @@ fn artifact_messages(
             Some(RunArtifactMessage {
                 message_id: record.message_id.to_string(),
                 sequence: record.sequence,
+                run_id: record.turn_run_id.clone(),
                 kind: record.kind,
                 status: record.status,
                 content,

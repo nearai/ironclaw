@@ -93,7 +93,7 @@ test("assistant bubbles expose final reply state for live QA", () => {
   );
 });
 
-test("only final assistant replies expose the run artifact download", async () => {
+test("only final assistant replies expose run and full-thread artifact downloads", async () => {
   const { MessageBubble } = await import("./message-bubble");
   const render = (isFinalReply: boolean) =>
     renderToStaticMarkup(
@@ -111,9 +111,13 @@ test("only final assistant replies expose the run artifact download", async () =
     );
 
   assert.match(render(true), /data-testid="download-run-artifact"/);
+  assert.match(render(true), /data-testid="download-thread-artifact"/);
   assert.doesNotMatch(render(false), /data-testid="download-run-artifact"/);
+  assert.doesNotMatch(render(false), /data-testid="download-thread-artifact"/);
   assert.match(messageBubbleSource, /fetchRunArtifact\(\{/);
+  assert.match(messageBubbleSource, /fetchThreadArtifact\(\{/);
   assert.match(messageBubbleSource, /ironclaw-run-\$\{filenameRunId\}\.json/);
+  assert.match(messageBubbleSource, /ironclaw-thread-\$\{filenameThreadId\}\.json/);
 });
 
 test("markdown body and code blocks inherit readable message sizing", () => {

@@ -7,7 +7,7 @@ import { ProjectFileChips } from "./project-file-chips";
 import { AttachmentChip } from "./attachment-chip";
 import { AttachmentPreviewModal } from "./attachment-preview";
 import { useT } from "../../../lib/i18n";
-import { fetchRunArtifact } from "../../../lib/api";
+import { fetchRunArtifact, fetchThreadArtifact } from "../../../lib/api";
 import { saveBlob } from "../../../lib/download";
 import {
   CHAT_MESSAGE_ROLES,
@@ -94,7 +94,9 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
       ? message.failureStatus
       : undefined;
   const [copied, setCopied] = React.useState(false);
-  const [artifactDownloading, setArtifactDownloading] = React.useState(false);
+  const [artifactDownloading, setArtifactDownloading] = React.useState<
+    "run" | "thread" | null
+  >(null);
   // The attachment currently open in the preview modal (null when closed).
   const [previewAttachment, setPreviewAttachment] =
     React.useState<ChatAttachment | null>(null);
@@ -118,7 +120,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
     typeof message.turnRunId === "string" ? message.turnRunId : "";
   const downloadArtifact = React.useCallback(async () => {
     if (!threadId || !turnRunId || artifactDownloading) return;
-    setArtifactDownloading(true);
+    setArtifactDownloading("run");
     try {
       const artifact = await fetchRunArtifact({ threadId, runId: turnRunId });
       const filenameRunId = turnRunId.replace(/[^a-zA-Z0-9._-]/g, "_");
@@ -136,9 +138,32 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
         { tone: "error" },
       );
     } finally {
-      setArtifactDownloading(false);
+      setArtifactDownloading(null);
     }
   }, [artifactDownloading, t, threadId, turnRunId]);
+  const downloadThreadArtifact = React.useCallback(async () => {
+    if (!threadId || artifactDownloading) return;
+    setArtifactDownloading("thread");
+    try {
+      const artifact = await fetchThreadArtifact({ threadId });
+      const filenameThreadId = threadId.replace(/[^a-zA-Z0-9._-]/g, "_");
+      saveBlob(
+        new Blob([`${JSON.stringify(artifact, null, 2)}\n`], {
+          type: "application/json",
+        }),
+        `ironclaw-thread-${filenameThreadId}.json`,
+      );
+    } catch (error) {
+      toast(
+        error instanceof Error
+          ? error.message
+          : t("chat.fileDownloadFailed"),
+        { tone: "error" },
+      );
+    } finally {
+      setArtifactDownloading(null);
+    }
+  }, [artifactDownloading, t, threadId]);
 
   if (
     role === CHAT_MESSAGE_ROLES.TOOL_ACTIVITY ||
@@ -187,6 +212,12 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
     !isOptimistic &&
     threadId &&
     turnRunId,
+  );
+  const showThreadArtifactAction = Boolean(
+    role === CHAT_MESSAGE_ROLES.ASSISTANT &&
+    message.isFinalReply === true &&
+    !isOptimistic &&
+    threadId,
   );
   const isNotice = role === CHAT_MESSAGE_ROLES.SYSTEM;
   const isError = role === CHAT_MESSAGE_ROLES.ERROR;
@@ -293,13 +324,26 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
               <button
                 type="button"
                 onClick={downloadArtifact}
-                disabled={artifactDownloading}
-                title={artifactDownloading ? t("common.loading") : t("common.download")}
-                aria-label={artifactDownloading ? t("common.loading") : t("common.download")}
+                disabled={artifactDownloading !== null}
+                title={artifactDownloading === "run" ? t("common.loading") : t("chat.downloadRunArtifact")}
+                aria-label={artifactDownloading === "run" ? t("common.loading") : t("chat.downloadRunArtifact")}
                 data-testid="download-run-artifact"
                 className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 hover:text-iron-100 disabled:opacity-50"
               >
                 <Icon name="download" className="h-3.5 w-3.5" />
+              </button>
+            )}
+            {showThreadArtifactAction && (
+              <button
+                type="button"
+                onClick={downloadThreadArtifact}
+                disabled={artifactDownloading !== null}
+                title={artifactDownloading === "thread" ? t("common.loading") : t("chat.downloadThreadArtifact")}
+                aria-label={artifactDownloading === "thread" ? t("common.loading") : t("chat.downloadThreadArtifact")}
+                data-testid="download-thread-artifact"
+                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 hover:text-iron-100 disabled:opacity-50"
+              >
+                <Icon name="layers" className="h-3.5 w-3.5" />
               </button>
             )}
             {showRetryAction && (

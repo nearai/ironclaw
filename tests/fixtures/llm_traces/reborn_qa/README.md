@@ -1,13 +1,14 @@
-# Reborn QA run artifacts
+# Reborn QA trajectory artifacts
 
-QA testers can download a redacted artifact for any finalized assistant reply
-with the **Download run artifact** action beside that reply. The request is
-authenticated and derives tenant/user ownership from the session; the browser
-never supplies a user id.
+QA testers can download either the selected run or the full thread from any
+finalized assistant reply. Both requests derive tenant/user ownership from the
+authenticated session; the browser never supplies a user id.
 
-The downloaded `ironclaw.run_artifact.v1` JSON contains the exact run's user,
-assistant, and tool-result context plus best-effort scoped process logs. Logs
-are diagnostic only: the buffer is bounded and process-local, so
+The exact-run `ironclaw.run_artifact.v1` and complete-thread
+`ironclaw.thread_artifact.v1` schemas contain redacted user, assistant, and
+tool-result context plus best-effort scoped process logs. Thread messages
+retain `run_id`, and the importer emits one candidate fixture turn per run.
+Logs are diagnostic only: the buffer is bounded and process-local, so
 `logs.complete` is deliberately always `false`. Railway or other node-wide
 logs are not part of the self-service export.
 
