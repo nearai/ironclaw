@@ -334,7 +334,7 @@ ironclaw_runner = { path = "crates/ironclaw_runner", version = "0.1.0" }
 # composing them in int-tier tests. All 17 of those modules are recompiled
 # into every int-tier test binary — a real, one-time build-time cost for the
 # lane, behaviorally inert for suites that never reference Slack types.
-ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support", "libsql"] }
+ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support"] }
 # Direct dev-dep: composition deliberately does NOT re-export the bare
 # `webui_v2_router`/`WebUiV2State` (facade-only rule), and the router smoke
 # drives the bare router, not the `webui_v2_app` wrapper. The v2 route surface

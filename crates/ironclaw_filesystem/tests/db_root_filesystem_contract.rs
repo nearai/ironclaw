@@ -1,19 +1,11 @@
-#![cfg(any(feature = "libsql", feature = "postgres"))]
-
 use ironclaw_filesystem::RootFilesystem;
-
-#[cfg(feature = "postgres")]
 use ironclaw_filesystem::PostgresRootFilesystem;
-#[cfg(feature = "libsql")]
 use ironclaw_filesystem::{
     Capability, CasExpectation, Entry, FileType, FilesystemError, FilesystemOperation, Filter,
     IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, LibSqlRootFilesystem, Page, RecordKind,
     SeqNo,
 };
-#[cfg(feature = "libsql")]
 use ironclaw_host_api::VirtualPath;
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_root_filesystem_reads_writes_and_stats_files() {
     let filesystem = libsql_root().await;
@@ -29,8 +21,6 @@ async fn libsql_root_filesystem_reads_writes_and_stats_files() {
     assert!(stat.modified.is_some());
     assert!(!stat.sensitive);
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_root_filesystem_lists_direct_children_sorted_with_virtual_paths() {
     let filesystem = libsql_root().await;
@@ -75,8 +65,6 @@ async fn libsql_root_filesystem_lists_direct_children_sorted_with_virtual_paths(
     );
     assert_eq!(entries[1].file_type, FileType::Directory);
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_root_filesystem_appends_deletes_and_creates_directories() {
     let filesystem = libsql_root().await;
@@ -113,8 +101,6 @@ async fn libsql_root_filesystem_appends_deletes_and_creates_directories() {
         }
     ));
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_root_filesystem_overwrites_existing_file() {
     let filesystem = libsql_root().await;
@@ -126,8 +112,6 @@ async fn libsql_root_filesystem_overwrites_existing_file() {
     assert_eq!(filesystem.read_file(&path).await.unwrap(), b"second");
     assert_eq!(filesystem.stat(&path).await.unwrap().len, 6);
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_root_filesystem_write_file_rejects_existing_directory() {
     let filesystem = libsql_root().await;
@@ -151,8 +135,6 @@ async fn libsql_root_filesystem_write_file_rejects_existing_directory() {
     );
     assert_eq!(filesystem.read_file(&child).await.unwrap(), b"one\n");
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_root_filesystem_write_file_rejects_implicit_directory() {
     let filesystem = libsql_root().await;
@@ -175,8 +157,6 @@ async fn libsql_root_filesystem_write_file_rejects_implicit_directory() {
     );
     assert_eq!(filesystem.read_file(&child).await.unwrap(), b"child");
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_root_filesystem_append_file_rejects_implicit_directory() {
     let filesystem = libsql_root().await;
@@ -202,8 +182,6 @@ async fn libsql_root_filesystem_append_file_rejects_implicit_directory() {
     );
     assert_eq!(filesystem.read_file(&child).await.unwrap(), b"child");
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_root_filesystem_fails_closed_for_missing_paths_without_host_paths() {
     let filesystem = libsql_root().await;
@@ -222,15 +200,11 @@ async fn libsql_root_filesystem_fails_closed_for_missing_paths_without_host_path
     assert!(!display.contains("/tmp"));
     assert!(!display.contains(".db"));
 }
-
-#[cfg(feature = "postgres")]
 #[test]
 fn postgres_root_filesystem_implements_root_filesystem_contract() {
     fn assert_root<T: RootFilesystem>() {}
     assert_root::<PostgresRootFilesystem>();
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_root_filesystem_migration_failure_surfaces_infrastructure_variant() {
     // Audit finding F1: backend connect/migration paths used to wrap
@@ -294,8 +268,6 @@ async fn libsql_root_filesystem_migration_failure_surfaces_infrastructure_varian
         "infrastructure error must not fabricate a virtual path: {display}"
     );
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_query_page_offset_overflow_surfaces_typed_error() {
     // Audit finding F6: `page.offset as i64` previously truncate-wrapped
@@ -330,14 +302,10 @@ async fn libsql_query_page_offset_overflow_surfaces_typed_error() {
         other => panic!("expected Backend error, got {other:?}"),
     }
 }
-
-#[cfg(feature = "libsql")]
 struct TestLibSqlRootFilesystem {
     filesystem: LibSqlRootFilesystem,
     _dir: tempfile::TempDir,
 }
-
-#[cfg(feature = "libsql")]
 impl std::ops::Deref for TestLibSqlRootFilesystem {
     type Target = LibSqlRootFilesystem;
 
@@ -345,8 +313,6 @@ impl std::ops::Deref for TestLibSqlRootFilesystem {
         &self.filesystem
     }
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_native_put_get_round_trip_with_record_metadata() {
     let filesystem = libsql_root().await;
@@ -377,8 +343,6 @@ async fn libsql_native_put_get_round_trip_with_record_metadata() {
     assert!(got.entry.indexed.contains_key(&scope_key));
     assert!(got.entry.indexed.contains_key(&status_key));
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_native_put_cas_absent_rejects_existing_path() {
     let filesystem = libsql_root().await;
@@ -393,8 +357,6 @@ async fn libsql_native_put_cas_absent_rejects_existing_path() {
         .unwrap_err();
     assert!(matches!(err, FilesystemError::VersionMismatch { .. }));
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_native_put_cas_version_advances_and_rejects_stale() {
     let filesystem = libsql_root().await;
@@ -421,7 +383,6 @@ async fn libsql_native_put_cas_version_advances_and_rejects_stale() {
 /// closed with `found: None` rather than panicking or reporting a stale
 /// version, so callers can distinguish "never written" from "someone
 /// else won the race" on the version-mismatch error.
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_native_put_cas_version_on_missing_path_reports_no_found_version() {
     let filesystem = libsql_root().await;
@@ -444,8 +405,6 @@ async fn libsql_native_put_cas_version_on_missing_path_reports_no_found_version(
         other => panic!("expected VersionMismatch, got: {other:?}"),
     }
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_delete_if_version_deletes_current_and_rejects_stale_or_missing() {
     let filesystem = libsql_root().await;
@@ -506,7 +465,6 @@ async fn libsql_delete_if_version_deletes_current_and_rejects_stale_or_missing()
 /// than being silently truncated into a bind parameter that could never
 /// match — and the guard must fire before any DELETE runs, so the entry
 /// survives untouched.
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_delete_if_version_rejects_out_of_range_expected_version() {
     let filesystem = libsql_root().await;
@@ -540,7 +498,6 @@ async fn libsql_delete_if_version_rejects_out_of_range_expected_version() {
 /// future change to libSQL's version-assignment (e.g. a sequence that
 /// doesn't reset) can't silently invalidate the trait doc's warning for
 /// this backend without a test noticing.
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_delete_if_version_is_vulnerable_to_aba_across_delete_recreate_cycles() {
     let filesystem = libsql_root().await;
@@ -578,7 +535,6 @@ async fn libsql_delete_if_version_is_vulnerable_to_aba_across_delete_recreate_cy
 /// `libsql_put_rejects_existing_directory`-style tests already pin for
 /// `put`. A directory-only path must diagnose as `NotFound` (no file-plane
 /// row at that path), never match/delete the directory row.
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_delete_if_version_excludes_explicit_directory_row() {
     let filesystem = libsql_root().await;
@@ -601,8 +557,6 @@ async fn libsql_delete_if_version_excludes_explicit_directory_row() {
          (is_dir = TRUE), got: {err:?}"
     );
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_native_put_cas_any_increments_existing_version() {
     let filesystem = libsql_root().await;
@@ -620,16 +574,12 @@ async fn libsql_native_put_cas_any_increments_existing_version() {
     assert_eq!(got.version, v2);
     assert_eq!(got.entry.body, vec![2]);
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_get_returns_none_for_missing_path() {
     let filesystem = libsql_root().await;
     let path = VirtualPath::new("/secrets/leases/missing").unwrap();
     assert!(filesystem.get(&path).await.unwrap().is_none());
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_write_file_after_put_resets_record_metadata_and_bumps_version() {
     // PR #3660 reviewer fix: legacy write_file/append_file used to update
@@ -661,8 +611,6 @@ async fn libsql_write_file_after_put_resets_record_metadata_and_bumps_version() 
     assert_eq!(got.entry.body, b"opaque");
     assert!(got.version > v1);
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_ensure_index_is_idempotent_and_conflict_aware() {
     let filesystem = libsql_root().await;
@@ -685,8 +633,6 @@ async fn libsql_ensure_index_is_idempotent_and_conflict_aware() {
         .unwrap_err();
     assert!(matches!(err, FilesystemError::IndexConflict { .. }));
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_ensure_index_accepts_fts_kind_and_filter_matches_text() {
     // FTS5 vtable + sync triggers are created at declaration time, and
@@ -736,8 +682,6 @@ async fn libsql_ensure_index_accepts_fts_kind_and_filter_matches_text() {
         .unwrap();
     assert_eq!(results.len(), 2);
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_fts_filter_picks_up_inserts_through_triggers() {
     // After ensure_index, inserting a new row through put() updates the
@@ -779,8 +723,6 @@ async fn libsql_fts_filter_picks_up_inserts_through_triggers() {
         .unwrap();
     assert_eq!(results.len(), 1);
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_ensure_index_fts_rejects_path_with_sql_metacharacters() {
     // Regression: the FTS5 sync triggers splice the mount-prefix path
@@ -815,8 +757,6 @@ async fn libsql_ensure_index_fts_rejects_path_with_sql_metacharacters() {
         other => panic!("expected Backend error, got: {other:?}"),
     }
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_vector_index_round_trips_and_ranks_by_cosine() {
     // IndexKind::Vector is accepted at declaration; storage shape is
@@ -884,8 +824,6 @@ async fn libsql_vector_index_round_trips_and_ranks_by_cosine() {
         Some(&IndexValue::Bytes(blob(&[1.0, 0.0, 0.0])))
     );
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_query_filters_on_indexed_projection() {
     let filesystem = libsql_root().await;
@@ -956,8 +894,6 @@ async fn libsql_query_filters_on_indexed_projection() {
         .count();
     assert_eq!(acme_active_count, 2);
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_query_prefix_filter_matches_text_prefix() {
     let filesystem = libsql_root().await;
@@ -996,8 +932,6 @@ async fn libsql_query_prefix_filter_matches_text_prefix() {
         .unwrap();
     assert_eq!(results.len(), 2);
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_query_or_empty_matches_nothing_and_all_matches_every_row() {
     // PR #3661 reviewer fix: empty `Or` was returning every row instead
@@ -1053,8 +987,6 @@ async fn libsql_query_or_empty_matches_nothing_and_all_matches_every_row() {
         .unwrap();
     assert_eq!(and_all.len(), 2);
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_query_prefix_filter_literal_percent_is_not_a_wildcard() {
     // PR #3661 reviewer fix: a literal prefix containing `%` was being
@@ -1097,8 +1029,6 @@ async fn libsql_query_prefix_filter_literal_percent_is_not_a_wildcard() {
         .unwrap();
     assert_eq!(results.len(), 1);
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_query_range_on_bool_finds_matching_rows() {
     // Regression test for the libSQL Range/Bool bug: SQLite's `json_type`
@@ -1161,8 +1091,6 @@ async fn libsql_query_range_on_bool_finds_matching_rows() {
         .unwrap();
     assert_eq!(only_true.len(), 1);
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_query_range_rejects_mixed_variant_bounds() {
     // Mixed-variant bounds (e.g. I64 lo + Text hi) used to silently fall
@@ -1195,8 +1123,6 @@ async fn libsql_query_range_rejects_mixed_variant_bounds() {
         "expected Unsupported for mixed-variant Range bounds, got {err:?}"
     );
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_vector_nearest_stable_tie_break_on_equal_cosine() {
     // Regression test for the tie-breaker fix: equal-cosine candidates
@@ -1265,8 +1191,6 @@ async fn libsql_vector_nearest_stable_tie_break_on_equal_cosine() {
     assert_eq!(top_two[0].path.as_str(), "/memory/tie_break/aa");
     assert_eq!(top_two[1].path.as_str(), "/memory/tie_break/mm");
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_query_paginates_results() {
     let filesystem = libsql_root().await;
@@ -1315,8 +1239,6 @@ async fn libsql_query_paginates_results() {
         assert!(!first.iter().any(|f| f.entry.body == entry.entry.body));
     }
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_append_and_tail_assigns_monotonic_seqno() {
     let filesystem = libsql_root().await;
@@ -1346,8 +1268,6 @@ async fn libsql_append_and_tail_assigns_monotonic_seqno() {
     let from_last = filesystem.tail(&log, s3).await.unwrap();
     assert!(from_last.is_empty());
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_append_batch_is_one_statement_with_contiguous_ordered_seqs() {
     let filesystem = libsql_root().await;
@@ -1386,8 +1306,6 @@ async fn libsql_append_batch_is_one_statement_with_contiguous_ordered_seqs() {
             .is_empty()
     );
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_append_batch_spanning_multiple_statements_commits_atomically_in_order() {
     // 600 > the 256-row chunk size, so this exercises the multi-statement
@@ -1416,8 +1334,6 @@ async fn libsql_append_batch_spanning_multiple_statements_commits_atomically_in_
         assert_eq!(all[offset].seq, seqs[offset]);
     }
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_tail_bounded_limits_records_before_materialization() {
     let filesystem = libsql_root().await;
@@ -1439,8 +1355,6 @@ async fn libsql_tail_bounded_limits_records_before_materialization() {
     assert_eq!(after_first[0].seq, s2);
     assert_eq!(filesystem.tail_bounded(&log, s3, 1).await.unwrap().len(), 0);
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_head_seq_returns_none_for_empty_path() {
     let filesystem = libsql_root().await;
@@ -1448,8 +1362,6 @@ async fn libsql_head_seq_returns_none_for_empty_path() {
     let head = filesystem.head_seq(&log, SeqNo::ZERO).await.unwrap();
     assert_eq!(head, None);
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_head_seq_returns_max_seq_after_appends() {
     let filesystem = libsql_root().await;
@@ -1462,8 +1374,6 @@ async fn libsql_head_seq_returns_max_seq_after_appends() {
     let head = filesystem.head_seq(&log, SeqNo::ZERO).await.unwrap();
     assert_eq!(head, Some(s3));
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_head_seq_returns_none_when_from_exceeds_all_seqs() {
     let filesystem = libsql_root().await;
@@ -1478,8 +1388,6 @@ async fn libsql_head_seq_returns_none_when_from_exceeds_all_seqs() {
     let head = filesystem.head_seq(&log, beyond).await.unwrap();
     assert_eq!(head, None);
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_append_distinct_paths_share_global_seq_but_are_isolated_on_tail() {
     // Each path's tail returns only its own records, even though the
@@ -1510,15 +1418,11 @@ async fn libsql_append_distinct_paths_share_global_seq_but_are_isolated_on_tail(
     // Per-path seq is monotonic.
     assert!(a1 < a2);
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_capabilities_advertise_events() {
     let filesystem = libsql_root().await;
     assert!(filesystem.capabilities().has(Capability::Events));
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_create_dir_all_concurrent_shared_prefixes_waits_for_writer() {
     let db_dir = tempfile::tempdir().unwrap();
@@ -1550,8 +1454,6 @@ async fn libsql_create_dir_all_concurrent_shared_prefixes_waits_for_writer() {
         FileType::Directory
     );
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_put_concurrent_distinct_children_waits_for_writer() {
     let db_dir = tempfile::tempdir().unwrap();
@@ -1587,8 +1489,6 @@ async fn libsql_put_concurrent_distinct_children_waits_for_writer() {
         vec![31]
     );
 }
-
-#[cfg(feature = "libsql")]
 async fn libsql_root() -> TestLibSqlRootFilesystem {
     let db_dir = tempfile::tempdir().unwrap();
     let db_path = db_dir.path().join("root-filesystem.db");
@@ -1610,8 +1510,6 @@ async fn libsql_root() -> TestLibSqlRootFilesystem {
 // race-idempotence, Range numeric vs text comparison) and gracefully skip
 // when no Postgres is reachable via `DATABASE_URL` /
 // `IRONCLAW_FILESYSTEM_POSTGRES_URL`.
-
-#[cfg(feature = "postgres")]
 mod postgres_tests {
     use super::*;
     use ironclaw_filesystem::{

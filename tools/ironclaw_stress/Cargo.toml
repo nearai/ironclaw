@@ -15,11 +15,10 @@ layer = "app"
 
 [features]
 default = ["libsql", "postgres"]
-libsql = ["dep:libsql", "ironclaw_filesystem/libsql"]
+libsql = ["dep:libsql"]
 postgres = [
     "dep:deadpool-postgres",
     "dep:tokio-postgres",
-    "ironclaw_filesystem/postgres",
 ]
 
 [dependencies]
