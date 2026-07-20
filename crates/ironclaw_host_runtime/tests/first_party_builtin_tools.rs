@@ -4123,7 +4123,8 @@ async fn builtin_http_save_passes_save_to_and_returns_saved_body_metadata() {
 
     let requests = egress.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].response_body_limit, Some(10 * 1024 * 1024));
+    // Default save-mode body limit (raised: http.save streams to disk, not memory).
+    assert_eq!(requests[0].response_body_limit, Some(128 * 1024 * 1024));
     let save_target = requests[0]
         .save_body_to
         .as_ref()
@@ -4161,7 +4162,8 @@ async fn builtin_http_save_rejects_response_body_limit_above_save_ceiling_before
         json!({
             "url": "https://api.example.test/v1/items",
             "save_to": "/workspace/response.json",
-            "response_body_limit": 10 * 1024 * 1024 + 1
+            // One byte above the (raised) save ceiling — still rejected before egress.
+            "response_body_limit": 256 * 1024 * 1024 + 1
         }),
         execution_context_with_mounts_and_network(
             [HTTP_SAVE_CAPABILITY_ID],

@@ -29,11 +29,19 @@ pub const HTTP_SAVE_CAPABILITY_ID: &str = "builtin.http.save";
 
 const DEFAULT_HTTP_TIMEOUT_MS: u32 = 10_000;
 const MAX_HTTP_TIMEOUT_MS: u32 = 30_000;
-pub(super) const MAX_HTTP_OUTPUT_BYTES: u64 = 15 * 1024 * 1024;
+// Umbrella cap. Raised to cover the larger save-to-disk limit below; the
+// model-facing inline body is still bounded separately by the much smaller
+// MAX_INLINE_RESPONSE_BODY_LIMIT, so this does not enlarge what reaches the model.
+pub(super) const MAX_HTTP_OUTPUT_BYTES: u64 = 256 * 1024 * 1024;
 const DEFAULT_INLINE_RESPONSE_BODY_LIMIT: u64 = 48 * 1024;
 const MAX_INLINE_RESPONSE_BODY_LIMIT: u64 = 256 * 1024;
-const DEFAULT_SAVE_RESPONSE_BODY_LIMIT: u64 = 10 * 1024 * 1024;
-const MAX_SAVE_RESPONSE_BODY_LIMIT: u64 = 10 * 1024 * 1024;
+// `http.save` streams the body to a file on disk, so it is NOT bounded by model
+// context the way an inline body is. The previous 10 MiB cap rejected legitimate
+// large downloads (e.g. multi-MB log files) with `OutputTooLarge`, which made the
+// agent retry-loop until the turn timed out (scoring the task 0). Raise the
+// save-mode limit so a large file can be fetched to disk and processed.
+const DEFAULT_SAVE_RESPONSE_BODY_LIMIT: u64 = 128 * 1024 * 1024;
+const MAX_SAVE_RESPONSE_BODY_LIMIT: u64 = 256 * 1024 * 1024;
 const DEFAULT_NETWORK_EGRESS_BYTES: u64 = 16 * 1024;
 const MAX_NETWORK_EGRESS_BYTES: u64 = 256 * 1024;
 const MAX_HTTP_HEADERS: usize = 64;
