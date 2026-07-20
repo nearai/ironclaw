@@ -145,15 +145,15 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
         AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityBatchInvocation,
-        CapabilityBatchOutcome, CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInvocation,
-        CapabilityOutcome, CapabilitySurfaceVersion, FinalizeAssistantMessage,
-        InstructionMaterializationStore, LoopCapabilityPort, LoopContextBundle,
-        LoopContextCompactionKind, LoopContextCompactionMetadata, LoopContextMessage,
-        LoopContextPort, LoopContextRequest, LoopDriverNoteKind, LoopHostMilestoneEmitter,
-        LoopHostMilestoneSink, LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest,
-        LoopModelResponse, LoopModelUsage, LoopPromptBundleAuthority, LoopRunContext,
-        LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput,
-        PromptMode, UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInvocation, CapabilityOutcome,
+        CapabilitySurfaceVersion, FinalizeAssistantMessage, InstructionMaterializationStore,
+        LoopCapabilityPort, LoopContextBundle, LoopContextCompactionKind,
+        LoopContextCompactionMetadata, LoopContextMessage, LoopContextPort, LoopContextRequest,
+        LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputCursor,
+        LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse, LoopModelUsage,
+        LoopPromptBundleAuthority, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
+        LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput, PromptMode, UpdateAssistantDraft,
+        VisibleCapabilityRequest, VisibleCapabilitySurface, capability_outcome_to_resolution,
         sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
     },
 };
@@ -901,7 +901,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for EmptyLoopCapabilityPort
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
         let empty_surface_version = empty_surface_version()?;
         if request.surface_version != empty_surface_version {
             return Err(AgentLoopHostError::new(
@@ -915,7 +915,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for EmptyLoopCapabilityPort
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+    ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
         let empty_surface_version = empty_surface_version()?;
         if request
             .invocations
@@ -927,18 +927,19 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for EmptyLoopCapabilityPort
                 "capability surface is stale or unknown",
             ));
         }
-        let outcomes = request
+        let resolutions = request
             .invocations
             .into_iter()
             .map(|_| {
-                CapabilityOutcome::Denied(CapabilityDenied {
+                capability_outcome_to_resolution(CapabilityOutcome::Denied(CapabilityDenied {
                     reason_kind: CapabilityDeniedReasonKind::EmptySurface,
                     safe_summary: "no capabilities are available to this loop".to_string(),
-                })
+                }))
+                .resolution
             })
             .collect();
-        Ok(CapabilityBatchOutcome {
-            outcomes,
+        Ok(ironclaw_host_api::ResolutionBatch {
+            resolutions,
             stopped_on_suspension: false,
         })
     }

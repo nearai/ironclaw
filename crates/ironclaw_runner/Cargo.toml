@@ -66,6 +66,7 @@ ironclaw_host_runtime = { path = "../ironclaw_host_runtime", version = "0.1.0" }
 ironclaw_llm = { path = "../ironclaw_llm", version = "0.1.0", optional = true, default-features = false }
 ironclaw_loop_host = { path = "../ironclaw_loop_host", version = "0.1.0" }
 ironclaw_observability = { path = "../ironclaw_observability" }
+ironclaw_run_state = { path = "../ironclaw_run_state", version = "0.1.0" }
 ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
 ironclaw_secrets = { path = "../ironclaw_secrets", version = "0.1.0", optional = true }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0", optional = true }

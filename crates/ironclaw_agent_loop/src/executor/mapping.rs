@@ -1,8 +1,9 @@
+use ironclaw_host_api::{Resolution, ToolVerdict};
 use ironclaw_turns::{
     LoopBlockedKind, LoopFailureKind, SanitizedFailure,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, CapabilityFailureKind,
-        CapabilityOutcome, LoopCheckpointKind, LoopGateKind,
+        LoopCheckpointKind, LoopGateKind,
     },
 };
 
@@ -52,29 +53,24 @@ pub(super) fn batch_policy_kind(policy: BatchPolicy) -> BatchPolicyKind {
     }
 }
 
-pub(super) fn capability_batch_counts(outcomes: &[CapabilityOutcome]) -> (u32, u32, u32, u32) {
+pub(super) fn capability_batch_counts(resolutions: &[Resolution]) -> (u32, u32, u32, u32) {
     let mut result_count = 0;
     let mut denied_count = 0;
     let mut gated_count = 0;
     let mut failed_count = 0;
-    for outcome in outcomes {
-        match outcome {
-            CapabilityOutcome::Completed(_) | CapabilityOutcome::SpawnedChildRun { .. } => {
-                result_count += 1
-            }
-            CapabilityOutcome::Denied(_) => denied_count += 1,
-            CapabilityOutcome::ApprovalRequired { .. }
-            | CapabilityOutcome::AuthRequired { .. }
-            | CapabilityOutcome::ResourceBlocked { .. }
-            // ExternalToolPending: the run parks waiting for the client to submit
-            // tool output — a non-completing, non-failing, non-denied gate.
-            | CapabilityOutcome::ExternalToolPending { .. }
-            | CapabilityOutcome::AwaitDependentRun { .. }
-            // SpawnedProcess: treated as gated — it is a non-completing, non-failing, non-denied
-            // outcome that defers completion to a background process. Grouped with gated to avoid
-            // treating it as completed or failed in batch accounting.
-            | CapabilityOutcome::SpawnedProcess(_) => gated_count += 1,
-            CapabilityOutcome::Failed(_) => failed_count += 1,
+    for resolution in resolutions {
+        // Exhaustive over `Resolution`, no wildcard (§11.9). `Done` splits on its
+        // verdict: `Success`/`ChildSpawned` are results, a `RecoverableFailure` is
+        // a model-visible failure. `Denied` is denied; every `Blocked` gate and
+        // every `Suspended` (process/dependent-run/external-tool) is gated — a
+        // non-completing, non-failing, non-denied outcome that defers completion.
+        match resolution {
+            Resolution::Done(outcome) => match &outcome.verdict {
+                ToolVerdict::Success | ToolVerdict::ChildSpawned { .. } => result_count += 1,
+                ToolVerdict::RecoverableFailure { .. } => failed_count += 1,
+            },
+            Resolution::Denied(_) => denied_count += 1,
+            Resolution::Blocked(_) | Resolution::Suspended(_) => gated_count += 1,
         }
     }
     (result_count, denied_count, gated_count, failed_count)

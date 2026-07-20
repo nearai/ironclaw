@@ -422,17 +422,17 @@ mod tests {
 
         use async_trait::async_trait;
         use ironclaw_agent_loop::test_support::test_run_context;
-        use ironclaw_host_api::{CapabilityId, RuntimeKind};
+        use ironclaw_host_api::{CapabilityId, Resolution, ResolutionBatch, RuntimeKind};
         use ironclaw_loop_host::{
             CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileFilter,
             CapabilitySurfaceProfileResolver, SubagentPromptMaterialSource,
         };
         use ironclaw_turns::run_profile::{
-            AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome,
-            CapabilityDescriptorView, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-            CapabilityResultMessage, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort,
-            LoopDriverId, ProviderToolDefinition, VisibleCapabilityRequest,
-            VisibleCapabilitySurface,
+            AgentLoopHostError, CapabilityBatchInvocation, CapabilityDescriptorView,
+            CapabilityInputRef, CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage,
+            CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopDriverId,
+            ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
+            capability_outcome_to_resolution,
         };
         use ironclaw_turns::{LoopResultRef, RunProfileId, RunProfileVersion};
 
@@ -526,12 +526,12 @@ mod tests {
             async fn invoke_capability(
                 &self,
                 request: CapabilityInvocation,
-            ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+            ) -> Result<Resolution, AgentLoopHostError> {
                 self.invoked
                     .lock()
                     .expect("invoked lock")
                     .push(request.capability_id.as_str().to_string());
-                Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
+                let outcome = CapabilityOutcome::Completed(CapabilityResultMessage {
                     result_ref: LoopResultRef::new("result:ok").expect("valid result ref"),
                     safe_summary: "ok".to_string(),
                     progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
@@ -539,15 +539,16 @@ mod tests {
                     byte_len: 0,
                     output_digest: None,
                     model_observation: None,
-                }))
+                });
+                Ok(capability_outcome_to_resolution(outcome).resolution)
             }
 
             async fn invoke_capability_batch(
                 &self,
                 _request: CapabilityBatchInvocation,
-            ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-                Ok(CapabilityBatchOutcome {
-                    outcomes: Vec::new(),
+            ) -> Result<ResolutionBatch, AgentLoopHostError> {
+                Ok(ResolutionBatch {
+                    resolutions: Vec::new(),
                     stopped_on_suspension: false,
                 })
             }
@@ -619,8 +620,8 @@ mod tests {
             }
         }
 
-        fn is_denied(outcome: &CapabilityOutcome) -> bool {
-            matches!(outcome, CapabilityOutcome::Denied(_))
+        fn is_denied(resolution: &Resolution) -> bool {
+            matches!(resolution, Resolution::Denied(_))
         }
 
         async fn visible_ids(

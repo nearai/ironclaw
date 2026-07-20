@@ -44,7 +44,10 @@ pub(crate) fn wrap_result_read_capability_for_test(
 ) -> Result<Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>, AgentLoopHostError> {
     super::synthetic_capability::wrap_synthetic_capabilities(
         inner,
-        vec![result_read_capability(thread_service, fallback_user_id.clone())?],
+        vec![result_read_capability(
+            thread_service,
+            fallback_user_id.clone(),
+        )?],
         run_context,
         fallback_user_id,
         input_resolver,

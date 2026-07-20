@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use ironclaw_host_api::{
-    AgentId, CapabilityId, ProjectId, RuntimeKind, TenantId, ThreadId, UserId,
+    AgentId, Blocked, CapabilityId, ProjectId, Resolution, RuntimeKind, TenantId, ThreadId, UserId,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
@@ -18,15 +18,15 @@ use ironclaw_turns::{
     events::EventCursor,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
-        BatchPolicyKind, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
-        CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
-        CapabilityInvocation, CapabilityOutcome, CapabilityProgress, CapabilityResultMessage,
-        CapabilitySurfaceVersion, CommunicationRuntimeContext, ConcurrencyHint,
-        ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState,
-        DeliveryTargetSummary, FinalizeAssistantMessage, HostManagedLoopModelPort,
-        HostManagedLoopPromptPort, InMemoryInstructionMaterializationStore,
-        InMemoryLoopHostMilestoneSink, InstructionBundleBuilder, InstructionBundleFingerprint,
-        InstructionBundleRequest, InstructionMaterializationStore, InstructionSafetyContext,
+        BatchPolicyKind, CapabilityBatchInvocation, CapabilityDenied, CapabilityDeniedReasonKind,
+        CapabilityDescriptorView, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
+        CapabilityProgress, CapabilityResultMessage, CapabilitySurfaceVersion,
+        CommunicationRuntimeContext, ConcurrencyHint, ConnectedChannelSummary,
+        ConnectedChannelsState, DeliveryTargetState, DeliveryTargetSummary,
+        FinalizeAssistantMessage, HostManagedLoopModelPort, HostManagedLoopPromptPort,
+        InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
+        InstructionBundleBuilder, InstructionBundleFingerprint, InstructionBundleRequest,
+        InstructionMaterializationStore, InstructionSafetyContext,
         LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LoopCancellationPort, LoopCancellationSignal,
         LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
         LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
@@ -42,6 +42,7 @@ use ironclaw_turns::{
         LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopRuntimeContext, LoopSafeSummary,
         LoopTranscriptPort, ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput, PromptMode,
         PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        capability_outcome_to_resolution,
     },
     runner::{ClaimRunRequest, TurnRunTransitionPort},
 };
@@ -2693,12 +2694,21 @@ impl AgentLoopDriver for CapabilityDriver {
             })
             .await
             .map_err(driver_error)?;
-        let CapabilityOutcome::ApprovalRequired { gate_ref, .. } = outcome else {
+        let Resolution::Blocked(Blocked::Approval(waypoint)) = outcome else {
             return Err(AgentLoopDriverError::Failed {
                 reason_kind: "expected_approval".to_string(),
                 detail: None,
             });
         };
+        // Reconstruct the loop gate ref from the channel's preserved origin.
+        let gate_ref = waypoint
+            .origin
+            .as_ref()
+            .and_then(|origin| ironclaw_turns::LoopGateRef::new(origin.as_str()).ok())
+            .ok_or(AgentLoopDriverError::Failed {
+                reason_kind: "expected_approval".to_string(),
+                detail: None,
+            })?;
         let state_ref = LoopCheckpointStateRef::new("checkpoint:approval-state").unwrap();
         let checkpoint_id = host
             .checkpoint(LoopCheckpointRequest {
@@ -3191,7 +3201,7 @@ impl LoopCapabilityPort for RecordingAgentLoopHost {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
         if request.surface_version != self.visible_surface.version
             || !self
                 .visible_surface
@@ -3215,14 +3225,15 @@ impl LoopCapabilityPort for RecordingAgentLoopHost {
                     "capability outcome unavailable",
                 )
             })
+            .map(|outcome| capability_outcome_to_resolution(outcome).resolution)
     }
 
     async fn invoke_capability_batch(
         &self,
         _request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-        Ok(CapabilityBatchOutcome {
-            outcomes: Vec::new(),
+    ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
+        Ok(ironclaw_host_api::ResolutionBatch {
+            resolutions: Vec::new(),
             stopped_on_suspension: false,
         })
     }

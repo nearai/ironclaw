@@ -16,15 +16,16 @@ use std::{
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use ironclaw_hooks::middleware::HookGateRefFactory;
-use ironclaw_host_api::{ApprovalRequestId, CapabilityId, UserId, sha256_digest_token};
+use ironclaw_host_api::{
+    ApprovalRequestId, CapabilityId, Resolution, ResolutionBatch, UserId, sha256_digest_token,
+};
 use ironclaw_turns::{
     LoopGateRef,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-        CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityInvocation, CapabilityOutcome,
-        LoopCapabilityPort, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
-        ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        CapabilityCallCandidate, CapabilityInvocation, LoopCapabilityPort, LoopRunContext,
+        ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolDefinition,
+        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 
@@ -401,7 +402,7 @@ impl LoopCapabilityPort for HookGateInvocationScopePort {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         let metadata = HookGateInvocationMetadata::for_invocation(&request)
             .map_err(AgentLoopHostError::from)?;
         HOOK_GATE_INVOCATION
@@ -412,25 +413,29 @@ impl LoopCapabilityPort for HookGateInvocationScopePort {
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
         let CapabilityBatchInvocation {
             invocations,
             stop_on_first_suspension,
         } = request;
-        let mut outcomes = Vec::with_capacity(invocations.len());
+        let mut resolutions = Vec::with_capacity(invocations.len());
         let mut stopped_on_suspension = false;
         for invocation in invocations {
             if stopped_on_suspension {
                 break;
             }
-            let outcome = self.invoke_capability(invocation).await?;
-            if outcome.is_suspension() && stop_on_first_suspension {
+            let resolution = self.invoke_capability(invocation).await?;
+            // H1: the batch stops on the first invocation that *parks* — a
+            // re-entrant gate as well as a suspension (the loop enum's old
+            // `is_suspension()` also lumped gates in). `Resolution::parks()` is
+            // that predicate.
+            if resolution.parks() && stop_on_first_suspension {
                 stopped_on_suspension = true;
             }
-            outcomes.push(outcome);
+            resolutions.push(resolution);
         }
-        Ok(CapabilityBatchOutcome {
-            outcomes,
+        Ok(ResolutionBatch {
+            resolutions,
             stopped_on_suspension,
         })
     }

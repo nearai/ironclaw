@@ -23,8 +23,8 @@ use ironclaw_approvals::test_support::{
 use ironclaw_authorization::in_memory_backed_capability_lease_store;
 use ironclaw_host_api::{
     AgentId, CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, MountAlias, MountGrant,
-    MountPermissions, MountView, PermissionMode, ProjectId, ProviderToolName, ResourceEstimate,
-    RuntimeKind, TenantId, ThreadId, UserId, VirtualPath,
+    MountPermissions, MountView, PermissionMode, ProjectId, ProviderToolName, Resolution,
+    ResourceEstimate, RuntimeKind, TenantId, ThreadId, ToolVerdict, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::RuntimeCapabilityOutcome;
 use ironclaw_host_runtime::{
@@ -51,8 +51,8 @@ use ironclaw_reborn_composition::test_support::{
 };
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, CapabilityInvocation,
-    CapabilityOutcome, InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopRunContext,
-    ProviderToolCall, RegisterProviderToolCallRequest, RunProfileResolutionRequest,
+    InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopRunContext, ProviderToolCall,
+    RegisterProviderToolCallRequest, RunProfileResolutionRequest,
 };
 use ironclaw_turns::{RunProfileResolver, TurnId, TurnRunId, TurnScope};
 
@@ -607,7 +607,7 @@ async fn input_and_result_refs_correlate_through_one_shared_io() {
         Some(serde_json::json!({"name": "My Project"}))
     );
 
-    let outcome = port
+    let resolution = port
         .invoke_capability(CapabilityInvocation {
             activity_id: candidate.activity_id,
             surface_version: candidate.surface_version,
@@ -619,10 +619,18 @@ async fn input_and_result_refs_correlate_through_one_shared_io() {
         .await
         .expect("invokes project_create");
 
-    let CapabilityOutcome::Completed(message) = outcome else {
-        panic!("expected a completed outcome, got {outcome:?}");
+    let Resolution::Done(outcome) = resolution else {
+        panic!("expected a completed outcome, got {resolution:?}");
     };
-    let staged_result = shared_io.staged_result(message.result_ref.as_str());
+    assert_eq!(outcome.verdict, ToolVerdict::Success);
+    // The minted `refs.result` is an opaque uuid; the originating loop result ref
+    // the shared io staged under is preserved on `refs.origin`.
+    let origin = outcome
+        .refs
+        .origin
+        .as_ref()
+        .expect("completed outcome preserves the originating loop result ref");
+    let staged_result = shared_io.staged_result(origin.as_str());
     assert!(
         staged_result.is_some(),
         "result_ref must resolve through the SAME shared io the input was staged in"

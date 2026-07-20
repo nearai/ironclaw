@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, HostApiError,
-    INPUT_ENCODE_HUMAN_SUMMARY, ProviderToolName, RuntimeCredentialAuthRequirement, RuntimeKind,
-    ThreadId,
+    INPUT_ENCODE_HUMAN_SUMMARY, ProviderToolName, Resolution, ResolutionBatch,
+    RuntimeCredentialAuthRequirement, RuntimeKind, ThreadId,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -2194,12 +2194,12 @@ pub trait LoopCapabilityPort: Send + Sync {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError>;
+    ) -> Result<Resolution, AgentLoopHostError>;
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError>;
+    ) -> Result<ResolutionBatch, AgentLoopHostError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2648,14 +2648,14 @@ mod tests {
         async fn invoke_capability(
             &self,
             _request: CapabilityInvocation,
-        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        ) -> Result<Resolution, AgentLoopHostError> {
             unreachable!("not used by this test")
         }
 
         async fn invoke_capability_batch(
             &self,
             _request: CapabilityBatchInvocation,
-        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        ) -> Result<ResolutionBatch, AgentLoopHostError> {
             unreachable!("not used by this test")
         }
     }

@@ -24,11 +24,12 @@ use ironclaw_hooks::{
     sink::{ObserverHook, ObserverSink},
 };
 use ironclaw_host_api::{
-    AgentId, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId,
-    CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, GrantConstraints,
-    HostPath, HostPortCatalog, MountAlias, MountGrant, MountPermissions, MountView, NetworkPolicy,
-    PackageId, PermissionMode, Principal, ProcessId, ProjectId, ResourceEstimate, ResourceUsage,
-    RuntimeKind, SecretHandle, TenantId, ThreadId, TrustClass, UserId, VirtualPath,
+    AgentId, ApprovalRequestId, Blocked, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId,
+    CapabilityId, CapabilitySet, DenyReason, EffectKind, ExecutionContext, ExtensionId,
+    FailureKind, GrantConstraints, HostPath, HostPortCatalog, MountAlias, MountGrant,
+    MountPermissions, MountView, NetworkPolicy, PackageId, PermissionMode, Principal, ProcessId,
+    ProjectId, Resolution, ResourceEstimate, ResourceUsage, RuntimeKind, SecretHandle, Suspension,
+    TenantId, ThreadId, ToolVerdict, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfacePolicy, HostRuntime,
@@ -121,8 +122,7 @@ use ironclaw_turns::{
     TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
-        BatchPolicyKind, CapabilityDeniedReasonKind, CapabilityDescriptorView,
-        CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
+        BatchPolicyKind, CapabilityDescriptorView, CapabilityInputRef, CapabilityInvocation,
         CapabilitySurfaceVersion, CommunicationContextFetch, CommunicationContextProvider,
         CommunicationRuntimeContext, CompactionInitiator, ConnectedChannelSummary,
         ConnectedChannelsState, DeliveryTargetState, FinalizeAssistantMessage,
@@ -1770,6 +1770,7 @@ async fn turn_runner_worker_completes_queued_run_after_turn_store_reopen() {
         Arc::new(registry),
         Arc::new(fixture.factory_with_loop_checkpoint_store(reopened_turn_store.clone()))
             as Arc<dyn HostFactory>,
+        None,
     ));
     let scheduler_handle = TurnRunScheduler::new(
         reopened_turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
@@ -1867,6 +1868,7 @@ async fn turn_runner_worker_emits_thread_run_correlated_operator_log() {
         Arc::new(registry),
         Arc::new(fixture.factory_with_loop_checkpoint_store(turn_store.clone()))
             as Arc<dyn HostFactory>,
+        None,
     ));
     let scheduler_handle = TurnRunScheduler::new(
         turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
@@ -2080,6 +2082,7 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
         applier,
         Arc::new(registry),
         Arc::new(factory) as Arc<dyn HostFactory>,
+        None,
     ));
     let scheduler_handle = TurnRunScheduler::new(
         turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
@@ -2215,6 +2218,7 @@ async fn turn_runner_worker_drives_full_text_only_model_transcript_completion_af
         Arc::new(registry),
         Arc::new(fixture.factory_with_loop_checkpoint_store(turn_store.clone()))
             as Arc<dyn HostFactory>,
+        None,
     ));
     let scheduler_handle = TurnRunScheduler::new(
         turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
@@ -2334,6 +2338,7 @@ async fn turn_runner_worker_full_reborn_fails_when_checkpoint_state_disk_is_full
         loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
         Arc::new(registry),
         Arc::new(factory) as Arc<dyn HostFactory>,
+        None,
     ));
     let scheduler_handle = TurnRunScheduler::new(
         turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
@@ -2401,6 +2406,7 @@ async fn turn_runner_worker_full_reborn_fails_cleanly_when_model_provider_is_off
         loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
         Arc::new(registry),
         Arc::new(factory) as Arc<dyn HostFactory>,
+        None,
     ));
     let scheduler_handle = TurnRunScheduler::new(
         turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
@@ -2484,6 +2490,7 @@ async fn turn_runner_worker_full_reborn_completes_while_postgres_heartbeats_are_
         loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
         Arc::new(registry),
         Arc::new(factory) as Arc<dyn HostFactory>,
+        None,
     ));
     let scheduler_handle = TurnRunScheduler::new(
         transitions.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
@@ -2577,6 +2584,7 @@ async fn turn_runner_worker_full_reborn_continues_after_tool_network_outage() {
         loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
         Arc::new(registry),
         Arc::new(host_factory) as Arc<dyn HostFactory>,
+        None,
     ));
     let scheduler_handle = TurnRunScheduler::new(
         turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
@@ -2700,6 +2708,7 @@ async fn turn_runner_worker_drives_script_capability_through_real_host_runtime()
         loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
         Arc::new(registry),
         Arc::new(factory) as Arc<dyn HostFactory>,
+        None,
     ));
     let scheduler_handle = TurnRunScheduler::new(
         turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
@@ -2813,6 +2822,7 @@ async fn turn_runner_rejects_driver_fabricated_approval_block_without_durable_ga
         Arc::new(registry),
         Arc::new(fixture.factory_with_loop_checkpoint_store(turn_store.clone()))
             as Arc<dyn HostFactory>,
+        None,
     ));
     let scheduler_handle = TurnRunScheduler::new(
         turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
@@ -2894,6 +2904,7 @@ async fn turn_runner_blocks_on_approval_then_coordinator_resume_completes_same_r
         Arc::new(registry),
         Arc::new(fixture.factory_with_loop_checkpoint_store(turn_store.clone()))
             as Arc<dyn HostFactory>,
+        None,
     ));
     let scheduler_handle = TurnRunScheduler::new(
         turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
@@ -3147,6 +3158,7 @@ async fn turn_runner_worker_fails_when_real_host_factory_rejects_claimed_scope()
         loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
         Arc::new(registry),
         Arc::new(rejecting_factory) as Arc<dyn HostFactory>,
+        None,
     ));
     let scheduler_handle = TurnRunScheduler::new(
         turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
@@ -3306,10 +3318,11 @@ async fn planned_host_factory_create_host_uses_profiled_capabilities() {
         .await
         .unwrap();
 
+    // Flip consequence (§5.2.9, confirmed): surface_profile_denied collapsed to PolicyDenied (was CapabilityDeniedReasonKind Unknown "surface_profile_denied")
     assert!(matches!(
         outcome,
-        CapabilityOutcome::Denied(denied)
-            if denied.reason_kind.as_str() == "surface_profile_denied"
+        Resolution::Denied(denied)
+            if denied.reason_kind == Some(DenyReason::PolicyDenied)
     ));
     assert!(runtime.invocations().is_empty());
 }
@@ -3548,6 +3561,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
     let event_sink = Arc::new(InMemoryTurnEventSink::default());
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        gate_record_store: None,
         turn_state: turn_store.clone(),
         thread_service: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
         thread_scope: fixture.thread_scope.clone(),
@@ -3651,10 +3665,11 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         })
         .await
         .unwrap();
+    // Flip consequence (§5.2.9, confirmed): surface_profile_denied collapsed to PolicyDenied (was CapabilityDeniedReasonKind Unknown "surface_profile_denied")
     assert!(matches!(
         outcome,
-        CapabilityOutcome::Denied(denied)
-            if denied.reason_kind.as_str() == "surface_profile_denied"
+        Resolution::Denied(denied)
+            if denied.reason_kind == Some(DenyReason::PolicyDenied)
     ));
     assert!(runtime.invocations().is_empty());
 }
@@ -3714,6 +3729,7 @@ async fn pre_minted_scheduler_wake_wiring_drives_scheduler_on_coordinator_submit
     // delivered through the pre-minted channel can complete the run in time.
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        gate_record_store: None,
         turn_state: turn_store.clone(),
         thread_service: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
         thread_scope: fixture.thread_scope.clone(),
@@ -3888,6 +3904,7 @@ async fn build_runtime_host_with_optional_hooks(
     ));
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        gate_record_store: None,
         turn_state: turn_store.clone(),
         thread_service: fixture.thread_service.clone(),
         thread_scope: fixture.thread_scope.clone(),
@@ -4050,7 +4067,7 @@ async fn hooks_flag_off_capability_invocation_is_unaffected() {
         .await
         .unwrap();
     assert!(
-        matches!(outcome, CapabilityOutcome::Completed(_)),
+        matches!(outcome, Resolution::Done(ref o) if o.verdict.is_success()),
         "flag OFF: allowed capability must complete unaffected, got {outcome:?}"
     );
     assert_eq!(
@@ -4094,7 +4111,7 @@ async fn hooks_flag_on_first_party_only_does_not_change_outcome() {
         .await
         .unwrap();
     assert!(
-        matches!(outcome, CapabilityOutcome::Completed(_)),
+        matches!(outcome, Resolution::Done(ref o) if o.verdict.is_success()),
         "first-party no-op observer must not change the outcome, got {outcome:?}"
     );
     assert_eq!(runtime.invocations().len(), 1, "inner port must be reached");
@@ -4131,7 +4148,7 @@ async fn hooks_flag_on_extension_deny_hook_denies_through_composed_runtime() {
         .await
         .unwrap();
     assert!(
-        matches!(outcome, CapabilityOutcome::Denied(_)),
+        matches!(outcome, Resolution::Denied(_)),
         "extension deny hook must deny through the composed runtime, got {outcome:?}"
     );
     assert!(
@@ -4168,7 +4185,7 @@ async fn hooks_are_isolated_per_tenant_runtime() {
         .await
         .unwrap();
     assert!(
-        matches!(outcome_a, CapabilityOutcome::Denied(_)),
+        matches!(outcome_a, Resolution::Denied(_)),
         "tenant A's deny hook must fire"
     );
     assert!(runtime_a.invocations().is_empty());
@@ -4198,7 +4215,7 @@ async fn hooks_are_isolated_per_tenant_runtime() {
         .await
         .unwrap();
     assert!(
-        matches!(outcome_b, CapabilityOutcome::Completed(_)),
+        matches!(outcome_b, Resolution::Done(ref o) if o.verdict.is_success()),
         "tenant B has no hooks; tenant A's deny must not leak across runtimes, got {outcome_b:?}"
     );
     assert_eq!(runtime_b.invocations().len(), 1);
@@ -4243,6 +4260,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
     );
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        gate_record_store: None,
         turn_state: turn_store.clone(),
         thread_service: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
         thread_scope: fixture.thread_scope.clone(),
@@ -4371,6 +4389,7 @@ async fn product_live_parts_for_gate_test(
     );
     DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        gate_record_store: None,
         turn_state: turn_store.clone(),
         thread_service: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
         thread_scope: fixture.thread_scope.clone(),
@@ -5927,9 +5946,10 @@ async fn text_only_host_skill_context_does_not_expand_capability_surface() {
         .await
         .unwrap();
 
+    // Flip consequence (§5.2.9, confirmed): EmptySurface collapsed to PolicyDenied (was CapabilityDeniedReasonKind::EmptySurface)
     assert!(matches!(
-        outcome.outcomes.as_slice(),
-        [CapabilityOutcome::Denied(denied)] if denied.reason_kind == CapabilityDeniedReasonKind::EmptySurface
+        outcome.resolutions.as_slice(),
+        [Resolution::Denied(denied)] if denied.reason_kind == Some(DenyReason::PolicyDenied)
     ));
 }
 
@@ -6054,11 +6074,19 @@ async fn text_only_host_routes_capability_invocation_through_host_runtime() {
         .await
         .unwrap();
 
-    let CapabilityOutcome::Completed(message) = outcome else {
+    let Resolution::Done(message) = outcome else {
         panic!("expected completed capability outcome");
     };
-    assert!(message.result_ref.as_str().starts_with("result:"));
-    assert_eq!(message.safe_summary, "capability completed");
+    assert!(
+        message
+            .refs
+            .origin
+            .as_ref()
+            .expect("preserved loop result ref")
+            .as_str()
+            .starts_with("result:")
+    );
+    assert_eq!(message.summary.as_str(), "capability completed");
     let invocations = runtime.invocations();
     assert_eq!(invocations.len(), 1);
     assert_eq!(invocations[0].capability_id, capability_id);
@@ -6120,10 +6148,11 @@ async fn text_only_host_profiled_capabilities_filter_surface_and_invocation() {
         .await
         .unwrap();
 
+    // Flip consequence (§5.2.9, confirmed): surface_profile_denied collapsed to PolicyDenied (was CapabilityDeniedReasonKind Unknown "surface_profile_denied")
     assert!(matches!(
         outcome,
-        CapabilityOutcome::Denied(denied)
-            if denied.reason_kind.as_str() == "surface_profile_denied"
+        Resolution::Denied(denied)
+            if denied.reason_kind == Some(DenyReason::PolicyDenied)
     ));
     assert!(runtime.invocations().is_empty());
 }
@@ -6197,11 +6226,12 @@ async fn default_strategy_filter_all_loses_to_host_profile_filter() {
         .await
         .unwrap();
 
+    // Flip consequence (§5.2.9, confirmed): surface_profile_denied collapsed to PolicyDenied (was CapabilityDeniedReasonKind Unknown "surface_profile_denied")
     assert!(
         matches!(
             &outcome,
-            CapabilityOutcome::Denied(denied)
-                if denied.reason_kind.as_str() == "surface_profile_denied"
+            Resolution::Denied(denied)
+                if denied.reason_kind == Some(DenyReason::PolicyDenied)
         ),
         "expected surface_profile_denied, got {outcome:?}"
     );
@@ -6271,7 +6301,7 @@ async fn text_only_host_uses_fresh_execution_context_per_capability_invocation()
             })
             .await
             .unwrap();
-        assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+        assert!(matches!(outcome, Resolution::Done(ref o) if o.verdict.is_success()));
     }
 
     let invocations = runtime.invocations();
@@ -6362,9 +6392,10 @@ async fn text_only_host_rejects_outside_surface_capability_before_host_runtime()
         .await
         .unwrap();
 
+    // Flip consequence (§5.2.9, confirmed): outside_visible_surface collapsed to PolicyDenied (was CapabilityDeniedReasonKind Unknown "outside_visible_surface")
     assert!(matches!(
         denied,
-        CapabilityOutcome::Denied(denied) if denied.reason_kind.as_str() == "outside_visible_surface"
+        Resolution::Denied(denied) if denied.reason_kind == Some(DenyReason::PolicyDenied)
     ));
     assert!(runtime.invocations().is_empty());
 
@@ -6436,10 +6467,11 @@ async fn text_only_host_sanitizes_runtime_failure_message_before_driver_output()
         .await
         .unwrap();
 
-    let CapabilityOutcome::Failed(failure) = outcome else {
+    let Resolution::Done(o) = outcome else {
         panic!("expected failed capability outcome");
     };
-    assert_eq!(failure.safe_summary, "capability invocation failed");
+    assert!(matches!(o.verdict, ToolVerdict::RecoverableFailure { .. }));
+    assert_eq!(o.summary.as_str(), "capability invocation failed");
 }
 
 #[tokio::test]
@@ -6545,35 +6577,33 @@ async fn text_only_host_maps_runtime_suspension_and_process_outcomes() {
         );
     }
 
+    // Flip consequence (§5.2.9, confirmed): approval/auth/resource/process safe_summary now lives on the side
+    // GateRecord / host process record, not the returned channel; dropped the four
+    // `safe_summary == ...` sub-assertions. Gate/process identity is asserted via the
+    // preserved originating loop ref on the waypoint `origin`.
     assert!(matches!(
         &outcomes[0],
-        CapabilityOutcome::ApprovalRequired { gate_ref, safe_summary, .. }
-            if gate_ref.as_str().starts_with("gate:approval-")
-                && safe_summary == "capability requires approval"
+        Resolution::Blocked(Blocked::Approval(w))
+            if w.origin.as_ref().is_some_and(|origin| origin.as_str().starts_with("gate:approval-"))
     ));
     assert!(matches!(
         &outcomes[1],
-        CapabilityOutcome::AuthRequired {
-            gate_ref,
-            safe_summary,
-            ..
-        }
-            if gate_ref.as_str().starts_with("gate:auth-")
-                && safe_summary == "capability requires authentication"
+        Resolution::Blocked(Blocked::Auth(w))
+            if w.origin.as_ref().is_some_and(|origin| origin.as_str().starts_with("gate:auth-"))
     ));
     assert!(matches!(
         &outcomes[2],
-        CapabilityOutcome::ResourceBlocked { gate_ref, safe_summary }
-            if gate_ref.as_str().starts_with("gate:resource-")
-                && safe_summary == "capability is blocked by resource limits"
+        Resolution::Blocked(Blocked::Resource(w))
+            if w.origin.as_ref().is_some_and(|origin| origin.as_str().starts_with("gate:resource-"))
     ));
     assert!(matches!(
         &outcomes[3],
-        CapabilityOutcome::SpawnedProcess(process)
-            if process.process_ref.as_str().starts_with("process:")
-                && process.safe_summary == "capability spawned background work"
+        Resolution::Suspended(Suspension::Process(w))
+            if w.origin.as_ref().is_some_and(|origin| origin.as_str().starts_with("process:"))
     ));
-    assert!(outcomes.iter().all(CapabilityOutcome::is_suspension));
+    // Flip consequence (§5.2.9, confirmed): Blocked gates are NOT host suspensions; the batch-park predicate is
+    // `Resolution::parks` (gates + process all park), replacing `CapabilityOutcome::is_suspension`.
+    assert!(outcomes.iter().all(Resolution::parks));
     assert_eq!(runtime.invocations().len(), 4);
 }
 
@@ -6630,18 +6660,15 @@ async fn text_only_host_maps_explicit_unknown_runtime_outcome_to_failure() {
         .await
         .unwrap();
 
-    let CapabilityOutcome::Failed(failure) = outcome else {
+    let Resolution::Done(o) = outcome else {
         panic!("expected failed capability outcome");
     };
     assert_eq!(
-        failure.error_kind,
-        CapabilityFailureKind::Unknown(
-            ironclaw_turns::run_profile::CapabilityFailureKindValue::new("streaming")
-                .expect("valid failure kind")
-        )
+        o.verdict.error_kind(),
+        Some(&FailureKind::unknown("streaming").expect("valid failure kind"))
     );
     assert_eq!(
-        failure.safe_summary,
+        o.summary.as_str(),
         "streaming outcomes are not supported by this loop port"
     );
 }
@@ -6715,9 +6742,9 @@ async fn text_only_host_preserves_invalid_request_and_returns_unavailable_as_fai
     assert_eq!(invalid.safe_summary, "capability input schema invalid");
     assert!(matches!(
         unavailable,
-        CapabilityOutcome::Failed(failure)
-            if failure.error_kind == CapabilityFailureKind::Unavailable
-                && failure.safe_summary == "resource governor temporarily unavailable"
+        Resolution::Done(ref o)
+            if o.verdict.error_kind() == Some(&FailureKind::Unavailable)
+                && o.summary.as_str() == "resource governor temporarily unavailable"
     ));
 }
 
@@ -6800,10 +6827,10 @@ async fn text_only_host_batch_stops_on_first_suspension_before_later_invocations
         .unwrap();
 
     assert!(batch.stopped_on_suspension);
-    assert_eq!(batch.outcomes.len(), 1);
+    assert_eq!(batch.resolutions.len(), 1);
     assert!(matches!(
-        batch.outcomes.as_slice(),
-        [CapabilityOutcome::ApprovalRequired { .. }]
+        batch.resolutions.as_slice(),
+        [Resolution::Blocked(Blocked::Approval(_))]
     ));
     assert_eq!(runtime.invocations().len(), 1);
 }
@@ -6857,7 +6884,9 @@ async fn text_only_host_does_not_reinvoke_runtime_after_failed_outcome_retry() {
     let first = host.invoke_capability(invocation.clone()).await.unwrap();
     let second = host.invoke_capability(invocation).await.unwrap();
 
-    assert!(matches!(first, CapabilityOutcome::Failed(_)));
+    assert!(
+        matches!(first, Resolution::Done(ref o) if matches!(o.verdict, ToolVerdict::RecoverableFailure { .. }))
+    );
     assert_eq!(first, second);
     let invocations = runtime.invocations();
     assert_eq!(invocations.len(), 1);
@@ -6987,7 +7016,7 @@ async fn text_only_host_waits_for_concurrent_duplicate_invocation_result() {
 
     let first = first.unwrap();
     let second = second.unwrap();
-    assert!(matches!(first, CapabilityOutcome::Completed(_)));
+    assert!(matches!(first, Resolution::Done(ref o) if o.verdict.is_success()));
     assert_eq!(first, second);
     assert_eq!(runtime.invocations().len(), 1);
 }
@@ -7063,7 +7092,7 @@ async fn text_only_host_bounds_completed_dispatch_records() {
             })
             .await
             .unwrap();
-        assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+        assert!(matches!(outcome, Resolution::Done(ref o) if o.verdict.is_success()));
     }
     let retried = host
         .invoke_capability(CapabilityInvocation {
@@ -7077,7 +7106,7 @@ async fn text_only_host_bounds_completed_dispatch_records() {
         .await
         .unwrap();
 
-    assert!(matches!(retried, CapabilityOutcome::Completed(_)));
+    assert!(matches!(retried, Resolution::Done(ref o) if o.verdict.is_success()));
     assert_eq!(runtime.invocations().len(), invocation_count + 1);
 }
 
@@ -7186,7 +7215,7 @@ async fn text_only_host_does_not_reinvoke_runtime_after_result_write_failure_ret
     let second = host.invoke_capability(invocation).await.unwrap();
 
     assert_eq!(first.kind, AgentLoopHostErrorKind::Unavailable);
-    assert!(matches!(second, CapabilityOutcome::Completed(_)));
+    assert!(matches!(second, Resolution::Done(ref o) if o.verdict.is_success()));
     let invocations = runtime.invocations();
     assert_eq!(invocations.len(), 1);
     assert!(invocations[0].idempotency_key.is_some());
@@ -7351,9 +7380,10 @@ async fn text_only_host_empty_capability_surface_denies_invocation() {
         .await
         .unwrap();
 
+    // Flip consequence (§5.2.9, confirmed): EmptySurface collapsed to PolicyDenied (was CapabilityDeniedReasonKind::EmptySurface)
     assert!(matches!(
-        outcome.outcomes.as_slice(),
-        [CapabilityOutcome::Denied(denied)] if denied.reason_kind == CapabilityDeniedReasonKind::EmptySurface
+        outcome.resolutions.as_slice(),
+        [Resolution::Denied(denied)] if denied.reason_kind == Some(DenyReason::PolicyDenied)
     ));
 
     let stale = host
@@ -7439,11 +7469,19 @@ async fn text_only_host_e2e_invokes_script_capability_through_real_host_runtime(
         .await
         .unwrap();
 
-    let CapabilityOutcome::Completed(completed) = outcome else {
+    let Resolution::Done(completed) = outcome else {
         panic!("expected completed script capability through host runtime");
     };
-    assert!(completed.result_ref.as_str().starts_with("result:"));
-    assert_eq!(completed.safe_summary, "capability completed");
+    assert!(
+        completed
+            .refs
+            .origin
+            .as_ref()
+            .expect("preserved loop result ref")
+            .as_str()
+            .starts_with("result:")
+    );
+    assert_eq!(completed.summary.as_str(), "capability completed");
     assert_eq!(io.results(), vec![(e2e_script_capability_id(), input)]);
     assert!(fixture.milestone_names().contains(&"capability_invoked"));
 }
@@ -7494,11 +7532,13 @@ async fn text_only_host_denies_capability_without_provider_trust_before_host_run
         .await
         .unwrap();
 
+    // Flip consequence (§5.2.9, confirmed): missing_provider_trust collapsed to PolicyDenied (was CapabilityDeniedReasonKind Unknown "missing_provider_trust")
     assert!(matches!(
         denied,
-        CapabilityOutcome::Denied(denied)
-            if denied.reason_kind.as_str() == "missing_provider_trust"
-                && denied.safe_summary == "capability provider trust is unavailable"
+        Resolution::Denied(denied)
+            if denied.reason_kind == Some(DenyReason::PolicyDenied)
+                && denied.summary.as_ref().map(|summary| summary.as_str())
+                    == Some("capability provider trust is unavailable")
     ));
     assert!(runtime.invocations().is_empty());
 }
@@ -7562,7 +7602,7 @@ async fn text_only_host_allows_retry_after_missing_capability_input_is_staged() 
     io.put_input(input_ref, json!({"message": "now staged"}));
     let retried = host.invoke_capability(invocation).await.unwrap();
 
-    assert!(matches!(retried, CapabilityOutcome::Completed(_)));
+    assert!(matches!(retried, Resolution::Done(ref o) if o.verdict.is_success()));
     assert_eq!(runtime.invocations().len(), 1);
     assert_eq!(
         io.results(),
@@ -8433,7 +8473,7 @@ impl AgentLoopDriver for ScriptCapabilityFinalReplyDriver {
             })
             .await
             .map_err(driver_host_error)?;
-        let CapabilityOutcome::Completed(completed) = capability else {
+        let Resolution::Done(completed) = capability else {
             return Err(AgentLoopDriverError::Failed {
                 reason_kind: "script_capability_did_not_complete".to_string(),
                 detail: None,
@@ -8472,7 +8512,7 @@ impl AgentLoopDriver for ScriptCapabilityFinalReplyDriver {
             .await
             .map_err(driver_host_error)?;
 
-        let _result_ref = completed.result_ref;
+        let _result_ref = completed.refs.origin;
         Ok(LoopExit::Completed(LoopCompleted {
             completion_kind: LoopCompletionKind::FinalReply,
             reply_message_refs: vec![reply_ref],

@@ -731,6 +731,15 @@ pub struct ProductLivePlannedRuntimeAdapterConfig {
     pub safety_context: InstructionSafetyContext,
     /// Sink for capability invocation milestones.
     pub milestone_sink: Arc<dyn LoopHostMilestoneSink>,
+    /// Durable gate-record store the capability port persists model-visible
+    /// [`GateRecord`]s into and a later resume renders from (§5.2.9). Without it
+    /// approval/auth resumes cannot load the gate record, so it is wired into
+    /// the capability port exactly as the local-dev path does (#6287).
+    pub gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
+    /// Host-private replay-payload store the capability port persists a gate's
+    /// `{input, estimate}` into at the fresh raise and reconstitutes on resume
+    /// (§5.3 Stage 2a-i). Without it a resume fails closed with no replay input.
+    pub replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
 }
 
 /// Adapter bundle consumed by `build_product_live_planned_runtime`.
@@ -779,6 +788,8 @@ impl ProductLivePlannedRuntimeAdapters {
             Arc::clone(&config.capability_input_resolver),
             Arc::clone(&config.capability_result_writer),
             config.milestone_sink,
+            config.gate_record_store,
+            config.replay_payload_store,
         );
         let model_route_resolver: Arc<dyn ModelRouteResolver> =
             Arc::new(config.model_routes.into_resolver());
@@ -808,6 +819,8 @@ struct ProductLiveLoopCapabilityPortFactory {
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
+    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
+    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
 }
 
 impl ProductLiveLoopCapabilityPortFactory {
@@ -817,6 +830,8 @@ impl ProductLiveLoopCapabilityPortFactory {
         input_resolver: Arc<dyn LoopCapabilityInputResolver>,
         result_writer: Arc<dyn LoopCapabilityResultWriter>,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
+        gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
+        replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
     ) -> Self {
         Self {
             runtime,
@@ -824,6 +839,8 @@ impl ProductLiveLoopCapabilityPortFactory {
             input_resolver,
             result_writer,
             milestone_sink,
+            gate_record_store,
+            replay_payload_store,
         }
     }
 }
@@ -849,7 +866,12 @@ impl LoopCapabilityPortFactory for ProductLiveLoopCapabilityPortFactory {
             Arc::clone(&self.result_writer),
             Arc::clone(&self.milestone_sink),
         )
-        .with_execution_mounts(execution_mounts);
+        .with_execution_mounts(execution_mounts)
+        // Wire the durable gate-record + replay-payload stores so approval/auth
+        // resumes on this ProductLive path persist and reconstitute their gate
+        // record and replay input — exactly as the local-dev path does (#6287).
+        .with_gate_record_store(Arc::clone(&self.gate_record_store))
+        .with_replay_payload_store(Arc::clone(&self.replay_payload_store));
         Ok(factory.for_run_context(run_context.clone()))
     }
 }
