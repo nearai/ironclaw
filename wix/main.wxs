@@ -60,7 +60,7 @@
 
     <Product
         Id='*'
-        Name='ironclaw'
+        Name='ironclaw_reborn_cli'
         UpgradeCode='D0156E61-BA37-451E-8AB9-1A2ECCCFA48F'
         Manufacturer='NEAR AI'
         Language='1033'
@@ -69,7 +69,7 @@
 
         <Package Id='*'
             Keywords='Installer'
-            Description='Secure personal AI assistant that protects your data and expands its capabilities on the fly'
+            Description='Standalone IronClaw Reborn binary'
             Manufacturer='NEAR AI'
             InstallerVersion='450'
             Languages='1033'
@@ -83,11 +83,11 @@
             DowngradeErrorMessage='A newer version of [ProductName] is already installed. Setup will now exit.'/>
 
         <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1'/>
-        <Property Id='DiskPrompt' Value='ironclaw Installation'/>
+        <Property Id='DiskPrompt' Value='ironclaw_reborn_cli Installation'/>
 
         <Directory Id='TARGETDIR' Name='SourceDir'>
             <Directory Id='$(var.PlatformProgramFilesFolder)' Name='PFiles'>
-                <Directory Id='APPLICATIONFOLDER' Name='ironclaw'>
+                <Directory Id='APPLICATIONFOLDER' Name='ironclaw_reborn_cli'>
                     
                     <!--
                       Enabling the license sidecar file in the installer is a four step process:
@@ -123,9 +123,9 @@
                         <Component Id='binary0' Guid='*'>
                             <File
                                 Id='exe0'
-                                Name='ironclaw-legacy.exe'
+                                Name='ironclaw.exe'
                                 DiskId='1'
-                                Source='$(var.CargoTargetBinDir)\ironclaw-legacy.exe'
+                                Source='$(var.CargoTargetBinDir)\ironclaw.exe'
                                 KeyPath='yes'/>
                         </Component>
                     </Directory>
