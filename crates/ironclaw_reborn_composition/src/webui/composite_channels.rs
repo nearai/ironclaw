@@ -13,18 +13,15 @@ use async_trait::async_trait;
 use ironclaw_product_workflow::{
     ChannelConnectionFacade, RebornServicesError, WebUiAuthenticatedCaller,
 };
-#[cfg(all(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 use ironclaw_product_workflow::{
     ConnectableChannelsProductFacade, RebornConnectableChannelListResponse,
 };
 
 /// Concatenates every inner facade's channel list, preserving order.
-#[cfg(all(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 pub(crate) struct CompositeConnectableChannelsFacade {
     inner: Vec<Arc<dyn ConnectableChannelsProductFacade>>,
 }
 
-#[cfg(all(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 impl CompositeConnectableChannelsFacade {
     pub(crate) fn new(inner: Vec<Arc<dyn ConnectableChannelsProductFacade>>) -> Self {
         Self { inner }
@@ -32,7 +29,6 @@ impl CompositeConnectableChannelsFacade {
 }
 
 #[async_trait]
-#[cfg(all(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 impl ConnectableChannelsProductFacade for CompositeConnectableChannelsFacade {
     async fn list_connectable_channels(
         &self,

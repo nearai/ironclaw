@@ -420,9 +420,9 @@ mod reborn_support_tests {
     use async_trait::async_trait;
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{
-        AgentId, CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
-        NetworkMethod, NetworkPolicy, NetworkTargetPattern, ProjectId, ResourceScope, TenantId,
-        ThreadId, UserId, VirtualPath,
+        AgentId, Blocked, CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions,
+        MountView, NetworkMethod, NetworkPolicy, NetworkTargetPattern, ProjectId, Resolution,
+        ResourceScope, TenantId, ThreadId, UserId, VirtualPath,
     };
     use ironclaw_llm::{LlmProvider, ToolCompletionRequest};
     use ironclaw_loop_host::{
@@ -461,7 +461,7 @@ mod reborn_support_tests {
         TurnStatus,
         events::EventCursor,
         run_profile::{
-            CapabilityBatchInvocation, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
+            CapabilityBatchInvocation, CapabilityInputRef, CapabilityInvocation,
             LoopCapabilityPort, ModelProfileId, ParentLoopOutput, VisibleCapabilityRequest,
         },
     };
@@ -1311,8 +1311,8 @@ mod reborn_support_tests {
         assert!(outcome.stopped_on_suspension);
         assert!(
             matches!(
-                outcome.outcomes.as_slice(),
-                [CapabilityOutcome::ApprovalRequired { .. }]
+                outcome.resolutions.as_slice(),
+                [Resolution::Blocked(Blocked::Approval(_))]
             ),
             "batch should return only the first suspension"
         );

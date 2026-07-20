@@ -38,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### CI / Release
 
-- *(release)* compile the canonical Reborn `ironclaw` binary across the seven supported OS/CPU targets as a tag-driven release preflight ([#6160](https://github.com/nearai/ironclaw/issues/6160)).
+- *(release)* compile the canonical Reborn `ironclaw` binary across the seven supported OS/CPU targets as a tag-driven preflight while temporarily skipping the legacy cargo-dist, WASM, GitHub Release, registry-update, announcement, and Docker jobs; manual and hourly Docker workflow entry points remain available ([#6160](https://github.com/nearai/ironclaw/issues/6160)).
 
 ### Removed
 

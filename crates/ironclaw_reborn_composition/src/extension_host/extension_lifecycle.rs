@@ -4067,7 +4067,6 @@ output_schema_ref = "schemas/run.output.json"
         assert_eq!(example.installation_phase, Some(LifecyclePhase::Active));
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_tools_extension_installs_activates_and_publishes_capabilities() {
         let (_dir, _storage_root, port, _active_registry, installation_store) =
@@ -4154,7 +4153,6 @@ output_schema_ref = "schemas/run.output.json"
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_tools_extension_activation_requires_personal_oauth() {
         let (_dir, _storage_root, port, _active_registry, _installation_store) =
@@ -4217,7 +4215,6 @@ output_schema_ref = "schemas/run.output.json"
     /// the non-retryable `InvalidBindingRequest` reserved for the unmounted
     /// host / configuration fault) and must not leak the store error text into
     /// the product-facing reason.
-    #[cfg(feature = "telegram-v2-host-beta")]
     #[tokio::test]
     async fn telegram_declared_without_mounted_host_fails_closed_through_activation_requirements() {
         let (_dir, _storage_root, port, _active_registry, _installation_store) =
@@ -4248,7 +4245,6 @@ output_schema_ref = "schemas/run.output.json"
         );
     }
 
-    #[cfg(feature = "telegram-v2-host-beta")]
     #[tokio::test]
     async fn telegram_pairing_status_outage_is_transient_through_activation_requirements() {
         #[derive(Debug)]
@@ -4301,7 +4297,6 @@ output_schema_ref = "schemas/run.output.json"
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_tools_extension_removal_fails_closed_without_channel_cleanup() {
         let (_dir, _storage_root, port, _active_registry, installation_store) =
@@ -7498,11 +7493,9 @@ output_schema_ref = "schemas/run.output.json"
     /// a readiness-map entry for `slack_personal` must fail
     /// `activation_credential_requirements` for the Slack extension BEFORE
     /// the per-account credential gate, naming the `config set slack.enabled`
-    /// remediation. Feature-gated because the Slack extension and
-    /// `slack_personal` provider only exist under `slack-v2-host-beta` (see
+    /// remediation. See
     /// `slack_tools_extension_activation_requires_personal_oauth` above for
-    /// the ungated-readiness-map counterpart).
-    #[cfg(feature = "slack-v2-host-beta")]
+    /// the ungated-readiness-map counterpart.
     #[tokio::test]
     async fn slack_family_activation_fails_closed_when_provider_instance_not_configured() {
         let mut readiness = std::collections::BTreeMap::new();

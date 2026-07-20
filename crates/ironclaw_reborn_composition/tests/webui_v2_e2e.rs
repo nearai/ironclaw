@@ -14,7 +14,7 @@
 //! endpoints — works end-to-end without anything mocked above the LLM
 //! boundary.
 
-#![cfg(all(feature = "webui-v2-beta", feature = "test-support"))]
+#![cfg(feature = "test-support")]
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -1880,7 +1880,6 @@ async fn untrusted_request_body_cannot_inject_system_scope() {
 // failed to deserialize, so the very next read-back (snapshot metadata, or the
 // previous-key read on a second save) returned `service_unavailable`.
 
-#[cfg(feature = "root-llm-provider")]
 mod operator_llm_config {
     use super::*;
     use ironclaw_reborn_config::{RebornBootConfig, RebornHome, RebornProfile};

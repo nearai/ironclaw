@@ -31,7 +31,6 @@ pub(crate) struct ProviderInstanceReadinessInputs {
     /// Slack host-beta build-time wiring signal:
     /// `RebornBuildInput::slack_host_beta_enabled`, resolved by the CLI
     /// serve path before the composition build.
-    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) slack_host_beta_enabled: bool,
 }
 
@@ -55,7 +54,6 @@ pub(crate) fn provider_instance_readiness_map(
             ),
         );
     }
-    #[cfg(feature = "slack-v2-host-beta")]
     if !inputs.slack_host_beta_enabled {
         map.insert(
             RuntimeCredentialAccountProviderId::new(ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID)?,
@@ -82,7 +80,6 @@ mod tests {
     fn google_entry_present_when_not_configured() {
         let map = provider_instance_readiness_map(ProviderInstanceReadinessInputs {
             google_oauth_configured: false,
-            #[cfg(feature = "slack-v2-host-beta")]
             slack_host_beta_enabled: true,
         })
         .expect("map builds");
@@ -95,14 +92,12 @@ mod tests {
     fn google_entry_absent_when_configured() {
         let map = provider_instance_readiness_map(ProviderInstanceReadinessInputs {
             google_oauth_configured: true,
-            #[cfg(feature = "slack-v2-host-beta")]
             slack_host_beta_enabled: true,
         })
         .expect("map builds");
         assert!(!map.contains_key(&google_provider()));
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn slack_entry_present_when_host_beta_not_enabled() {
         let map = provider_instance_readiness_map(ProviderInstanceReadinessInputs {
@@ -117,7 +112,6 @@ mod tests {
         assert!(text.contains("config set slack.enabled"));
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn slack_entry_absent_when_host_beta_enabled() {
         let map = provider_instance_readiness_map(ProviderInstanceReadinessInputs {

@@ -1145,9 +1145,8 @@ async fn cleanup_for_lifecycle_cancels_pending_flows_for_the_disconnected_provid
 ///   primary door under test here, never a silent skip;
 /// - the WebUI Slack-disconnect facade
 ///   ([`SlackPersonalCredentialCleanup::cleanup_credentials_for_lifecycle`])
-///   only exists under `slack-v2-host-beta`, so when that feature is built we
-///   ALSO drive it and assert identical behaviour, proving the two doors stay in
-///   lockstep.
+///   is likewise always compiled, so we ALSO drive it and assert identical
+///   behaviour, proving the two doors stay in lockstep.
 ///
 /// Each door runs independently against the REAL durable service. Provider-
 /// agnostic ("google", not Slack) so the guarantee cannot silently narrow to a
@@ -1236,9 +1235,8 @@ async fn removal_doors_cancel_pending_flow_through_the_shared_cleanup() {
         .expect("extension_remove tool cleanup should succeed");
     assert_pending_flow_canceled(&tool_durable, &tool_scope, &provider).await;
 
-    // Parity door (only compiled under `slack-v2-host-beta`) — the WebUI
-    // channel-disconnect facade must yield the identical cancel.
-    #[cfg(feature = "slack-v2-host-beta")]
+    // Parity door — the WebUI channel-disconnect facade must yield the
+    // identical cancel.
     {
         use crate::slack::slack_channel_connection::SlackPersonalCredentialCleanup;
         let (web, web_scope, web_durable) = seeded_facade(&provider).await;

@@ -37,7 +37,7 @@
 //! Supports the CSRF/origin/CORS + body/rate/connection-limit slice of
 //! the #3615 WebUI security parity audit.
 
-#![cfg(feature = "dev-in-memory-session")]
+#![cfg(feature = "test-support")]
 
 use std::net::SocketAddr;
 use std::sync::Arc;

@@ -34,7 +34,7 @@ use ironclaw_turns::{
     InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, LoopCheckpointStateRef,
     ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest, SourceBindingRef,
     SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnCoordinator, TurnError,
-    TurnErrorCategory, TurnLeaseToken, TurnRunnerId, TurnStateStore,
+    TurnErrorCategory, TurnLeaseToken, TurnRunnerId, TurnStateDurabilityPolicy, TurnStateStore,
     runner::{
         BlockRunRequest, ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, TurnRunTransitionPort,
     },
@@ -75,6 +75,9 @@ where
     target: String,
     turn_state_backend: TurnStateBackend,
     turn_state_limits: InMemoryTurnStateStoreLimits,
+    /// Durable-commit policy applied to the row-store backends (`filesystem-row`,
+    /// `row-memory`). Ignored by the blob/memory backends.
+    turn_state_durability: TurnStateDurabilityPolicy,
     /// Single shared in-process turn-state authority, used when
     /// `turn_state_backend == Memory`. Shared across all workers (one process)
     /// to faithfully model the production single-process design.
@@ -223,6 +226,7 @@ async fn build_libsql_user_turn_workload(
         model_latency,
         args.turn_state_backend,
         args.turn_state_store_limits(),
+        args.turn_state_durability.to_policy(),
     )?))
 }
 
@@ -250,6 +254,7 @@ async fn build_postgres_user_turn_workload(
         model_latency,
         args.turn_state_backend,
         args.turn_state_store_limits(),
+        args.turn_state_durability.to_policy(),
     )?))
 }
 
@@ -1712,7 +1717,8 @@ where
                     ));
                     Arc::new(
                         FilesystemTurnStateRowStore::new(scoped)
-                            .with_limits(self.turn_state_limits),
+                            .with_limits(self.turn_state_limits)
+                            .with_durability_policy(self.turn_state_durability),
                     )
                 })
             }
@@ -1729,7 +1735,8 @@ where
                     ));
                     Arc::new(
                         FilesystemTurnStateRowStore::new(scoped)
-                            .with_limits(self.turn_state_limits),
+                            .with_limits(self.turn_state_limits)
+                            .with_durability_policy(self.turn_state_durability),
                     )
                 })
             }
@@ -1794,6 +1801,8 @@ where
     }
 }
 
+// arch-exempt: too_many_args, stress-harness workload constructor; turn-state axes (backend/limits/durability) would group into a TurnStateWorkloadConfig, plan #6263
+#[allow(clippy::too_many_arguments)]
 fn user_turn_services_from_root<F>(
     root: Arc<F>,
     governor: Arc<dyn ResourceGovernor>,
@@ -1802,6 +1811,7 @@ fn user_turn_services_from_root<F>(
     model_latency: Arc<ModelLatencyDriver>,
     turn_state_backend: TurnStateBackend,
     turn_state_limits: InMemoryTurnStateStoreLimits,
+    turn_state_durability: TurnStateDurabilityPolicy,
 ) -> Result<UserTurnServices<F>, String>
 where
     F: RootFilesystem + 'static,
@@ -1820,6 +1830,7 @@ where
         target,
         turn_state_backend,
         turn_state_limits,
+        turn_state_durability,
         // Constructed once and shared across every worker (the workload is held
         // behind one Arc), so the Memory backend exercises a single shared
         // authority exactly as the single-process runtime would. When the

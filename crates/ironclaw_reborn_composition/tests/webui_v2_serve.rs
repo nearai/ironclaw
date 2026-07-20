@@ -9,8 +9,6 @@
 //! facade is mocked so the regression target stays the gateway-layer
 //! composition.
 
-#![cfg(feature = "webui-v2-beta")]
-
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -212,7 +210,6 @@ async fn health_route_is_public_for_platform_probes() {
     assert_eq!(json["channel"], "reborn");
 }
 
-#[cfg(feature = "openai-compat-beta")]
 mod openai_compat_mount_tests {
     use super::*;
     use ironclaw_product_adapters::{
@@ -3230,7 +3227,6 @@ async fn static_automations_delivery_surfaces_save_error_and_gates_slack_hint() 
 /// as 413 BEFORE verification/parse ever runs) and qa-telegram:S6 (path
 /// probes under the webhook prefix 404 at the router without reaching the
 /// installation resolver — an unmounted path cannot consult any store).
-#[cfg(feature = "telegram-v2-host-beta")]
 #[tokio::test]
 async fn telegram_public_mount_enforces_descriptor_body_limit_and_404s_path_probes() {
     use ironclaw_host_api::{AgentId, UserId};

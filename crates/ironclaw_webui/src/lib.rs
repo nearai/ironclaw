@@ -53,7 +53,7 @@ pub use webui_serve::{
     WebuiServeError, WebuiV2App, webui_v2_app, webui_v2_app_with_lifecycle,
 };
 
-#[cfg(any(test, feature = "dev-in-memory-session"))]
+#[cfg(any(test, feature = "test-support"))]
 pub use auth::EmailUserDirectory;
 pub use auth::{
     GitHubOAuthConfig, GitHubProvider, GoogleOAuthConfig, GoogleProvider, OAuthError,
@@ -78,10 +78,10 @@ pub use signed_session_login::{
     CompositeAuthenticator, SignedSessionLoginConfig, SignedSessionLoginWiring,
     build_signed_session_login, signed_session_store,
 };
-// `InMemorySessionStore` is gated behind `dev-in-memory-session` so a
+// `InMemorySessionStore` is gated behind `test-support` so a
 // production binary cannot accidentally wire a process-local store as
 // a `SessionStore` impl. Local dev and tests opt in via the feature.
-#[cfg(any(test, feature = "dev-in-memory-session"))]
+#[cfg(any(test, feature = "test-support"))]
 pub use session::InMemorySessionStore;
 
 use std::convert::Infallible;
