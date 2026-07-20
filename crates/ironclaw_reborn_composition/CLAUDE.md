@@ -71,7 +71,7 @@ middleware with v1's `src/channels/web/`.
 | `RebornProjectionServices` (in `src/projection.rs`) | Runtime-owned projection/event-stream composition; owns the single local-dev `EventStreamManager` and creates product-specific `ProjectionStream` adapters over it |
 | `WebuiAuthenticator` trait | Host-supplied bearer-token verifier; returns `Option<WebuiAuthentication>` so identity and request-scoped WebUI capabilities travel together |
 | `WebuiServeConfig { tenant_id, authenticator, max_body_bytes, allowed_origins, csp_header }` | Required config for `webui_v2_app`; no defaults that silently disable security |
-| `webui_v2_app(bundle, config) -> Router` | Build the fully-composed axum `Router`. This is the seam between this product/API crate and host-owned HTTP ingress: tests drive it via `tower::ServiceExt::oneshot`; the `ironclaw-reborn serve` subcommand (follow-up PR) hands it to `axum::serve` from a host-owned listener |
+| `webui_v2_app(bundle, config) -> Router` | Build the fully-composed axum `Router`. This is the seam between this product/API crate and host-owned HTTP ingress: tests drive it via `tower::ServiceExt::oneshot`; the `ironclaw serve` subcommand hands it to `axum::serve` from a host-owned listener |
 | `ProtectedRouteMount` | Host-supplied protected API route fragment merged inside the WebUI bearer-auth layer with descriptor-driven body/rate limits. Reborn OpenAI-compatible routes use this seam; do not use it for v1 gateway routers. |
 
 ### Middleware stack composed by `webui_v2_app`
@@ -368,7 +368,7 @@ Per Path A in `docs/reborn/how-to-port-channel-to-reborn.md`:
   `feat/webui-v2-gateway-composition-3580` deliberately keeps the v1
   binary untouched.
 
-### How the standalone `ironclaw-reborn serve` consumes this
+### How the standalone `ironclaw serve` consumes this
 
 The `serve` subcommand builds a full local-dev `RebornRuntime`, asks
 `build_webui_services(&runtime, None)` for the WebUI bundle, and hands
