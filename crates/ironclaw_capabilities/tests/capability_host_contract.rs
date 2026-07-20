@@ -11,7 +11,7 @@ async fn capability_host_denies_missing_grant_before_dispatch() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
     let authorizer = GrantAuthorizer::new();
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer);
+    let host = capability_host(&registry, &dispatcher, &authorizer);
     let context = execution_context(CapabilitySet::default());
 
     let err = host
@@ -40,7 +40,7 @@ async fn capability_host_denies_dispatch_when_trust_ceiling_omits_capability_eff
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
     let authorizer = GrantAuthorizer::new();
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer);
+    let host = capability_host(&registry, &dispatcher, &authorizer);
     let context = execution_context(CapabilitySet {
         grants: vec![dispatch_grant()],
     });
@@ -71,7 +71,7 @@ async fn capability_host_authorized_dispatch_uses_neutral_dispatch_port() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
     let authorizer = GrantAuthorizer::new();
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer);
+    let host = capability_host(&registry, &dispatcher, &authorizer);
     let context = execution_context(CapabilitySet {
         grants: vec![dispatch_grant()],
     });
@@ -101,7 +101,7 @@ async fn capability_host_authorized_dispatch_uses_neutral_dispatch_port() {
 async fn capability_host_returns_approval_store_missing_when_approval_cannot_be_persisted() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
-    let host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer);
+    let host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer);
     let context = execution_context(CapabilitySet::default());
 
     let err = host
@@ -127,7 +127,7 @@ async fn capability_host_fails_closed_on_unsupported_obligations_before_dispatch
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
     let authorizer = ObligatingAuthorizer;
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer);
+    let host = capability_host(&registry, &dispatcher, &authorizer);
     let context = execution_context(CapabilitySet::default());
 
     let err = host

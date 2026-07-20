@@ -22,7 +22,7 @@ async fn capability_host_blocks_for_approval_without_dispatch() {
     let dispatcher = RecordingDispatcher::default();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
-    let host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+    let host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
@@ -104,7 +104,7 @@ output_schema_ref = "schemas/shell.output.v1.json"
     let dispatcher = RecordingDispatcher::default();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
-    let host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+    let host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
@@ -164,7 +164,7 @@ async fn capability_host_uses_combined_store_for_atomic_approval_block() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
     let store = RecordingCombinedRunStateApprovalStore::new();
-    let host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+    let host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state_approval_store(&store);
     let context = execution_context(CapabilitySet::default());
     let scope = context.resource_scope.clone();
@@ -215,7 +215,7 @@ async fn capability_host_separate_store_setters_clear_combined_atomic_path() {
     let dispatcher = RecordingDispatcher::default();
     let combined = RecordingCombinedRunStateApprovalStore::new();
     let separate_run_state = ironclaw_run_state::in_memory_backed_run_state_store();
-    let host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+    let host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state_approval_store(&combined)
         .with_run_state(&separate_run_state);
     let context = execution_context(CapabilitySet::default());
@@ -259,7 +259,7 @@ async fn capability_host_leaves_run_blocked_when_resume_is_attempted_before_appr
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
-    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+    let block_host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
@@ -287,7 +287,7 @@ async fn capability_host_leaves_run_blocked_when_resume_is_attempted_before_appr
         .unwrap();
 
     let resume_authorizer = GrantAuthorizer::new();
-    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer)
+    let resume_host = capability_host(&registry, &dispatcher, &resume_authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -355,7 +355,7 @@ async fn assert_mismatched_approval_request_rejected(
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let authorizer = MismatchedApprovalRequestAuthorizer { mismatch };
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+    let host = capability_host(&registry, &dispatcher, &authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
@@ -398,7 +398,7 @@ async fn capability_host_does_not_point_run_at_approval_before_approval_is_persi
     let dispatcher = RecordingDispatcher::default();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = HangingSaveApprovalRequestStore::new();
-    let host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+    let host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
@@ -446,7 +446,7 @@ async fn capability_host_marks_run_failed_when_obligations_are_unsupported() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
-    let host = CapabilityHost::new(&registry, &dispatcher, &ObligatingAuthorizer)
+    let host = capability_host(&registry, &dispatcher, &ObligatingAuthorizer)
         .with_run_state(&run_state);
     let context = execution_context(CapabilitySet::default());
     let scope = context.resource_scope.clone();
@@ -479,7 +479,7 @@ async fn capability_host_returns_business_error_when_run_state_fail_transition_f
     let dispatcher = RecordingDispatcher::default();
     let authorizer = GrantAuthorizer::new();
     let run_state = FailOnFailRunStateStore::new();
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
+    let host = capability_host(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
     let context = execution_context(CapabilitySet::default());
 
     let err = host
@@ -510,7 +510,7 @@ async fn capability_host_returns_resume_business_error_when_run_state_fail_trans
     let run_state = FailOnFailRunStateStore::new();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
-    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+    let block_host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
@@ -538,7 +538,7 @@ async fn capability_host_returns_resume_business_error_when_run_state_fail_trans
         .unwrap();
 
     let resume_authorizer = GrantAuthorizer::new();
-    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer)
+    let resume_host = capability_host(&registry, &dispatcher, &resume_authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -570,7 +570,7 @@ async fn capability_host_does_not_orphan_approval_when_run_block_fails() {
     let dispatcher = RecordingDispatcher::default();
     let run_state = FailBlockApprovalRunStateStore::new();
     let approval_requests = RecordingApprovalStore::new();
-    let host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+    let host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
@@ -638,7 +638,7 @@ async fn capability_host_returns_specific_error_for_authorizer_fingerprint_misma
     let dispatcher = RecordingDispatcher::default();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
-    let host = CapabilityHost::new(&registry, &dispatcher, &MismatchedApprovalAuthorizer)
+    let host = capability_host(&registry, &dispatcher, &MismatchedApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
@@ -667,7 +667,7 @@ async fn capability_host_returns_dispatch_result_when_run_completion_fails_after
     let dispatcher = RecordingDispatcher::default();
     let authorizer = GrantAuthorizer::new();
     let run_state = FailCompleteRunStateStore::new();
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
+    let host = capability_host(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
     let context = execution_context(CapabilitySet {
         grants: vec![dispatch_grant()],
     });
@@ -694,7 +694,7 @@ async fn capability_host_resumes_approved_invocation_and_consumes_matching_lease
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
-    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+    let block_host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let mut context = execution_context(CapabilitySet::default());
@@ -742,7 +742,7 @@ async fn capability_host_resumes_approved_invocation_and_consumes_matching_lease
         .unwrap();
 
     let resume_authorizer = GrantAuthorizer::new();
-    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer)
+    let resume_host = capability_host(&registry, &dispatcher, &resume_authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -815,7 +815,7 @@ async fn capability_host_returns_dispatch_result_when_run_completion_fails_after
     let run_state = FailCompleteRunStateStore::new();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
-    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+    let block_host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
@@ -862,7 +862,7 @@ async fn capability_host_returns_dispatch_result_when_run_completion_fails_after
         .unwrap();
 
     let resume_authorizer = GrantAuthorizer::new();
-    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer)
+    let resume_host = capability_host(&registry, &dispatcher, &resume_authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -888,7 +888,7 @@ async fn capability_host_denies_resume_when_trust_ceiling_omits_capability_effec
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
-    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+    let block_host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
@@ -935,7 +935,7 @@ async fn capability_host_denies_resume_when_trust_ceiling_omits_capability_effec
         .unwrap();
 
     let resume_authorizer = GrantAuthorizer::new();
-    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer)
+    let resume_host = capability_host(&registry, &dispatcher, &resume_authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -971,7 +971,7 @@ async fn capability_host_revokes_claimed_lease_when_dispatch_fails_after_resume(
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
     let block_dispatcher = RecordingDispatcher::default();
-    let block_host = CapabilityHost::new(&registry, &block_dispatcher, &ApprovalAuthorizer)
+    let block_host = capability_host(&registry, &block_dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
@@ -1018,7 +1018,7 @@ async fn capability_host_revokes_claimed_lease_when_dispatch_fails_after_resume(
         .unwrap();
 
     let resume_authorizer = GrantAuthorizer::new();
-    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer)
+    let resume_host = capability_host(&registry, &dispatcher, &resume_authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -1061,7 +1061,7 @@ async fn capability_host_returns_dispatch_result_when_lease_consume_fails_after_
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = ConsumeFailingLeaseStore::new();
-    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+    let block_host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
@@ -1108,7 +1108,7 @@ async fn capability_host_returns_dispatch_result_when_lease_consume_fails_after_
         .unwrap();
 
     let resume_authorizer = GrantAuthorizer::new();
-    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer)
+    let resume_host = capability_host(&registry, &dispatcher, &resume_authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -1139,7 +1139,7 @@ async fn capability_host_does_not_overwrite_completed_run_when_concurrent_resume
     let run_state = CompleteNotifyingRunStateStore::new(complete_notify.clone());
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = CoordinatedClaimConflictLeaseStore::new(complete_notify);
-    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+    let block_host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
@@ -1186,7 +1186,7 @@ async fn capability_host_does_not_overwrite_completed_run_when_concurrent_resume
         .unwrap();
 
     let resume_authorizer = GrantAuthorizer::new();
-    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer)
+    let resume_host = capability_host(&registry, &dispatcher, &resume_authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -1225,7 +1225,7 @@ async fn capability_host_rejects_resume_with_mismatched_capability_id() {
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
-    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+    let block_host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
@@ -1253,7 +1253,7 @@ async fn capability_host_rejects_resume_with_mismatched_capability_id() {
         .unwrap();
 
     let resume_authorizer = GrantAuthorizer::new();
-    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer)
+    let resume_host = capability_host(&registry, &dispatcher, &resume_authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -1292,7 +1292,7 @@ async fn capability_host_rejects_resume_with_mismatched_approval_request_id() {
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
-    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+    let block_host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
@@ -1322,7 +1322,7 @@ async fn capability_host_rejects_resume_with_mismatched_approval_request_id() {
     assert_ne!(bogus_approval_id, real_approval_id);
 
     let resume_authorizer = GrantAuthorizer::new();
-    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer)
+    let resume_host = capability_host(&registry, &dispatcher, &resume_authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -1358,7 +1358,7 @@ async fn capability_host_rejects_resume_with_mutated_input_before_lease_claim_or
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
-    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+    let block_host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
@@ -1404,7 +1404,7 @@ async fn capability_host_rejects_resume_with_mutated_input_before_lease_claim_or
         .unwrap();
 
     let resume_authorizer = GrantAuthorizer::new();
-    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer)
+    let resume_host = capability_host(&registry, &dispatcher, &resume_authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);

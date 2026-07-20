@@ -8,10 +8,30 @@ use std::sync::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::*;
+use ironclaw_capabilities::CapabilityHost;
 use ironclaw_extensions::*;
 use ironclaw_host_api::*;
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use serde_json::json;
+
+/// Central constructor for `CapabilityHost` in tests.
+///
+/// Every test builds its host through this helper instead of calling
+/// `CapabilityHost::new` inline, so a change to the kernel's construction
+/// signature (e.g. the §5.3.2 milestone adding the trust-policy / runtime-policy
+/// / policy-facts inputs) touches this one place rather than ~130 call sites.
+/// It currently forwards verbatim; the policy-input defaults are attached here
+/// as those inputs land.
+pub fn capability_host<'a, D>(
+    registry: &'a ExtensionRegistry,
+    dispatcher: &'a D,
+    authorizer: &'a dyn TrustAwareCapabilityDispatchAuthorizer,
+) -> CapabilityHost<'a, D>
+where
+    D: CapabilityDispatcher + ?Sized,
+{
+    CapabilityHost::new(registry, dispatcher, authorizer)
+}
 
 #[derive(Default)]
 pub struct RecordingDispatcher {

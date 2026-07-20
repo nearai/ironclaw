@@ -13,6 +13,7 @@ mod obligations;
 mod ports;
 mod replay_payload;
 mod requests;
+mod trust;
 
 pub use conformance::{
     CapabilityProfileClaim, CapabilityProfileClaimedOperation, CapabilityProfileConformanceFinding,
