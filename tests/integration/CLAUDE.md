@@ -376,7 +376,7 @@ On a harness built from a `live_approvals` group:
 
 `ironclaw_reborn_composition::test_support` exposes:
 
-- `build_local_dev_secret_store_for_test(root, scoped)` — constructs the `LocalDevSecretStore` used by production local-dev composition; for store read-back in secrets tests.
+- `build_secret_store_for_test(root, scoped)` — constructs the `LocalDevSecretStore` used by production local-dev composition; for store read-back in secrets tests.
 
 `RebornServices` (returned by `build_reborn_services`/exposed via `RebornRuntime::services()`, methods defined in `crates/ironclaw_reborn_composition/src/runtime/test_support.rs`) exposes:
 

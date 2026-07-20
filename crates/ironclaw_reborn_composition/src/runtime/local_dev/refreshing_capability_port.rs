@@ -60,6 +60,13 @@ pub(crate) struct RefreshingCapabilityPortConfig {
     pub(super) approval_settings: Arc<dyn ApprovalSettingsProvider>,
     pub(super) approval_requests: Arc<dyn ApprovalRequestStore>,
     pub(super) capability_leases: Arc<dyn CapabilityLeaseStore>,
+    /// Durable model-visible gate-record store the built capability port persists
+    /// pending-gate records into (wires the #6245 production gap closed).
+    pub(super) gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
+    /// Durable host-private replay-payload store the built capability port
+    /// persists gate/auth replay payloads into and reconstitutes on resume
+    /// (arch-simplification §5.3 Stage 2a-i).
+    pub(super) replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
     pub(super) external_tool_catalog: Arc<dyn ExternalToolCatalog>,
     /// Per-capability mount overrides, merged via `with_capability_execution_mount`.
     /// Always empty at the sole production call site (`local_dev.rs`'s `create_capability_port`);
@@ -111,6 +118,8 @@ pub(crate) async fn create_refreshing_capability_port(
         approval_settings: config.approval_settings,
         approval_requests: config.approval_requests,
         capability_leases: config.capability_leases,
+        gate_record_store: config.gate_record_store,
+        replay_payload_store: config.replay_payload_store,
         external_tool_catalog: config.external_tool_catalog,
         capability_execution_mount_overrides: config.capability_execution_mount_overrides,
         additional_provider_trust: config.additional_provider_trust,
@@ -148,6 +157,8 @@ struct RefreshingCapabilityPort {
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
     approval_requests: Arc<dyn ApprovalRequestStore>,
     capability_leases: Arc<dyn CapabilityLeaseStore>,
+    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
+    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
     external_tool_catalog: Arc<dyn ExternalToolCatalog>,
     capability_execution_mount_overrides: HashMap<CapabilityId, MountView>,
     additional_provider_trust: BTreeMap<ExtensionId, TrustDecision>,
@@ -251,6 +262,12 @@ impl RefreshingCapabilityPort {
             Arc::clone(&self.milestone_sink),
         )
         .with_execution_mounts(self.workspace_mounts.clone())
+        // Durable gate-record + host-private replay-payload stores (§5.2.9 /
+        // §5.3 Stage 2a-i): without these the port defaults to a no-op gate
+        // store and a fail-closed replay store, so production gate records never
+        // persist and a gate/auth resume cannot reconstitute its replay input.
+        .with_gate_record_store(Arc::clone(&self.gate_record_store))
+        .with_replay_payload_store(Arc::clone(&self.replay_payload_store))
         // Adapt the composition-owned observer to the loop-host substrate
         // trait the capability port consumes (the input hook). The result hook
         // calls the composition trait directly from `StagedCapabilityIo`.
@@ -305,17 +322,21 @@ impl RefreshingCapabilityPort {
                 Arc::clone(&self.capability_leases),
                 self.outbound_delivery_target_set_requires_approval,
                 Arc::clone(&self.approval_settings),
+                Arc::clone(&self.replay_payload_store),
+                Arc::clone(&self.gate_record_store),
             )?);
         }
         let port = wrap_synthetic_capabilities(
             port,
             synthetic_capabilities,
             self.run_context.clone(),
+            self.fallback_user_id.clone(),
             Arc::clone(&self.input_resolver),
             Arc::clone(&self.result_writer),
             // Synthetic capabilities bypass the inner port's input hook, so the
             // wrapper needs the observer to emit `on_capability_input` itself.
             self.trajectory_observer.clone(),
+            Arc::clone(&self.replay_payload_store),
         )?;
         let port = wrap_surface_disclosure(port, &self.workspace_mounts);
         // Outermost: external (client-supplied) tools see the full resolved
@@ -472,6 +493,8 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
         persistent_approval_policies,
         approval_requests,
         capability_leases,
+        gate_record_store,
+        replay_payload_store,
         capability_execution_mount_overrides,
         additional_provider_trust,
         capability_id_filter,
@@ -525,6 +548,8 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
         approval_settings,
         approval_requests,
         capability_leases,
+        gate_record_store,
+        replay_payload_store,
         external_tool_catalog: Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new()),
         capability_execution_mount_overrides,
         additional_provider_trust,

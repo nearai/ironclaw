@@ -499,9 +499,12 @@ async fn local_dev_adapter_gates_builtin_echo_when_global_auto_approve_is_off() 
     else {
         panic!("expected builtin echo approval gate, got {outcome:?}");
     };
-    assert_eq!(
-        resume.input,
-        serde_json::json!({ "message": "hello product live" })
+    // Raw input/estimate no longer ride the loop-facing approval resume (§5.3
+    // Stage 2a-i); the host persists them in the replay-payload store at the gate
+    // raise. The gate still carries the resume token that keys that payload.
+    assert!(
+        !resume.resume_token.as_str().is_empty(),
+        "approval gate must carry the resume token that keys the host-side replay payload"
     );
 }
 
@@ -1899,3 +1902,5 @@ impl ProductLiveCancellationProbe for ReadyCancellationProbe {
         Ok(self.handle.is_requested())
     }
 }
+
+// arch-exempt: large_file, pre-existing large file minimally touched for the §5.3 Stage 2a-i replay-payload move (field/store wiring + tests), plan #6175

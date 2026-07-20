@@ -405,6 +405,16 @@ fn test_parts(
         persistent_approval_policies: Arc::new(in_memory_backed_persistent_approval_policy_store()),
         approval_requests: Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store()),
         capability_leases: Arc::new(in_memory_backed_capability_lease_store()),
+        gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+            ironclaw_reborn_composition::wrap_scoped(Arc::new(
+                ironclaw_filesystem::InMemoryBackend::new(),
+            )),
+        )),
+        replay_payload_store: Arc::new(ironclaw_capabilities::FilesystemReplayPayloadStore::new(
+            ironclaw_reborn_composition::wrap_scoped(Arc::new(
+                ironclaw_filesystem::InMemoryBackend::new(),
+            )),
+        )),
         capability_execution_mount_overrides,
         additional_provider_trust,
         capability_id_filter,

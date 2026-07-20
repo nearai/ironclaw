@@ -281,7 +281,8 @@ async fn running_counter_decrements_on_cancel_completion() {
     assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 0);
 }
 
-/// Lease expiry: Running → Failed (lease expired). Counter should drop to 0.
+/// Lease expiry of a checkpoint-less run: Running → Queued (re-drivable, #6284).
+/// Leaving `Running` releases the concurrency slot, so the counter drops to 0.
 #[tokio::test]
 async fn running_counter_decrements_on_lease_expiry() {
     let store = make_store();

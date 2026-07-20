@@ -30,6 +30,16 @@
 //!   compatibility matrix prevents this at the `(deployment, profile)` step
 //!   before the backend mapping runs.
 //!
+//! ## Resolved policy values
+//!
+//! Beyond the backend/mode fields on [`EffectiveRuntimePolicy`], this crate
+//! classifies the resolved policy into the enforcement axes composition needs:
+//! [`budget_enforcement`] and [`minimal_approval_bypass`]. Both are keyed on
+//! the *resolved* profile, so a tenant/org ceiling narrowing authority reaches
+//! them for free. They exist so no consumer past the composition edge branches
+//! on a deployment mode — §4.4 of
+//! `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`.
+//!
 //! ## Determinism and audit
 //!
 //! [`resolve`] is deterministic — equal inputs always produce equal outputs,
@@ -41,7 +51,10 @@
 
 mod resolver;
 
-pub use resolver::{OrgPolicyConstraints, ResolveError, ResolveRequest, resolve};
+pub use resolver::{
+    BudgetEnforcement, MinimalApprovalBypass, OrgPolicyConstraints, ResolveError, ResolveRequest,
+    budget_enforcement, minimal_approval_bypass, resolve,
+};
 
 // `EffectiveRuntimePolicy` appears in `resolve`'s return type, so it must be
 // reachable from the crate root. Other host-api runtime_policy types are not

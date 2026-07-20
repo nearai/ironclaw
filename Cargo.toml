@@ -305,6 +305,9 @@ ironclaw_attachments = { path = "crates/ironclaw_attachments", version = "0.1.0"
 # `test-support` enables the in-memory-backed capability-lease store constructor
 # for the integration-test harness (cfg(test) does not propagate into deps).
 ironclaw_authorization = { path = "crates/ironclaw_authorization", version = "0.1.0", features = ["test-support"] }
+# Integration harness builds a fresh in-memory `FilesystemReplayPayloadStore`
+# fallback for harnesses without shared approval parts (§5.3 Stage 2a-i).
+ironclaw_capabilities = { path = "crates/ironclaw_capabilities", version = "0.1.0" }
 ironclaw_extensions = { path = "crates/ironclaw_extensions", version = "0.1.0" }
 ironclaw_filesystem = { path = "crates/ironclaw_filesystem", version = "0.1.0" }
 ironclaw_mcp = { path = "crates/ironclaw_mcp", version = "0.1.0" }

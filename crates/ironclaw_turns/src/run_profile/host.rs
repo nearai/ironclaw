@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, HostApiError,
-    INPUT_ENCODE_HUMAN_SUMMARY, ProviderToolName, ResourceEstimate,
-    RuntimeCredentialAuthRequirement, RuntimeKind, ThreadId,
+    INPUT_ENCODE_HUMAN_SUMMARY, ProviderToolName, RuntimeCredentialAuthRequirement, RuntimeKind,
+    ThreadId,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -1742,6 +1742,15 @@ impl<'de> Deserialize<'de> for CapabilityResumeToken {
     }
 }
 
+/// Approval-gate resume identity carried by the loop.
+///
+/// Raw runtime `input`/`estimate` no longer ride here (arch-simplification §5.3
+/// Stage 2a-i): the host persists the host-private `ReplayPayload`
+/// (`ironclaw_capabilities`) at the gate raise, keyed by the invocation id
+/// encoded in `resume_token`, and reconstitutes it host-side on resume. Keeping
+/// the raw tool args out of the loop's serialized checkpoint retires the
+/// charter-violating exposure flagged in `ironclaw_agent_loop`'s `CLAUDE.md`
+/// ("Do not store raw prompts, raw model output, tool args ... in state").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityApprovalResume {
     pub approval_request_id: ApprovalRequestId,
@@ -1749,8 +1758,6 @@ pub struct CapabilityApprovalResume {
     #[serde(default = "CorrelationId::new")]
     pub correlation_id: CorrelationId,
     pub input_ref: CapabilityInputRef,
-    pub input: serde_json::Value,
-    pub estimate: ResourceEstimate,
 }
 
 /// Prior-approval identity carried through an auth-gate resume.
@@ -1786,22 +1793,17 @@ pub struct CapabilityAuthResume {
     pub resume_token: CapabilityResumeToken,
     /// Present when the invocation previously passed a one-shot approval gate.
     /// The two sub-fields are always set together; see [`AuthResumeApprovalIdentity`].
+    //
+    // Design note (not part of this field's contract): the raw runtime
+    // `input`/`estimate` no longer ride this struct (arch-simplification §5.3
+    // Stage 2a-i) — capability input refs are scoped to a loop run and may be
+    // consumed by the first dispatch, so the host persists the host-private
+    // `ReplayPayload` (`ironclaw_capabilities`) at the gate raise — keyed by
+    // the invocation id encoded in `resume_token` — and reconstitutes it
+    // host-side on resume, rather than round-tripping raw tool args through
+    // the loop checkpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prior_approval: Option<AuthResumeApprovalIdentity>,
-    /// Original runtime input captured when the auth gate was produced.
-    ///
-    /// Capability input refs are scoped to a loop run and may be consumed by the
-    /// first dispatch before the auth gate is resolved. When present, this
-    /// replay payload lets auth-resume re-dispatch without resolving a stale or
-    /// already-consumed input ref.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replay: Option<CapabilityAuthResumeReplay>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CapabilityAuthResumeReplay {
-    pub input: serde_json::Value,
-    pub estimate: ResourceEstimate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2765,3 +2767,5 @@ mod tests {
         assert_eq!(plain.detail, None);
     }
 }
+
+// arch-exempt: large_file, pre-existing large file minimally touched for the §5.3 Stage 2a-i replay-payload move (field/store wiring + tests), plan #6175

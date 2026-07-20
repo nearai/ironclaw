@@ -1,3 +1,7 @@
+// arch-exempt: large_file, pre-existing ~6.9K-line composition runtime test suite; this change only repoints existing cutover-gate cases at DeploymentConfig plus one shared helper, plan #6168
+//
+// Decomposition into per-concern test modules is tracked with the composition
+// god-crate shrink (#6168); this file is not the place to add unrelated cases.
 use std::sync::{
     Arc, Mutex as StdMutex,
     atomic::{AtomicUsize, Ordering},
@@ -263,6 +267,18 @@ fn readiness_for_runtime_gate(
     }
 }
 
+/// Drive the cutover gate the way production does: build the deployment from
+/// the profile, then gate on its `TrafficPolicy`.
+fn cutover_gate(
+    profile: RebornCompositionProfile,
+    readiness: &crate::RebornReadiness,
+) -> Result<(), RebornRuntimeError> {
+    super::enforce_runtime_cutover_gate(
+        &crate::deployment::DeploymentConfig::for_profile(profile, false),
+        readiness,
+    )
+}
+
 #[test]
 fn runtime_cutover_gate_allows_validated_production_readiness() {
     let readiness = readiness_for_runtime_gate(
@@ -271,7 +287,7 @@ fn runtime_cutover_gate_allows_validated_production_readiness() {
         Vec::new(),
     );
 
-    super::enforce_runtime_cutover_gate(RebornCompositionProfile::Production, &readiness)
+    cutover_gate(RebornCompositionProfile::Production, &readiness)
         .expect("validated production runtime can start");
 }
 
@@ -290,9 +306,8 @@ fn runtime_cutover_gate_rejects_blocking_production_diagnostic() {
         ],
     );
 
-    let error =
-        super::enforce_runtime_cutover_gate(RebornCompositionProfile::Production, &readiness)
-            .expect_err("blocking production diagnostic prevents runtime start");
+    let error = cutover_gate(RebornCompositionProfile::Production, &readiness)
+        .expect_err("blocking production diagnostic prevents runtime start");
     let RebornRuntimeError::InvalidArgument { reason } = error else {
         panic!("expected invalid argument, got {error:?}");
     };
@@ -308,9 +323,8 @@ fn runtime_cutover_gate_rejects_migration_dry_run_runtime_start() {
         Vec::new(),
     );
 
-    let error =
-        super::enforce_runtime_cutover_gate(RebornCompositionProfile::MigrationDryRun, &readiness)
-            .expect_err("migration-dry-run cannot start live runtime");
+    let error = cutover_gate(RebornCompositionProfile::MigrationDryRun, &readiness)
+        .expect_err("migration-dry-run cannot start live runtime");
     let RebornRuntimeError::InvalidArgument { reason } = error else {
         panic!("expected invalid argument, got {error:?}");
     };
@@ -325,7 +339,7 @@ fn runtime_cutover_gate_allows_local_dev_readiness() {
         vec![crate::RebornReadinessDiagnostic::local_dev()],
     );
 
-    super::enforce_runtime_cutover_gate(RebornCompositionProfile::LocalDev, &readiness)
+    cutover_gate(RebornCompositionProfile::LocalDev, &readiness)
         .expect("local-dev runtime is not production traffic");
 }
 
@@ -337,7 +351,7 @@ fn runtime_cutover_gate_allows_hosted_single_tenant_readiness() {
         Vec::new(),
     );
 
-    super::enforce_runtime_cutover_gate(RebornCompositionProfile::HostedSingleTenant, &readiness)
+    cutover_gate(RebornCompositionProfile::HostedSingleTenant, &readiness)
         .expect("validated hosted single-tenant runtime can start");
 }
 
@@ -349,11 +363,8 @@ fn runtime_cutover_gate_rejects_local_dev_readiness_for_hosted_single_tenant() {
         vec![crate::RebornReadinessDiagnostic::local_dev()],
     );
 
-    let error = super::enforce_runtime_cutover_gate(
-        RebornCompositionProfile::HostedSingleTenant,
-        &readiness,
-    )
-    .expect_err("hosted single-tenant runtime requires hosted readiness");
+    let error = cutover_gate(RebornCompositionProfile::HostedSingleTenant, &readiness)
+        .expect_err("hosted single-tenant runtime requires hosted readiness");
     let RebornRuntimeError::InvalidArgument { reason } = error else {
         panic!("expected invalid argument, got {error:?}");
     };

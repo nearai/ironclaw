@@ -112,6 +112,16 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         ),
         approval_requests: local_runtime.approval_requests.clone(),
         capability_leases: local_runtime.capability_leases.clone(),
+        gate_record_store: std::sync::Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+            crate::wrap_scoped(std::sync::Arc::new(
+                ironclaw_filesystem::InMemoryBackend::new(),
+            )),
+        )),
+        replay_payload_store: std::sync::Arc::new(
+            ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
+                std::sync::Arc::new(ironclaw_filesystem::InMemoryBackend::new()),
+            )),
+        ),
         external_tool_catalog: std::sync::Arc::new(
             ironclaw_turns::InMemoryExternalToolCatalog::new(),
         ),

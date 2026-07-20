@@ -30,7 +30,7 @@ mod approval_test_support;
 mod automation;
 mod blocked_auth_resume;
 mod builtin_capability_policy;
-mod deployment;
+pub mod deployment;
 mod error;
 mod extension_host;
 mod factory;
@@ -674,6 +674,7 @@ const PER_USER_ALIASES: &[&str] = &[
     "/run-state",
     "/approvals",
     "/gate-records",
+    "/replay-payloads",
     "/threads",
     "/conversations",
     "/turns",

@@ -4,6 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ironclaw_capabilities::{ReplayPayload, ReplayPayloadStore, ReplayPayloadStoreError};
 use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, CapabilityId, CapabilitySet, CorrelationId,
     DispatchFailureDetail, DispatchInputIssue, DispatchInputIssueCode, EffectKind,
@@ -596,6 +597,7 @@ pub struct HostRuntimeLoopCapabilityPortFactory {
     capability_execution_mounts: HashMap<CapabilityId, MountView>,
     trajectory_observer: Option<Arc<dyn CapabilityTrajectoryObserver>>,
     gate_record_store: Arc<dyn GateRecordStore>,
+    replay_payload_store: Arc<dyn ReplayPayloadStore>,
 }
 
 impl HostRuntimeLoopCapabilityPortFactory {
@@ -620,6 +622,12 @@ impl HostRuntimeLoopCapabilityPortFactory {
             // the resume-read follow-up, so skipping the write is behavior-
             // preserving). See `NoopGateRecordStore`.
             gate_record_store: Arc::new(NoopGateRecordStore),
+            // Transitional fail-closed default until composition wires the durable
+            // replay-payload store via `with_replay_payload_store`. See
+            // `NoopReplayPayloadStore`: an unwired factory persists nothing, so a
+            // gate/auth resume that must reconstitute its replay input fails closed
+            // (sanitized terminal failure) rather than dispatching empty input.
+            replay_payload_store: Arc::new(NoopReplayPayloadStore),
         }
     }
 
@@ -628,6 +636,16 @@ impl HostRuntimeLoopCapabilityPortFactory {
     /// calls this; the fail-closed default only guards an unwired factory.
     pub fn with_gate_record_store(mut self, store: Arc<dyn GateRecordStore>) -> Self {
         self.gate_record_store = store;
+        self
+    }
+
+    /// Wire the durable host-private [`ReplayPayloadStore`] every port built by
+    /// this factory persists gate/auth replay payloads into and reconstitutes
+    /// them from on resume (arch-simplification §5.3 Stage 2a-i). Production
+    /// composition always calls this; the fail-closed default only guards an
+    /// unwired factory.
+    pub fn with_replay_payload_store(mut self, store: Arc<dyn ReplayPayloadStore>) -> Self {
+        self.replay_payload_store = store;
         self
     }
 
@@ -670,6 +688,7 @@ impl HostRuntimeLoopCapabilityPortFactory {
             Arc::clone(&self.milestone_sink),
         )
         .with_gate_record_store(Arc::clone(&self.gate_record_store))
+        .with_replay_payload_store(Arc::clone(&self.replay_payload_store))
         .with_execution_mounts(self.execution_mounts.clone())
         .with_capability_execution_mounts(self.capability_execution_mounts.clone())
         .with_trajectory_observer(self.trajectory_observer.clone())
@@ -721,8 +740,6 @@ enum DispatchRecord {
 
 struct RuntimeOutcomeCompletion<'a> {
     input_ref: &'a CapabilityInputRef,
-    input: Option<&'a Value>,
-    estimate: Option<&'a ResourceEstimate>,
     invocation_id: InvocationId,
     correlation_id: CorrelationId,
     requested_capability_id: &'a CapabilityId,
@@ -733,17 +750,10 @@ struct RuntimeOutcomeCompletion<'a> {
 
 struct RuntimeOutcomeConversion<'a> {
     input_ref: &'a CapabilityInputRef,
-    input: Option<&'a Value>,
-    estimate: Option<&'a ResourceEstimate>,
     invocation_id: InvocationId,
     correlation_id: CorrelationId,
     requested_capability_id: &'a CapabilityId,
     outcome: RuntimeCapabilityOutcome,
-}
-
-struct CapabilityReplayInput<'a> {
-    input: &'a Value,
-    estimate: &'a ResourceEstimate,
 }
 
 fn ensure_cached_invocation_matches_activity(
@@ -763,8 +773,6 @@ impl<'a> RuntimeOutcomeCompletion<'a> {
     fn conversion(&self) -> RuntimeOutcomeConversion<'a> {
         RuntimeOutcomeConversion {
             input_ref: self.input_ref,
-            input: self.input,
-            estimate: self.estimate,
             invocation_id: self.invocation_id,
             correlation_id: self.correlation_id,
             requested_capability_id: self.requested_capability_id,
@@ -1036,6 +1044,13 @@ pub struct HostRuntimeLoopCapabilityPort {
     /// from on a later resume turn (§5.2.9). Written at the capability seam when a
     /// gate/suspension outcome is produced; see `persist_gate_record_for_outcome`.
     gate_record_store: Arc<dyn GateRecordStore>,
+    /// Host-private store for the raw replay payload (tool `input` + `estimate`)
+    /// a gate/auth resume re-dispatches from (arch-simplification §5.3 Stage
+    /// 2a-i). Written at a FRESH gate raise keyed by `InvocationId`
+    /// (`persist_replay_payload_for_fresh_gate`); loaded on resume by the
+    /// invocation id recovered from the resume token
+    /// (`replay_payload_for_resume`). Never model-visible.
+    replay_payload_store: Arc<dyn ReplayPayloadStore>,
     /// Idempotency keys whose gate record was already persisted by this port.
     /// A replayed invocation (same key) returns the CACHED gate outcome from
     /// `dispatch_records`; without this guard the seam would mint a fresh
@@ -1092,6 +1107,10 @@ impl HostRuntimeLoopCapabilityPort {
             // through the factory's `with_gate_record_store`, which forwards via
             // the port-level builder below. See `NoopGateRecordStore`.
             gate_record_store: Arc::new(NoopGateRecordStore),
+            // Transitional fail-closed default; composition wires the durable
+            // store through the factory's `with_replay_payload_store`. See
+            // `NoopReplayPayloadStore`.
+            replay_payload_store: Arc::new(NoopReplayPayloadStore),
             gate_records_persisted: Mutex::new(HashSet::new()),
         }
     }
@@ -1101,6 +1120,15 @@ impl HostRuntimeLoopCapabilityPort {
     /// [`NoopGateRecordStore`] when unset.
     pub fn with_gate_record_store(mut self, store: Arc<dyn GateRecordStore>) -> Self {
         self.gate_record_store = store;
+        self
+    }
+
+    /// Wire the durable host-private [`ReplayPayloadStore`] this port persists
+    /// gate/auth replay payloads into and reconstitutes them from on resume
+    /// (arch-simplification §5.3 Stage 2a-i). Defaults to the transitional
+    /// fail-closed [`NoopReplayPayloadStore`] when unset.
+    pub fn with_replay_payload_store(mut self, store: Arc<dyn ReplayPayloadStore>) -> Self {
+        self.replay_payload_store = store;
         self
     }
 
@@ -1709,19 +1737,16 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
         // Slice C result-side collapse (§3/§5.3): produce the loop-facing outcome,
         // then persist the durable host_api gate record its `Resolution` channel
-        // renders from before returning it to the loop. The idempotency key is a
-        // pure function of the request (same derivation the dispatch cache uses),
-        // computed up front so replays that return a cached gate outcome do not
-        // persist a duplicate record — see `persist_gate_record_for_outcome`.
-        let effective_input_ref = request
-            .approval_resume
-            .as_ref()
-            .map(|resume| &resume.input_ref)
-            .unwrap_or(&request.input_ref);
-        let idempotency_key =
-            invocation_idempotency_key(&self.run_context, &request, effective_input_ref)?;
-        let outcome = self.invoke_capability_dispatch(request).await?;
-        self.persist_gate_record_for_outcome(&idempotency_key, &outcome)
+        // renders from before returning it to the loop. The idempotency key is
+        // derived INSIDE `persist_gate_record_for_outcome`, after dispatch and only
+        // for a gate-bearing outcome — its `resume.input_ref` binding is the
+        // STORE-derived one (same derivation the dispatch cache uses), so it stays
+        // byte-stable and identical to dispatch's (§5.3 Stage 0). Deriving it there
+        // (rather than up front) keeps dispatch's own resume identity/activity
+        // validation the FIRST error a malformed resume surfaces — a missing/stale
+        // resume payload must not pre-empt an `InvalidInvocation` activity mismatch.
+        let outcome = self.invoke_capability_dispatch(request.clone()).await?;
+        self.persist_gate_record_for_outcome(&request, &outcome)
             .await?;
         Ok(outcome)
     }
@@ -1764,14 +1789,24 @@ impl HostRuntimeLoopCapabilityPort {
     ///
     /// Fail-closed: a store write failure is a genuine host storage fault and
     /// propagates, consistent with `record_loop_completed`/`record_runtime_completed`.
+    ///
+    /// The idempotency key (the write-once replay guard) is derived HERE, after
+    /// dispatch and only once a gate record exists, from the SAME store-derived
+    /// input_ref dispatch used (hazard 3, §5.3 Stage 0): on a resume the payload
+    /// is reconstituted from the store, not the advisory loop-supplied
+    /// `resume.input_ref`, so the key is byte-stable. Deriving it lazily keeps a
+    /// missing/stale resume payload from pre-empting dispatch's own resume
+    /// identity/activity validation — a malformed resume surfaces
+    /// `InvalidInvocation` from dispatch, never a spurious payload-missing error.
     async fn persist_gate_record_for_outcome(
         &self,
-        idempotency_key: &IdempotencyKey,
+        request: &CapabilityInvocation,
         outcome: &CapabilityOutcome,
     ) -> Result<(), AgentLoopHostError> {
         let mapped = capability_outcome_to_resolution(outcome.clone());
         let Some(record) = mapped.gate_record else {
-            // Done / Denied / Suspended(Process): nothing durable to persist.
+            // Done / Denied / Suspended(Process): nothing durable to persist, and
+            // no idempotency key needed.
             return Ok(());
         };
         let Some(gate_ref) = gate_ref_for_resolution(&mapped.resolution) else {
@@ -1782,6 +1817,16 @@ impl HostRuntimeLoopCapabilityPort {
                 "mapped gate record has no gate ref on its resolution channel",
             ));
         };
+        // The dispatch that produced this gate outcome already reconstituted (and
+        // for a fresh raise, persisted) the resume payload, so this load hits a
+        // present record on a resume and returns `None` on a fresh dispatch.
+        let resume_payload = self.resume_replay_payload(request).await?;
+        let effective_input_ref = resume_payload
+            .as_ref()
+            .map(|payload| &payload.input_ref)
+            .unwrap_or(&request.input_ref);
+        let idempotency_key =
+            invocation_idempotency_key(&self.run_context, request, effective_input_ref)?;
         // Replay guard: the dispatch cache replays the same gate outcome for a
         // repeated invocation (same idempotency key); persisting again would
         // mint a fresh GateRef and orphan another write-once record per retry.
@@ -1795,10 +1840,130 @@ impl HostRuntimeLoopCapabilityPort {
             // Roll the guard entry back so a later replay retries the persist
             // instead of permanently skipping it after a transient store fault.
             lock_mut(&self.gate_records_persisted, "gate record replay guard")?
-                .remove(idempotency_key);
+                .remove(&idempotency_key);
             return Err(gate_record_store_error(error));
         }
         Ok(())
+    }
+
+    /// Persist the host-private [`ReplayPayload`] a later gate/auth resume
+    /// reconstitutes `{input, estimate}` from (arch-simplification §5.3 Stage
+    /// 2a-i), keyed by `invocation_id`. Only an approval/auth gate outcome
+    /// carries a resume; every other outcome no-ops.
+    ///
+    /// Called ONLY on a fresh dispatch, so `prior_approval` is always absent here
+    /// (a fresh invocation has passed no prior approval gate) and the write cannot
+    /// collide with an existing entry for a reused invocation id. The payload is
+    /// invocation-stable, so a benign duplicate (`ReplayPayloadAlreadyExists`) is
+    /// tolerated rather than ending the run; any other store fault is a genuine
+    /// host storage failure and fails closed.
+    async fn persist_replay_payload_for_fresh_gate(
+        &self,
+        invocation_id: InvocationId,
+        input_ref: &CapabilityInputRef,
+        input: &Value,
+        estimate: &ResourceEstimate,
+        correlation_id: CorrelationId,
+        outcome: &RuntimeCapabilityOutcome,
+    ) -> Result<(), AgentLoopHostError> {
+        if !matches!(
+            outcome,
+            RuntimeCapabilityOutcome::ApprovalRequired(_)
+                | RuntimeCapabilityOutcome::AuthRequired(_)
+        ) {
+            return Ok(());
+        }
+        let payload = ReplayPayload {
+            input: input.clone(),
+            estimate: estimate.clone(),
+            // Fresh dispatch: no prior approval. The approval→auth bridge keeps
+            // the prior-approval identity on the loop-facing resume wire in this
+            // slice (it moves host-side in §5.3 Stage 2a-ii).
+            prior_approval: None,
+            input_ref: input_ref.clone(),
+            correlation_id,
+        };
+        let scope = self.visible_request.context.resource_scope.clone();
+        match self
+            .replay_payload_store
+            .save(scope, invocation_id, payload)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(ReplayPayloadStoreError::ReplayPayloadAlreadyExists { .. }) => {
+                // Invocation-stable payload already persisted; the resume-read path
+                // will load the identical record. Benign, not a fault.
+                tracing::debug!(
+                    invocation_id = %invocation_id,
+                    "replay payload already persisted for fresh gate raise; keeping existing record"
+                );
+                Ok(())
+            }
+            Err(error) => Err(replay_payload_store_error(error)),
+        }
+    }
+
+    /// Load the host-private replay payload persisted at the fresh gate raise for
+    /// `invocation_id` (recovered from the resume token). **Fail closed on a
+    /// miss:** a resume whose payload is absent — including a wrong-scope read the
+    /// store reports as unknown — is a sanitized terminal failure, never a silent
+    /// empty-input dispatch (arch-simplification §5.3 Stage 2a-i).
+    /// Reconstitute the host-private replay payload a resume binds to, if this is
+    /// a resume. On a gate/auth resume the loop-supplied `input_ref` is ADVISORY:
+    /// the payload persisted at the FRESH gate raise is the host-side source of
+    /// truth for `input_ref` (and `{input, estimate}`), so the idempotency key
+    /// stays byte-stable regardless of what the loop echoes back, and a resume
+    /// whose payload is absent fails CLOSED (§5.3 Stage 2a-i / Stage 0).
+    ///
+    /// Returns `None` for a fresh dispatch and for the mutually-exclusive
+    /// both-resume-modes case — `invoke_capability_dispatch`'s `resume_mode`
+    /// resolution surfaces the latter as `InvalidInvocation`; this helper does not
+    /// pre-empt that with a payload load. Keeping the derivation in one place lets
+    /// the `invoke_capability` seam and dispatch compute the SAME key.
+    async fn resume_replay_payload(
+        &self,
+        request: &CapabilityInvocation,
+    ) -> Result<Option<ReplayPayload>, AgentLoopHostError> {
+        let invocation_id = match (
+            request.approval_resume.as_ref(),
+            request.auth_resume.as_ref(),
+        ) {
+            (Some(_), Some(_)) | (Option::None, Option::None) => return Ok(Option::None),
+            (Some(resume), Option::None) => invocation_id_from_resume_token(&resume.resume_token)?,
+            (Option::None, Some(auth_resume)) => {
+                invocation_id_from_resume_token(&auth_resume.resume_token)?
+            }
+        };
+        Ok(Some(self.replay_payload_for_resume(invocation_id).await?))
+    }
+
+    async fn replay_payload_for_resume(
+        &self,
+        invocation_id: InvocationId,
+    ) -> Result<ReplayPayload, AgentLoopHostError> {
+        let scope = self.visible_request.context.resource_scope.clone();
+        let payload = self
+            .replay_payload_store
+            .load(&scope, invocation_id)
+            .await
+            .map_err(replay_payload_store_error)?;
+        // A miss here is fail-closed. Two causes: (a) a genuine store fault, or
+        // (b) a gate raised before this host-side `ReplayPayloadStore` existed
+        // (pre-#6271), whose `{input, estimate}` rode the loop checkpoint rather
+        // than the store. #6271 ships no backward-compat bridge for (b) by
+        // decision: the rollout is drain-then-deploy — in-flight gates from
+        // before the cutover are drained first (and none exist pre-release), so
+        // in production a miss is a real fault, never a migration gap.
+        payload.ok_or_else(|| {
+            tracing::warn!(
+                invocation_id = %invocation_id,
+                "capability resume replay payload is missing; failing the run closed"
+            );
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "capability resume replay payload is unavailable",
+            )
+        })
     }
 
     async fn invoke_capability_dispatch(
@@ -1859,11 +2024,28 @@ impl HostRuntimeLoopCapabilityPort {
             }
             (Option::None, Option::None) => ResolvedResumeMode::None,
         };
-        let effective_input_ref = request
-            .approval_resume
+        // Host-side resume reconstitution (hazard 3, §5.3 Stage 0): on a resume the
+        // effective input_ref used for the idempotency key + validation is derived
+        // from the host-private payload persisted at the FRESH gate raise — loaded
+        // by the resume's invocation id — NOT from the advisory loop-supplied
+        // `resume.input_ref`. `resume_mode` above already validated token identity
+        // and the resume→activity match, so that precedence still runs before the
+        // registered-activity check below; the payload load fails CLOSED on a miss
+        // (§5.3 Stage 2a-i). The same payload is reused for `{input, estimate}`
+        // below, so a resume loads it exactly once here.
+        let resume_payload = match &resume_mode {
+            ResolvedResumeMode::Approval { invocation_id, .. }
+            | ResolvedResumeMode::Auth { invocation_id, .. } => {
+                Some(self.replay_payload_for_resume(*invocation_id).await?)
+            }
+            ResolvedResumeMode::None => Option::None,
+        };
+        // Owned clone so `effective_input_ref` borrows this local, not
+        // `resume_payload` — the payload is consumed for `{input, estimate}` below.
+        let resume_input_ref = resume_payload
             .as_ref()
-            .map(|resume| &resume.input_ref)
-            .unwrap_or(&request.input_ref);
+            .map(|payload| payload.input_ref.clone());
+        let effective_input_ref = resume_input_ref.as_ref().unwrap_or(&request.input_ref);
         self.validate_provider_tool_call_registration_activity(
             effective_input_ref,
             request.activity_id,
@@ -1897,8 +2079,6 @@ impl HostRuntimeLoopCapabilityPort {
                                 &idempotency_key,
                                 RuntimeOutcomeCompletion {
                                     input_ref: effective_input_ref,
-                                    input: None,
-                                    estimate: None,
                                     invocation_id,
                                     correlation_id,
                                     requested_capability_id: &requested_capability_id,
@@ -1914,8 +2094,6 @@ impl HostRuntimeLoopCapabilityPort {
                         self.result_writer.as_ref(),
                         RuntimeOutcomeConversion {
                             input_ref: effective_input_ref,
-                            input: None,
-                            estimate: None,
                             invocation_id,
                             correlation_id,
                             requested_capability_id: &requested_capability_id,
@@ -1979,75 +2157,55 @@ impl HostRuntimeLoopCapabilityPort {
                 safe_summary: "capability provider trust is unavailable".to_string(),
             }));
         };
-        let (input, estimate) = if let Some(replay) = invocation_replay_input(&request) {
-            (replay.input.clone(), replay.estimate.clone())
-        } else {
-            let input = self
-                .input_resolver
-                .resolve_capability_input(&self.run_context, effective_input_ref)
-                .await?;
-            // Trajectory capture: the resolved input is the model's tool
-            // arguments, and this is the one place they are visible (the provider
-            // tool-call decorator stages them upstream and bypasses the input
-            // resolver hook).
-            if let Some(observer) = &self.trajectory_observer {
-                // Best-effort, inline on the capability hot path: a panicking
-                // observer must never unwind the invocation before dispatch.
-                // (Blocking is the observer's own contract.)
-                let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    observer.on_capability_input(
-                        effective_input_ref.as_str(),
-                        request.capability_id.as_str(),
-                        &input,
-                    );
-                }));
-                if caught.is_err() {
-                    tracing::warn!(
-                        capability_id = request.capability_id.as_str(),
-                        "trajectory observer on_capability_input panicked; dropping event"
-                    );
-                }
-            }
-            let input = match prepare_provider_arguments_with_detail(
-                &input,
-                &capability.parameters_schema,
-                "capability input",
-            ) {
-                Ok(input) => input,
-                Err(error)
-                    if error.error.kind == AgentLoopHostErrorKind::InvalidInvocation
-                        && is_provider_tool_call_input_ref(effective_input_ref) =>
-                {
-                    let host_error = *error.error;
-                    let result = Ok(CapabilityOutcome::Failed(CapabilityFailure {
-                        error_kind: CapabilityFailureKind::InvalidInput,
-                        safe_summary: host_error.safe_summary,
-                        detail: error.detail,
+        let (input, estimate) = match resume_payload {
+            // Host-side resume replay: reconstitute {input, estimate} from the
+            // host-private payload loaded up front (keyed by the resume's
+            // invocation id). `Some` iff this is a resume; a missing payload
+            // already failed CLOSED above — never a silent empty-input dispatch
+            // (arch-simplification §5.3 Stage 2a-i).
+            Some(payload) => (payload.input, payload.estimate),
+            Option::None => {
+                let input = self
+                    .input_resolver
+                    .resolve_capability_input(&self.run_context, effective_input_ref)
+                    .await?;
+                // Trajectory capture: the resolved input is the model's tool
+                // arguments, and this is the one place they are visible (the provider
+                // tool-call decorator stages them upstream and bypasses the input
+                // resolver hook).
+                if let Some(observer) = &self.trajectory_observer {
+                    // Best-effort, inline on the capability hot path: a panicking
+                    // observer must never unwind the invocation before dispatch.
+                    // (Blocking is the observer's own contract.)
+                    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        observer.on_capability_input(
+                            effective_input_ref.as_str(),
+                            request.capability_id.as_str(),
+                            &input,
+                        );
                     }));
-                    guard.commit();
-                    self.record_loop_completed(
-                        &idempotency_key,
-                        requested_invocation_id,
-                        result.clone(),
-                    )?;
-                    return result;
+                    if caught.is_err() {
+                        tracing::warn!(
+                            capability_id = request.capability_id.as_str(),
+                            "trajectory observer on_capability_input panicked; dropping event"
+                        );
+                    }
                 }
-                Err(error) => return Err(*error.error),
-            };
-            let runtime_input =
-                match host_runtime_input_for_capability(&request.capability_id, input) {
-                    Ok(runtime_input) => runtime_input,
-                    Err(error) if error.kind == AgentLoopHostErrorKind::InvalidInvocation => {
-                        // A malformed/invalid model-supplied process sandbox plan is a
-                        // model-fixable error, not a host fault: surface it as a
-                        // model-visible tool error so the agent can correct the
-                        // arguments instead of ending the run. `host_runtime_input_for_capability`
-                        // only returns `InvalidInvocation` for the sandbox-plan parse/validation
-                        // case; its host-internal serialization failure keeps its `Internal` Err.
+                let input = match prepare_provider_arguments_with_detail(
+                    &input,
+                    &capability.parameters_schema,
+                    "capability input",
+                ) {
+                    Ok(input) => input,
+                    Err(error)
+                        if error.error.kind == AgentLoopHostErrorKind::InvalidInvocation
+                            && is_provider_tool_call_input_ref(effective_input_ref) =>
+                    {
+                        let host_error = *error.error;
                         let result = Ok(CapabilityOutcome::Failed(CapabilityFailure {
                             error_kind: CapabilityFailureKind::InvalidInput,
-                            safe_summary: error.safe_summary,
-                            detail: None,
+                            safe_summary: host_error.safe_summary,
+                            detail: error.detail,
                         }));
                         guard.commit();
                         self.record_loop_completed(
@@ -2057,9 +2215,35 @@ impl HostRuntimeLoopCapabilityPort {
                         )?;
                         return result;
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => return Err(*error.error),
                 };
-            (runtime_input, capability.estimate.clone())
+                let runtime_input =
+                    match host_runtime_input_for_capability(&request.capability_id, input) {
+                        Ok(runtime_input) => runtime_input,
+                        Err(error) if error.kind == AgentLoopHostErrorKind::InvalidInvocation => {
+                            // A malformed/invalid model-supplied process sandbox plan is a
+                            // model-fixable error, not a host fault: surface it as a
+                            // model-visible tool error so the agent can correct the
+                            // arguments instead of ending the run. `host_runtime_input_for_capability`
+                            // only returns `InvalidInvocation` for the sandbox-plan parse/validation
+                            // case; its host-internal serialization failure keeps its `Internal` Err.
+                            let result = Ok(CapabilityOutcome::Failed(CapabilityFailure {
+                                error_kind: CapabilityFailureKind::InvalidInput,
+                                safe_summary: error.safe_summary,
+                                detail: None,
+                            }));
+                            guard.commit();
+                            self.record_loop_completed(
+                                &idempotency_key,
+                                requested_invocation_id,
+                                result.clone(),
+                            )?;
+                            return result;
+                        }
+                        Err(error) => return Err(error),
+                    };
+                (runtime_input, capability.estimate.clone())
+            }
         };
         let mut invocation_context =
             invocation_context_from_visible(VisibleInvocationContextRequest {
@@ -2130,6 +2314,11 @@ impl HostRuntimeLoopCapabilityPort {
             capability_id: request.capability_id.clone(),
         })
         .await?;
+        // Only a FRESH dispatch mints a replay payload; an approval/auth resume
+        // reuses the invocation id and its already-persisted payload (write-once),
+        // so re-persisting would collide. Captured before `resume_mode` is
+        // consumed by the dispatch match below.
+        let is_fresh_dispatch = matches!(resume_mode, ResolvedResumeMode::None);
         let outcome = match resume_mode {
             ResolvedResumeMode::Approval { resume, .. } => {
                 let runtime_request = RuntimeCapabilityResumeRequest::new(
@@ -2209,13 +2398,34 @@ impl HostRuntimeLoopCapabilityPort {
                     .await;
             }
         };
+        // Persist the host-private replay payload BEFORE returning the gate to the
+        // loop, so a later resume turn can reconstitute {input, estimate} host-side
+        // without the loop carrying raw tool args (arch-simplification §5.3 Stage
+        // 2a-i; charter: agent-loop state never stores raw tool args). No-op unless
+        // this is a fresh dispatch that produced an approval/auth gate.
+        //
+        // The dispatch reservation is committed only AFTER this fallible store
+        // write succeeds (#6271 IronLoop): committing before it means a transient
+        // store error would `?`-return with the reservation still `InFlight` and
+        // the committed guard skipping its cleanup, stranding retries/duplicates
+        // waiting on the key forever. On error the uncommitted guard clears the
+        // reservation and wakes waiters so one re-dispatches.
+        if is_fresh_dispatch {
+            self.persist_replay_payload_for_fresh_gate(
+                invocation_id,
+                effective_input_ref,
+                &input,
+                &estimate,
+                correlation_id,
+                &outcome,
+            )
+            .await?;
+        }
         guard.commit();
         self.finish_runtime_outcome(
             &idempotency_key,
             RuntimeOutcomeCompletion {
                 input_ref: effective_input_ref,
-                input: Some(&input),
-                estimate: Some(&estimate),
                 invocation_id,
                 correlation_id,
                 requested_capability_id: &requested_capability_id,
@@ -2286,6 +2496,58 @@ impl GateRecordStore for NoopGateRecordStore {
         _scope: &ResourceScope,
         _gate_ref: GateRef,
     ) -> Result<Option<GateRecord>, RunStateError> {
+        Ok(None)
+    }
+}
+
+/// Map a replay-payload store failure to a fail-closed host error. The bound
+/// cause (which may carry a host path) is logged server-side at `warn` — a
+/// genuine host storage fault operators must see — and never interpolated into
+/// the model-visible summary (agent-loop-capabilities.md). Mirrors
+/// `gate_record_store_error`.
+fn replay_payload_store_error(error: ReplayPayloadStoreError) -> AgentLoopHostError {
+    tracing::warn!(error = %error, "failed to persist/load capability replay payload at loop host seam");
+    AgentLoopHostError::new(
+        AgentLoopHostErrorKind::Unavailable,
+        "failed to access capability replay payload",
+    )
+}
+
+/// Transitional fail-closed default [`ReplayPayloadStore`] used until composition
+/// wires a durable store into the capability-port factory via
+/// [`HostRuntimeLoopCapabilityPortFactory::with_replay_payload_store`].
+///
+/// Unlike [`NoopGateRecordStore`] this is deliberately fail-closed on read: the
+/// replay payload has a real consumer (the resume-read path,
+/// `replay_payload_for_resume`), so an unwired store that silently returned an
+/// empty payload would dispatch a resume with the WRONG (empty) input. `save`
+/// no-ops (an unwired factory persists nothing) and `load` returns `Ok(None)`,
+/// which the resume-read path treats as a sanitized terminal failure.
+#[derive(Debug, Default)]
+struct NoopReplayPayloadStore;
+
+#[async_trait]
+impl ReplayPayloadStore for NoopReplayPayloadStore {
+    async fn save(
+        &self,
+        _scope: ResourceScope,
+        _invocation_id: InvocationId,
+        _payload: ReplayPayload,
+    ) -> Result<(), ReplayPayloadStoreError> {
+        // silent-ok: transitional no-op — an unwired factory persists nothing; the
+        // fail-closed `load` below turns any resume that needs a payload into a
+        // sanitized terminal failure rather than a silent empty-input dispatch.
+        tracing::debug!(
+            "replay payload store not wired; skipping durable replay-payload persistence"
+        );
+        Ok(())
+    }
+
+    async fn load(
+        &self,
+        _scope: &ResourceScope,
+        _invocation_id: InvocationId,
+    ) -> Result<Option<ReplayPayload>, ReplayPayloadStoreError> {
         Ok(None)
     }
 }
@@ -2763,43 +3025,6 @@ fn loop_surface_version(
     })
 }
 
-fn runtime_resume_replay<'a>(
-    input: Option<&'a Value>,
-    estimate: Option<&'a ResourceEstimate>,
-    gate_kind: &'static str,
-) -> Result<CapabilityReplayInput<'a>, AgentLoopHostError> {
-    let input = input.ok_or_else(|| {
-        AgentLoopHostError::new(
-            AgentLoopHostErrorKind::Internal,
-            format!("{gate_kind} resume replay input is unavailable"),
-        )
-    })?;
-    let estimate = estimate.ok_or_else(|| {
-        AgentLoopHostError::new(
-            AgentLoopHostErrorKind::Internal,
-            format!("{gate_kind} resume replay estimate is unavailable"),
-        )
-    })?;
-    Ok(CapabilityReplayInput { input, estimate })
-}
-
-fn invocation_replay_input(request: &CapabilityInvocation) -> Option<CapabilityReplayInput<'_>> {
-    if let Some(resume) = request.approval_resume.as_ref() {
-        return Some(CapabilityReplayInput {
-            input: &resume.input,
-            estimate: &resume.estimate,
-        });
-    }
-    request
-        .auth_resume
-        .as_ref()
-        .and_then(|resume| resume.replay.as_ref())
-        .map(|replay| CapabilityReplayInput {
-            input: &replay.input,
-            estimate: &replay.estimate,
-        })
-}
-
 async fn runtime_outcome_to_loop(
     run_context: &LoopRunContext,
     result_writer: &(dyn LoopCapabilityResultWriter + Send + Sync),
@@ -2830,7 +3055,10 @@ async fn runtime_outcome_to_loop(
             })
         }
         RuntimeCapabilityOutcome::ApprovalRequired(gate) => {
-            let replay = runtime_resume_replay(conversion.input, conversion.estimate, "approval")?;
+            // Raw input/estimate no longer ride the loop-facing outcome; the host
+            // persists them in the replay-payload store at the fresh gate raise
+            // (see `persist_replay_payload_for_fresh_gate`) and reconstitutes them
+            // on resume (arch-simplification §5.3 Stage 2a-i).
             CapabilityOutcome::ApprovalRequired {
                 gate_ref: loop_gate_ref("approval", gate.approval_request_id.to_string())?,
                 safe_summary: blocked_summary(gate.reason).to_string(),
@@ -2839,27 +3067,18 @@ async fn runtime_outcome_to_loop(
                     resume_token: resume_token_from_invocation_id(conversion.invocation_id)?,
                     correlation_id: conversion.correlation_id,
                     input_ref: conversion.input_ref.clone(),
-                    input: replay.input.clone(),
-                    estimate: replay.estimate.clone(),
                 }),
             }
         }
-        RuntimeCapabilityOutcome::AuthRequired(gate) => {
-            let replay = runtime_resume_replay(conversion.input, conversion.estimate, "auth")?;
-            CapabilityOutcome::AuthRequired {
-                gate_ref: loop_gate_ref("auth", gate.gate_id.to_string())?,
-                credential_requirements: gate.credential_requirements,
-                safe_summary: blocked_summary(gate.reason).to_string(),
-                auth_resume: Some(ironclaw_turns::run_profile::CapabilityAuthResume {
-                    resume_token: resume_token_from_invocation_id(conversion.invocation_id)?,
-                    prior_approval: None,
-                    replay: Some(ironclaw_turns::run_profile::CapabilityAuthResumeReplay {
-                        input: replay.input.clone(),
-                        estimate: replay.estimate.clone(),
-                    }),
-                }),
-            }
-        }
+        RuntimeCapabilityOutcome::AuthRequired(gate) => CapabilityOutcome::AuthRequired {
+            gate_ref: loop_gate_ref("auth", gate.gate_id.to_string())?,
+            credential_requirements: gate.credential_requirements,
+            safe_summary: blocked_summary(gate.reason).to_string(),
+            auth_resume: Some(ironclaw_turns::run_profile::CapabilityAuthResume {
+                resume_token: resume_token_from_invocation_id(conversion.invocation_id)?,
+                prior_approval: None,
+            }),
+        },
         RuntimeCapabilityOutcome::ResourceBlocked(gate) => CapabilityOutcome::ResourceBlocked {
             gate_ref: loop_gate_ref("resource", gate.gate_id.to_string())?,
             safe_summary: blocked_summary(gate.reason).to_string(),
@@ -7990,13 +8209,10 @@ mod tests {
                 correlation_id: CorrelationId::new(),
                 input_ref: CapabilityInputRef::new("input:test-dual-resume")
                     .expect("valid input ref"),
-                input: serde_json::json!({}),
-                estimate: ResourceEstimate::default(),
             }),
             auth_resume: Some(CapabilityAuthResume {
                 resume_token,
                 prior_approval: None,
-                replay: None,
             }),
         };
 
@@ -8051,8 +8267,6 @@ mod tests {
                     resume_token: resume_token_for_different_activity(invocation.activity_id),
                     correlation_id: CorrelationId::new(),
                     input_ref: invocation.input_ref,
-                    input: serde_json::json!({}),
-                    estimate: ResourceEstimate::default(),
                 }),
                 auth_resume: None,
             })
@@ -8080,12 +8294,19 @@ mod tests {
             capability_id.clone(),
             provider_id.clone(),
         )]));
-        let port = runtime_capability_port(
+        // The resume now reconstitutes its effective input_ref from the host
+        // payload (hazard 3, §5.3 Stage 0), so seed the payload the mismatched
+        // resume loads — carrying the REGISTERED input_ref — and the port then
+        // runs the registered-activity check against it (the resume's own
+        // loop-supplied input_ref is advisory and ignored).
+        let replay_store = Arc::new(RecordingReplayPayloadStore::default());
+        let port = runtime_capability_port_with_replay_store(
             &capability_id,
             &provider_id,
             runtime.clone(),
             Arc::new(RecordingResultWriter::default()),
             dummy_milestone_sink(),
+            replay_store.clone(),
             "thread-approval-resume-effective-input-ref-mismatch",
         )
         .await;
@@ -8104,6 +8325,20 @@ mod tests {
                 break candidate_activity;
             }
         };
+        // Seed the payload the mismatched resume reconstitutes from, keyed by the
+        // resume token's invocation id, carrying the registered provider tool-call
+        // input_ref so the registered-activity check has the same input to reject.
+        replay_store.seed(
+            ResourceScope::system(),
+            InvocationId::from_uuid(mismatched_activity_id.as_uuid()),
+            ReplayPayload {
+                input: serde_json::json!({}),
+                estimate: ResourceEstimate::default(),
+                prior_approval: None,
+                input_ref: candidate.input_ref.clone(),
+                correlation_id: CorrelationId::new(),
+            },
+        );
         let err = port
             .invoke_capability(CapabilityInvocation {
                 activity_id: mismatched_activity_id,
@@ -8117,8 +8352,6 @@ mod tests {
                         .expect("valid resume token"),
                     correlation_id: CorrelationId::new(),
                     input_ref: candidate.input_ref,
-                    input: serde_json::json!({}),
-                    estimate: ResourceEstimate::default(),
                 }),
                 auth_resume: None,
             })
@@ -8146,25 +8379,40 @@ mod tests {
             capability_id.clone(),
             provider_id.clone(),
         )]));
-        let port = runtime_capability_port(
+        // This test injects an approval resume directly (no preceding fresh gate
+        // raise), so seed the host-private replay payload the resume-read path
+        // reconstitutes {input, estimate} from (§5.3 Stage 2a-i).
+        let replay_store = Arc::new(RecordingReplayPayloadStore::default());
+        let port = runtime_capability_port_with_replay_store(
             &capability_id,
             &provider_id,
             runtime.clone(),
             Arc::new(RecordingResultWriter::default()),
             dummy_milestone_sink(),
+            replay_store.clone(),
             "thread-cached-approval-resume-activity-mismatch",
         )
         .await;
 
         let invocation = visible_runtime_invocation(&port).await;
+        let seeded_invocation_id = InvocationId::from_uuid(invocation.activity_id.as_uuid());
+        replay_store.seed(
+            ResourceScope::system(),
+            seeded_invocation_id,
+            ReplayPayload {
+                input: serde_json::json!({}),
+                estimate: ResourceEstimate::default(),
+                prior_approval: None,
+                input_ref: invocation.input_ref.clone(),
+                correlation_id: CorrelationId::new(),
+            },
+        );
         let resume = CapabilityApprovalResume {
             approval_request_id: ApprovalRequestId::new(),
             resume_token: CapabilityResumeToken::new(invocation.activity_id.to_string())
                 .expect("valid resume token"),
             correlation_id: CorrelationId::new(),
             input_ref: invocation.input_ref.clone(),
-            input: serde_json::json!({}),
-            estimate: ResourceEstimate::default(),
         };
         let first_outcome = port
             .invoke_capability(CapabilityInvocation {
@@ -8242,7 +8490,6 @@ mod tests {
                 auth_resume: Some(CapabilityAuthResume {
                     resume_token: resume_token_for_different_activity(invocation.activity_id),
                     prior_approval: None,
-                    replay: None,
                 }),
             })
             .await
@@ -8256,6 +8503,189 @@ mod tests {
         );
         assert!(runtime.take_requests().is_empty());
         assert!(runtime.take_spawn_requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn approval_resume_with_missing_replay_payload_fails_closed() {
+        // §5.3 Stage 2a-i: a resume whose host-private replay payload is ABSENT is
+        // a sanitized terminal failure — the port must NOT re-dispatch with empty
+        // or re-resolved input. Wire an EMPTY replay store (nothing seeded) and
+        // drive a matching approval resume: the resume-read path fails CLOSED
+        // before any runtime dispatch.
+        use ironclaw_host_api::ApprovalRequestId;
+        use ironclaw_turns::run_profile::CapabilityApprovalResume;
+
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let runtime = Arc::new(RecordingResumeHostRuntime::new(vec![visible_capability(
+            capability_id.clone(),
+            provider_id.clone(),
+        )]));
+        let replay_store = Arc::new(RecordingReplayPayloadStore::default());
+        let port = runtime_capability_port_with_replay_store(
+            &capability_id,
+            &provider_id,
+            runtime.clone(),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+            replay_store,
+            "thread-approval-resume-missing-replay-payload",
+        )
+        .await;
+
+        let invocation = visible_runtime_invocation(&port).await;
+        let resume = CapabilityApprovalResume {
+            approval_request_id: ApprovalRequestId::new(),
+            resume_token: CapabilityResumeToken::new(invocation.activity_id.to_string())
+                .expect("valid resume token"),
+            correlation_id: CorrelationId::new(),
+            input_ref: invocation.input_ref.clone(),
+        };
+        let err = port
+            .invoke_capability(CapabilityInvocation {
+                activity_id: invocation.activity_id,
+                surface_version: invocation.surface_version,
+                capability_id: invocation.capability_id,
+                input_ref: invocation.input_ref,
+                approval_resume: Some(resume),
+                auth_resume: None,
+            })
+            .await
+            .expect_err("a resume with no persisted replay payload must fail closed");
+
+        assert_eq!(
+            err.kind,
+            AgentLoopHostErrorKind::Unavailable,
+            "a missing replay payload is a sanitized terminal failure, got {:?}",
+            err.kind
+        );
+        assert!(
+            !err.safe_summary.is_empty(),
+            "the terminal failure carries a sanitized summary"
+        );
+        // Fail-closed BEFORE any runtime dispatch — no empty-input dispatch reached
+        // the runtime.
+        assert_eq!(
+            runtime.resume_request_count(),
+            0,
+            "the run must fail before re-dispatching with empty/absent input"
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_resume_derives_input_ref_and_key_from_store_not_loop_supplied() {
+        // Hazard 3 (§5.3 Stage 0): on resume the effective input_ref used for the
+        // idempotency key + validation is reconstituted from the host-persisted
+        // payload, NOT the advisory loop-supplied `resume.input_ref`. Proven two
+        // ways: (1) a resume whose loop-supplied input_ref is a WRONG/stale value
+        // still reconstitutes the ORIGINAL input from the store; (2) a second
+        // resume differing ONLY in that advisory input_ref collapses to the SAME
+        // idempotency key, so it REPLAYS the cached outcome instead of
+        // re-dispatching — the key is byte-stable regardless of the loop value.
+        use ironclaw_host_api::ApprovalRequestId;
+        use ironclaw_turns::run_profile::CapabilityApprovalResume;
+
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let runtime = Arc::new(RecordingResumeHostRuntime::new(vec![visible_capability(
+            capability_id.clone(),
+            provider_id.clone(),
+        )]));
+        let replay_store = Arc::new(RecordingReplayPayloadStore::default());
+        let port = runtime_capability_port_with_replay_store(
+            &capability_id,
+            &provider_id,
+            runtime.clone(),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+            replay_store.clone(),
+            "thread-approval-resume-store-derived-input-ref",
+        )
+        .await;
+
+        let invocation = visible_runtime_invocation(&port).await;
+        let seeded_invocation_id = InvocationId::from_uuid(invocation.activity_id.as_uuid());
+        // The payload the FRESH gate raise persisted: the ORIGINAL input_ref +
+        // input the host reconstitutes on resume.
+        let original_input = serde_json::json!({"query": "original"});
+        replay_store.seed(
+            ResourceScope::system(),
+            seeded_invocation_id,
+            ReplayPayload {
+                input: original_input.clone(),
+                estimate: ResourceEstimate::default(),
+                prior_approval: None,
+                input_ref: invocation.input_ref.clone(),
+                correlation_id: CorrelationId::new(),
+            },
+        );
+
+        // Resume carrying a DELIBERATELY WRONG loop-supplied input_ref: the host
+        // must ignore it and reconstitute the original from the store.
+        let stale_ref =
+            CapabilityInputRef::new("input:stale-loop-supplied").expect("valid input ref");
+        let approval_request_id = ApprovalRequestId::new();
+        let resume_token = CapabilityResumeToken::new(invocation.activity_id.to_string())
+            .expect("valid resume token");
+        let correlation_id = CorrelationId::new();
+        let first = port
+            .invoke_capability(CapabilityInvocation {
+                activity_id: invocation.activity_id,
+                surface_version: invocation.surface_version.clone(),
+                capability_id: invocation.capability_id.clone(),
+                input_ref: stale_ref.clone(),
+                approval_resume: Some(CapabilityApprovalResume {
+                    approval_request_id,
+                    resume_token: resume_token.clone(),
+                    correlation_id,
+                    input_ref: stale_ref.clone(),
+                }),
+                auth_resume: None,
+            })
+            .await
+            .expect("resume reconstitutes from store despite a stale loop input_ref");
+        assert!(
+            matches!(first, CapabilityOutcome::Completed(_)),
+            "resume completes from the store payload, got {first:?}"
+        );
+        let requests = runtime.resume_requests();
+        assert_eq!(requests.len(), 1, "resume dispatched to the runtime once");
+        assert_eq!(
+            requests[0].input, original_input,
+            "resume must dispatch the STORE-reconstituted input, not re-resolve the stale loop ref"
+        );
+
+        // A second resume differing ONLY in the advisory loop-supplied input_ref
+        // derives the SAME store input_ref → SAME idempotency key → replays the
+        // cached outcome (no re-dispatch). Under the pre-fix behavior the key
+        // varied with the loop ref and this would re-dispatch (count 2).
+        let other_stale_ref =
+            CapabilityInputRef::new("input:other-stale-loop-supplied").expect("valid input ref");
+        let replayed = port
+            .invoke_capability(CapabilityInvocation {
+                activity_id: invocation.activity_id,
+                surface_version: invocation.surface_version,
+                capability_id: invocation.capability_id,
+                input_ref: other_stale_ref.clone(),
+                approval_resume: Some(CapabilityApprovalResume {
+                    approval_request_id,
+                    resume_token,
+                    correlation_id,
+                    input_ref: other_stale_ref,
+                }),
+                auth_resume: None,
+            })
+            .await
+            .expect("second resume replays the cached outcome");
+        assert!(
+            matches!(replayed, CapabilityOutcome::Completed(_)),
+            "second resume replays completion, got {replayed:?}"
+        );
+        assert_eq!(
+            runtime.resume_request_count(),
+            1,
+            "byte-stable key: a differing advisory loop input_ref must NOT re-dispatch"
+        );
     }
 
     fn visible_request(
@@ -8604,6 +9034,72 @@ mod tests {
         }
     }
 
+    /// Deterministic in-memory [`ReplayPayloadStore`] fake for seam tests: the
+    /// port `save`s the raw replay payload at a fresh gate raise and `load`s it on
+    /// resume. Keyed by `InvocationId` (globally unique per invocation); the scope
+    /// is recorded for assertions but `load` is scope-insensitive because these
+    /// crate-tier tests pin the write/read WIRING, not scope isolation — the
+    /// durable `FilesystemReplayPayloadStore`'s wrong-scope-looks-unknown check is
+    /// covered by `ironclaw_capabilities`' own contract test and the full-infra
+    /// cross-tenant integration scenario.
+    #[derive(Debug, Default)]
+    struct RecordingReplayPayloadStore {
+        saves: Mutex<std::collections::HashMap<InvocationId, (ResourceScope, ReplayPayload)>>,
+    }
+
+    impl RecordingReplayPayloadStore {
+        fn get(&self, invocation_id: InvocationId) -> Option<ReplayPayload> {
+            self.saves
+                .lock()
+                .expect("replay payload saves lock")
+                .get(&invocation_id)
+                .map(|(_, payload)| payload.clone())
+        }
+
+        /// Pre-seed a payload as if a prior fresh gate raise had persisted it, for
+        /// tests that inject a resume without a preceding raise.
+        fn seed(&self, scope: ResourceScope, invocation_id: InvocationId, payload: ReplayPayload) {
+            self.saves
+                .lock()
+                .expect("replay payload saves lock")
+                .insert(invocation_id, (scope, payload));
+        }
+    }
+
+    #[async_trait]
+    impl ReplayPayloadStore for RecordingReplayPayloadStore {
+        async fn save(
+            &self,
+            scope: ResourceScope,
+            invocation_id: InvocationId,
+            payload: ReplayPayload,
+        ) -> Result<(), ReplayPayloadStoreError> {
+            use std::collections::hash_map::Entry;
+            match self
+                .saves
+                .lock()
+                .expect("replay payload saves lock")
+                .entry(invocation_id)
+            {
+                Entry::Occupied(_) => {
+                    Err(ReplayPayloadStoreError::ReplayPayloadAlreadyExists { invocation_id })
+                }
+                Entry::Vacant(slot) => {
+                    slot.insert((scope, payload));
+                    Ok(())
+                }
+            }
+        }
+
+        async fn load(
+            &self,
+            _scope: &ResourceScope,
+            invocation_id: InvocationId,
+        ) -> Result<Option<ReplayPayload>, ReplayPayloadStoreError> {
+            Ok(self.get(invocation_id))
+        }
+    }
+
     const RECORDING_OUTPUT_BYTES: u64 = 12;
 
     async fn runtime_capability_port(
@@ -8666,6 +9162,40 @@ mod tests {
             milestone_sink,
         )
         .with_gate_record_store(gate_record_store)
+        .port_for_run_context(run_context)
+    }
+
+    /// Like [`runtime_capability_port`] but wires an explicit
+    /// [`ReplayPayloadStore`], so resume seam tests can round-trip the raw replay
+    /// payload the host persists at a gate raise and reconstitutes on resume.
+    async fn runtime_capability_port_with_replay_store(
+        capability_id: &CapabilityId,
+        provider_id: &ExtensionId,
+        runtime: Arc<dyn HostRuntime>,
+        result_writer: Arc<dyn LoopCapabilityResultWriter>,
+        milestone_sink: Arc<dyn LoopHostMilestoneSink>,
+        replay_payload_store: Arc<dyn ReplayPayloadStore>,
+        thread_id: &str,
+    ) -> HostRuntimeLoopCapabilityPort {
+        let mut context = execution_context(thread_id);
+        let run_context = loop_run_context(&context).await;
+        let loop_driver_extension =
+            loop_driver_execution_extension_id(&run_context).expect("valid extension id");
+        context.grants.grants.push(dispatch_capability_grant(
+            capability_id,
+            &loop_driver_extension,
+        ));
+        HostRuntimeLoopCapabilityPortFactory::new(
+            runtime,
+            visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
+                provider_id.clone(),
+                dispatch_trust_decision(),
+            )])),
+            dummy_input_resolver(),
+            result_writer,
+            milestone_sink,
+        )
+        .with_replay_payload_store(replay_payload_store)
         .port_for_run_context(run_context)
     }
 
@@ -9044,6 +9574,13 @@ mod tests {
                 .lock()
                 .expect("resume requests lock")
                 .len()
+        }
+
+        fn resume_requests(&self) -> Vec<RuntimeCapabilityResumeRequest> {
+            self.resume_requests
+                .lock()
+                .expect("resume requests lock")
+                .clone()
         }
     }
 

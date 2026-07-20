@@ -263,37 +263,17 @@ pub struct RebornReadinessDiagnostic {
     pub blocks_production: bool,
 }
 
+/// The readiness contract a profile reports.
+///
+/// §4.4 Bucket 1: this used to `match` the composition profile to build the
+/// pair. The contract is now data each `DeploymentConfig` constructor carries,
+/// so this is a field read.
 pub(crate) fn readiness_contract_for_profile(
     profile: RebornCompositionProfile,
 ) -> (RebornReadinessState, Vec<RebornReadinessDiagnostic>) {
-    match profile {
-        RebornCompositionProfile::Disabled => (
-            RebornReadinessState::Disabled,
-            vec![RebornReadinessDiagnostic::disabled()],
-        ),
-        RebornCompositionProfile::LocalDev => (
-            RebornReadinessState::DevOnly,
-            vec![RebornReadinessDiagnostic::local_dev()],
-        ),
-        RebornCompositionProfile::LocalDevYolo => (
-            RebornReadinessState::DevOnly,
-            vec![RebornReadinessDiagnostic::local_dev_yolo()],
-        ),
-        RebornCompositionProfile::HostedSingleTenant => (
-            RebornReadinessState::HostedSingleTenantValidated,
-            vec![RebornReadinessDiagnostic::hosted_single_tenant()],
-        ),
-        RebornCompositionProfile::HostedSingleTenantVolume => (
-            RebornReadinessState::HostedSingleTenantVolumePreviewValidated,
-            vec![RebornReadinessDiagnostic::hosted_single_tenant_volume()],
-        ),
-        RebornCompositionProfile::Production => {
-            (RebornReadinessState::ProductionValidated, Vec::new())
-        }
-        RebornCompositionProfile::MigrationDryRun => {
-            (RebornReadinessState::MigrationDryRunValidated, Vec::new())
-        }
-    }
+    let config = crate::deployment::DeploymentConfig::for_profile(profile, false);
+    let contract = config.readiness();
+    (contract.state, contract.diagnostics.clone())
 }
 
 impl RebornReadinessDiagnostic {
