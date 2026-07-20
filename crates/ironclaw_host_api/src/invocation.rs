@@ -223,6 +223,24 @@ mod tests {
     }
 
     #[test]
+    fn actor_kind_matches_serde_tag_and_user_id_accessor() {
+        // Same drift guard as `invocation_origin_kind_matches_serde_tag`, plus the
+        // `user_id()` accessor: `Sealed` must yield its user, `System` must yield
+        // `None` (never a stand-in user).
+        let sealed = Actor::Sealed(UserId::new("user1").unwrap());
+        assert_eq!(sealed.kind(), "sealed");
+        assert_eq!(sealed.user_id(), Some(&UserId::new("user1").unwrap()));
+        assert_eq!(
+            serde_json::to_value(&sealed).unwrap(),
+            serde_json::json!({ "sealed": "user1" })
+        );
+
+        assert_eq!(Actor::System.kind(), "system");
+        assert_eq!(Actor::System.user_id(), None);
+        assert_eq!(serde_json::to_value(&Actor::System).unwrap(), "system");
+    }
+
+    #[test]
     fn origin_id_newtypes_reject_invalid_and_accept_valid() {
         // Assert the specific rejection (kind + reason), not just is_err(), so
         // an infrastructure failure can't masquerade as a validation pass.
