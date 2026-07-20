@@ -1,5 +1,3 @@
-#![cfg(feature = "openai-compat-beta")]
-
 use axum::body::Body;
 use http::Request;
 use http_body_util::BodyExt;

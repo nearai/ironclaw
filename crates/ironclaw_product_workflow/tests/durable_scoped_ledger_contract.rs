@@ -1,5 +1,4 @@
 // The generic filesystem-backed ledger lives behind the `storage` feature.
-#![cfg(feature = "storage")]
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;

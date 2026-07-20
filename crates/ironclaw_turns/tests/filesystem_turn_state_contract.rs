@@ -3038,7 +3038,12 @@ async fn filesystem_turn_state_store_recover_expired_leases_uses_memory_runner_l
         .unwrap();
     assert_eq!(recovered.recovered.len(), 1);
     assert_eq!(recovered.recovered[0].run_id, run_id);
-    assert_eq!(recovered.recovered[0].status, TurnStatus::Failed);
+    // #6284: a checkpoint-less run (no loop checkpoint reached) that crashed
+    // before any side effect is re-queued to a claimable state, not stranded
+    // terminal `Failed`. The point of this test — recovery firing on the
+    // heartbeat-refreshed memory lease, not the stale state.json expiry — is
+    // unchanged; the run is still recovered exactly once.
+    assert_eq!(recovered.recovered[0].status, TurnStatus::Queued);
 }
 
 #[tokio::test]

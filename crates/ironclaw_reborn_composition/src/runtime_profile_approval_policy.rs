@@ -1,7 +1,5 @@
-use ironclaw_host_api::{
-    CapabilityId, EffectKind,
-    runtime_policy::{ApprovalPolicy, RuntimeProfile},
-};
+use ironclaw_host_api::{CapabilityId, EffectKind, runtime_policy::ApprovalPolicy};
+use ironclaw_runtime_policy::MinimalApprovalBypass;
 
 use crate::profile_approval_authorization::ProfileApprovalGatePolicy;
 
@@ -22,18 +20,22 @@ impl RuntimeProfileApprovalGateEffectSets {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeProfileApprovalGatePolicy {
-    resolved_profile: RuntimeProfile,
+    /// Whether `ApprovalPolicy::Minimal` may bypass effect gates, as a
+    /// resolved policy *value* — not a deployment profile this type then asks
+    /// about itself (§4.4). `ironclaw_runtime_policy::minimal_approval_bypass`
+    /// is the one place that classification lives.
+    minimal_bypass: MinimalApprovalBypass,
     effects: RuntimeProfileApprovalGateEffectSets,
     exempt_capabilities: Vec<CapabilityId>,
 }
 
 impl RuntimeProfileApprovalGatePolicy {
     pub(crate) fn new(
-        resolved_profile: RuntimeProfile,
+        minimal_bypass: MinimalApprovalBypass,
         effects: RuntimeProfileApprovalGateEffectSets,
     ) -> Self {
         Self {
-            resolved_profile,
+            minimal_bypass,
             effects,
             exempt_capabilities: Vec::new(),
         }
@@ -48,7 +50,7 @@ impl RuntimeProfileApprovalGatePolicy {
     }
 
     fn profile_allows_minimal_bypass(&self) -> bool {
-        self.resolved_profile.allows_minimal_approval_bypass()
+        self.minimal_bypass == MinimalApprovalBypass::Allowed
     }
 }
 
@@ -97,19 +99,44 @@ impl ProfileApprovalGatePolicy for RuntimeProfileApprovalGatePolicy {
 mod tests {
     use ironclaw_host_api::{
         EffectKind,
-        runtime_policy::{ApprovalPolicy, RuntimeProfile},
+        runtime_policy::{ApprovalPolicy, DeploymentMode, RuntimeProfile},
     };
+    use ironclaw_runtime_policy::{OrgPolicyConstraints, ResolveRequest};
 
     use super::*;
 
+    /// Build the gate policy the way production does: resolve the profile
+    /// through the sanctioned resolver, then classify the resolved policy.
+    /// Driving the real resolver here (rather than hand-picking a bypass
+    /// value) keeps this suite honest about which profiles actually reach
+    /// `MinimalApprovalBypass::Allowed`.
     fn policy(profile: RuntimeProfile) -> RuntimeProfileApprovalGatePolicy {
         RuntimeProfileApprovalGatePolicy::new(
-            profile,
+            bypass_for(profile),
             RuntimeProfileApprovalGateEffectSets::new(
                 vec![EffectKind::WriteFilesystem, EffectKind::SpawnProcess],
                 vec![EffectKind::SpawnProcess],
             ),
         )
+    }
+
+    fn bypass_for(profile: RuntimeProfile) -> MinimalApprovalBypass {
+        let deployment = match profile {
+            RuntimeProfile::HostedSafe
+            | RuntimeProfile::HostedDev
+            | RuntimeProfile::HostedYoloTenantScoped => DeploymentMode::HostedMultiTenant,
+            RuntimeProfile::EnterpriseSafe
+            | RuntimeProfile::EnterpriseDev
+            | RuntimeProfile::EnterpriseYoloDedicated => DeploymentMode::EnterpriseDedicated,
+            _ => DeploymentMode::LocalSingleUser,
+        };
+        let resolved = ironclaw_runtime_policy::resolve(ResolveRequest {
+            yolo_disclosure_acknowledged: true,
+            org_policy: OrgPolicyConstraints::default().set_admin_approves_dedicated_yolo(true),
+            ..ResolveRequest::new(deployment, profile)
+        })
+        .expect("test profile resolves");
+        ironclaw_runtime_policy::minimal_approval_bypass(&resolved)
     }
 
     #[test]
@@ -167,6 +194,35 @@ mod tests {
                 "{profile:?} should fail closed if Minimal reaches a non-minimal profile"
             );
         }
+    }
+
+    #[test]
+    fn org_ceiling_narrowing_yolo_away_restores_minimal_approval_gates() {
+        // Regression for the mode-as-type leak (§4.4): the gate policy used to
+        // hold a `RuntimeProfile` and ask it about itself. It now consumes a
+        // resolved value, so a tenant/org ceiling that narrows `LocalYolo`
+        // down to `LocalDev` also re-gates `Minimal` — authority reductions
+        // reach this axis instead of stopping at the requested profile.
+        let narrowed = ironclaw_runtime_policy::resolve(ResolveRequest {
+            yolo_disclosure_acknowledged: true,
+            org_policy: OrgPolicyConstraints::default().set_max_profile(RuntimeProfile::LocalDev),
+            ..ResolveRequest::new(DeploymentMode::LocalSingleUser, RuntimeProfile::LocalYolo)
+        })
+        .expect("narrowed local yolo resolves");
+        assert!(narrowed.was_reduced());
+
+        let gate_policy = RuntimeProfileApprovalGatePolicy::new(
+            ironclaw_runtime_policy::minimal_approval_bypass(&narrowed),
+            RuntimeProfileApprovalGateEffectSets::new(
+                vec![EffectKind::WriteFilesystem, EffectKind::SpawnProcess],
+                vec![EffectKind::SpawnProcess],
+            ),
+        );
+        assert!(
+            gate_policy
+                .effects_require_approval(ApprovalPolicy::Minimal, &[EffectKind::SpawnProcess]),
+            "an org ceiling that removes yolo must restore Minimal approval gates"
+        );
     }
 
     #[test]

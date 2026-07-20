@@ -43,6 +43,17 @@ RUST_LOG=ironclaw=debug cargo run                            # run with logging
 
 E2E tests: see `tests/e2e/CLAUDE.md`.
 
+### Cargo features are a last resort
+
+A feature is a second build of the workspace that must be compiled,
+linted, and tested forever. Add one only for a heavy optional dependency,
+a build shape something actually ships with it OFF, a CI lane selector, a
+dev-only seam (always named `test-support`), or a privilege boundary — and
+say which in the manifest comment. Deployment shape belongs in
+`DeploymentConfig` and `[storage]`, not `#[cfg]`. Full bar, the
+delete-checklist, and the feature-gated-dead-code trap:
+`.claude/rules/cargo-features.md`.
+
 ## Testing Discipline
 
 Two rules are non-negotiable for **all** tests:

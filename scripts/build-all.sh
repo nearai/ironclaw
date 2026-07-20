@@ -14,7 +14,7 @@ echo ""
 echo "Building canonical IronClaw (Reborn)..."
 cargo build --release \
     -p ironclaw_reborn_cli \
-    --features webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta,openai-compat-beta,libsql,postgres,inmemory-turn-state \
+    --features libsql,postgres,inmemory-turn-state \
     --bin ironclaw
 
 echo ""

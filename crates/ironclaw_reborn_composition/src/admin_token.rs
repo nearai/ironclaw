@@ -1,9 +1,8 @@
 //! Admin API token minting port.
 //!
-//! Kept in its own module (not feature-gated) so it can appear in the
-//! `build_webui_services` signature, which is compiled in builds without the
-//! `webui-v2-beta` feature. The trait carries no WebUI/ingress types — just the
-//! canonical identifiers and a `SecretString` — so it is dependency-free.
+//! Kept in its own module so it can appear in the `build_webui_services`
+//! signature. The trait carries no WebUI/ingress types — just the canonical
+//! identifiers and a `SecretString` — so it is dependency-free.
 
 use ironclaw_host_api::{TenantId, UserId};
 use secrecy::SecretString;

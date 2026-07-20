@@ -33,58 +33,39 @@ impl RebornCompositionProfile {
         self != Self::Disabled
     }
 
+    /// The deployment data this profile name selects.
+    ///
+    /// Every predicate below reads this rather than `match`ing on `self`:
+    /// `DeploymentConfig::for_profile` is the one profile match in the crate
+    /// (§4.4). The `confirm_host_access` argument only affects the yolo
+    /// *policy request*, which none of these predicates read, so passing
+    /// `false` here cannot change any answer.
+    fn deployment(self) -> crate::deployment::DeploymentConfig {
+        crate::deployment::DeploymentConfig::for_profile(self, false)
+    }
+
     pub fn requires_production_shape(self) -> bool {
-        matches!(self, Self::Production | Self::MigrationDryRun)
+        self.deployment().substrate() == crate::deployment::RuntimeSubstrate::ProductionShaped
     }
 
     pub fn uses_local_runtime_substrate(self) -> bool {
-        matches!(
-            self,
-            Self::LocalDev
-                | Self::LocalDevYolo
-                | Self::HostedSingleTenant
-                | Self::HostedSingleTenantVolume
-        )
+        self.deployment().substrate() == crate::deployment::RuntimeSubstrate::Local
     }
 
     pub fn uses_local_dev_storage_input(self) -> bool {
-        matches!(
-            self,
-            Self::LocalDev | Self::LocalDevYolo | Self::HostedSingleTenantVolume
-        )
+        self.deployment().uses_local_dev_storage_input()
     }
 
     pub fn starts_live_runtime(self) -> bool {
-        matches!(
-            self,
-            Self::LocalDev
-                | Self::LocalDevYolo
-                | Self::HostedSingleTenant
-                | Self::HostedSingleTenantVolume
-                | Self::Production
-        )
+        self.deployment().traffic().starts_live_runtime()
     }
 
     pub fn uses_hosted_extension_installation_state(self) -> bool {
-        matches!(
-            self,
-            Self::HostedSingleTenant | Self::HostedSingleTenantVolume
-        )
+        self.deployment().uses_hosted_extension_installation_state()
     }
 
     pub fn to_event_store_profile(self) -> ironclaw_reborn_event_store::RebornProfile {
-        match self {
-            Self::Disabled
-            | Self::LocalDev
-            | Self::LocalDevYolo
-            | Self::HostedSingleTenant
-            | Self::HostedSingleTenantVolume => {
-                ironclaw_reborn_event_store::RebornProfile::LocalDev
-            }
-            Self::Production | Self::MigrationDryRun => {
-                ironclaw_reborn_event_store::RebornProfile::Production
-            }
-        }
+        self.deployment().event_store_profile()
     }
 }
 

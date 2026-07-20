@@ -15,8 +15,7 @@ pub(crate) struct StatusDto {
     pub model_slots: Vec<String>,
     pub drivers: DriversSnapshot,
     /// CLI-token `/login?token=` bootstrap link, present only when a valid
-    /// `webui-token` file exists under `reborn_home`. `None` without the
-    /// `webui-v2-beta` feature.
+    /// `webui-token` file exists under `reborn_home`.
     ///
     /// `skip_serializing`: carries a live bearer token in the query string;
     /// `status --json` is diagnostic data pasted into issues/logs and must
@@ -42,21 +41,20 @@ pub(crate) struct StatusDto {
 }
 
 /// Live OS-service lifecycle state. Mirrors `commands::service::ServiceState`,
-/// redefined here rather than deriving `Serialize` on that type directly
-/// because it's gated behind `webui-v2-beta` and this DTO must exist (with
-/// an `Unknown` fallback) on every build.
+/// redefined here rather than deriving `Serialize` on that type directly so the
+/// wire shape stays owned by this DTO layer, with an `Unknown` fallback for
+/// platforms where the state cannot be determined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-// The concrete states are constructed only by the `webui-v2-beta`-gated
-// resolver (`status::resolve_service_state`); the enum stays whole on every
-// build for wire stability, so the variants are legitimately unconstructed
-// (dead-code in the default/libsql clippy lanes) without that feature.
-#[cfg_attr(not(feature = "webui-v2-beta"), allow(dead_code))]
+// The concrete states are constructed only by the resolver
+// (`status::resolve_service_state`); the enum stays whole on every build for
+// wire stability, so some variants can be legitimately unconstructed
+// (dead-code) in a given clippy lane.
 pub(crate) enum ServiceStateDto {
     Running,
     Stopped,
     NotInstalled,
-    /// Detection failed, or `webui-v2-beta` isn't compiled in. Distinct
+    /// Detection failed (query error, or an unsupported platform). Distinct
     /// from `NotInstalled`: "we don't know" vs. "we know it isn't installed".
     Unknown,
 }

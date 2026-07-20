@@ -67,7 +67,7 @@ jobs:
             echo "has_boundary_check=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/ironclaw_runner/|crates/ironclaw_reborn_cli/|crates/ironclaw_reborn_config/|crates/ironclaw_architecture/tests/reborn_dependency_boundaries\.rs$|Cargo\.toml$|Cargo\.lock$|\.github/workflows/code_style\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/ironclaw_runner/|crates/ironclaw_reborn_cli/|crates/ironclaw_reborn_config/|crates/ironclaw_architecture/tests/reborn_dependency_boundaries\.rs$|Cargo\.toml$|Cargo\.lock$|\.github/workflows/(code_style|release|docker|reborn-release-compile)\.yml$)'; then
             echo "has_reborn_cli=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_reborn_cli=false" >> "$GITHUB_OUTPUT"
@@ -477,6 +477,10 @@ jobs:
           persist-credentials: false
       - run: |
           if [[ "${{ needs.changes.outputs.has_code }}" == "false" ]]; then
+            if [[ "${{ needs.changes.outputs.has_reborn_cli }}" == "true" && "${{ needs.reborn-cli-smoke.result }}" != "success" ]]; then
+              echo "Reborn CLI smoke failed: ${{ needs.reborn-cli-smoke.result }}"
+              exit 1
+            fi
             echo "No code changes — style checks skipped correctly"
             exit 0
           fi

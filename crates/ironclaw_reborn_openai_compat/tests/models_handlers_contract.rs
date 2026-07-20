@@ -1,5 +1,3 @@
-#![cfg(feature = "openai-compat-beta")]
-
 //! Caller-level contract for the OpenAI-compatible `GET /v1/models` route.
 //!
 //! Ports the v1 OpenAI-compatible proxy's `test_models_endpoint` and

@@ -530,7 +530,6 @@ pub(crate) enum CallbackScopeResolution {
     /// The provider does not echo granted scopes on the redirect; submit the
     /// requested scopes from the encoded state directly (Slack personal — the
     /// granted scopes arrive later in the token response under `authed_user`).
-    #[cfg(feature = "slack-v2-host-beta")]
     RequestedOnly,
 }
 
@@ -591,7 +590,6 @@ fn oauth_callback_descriptor_for_provider(
     if provider.as_str() == GOOGLE_PROVIDER_ID {
         return Some(&GOOGLE_CALLBACK_DESCRIPTOR);
     }
-    #[cfg(feature = "slack-v2-host-beta")]
     if provider.as_str() == SLACK_PERSONAL_PROVIDER_ID {
         return Some(&crate::slack::slack_personal_oauth::SLACK_PERSONAL_CALLBACK_DESCRIPTOR);
     }
@@ -609,7 +607,6 @@ fn resolve_callback_scopes(
     query_scopes: Option<&str>,
 ) -> Result<CallbackScopeOutcome, ProductAuthRouteFailure> {
     match resolution {
-        #[cfg(feature = "slack-v2-host-beta")]
         CallbackScopeResolution::RequestedOnly => {
             Ok(CallbackScopeOutcome::Scopes(requested_scopes.to_vec()))
         }
@@ -1270,7 +1267,6 @@ mod tests {
     };
     use async_trait::async_trait;
     use axum::body::to_bytes;
-    #[cfg(feature = "slack-v2-host-beta")]
     use ironclaw_auth::{
         AuthFlowManager, AuthProviderClient, CredentialAccountLabel, CredentialAccountRecordSource,
         CredentialAccountService, CredentialOwnership, NewCredentialAccount, OAuthProviderExchange,
@@ -1278,26 +1274,20 @@ mod tests {
         OAuthProviderRefreshRequest,
     };
     use ironclaw_auth::{GOOGLE_CALENDAR_READONLY_SCOPE, InMemoryAuthProductServices};
-    #[cfg(feature = "slack-v2-host-beta")]
     use ironclaw_host_api::SecretHandle;
     use ironclaw_host_api::{RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement};
-    #[cfg(feature = "slack-v2-host-beta")]
     use ironclaw_product_adapters::AdapterInstallationId;
     use ironclaw_secrets::{FilesystemSecretStore, SecretStore};
     use ironclaw_turns::{TurnRunId, TurnScope};
-    #[cfg(feature = "slack-v2-host-beta")]
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
-    #[cfg(feature = "slack-v2-host-beta")]
     use crate::extension_host::available_extensions::slack_personal_oauth_setup_scopes;
-    #[cfg(feature = "slack-v2-host-beta")]
     use crate::slack::slack_host_beta::{
         SlackPersonalConnectionScope, SlackPersonalConnectionScopeResolver,
         StaticSlackPersonalConnectionScopeResolver,
     };
-    #[cfg(feature = "slack-v2-host-beta")]
     use crate::slack::slack_personal_binding::{
         RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
         RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
@@ -1306,15 +1296,12 @@ mod tests {
         SlackPersonalUserBindingService, SlackUserBindingLifecycleError,
         SlackUserBindingLifecycleStore, SlackUserIdentityCleanupBinding,
     };
-    #[cfg(feature = "slack-v2-host-beta")]
     use crate::slack::slack_personal_oauth::{
         SLACK_PERSONAL_CALLBACK_DESCRIPTOR, SlackPersonalOAuthGateLifecycle,
         SlackPersonalOAuthGateProvider, slack_lifecycle_start_failure,
         slack_personal_oauth_callback_handler,
     };
-    #[cfg(feature = "slack-v2-host-beta")]
     use crate::slack::slack_serve::SlackInstallationSelector;
-    #[cfg(feature = "slack-v2-host-beta")]
     use crate::slack::slack_setup::{
         SlackInstallationSetup, SlackInstallationSetupStore, SlackInstallationSetupUpdate,
         SlackPersonalSetupServiceSlot, SlackSetupError, SlackSetupService,
@@ -1334,13 +1321,11 @@ mod tests {
         })
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[derive(Debug, Default)]
     struct MemorySlackSetupStore {
         setup: Mutex<Option<SlackInstallationSetup>>,
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[async_trait]
     impl SlackInstallationSetupStore for MemorySlackSetupStore {
         async fn get_slack_installation_setup(
@@ -1363,7 +1348,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     async fn slack_personal_oauth_test_slot() -> SlackPersonalSetupServiceSlot {
         let redirect_uri = ironclaw_auth::OAuthRedirectUri::new(
             "http://127.0.0.1:3000/api/reborn/product-auth/oauth/slack_personal/callback",
@@ -1487,7 +1471,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_personal_turn_gate_callback_activates_binding_lifecycle_and_account() {
         let shared = Arc::new(InMemoryAuthProductServices::new());
@@ -2268,7 +2251,6 @@ mod tests {
         assert_eq!(error.body.code, AuthErrorCode::MalformedCallback);
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_personal_oauth_start_uses_server_scopes_not_client_supplied_scopes() {
         let shared = Arc::new(InMemoryAuthProductServices::new());
@@ -2349,7 +2331,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_personal_oauth_start_failure_before_publish_creates_no_lifecycle_epoch() {
         let shared = Arc::new(InMemoryAuthProductServices::new());
@@ -2421,7 +2402,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_personal_oauth_start_rejects_non_slack_requester_extension() {
         let shared = Arc::new(InMemoryAuthProductServices::new());
@@ -2462,7 +2442,6 @@ mod tests {
         assert_eq!(error.body.code, AuthErrorCode::InvalidRequest);
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn slack_lifecycle_start_conflicts_do_not_claim_another_user_owns_the_identity() {
         for error in [
@@ -2479,7 +2458,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_terminal_cleanup_without_binding_authority_stays_retryable() {
         let product_auth = Arc::new(RebornProductAuthServices::from_shared(
@@ -2515,7 +2493,6 @@ mod tests {
         assert_eq!(error.body.code, AuthErrorCode::BackendUnavailable);
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_personal_oauth_denial_abandons_the_epoch_owner_after_setup_drift() {
         let product_auth = Arc::new(RebornProductAuthServices::from_shared(
@@ -2587,7 +2564,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_personal_oauth_callback_binds_authenticated_user_to_slack_identity() {
         let shared = Arc::new(InMemoryAuthProductServices::new());
@@ -2727,7 +2703,6 @@ mod tests {
         assert_eq!(stored_identity.app_id.as_deref(), Some("A123"));
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_personal_terminal_callback_failures_allow_immediate_retry() {
         let shared = Arc::new(InMemoryAuthProductServices::new());
@@ -2950,7 +2925,6 @@ mod tests {
         .expect("missing PKCE must not block immediate reconnect");
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_personal_oauth_callback_does_not_configure_credential_when_binding_rejects_app()
     {
@@ -3066,7 +3040,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_personal_oauth_callback_renders_duplicate_slack_identity_failure() {
         let shared = Arc::new(InMemoryAuthProductServices::new());
@@ -3220,7 +3193,6 @@ mod tests {
         assert!(retried_cleanup_account.refresh_secret.is_none());
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_personal_oauth_callback_rejects_foreign_tenant_state_before_token_exchange() {
         let shared = Arc::new(InMemoryAuthProductServices::new());
@@ -3341,10 +3313,8 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     struct RejectingContinuationDispatcher;
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[async_trait]
     impl RebornAuthContinuationDispatcher for RejectingContinuationDispatcher {
         async fn dispatch_auth_continuation(
@@ -3355,13 +3325,11 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[derive(Default)]
     struct RejectingSecondContinuationDispatcher {
         calls: AtomicUsize,
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[async_trait]
     impl RebornAuthContinuationDispatcher for RejectingSecondContinuationDispatcher {
         async fn dispatch_auth_continuation(
@@ -3376,7 +3344,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[derive(Clone)]
     struct SlackIdentityProviderClient {
         provider_identity: OAuthProviderIdentity,
@@ -3386,7 +3353,6 @@ mod tests {
         fail_cleanup: Arc<AtomicBool>,
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     impl SlackIdentityProviderClient {
         fn new(provider_identity: OAuthProviderIdentity) -> Self {
             Self {
@@ -3416,7 +3382,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[async_trait]
     impl AuthProviderClient for SlackIdentityProviderClient {
         async fn exchange_callback(
@@ -3473,7 +3438,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[derive(Default)]
     struct RecordingBindingStore {
         bindings: Arc<Mutex<Vec<RebornUserIdentityBinding>>>,
@@ -3481,7 +3445,6 @@ mod tests {
         fail_delete_once: Arc<Mutex<bool>>,
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[derive(Debug, Default)]
     struct TestSlackLifecycleStore {
         entries: Mutex<Vec<TestSlackLifecycleEntry>>,
@@ -3489,7 +3452,6 @@ mod tests {
         transition_after_next_state_read: Mutex<Option<SlackConnectionState>>,
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[derive(Debug)]
     struct TestSlackLifecycleEntry {
         epoch: SlackConnectionEpoch,
@@ -3499,7 +3461,6 @@ mod tests {
         cleanup_selector: Option<SlackConnectionCleanupSelector>,
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     impl TestSlackLifecycleStore {
         fn activate(
             &self,
@@ -3567,7 +3528,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[async_trait]
     impl SlackUserBindingLifecycleStore for TestSlackLifecycleStore {
         async fn begin_connection(
@@ -3841,7 +3801,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     impl RecordingBindingStore {
         fn bindings(&self) -> Vec<RebornUserIdentityBinding> {
             self.bindings.lock().expect("binding store lock").clone()
@@ -3852,7 +3811,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[async_trait]
     impl RebornUserIdentityBindingStore for RecordingBindingStore {
         async fn bind_user_identity(
@@ -3935,14 +3893,12 @@ mod tests {
 
     /// Test seam mirroring the production filesystem store's atomic
     /// identity-bind + lifecycle activation write.
-    #[cfg(feature = "slack-v2-host-beta")]
     struct ActivatingBindingStore {
         inner: Arc<RecordingBindingStore>,
         lifecycle_store: Arc<TestSlackLifecycleStore>,
         owner: SlackConnectionOwner,
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[async_trait]
     impl RebornUserIdentityBindingStore for ActivatingBindingStore {
         async fn bind_user_identity(
@@ -3986,10 +3942,8 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     struct FailingBindingStore;
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[async_trait]
     impl RebornUserIdentityBindingStore for FailingBindingStore {
         async fn bind_user_identity(
@@ -4011,7 +3965,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[async_trait]
     impl crate::slack::slack_personal_binding::RebornUserIdentityBindingDeleteStore
         for RecordingBindingStore
@@ -4107,7 +4060,6 @@ mod tests {
     /// Delegates every flow operation to the in-memory fake but fails
     /// `complete_oauth_callback`, modeling a completion failure (flow-store
     /// IO, CAS mismatch) that lands after the identity hook already bound.
-    #[cfg(feature = "slack-v2-host-beta")]
     struct FailingCompletionFlowManager {
         inner: Arc<InMemoryAuthProductServices>,
         fail_create: bool,
@@ -4116,14 +4068,12 @@ mod tests {
     /// Delegates every flow operation to the in-memory fake but fails the
     /// first continuation marker write after the continuation side effect has
     /// already succeeded.
-    #[cfg(feature = "slack-v2-host-beta")]
     struct FailingOnceContinuationMarkerFlowManager {
         inner: Arc<InMemoryAuthProductServices>,
         fail_marker_once: AtomicBool,
         marker_calls: AtomicUsize,
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     impl FailingOnceContinuationMarkerFlowManager {
         fn new(inner: Arc<InMemoryAuthProductServices>) -> Self {
             Self {
@@ -4138,7 +4088,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[async_trait]
     impl ironclaw_auth::AuthFlowManager for FailingCompletionFlowManager {
         async fn create_flow(
@@ -4243,7 +4192,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[async_trait]
     impl ironclaw_auth::AuthFlowManager for FailingOnceContinuationMarkerFlowManager {
         async fn create_flow(
@@ -4353,7 +4301,6 @@ mod tests {
     /// back: the binding is the user-visible "connected" signal, and the
     /// completed-flow replay path never re-runs the hook, so a surviving
     /// binding would show Slack connected with no usable credential.
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_personal_oauth_callback_rolls_back_binding_when_completion_fails() {
         let shared = Arc::new(InMemoryAuthProductServices::new());
@@ -4460,7 +4407,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_personal_oauth_callback_compensates_when_lifecycle_activation_fails() {
         let shared = Arc::new(InMemoryAuthProductServices::new());
@@ -4745,7 +4691,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_personal_oauth_marker_failure_preserves_connection_and_retries_ack() {
         let shared = Arc::new(InMemoryAuthProductServices::new());
@@ -4908,7 +4853,6 @@ mod tests {
         assert_eq!(binding_store.bindings().len(), 1);
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_personal_oauth_activation_failure_after_reconfigure_fully_disconnects_owner() {
         let shared = Arc::new(InMemoryAuthProductServices::new());
@@ -5069,7 +5013,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_personal_oauth_failed_reconfigure_restores_previous_active_binding() {
         let shared = Arc::new(InMemoryAuthProductServices::new());
@@ -5205,7 +5148,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_personal_oauth_failed_identity_rollback_allows_disconnect_then_reconnect() {
         let shared = Arc::new(InMemoryAuthProductServices::new());

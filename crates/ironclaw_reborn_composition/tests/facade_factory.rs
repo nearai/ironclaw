@@ -1,3 +1,7 @@
+// arch-exempt: large_file, pre-existing ~1.9K-line facade test suite; this change is a net-zero rename of build_local_dev_secret_store_for_test call sites with no cases added, plan #6168
+//
+// Decomposition of this suite travels with the composition god-crate shrink
+// (#6168); do not add unrelated cases here.
 #[cfg(feature = "postgres")]
 #[path = "support/postgres.rs"]
 mod postgres_support;
@@ -11,7 +15,7 @@ use chrono::Utc;
 use deadpool_postgres::tokio_postgres;
 #[cfg(feature = "libsql")]
 use ironclaw_auth::{OAuthClientId, OAuthRedirectUri};
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+#[cfg(feature = "postgres")]
 use ironclaw_host_api::{AgentId, ProjectId, TenantId};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{
@@ -32,7 +36,7 @@ use ironclaw_host_runtime::{
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn_composition::RebornRuntimeProcessBinding;
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+#[cfg(feature = "postgres")]
 use ironclaw_reborn_composition::{
     LocalTriggerAccessRole, LocalTriggerAccessSeed, LocalTriggerAccessSource,
 };
@@ -47,7 +51,7 @@ use ironclaw_reborn_composition::{
     RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
     RebornReadinessDiagnosticStatus,
 };
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+#[cfg(feature = "postgres")]
 use ironclaw_reborn_config::{RebornConfigFile, StorageBackend, StorageSection};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_runner::turn_scheduler::{
@@ -78,7 +82,7 @@ use tokio::sync::Mutex;
 #[cfg(feature = "libsql")]
 static SECRETS_MASTER_KEY_ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+#[cfg(feature = "postgres")]
 static HOSTED_TRIGGER_ACCESS_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(feature = "libsql")]
@@ -114,13 +118,13 @@ impl Drop for EnvVarGuard {
     }
 }
 
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+#[cfg(feature = "postgres")]
 struct PostgresEnvVarGuard {
     key: &'static str,
     previous: Option<std::ffi::OsString>,
 }
 
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+#[cfg(feature = "postgres")]
 impl PostgresEnvVarGuard {
     fn set(key: &'static str, value: &str) -> Self {
         let previous = std::env::var_os(key);
@@ -143,7 +147,7 @@ impl PostgresEnvVarGuard {
     }
 }
 
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+#[cfg(feature = "postgres")]
 impl Drop for PostgresEnvVarGuard {
     fn drop(&mut self) {
         // SAFETY: PostgresEnvVarGuard is only constructed while
@@ -1311,7 +1315,7 @@ async fn local_dev_secret_store_falls_through_suppressed_keychain_to_dotfile() {
     let composite = std::sync::Arc::new(composite);
     let scoped = ironclaw_reborn_composition::wrap_scoped(std::sync::Arc::clone(&composite));
 
-    ironclaw_reborn_composition::test_support::build_local_dev_secret_store_for_test(
+    ironclaw_reborn_composition::test_support::build_secret_store_for_test(
         root,
         std::sync::Arc::clone(&scoped),
     )
@@ -1323,7 +1327,7 @@ async fn local_dev_secret_store_falls_through_suppressed_keychain_to_dotfile() {
     );
     let cached = std::fs::read_to_string(&key_path).expect("read generated dotfile");
 
-    ironclaw_reborn_composition::test_support::build_local_dev_secret_store_for_test(root, scoped)
+    ironclaw_reborn_composition::test_support::build_secret_store_for_test(root, scoped)
         .await
         .expect("second store build must read the now-cached dotfile idempotently");
     assert_eq!(
@@ -1528,7 +1532,7 @@ async fn production_postgres_services_migrate_trigger_repository_before_runtime_
     assert_eq!(count, 0);
 }
 
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn hosted_single_tenant_trigger_access_store_persists_across_reopen() {
     let Some((_container, _pool, database_url)) = postgres_pool_or_skip().await else {

@@ -33,7 +33,7 @@ primary references during the retirement:
 | Legacy Rust matrix | `.github/workflows/test.yml` is the root package test matrix, now frozen in workflow docs. |
 | Build helper | `scripts/build-all.sh` reports `target/release/ironclaw`. |
 | Scope classifiers | `.github/workflows/test.yml`, `platform-and-compat.yml`, and `scripts/ci/classify-test-scope.sh` still route selected changes through legacy `src/` and gateway paths. |
-| Release packaging | Blocked: root package `ironclaw` owns `ironclaw-v*`, while the canonical binary still belongs to package `ironclaw_reborn_cli`. |
+| Release packaging | Compile-only preflight: root package `ironclaw` still owns `ironclaw-v*`, so artifact and image publishing remain blocked while the canonical binary belongs to package `ironclaw_reborn_cli`. |
 
 ## Retarget Sequence
 
@@ -57,7 +57,7 @@ primary references during the retirement:
 Run these checks in the retargeting PRs, not only in the final deletion PR:
 
 ```bash
-cargo build -p ironclaw_reborn_cli --features webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta,openai-compat-beta,libsql,postgres,inmemory-turn-state --bin ironclaw
+cargo build -p ironclaw_reborn_cli --features libsql,postgres,inmemory-turn-state --bin ironclaw
 cargo test -p ironclaw_architecture
 bash scripts/reborn-e2e-rust.sh
 git diff --check

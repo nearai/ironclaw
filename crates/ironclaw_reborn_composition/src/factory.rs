@@ -88,14 +88,8 @@ use ironclaw_outbound::CommunicationPreferenceRepository;
 // (over a libsql/postgres or in-memory backend), so this import is
 // unconditional, not gated behind the durable-backend features.
 use ironclaw_outbound::FilesystemOutboundStateStore;
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRunDeliveryStore};
 use ironclaw_processes::ProcessServices;
-#[cfg(any(
-    feature = "slack-v2-host-beta",
-    feature = "telegram-v2-host-beta",
-    test
-))]
 use ironclaw_product_workflow::ChannelConnectionFacade;
 use ironclaw_product_workflow::{
     ExtensionAccountSetupRegistry, LifecycleProductSurfaceContext,
@@ -117,13 +111,10 @@ use ironclaw_resources::{
 // unconditional (arch-simplification §4.3).
 use crate::RebornProductAuthServicePorts;
 use crate::builtin_capability_policy::{BuiltinCapabilityPolicy, builtin_capability_policy};
-#[cfg(feature = "telegram-v2-host-beta")]
 use crate::extension_host::available_extensions::telegram_manifest_digest;
-#[cfg(feature = "slack-v2-host-beta")]
 use crate::extension_host::available_extensions::{
     slack_bot_manifest_digest, slack_manifest_digest,
 };
-#[cfg(feature = "slack-v2-host-beta")]
 use crate::extension_host::extension_removal_cleanup::SlackPersonalConnectionCleanupAdapter;
 use crate::extension_host::lifecycle::{
     RebornLocalLifecycleFacade, RebornLocalSkillManagementPort, build_local_skill_management_port,
@@ -206,7 +197,7 @@ use ironclaw_turns::{
     LoopCheckpointStore,
 };
 
-/// Output of [`build_local_dev_root_filesystem`]: the composed local-dev
+/// Output of [`build_local_runtime_root_filesystem`]: the composed local-dev
 /// root filesystem and, when libSQL is the substrate, a clone of the raw
 /// libSQL handle. The handle backs both the local-dev trigger repository
 /// and the canonical Reborn identity store, so each rides the same
@@ -235,7 +226,7 @@ enum StorageBackendInput {
     Postgres(deadpool_postgres::Pool),
 }
 
-type LocalDevWorkspaceFilesystems = (
+type WorkspaceFilesystems = (
     Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     MountView,
@@ -533,10 +524,6 @@ pub struct RebornServices {
     /// Shared scoped secret store. Exposed so runtime-level features (e.g.
     /// operator LLM-key storage) can reuse the same instance product-auth uses
     /// rather than standing up a second authority.
-    #[cfg_attr(
-        not(any(feature = "root-llm-provider", feature = "slack-v2-host-beta")),
-        allow(dead_code)
-    )]
     pub(crate) secret_store: Arc<dyn SecretStore>,
     #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
@@ -576,10 +563,6 @@ pub(crate) enum CredentialRefreshWorkerReady {
 
 impl RebornServices {
     /// The shared scoped secret store backing this composition.
-    #[cfg_attr(
-        not(any(feature = "root-llm-provider", feature = "slack-v2-host-beta")),
-        allow(dead_code)
-    )]
     pub(crate) fn secret_store(&self) -> Arc<dyn SecretStore> {
         Arc::clone(&self.secret_store)
     }
@@ -621,9 +604,23 @@ impl RebornServices {
             local_runtime.approval_requests.clone();
         let capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStore> =
             local_runtime.capability_leases.clone();
+        // Build over the same shared composite root production `capability_wiring`
+        // uses, so these test-support stores persist across the group's
+        // threads/turns and round-trip identically to production.
+        let capability_store_filesystem =
+            crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem));
+        let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore> =
+            Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                Arc::clone(&capability_store_filesystem),
+            ));
+        let replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore> = Arc::new(
+            ironclaw_capabilities::FilesystemReplayPayloadStore::new(capability_store_filesystem),
+        );
         Some(RebornApprovalTestParts {
             approval_requests,
             capability_leases,
+            gate_record_store,
+            replay_payload_store,
         })
     }
 
@@ -695,7 +692,7 @@ impl RebornServices {
     }
 
     /// Test-support access to the local-dev communication-preference repository
-    /// (W6-COLD-SPOTS seam). This is the SAME `Arc` that `build_local_dev_store_graph`
+    /// (W6-COLD-SPOTS seam). This is the SAME `Arc` that `build_local_runtime_store_graph`
     /// wires into `RebornRuntimeSubstrate::outbound_preferences` via
     /// `local_dev_outbound_store`, for tests only. Returns `None` for
     /// production-profile compositions without a local-dev runtime.
@@ -709,7 +706,7 @@ impl RebornServices {
 
     /// Test-support access to the on-disk local-dev storage root (W6-COLD-SPOTS
     /// seam), for tests only — mirrors the same `local_runtime.local_dev_storage_root`
-    /// that `build_local_dev_store_graph` establishes in production. Used to reopen
+    /// that `build_local_runtime_store_graph` establishes in production. Used to reopen
     /// a fresh outbound-preferences store at the same root (see
     /// `open_local_dev_outbound_preferences_store_for_test`). Returns `None` for
     /// production-profile compositions without a local-dev runtime.
@@ -999,6 +996,14 @@ pub struct AttachmentTestSupport {
 pub struct RebornApprovalTestParts {
     pub approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
     pub capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStore>,
+    /// Durable model-visible gate-record store, shared across the group's threads
+    /// so a gate raised on one thread can be read back on another.
+    pub gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
+    /// Durable host-private replay-payload store (§5.3 Stage 2a-i), shared across
+    /// the group's threads/turns so a gate/auth resume reconstitutes the input the
+    /// original raise persisted. Backed by the same composite root as production
+    /// `capability_wiring`, so the harness store round-trips identically.
+    pub replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
 }
 
 pub(crate) struct RebornRuntimeSubstrate {
@@ -1039,11 +1044,8 @@ pub(crate) struct RebornRuntimeSubstrate {
     /// Settings write flips it and the next turn's selection honors the new
     /// value without a restart.
     pub(crate) skill_auto_activate_learned: Arc<AtomicBool>,
-    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) outbound_state: Arc<dyn OutboundStateStore>,
-    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) delivered_gate_routes: Arc<dyn DeliveredGateRouteStore>,
-    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     pub(crate) trigger_conversation_services: InMemoryConversationServices,
@@ -1057,13 +1059,11 @@ pub(crate) struct RebornRuntimeSubstrate {
     /// rides the host `RootFilesystem` abstraction like every other durable
     /// Reborn store rather than a raw DB handle. Only the WebUI v2 SSO surface
     /// reads it today, hence `dead_code` when that feature is off.
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[allow(dead_code)]
     pub(crate) identity_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     /// Admin per-user secret provisioner (target-user-scoped secret store over
     /// the shared root + crypto). `None` when no filesystem secret store was
     /// built. Read only by the WebUI v2 admin surface.
-    #[cfg(feature = "webui-v2-beta")]
     pub(crate) admin_secret_provisioner:
         Option<Arc<dyn crate::admin_secrets::AdminSecretProvisioner>>,
     /// Raw libSQL substrate handle backing `reborn-local-dev.db`. Carried ONLY
@@ -1119,11 +1119,6 @@ pub(crate) struct RebornRuntimeSubstrate {
     /// deployments without a connectable channel, in which case the handler
     /// fails closed (blocks) for any channel that declares a connection
     /// requirement. Mirrors the `post_submit_hook_slot` deferred-wiring pattern.
-    #[cfg(any(
-        feature = "slack-v2-host-beta",
-        feature = "telegram-v2-host-beta",
-        test
-    ))]
     pub(crate) channel_connection_facade_slot:
         Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionFacade>>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
@@ -1133,21 +1128,12 @@ pub(crate) struct RebornRuntimeSubstrate {
     pub(crate) system_extensions_lifecycle_mounts: MountView,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     pub(crate) workspace_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
-    #[cfg(all(
-        any(feature = "libsql", feature = "postgres"),
-        feature = "slack-v2-host-beta"
-    ))]
     pub(crate) host_state_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     /// Telegram analog of `host_state_filesystem`: a `ScopedFilesystem` whose
     /// fixed resolver is [`crate::telegram_host_state_mount_view`], backing the
     /// durable Telegram setup/pairing/binding/DM-target stores plus the
     /// telegram-scoped idempotency ledger and conversation-binding store.
-    #[cfg(all(
-        any(feature = "libsql", feature = "postgres"),
-        feature = "telegram-v2-host-beta"
-    ))]
     pub(crate) telegram_host_state_filesystem: Arc<ScopedFilesystem<dyn RootFilesystem>>,
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) subagent_goal_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     /// Tenant-scoped root filesystem used for third-party extension hook
     /// discovery (`/system/extensions/<tenant>`). The runtime derives the
@@ -1222,6 +1208,9 @@ impl RebornProductionRuntimeServices {
     }
 }
 
+// `trigger_conversation_services` is a `OnceCell<RebornFilesystemConversationServices>`
+// under a durable backend and an `InMemoryConversationServices` without one, so this
+// accessor only exists in the durable shape.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 impl RebornRuntimeSubstrate {
     pub(crate) async fn durable_trigger_conversation_services(
@@ -1318,17 +1307,18 @@ pub async fn build_reborn_services(
     input: RebornBuildInput,
 ) -> Result<RebornServices, RebornBuildError> {
     tracing::debug!(
-        profile = %input.profile,
+        profile = %input.profile(),
         owner_id = %input.owner_id,
         "building Reborn composition facades"
     );
-    match input.profile {
-        RebornCompositionProfile::Disabled => Ok(RebornServices::disabled()),
-        RebornCompositionProfile::LocalDev
-        | RebornCompositionProfile::LocalDevYolo
-        | RebornCompositionProfile::HostedSingleTenant
-        | RebornCompositionProfile::HostedSingleTenantVolume => build_local_runtime(input).await,
-        RebornCompositionProfile::Production | RebornCompositionProfile::MigrationDryRun => {
+    // Substrate selection is deployment *data* (§4.4/§5.6), not a profile
+    // match: the config says which substrate to assemble and this dispatches
+    // on that value.
+    let substrate = input.deployment().substrate();
+    match substrate {
+        crate::deployment::RuntimeSubstrate::None => Ok(RebornServices::disabled()),
+        crate::deployment::RuntimeSubstrate::Local => build_local_runtime(input).await,
+        crate::deployment::RuntimeSubstrate::ProductionShaped => {
             build_production_shaped(input).await
         }
     }
@@ -1446,19 +1436,18 @@ fn production_config(
 /// backend through `RebornStorageInput::HostedSingleTenantPostgres`; local-dev
 /// keeps its historical local filesystem/libSQL default.
 async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, RebornBuildError> {
-    #[cfg(all(test, feature = "slack-v2-host-beta"))]
+    #[cfg(test)]
     let host_runtime_http_egress_for_test = input.host_runtime_http_egress_for_test.clone();
     #[cfg(any(test, feature = "test-support"))]
     let network_http_egress_for_test = input.network_http_egress_for_test.clone();
     let RebornBuildInput {
-        profile,
+        deployment,
         storage,
         runtime_policy,
         runtime_process_binding,
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_provider_configs,
-        #[cfg(feature = "slack-v2-host-beta")]
         slack_personal_oauth_lazy_slot,
         nearai_mcp_bootstrap_config,
         owner_id,
@@ -1466,6 +1455,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         turn_state_store_limits,
         ..
     } = input;
+    // Label for logging/errors; behaviour reads `deployment`'s axes.
+    let profile = deployment.profile();
     // Computed before `oauth_provider_configs` is consumed by
     // `compose_provider_client` below — see `google_oauth_configured`.
     let google_oauth_configured = google_oauth_configured(&oauth_provider_configs);
@@ -1479,7 +1470,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         postgres_resource_governor_singleton,
     ) = match storage {
         RebornStorageInput::LocalDev { .. }
-            if profile == RebornCompositionProfile::HostedSingleTenant =>
+            if deployment.storage_shape()
+                == crate::deployment::StorageShape::HostedSingleTenantPool =>
         {
             return Err(RebornBuildError::InvalidConfig {
                     reason: "profile=hosted-single-tenant requires hosted single-tenant Postgres storage input"
@@ -1500,7 +1492,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         ),
         #[cfg(feature = "postgres")]
         RebornStorageInput::HostedSingleTenantPostgres { .. }
-            if profile != RebornCompositionProfile::HostedSingleTenant =>
+            if deployment.storage_shape()
+                != crate::deployment::StorageShape::HostedSingleTenantPool =>
         {
             return Err(RebornBuildError::InvalidConfig {
                 reason: format!("{profile} profile requires local-runtime storage input"),
@@ -1589,7 +1582,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         }
     })?;
     crate::extension_host::bundled_skills::ensure_bundled_reborn_skills_installed(&root).await?;
-    let filesystem_bundle = build_local_dev_root_filesystem(
+    let filesystem_bundle = build_local_runtime_root_filesystem(
         &root,
         &workspace_root,
         host_home_root.as_ref(),
@@ -1673,7 +1666,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         owner_user_id.clone(),
         local_runtime_identity_for_nearai_mcp.as_ref(),
     )?;
-    let mut store_graph = build_local_dev_store_graph(RebornStoreGraphInput {
+    let mut store_graph = build_local_runtime_store_graph(RebornStoreGraphInput {
         filesystem: Arc::clone(&filesystem),
         owner_user_id,
         local_runtime_identity,
@@ -1699,7 +1692,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     let local_dev_product_auth_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
     #[cfg(any(feature = "libsql", feature = "postgres"))]
-    let local_dev_secret_bundle = build_local_dev_secret_store(
+    let local_dev_secret_bundle = build_secret_store(
         &root,
         Arc::clone(&local_dev_product_auth_filesystem),
         secret_master_key,
@@ -1715,9 +1708,10 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     let secret_store: Arc<dyn SecretStore> =
         Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral());
     // Admin per-user secret provisioner over the shared root + the SAME crypto
-    // as the runtime's own secret store (webui-v2-beta implies libsql, so the
-    // bundle above always exists here).
-    #[cfg(feature = "webui-v2-beta")]
+    // as the runtime's own secret store. Only a durable backend produces the
+    // secret bundle this reuses, so the no-storage build has no provisioner —
+    // `None` is an ordinary value here (see the in-memory runtime below).
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
     let admin_secret_provisioner: Option<
         Arc<dyn crate::admin_secrets::AdminSecretProvisioner>,
     > = Some(Arc::new(
@@ -1726,6 +1720,10 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             local_dev_secret_bundle.1,
         ),
     ));
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    let admin_secret_provisioner: Option<
+        Arc<dyn crate::admin_secrets::AdminSecretProvisioner>,
+    > = None;
     let local_dev_trust_policy = Arc::new(builtin_first_party_trust_policy()?);
     let local_dev_trust_invalidation_bus = Arc::new(ironclaw_trust::InvalidationBus::new());
     let extension_registry = Arc::new(local_dev_builtin_extension_registry()?);
@@ -1807,10 +1805,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         oauth_dcr_provider_configs,
         Arc::clone(&secret_store),
         product_auth_runtime_ports.clone(),
-        #[cfg(feature = "slack-v2-host-beta")]
         slack_personal_oauth_lazy_slot,
-        #[cfg(not(feature = "slack-v2-host-beta"))]
-        None,
     )?;
     let security_audit_sink = services.security_audit_sink();
     let nearai_mcp_host_managed_scope =
@@ -1909,11 +1904,6 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                     Some(registry) => services.with_oauth_gate_registry(registry),
                     None => services,
                 };
-                #[cfg(feature = "slack-v2-host-beta")]
-                let services = match provider_composition.slack_gate_registry.clone() {
-                    Some(registry) => services.with_slack_oauth_gate_registry(registry),
-                    None => services,
-                };
                 Arc::new(services.with_host_managed_nearai_credential_scope(
                     nearai_mcp_host_managed_scope.clone(),
                 )?)
@@ -1974,12 +1964,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("extension lifecycle state could not be restored: {error}"),
     })?;
-    #[cfg_attr(
-        not(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")),
-        allow(unused_mut)
-    )]
     let mut removal_cleanup_adapters: Vec<Arc<dyn ExtensionRemovalCleanupAdapter>> = Vec::new();
-    #[cfg(feature = "slack-v2-host-beta")]
     removal_cleanup_adapters.push(Arc::new(
         SlackPersonalConnectionCleanupAdapter::new(Arc::clone(
             &store_graph.local_runtime.channel_connection_facade_slot,
@@ -1988,7 +1973,6 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             reason: format!("Slack extension removal cleanup could not be built: {error}"),
         })?,
     ));
-    #[cfg(feature = "telegram-v2-host-beta")]
     removal_cleanup_adapters.push(Arc::new(
         crate::extension_host::extension_removal_cleanup::TelegramPairingConnectionCleanupAdapter::new(
             Arc::clone(&store_graph.local_runtime.channel_connection_facade_slot),
@@ -2005,7 +1989,6 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         )?,
     );
     let account_setups = ExtensionAccountSetupRegistry::default();
-    #[cfg(feature = "telegram-v2-host-beta")]
     {
         let descriptor =
             ironclaw_telegram_extension::telegram_account_setup_descriptor().map_err(|error| {
@@ -2062,13 +2045,12 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         local_runtime.extension_registry = Arc::clone(&extension_registry);
         local_runtime.shared_extension_registry = Some(services.shared_extension_registry());
         let host_runtime_http_egress = services.host_runtime_http_egress_port();
-        #[cfg(all(test, feature = "slack-v2-host-beta"))]
+        #[cfg(test)]
         let host_runtime_http_egress =
             host_runtime_http_egress_for_test.unwrap_or(host_runtime_http_egress);
         local_runtime.host_runtime_http_egress = host_runtime_http_egress;
         // Attach the admin secret provisioner now the secret-store crypto is
         // built (the store graph was constructed before it existed).
-        #[cfg(feature = "webui-v2-beta")]
         {
             local_runtime.admin_secret_provisioner = admin_secret_provisioner;
         }
@@ -2449,7 +2431,7 @@ fn local_dev_extension_installation_state_path(
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-async fn build_local_dev_store_graph(
+async fn build_local_runtime_store_graph(
     input: RebornStoreGraphInput,
 ) -> Result<RebornStoreGraph, RebornBuildError> {
     let RebornStoreGraphInput {
@@ -2577,9 +2559,7 @@ async fn build_local_dev_store_graph(
                 reason: error.to_string(),
             }
         })?;
-    #[cfg(feature = "slack-v2-host-beta")]
     let host_state_filesystem = local_dev_slack_host_state_filesystem(Arc::clone(&filesystem));
-    #[cfg(feature = "telegram-v2-host-beta")]
     let telegram_host_state_filesystem =
         local_dev_telegram_host_state_filesystem(Arc::clone(&filesystem));
     let extension_lifecycle_surface_context = local_dev_extension_lifecycle_surface_context(
@@ -2608,11 +2588,8 @@ async fn build_local_dev_store_graph(
             crate::outbound::MutableOutboundDeliveryTargetRegistry::default(),
         ),
         skill_auto_activate_learned: Arc::new(AtomicBool::new(true)),
-        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         outbound_state: outbound_stores.outbound_state,
-        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         delivered_gate_routes: outbound_stores.delivered_gate_routes,
-        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         triggered_run_delivery: outbound_stores.triggered_run_delivery,
         #[cfg(not(any(feature = "libsql", feature = "postgres")))]
         trigger_conversation_services,
@@ -2629,11 +2606,6 @@ async fn build_local_dev_store_graph(
         budget_gate_store,
         skill_management,
         extension_management: None,
-        #[cfg(any(
-            feature = "slack-v2-host-beta",
-            feature = "telegram-v2-host-beta",
-            test
-        ))]
         channel_connection_facade_slot: Arc::new(std::sync::OnceLock::new()),
         runtime_http_egress: None,
         host_runtime_http_egress: None,
@@ -2642,15 +2614,12 @@ async fn build_local_dev_store_graph(
         system_extensions_lifecycle_mounts,
         skill_filesystem,
         workspace_filesystem,
-        #[cfg(feature = "slack-v2-host-beta")]
         host_state_filesystem,
-        #[cfg(feature = "telegram-v2-host-beta")]
         telegram_host_state_filesystem,
         subagent_goal_filesystem: Arc::clone(&scoped_filesystem),
         identity_filesystem: Arc::clone(&scoped_filesystem),
         // Set later in `build_local_runtime`, once the secret-store crypto
         // exists, via `Arc::get_mut` on this services value.
-        #[cfg(feature = "webui-v2-beta")]
         admin_secret_provisioner: None,
         #[cfg(feature = "libsql")]
         identity_substrate_db,
@@ -2679,7 +2648,7 @@ async fn build_local_dev_store_graph(
 }
 
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-async fn build_local_dev_store_graph(
+async fn build_local_runtime_store_graph(
     input: RebornStoreGraphInput,
 ) -> Result<RebornStoreGraph, RebornBuildError> {
     let RebornStoreGraphInput {
@@ -2775,9 +2744,9 @@ async fn build_local_dev_store_graph(
                 reason: error.to_string(),
             }
         })?;
-    #[cfg(all(feature = "postgres", feature = "slack-v2-host-beta"))]
+    #[cfg(feature = "postgres")]
     let host_state_filesystem = local_dev_slack_host_state_filesystem(Arc::clone(&filesystem));
-    #[cfg(all(feature = "postgres", feature = "telegram-v2-host-beta"))]
+    #[cfg(feature = "postgres")]
     let telegram_host_state_filesystem =
         local_dev_telegram_host_state_filesystem(Arc::clone(&filesystem));
     let extension_lifecycle_surface_context = local_dev_extension_lifecycle_surface_context(
@@ -2808,11 +2777,8 @@ async fn build_local_dev_store_graph(
             crate::outbound::MutableOutboundDeliveryTargetRegistry::default(),
         ),
         skill_auto_activate_learned: Arc::new(AtomicBool::new(true)),
-        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         outbound_state: outbound_stores.outbound_state,
-        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         delivered_gate_routes: outbound_stores.delivered_gate_routes,
-        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         triggered_run_delivery: outbound_stores.triggered_run_delivery,
         #[cfg(not(any(feature = "libsql", feature = "postgres")))]
         trigger_conversation_services,
@@ -2829,11 +2795,6 @@ async fn build_local_dev_store_graph(
         budget_gate_store,
         skill_management,
         extension_management: None,
-        #[cfg(any(
-            feature = "slack-v2-host-beta",
-            feature = "telegram-v2-host-beta",
-            test
-        ))]
         channel_connection_facade_slot: Arc::new(std::sync::OnceLock::new()),
         runtime_http_egress: None,
         host_runtime_http_egress: None,
@@ -2842,6 +2803,14 @@ async fn build_local_dev_store_graph(
         system_extensions_lifecycle_mounts,
         skill_filesystem,
         workspace_filesystem,
+        host_state_filesystem: local_dev_slack_host_state_filesystem(Arc::clone(&filesystem)),
+        telegram_host_state_filesystem: local_dev_telegram_host_state_filesystem(Arc::clone(
+            &filesystem,
+        )),
+        subagent_goal_filesystem: local_dev_scoped_filesystem(Arc::clone(&filesystem)),
+        identity_filesystem: local_dev_scoped_filesystem(Arc::clone(&filesystem)),
+        // Set later in `build_local_runtime`, once secret-store crypto exists.
+        admin_secret_provisioner: None,
         extension_filesystem: Arc::clone(&filesystem),
         workspace_mounts,
         local_dev_storage_root,
@@ -3162,7 +3131,7 @@ fn build_budget_sinks() -> BudgetSinks {
     }
 }
 
-async fn build_local_dev_root_filesystem(
+async fn build_local_runtime_root_filesystem(
     root: &Path,
     workspace_root: &Path,
     host_home_root: Option<&HostHomeRoot>,
@@ -3232,7 +3201,7 @@ async fn open_local_dev_libsql_database(
 // (`build_default_local_dev_database_roots_for_test`) can call this
 // without duplicating the 4-step libSQL setup sequence (Builder →
 // LibSqlRootFilesystem → run_migrations → mount). Production callers
-// stay inside this module (`build_local_dev_root_filesystem`).
+// stay inside this module (`build_local_runtime_root_filesystem`).
 pub(crate) async fn build_default_local_dev_database_roots(
     root: &Path,
     composite: &mut CompositeRootFilesystem,
@@ -3315,16 +3284,12 @@ fn local_dev_project_filesystem(
 /// fresh `InMemoryBackend` — under a postgres-composed runtime that would be
 /// a brand-new empty store, not the live Postgres-backed host state, so a
 /// postgres gate here would compile a probe that can only report absence.
-#[cfg(all(
-    feature = "test-support",
-    feature = "slack-v2-host-beta",
-    feature = "libsql"
-))]
+#[cfg(all(feature = "test-support", feature = "libsql"))]
 pub(crate) async fn open_local_dev_slack_host_state_filesystem_for_test(
     storage_root: &Path,
 ) -> Result<Arc<ScopedFilesystem<CompositeRootFilesystem>>, RebornBuildError> {
     let workspace_root = storage_root.join("workspace");
-    let bundle = build_local_dev_root_filesystem(
+    let bundle = build_local_runtime_root_filesystem(
         storage_root,
         &workspace_root,
         None,
@@ -3431,7 +3396,7 @@ pub(crate) async fn open_local_dev_approval_request_store_for_test(
 /// W6-COLD-SPOTS: fresh `CommunicationPreferenceRepository` reopen, mirrors
 /// [`open_local_dev_approval_request_store_for_test`]. Reuses
 /// [`local_dev_outbound_store`] — the same composition-owned construction the
-/// production `build_local_dev_store_graph` path uses — so the reopen path
+/// production `build_local_runtime_store_graph` path uses — so the reopen path
 /// never drifts from production and needs no `disallowed_methods` exception.
 /// Tests only.
 #[cfg(all(feature = "test-support", feature = "libsql"))]
@@ -3451,7 +3416,7 @@ pub(crate) async fn open_local_dev_outbound_preferences_store_for_test(
 /// [`open_local_dev_approval_request_store_for_test`] (same on-disk root;
 /// sibling capability stores). Reuses [`mount_default_local_dev_database_roots`]
 /// plus the production [`crate::wrap_scoped`] so the reopen mounts and scopes
-/// the SAME way `build_local_dev_store_graph` does when it first builds
+/// the SAME way `build_local_runtime_store_graph` does when it first builds
 /// `tool_permission_overrides` / `auto_approve_settings` /
 /// `persistent_approval_policies` (above) — the reopen path never drifts from
 /// production. Tests only; zero bytes in production builds.
@@ -3527,7 +3492,7 @@ where
 // (`mount_local_dev_database_roots_for_test`) can forward to it across the
 // crate boundary for downstream integration tests without a second copy of the
 // mount truth. Production callers stay inside this module
-// (`build_local_dev_root_filesystem` / `build_default_local_dev_database_roots`).
+// (`build_local_runtime_root_filesystem` / `build_default_local_dev_database_roots`).
 pub(crate) fn mount_local_dev_database_roots<F>(
     root: &mut CompositeRootFilesystem,
     database: Arc<F>,
@@ -3595,7 +3560,7 @@ fn mount_local_dev_project_roots(
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-pub(crate) async fn build_local_dev_secret_store<F>(
+pub(crate) async fn build_secret_store<F>(
     root: &Path,
     scoped_filesystem: Arc<ScopedFilesystem<F>>,
     explicit_master_key: Option<ironclaw_secrets::SecretMaterial>,
@@ -3634,11 +3599,11 @@ where
 ///   and reconstructing the whole composite just to reach one mount is
 ///   heavy and risks silently diverging from `serve`'s copy.
 /// - `/secrets`'s physical backing is the same local-dev libSQL file
-///   `build_local_dev_root_filesystem` opens for `/tenants` in production —
+///   `build_local_runtime_root_filesystem` opens for `/tenants` in production —
 ///   a key written here is immediately visible to `serve`, no extra
 ///   coordination needed.
 /// - Uses the same resolver chain as production (env -> cached dotfile ->
-///   OS keychain -> generate-and-cache, via [`build_local_dev_secret_store`]).
+///   OS keychain -> generate-and-cache, via [`build_secret_store`]).
 /// - `run_migrations()` here and again on `serve`'s later open is safe —
 ///   already relied on as idempotent elsewhere in this module's tests.
 #[cfg(feature = "libsql")]
@@ -3649,7 +3614,7 @@ pub async fn open_local_dev_secret_store(
     let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
     filesystem.run_migrations().await?;
     let scoped = crate::wrap_scoped(filesystem);
-    let (store, _crypto) = build_local_dev_secret_store(root, scoped, None).await?;
+    let (store, _crypto) = build_secret_store(root, scoped, None).await?;
     Ok(store as Arc<dyn SecretStore>)
 }
 
@@ -4009,11 +3974,8 @@ fn local_dev_scoped_filesystem(
 /// See docs/plans/2026-05-29-trigger-loop-delivery-resolution-implementation.md.
 pub(crate) struct OutboundStores {
     pub(crate) outbound_preferences: Arc<dyn CommunicationPreferenceRepository>,
-    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) outbound_state: Arc<dyn OutboundStateStore>,
-    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) delivered_gate_routes: Arc<dyn DeliveredGateRouteStore>,
-    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
 }
 
@@ -4032,19 +3994,12 @@ fn local_dev_outbound_store(filesystem: Arc<CompositeRootFilesystem>) -> Outboun
     );
     OutboundStores {
         outbound_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
-        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         outbound_state: Arc::clone(&store) as Arc<dyn OutboundStateStore>,
-        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         delivered_gate_routes: Arc::clone(&store) as Arc<dyn DeliveredGateRouteStore>,
-        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         triggered_run_delivery: store as Arc<dyn TriggeredRunDeliveryStore>,
     }
 }
 
-#[cfg(all(
-    any(feature = "libsql", feature = "postgres"),
-    feature = "slack-v2-host-beta"
-))]
 fn local_dev_slack_host_state_filesystem(
     filesystem: Arc<CompositeRootFilesystem>,
 ) -> Arc<ScopedFilesystem<CompositeRootFilesystem>> {
@@ -4054,10 +4009,6 @@ fn local_dev_slack_host_state_filesystem(
     ))
 }
 
-#[cfg(all(
-    any(feature = "libsql", feature = "postgres"),
-    feature = "telegram-v2-host-beta"
-))]
 fn local_dev_telegram_host_state_filesystem(
     filesystem: Arc<CompositeRootFilesystem>,
 ) -> Arc<ScopedFilesystem<dyn RootFilesystem>> {
@@ -4144,7 +4095,7 @@ fn build_workspace_filesystems(
     filesystem: Arc<CompositeRootFilesystem>,
     workspace_root: &Path,
     host_home_root: Option<&HostHomeRoot>,
-) -> Result<LocalDevWorkspaceFilesystems, RebornBuildError> {
+) -> Result<WorkspaceFilesystems, RebornBuildError> {
     let read_only_workspace_mounts = workspace_mount_view(MountPermissions::read_only(), &[])
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: error.to_string(),
@@ -4335,10 +4286,6 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
     let policy = builtin_capability_policy().map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("local-dev capability policy is invalid: {error}"),
     })?;
-    #[cfg_attr(
-        not(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")),
-        allow(unused_mut)
-    )]
     let mut entries = vec![
         AdminEntry::for_local_manifest(
             policy.provider.id,
@@ -4433,7 +4380,6 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
             None,
         ),
     ];
-    #[cfg(feature = "slack-v2-host-beta")]
     entries.push(AdminEntry::for_local_manifest(
         PackageId::new("slack_bot").map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("Slack first-party package id is invalid: {error}"),
@@ -4444,7 +4390,6 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
         Vec::new(),
         None,
     ));
-    #[cfg(feature = "slack-v2-host-beta")]
     entries.push(AdminEntry::for_local_manifest(
         PackageId::new("slack").map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("Slack personal first-party package id is invalid: {error}"),
@@ -4457,7 +4402,6 @@ pub fn builtin_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuild
     ));
     // Zero-tool channel package (like slack_bot): activation registers the
     // channel surface only, so no capability effects are granted.
-    #[cfg(feature = "telegram-v2-host-beta")]
     entries.push(AdminEntry::for_local_manifest(
         PackageId::new("telegram").map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("Telegram first-party package id is invalid: {error}"),
@@ -4484,7 +4428,6 @@ fn gsuite_allowed_effects() -> Vec<EffectKind> {
     ]
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 fn slack_user_allowed_effects() -> Vec<EffectKind> {
     vec![
         EffectKind::DispatchCapability,
@@ -4520,7 +4463,7 @@ async fn build_production_shaped(
     input: RebornBuildInput,
 ) -> Result<RebornServices, RebornBuildError> {
     let RebornBuildInput {
-        profile,
+        deployment,
         owner_id,
         local_runtime_identity,
         storage,
@@ -4535,18 +4478,19 @@ async fn build_production_shaped(
         required_runtime_backends,
         require_runtime_http_egress,
         require_wasm_credentials,
-        #[cfg(all(test, feature = "slack-v2-host-beta"))]
+        #[cfg(test)]
             host_runtime_http_egress_for_test: _,
         #[cfg(any(test, feature = "test-support"))]
             network_http_egress_for_test: _,
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_provider_configs,
-        #[cfg(feature = "slack-v2-host-beta")]
         slack_personal_oauth_lazy_slot,
         nearai_mcp_bootstrap_config: _,
         turn_state_store_limits,
     } = input;
+    // Label for logging/errors; behaviour reads `deployment`'s axes.
+    let profile = deployment.profile();
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     let wiring_config = production_config(
         required_runtime_backends,
@@ -4568,7 +4512,6 @@ async fn build_production_shaped(
         oauth_dcr_provider_configs,
         turn_state_store_limits,
     );
-    #[cfg(feature = "slack-v2-host-beta")]
     let _ = slack_personal_oauth_lazy_slot;
 
     match storage {
@@ -4619,7 +4562,6 @@ async fn build_production_shaped(
                 product_auth_ports,
                 oauth_provider_configs,
                 oauth_dcr_provider_configs,
-                #[cfg(feature = "slack-v2-host-beta")]
                 slack_personal_oauth_lazy_slot,
                 owner_id,
                 local_runtime_identity,
@@ -4666,7 +4608,6 @@ async fn build_production_shaped(
                 product_auth_ports,
                 oauth_provider_configs,
                 oauth_dcr_provider_configs,
-                #[cfg(feature = "slack-v2-host-beta")]
                 slack_personal_oauth_lazy_slot,
                 owner_id,
                 local_runtime_identity,
@@ -4711,7 +4652,6 @@ struct RebornProductionBuildContext {
     product_auth_ports: Option<RebornProductAuthServicePorts>,
     oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
     oauth_dcr_provider_configs: Vec<crate::input::OAuthDcrProviderBackendConfig>,
-    #[cfg(feature = "slack-v2-host-beta")]
     slack_personal_oauth_lazy_slot:
         Option<crate::slack::slack_setup::SlackPersonalSetupServiceSlot>,
     owner_id: String,
@@ -5258,7 +5198,6 @@ where
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_provider_configs,
-        #[cfg(feature = "slack-v2-host-beta")]
         slack_personal_oauth_lazy_slot,
         owner_id,
         local_runtime_identity,
@@ -5386,10 +5325,7 @@ where
         oauth_dcr_provider_configs,
         Arc::clone(&secret_store),
         product_auth_runtime_ports.clone(),
-        #[cfg(feature = "slack-v2-host-beta")]
         slack_personal_oauth_lazy_slot,
-        #[cfg(not(feature = "slack-v2-host-beta"))]
-        None,
     )?;
     let services = apply_production_runtime_process_binding(
         services,
@@ -6086,11 +6022,8 @@ mod tests {
             project_service: Arc::clone(&base_runtime.project_service),
             outbound_preferences: Arc::clone(&base_runtime.outbound_preferences),
             skill_auto_activate_learned: Arc::clone(&base_runtime.skill_auto_activate_learned),
-            #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
             outbound_state: Arc::clone(&base_runtime.outbound_state),
-            #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
             delivered_gate_routes: Arc::clone(&base_runtime.delivered_gate_routes),
-            #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
             triggered_run_delivery: Arc::clone(&base_runtime.triggered_run_delivery),
             #[cfg(not(any(feature = "libsql", feature = "postgres")))]
             trigger_conversation_services: base_runtime.trigger_conversation_services.clone(),
@@ -6106,11 +6039,6 @@ mod tests {
             budget_gate_store: Arc::clone(&base_runtime.budget_gate_store),
             skill_management: Arc::clone(&base_runtime.skill_management),
             extension_management: base_runtime.extension_management.clone(),
-            #[cfg(any(
-                feature = "slack-v2-host-beta",
-                feature = "telegram-v2-host-beta",
-                test
-            ))]
             channel_connection_facade_slot: Arc::clone(
                 &base_runtime.channel_connection_facade_slot,
             ),
@@ -6123,15 +6051,12 @@ mod tests {
                 .clone(),
             skill_filesystem: Arc::clone(&base_runtime.skill_filesystem),
             workspace_filesystem: Arc::clone(&base_runtime.workspace_filesystem),
-            #[cfg(feature = "slack-v2-host-beta")]
             host_state_filesystem: Arc::clone(&base_runtime.host_state_filesystem),
-            #[cfg(feature = "telegram-v2-host-beta")]
             telegram_host_state_filesystem: Arc::clone(
                 &base_runtime.telegram_host_state_filesystem,
             ),
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             identity_filesystem: Arc::clone(&base_runtime.identity_filesystem),
-            #[cfg(feature = "webui-v2-beta")]
             admin_secret_provisioner: base_runtime.admin_secret_provisioner.clone(),
             #[cfg(feature = "libsql")]
             identity_substrate_db: base_runtime.identity_substrate_db.clone(),
@@ -6218,11 +6143,16 @@ mod tests {
     #[tokio::test]
     async fn hosted_single_tenant_rejects_local_dev_storage_input() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut input = RebornBuildInput::local_dev(
+        let input = RebornBuildInput::local_dev(
             "hosted-single-tenant-local-storage-owner",
             dir.path().join("local-dev"),
         );
-        input.profile = RebornCompositionProfile::HostedSingleTenant;
+        // Deliberate mismatch: a hosted single-tenant deployment paired with a
+        // local-dev storage input must be rejected by the storage-shape guard.
+        let input = input.with_deployment(crate::deployment::DeploymentConfig::for_profile(
+            RebornCompositionProfile::HostedSingleTenant,
+            false,
+        ));
 
         let error = match build_reborn_services(input).await {
             Ok(_) => {
@@ -6415,7 +6345,7 @@ mod tests {
             .expect("manual-token account should survive local-dev rebuild");
         assert_eq!(rebuilt_account.access_secret.as_ref(), Some(&access_secret));
 
-        let rebuilt_filesystem = build_local_dev_root_filesystem(
+        let rebuilt_filesystem = build_local_runtime_root_filesystem(
             &local_dev_root,
             &local_dev_root.join("workspace"),
             None,
@@ -6424,7 +6354,7 @@ mod tests {
         .await
         .expect("local-dev filesystem rebuild")
         .filesystem;
-        let (rebuilt_secret_store, _rebuilt_secret_crypto) = build_local_dev_secret_store(
+        let (rebuilt_secret_store, _rebuilt_secret_crypto) = build_secret_store(
             &local_dev_root,
             local_dev_scoped_filesystem(rebuilt_filesystem),
             None,
@@ -6475,10 +6405,7 @@ mod tests {
     /// bug fixed in 7917cf89f). This drives that exact composition so a future
     /// edit that drops the alias fails here, not just in the mount-view unit
     /// test the composition never consults directly.
-    #[cfg(all(
-        any(feature = "libsql", feature = "postgres"),
-        feature = "slack-v2-host-beta"
-    ))]
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[tokio::test]
     async fn slack_durable_conversation_store_initializes_through_composed_host_state_mount() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -6489,7 +6416,7 @@ mod tests {
         std::fs::create_dir_all(local_dev_root.join("system/extensions"))
             .expect("system extensions dir");
 
-        let root_filesystem = build_local_dev_root_filesystem(
+        let root_filesystem = build_local_runtime_root_filesystem(
             &local_dev_root,
             &local_dev_root.join("workspace"),
             None,
@@ -6747,7 +6674,7 @@ mod tests {
     /// `forbid(unsafe_code)` note above — this crate's inline tests cannot
     /// mutate process env, and a cached dotfile is the non-env-mutating way
     /// to make the resolver deterministic here).
-    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn open_local_dev_secret_store_opens_a_working_store_over_the_bare_root() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -6779,7 +6706,7 @@ mod tests {
     /// db file, same cached master key) must decrypt a value written by a
     /// prior open — this is the "onboard writes, serve reads" contract B2
     /// exists to satisfy.
-    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn open_local_dev_secret_store_is_visible_across_reopens_of_the_same_root() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -8509,10 +8436,7 @@ mod tests {
     /// `RebornRuntimeSubstrate` and compares their data halves via
     /// `std::ptr::addr_eq` (trait objects of different traits cannot be compared
     /// with `Arc::ptr_eq` directly).
-    #[cfg(all(
-        any(feature = "libsql", feature = "postgres"),
-        feature = "slack-v2-host-beta"
-    ))]
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[tokio::test]
     async fn local_dev_outbound_store_durable_shares_one_allocation_across_all_roles() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -8545,7 +8469,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     fn slack_identity(
         manifest_path: &str,
         digest: Option<String>,
@@ -8560,7 +8483,6 @@ mod tests {
         )
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn builtin_first_party_trust_policy_includes_slack_local_manifest_entry() {
         let policy = builtin_first_party_trust_policy().expect("trust policy");

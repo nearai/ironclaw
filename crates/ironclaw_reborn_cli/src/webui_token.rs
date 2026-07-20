@@ -9,9 +9,9 @@
 //! `onboard` (unconditional — [`ensure_webui_token_file`]) provisions the
 //! fallback file so a service-installed `serve` (launchd/systemd), whose
 //! unit environment carries only `HOME`/`PROFILE` (see
-//! `serve_invocation.rs`), still has a token to read. `serve` (gated
-//! behind the `webui-v2-beta` feature — [`resolve_webui_token`]) reads
-//! through this same precedence and entropy validation.
+//! `serve_invocation.rs`), still has a token to read. `serve`
+//! ([`resolve_webui_token`]) reads through this same precedence and entropy
+//! validation.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -329,7 +329,6 @@ fn write_token_file(path: &Path, token: &str) -> anyhow::Result<()> {
 /// `commands::serve::execute`'s `cli_login_mount` and the
 /// `onboard`/`status` login-link printers, which need the source to avoid
 /// advertising a link to an unmounted route.
-#[cfg(feature = "webui-v2-beta")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WebuiTokenSource {
     /// Resolved from the operator's env var (`[webui].env_token_var`,
@@ -347,13 +346,11 @@ pub(crate) enum WebuiTokenSource {
 /// the WebChat v2 bearer credential *and* the session-signing HMAC key (see
 /// the module doc), so a derived `Debug` would print the live secret
 /// verbatim into any log line or panic message that formats this struct.
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) struct ResolvedWebuiToken {
     pub(crate) value: String,
     pub(crate) source: WebuiTokenSource,
 }
 
-#[cfg(feature = "webui-v2-beta")]
 impl std::fmt::Debug for ResolvedWebuiToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ResolvedWebuiToken")
@@ -382,7 +379,6 @@ impl std::fmt::Debug for ResolvedWebuiToken {
 /// reading `std::env` itself, so callers own env access (trivially
 /// unit-testable without mutating process env) and control which env
 /// var name is in play (`[webui].env_token_var` may rename it).
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) fn resolve_webui_token(
     env_var_name: &str,
     env_value: Option<&str>,
@@ -437,7 +433,6 @@ pub(crate) fn resolve_webui_token(
 /// `commands::serve::present_unicode_env_var`'s unset-vs-not-unicode
 /// distinction so `onboard`/`status` can't disagree with `serve` about
 /// whether the var is "active".
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) fn env_token_is_active(env_var_name: &str) -> anyhow::Result<bool> {
     Ok(
         crate::commands::serve::present_unicode_env_var(env_var_name)?
@@ -450,7 +445,6 @@ pub(crate) fn env_token_is_active(env_var_name: &str) -> anyhow::Result<bool> {
 /// `commands::serve::DEFAULT_ENV_TOKEN_VAR`. Shared so `onboard`/`status`
 /// check [`env_token_is_active`] against the same name `serve` resolves
 /// against.
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) fn resolve_env_token_var_name(
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
 ) -> &str {
@@ -465,7 +459,6 @@ pub(crate) fn resolve_env_token_var_name(
 /// actually mounts — when `serve` will source its bearer from the token file
 /// rather than an env var (see [`WebuiTokenSource`]'s doc for why the CLI
 /// login route is file-source-only).
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) enum LoginLinkAnnouncement {
     /// The CLI-token login link, ready to print.
     Link(String),
@@ -486,7 +479,6 @@ pub(crate) enum LoginLinkAnnouncement {
 /// Propagates a real error when the env var is set but not valid UTF-8 —
 /// see [`env_token_is_active`] — rather than silently treating it as
 /// inactive.
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) fn resolve_login_link_announcement(
     home: &ironclaw_reborn_config::RebornHome,
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
@@ -503,7 +495,6 @@ pub(crate) fn resolve_login_link_announcement(
     })
 }
 
-#[cfg(feature = "webui-v2-beta")]
 fn validate_token_entropy(
     value: &str,
     env_var_name: &str,
@@ -528,7 +519,6 @@ fn validate_token_entropy(
 /// `serve`'s own default host:port constants. Shared by every caller that
 /// prints a login link (`onboard`, `status`) so the construction lives in
 /// one place.
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) fn login_link(
     home: &ironclaw_reborn_config::RebornHome,
 ) -> anyhow::Result<Option<String>> {
@@ -549,7 +539,6 @@ pub(crate) fn login_link(
 mod tests {
     use super::*;
 
-    #[cfg(feature = "webui-v2-beta")]
     const VALID_TOKEN: &str = "reborn-smoke-test-token-0123456789abcdef"; // 40 bytes
 
     #[test]
@@ -635,7 +624,6 @@ mod tests {
         assert!(webui_token_file_is_valid(dir.path()).expect("query must succeed"));
     }
 
-    #[cfg(feature = "webui-v2-beta")]
     #[test]
     fn resolve_prefers_env_value_when_set() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -645,7 +633,6 @@ mod tests {
         assert_eq!(resolved.source, WebuiTokenSource::Env);
     }
 
-    #[cfg(feature = "webui-v2-beta")]
     #[test]
     fn resolve_falls_back_to_home_file_when_env_unset() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -658,7 +645,6 @@ mod tests {
         assert_eq!(resolved.source, WebuiTokenSource::File);
     }
 
-    #[cfg(feature = "webui-v2-beta")]
     #[test]
     fn resolved_webui_token_debug_redacts_the_value() {
         let resolved = ResolvedWebuiToken {
@@ -680,7 +666,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "webui-v2-beta")]
     #[test]
     fn resolve_errors_naming_both_var_and_file_when_neither_is_present() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -697,7 +682,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "webui-v2-beta")]
     #[test]
     fn resolve_rejects_a_too_short_env_token() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -711,7 +695,6 @@ mod tests {
         assert!(message.contains("at least 32 bytes"), "message: {message}");
     }
 
-    #[cfg(feature = "webui-v2-beta")]
     #[test]
     fn resolve_rejects_a_too_short_home_file_token() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -856,7 +839,6 @@ mod tests {
         assert!(error.to_string().contains("bytes"), "error: {error}");
     }
 
-    #[cfg(feature = "webui-v2-beta")]
     #[cfg(unix)]
     #[test]
     fn resolve_rejects_a_symlinked_token_file() {
@@ -871,7 +853,6 @@ mod tests {
         assert!(error.to_string().contains("symlink"), "error: {error}");
     }
 
-    #[cfg(feature = "webui-v2-beta")]
     #[cfg(unix)]
     #[test]
     fn resolve_repairs_a_wrongly_permissioned_token_file_on_accept() {
@@ -893,7 +874,6 @@ mod tests {
         assert_eq!(mode, 0o600, "mode must be repaired to 0600, got {mode:o}");
     }
 
-    #[cfg(feature = "webui-v2-beta")]
     #[test]
     fn env_token_is_active_true_when_env_var_set_and_non_empty() {
         let _guard = crate::runtime::test_env::lock_runtime_env();
@@ -909,7 +889,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "webui-v2-beta")]
     #[test]
     fn env_token_is_active_false_when_unset_or_empty() {
         let _guard = crate::runtime::test_env::lock_runtime_env();
@@ -933,7 +912,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "webui-v2-beta")]
     #[cfg(unix)]
     #[test]
     fn env_token_is_active_propagates_not_unicode_instead_of_treating_it_as_inactive() {

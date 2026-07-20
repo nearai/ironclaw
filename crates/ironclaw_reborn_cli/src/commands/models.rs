@@ -1,6 +1,5 @@
 use clap::{Args, Subcommand};
 
-#[cfg(feature = "root-llm-provider")]
 use crate::context::RebornCliContext;
 
 #[derive(Debug, Args)]
@@ -66,7 +65,6 @@ impl ModelsCommand {
     }
 }
 
-#[cfg(feature = "root-llm-provider")]
 impl ModelsListCommand {
     fn execute(self) -> anyhow::Result<()> {
         let context = RebornCliContext::resolve_from_env()?;
@@ -89,50 +87,6 @@ impl ModelsListCommand {
     }
 }
 
-#[cfg(not(feature = "root-llm-provider"))]
-impl ModelsListCommand {
-    fn execute(self) -> anyhow::Result<()> {
-        // Reads stay informational without the provider feature (the libsql-only
-        // lane's smoke tests pin this); only writes error — see ModelsSetCommand.
-        // A provider-detail request (`models list <provider>` / `--verbose`)
-        // needs real provider data, so answering it with the generic slot list
-        // would be silently wrong — those option-bearing invocations error like
-        // the write commands do.
-        if let Some(provider) = self.provider.as_deref() {
-            return Err(feature_not_available(&format!("list {provider}")));
-        }
-        if self.verbose {
-            return Err(feature_not_available("list --verbose"));
-        }
-        let slots = ironclaw_reborn_composition::reborn_model_slot_names();
-
-        if self.json {
-            let slots = slots
-                .iter()
-                .map(|slot| serde_json::json!({ "slot": slot }))
-                .collect::<Vec<_>>();
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "slots": slots,
-                    "routes": "not-configured",
-                    "v1_state": "not-used",
-                }))?
-            );
-            return Ok(());
-        }
-
-        println!("IronClaw Reborn model slots");
-        for slot in slots {
-            println!("- {}", slot);
-        }
-        println!("routes: not-configured");
-        println!("v1_state: not-used");
-        Ok(())
-    }
-}
-
-#[cfg(feature = "root-llm-provider")]
 impl ModelsStatusCommand {
     fn execute(self) -> anyhow::Result<()> {
         let context = RebornCliContext::resolve_from_env()?;
@@ -149,7 +103,6 @@ impl ModelsStatusCommand {
     }
 }
 
-#[cfg(feature = "root-llm-provider")]
 impl ModelsSetCommand {
     fn execute(self) -> anyhow::Result<()> {
         let context = RebornCliContext::resolve_from_env()?;
@@ -161,14 +114,6 @@ impl ModelsSetCommand {
     }
 }
 
-#[cfg(not(feature = "root-llm-provider"))]
-impl ModelsSetCommand {
-    fn execute(self) -> anyhow::Result<()> {
-        Err(feature_not_available(&format!("set {}", self.model)))
-    }
-}
-
-#[cfg(feature = "root-llm-provider")]
 impl ModelsSetProviderCommand {
     fn execute(self) -> anyhow::Result<()> {
         let context = RebornCliContext::resolve_from_env()?;
@@ -180,58 +125,6 @@ impl ModelsSetProviderCommand {
     }
 }
 
-#[cfg(not(feature = "root-llm-provider"))]
-impl ModelsSetProviderCommand {
-    fn execute(self) -> anyhow::Result<()> {
-        Err(feature_not_available(&format!(
-            "set-provider {}",
-            self.provider
-        )))
-    }
-}
-
-#[cfg(not(feature = "root-llm-provider"))]
-fn feature_not_available(command: &str) -> anyhow::Error {
-    anyhow::anyhow!("`models {command}` requires the root-llm-provider feature; v1_state: not-used")
-}
-
-#[cfg(not(feature = "root-llm-provider"))]
-impl ModelsStatusCommand {
-    fn execute(self) -> anyhow::Result<()> {
-        let slots = ironclaw_reborn_composition::reborn_model_slot_names();
-
-        if self.json {
-            let slot_status: serde_json::Map<String, serde_json::Value> = slots
-                .iter()
-                .map(|slot| {
-                    (
-                        (*slot).to_string(),
-                        serde_json::Value::from("not-configured"),
-                    )
-                })
-                .collect();
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "routes": "not-configured",
-                    "slots": slot_status,
-                    "v1_state": "not-used",
-                }))?
-            );
-            return Ok(());
-        }
-
-        println!("IronClaw Reborn model status");
-        println!("routes: not-configured");
-        for slot in slots {
-            println!("{}: not-configured", slot);
-        }
-        println!("v1_state: not-used");
-        Ok(())
-    }
-}
-
-#[cfg(feature = "root-llm-provider")]
 fn print_provider_list(list: &ironclaw_reborn_composition::RebornProviderList, verbose: bool) {
     println!("IronClaw Reborn LLM providers");
     println!("config_file: {}", list.config_file.display());
@@ -293,7 +186,6 @@ fn print_provider_list(list: &ironclaw_reborn_composition::RebornProviderList, v
     println!("* = active provider. v1_state: {}", list.v1_state);
 }
 
-#[cfg(feature = "root-llm-provider")]
 fn print_provider_detail(list: &ironclaw_reborn_composition::RebornProviderList) {
     let Some(provider) = list.providers.first() else {
         return;
@@ -331,7 +223,6 @@ fn print_provider_detail(list: &ironclaw_reborn_composition::RebornProviderList)
     println!("v1_state: {}", list.v1_state);
 }
 
-#[cfg(feature = "root-llm-provider")]
 fn print_status(status: &ironclaw_reborn_composition::RebornProviderStatus) {
     println!("IronClaw Reborn model status");
     println!("config_file: {}", status.config_file.display());
@@ -366,14 +257,12 @@ fn print_status(status: &ironclaw_reborn_composition::RebornProviderStatus) {
     println!("v1_state: {}", status.v1_state);
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[derive(Debug, Clone, Copy)]
 enum WriteOutcomeKind {
     Model,
     Provider,
 }
 
-#[cfg(feature = "root-llm-provider")]
 fn print_write_outcome(
     kind: WriteOutcomeKind,
     outcome: &ironclaw_reborn_composition::RebornProviderWriteOutcome,

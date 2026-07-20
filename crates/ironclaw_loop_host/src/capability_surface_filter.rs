@@ -4,14 +4,14 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::{CapabilityId, Resolution, ResolutionBatch};
 use ironclaw_turns::CapabilityActivityId;
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityBatchOutcome,
-    CapabilityCallCandidate, CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInvocation,
-    CapabilityOutcome, CapabilitySurfaceProfileId, LoopCapabilityPort, LoopRunContext,
-    ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolDefinition,
-    RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityCallCandidate,
+    CapabilityDeniedReasonKind, CapabilityInvocation, CapabilitySurfaceProfileId,
+    LoopCapabilityPort, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
+    ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, resolution,
 };
 
 use crate::{CapabilityAllowSet, LoopCapabilityPortDecorator, capability_info};
@@ -133,7 +133,7 @@ impl LoopCapabilityPort for CapabilitySurfaceVisibleFilter {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         if !invocation_capability_permitted(&self.staged_invocations, &request, |capability_id| {
             self.permits(capability_id)
         })? {
@@ -145,7 +145,7 @@ impl LoopCapabilityPort for CapabilitySurfaceVisibleFilter {
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
         invoke_filtered_batch(
             &*self.inner,
             request,
@@ -266,7 +266,7 @@ impl LoopCapabilityPort for CapabilitySurfaceDenyFilter {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         if !invocation_capability_permitted(&self.staged_invocations, &request, |capability_id| {
             self.permits(capability_id)
         })? {
@@ -278,7 +278,7 @@ impl LoopCapabilityPort for CapabilitySurfaceDenyFilter {
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
         invoke_filtered_batch(
             &*self.inner,
             request,
@@ -426,7 +426,7 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         if !invocation_capability_permitted(&self.staged_invocations, &request, |capability_id| {
             self.allow_set.permits(capability_id)
         })? {
@@ -438,7 +438,7 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
         if matches!(self.allow_set.as_ref(), CapabilityAllowSet::All) {
             return self.inner.invoke_capability_batch(request).await;
         }
@@ -463,9 +463,9 @@ async fn invoke_filtered_batch(
     inner: &(dyn LoopCapabilityPort + Send + Sync),
     request: CapabilityBatchInvocation,
     permits: impl Fn(&CapabilityInvocation) -> Result<bool, AgentLoopHostError>,
-    denied_outcome: fn() -> CapabilityOutcome,
-) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-    let mut slots = Vec::with_capacity(request.invocations.len());
+    denied_outcome: fn() -> Resolution,
+) -> Result<ResolutionBatch, AgentLoopHostError> {
+    let mut slots: Vec<Option<Resolution>> = Vec::with_capacity(request.invocations.len());
     let mut allowed = Vec::new();
     let mut allowed_idx = Vec::new();
 
@@ -488,7 +488,7 @@ async fn invoke_filtered_batch(
                 stop_on_first_suspension: request.stop_on_first_suspension,
             })
             .await?;
-        (inner_batch.outcomes, inner_batch.stopped_on_suspension)
+        (inner_batch.resolutions, inner_batch.stopped_on_suspension)
     };
 
     if inner_outcomes.len() > allowed_idx.len() {
@@ -517,7 +517,7 @@ async fn invoke_filtered_batch(
     };
     slots.truncate(truncate_to);
 
-    let mut outcomes = Vec::with_capacity(slots.len());
+    let mut resolutions = Vec::with_capacity(slots.len());
     for slot in slots {
         let outcome = slot.ok_or_else(|| {
             AgentLoopHostError::new(
@@ -525,11 +525,11 @@ async fn invoke_filtered_batch(
                 "capability surface filter retained an unpopulated outcome slot",
             )
         })?;
-        outcomes.push(outcome);
+        resolutions.push(outcome);
     }
 
-    Ok(CapabilityBatchOutcome {
-        outcomes,
+    Ok(ResolutionBatch {
+        resolutions,
         stopped_on_suspension,
     })
 }
@@ -670,11 +670,12 @@ fn provider_capability_permitted(
     permits(capability_id) || capability_info::is_capability_id(capability_id)
 }
 
-fn model_view_denied_outcome() -> CapabilityOutcome {
-    CapabilityOutcome::Denied(CapabilityDenied {
-        reason_kind: model_view_denied_kind(),
-        safe_summary: "capability outside the model-visible view".to_string(),
-    })
+fn model_view_denied_outcome() -> Resolution {
+    resolution::denied(
+        model_view_denied_kind(),
+        "capability outside the model-visible view".to_string(),
+    )
+    .resolution
 }
 
 fn model_view_denied_kind() -> CapabilityDeniedReasonKind {
@@ -691,11 +692,12 @@ fn model_view_denied_kind() -> CapabilityDeniedReasonKind {
     }
 }
 
-fn surface_profile_denied_outcome() -> CapabilityOutcome {
-    CapabilityOutcome::Denied(CapabilityDenied {
-        reason_kind: surface_profile_denied_kind(),
-        safe_summary: "capability not in run-profile surface".to_string(),
-    })
+fn surface_profile_denied_outcome() -> Resolution {
+    resolution::denied(
+        surface_profile_denied_kind(),
+        "capability not in run-profile surface".to_string(),
+    )
+    .resolution
 }
 
 fn surface_profile_denied_kind() -> CapabilityDeniedReasonKind {
@@ -716,13 +718,15 @@ fn surface_profile_denied_kind() -> CapabilityDeniedReasonKind {
 mod tests {
     use std::{collections::HashMap, sync::Mutex};
 
-    use ironclaw_host_api::{CapabilityId, ProviderToolName, RuntimeKind, TenantId, ThreadId};
+    use ironclaw_host_api::{
+        Blocked, CapabilityId, ProviderToolName, RuntimeKind, TenantId, ThreadId,
+    };
     use ironclaw_turns::run_profile::{
-        CancellationPolicy, CapabilityDescriptorView, CapabilityInputRef, CapabilityResultMessage,
-        CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass,
-        ConcurrencyHint, ContextProfileId, LoopDriverId, ModelProfileId, PersonalContextPolicy,
-        RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier,
-        RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
+        CancellationPolicy, CapabilityDescriptorView, CapabilityInputRef, CapabilitySurfaceVersion,
+        CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass, ConcurrencyHint, ContextProfileId,
+        LoopDriverId, ModelProfileId, PersonalContextPolicy, RedactedRunProfileProvenance,
+        ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier, RuntimeProfileConstraints,
+        SchedulingClass, SteeringPolicy, resolution,
     };
     use ironclaw_turns::{
         AgentLoopDriverDescriptor, LoopGateRef, LoopResultRef, RunClassId, RunProfileFingerprint,
@@ -734,7 +738,7 @@ mod tests {
     #[derive(Default)]
     struct SpyPort {
         surface: Mutex<Option<VisibleCapabilitySurface>>,
-        batch_outcome: Mutex<Option<CapabilityBatchOutcome>>,
+        batch_outcome: Mutex<Option<ironclaw_host_api::ResolutionBatch>>,
         tool_definitions: Mutex<Vec<ProviderToolDefinition>>,
         provider_call_capability_ids:
             Mutex<HashMap<ProviderToolName, ProviderToolCallCapabilityIds>>,
@@ -840,7 +844,7 @@ mod tests {
         async fn invoke_capability(
             &self,
             request: CapabilityInvocation,
-        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        ) -> Result<Resolution, AgentLoopHostError> {
             self.invocations
                 .lock()
                 .expect("invocation lock")
@@ -851,15 +855,15 @@ mod tests {
         async fn invoke_capability_batch(
             &self,
             request: CapabilityBatchInvocation,
-        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        ) -> Result<ResolutionBatch, AgentLoopHostError> {
             self.batches.lock().expect("batch lock").push(request);
             Ok(self
                 .batch_outcome
                 .lock()
                 .expect("batch outcome lock")
                 .clone()
-                .unwrap_or_else(|| CapabilityBatchOutcome {
-                    outcomes: vec![completed("result:first"), completed("result:second")],
+                .unwrap_or_else(|| ironclaw_host_api::ResolutionBatch {
+                    resolutions: vec![completed("result:first"), completed("result:second")],
                     stopped_on_suspension: false,
                 }))
         }
@@ -944,29 +948,39 @@ mod tests {
         call
     }
 
-    fn completed(result_ref: &str) -> CapabilityOutcome {
-        CapabilityOutcome::Completed(CapabilityResultMessage {
-            result_ref: LoopResultRef::new(result_ref).expect("test result ref is valid"),
-            safe_summary: "done".to_string(),
-            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-            terminate_hint: false,
-            byte_len: 0,
-            output_digest: None,
-            model_observation: None,
-        })
+    fn completed(result_ref: &str) -> Resolution {
+        resolution::completed(
+            LoopResultRef::new(result_ref).expect("test result ref is valid"),
+            "done".to_string(),
+            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            false,
+            0,
+            None,
+            None,
+        )
     }
 
-    fn approval_required(gate_ref: &str) -> CapabilityOutcome {
-        CapabilityOutcome::ApprovalRequired {
-            gate_ref: LoopGateRef::new(gate_ref).expect("test gate ref is valid"),
-            safe_summary: "approval needed".to_string(),
-            approval_resume: None,
-        }
+    fn approval_required(gate_ref: &str) -> Resolution {
+        resolution::approval_required(
+            LoopGateRef::new(gate_ref).expect("test gate ref is valid"),
+            "approval needed".to_string(),
+            None,
+        )
+        .resolution
     }
 
-    fn denied_reason(outcome: &CapabilityOutcome) -> Option<&str> {
-        match outcome {
-            CapabilityOutcome::Denied(denied) => Some(denied.reason_kind.as_str()),
+    // The §5.3 collapse maps the open-set loop `reason_kind`
+    // (`model_view_denied` / `surface_profile_denied`) onto the closed host_api
+    // `DenyReason` (both become `PolicyDenied`), so the specific reason tag no
+    // longer rides the structured denial channel. The two filter denials remain
+    // distinguishable by their fixed, host-authored summaries, which survive on
+    // `Denial.summary` — recover the original reason tag from there so these
+    // assertions keep verifying *which* filter denied the call.
+    fn denied_reason(resolution: &Resolution) -> Option<&'static str> {
+        let summary = resolution.denial()?.summary.as_ref()?.as_str();
+        match summary {
+            "capability not in run-profile surface" => Some("surface_profile_denied"),
+            "capability outside the model-visible view" => Some("model_view_denied"),
             _ => None,
         }
     }
@@ -1405,10 +1419,11 @@ mod tests {
     #[tokio::test]
     async fn visible_filter_batches_staged_capability_info_invocation() {
         let inner = Arc::new(SpyPort::default());
-        *inner.batch_outcome.lock().expect("batch outcome lock") = Some(CapabilityBatchOutcome {
-            outcomes: vec![completed("result:capability-info")],
-            stopped_on_suspension: false,
-        });
+        *inner.batch_outcome.lock().expect("batch outcome lock") =
+            Some(ironclaw_host_api::ResolutionBatch {
+                resolutions: vec![completed("result:capability-info")],
+                stopped_on_suspension: false,
+            });
         *inner
             .tool_definitions
             .lock()
@@ -1577,10 +1592,11 @@ mod tests {
     #[tokio::test]
     async fn batch_partitions_correctly() {
         let inner = Arc::new(SpyPort::default());
-        *inner.batch_outcome.lock().expect("batch outcome lock") = Some(CapabilityBatchOutcome {
-            outcomes: vec![completed("result:first"), completed("result:second")],
-            stopped_on_suspension: false,
-        });
+        *inner.batch_outcome.lock().expect("batch outcome lock") =
+            Some(ironclaw_host_api::ResolutionBatch {
+                resolutions: vec![completed("result:first"), completed("result:second")],
+                stopped_on_suspension: false,
+            });
         let filter = CapabilitySurfaceProfileFilter::new(
             inner.clone(),
             Arc::new(CapabilityAllowSet::allowlist([
@@ -1601,9 +1617,9 @@ mod tests {
             .await
             .expect("batch outcome");
 
-        assert_eq!(outcome.outcomes.len(), 3);
+        assert_eq!(outcome.resolutions.len(), 3);
         assert_eq!(
-            denied_reason(&outcome.outcomes[1]),
+            denied_reason(&outcome.resolutions[1]),
             Some("surface_profile_denied")
         );
         let batches = inner.batches.lock().expect("batch lock");
@@ -1622,10 +1638,11 @@ mod tests {
     #[tokio::test]
     async fn partial_inner_outcomes_truncate_correctly() {
         let inner = Arc::new(SpyPort::default());
-        *inner.batch_outcome.lock().expect("batch outcome lock") = Some(CapabilityBatchOutcome {
-            outcomes: vec![completed("result:first"), completed("result:second")],
-            stopped_on_suspension: true,
-        });
+        *inner.batch_outcome.lock().expect("batch outcome lock") =
+            Some(ironclaw_host_api::ResolutionBatch {
+                resolutions: vec![completed("result:first"), completed("result:second")],
+                stopped_on_suspension: true,
+            });
         let filter = CapabilitySurfaceProfileFilter::new(
             inner,
             Arc::new(CapabilityAllowSet::allowlist([
@@ -1648,9 +1665,9 @@ mod tests {
             .await
             .expect("batch outcome");
 
-        assert_eq!(outcome.outcomes.len(), 3);
+        assert_eq!(outcome.resolutions.len(), 3);
         assert_eq!(
-            denied_reason(&outcome.outcomes[1]),
+            denied_reason(&outcome.resolutions[1]),
             Some("surface_profile_denied")
         );
         assert!(outcome.stopped_on_suspension);
@@ -1659,10 +1676,11 @@ mod tests {
     #[tokio::test]
     async fn stopped_inner_batch_truncates_denials_after_last_allowed_outcome() {
         let inner = Arc::new(SpyPort::default());
-        *inner.batch_outcome.lock().expect("batch outcome lock") = Some(CapabilityBatchOutcome {
-            outcomes: vec![approval_required("gate:first")],
-            stopped_on_suspension: true,
-        });
+        *inner.batch_outcome.lock().expect("batch outcome lock") =
+            Some(ironclaw_host_api::ResolutionBatch {
+                resolutions: vec![approval_required("gate:first")],
+                stopped_on_suspension: true,
+            });
         let filter = CapabilitySurfaceProfileFilter::new(
             inner.clone(),
             Arc::new(CapabilityAllowSet::allowlist([capability_id("demo.first")])),
@@ -1680,10 +1698,10 @@ mod tests {
             .expect("batch outcome");
 
         assert!(outcome.stopped_on_suspension);
-        assert_eq!(outcome.outcomes.len(), 1);
+        assert_eq!(outcome.resolutions.len(), 1);
         assert!(matches!(
-            outcome.outcomes.as_slice(),
-            [CapabilityOutcome::ApprovalRequired { .. }]
+            outcome.resolutions.as_slice(),
+            [Resolution::Blocked(Blocked::Approval(_))]
         ));
         let batches = inner.batches.lock().expect("batch lock");
         assert_eq!(batches.len(), 1);
@@ -1958,7 +1976,7 @@ mod tests {
             .expect("outcome");
 
         assert!(
-            matches!(allowed_outcome, CapabilityOutcome::Completed(_)),
+            matches!(allowed_outcome, Resolution::Done(_)),
             "allowed capability should complete"
         );
         assert_eq!(inner.invocations.lock().expect("invocation lock").len(), 1);

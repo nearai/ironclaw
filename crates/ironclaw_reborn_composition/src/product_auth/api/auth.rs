@@ -106,7 +106,7 @@ pub(crate) struct RebornOAuthStartFlowRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(
     dead_code,
-    reason = "used by the webui-v2-beta extension OAuth route through product-auth route composition"
+    reason = "used by the WebUI v2 extension OAuth route through product-auth route composition"
 )]
 pub(crate) struct RebornDcrOAuthStartFlowRequest {
     pub(crate) scope: AuthProductScope,
@@ -876,7 +876,6 @@ impl RebornProductAuthServices {
     /// hence the feature gate) reuse it so a pairing completion resumes
     /// blocked turns through the same path as OAuth callbacks and
     /// manual-token submissions.
-    #[cfg(feature = "telegram-v2-host-beta")]
     pub(crate) fn continuation_dispatcher(&self) -> Arc<dyn RebornAuthContinuationDispatcher> {
         Arc::clone(&self.continuation_dispatcher)
     }
@@ -1431,7 +1430,7 @@ impl RebornProductAuthServices {
     /// exposing cross-scope flow existence.
     #[allow(
         dead_code,
-        reason = "used by the feature-scoped webui-v2-beta OAuth status route"
+        reason = "used by the WebUI v2 OAuth status route through product-auth route composition"
     )]
     pub(crate) async fn flow_record_for_status(
         &self,
@@ -1458,7 +1457,7 @@ impl RebornProductAuthServices {
     /// [`Self::flow_record_for_status`] instead.
     #[allow(
         dead_code,
-        reason = "used by the webui-v2-beta OAuth reconciliation command"
+        reason = "used by the WebUI v2 OAuth reconciliation command"
     )]
     pub(crate) async fn reconcile_oauth_flow(
         &self,
@@ -1511,7 +1510,7 @@ impl RebornProductAuthServices {
 
     #[allow(
         dead_code,
-        reason = "used by the webui-v2-beta OAuth callback route when DCR fallback PKCE storage is enabled"
+        reason = "used by the WebUI v2 OAuth callback route when DCR fallback PKCE storage is enabled"
     )]
     pub(crate) async fn oauth_pkce_verifier_for_flow(
         &self,
@@ -1562,7 +1561,7 @@ impl RebornProductAuthServices {
 
     #[allow(
         dead_code,
-        reason = "used by the webui-v2-beta extension OAuth route through product-auth route composition"
+        reason = "used by the WebUI v2 extension OAuth route through product-auth route composition"
     )]
     pub(crate) async fn start_dcr_setup_oauth_flow(
         &self,

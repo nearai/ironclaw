@@ -152,6 +152,22 @@ pub(super) fn capability_wiring(
     // run-scoped external-tool state.
     let external_tool_catalog: Arc<dyn ExternalToolCatalog> =
         Arc::clone(&local_runtime.external_tool_catalog);
+    // Wire the durable gate-record and host-private replay-payload stores over
+    // the composition-owned scoped filesystem (same backend + per-user mount view
+    // as every other durable store; `extension_filesystem` is the shared composite
+    // root). Before this, the loop-host capability port defaulted both to
+    // no-op/fail-closed, so production gate records never persisted (the #6245 gap)
+    // and a gate/auth resume had no host-side replay payload to reconstitute
+    // {input, estimate} from (arch-simplification §5.3 Stage 2a-i).
+    let capability_store_filesystem =
+        crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem));
+    let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore> =
+        Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+            Arc::clone(&capability_store_filesystem),
+        ));
+    let replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore> = Arc::new(
+        ironclaw_capabilities::FilesystemReplayPayloadStore::new(capability_store_filesystem),
+    );
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
         Arc::new(RefreshingLoopCapabilityPortFactory {
             runtime,
@@ -173,6 +189,8 @@ pub(super) fn capability_wiring(
             approval_settings,
             approval_requests,
             capability_leases,
+            gate_record_store,
+            replay_payload_store,
             external_tool_catalog,
         });
     Some(CapabilityPortWiring {
@@ -205,6 +223,12 @@ struct RefreshingLoopCapabilityPortFactory {
     approval_settings: Arc<dyn ApprovalSettingsProvider>,
     approval_requests: Arc<dyn ApprovalRequestStore>,
     capability_leases: Arc<dyn CapabilityLeaseStore>,
+    /// Durable model-visible gate-record store; one instance per runtime, shared
+    /// by reference into every port this factory builds.
+    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
+    /// Durable host-private replay-payload store (§5.3 Stage 2a-i); one instance
+    /// per runtime, shared by reference into every port this factory builds.
+    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
     /// Per-runtime catalog of client-supplied ("external") tools. Shared across
     /// all runs in this runtime so a parked external-tool call and its later
     /// client-submitted output (across a pause/resume) hit the same store.
@@ -248,6 +272,8 @@ impl LoopCapabilityPortFactory for RefreshingLoopCapabilityPortFactory {
             approval_settings: Arc::clone(&self.approval_settings),
             approval_requests: Arc::clone(&self.approval_requests),
             capability_leases: Arc::clone(&self.capability_leases),
+            gate_record_store: Arc::clone(&self.gate_record_store),
+            replay_payload_store: Arc::clone(&self.replay_payload_store),
             external_tool_catalog: Arc::clone(&self.external_tool_catalog),
             // Test-support-only knobs (see each field's doc-comment on
             // `RefreshingCapabilityPortConfig`): always empty here.
@@ -1020,7 +1046,7 @@ fn durable_result_scope_error() -> AgentLoopHostError {
     )
 }
 
-fn local_dev_resource_scope_for_run(
+pub(super) fn local_dev_resource_scope_for_run(
     run_context: &LoopRunContext,
     fallback_user_id: &UserId,
 ) -> ResourceScope {
@@ -1177,6 +1203,26 @@ fn host_api_agent_loop_error(
         safe_summary,
         format!("{error:?}"),
     )
+}
+
+/// Shared test assertion for the `local_dev` per-capability submodules: the
+/// §5.3 collapse maps a recoverable service failure onto `Resolution::Done`
+/// carrying a `RecoverableFailure` verdict (the collapse of the old
+/// `CapabilityOutcome::Failed`). Consumed by `outbound_delivery`,
+/// `project_create`, and further submodules as they migrate to the `Resolution`
+/// shape — replacing the byte-identical per-file copies (CodeRabbit #6299).
+#[cfg(test)]
+pub(crate) fn assert_recoverable_failure(
+    resolution: &ironclaw_host_api::Resolution,
+    expected: ironclaw_host_api::FailureKind,
+) {
+    match resolution {
+        ironclaw_host_api::Resolution::Done(outcome) => assert_eq!(
+            outcome.verdict,
+            ironclaw_host_api::ToolVerdict::recoverable_failure(expected)
+        ),
+        other => panic!("expected Resolution::Done recoverable failure, got {other:?}"),
+    }
 }
 
 #[cfg(test)]

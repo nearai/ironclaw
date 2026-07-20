@@ -52,17 +52,17 @@ use crate::search::MemorySearchRequest;
 /// leaks between calls.
 pub type RepoFactory<R> = fn() -> R; // pub-api-exempt: contract-test consumers name this factory type from downstream crates.
 
-#[cfg(any(test, feature = "contract-tests"))]
+#[cfg(any(test, feature = "test-support"))]
 fn scope_a() -> MemoryDocumentScope {
     MemoryDocumentScope::new("tenant-a", "alice", Some("project-1")).expect("valid scope a")
 }
 
-#[cfg(any(test, feature = "contract-tests"))]
+#[cfg(any(test, feature = "test-support"))]
 fn scope_b() -> MemoryDocumentScope {
     MemoryDocumentScope::new("tenant-b", "bob", Some("project-1")).expect("valid scope b")
 }
 
-#[cfg(any(test, feature = "contract-tests"))]
+#[cfg(any(test, feature = "test-support"))]
 fn path_in(scope: &MemoryDocumentScope, relative: &str) -> MemoryDocumentPath {
     MemoryDocumentPath::new(
         scope.tenant_id(),
@@ -74,7 +74,7 @@ fn path_in(scope: &MemoryDocumentScope, relative: &str) -> MemoryDocumentPath {
 }
 
 /// Contract: a put followed by a get returns the same bytes.
-#[cfg(any(test, feature = "contract-tests"))]
+#[cfg(any(test, feature = "test-support"))]
 pub async fn round_trip_returns_written_bytes<R, F>(factory: F)
 where
     R: MemoryDocumentRepository,
@@ -96,7 +96,7 @@ where
 /// This is the load-bearing invariant flagged in #3890 — search and
 /// list isolation across tenants. Every impl must honor it; the
 /// harness is the place to assert it once.
-#[cfg(any(test, feature = "contract-tests"))]
+#[cfg(any(test, feature = "test-support"))]
 pub async fn writes_isolated_across_scopes<R, F>(factory: F)
 where
     R: MemoryDocumentRepository,
@@ -122,7 +122,7 @@ where
 }
 
 /// Contract: list_documents honors scope.
-#[cfg(any(test, feature = "contract-tests"))]
+#[cfg(any(test, feature = "test-support"))]
 pub async fn list_documents_honors_scope<R, F>(factory: F)
 where
     R: MemoryDocumentRepository,
@@ -183,7 +183,7 @@ where
 /// Impls that *do* support search are exercised by
 /// [`search_documents_isolated_across_scopes`] instead, which seeds
 /// chunk records so the FTS query returns real hits.
-#[cfg(any(test, feature = "contract-tests"))]
+#[cfg(any(test, feature = "test-support"))]
 pub async fn search_documents_unsupported_is_documented<R, F>(factory: F)
 where
     R: MemoryDocumentRepository,
@@ -232,7 +232,7 @@ where
 /// seeded, scope A's search must return its own hit and must NOT return
 /// scope B's identical-content hit; if the impl ignored scope, this test
 /// fails on the cross-tenant leak assertion.
-#[cfg(any(test, feature = "contract-tests"))]
+#[cfg(any(test, feature = "test-support"))]
 pub async fn search_documents_isolated_across_scopes<R, F>(factory: F)
 where
     R: MemoryDocumentRepository + MemoryDocumentIndexRepository,
