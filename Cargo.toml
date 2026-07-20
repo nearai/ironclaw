@@ -435,7 +435,7 @@ path = "tests/integration/group_journeys/main.rs"
 
 [[test]]
 name = "reborn_integration_oauth_refresh"
-path = "tests/integration/oauth_refresh.rs"
+path = "tests/integration/auth/oauth_refresh.rs"
 required-features = ["libsql"]
 
 [[test]]
@@ -448,11 +448,11 @@ path = "tests/integration/subagent_await_edge.rs"
 
 [[test]]
 name = "reborn_integration_auth_failure"
-path = "tests/integration/auth_failure.rs"
+path = "tests/integration/auth/auth_failure.rs"
 
 [[test]]
 name = "reborn_integration_auth_gate"
-path = "tests/integration/auth_gate.rs"
+path = "tests/integration/auth/auth_gate.rs"
 
 [[test]]
 name = "reborn_integration_backend_matrix"
@@ -524,7 +524,11 @@ path = "tests/integration/mcp.rs"
 
 [[test]]
 name = "reborn_integration_oauth_connect"
-path = "tests/integration/oauth_connect.rs"
+path = "tests/integration/auth/oauth_connect.rs"
+
+[[test]]
+name = "reborn_integration_oauth_popup_journeys"
+path = "tests/integration/auth/oauth_popup_journeys.rs"
 
 [[test]]
 name = "reborn_integration_outbound_store_durability"
@@ -552,7 +556,7 @@ path = "tests/integration/real_egress_pipeline.rs"
 
 [[test]]
 name = "reborn_integration_reopen_resume_through_gate"
-path = "tests/integration/reopen_resume_through_gate.rs"
+path = "tests/integration/auth/reopen_resume_through_gate.rs"
 
 [[test]]
 name = "reborn_integration_safety"

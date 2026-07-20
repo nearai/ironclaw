@@ -128,6 +128,40 @@ impl InMemoryAuthProductServices {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+
+    /// The supersede walk over already-locked state used by `create_flow`,
+    /// which must run walk + insert inside one lock acquisition — two racing
+    /// setup creates could otherwise both observe "no live predecessor" and
+    /// both survive.
+    ///
+    /// Owner granularity (tenant/user/agent/project + surface + session):
+    /// setup flows are thread-less and each re-opened connect popup mints a
+    /// fresh invocation, so `flow_shares_setup_owner_root` — not full scope
+    /// equality — is the correct predicate here, mirroring the durable
+    /// store's per-owner+surface+session flow-root listing. Records are
+    /// mutated in place rather than routed through `cancel_flow`, whose
+    /// full-scope check would reject the prior invocation's scope.
+    fn supersede_setup_flows_locked(
+        state: &mut AuthState,
+        scope: &crate::AuthProductScope,
+        provider: &crate::AuthProviderId,
+    ) -> Vec<AuthFlowId> {
+        let now = Utc::now();
+        let mut superseded = Vec::new();
+        for record in state.flows.values_mut() {
+            if crate::flow_shares_setup_owner_root(&record.scope, scope)
+                && &record.provider == provider
+                && crate::is_setup_class_continuation(&record.continuation)
+                && !crate::is_terminal_status(record.status)
+            {
+                record.status = AuthFlowStatus::Canceled;
+                record.error = Some(crate::AuthErrorCode::Canceled);
+                record.updated_at = now;
+                superseded.push(record.id);
+            }
+        }
+        superseded
+    }
 }
 
 #[async_trait]
@@ -164,6 +198,13 @@ impl AuthFlowRecordSource for InMemoryAuthProductServices {
 impl AuthFlowManager for InMemoryAuthProductServices {
     async fn create_flow(&self, request: NewAuthFlow) -> Result<AuthFlowRecord, AuthProductError> {
         let mut state = self.lock_state();
+        // Supersede-on-start happens at the creation seam itself (see the
+        // `AuthFlowManager::create_flow` contract), under the SAME lock
+        // acquisition as the insert below: walk + insert must be one critical
+        // section or two racing creates both observe "no live predecessor".
+        if crate::is_setup_class_continuation(&request.continuation) {
+            Self::supersede_setup_flows_locked(&mut state, &request.scope, &request.provider);
+        }
         if let Some(binding) = &request.update_binding {
             let account = state
                 .accounts
@@ -508,7 +549,10 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         }
         if !matches!(
             record.status,
-            AuthFlowStatus::Completed | AuthFlowStatus::Canceled | AuthFlowStatus::Failed
+            AuthFlowStatus::Completed
+                | AuthFlowStatus::Canceled
+                | AuthFlowStatus::Failed
+                | AuthFlowStatus::Expired
         ) {
             return Err(AuthProductError::FlowAlreadyTerminal);
         }
@@ -1147,11 +1191,30 @@ impl SecretCleanupService for InMemoryAuthProductServices {
         // reported so the composition layer denies its blocked turn gate
         // instead of leaving the turn parked. `mark_continuation_dispatched`
         // makes the handoff emit-once across cleanup retries.
-        if let Some(provider) = request.provider.as_ref() {
+        if request.provider.is_some() || request.lifecycle_package.is_some() {
             for record in state.flows.values_mut() {
-                if &record.provider != provider
-                    || !flow_matches_credential_owner(&record.scope, &request.scope)
-                {
+                if !flow_matches_credential_owner(&record.scope, &request.scope) {
+                    continue;
+                }
+                let provider_selected = request.provider.as_ref() == Some(&record.provider);
+                // Package-keyed selection mirrors the durable store (#6169):
+                // the removed extension's own LifecycleActivation flows die
+                // with it even when the provider is shared with another
+                // installed extension.
+                let package_selected = matches!(
+                    (&record.continuation, request.lifecycle_package.as_ref()),
+                    (
+                        crate::AuthContinuationRef::LifecycleActivation { package_ref },
+                        Some(package),
+                    ) if package_ref == package
+                );
+                let requires_cleanup = !crate::is_terminal_status(record.status)
+                    || (record.continuation_emitted_at.is_none()
+                        && matches!(
+                            record.continuation,
+                            crate::AuthContinuationRef::TurnGateResume { .. }
+                        ));
+                if !(provider_selected || package_selected) || !requires_cleanup {
                     continue;
                 }
                 if !crate::is_terminal_status(record.status) {
@@ -1176,6 +1239,12 @@ impl SecretCleanupService for InMemoryAuthProductServices {
                             emitted_at: Utc::now(),
                         });
                 }
+                // #6169: report each walked flow so the composition layer can
+                // eagerly drop its durable setup PKCE verifier secret.
+                report.canceled_flows.push(crate::CanceledCleanupFlow {
+                    scope: record.scope.clone(),
+                    flow_id: record.id,
+                });
             }
         }
         // Credential-owner granularity, not full scope equality: cleanup

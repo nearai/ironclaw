@@ -55,5 +55,5 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # reach `ironclaw_auth::test_support`.
 ironclaw_auth = { path = ".", features = ["test-support"] }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "rt", "sync"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync"] }
 toml = "1.1"

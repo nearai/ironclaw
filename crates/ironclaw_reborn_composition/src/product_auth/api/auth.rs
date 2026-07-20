@@ -141,7 +141,12 @@ pub struct RebornOAuthCallbackRequest {
 ///
 /// The browser-facing route chooses neither flow kind nor continuation. Those
 /// product-auth semantics stay here with the auth service boundary.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Deliberately not serializable and not comparable: it carries the raw
+/// `pkce_verifier` as a one-shot input to the auth service boundary. Its
+/// `Debug` redacts the secret (`SecretString`), and equality is not derived so
+/// the verifier cannot be probed by comparison.
+#[derive(Debug, Clone)]
 pub(crate) struct RebornOAuthStartFlowRequest {
     pub(crate) flow_id: Option<AuthFlowId>,
     pub(crate) scope: AuthProductScope,
@@ -1032,6 +1037,11 @@ impl RebornProductAuthServices {
                 .await
                 .map_err(RebornCredentialLifecycleError::from)?;
         }
+        // #6169 follow-up: `report.canceled_flows` names the flows whose
+        // durable setup PKCE verifiers should be dropped eagerly. This branch
+        // still stores setup verifiers process-locally (see the serve-layer
+        // PKCE cache), so there is no durable secret to drop yet; the eager
+        // drop lands with the durable setup-PKCE port.
         Ok(report)
     }
 
@@ -1317,7 +1327,10 @@ impl RebornProductAuthServices {
             .map_err(RebornOAuthCallbackError::from)
     }
 
-    #[allow(dead_code, reason = "used by upcoming Reborn OAuth setup route wiring")]
+    #[allow(
+        dead_code,
+        reason = "used by the feature-scoped webui-v2-beta OAuth setup routes"
+    )]
     pub(crate) async fn start_setup_oauth_flow(
         &self,
         request: RebornOAuthStartFlowRequest,
@@ -1580,6 +1593,7 @@ impl RebornProductAuthServices {
                 let request = SecretCleanupRequest {
                     scope: completed.scope.clone(),
                     extension_id,
+                    lifecycle_package: Some(package_ref.clone()),
                     // The OAuth callback stores the minted personal credential as
                     // `UserReusable` with no extension ownership, so an
                     // extension-keyed cleanup alone would never reach it; select

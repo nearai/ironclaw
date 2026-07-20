@@ -20,6 +20,8 @@ use std::{
     time::Duration,
 };
 
+use lru::LruCache;
+
 use axum::{
     Json, Router,
     extract::{Extension, Path, RawQuery, State},
@@ -53,7 +55,6 @@ use ironclaw_host_api::{
 use ironclaw_product_workflow::{
     LifecyclePackageKind, RebornServicesApi, RebornServicesError, WebUiAuthenticatedCaller,
 };
-use lru::LruCache;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::json;
@@ -1537,6 +1538,7 @@ mod tests {
     };
     use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
     use ironclaw_turns::{TurnRunId, TurnScope};
+    use std::sync::Mutex;
     use tower::ServiceExt;
 
     // Contract: the origin-independent reconnect flow-status route is a
@@ -1639,17 +1641,6 @@ mod tests {
         }
     }
 
-    fn test_state() -> ProductAuthRouteState {
-        ProductAuthRouteState::new(
-            Arc::new(RebornProductAuthServices::local_dev_in_memory(Arc::new(
-                NoopDispatcher,
-            ))),
-            TenantId::new("tenant-alpha").expect("tenant"),
-            None,
-            None,
-        )
-    }
-
     fn test_resource_scope() -> ResourceScope {
         ResourceScope {
             tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
@@ -1666,6 +1657,17 @@ mod tests {
         WebUiAuthenticatedCaller::new(
             TenantId::new("tenant-alpha").expect("tenant"),
             UserId::new("user-alpha").expect("user"),
+            None,
+            None,
+        )
+    }
+
+    fn test_state() -> ProductAuthRouteState {
+        ProductAuthRouteState::new(
+            Arc::new(RebornProductAuthServices::local_dev_in_memory(Arc::new(
+                NoopDispatcher,
+            ))),
+            TenantId::new("tenant-alpha").expect("tenant"),
             None,
             None,
         )

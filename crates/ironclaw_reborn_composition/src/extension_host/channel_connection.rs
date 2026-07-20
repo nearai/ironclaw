@@ -507,6 +507,7 @@ fn personal_credential_cleanup_request(
             AuthProviderId::new(provider)
                 .map_err(|error| RebornServicesError::internal_from(error.to_string()))?,
         ),
+        lifecycle_package: None,
         action: SecretCleanupAction::Uninstall,
     })
 }

@@ -1484,6 +1484,7 @@ async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_unins
             scope: scope.clone(),
             extension_id: ext_id.clone(),
             provider: None,
+            lifecycle_package: None,
             action: SecretCleanupAction::Deactivate,
         })
         .await
@@ -1504,6 +1505,7 @@ async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_unins
             scope: scope.clone(),
             extension_id: ext_id.clone(),
             provider: None,
+            lifecycle_package: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await
@@ -1587,6 +1589,7 @@ async fn filesystem_cleanup_matches_owner_granularity_and_provider_selector() {
             scope: cleanup_scope.clone(),
             extension_id: ExtensionId::new("slack").unwrap(),
             provider: None,
+            lifecycle_package: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await
@@ -1599,6 +1602,7 @@ async fn filesystem_cleanup_matches_owner_granularity_and_provider_selector() {
             scope: cleanup_scope,
             extension_id: ExtensionId::new("slack").unwrap(),
             provider: Some(google_provider()),
+            lifecycle_package: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await
@@ -2432,6 +2436,7 @@ async fn filesystem_cleanup_removes_grant_from_non_owner_account() {
             scope: scope.clone(),
             extension_id: ext_id.clone(),
             provider: None,
+            lifecycle_package: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await
@@ -4376,86 +4381,163 @@ async fn filesystem_complete_credential_selection_rejects_different_auth_surface
     );
 }
 
-/// A1 · Supersede-on-start (RFC 9700 §4.7.1) over the durable filesystem store.
-/// A re-opened "Connect" popup cancels the prior non-terminal `SetupOnly` flow
-/// for the same owner+provider, leaving exactly one live setup flow — without
-/// touching an in-flight extension (`LifecycleActivation`) flow or a different
-/// provider. Exercises the real durable `cancel_superseded_setup_flows` path,
-/// which lists the owner+surface+session flow root (thread/invocation-agnostic)
-/// and cancels each matching setup flow.
+/// Durable twin of the `create_flow_supersedes_prior_live_setup_class_flows`
+/// contract test: supersede-on-start lives INSIDE `create_flow`, keyed off the
+/// request's continuation class, so a start route that reaches flow creation
+/// through any path (plain setup, DCR registry, a future route) inherits the
+/// "≤1 live setup-class flow per owner+provider" invariant structurally.
+/// Setup flows are thread-less and every popup re-open mints a fresh
+/// invocation, so the two prior flows here deliberately carry different
+/// invocation ids under the same durable owner root.
 #[tokio::test]
-async fn filesystem_cancel_superseded_setup_flows_supersedes_only_matching_setup_only_flow() {
+async fn create_flow_supersedes_prior_live_setup_class_flows_in_the_durable_store() {
+    use ironclaw_auth::{AuthGateRef, TurnRunRef};
+
     let filesystem = test_filesystem();
     let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
-    let scope = test_scope();
     let service = test_service(filesystem, secret_store);
-    let github = AuthProviderId::new("github").unwrap();
 
-    let setup_flow = |provider: AuthProviderId, continuation: AuthContinuationRef| {
-        let scope = scope.clone();
+    let provider = AuthProviderId::new("github").unwrap();
+    let other_provider = AuthProviderId::new("gmail").unwrap();
+    let setup_flow = |scope: &AuthProductScope,
+                      flow_provider: &AuthProviderId,
+                      continuation: AuthContinuationRef,
+                      state: &str| NewAuthFlow {
+        id: None,
+        scope: scope.clone(),
+        kind: AuthFlowKind::IntegrationCredential,
+        provider: flow_provider.clone(),
+        challenge: AuthChallenge::OAuthUrl {
+            authorization_url: OAuthAuthorizationUrl::new(
+                "https://example.com/oauth/authorize?state=supersede",
+            )
+            .unwrap(),
+            expires_at: Utc::now() + Duration::minutes(10),
+        },
+        continuation,
+        update_binding: None,
+        opaque_state_hash: Some(state_hash(state)),
+        pkce_verifier_hash: Some(pkce_hash(state)),
+        expires_at: Utc::now() + Duration::minutes(10),
+    };
+
+    // Each start mints a fresh invocation id (`test_scope` does the same), so
+    // supersede must match on the owner root, not full scope equality.
+    let first_open = test_scope();
+    let setup_only = service
+        .create_flow(setup_flow(
+            &first_open,
+            &provider,
+            AuthContinuationRef::SetupOnly,
+            "first-open",
+        ))
+        .await
+        .unwrap();
+    let card_open = test_scope();
+    let lifecycle = service
+        .create_flow(setup_flow(
+            &card_open,
+            &provider,
+            AuthContinuationRef::LifecycleActivation {
+                package_ref: ironclaw_auth::LifecyclePackageRef::new("github-extension").unwrap(),
+            },
+            "card-open",
+        ))
+        .await
+        .unwrap();
+    let gate_scope = test_scope();
+    let turn_gate = service
+        .create_flow(setup_flow(
+            &gate_scope,
+            &provider,
+            AuthContinuationRef::TurnGateResume {
+                turn_run_ref: TurnRunRef::new("run-parked").unwrap(),
+                gate_ref: AuthGateRef::new("gate:parked-turn").unwrap(),
+            },
+            "gate-open",
+        ))
+        .await
+        .unwrap();
+    let other_scope = test_scope();
+    let other_prov = service
+        .create_flow(setup_flow(
+            &other_scope,
+            &other_provider,
+            AuthContinuationRef::SetupOnly,
+            "other-provider",
+        ))
+        .await
+        .unwrap();
+
+    let reopen = test_scope();
+    let reopened = service
+        .create_flow(setup_flow(
+            &reopen,
+            &provider,
+            AuthContinuationRef::SetupOnly,
+            "reopen",
+        ))
+        .await
+        .unwrap();
+
+    let status_of = |flow: &AuthFlowRecord| {
+        let scope = flow.scope.clone();
+        let id = flow.id;
         let service = &service;
         async move {
             service
-                .create_flow(NewAuthFlow {
-                    id: None,
-                    scope,
-                    kind: AuthFlowKind::IntegrationCredential,
-                    provider,
-                    challenge: AuthChallenge::OAuthUrl {
-                        authorization_url: OAuthAuthorizationUrl::new(
-                            "https://provider.example/oauth",
-                        )
-                        .unwrap(),
-                        expires_at: Utc::now() + Duration::minutes(5),
-                    },
-                    continuation,
-                    update_binding: None,
-                    opaque_state_hash: Some(state_hash("state")),
-                    pkce_verifier_hash: Some(pkce_hash("pkce")),
-                    expires_at: Utc::now() + Duration::minutes(5),
-                })
+                .get_flow(&scope, id)
                 .await
                 .unwrap()
+                .expect("flow record is retained")
+                .status
         }
     };
-
-    // Prior abandoned github setup popup (SetupOnly, still AwaitingUser).
-    let first = setup_flow(github.clone(), AuthContinuationRef::SetupOnly).await;
-    // Bystanders supersede must never disturb.
-    let lifecycle = setup_flow(
-        github.clone(),
-        AuthContinuationRef::LifecycleActivation {
-            package_ref: ironclaw_auth::LifecyclePackageRef::new("github-ext").unwrap(),
-        },
-    )
-    .await;
-    let other_provider = setup_flow(google_provider(), AuthContinuationRef::SetupOnly).await;
-
-    let superseded = service
-        .cancel_superseded_setup_flows(&scope, &github)
-        .await
-        .unwrap();
-    assert_eq!(superseded, vec![first.id]);
-
-    let status = |id| {
-        let scope = scope.clone();
-        let service = &service;
-        async move { service.get_flow(&scope, id).await.unwrap().unwrap().status }
-    };
-    assert_eq!(status(first.id).await, AuthFlowStatus::Canceled);
-    assert_eq!(status(lifecycle.id).await, AuthFlowStatus::AwaitingUser);
     assert_eq!(
-        status(other_provider.id).await,
-        AuthFlowStatus::AwaitingUser
+        status_of(&reopened).await,
+        AuthFlowStatus::AwaitingUser,
+        "the freshly created flow must not supersede itself"
+    );
+    assert_eq!(
+        status_of(&setup_only).await,
+        AuthFlowStatus::Canceled,
+        "creation must cancel the prior SetupOnly flow across invocation ids"
+    );
+    assert_eq!(
+        status_of(&lifecycle).await,
+        AuthFlowStatus::Canceled,
+        "creation must cancel the prior LifecycleActivation flow"
+    );
+    assert_eq!(
+        status_of(&turn_gate).await,
+        AuthFlowStatus::AwaitingUser,
+        "a parked turn's gate flow must survive a setup start"
+    );
+    assert_eq!(
+        status_of(&other_prov).await,
+        AuthFlowStatus::AwaitingUser,
+        "another provider's setup flow must survive"
     );
 
-    // Idempotent: nothing live left to cancel for github.
-    let again = service
-        .cancel_superseded_setup_flows(&scope, &github)
+    // And the exclusion cuts both ways: a gate creation supersedes nothing.
+    let second_gate_scope = test_scope();
+    service
+        .create_flow(setup_flow(
+            &second_gate_scope,
+            &provider,
+            AuthContinuationRef::TurnGateResume {
+                turn_run_ref: TurnRunRef::new("run-parked-two").unwrap(),
+                gate_ref: AuthGateRef::new("gate:parked-turn-two").unwrap(),
+            },
+            "second-gate-open",
+        ))
         .await
         .unwrap();
-    assert!(again.is_empty());
-    assert_eq!(status(first.id).await, AuthFlowStatus::Canceled);
+    assert_eq!(
+        status_of(&reopened).await,
+        AuthFlowStatus::AwaitingUser,
+        "a gate flow's creation must never cancel the live setup flow"
+    );
 }
 
 /// A3 · A removal/disconnect cleanup that arrives on a *different* surface
@@ -4588,6 +4670,7 @@ async fn filesystem_cleanup_cancels_pending_flow_across_surfaces() {
             scope: cleanup_scope.clone(),
             extension_id: ExtensionId::new("github").unwrap(),
             provider: Some(github.clone()),
+            lifecycle_package: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await
@@ -4638,6 +4721,7 @@ async fn filesystem_cleanup_cancels_pending_flow_across_surfaces() {
             scope: cleanup_scope,
             extension_id: ExtensionId::new("github").unwrap(),
             provider: Some(github),
+            lifecycle_package: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await

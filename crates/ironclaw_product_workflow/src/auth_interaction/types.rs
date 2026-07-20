@@ -303,8 +303,10 @@ impl AuthGateRecord {
         // when a background sweep has not yet transitioned it to `Expired`.
         // Without this, an abandoned "Connect" flow keeps reading as
         // authenticating past its deadline. The durable write paths expire flows
-        // lazily; read projections must guard the clock themselves.
-        if now > self.flow.expires_at {
+        // lazily; read projections must guard the clock themselves. The
+        // boundary is inclusive (`>=`) to match `project_flow_status`'s
+        // `expires_at <= now`, so both projections flip at the same instant.
+        if now >= self.flow.expires_at {
             return None;
         }
         let status = AuthInteractionStatus::from_flow_status(self.flow.status)?;

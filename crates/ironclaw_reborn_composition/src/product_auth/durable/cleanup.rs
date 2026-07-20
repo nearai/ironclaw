@@ -5,8 +5,8 @@ use ironclaw_filesystem::{CasExpectation, RootFilesystem};
 use super::FilesystemAuthProductServices;
 use ironclaw_auth::{
     AuthContinuationEvent, AuthContinuationRef, AuthFlowManager, AuthProductError,
-    CredentialAccountOwnerScope, CredentialAccountStatus, CredentialOwnership, SecretCleanupAction,
-    SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
+    CanceledCleanupFlow, CredentialAccountOwnerScope, CredentialAccountStatus, CredentialOwnership,
+    SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
 };
 
 #[async_trait]
@@ -39,11 +39,30 @@ where
         // reported so the composition layer denies its blocked turn gate
         // instead of leaving the turn parked. `mark_continuation_dispatched`
         // makes the handoff emit-once across cleanup retries.
-        if let Some(provider) = request.provider.as_ref() {
-            for flow in self
-                .lifecycle_flows_for_owner_provider(&request.scope.resource, provider)
-                .await?
-            {
+        if request.provider.is_some() || request.lifecycle_package.is_some() {
+            let mut flows = Vec::new();
+            if let Some(provider) = request.provider.as_ref() {
+                flows.extend(
+                    self.lifecycle_flows_for_owner_provider(&request.scope.resource, provider)
+                        .await?,
+                );
+            }
+            // Package-keyed selection (#6169) is independent of the provider
+            // selector: uninstall passes it even when the provider is shared
+            // with (and therefore retained for) another installed extension,
+            // so the removed extension's own LifecycleActivation flows still
+            // die with it.
+            if let Some(package) = request.lifecycle_package.as_ref() {
+                for flow in self
+                    .lifecycle_flows_for_owner_package(&request.scope.resource, package)
+                    .await?
+                {
+                    if !flows.iter().any(|existing| existing.id == flow.id) {
+                        flows.push(flow);
+                    }
+                }
+            }
+            for flow in flows {
                 let canceled = match flow.status {
                     status if ironclaw_auth::is_terminal_status(status) => flow,
                     _ => match self.cancel_flow(&flow.scope, flow.id).await {
@@ -71,6 +90,12 @@ where
                             emitted_at: Utc::now(),
                         });
                 }
+                // Name every walked terminal flow so the composition wrapper
+                // can eagerly drop its durable setup PKCE verifier.
+                report.canceled_flows.push(CanceledCleanupFlow {
+                    scope: canceled.scope.clone(),
+                    flow_id: canceled.id,
+                });
             }
         }
         // Credential-owner granularity, not full scope equality: lifecycle and

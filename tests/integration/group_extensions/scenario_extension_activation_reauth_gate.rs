@@ -18,7 +18,7 @@
 //!   wedge the machine (#5878's "requires multiple retry attempts" arm).
 //!
 //! Complements the DISPATCH-TIME 401 → re-auth pin in
-//! `tests/integration/auth_gate.rs` (issue #5878 reported the
+//! `tests/integration/auth/auth_gate.rs` (issue #5878 reported the
 //! `extension_activate` surface specifically, which that test does not
 //! drive). Uses "notion" (installed+removed by scenario 2, so the install
 //! here is fresh; no other scenario touches its credential accounts).

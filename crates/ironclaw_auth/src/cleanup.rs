@@ -3,8 +3,8 @@ use ironclaw_host_api::ExtensionId;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AuthContinuationEvent, AuthProductError, AuthProviderId, CredentialAccountId,
-    scope::AuthProductScope,
+    AuthContinuationEvent, AuthFlowId, AuthProductError, AuthProviderId, CredentialAccountId,
+    LifecyclePackageRef, scope::AuthProductScope,
 };
 
 /// Lifecycle event that drives credential/session cleanup.
@@ -33,7 +33,25 @@ pub struct SecretCleanupRequest {
     /// channel disconnect uses to revoke (not delete) the caller's own
     /// personal token.
     pub provider: Option<AuthProviderId>,
+    /// Cancel every non-terminal flow whose `LifecycleActivation`
+    /// continuation names this package, regardless of provider. Uninstall
+    /// callers pass the removed extension's package ref so its own connect
+    /// flows die with it even when the provider is shared with another
+    /// installed extension (a provider-keyed cancel is deliberately skipped
+    /// for shared providers, but the removed extension's flows must not
+    /// survive to complete a late callback and then compensate away the
+    /// shared credential).
+    pub lifecycle_package: Option<LifecyclePackageRef>,
     pub action: SecretCleanupAction,
+}
+
+/// A flow that lifecycle cleanup drove to (or found already in) a terminal
+/// state, so callers can drop per-flow material stored outside the flow
+/// record — today the setup-path PKCE verifier secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanceledCleanupFlow {
+    pub scope: AuthProductScope,
+    pub flow_id: AuthFlowId,
 }
 
 /// Redacted cleanup report. It carries account ids only, never secret handles or
@@ -54,6 +72,12 @@ pub struct SecretCleanupReport {
     /// it carries no secret material (flow/scope/continuation refs only).
     #[serde(skip)]
     pub canceled_turn_gate_continuations: Vec<AuthContinuationEvent>,
+    /// Flows this cleanup walked to a terminal state, so the composition
+    /// layer can eagerly drop their durable setup PKCE verifier secrets
+    /// instead of leaving them to TTL expiry. Internal handoff only — never
+    /// serialized into product responses.
+    #[serde(skip)]
+    pub canceled_flows: Vec<CanceledCleanupFlow>,
 }
 
 /// Stable redacted cleanup quarantine category.
