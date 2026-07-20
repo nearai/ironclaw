@@ -187,20 +187,9 @@ use ironclaw_triggers::{
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 #[cfg(feature = "test-support")]
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
-#[cfg(all(
-    feature = "inmemory-turn-state",
-    any(feature = "libsql", feature = "postgres")
-))]
-use ironclaw_turns::FilesystemTurnStateBlockPersistence;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::FilesystemTurnStateStoreKind;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::InMemoryRunProfileResolver;
-#[cfg(any(
-    feature = "inmemory-turn-state",
-    not(any(feature = "libsql", feature = "postgres"))
-))]
-use ironclaw_turns::InMemoryTurnStateStore;
 use ironclaw_turns::{
     CheckpointStateStore, DefaultTurnCoordinator, ExternalToolCatalog, InMemoryExternalToolCatalog,
     LoopCheckpointStore,
@@ -266,19 +255,17 @@ impl ironclaw_network::NetworkHttpEgress for TestNetworkHttpEgress {
     }
 }
 
-// The in-memory turn-state authority wins whenever `inmemory-turn-state` is on
-// (the runtime-wedge fix), and is also the only option in pure-memory builds.
-// Otherwise the durable per-user filesystem row store is used.
-#[cfg(all(
-    not(feature = "inmemory-turn-state"),
-    any(feature = "libsql", feature = "postgres")
-))]
+// One turn-state store, backend-injected — the production
+// `FilesystemTurnStateStoreKind<F>` (row layout) every deployment uses, never a
+// bespoke `InMemoryTurnStateStore` standalone authority (arch-simplification
+// §4.3). The `inmemory-turn-state` feature no longer selects the store TYPE, only
+// the durability POLICY: it flips this store to `WriteBehind` at the build arm.
+// The no-durable-features build backs it with `InMemoryBackend` directly
+// (volatile, `LocalOnly`), matching the sibling run-state/approval/lease stores.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type ComposedTurnStateStore = FilesystemTurnStateStoreKind<CompositeRootFilesystem>;
-#[cfg(any(
-    feature = "inmemory-turn-state",
-    not(any(feature = "libsql", feature = "postgres"))
-))]
-pub(crate) type ComposedTurnStateStore = InMemoryTurnStateStore;
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+pub(crate) type ComposedTurnStateStore = FilesystemTurnStateStoreKind<InMemoryBackend>;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 type ComposedResourceGovernor = FilesystemResourceGovernor<CompositeRootFilesystem>;
@@ -2497,35 +2484,46 @@ async fn build_local_runtime_store_graph(
     let persistent_approval_policies = Arc::new(FilesystemPersistentApprovalPolicyStore::new(
         Arc::clone(&scoped_filesystem),
     ));
-    // Runtime-wedge fix: with `inmemory-turn-state`, the whole local-dev/hosted
-    // runtime family (incl. hosted-single-tenant-volume) coordinates turn state
-    // in one in-process authority — no per-user `state.json` CAS livelock.
-    // Otherwise the durable filesystem row store is used. `ComposedTurnStateStore`
-    // resolves to the matching concrete type via the same feature cfg, so both
-    // arms satisfy every downstream consumer (coordinator, `LoopCheckpointStore`,
-    // `RuntimeTurnStateStore`) with no trait-object plumbing.
+    // #6263 Step 4 — the `inmemory-turn-state` profile no longer stands up the raw
+    // in-memory authority + block-persistence snapshot. EVERY deployment now
+    // composes the durable filesystem ROW store (typed journal/delta rows + a hot
+    // in-process snapshot cache). `ComposedTurnStateStore` is
+    // `FilesystemTurnStateStoreKind<F>` unconditionally, so the feature no longer
+    // selects the store TYPE. The row store is crash-recoverable (rehydrates from
+    // its own rows on boot) and, unlike the old blob store, has NO per-user
+    // `state.json` CAS livelock (journal/row model, not whole-snapshot CAS) — so it
+    // is strictly more durable than the former in-memory authority (which lost
+    // in-flight turns on crash and persisted only the gate-blocked set + a graceful
+    // shutdown snapshot). Existing deployments migrate automatically: their on-disk
+    // block-persistence snapshot at `/turns/state.json` is imported as the row
+    // store's first delta on an empty-rows boot
+    // (`FilesystemTurnStateRowStore::migrate_legacy_blob_if_needed` reads the SAME
+    // path/format the block-persistence sink wrote), so no gate-parked/approval turn
+    // is lost on first boot after the flip.
+    //
+    // POLICY: ships at the `WriteThrough` default (every transition synchronously
+    // durable). The async `WriteBehind` policy that this flip was intended to select
+    // under `inmemory-turn-state` is DELIBERATELY NOT wired here yet: its durable
+    // query paths (`FilesystemTurnStateRowStore::get_run_state` et al. read
+    // materialized rows, not the hot cache — see
+    // `filesystem_store/row_store/traits.rs`), so a just-submitted run whose row is
+    // still async-materializing reads back `ScopeNotFound`. That breaks the
+    // runtime's read-after-submit (`send_user_message` → `wait_for_terminal` →
+    // `get_run_state`) on EVERY turn (proven: `budget_approval_e2e` fails under
+    // `WriteBehind`, passes under `WriteThrough`; store-tier submit→get_run_state
+    // returns `ScopeNotFound` single-threaded). `WriteBehind` must make its query
+    // paths cache-aware — validated by the §11.4 reference-model suite — before it
+    // can be selected here. The feature arm below is the seam that flip lands on.
     #[cfg(feature = "inmemory-turn-state")]
-    let turn_state = {
-        // Persist-on-block: the in-memory authority owns turn state in-process
-        // (no per-user `state.json` CAS livelock) but is otherwise volatile.
-        // Attach a durable sink that snapshots only when the gate-blocked set
-        // changes, and rehydrate from the last such snapshot on startup so a
-        // deploy never silently drops a turn parked on approval/auth.
-        let block_persistence = Arc::new(FilesystemTurnStateBlockPersistence::new(Arc::clone(
-            &turn_state_filesystem,
-        )));
-        // Fail loud on a real recovery fault. `load()` returns an empty snapshot
-        // for the normal missing-snapshot case (fresh volume), so an `Err` here is
-        // a genuine read/deserialization/integrity failure — falling back to an
-        // empty store would silently drop persisted blocked approvals/auth and
-        // defeat the recovery guarantee. Surface it as a build error instead
-        // (`RebornBuildError: Turn`), so an operator sees the failure rather than
-        // losing gate-parked turns.
-        let restored = block_persistence.load().await?;
-        let store =
-            InMemoryTurnStateStore::from_persistence_snapshot(restored, turn_state_store_limits)?;
-        Arc::new(store.with_block_persistence(block_persistence))
-    };
+    let turn_state = Arc::new(
+        production_turn_state_store(Arc::clone(&turn_state_filesystem), turn_state_store_limits)
+            // TODO(#6263 Step 4): `TurnStateDurabilityPolicy::WriteBehind` here once
+            // the row store's durable-read query paths are cache-aware (they
+            // currently return `ScopeNotFound` for an async-materializing run,
+            // breaking runtime read-after-submit). Pinned to `WriteThrough` so the
+            // profile is on the durable row store safely, with no regression.
+            .with_durability_policy(ironclaw_turns::TurnStateDurabilityPolicy::WriteThrough),
+    );
     #[cfg(not(feature = "inmemory-turn-state"))]
     let turn_state = Arc::new(production_turn_state_store(
         Arc::clone(&turn_state_filesystem),
@@ -2726,7 +2724,16 @@ async fn build_local_runtime_store_graph(
     let persistent_approval_policies = Arc::new(FilesystemPersistentApprovalPolicyStore::new(
         Arc::clone(&approvals_filesystem),
     ));
-    let turn_state = Arc::new(InMemoryTurnStateStore::with_limits(turn_state_store_limits));
+    // Turn state runs the production `FilesystemTurnStateStoreKind` row store over
+    // a dedicated volatile `InMemoryBackend` (§4.3) at the `WriteThrough` default —
+    // no bespoke `InMemoryTurnStateStore` standalone authority. Matches the sibling
+    // run-state/approval stores in this build (volatile, `LocalOnly`); the row
+    // store persists every transition synchronously, so this build needs no
+    // shutdown drain.
+    let turn_state = Arc::new(
+        FilesystemTurnStateStoreKind::row(crate::wrap_scoped(Arc::new(InMemoryBackend::new())))
+            .with_limits(turn_state_store_limits),
+    );
     // §4.3: checkpoint payloads run the production `FilesystemCheckpointStateStore`
     // over a dedicated volatile `InMemoryBackend`, and checkpoint metadata lives in
     // the turn-state store — the same `LoopCheckpointStore` wiring the durable

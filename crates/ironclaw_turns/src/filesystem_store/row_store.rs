@@ -251,6 +251,35 @@ where
         Ok(snapshot)
     }
 
+    /// Flush the `WriteBehind` tail: await every enqueued-but-un-acked
+    /// non-critical delta ack so nothing un-durable remains when the process
+    /// exits.
+    ///
+    /// Under [`TurnStateDurabilityPolicy::WriteThrough`] the pending window is
+    /// always empty (every commit already awaited its own ack), so this is a
+    /// no-op. Under [`TurnStateDurabilityPolicy::WriteBehind`] it awaits the
+    /// oldest-first backpressure window drained by
+    /// [`register_write_behind_commit`](Self::register_write_behind_commit),
+    /// giving a planned/graceful restart a clean durable tail. A hard crash
+    /// (SIGKILL/OOM) still loses only the un-acked non-critical (non-critical =
+    /// not gate-park/terminal) tail; gate-park and terminal transitions are
+    /// synchronously durable in both modes and never wait on this drain.
+    ///
+    /// Idempotent. On an append failure the flusher has halted and latched the
+    /// store degraded; the error is surfaced and the hot cache is rolled back to
+    /// the last consistent durable point (mirroring the backpressure path).
+    pub async fn drain(&self) -> Result<(), TurnError> {
+        let mut window = self.pending_write_behind.lock().await;
+        while let Some(ack) = window.pop_front() {
+            if let Err(error) = DeltaJournal::await_ack(Some(ack)).await {
+                drop(window);
+                self.clear_snapshot_cache().await;
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
     async fn read_snapshot(
         &self,
     ) -> Result<(TurnPersistenceSnapshot, Option<RecordVersion>), TurnError> {

@@ -2604,6 +2604,53 @@ async fn write_behind_critical_op_is_a_barrier_flushing_the_async_tail() {
     check_internal_invariants(&recovered.persistence_snapshot().await.unwrap()).unwrap();
 }
 
+/// #6263 Step 4 — `drain()` is the graceful-shutdown analog of the critical
+/// barrier. Under `WriteBehind` a batch of non-critical transitions returns `Ok`
+/// before flushing; calling [`FilesystemTurnStateRowStore::drain`] awaits the
+/// whole enqueued-but-un-acked async tail, so a crash (drop + reopen)
+/// immediately after the drain recovers every non-critical submit — with NO
+/// terminal op forcing a barrier. This is exactly what the runtime's graceful
+/// `shutdown()` relies on to recover in-flight (non-critical) runs across a
+/// planned restart under the flipped `inmemory-turn-state` profile.
+#[tokio::test]
+async fn write_behind_drain_flushes_the_async_tail_for_graceful_restart() {
+    let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
+    let scoped = fault_scoped(Arc::clone(&backend));
+    let policy = TurnStateDurabilityPolicy::WriteBehind;
+    let scope_list = scopes();
+
+    let run_ids: Vec<TurnRunId> = {
+        let store = open_row_store_with_policy(Arc::clone(&scoped), policy);
+        let mut run_ids = Vec::new();
+        for (i, scope) in scope_list.iter().enumerate() {
+            // Non-critical (Queued): returns Ok before its durable ack.
+            run_ids.push(submit_one(&store, scope, &format!("idem-drain-{i}")).await);
+        }
+        // Graceful shutdown drains the WriteBehind tail; NO terminal op forces it.
+        store.drain().await.expect("drain flushes the async tail");
+        // Crash synchronously — no await between drain's Ok and the drop.
+        drop(store);
+        run_ids
+    };
+
+    let recovered = open_row_store_with_policy(Arc::clone(&scoped), policy);
+    for (i, run_id) in run_ids.iter().enumerate() {
+        let state = recovered
+            .get_run_state(GetRunStateRequest {
+                scope: scope_list[i].clone(),
+                run_id: *run_id,
+            })
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "drain must have flushed async submit #{i} ({run_id}) durably, got {error:?}"
+                )
+            });
+        assert_eq!(state.status, TurnStatus::Queued, "drain-flushed run #{i}");
+    }
+    check_internal_invariants(&recovered.persistence_snapshot().await.unwrap()).unwrap();
+}
+
 /// #6263 Step 3 — append-failure HALT (`WriteBehind`, constraint 4). A
 /// non-critical op returns `Ok` before its durable append; if that append later
 /// fails, CONTINUING would leave later deltas building on a durable GAP =
