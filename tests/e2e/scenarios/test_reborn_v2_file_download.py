@@ -191,6 +191,7 @@ async def test_workspace_deep_link_expands_selected_file_parents(reborn_v2_yolo_
     async def serve_listing(route):
         query = parse_qs(urlparse(route.request.url).query)
         path = query.get("path", [""])[0]
+        assert path in listings, f"unexpected Workspace listing path: {path}"
         await route.fulfill(
             content_type="application/json",
             body=json.dumps({"mount": "workspace", "entries": listings[path]}),
