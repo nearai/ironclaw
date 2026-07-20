@@ -17,6 +17,7 @@ use ironclaw_turns::{
 
 const DEFAULT_SYSTEM_PROMPT_NAME: &str = "SYSTEM.md";
 const DEFAULT_SYSTEM_PROMPT_EMBEDDED: &str = include_str!("../../assets/prompts/default-system.md");
+pub(crate) const DEFAULT_SYSTEM_PROMPT_LANGUAGE_POLICY: &str = "- Respond in the same language as the user's current message unless they explicitly request another language.\n";
 /// Progressive tool-disclosure protocol, appended to the system prompt only when
 /// disclosure is active (bridged mode). A weak model will not adopt the
 /// search/describe/call protocol from the `tool_search` tool description alone —
@@ -72,7 +73,10 @@ impl DefaultSystemPromptIdentitySource {
     }
 
     fn prompt_content(&self) -> Result<String, DefaultSystemPromptError> {
-        let base = read_default_system_prompt(&self.storage_root, &self.prompt_path)?;
+        let base = effective_default_system_prompt(read_default_system_prompt(
+            &self.storage_root,
+            &self.prompt_path,
+        )?);
         if !self.disclosure_protocol_active {
             return Ok(base);
         }
@@ -108,6 +112,20 @@ impl DefaultSystemPromptIdentitySource {
             .map_err(|_| HostIdentityContextBuildError::Internal)?
             .insert(message_ref, HostIdentityMessageContent { name, content });
         Ok(())
+    }
+}
+
+fn effective_default_system_prompt(content: String) -> String {
+    let known_prior_default =
+        DEFAULT_SYSTEM_PROMPT_EMBEDDED.replacen(DEFAULT_SYSTEM_PROMPT_LANGUAGE_POLICY, "", 1);
+    if content == known_prior_default {
+        // Keep the editable file untouched rather than attempting a
+        // check-then-rewrite while its contents can change concurrently. The
+        // byte-identical prior bundle is the sole safe upgrade candidate, so
+        // compose the updated bundle only for the model request.
+        DEFAULT_SYSTEM_PROMPT_EMBEDDED.to_string()
+    } else {
+        content
     }
 }
 
@@ -480,11 +498,8 @@ mod tests {
         let prompt_path = storage_root.join("system/prompts/default-system.md");
         std::fs::create_dir_all(prompt_path.parent().expect("prompt parent"))
             .expect("prompt parent");
-        let known_prior_default = DEFAULT_SYSTEM_PROMPT_EMBEDDED.replacen(
-            "- Respond in the same language as the user's current message unless they explicitly request another language.\n",
-            "",
-            1,
-        );
+        let known_prior_default =
+            DEFAULT_SYSTEM_PROMPT_EMBEDDED.replacen(DEFAULT_SYSTEM_PROMPT_LANGUAGE_POLICY, "", 1);
         assert_ne!(
             known_prior_default, DEFAULT_SYSTEM_PROMPT_EMBEDDED,
             "fixture should represent the embedded prompt before the language policy"

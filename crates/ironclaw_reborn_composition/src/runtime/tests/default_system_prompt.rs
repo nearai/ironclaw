@@ -13,6 +13,7 @@ use ironclaw_loop_host::{
 use ironclaw_turns::TurnStatus;
 
 use crate::input::RebornBuildInput;
+use crate::root::default_system_prompt::DEFAULT_SYSTEM_PROMPT_LANGUAGE_POLICY;
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 
 use super::{RebornRuntimeError, build_reborn_runtime};
@@ -159,6 +160,67 @@ async fn local_dev_runtime_uses_existing_edited_default_system_prompt() {
                 && message.content.contains("tool_search")
         }),
         "default-on disclosure should append the tool-search protocol to the edited prompt"
+    );
+    assert!(
+        recorded_requests[0].messages.iter().any(|message| {
+            message.role == HostManagedModelMessageRole::System
+                && message.content.starts_with("custom edited runtime prompt")
+                && !message
+                    .content
+                    .contains("Respond in the same language as the user's current message")
+        }),
+        "a custom prompt should not be mistaken for the prior bundled prompt"
+    );
+
+    runtime.shutdown().await.expect("runtime shutdown");
+}
+
+#[tokio::test]
+async fn local_dev_runtime_applies_language_policy_to_known_prior_default_system_prompt() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let storage_root = root.path().join("local-dev");
+    let prompt_path = storage_root.join("system/prompts/default-system.md");
+    let known_prior_default = include_str!("../../../assets/prompts/default-system.md").replacen(
+        DEFAULT_SYSTEM_PROMPT_LANGUAGE_POLICY,
+        "",
+        1,
+    );
+    assert_ne!(
+        known_prior_default,
+        include_str!("../../../assets/prompts/default-system.md"),
+        "fixture should represent the bundled prompt before the language policy"
+    );
+    std::fs::create_dir_all(prompt_path.parent().expect("prompt parent")).expect("prompt parent");
+    std::fs::write(&prompt_path, &known_prior_default).expect("prior prompt");
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let input = runtime_input(storage_root, Arc::clone(&requests));
+
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    let conversation = runtime.new_conversation().await.expect("conversation");
+    let reply = tokio::time::timeout(
+        Duration::from_secs(3),
+        runtime.send_user_message(&conversation, "ping"),
+    )
+    .await
+    .expect("runtime send should finish")
+    .expect("runtime send should succeed");
+
+    assert_eq!(reply.status, TurnStatus::Completed);
+    assert_eq!(
+        std::fs::read_to_string(&prompt_path).expect("prior prompt reads"),
+        known_prior_default,
+        "the prior prompt file remains editable and is never rewritten during startup"
+    );
+    let recorded_requests = recorded_requests(&requests);
+    assert_eq!(recorded_requests.len(), 1);
+    assert!(
+        recorded_requests[0].messages.iter().any(|message| {
+            message.role == HostManagedModelMessageRole::System
+                && message
+                    .content
+                    .contains(DEFAULT_SYSTEM_PROMPT_LANGUAGE_POLICY.trim())
+        }),
+        "the model gateway should receive the language policy for the known prior default"
     );
 
     runtime.shutdown().await.expect("runtime shutdown");
