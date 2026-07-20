@@ -273,7 +273,6 @@ SEL_V2 = {
     "workspace_directory_entry_for": (
         "[data-testid='workspace-directory-entry'][data-entry-path='{path}']"
     ),
-    "toast": "[data-testid='toast']",
     "thread_delete_for": (
         '[data-testid="thread-delete"][data-thread-id="{id}"]'
     ),
@@ -308,6 +307,7 @@ SEL_V2 = {
     "header_docs_link": "[data-testid='header-docs-link']",
     "command_palette_dialog_name": "Command palette",
     "command_palette_search_placeholder": "Type a command or search",
+    "command_palette_go_settings_name": "Go to Settings",
     "auth_gate":      "[data-testid='auth-gate']",
     "auth_gate_for":  "[data-testid='auth-gate'][data-auth-challenge='{kind}']",
     "auth_token_input": "[data-testid='auth-token-input']",
@@ -367,6 +367,7 @@ SEL_V2 = {
     "logs_entry_context": "[data-testid='logs-entry-context']",
     "logs_context_chip": "[data-testid='logs-context-chip'][data-context-key='{key}']",
     "settings_search_placeholder": "Search settings...",
+    "settings_import_file": 'input[type="file"][accept=".json,application/json"]',
     "settings_tool_row_for": (
         "[data-testid='settings-tool-row'][data-tool-name='{name}']"
     ),

@@ -288,6 +288,7 @@ registerPack("en", {
   "settings.exportSuccess": "Settings exported",
   "settings.importSuccess": "Settings imported",
   "settings.importInvalid": "Selected file must contain a settings object",
+  "settings.importNoSupported": "No supported settings found in the selected file",
   "settings.importFailed": "Import failed: {message}",
 
   // Settings — restart banner
@@ -791,6 +792,7 @@ registerPack("en", {
   "automations.filter.completed": "Completed",
   "automations.refresh": "Refresh automations",
   "automations.error.loadFailed": "Unable to load automations",
+  "automations.error.actionFailed": "Unable to update the automation. Please try again.",
   "automations.rename.action": "Rename automation",
   "automations.rename.nameLabel": "Automation name",
   "automations.rename.nameRequired": "Automation name is required.",
