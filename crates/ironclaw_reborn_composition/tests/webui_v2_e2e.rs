@@ -1087,10 +1087,10 @@ fn has_browser_visible_progress(events: &[ParsedSseEvent]) -> bool {
     })
 }
 
-fn events_include_error(bytes: &[u8]) -> bool {
+fn events_include_stream_error(bytes: &[u8]) -> bool {
     parse_sse_events(bytes)
         .iter()
-        .any(|event| event.event.as_deref() == Some("error"))
+        .any(|event| event.event.as_deref() == Some("stream_error"))
 }
 
 fn events_include_final_reply(bytes: &[u8]) -> bool {
@@ -1203,8 +1203,8 @@ fn assert_only_fail_closed_error(label: &str, events: &[ParsedSseEvent]) -> Valu
         .as_deref();
     assert_eq!(
         error_event,
-        Some("error"),
-        "{label} must emit only an error event, got: {events:?}"
+        Some("stream_error"),
+        "{label} must emit only a stream_error event, got: {events:?}"
     );
     event_payload_json(events.first().expect("event count checked"))
 }
@@ -1378,7 +1378,7 @@ async fn webui_v2_beta_acceptance_stream_replay_restart_and_redaction() {
     let foreign_bytes = collect_sse_until(
         &mut foreign_body,
         Duration::from_secs(5),
-        events_include_error,
+        events_include_stream_error,
     )
     .await;
     drop(foreign_body);

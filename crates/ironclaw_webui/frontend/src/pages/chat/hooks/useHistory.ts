@@ -6,6 +6,7 @@ import { messagesFromTimeline } from "../lib/history-messages";
 import {
   carryFinalAssistantOrderFlags,
   isFinalAssistantMessage,
+  isLiveAssistantMessage,
   isRunActivityMessage,
 } from "../lib/stream-order-memory";
 
@@ -517,16 +518,6 @@ function mergeFullRefresh(fresh, current, options = {}) {
   return preserved.length > 0
     ? insertPreservedAtOriginalPositions(hydratedFresh, preserved, current)
     : hydratedFresh;
-}
-
-function isLiveAssistantMessage(message) {
-  return (
-    message?.role === "assistant" &&
-    message?.isFinalReply === false &&
-    typeof message?.turnRunId === "string" &&
-    typeof message?.id === "string" &&
-    message.id.startsWith("text-")
-  );
 }
 
 function isSeededOptimisticMessage(message) {

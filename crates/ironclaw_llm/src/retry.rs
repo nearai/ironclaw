@@ -76,6 +76,20 @@ pub(crate) fn retry_backoff_delay(attempt: u32) -> Duration {
     Duration::from_millis(delay_ms)
 }
 
+fn retry_delay_for(err: &LlmError, attempt: u32) -> Duration {
+    match err {
+        LlmError::RateLimited {
+            retry_after: Some(duration),
+            ..
+        }
+        | LlmError::BadGateway {
+            retry_after: Some(duration),
+            ..
+        } => *duration,
+        _ => retry_backoff_delay(attempt),
+    }
+}
+
 /// Clamp a provider-suggested retry delay to a safe maximum.
 pub(crate) fn cap_retry_after(duration: Duration) -> Duration {
     duration.min(Duration::from_secs(MAX_RETRY_AFTER_SECS))
@@ -175,17 +189,7 @@ impl RetryProvider {
                         return Err(err);
                     }
 
-                    let delay = match &err {
-                        LlmError::RateLimited {
-                            retry_after: Some(duration),
-                            ..
-                        }
-                        | LlmError::BadGateway {
-                            retry_after: Some(duration),
-                            ..
-                        } => *duration,
-                        _ => retry_backoff_delay(attempt),
-                    };
+                    let delay = retry_delay_for(&err, attempt);
 
                     tracing::warn!(
                         provider = %self.inner.model_name(),
@@ -238,17 +242,7 @@ impl RetryProvider {
                             && is_retryable(&err)
                             && attempt < self.config.max_retries;
                         if can_replace_partial {
-                            let delay = match &err {
-                                LlmError::RateLimited {
-                                    retry_after: Some(duration),
-                                    ..
-                                }
-                                | LlmError::BadGateway {
-                                    retry_after: Some(duration),
-                                    ..
-                                } => *duration,
-                                _ => retry_backoff_delay(attempt),
-                            };
+                            let delay = retry_delay_for(&err, attempt);
                             tracing::warn!(
                                 provider = %self.inner.model_name(),
                                 attempt = attempt + 1,
@@ -277,17 +271,7 @@ impl RetryProvider {
                         return Err(err);
                     }
 
-                    let delay = match &err {
-                        LlmError::RateLimited {
-                            retry_after: Some(duration),
-                            ..
-                        }
-                        | LlmError::BadGateway {
-                            retry_after: Some(duration),
-                            ..
-                        } => *duration,
-                        _ => retry_backoff_delay(attempt),
-                    };
+                    let delay = retry_delay_for(&err, attempt);
 
                     tracing::warn!(
                         provider = %self.inner.model_name(),
@@ -954,6 +938,34 @@ mod tests {
                 .lock()
                 .expect("replacement sink text lock")
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_streaming_retries_partial_text_replacement_only_once() {
+        let inner = Arc::new(StreamingRetryLlm::new(
+            StreamingRetryScript::AlwaysAfterText,
+        ));
+        let retry = RetryProvider::new(inner.clone(), fast_config(3));
+        let sink = Arc::new(ReplacingCompletionStreamSink::default());
+
+        let error = retry
+            .complete_streaming(make_request(), sink.clone())
+            .await
+            .expect_err("a second interrupted partial response must not retry again");
+
+        assert!(matches!(error, LlmError::RateLimited { .. }));
+        assert_eq!(inner.calls(), 2);
+        assert_eq!(
+            *sink.updates.lock().expect("replacement sink updates lock"),
+            ["partial", "partial"]
+        );
+        assert_eq!(
+            sink.text
+                .lock()
+                .expect("replacement sink text lock")
+                .as_str(),
+            "partial"
         );
     }
 

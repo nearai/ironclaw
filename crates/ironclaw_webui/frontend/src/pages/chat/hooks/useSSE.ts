@@ -189,8 +189,8 @@ export function useSSE({ threadId, onEvent, enabled }) {
         if (event.lastEventId) {
           setLastEventId(threadId, event.lastEventId);
         }
-        const type = frame.type ||
-          (fallbackType === "stream_error" ? "error" : fallbackType);
+        const rawType = frame.type || fallbackType;
+        const type = rawType === "stream_error" ? "error" : rawType;
         // Some browsers resume an interrupted EventSource by delivering the
         // next frame without a second `open` callback. A normal frame proves
         // the transport recovered and must clear a stale reconnecting badge.

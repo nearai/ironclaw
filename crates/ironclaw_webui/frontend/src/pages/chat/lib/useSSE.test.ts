@@ -309,6 +309,7 @@ test("useSSE does not reconnect after a non-retryable server error", () => {
   const stream = streams[0];
   stream.listener("stream_error")({
     data: JSON.stringify({
+      type: "stream_error",
       error: "not_found",
       kind: "not_found",
       retryable: false,
@@ -321,6 +322,7 @@ test("useSSE does not reconnect after a non-retryable server error", () => {
   assert.equal(timers.length, 0);
   assert.deepEqual(statuses, ["connecting", "disconnected"]);
   assert.equal(events.length, 1);
+  assert.equal(events[0].type, "error");
   assert.equal(events[0].frame.retryable, false);
 
   // Browsers report the server's subsequent close through `onerror`. It must
