@@ -284,7 +284,7 @@ test("useSSE falls back to app reconnect timer for closed streams", () => {
 
 test("useSSE does not reconnect after a non-retryable server error", () => {
   const events = [];
-  const { context, statuses, streams, timers } = createHarness({
+  const { context, statuses, streams, timers, windowListeners } = createHarness({
     onEvent: (event) => events.push(event),
   });
 
@@ -308,6 +308,7 @@ test("useSSE does not reconnect after a non-retryable server error", () => {
   // Browsers report the server's subsequent close through `onerror`. It must
   // not override the terminal classification or schedule another connection.
   stream.onerror();
+  windowListeners.get("online")();
   assert.equal(timers.length, 0);
   assert.equal(streams.length, 1);
   assert.deepEqual(statuses, ["connecting", "disconnected"]);

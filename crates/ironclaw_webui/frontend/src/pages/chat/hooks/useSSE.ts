@@ -111,7 +111,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
     function reconnectWithTimer(
       status: ConnectionStatus = CONNECTION_STATUS.DISCONNECTED,
     ) {
-      if (disposed) return;
+      if (disposed || terminalErrorReceived) return;
       if (es) {
         es.close();
         es = null;
@@ -145,7 +145,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
 
     function connect() {
       reconnectTimer = null;
-      if (disposed) return;
+      if (disposed || terminalErrorReceived) return;
       if (document.visibilityState === "hidden") {
         setStatus(CONNECTION_STATUS.PAUSED);
         return;
@@ -246,7 +246,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
     }
 
     function disconnectForHiddenTab() {
-      if (disposed) return;
+      if (disposed || terminalErrorReceived) return;
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
@@ -260,7 +260,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
     }
 
     function handleVisibilityChange() {
-      if (disposed) return;
+      if (disposed || terminalErrorReceived) return;
       if (document.visibilityState === "hidden") {
         disconnectForHiddenTab();
       } else if (!es) {
@@ -269,12 +269,12 @@ export function useSSE({ threadId, onEvent, enabled }) {
     }
 
     function handleNetworkOffline() {
-      if (disposed) return;
+      if (disposed || terminalErrorReceived) return;
       setStatus(CONNECTION_STATUS.RECONNECTING);
     }
 
     function handleNetworkOnline() {
-      if (disposed) return;
+      if (disposed || terminalErrorReceived) return;
       if (es && isEventSourceOpen(es)) {
         clearReconnectWatchdog();
         reconnectAttempts = 0;
