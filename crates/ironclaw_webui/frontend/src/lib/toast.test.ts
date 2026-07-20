@@ -3,12 +3,14 @@ import { beforeEach, test, vi } from "vitest";
 
 const hotToast = vi.hoisted(() => ({
   blank: vi.fn((..._args: unknown[]) => "blank-id"),
+  dismiss: vi.fn((..._args: unknown[]) => {}),
   error: vi.fn((..._args: unknown[]) => "error-id"),
   success: vi.fn((..._args: unknown[]) => "success-id"),
 }));
 
 vi.mock("react-hot-toast", () => ({
   default: Object.assign(hotToast.blank, {
+    dismiss: hotToast.dismiss,
     error: hotToast.error,
     success: hotToast.success,
   }),
@@ -17,6 +19,7 @@ vi.mock("react-hot-toast", () => ({
 import {
   DEFAULT_ERROR_TOAST_DURATION,
   DEFAULT_TOAST_DURATION,
+  dismissToast,
   toast,
 } from "./toast";
 
@@ -61,4 +64,11 @@ test("toast preserves an explicit duration", () => {
       ariaProps: { role: "alert", "aria-live": "assertive" },
     },
   ]);
+});
+
+test("dismissToast removes the matching active toast", () => {
+  dismissToast("error-id");
+  dismissToast(null);
+
+  assert.deepEqual(hotToast.dismiss.mock.calls, [["error-id"]]);
 });

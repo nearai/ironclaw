@@ -81,11 +81,48 @@ export async function updateSetting(key, value) {
   });
   return { success: true, entry: data.entry, value: data.entry?.value };
 }
-export async function importSettings(payload) {
+
+type SettingsImportUpdateResult = Awaited<ReturnType<typeof updateSetting>>;
+
+export type SettingsImportSuccess = {
+  success: true;
+  imported: number;
+  results: SettingsImportUpdateResult[];
+};
+
+export type NoSupportedSettingsImportFailure = {
+  success: false;
+  imported: 0;
+  results: SettingsImportUpdateResult[];
+  message: string;
+};
+
+export type SettingsImportResult =
+  | SettingsImportSuccess
+  | NoSupportedSettingsImportFailure;
+
+export class NoSupportedSettingsImportError extends Error {
+  constructor(failure: NoSupportedSettingsImportFailure) {
+    super(failure.message);
+    this.name = "NoSupportedSettingsImportError";
+  }
+}
+
+export async function importSettings(
+  payload: { settings?: Record<string, unknown> } | null | undefined
+): Promise<SettingsImportResult> {
   const settings = payload?.settings || {};
-  const imported = [];
+  const imported: SettingsImportUpdateResult[] = [];
   if (Object.prototype.hasOwnProperty.call(settings, AUTO_APPROVE_KEY)) {
     imported.push(await updateSetting(AUTO_APPROVE_KEY, Boolean(settings[AUTO_APPROVE_KEY])));
+  }
+  if (imported.length === 0) {
+    return {
+      success: false,
+      imported: 0,
+      results: imported,
+      message: "No supported settings were found in the selected file",
+    };
   }
   return { success: true, imported: imported.length, results: imported };
 }
