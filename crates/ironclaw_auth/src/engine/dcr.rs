@@ -266,17 +266,37 @@ fn authorization_server_metadata_url(issuer: &str) -> Result<String, AuthProduct
     Ok(metadata.to_string())
 }
 
-/// The issuer must share the resource's registrable domain: a compromised
-/// metadata document may not redirect registration to an attacker host.
+/// The issuer must be origin-bound to the resource: a compromised metadata
+/// document may not redirect registration to an attacker host. Two hosts are
+/// related when they are exactly equal (the only relation IP literals and
+/// single-label hosts can have) or when both resolve to the same Public
+/// Suffix List registrable domain (eTLD+1) — so `auth.example.co.uk` may
+/// vouch for `mcp.example.co.uk`, while `attacker.co.uk` may not. Hosts with
+/// no derivable registrable domain (a bare public suffix, an empty host)
+/// fail closed.
 fn validate_issuer_related_to_resource(
     resource: &str,
     issuer: &str,
 ) -> Result<(), AuthProductError> {
     let resource = url::Url::parse(resource).map_err(|_| AuthProductError::BackendUnavailable)?;
     let issuer = url::Url::parse(issuer).map_err(|_| AuthProductError::BackendUnavailable)?;
-    match (registrable_domain(&resource), registrable_domain(&issuer)) {
-        (Some(resource_domain), Some(issuer_domain)) if resource_domain == issuer_domain => Ok(()),
-        _ => Err(AuthProductError::BackendUnavailable),
+    let related = match (resource.host(), issuer.host()) {
+        (Some(resource_host), Some(issuer_host)) if resource_host == issuer_host => true,
+        (Some(url::Host::Domain(resource_host)), Some(url::Host::Domain(issuer_host))) => {
+            match (
+                psl::domain(resource_host.trim_end_matches('.').as_bytes()),
+                psl::domain(issuer_host.trim_end_matches('.').as_bytes()),
+            ) {
+                (Some(resource_domain), Some(issuer_domain)) => resource_domain == issuer_domain,
+                _ => false,
+            }
+        }
+        _ => false,
+    };
+    if related {
+        Ok(())
+    } else {
+        Err(AuthProductError::BackendUnavailable)
     }
 }
 
@@ -287,15 +307,6 @@ fn validate_endpoint_origin(endpoint: &str, expected: &str) -> Result<(), AuthPr
         return Err(AuthProductError::BackendUnavailable);
     }
     Ok(())
-}
-
-fn registrable_domain(url: &url::Url) -> Option<String> {
-    let host = url.host_str()?.trim_end_matches('.');
-    let labels = host.split('.').collect::<Vec<_>>();
-    if labels.len() < 2 {
-        return None;
-    }
-    Some(labels[labels.len() - 2..].join("."))
 }
 
 #[cfg(test)]
@@ -329,6 +340,57 @@ mod tests {
             )
             .is_err()
         );
+        // Multi-part public suffixes: `co.uk` is a suffix, not a registrable
+        // domain — an attacker host sharing only the suffix must be rejected
+        // (the PR #6116 security-high finding), while a sibling under the same
+        // registrable domain stays accepted.
+        assert!(
+            validate_issuer_related_to_resource(
+                "https://mcp.example.co.uk/mcp",
+                "https://attacker.co.uk"
+            )
+            .is_err()
+        );
+        validate_issuer_related_to_resource(
+            "https://mcp.example.co.uk/mcp",
+            "https://auth.example.co.uk",
+        )
+        .unwrap();
+        // A bare public suffix has no registrable domain and cannot vouch.
+        assert!(
+            validate_issuer_related_to_resource("https://foo.co.uk/mcp", "https://co.uk").is_err()
+        );
+        // Unrelated registrable domains under the same simple TLD.
+        assert!(
+            validate_issuer_related_to_resource(
+                "https://mcp.example.com/mcp",
+                "https://example.net"
+            )
+            .is_err()
+        );
+        // IP literals relate only by exact host equality.
+        validate_issuer_related_to_resource("https://203.0.113.5/mcp", "https://203.0.113.5")
+            .unwrap();
+        assert!(
+            validate_issuer_related_to_resource("https://203.0.113.5/mcp", "https://203.0.113.6")
+                .is_err()
+        );
+        assert!(
+            validate_issuer_related_to_resource("https://203.0.113.5/mcp", "https://attacker.com")
+                .is_err()
+        );
+        // Single-label hosts relate only by exact host equality.
+        validate_issuer_related_to_resource("https://localhost/mcp", "https://localhost").unwrap();
+        assert!(
+            validate_issuer_related_to_resource("https://localhost/mcp", "https://otherhost")
+                .is_err()
+        );
+        // Malformed issuers fail closed.
+        assert!(
+            validate_issuer_related_to_resource("https://mcp.example.com/mcp", "not a url")
+                .is_err()
+        );
+        assert!(validate_issuer_related_to_resource("https://mcp.example.com/mcp", "").is_err());
     }
 
     #[test]

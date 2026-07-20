@@ -1489,6 +1489,103 @@ async fn dcr_vendor_registers_once_and_runs_standard_oauth_afterwards() {
     );
 }
 
+/// A compromised protected-resource metadata document must not be able to
+/// redirect dynamic client registration to an attacker host that shares only
+/// a multi-part public suffix with the resource. The pre-PSL validation took
+/// the final two host labels, so `mcp.example.co.uk` and `attacker.co.uk`
+/// both resolved to "co.uk" and the attacker issuer passed (the PR #6116
+/// security-high finding). The discriminating assertion is the request count:
+/// the engine must stop after the protected-resource metadata fetch and never
+/// contact the attacker authorization server.
+#[tokio::test]
+async fn dcr_issuer_sharing_only_a_public_suffix_is_rejected_before_any_attacker_contact() {
+    let mut recipe = manifest_recipe("notion-mcp", "notion");
+    recipe.token_exchange_resource = Some("https://mcp.example.co.uk/mcp".to_string());
+    let harness = Harness::new(vec![recipe]);
+    harness.server.script(
+        "https://mcp.example.co.uk/mcp/.well-known/oauth-protected-resource",
+        200,
+        serde_json::json!({ "authorization_servers": ["https://attacker.co.uk"] }),
+    );
+
+    let result = harness
+        .engine
+        .prepare_oauth_flow(PrepareOAuthFlowRequest {
+            vendor: "notion".to_string(),
+            scope: test_scope(),
+            flow_id: AuthFlowId::new(),
+            account_label: CredentialAccountLabel::new("account").unwrap(),
+            requested_scopes: Vec::new(),
+        })
+        .await;
+
+    assert!(
+        result.is_err(),
+        "an issuer on a foreign registrable domain under a shared public suffix must fail the flow"
+    );
+    assert_eq!(
+        harness.server.request_count(),
+        1,
+        "the engine stops at the protected-resource metadata fetch; no request reaches the attacker host"
+    );
+    assert!(
+        harness
+            .server
+            .requests_for("https://attacker.co.uk/.well-known/oauth-authorization-server")
+            .is_empty(),
+        "the attacker authorization-server metadata is never fetched"
+    );
+}
+
+/// The positive companion: an issuer under the SAME registrable domain as the
+/// resource — including on a multi-part public suffix — keeps working end to
+/// end (discovery, registration, authorize URL), so the fix cannot overblock
+/// legitimate vendors whose auth host is a sibling of the MCP host.
+#[tokio::test]
+async fn dcr_issuer_on_same_registrable_domain_under_multi_part_suffix_registers() {
+    let mut recipe = manifest_recipe("notion-mcp", "notion");
+    recipe.token_exchange_resource = Some("https://mcp.example.co.uk/mcp".to_string());
+    let harness = Harness::new(vec![recipe]);
+    harness.server.script(
+        "https://mcp.example.co.uk/mcp/.well-known/oauth-protected-resource",
+        200,
+        serde_json::json!({ "authorization_servers": ["https://auth.example.co.uk"] }),
+    );
+    harness.server.script(
+        "https://auth.example.co.uk/.well-known/oauth-authorization-server",
+        200,
+        serde_json::json!({
+            "authorization_endpoint": "https://auth.example.co.uk/authorize",
+            "token_endpoint": "https://auth.example.co.uk/token",
+            "registration_endpoint": "https://auth.example.co.uk/register"
+        }),
+    );
+    harness.server.script(
+        "https://auth.example.co.uk/register",
+        201,
+        serde_json::json!({ "client_id": "couk-dcr-client-1" }),
+    );
+
+    let prepared = harness
+        .engine
+        .prepare_oauth_flow(PrepareOAuthFlowRequest {
+            vendor: "notion".to_string(),
+            scope: test_scope(),
+            flow_id: AuthFlowId::new(),
+            account_label: CredentialAccountLabel::new("account").unwrap(),
+            requested_scopes: Vec::new(),
+        })
+        .await
+        .expect("sibling issuer under the same registrable domain is accepted");
+    assert!(
+        prepared
+            .authorization_url
+            .as_str()
+            .starts_with("https://auth.example.co.uk/authorize"),
+        "the discovered sibling authorize endpoint is used"
+    );
+}
+
 /// A4 pin on the REAL bundled manifest: Notion issues ~1h access tokens with
 /// single-use rotating refresh tokens, so its recipe must declare the
 /// `refresh_token`/`expires_in` capture pointers and the rotation flag. The
