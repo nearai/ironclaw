@@ -184,6 +184,26 @@ test("Tool permission select follows global unless a per-tool override exists", 
   assert.equal(componentProps(overrideSelect, "SelectMenu").value, "ask_each_time");
 });
 
+test("Tool permission select retains a pending selection while saving", () => {
+  const { exports } = renderToolsModule();
+  const rendered = exports.ToolRow({
+    tool: {
+      name: "builtin.echo",
+      description: "Echo",
+      state: "ask_each_time",
+      default_state: "ask_each_time",
+      effective_source: "override",
+      locked: false,
+    },
+    pendingPermission: "disabled",
+    onPermissionChange: () => {},
+    isSaved: false,
+  });
+
+  const select = findComponentNode(rendered, "SelectMenu");
+  assert.equal(componentProps(select, "SelectMenu").value, "disabled");
+});
+
 test("Tool rows localize built-in descriptions by capability id", () => {
   const { exports } = renderToolsModule({
     translations: {
