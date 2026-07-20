@@ -318,6 +318,16 @@ where
     /// textual `<attachments>` pointer (the same fallback a text-only model
     /// gets) rather than failing the turn.
     pub attachment_read_port: Option<Arc<dyn LoopAttachmentReadPort>>,
+    /// Durable store the loop-host persisted `GateRecord::Auth` into (§5.2.9),
+    /// threaded to the turn executor so an auth block re-sources its
+    /// `credential_requirements` from the host record (render-from-record) after
+    /// the §5.3 flip moved them off the loop-facing channel. Must be the SAME
+    /// `Arc` the composition wired into the capability port's
+    /// `with_gate_record_store`, or the read scope/key will not find the saved
+    /// record. `None` only for helper/test compositions with no run-state
+    /// filesystem (they never raise a durable auth gate); a production `None` is
+    /// a bug — the same "genuinely optional" shape as `attachment_read_port`.
+    pub gate_record_store: Option<Arc<dyn ironclaw_run_state::GateRecordStore>>,
     pub input_queue: Option<Arc<dyn HostInputQueue>>,
     /// Required by live planned-runtime composition. Helper-level tests may use
     /// a no-op implementation, but the type signature always requires a valid
@@ -801,6 +811,7 @@ where
         Arc::clone(&loop_exit_applier),
         Arc::clone(&driver_registry),
         host_factory.clone() as Arc<dyn crate::turn_runner::HostFactory>,
+        parts.gate_record_store.clone(),
     ));
     let scheduler_config = TurnRunSchedulerConfig::default()
         .with_max_concurrent_runs(scheduler_permit_count(parts.config.worker_count))
@@ -897,7 +908,10 @@ mod tests {
 
     use super::{SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS, scheduler_permit_count};
     use async_trait::async_trait;
-    use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, RuntimeKind, TenantId, ThreadId};
+    use ironclaw_host_api::{
+        AgentId, CapabilityId, ProjectId, Resolution, ResolutionBatch, RuntimeKind, TenantId,
+        ThreadId,
+    };
     use ironclaw_host_runtime::{
         TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
         TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
@@ -906,10 +920,9 @@ mod tests {
         InMemoryRunProfileResolver, RunProfileResolver, TurnId, TurnRunId, TurnScope,
         run_profile::{
             AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-            CapabilityBatchOutcome, CapabilityDescriptorView, CapabilityInvocation,
-            CapabilityOutcome, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort,
-            LoopRunContext, RunProfileResolutionRequest, VisibleCapabilityRequest,
-            VisibleCapabilitySurface,
+            CapabilityDescriptorView, CapabilityInvocation, CapabilitySurfaceVersion,
+            ConcurrencyHint, LoopCapabilityPort, LoopRunContext, RunProfileResolutionRequest,
+            VisibleCapabilityRequest, VisibleCapabilitySurface,
         },
     };
 
@@ -1049,7 +1062,7 @@ mod tests {
         async fn invoke_capability(
             &self,
             _request: CapabilityInvocation,
-        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        ) -> Result<Resolution, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
                 format!("{label} unused", label = self.label),
@@ -1059,7 +1072,7 @@ mod tests {
         async fn invoke_capability_batch(
             &self,
             _request: CapabilityBatchInvocation,
-        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        ) -> Result<ResolutionBatch, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
                 format!("{label} unused", label = self.label),
@@ -1105,7 +1118,7 @@ mod tests {
         async fn invoke_capability(
             &self,
             request: CapabilityInvocation,
-        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        ) -> Result<Resolution, AgentLoopHostError> {
             self.log.lock().unwrap().push(self.label);
             self.inner.invoke_capability(request).await
         }
@@ -1113,7 +1126,7 @@ mod tests {
         async fn invoke_capability_batch(
             &self,
             request: CapabilityBatchInvocation,
-        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        ) -> Result<ResolutionBatch, AgentLoopHostError> {
             self.log.lock().unwrap().push(self.label);
             self.inner.invoke_capability_batch(request).await
         }
@@ -1232,7 +1245,7 @@ mod tests {
         async fn invoke_capability(
             &self,
             _request: CapabilityInvocation,
-        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        ) -> Result<Resolution, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
                 "unused in this test",
@@ -1242,7 +1255,7 @@ mod tests {
         async fn invoke_capability_batch(
             &self,
             _request: CapabilityBatchInvocation,
-        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        ) -> Result<ResolutionBatch, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
                 "unused in this test",

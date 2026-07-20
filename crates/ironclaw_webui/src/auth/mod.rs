@@ -42,6 +42,6 @@ pub use profile::OAuthUserProfile;
 pub use provider::OAuthProvider;
 pub use provider_name::{OAuthProviderName, OAuthProviderNameError};
 pub use routes::{OAuthRouterConfig, empty_webui_v2_auth_providers_mount, webui_v2_auth_router};
-#[cfg(any(test, feature = "dev-in-memory-session"))]
+#[cfg(any(test, feature = "test-support"))]
 pub use user_directory::EmailUserDirectory;
 pub use user_directory::{UserDirectory, UserDirectoryError};

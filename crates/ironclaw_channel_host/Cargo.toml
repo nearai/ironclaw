@@ -14,15 +14,9 @@ publish = false
 layer = "products"
 
 [features]
-# Webhook-serving helpers (installation rate limiting, sanitized webhook error
-# responses, runner-error HTTP mapping). Split out so hosts that only need the
-# ports/contracts (the default composition build) do not pull axum or the
-# product-adapter runner crate.
-webhook-serve = ["dep:axum", "dep:ironclaw_wasm_product_adapters"]
-
 [dependencies]
 async-trait = "0.1"
-axum = { version = "0.8", optional = true }
+axum = { version = "0.8" }
 ironclaw_auth = { path = "../ironclaw_auth" }
 ironclaw_conversations = { path = "../ironclaw_conversations" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
@@ -35,7 +29,7 @@ ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_turns = { path = "../ironclaw_turns" }
-ironclaw_wasm_product_adapters = { path = "../ironclaw_wasm_product_adapters", optional = true }
+ironclaw_wasm_product_adapters = { path = "../ironclaw_wasm_product_adapters" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

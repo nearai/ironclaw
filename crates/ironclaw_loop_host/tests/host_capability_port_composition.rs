@@ -7,8 +7,8 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, MountAlias,
-    MountGrant, MountPermissions, MountView, PermissionMode, ProviderToolName, ResourceEstimate,
-    ResourceUsage, RuntimeKind, ThreadId, TrustClass, UserId, VirtualPath,
+    MountGrant, MountPermissions, MountView, PermissionMode, ProviderToolName, Resolution,
+    ResourceEstimate, ResourceUsage, RuntimeKind, ThreadId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime,
@@ -223,10 +223,7 @@ async fn factory_stages_provider_tool_call_arguments_without_custom_resolver_ove
         .await
         .expect("staged provider input should invoke");
     assert!(
-        matches!(
-            outcome,
-            ironclaw_turns::run_profile::CapabilityOutcome::Completed(_)
-        ),
+        matches!(&outcome, Resolution::Done(done) if done.verdict.is_success()),
         "expected completed provider invocation, got {outcome:?}"
     );
     assert_eq!(runtime.take_requests()[0].input, arguments);

@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, HostApiError,
-    INPUT_ENCODE_HUMAN_SUMMARY, ProviderToolName, RuntimeCredentialAuthRequirement, RuntimeKind,
+    INPUT_ENCODE_HUMAN_SUMMARY, ProviderToolName, Resolution, ResolutionBatch, RuntimeKind,
     ThreadId,
 };
 use serde::{Deserialize, Deserializer, Serialize};
@@ -1812,116 +1812,6 @@ pub struct CapabilityBatchInvocation {
     pub stop_on_first_suspension: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CapabilityBatchOutcome {
-    pub outcomes: Vec<CapabilityOutcome>,
-    pub stopped_on_suspension: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CapabilityOutcome {
-    Completed(CapabilityResultMessage),
-    ApprovalRequired {
-        gate_ref: LoopGateRef,
-        safe_summary: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        approval_resume: Option<CapabilityApprovalResume>,
-    },
-    AuthRequired {
-        gate_ref: LoopGateRef,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
-        safe_summary: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        auth_resume: Option<CapabilityAuthResume>,
-    },
-    ResourceBlocked {
-        gate_ref: LoopGateRef,
-        safe_summary: String,
-    },
-    /// The model called a client-supplied ("external") tool. The host does not
-    /// execute it: the run parks and control returns to the API client, which
-    /// resumes by submitting the tool output. Carries only the opaque gate ref
-    /// and a bounded safe summary (never the raw caller tool args or output).
-    ExternalToolPending {
-        gate_ref: LoopGateRef,
-        safe_summary: String,
-    },
-    SpawnedProcess(ProcessHandleSummary),
-    AwaitDependentRun {
-        gate_ref: LoopGateRef,
-        result_ref: LoopResultRef,
-        safe_summary: String,
-        /// Size in bytes of the payload staged at `result_ref` time
-        /// (i.e. the serialized capability output, not the size of this struct).
-        /// Propagated from LoopCapabilityResultWriter::write_capability_result.
-        /// Used by ByteCapStrategy to evaluate per-capability byte caps.
-        #[serde(default)]
-        byte_len: u64,
-        /// Bounded model-visible metadata for the child result.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        model_observation: Option<ModelVisibleToolObservation>,
-    },
-    SpawnedChildRun {
-        child_run_id: TurnRunId,
-        result_ref: LoopResultRef,
-        safe_summary: String,
-        /// Size in bytes of the payload staged at `result_ref` time
-        /// (i.e. the serialized capability output, not the size of this struct).
-        /// Same semantics as AwaitDependentRun.byte_len.
-        #[serde(default)]
-        byte_len: u64,
-        /// Bounded model-visible metadata for the child result.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        model_observation: Option<ModelVisibleToolObservation>,
-    },
-    Denied(CapabilityDenied),
-    Failed(CapabilityFailure),
-}
-
-impl CapabilityOutcome {
-    pub fn is_suspension(&self) -> bool {
-        matches!(
-            self,
-            Self::ApprovalRequired { .. }
-                | Self::AuthRequired { .. }
-                | Self::ResourceBlocked { .. }
-                | Self::ExternalToolPending { .. }
-                | Self::AwaitDependentRun { .. }
-                | Self::SpawnedProcess(_)
-        )
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CapabilityResultMessage {
-    pub result_ref: LoopResultRef,
-    pub safe_summary: String,
-    /// Typed host signal describing whether this result advanced the loop's
-    /// evidence/state. This lets the loop distinguish deterministic
-    /// no-change outcomes from productive calls without inferring progress
-    /// from prose summaries or token counts.
-    #[serde(default)]
-    pub progress: CapabilityProgress,
-    /// Host hint that this completed capability result should end the loop
-    /// naturally after the current batch. Defaults to false for compatibility
-    /// with older hosts.
-    #[serde(default)]
-    pub terminate_hint: bool,
-    /// Serialized output size in bytes — pure metadata, no PII.
-    #[serde(default)]
-    pub byte_len: u64,
-    /// Digest over normalized output content. Optional for backward
-    /// compatibility and for synthetic results that do not stage real output.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_digest: Option<ContentDigest>,
-    /// Bounded, model-visible result metadata or preview. Full output remains
-    /// host-owned and is retrieved only through the result reference.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_observation: Option<ModelVisibleToolObservation>,
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CapabilityProgress {
@@ -1938,16 +1828,39 @@ pub enum CapabilityProgress {
     Blocked,
 }
 
+/// The agent-loop executor's reconstructed view of a completed capability result.
+///
+/// Producers no longer emit this (they emit [`Resolution`](ironclaw_host_api::Resolution)
+/// directly, §5.3 Stage 2b); the executor rebuilds it from the host_api
+/// [`Outcome`](ironclaw_host_api::Outcome) channel (`capability_result_from_outcome`)
+/// to feed its result-admission/strategy pipeline. It is loop-internal working
+/// vocabulary, no longer a wire/producer DTO.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProcessHandleSummary {
-    pub process_ref: LoopProcessRef,
+pub struct CapabilityResultMessage {
+    pub result_ref: LoopResultRef,
     pub safe_summary: String,
+    #[serde(default)]
+    pub progress: CapabilityProgress,
+    #[serde(default)]
+    pub terminate_hint: bool,
+    #[serde(default)]
+    pub byte_len: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_digest: Option<ContentDigest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_observation: Option<ModelVisibleToolObservation>,
 }
 
+/// The agent-loop executor's reconstructed view of a recoverable capability
+/// failure, rebuilt from the host_api `RecoverableFailure` verdict
+/// (`capability_failure_from_recoverable`) to drive retry/explain recovery.
+/// Loop-internal working vocabulary, no longer a wire/producer DTO.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CapabilityDenied {
-    pub reason_kind: CapabilityDeniedReasonKind,
+pub struct CapabilityFailure {
+    pub error_kind: CapabilityFailureKind,
     pub safe_summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<CapabilityFailureDetail>,
 }
 
 #[non_exhaustive]
@@ -2009,14 +1922,6 @@ impl<'de> Deserialize<'de> for CapabilityDeniedReasonKind {
             _ => Self::unknown(value).map_err(serde::de::Error::custom),
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CapabilityFailure {
-    pub error_kind: CapabilityFailureKind,
-    pub safe_summary: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<CapabilityFailureDetail>,
 }
 
 // Deliberately NOT `#[non_exhaustive]`: the `Unknown(CapabilityFailureKindValue)`
@@ -2194,12 +2099,12 @@ pub trait LoopCapabilityPort: Send + Sync {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError>;
+    ) -> Result<Resolution, AgentLoopHostError>;
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError>;
+    ) -> Result<ResolutionBatch, AgentLoopHostError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2648,14 +2553,14 @@ mod tests {
         async fn invoke_capability(
             &self,
             _request: CapabilityInvocation,
-        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        ) -> Result<Resolution, AgentLoopHostError> {
             unreachable!("not used by this test")
         }
 
         async fn invoke_capability_batch(
             &self,
             _request: CapabilityBatchInvocation,
-        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        ) -> Result<ResolutionBatch, AgentLoopHostError> {
             unreachable!("not used by this test")
         }
     }

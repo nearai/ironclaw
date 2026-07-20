@@ -128,76 +128,20 @@ fn validate_safe_summary(value: &str) -> Result<(), HostApiError> {
     let lower = value.to_ascii_lowercase();
     // Only credential markers are banned; descriptive error vocabulary
     // ("provider error", "stack trace", "tool input", …) is allowed because the
-    // raw cause rides the dedicated model-visible detail channel.
-    for forbidden in [
-        "access token",
-        "api key",
-        "api_key",
-        "apikey",
-        "authorization:",
-        "bearer ",
-        "password",
-        "passwd",
-        "secret",
-    ] {
-        if lower.contains(forbidden) {
-            return Err(HostApiError::invalid_safe_summary(format!(
-                "must not contain sensitive marker `{forbidden}`"
-            )));
-        }
+    // raw cause rides the dedicated model-visible detail channel. Markers match
+    // at a WORD BOUNDARY, not as a substring (#6129): `secret` must not scrub
+    // `Secretary`.
+    if crate::credential_redaction::contains_credential_marker(&lower) {
+        return Err(HostApiError::invalid_safe_summary(
+            "must not contain a sensitive marker",
+        ));
     }
-    if contains_secret_like_token(&lower) {
+    if crate::credential_redaction::contains_secret_like_token(&lower) {
         return Err(HostApiError::invalid_safe_summary(
             "must not contain API-key-like tokens",
         ));
     }
     Ok(())
-}
-
-fn contains_secret_like_token(lower: &str) -> bool {
-    lower
-        .split(|character: char| {
-            !character.is_ascii_alphanumeric() && !matches!(character, '-' | '_' | '.')
-        })
-        .any(has_secret_like_prefix)
-}
-
-/// True when a credential-shaped prefix starts this token or any interior
-/// segment after a `-`/`_`/`.` separator. The tokenizer above deliberately
-/// keeps those separators inside tokens so multi-part prefixes like
-/// `github_pat_` stay matchable — but that alone would let `memo_sk-abc123`
-/// hide a key behind a leading word, so every separator boundary is checked
-/// as a token start too. (Tokens are pure ASCII by construction: the split
-/// removes every non-ASCII-alphanumeric character except `-`/`_`/`.`, so
-/// byte indexing after a separator is char-boundary-safe.)
-fn has_secret_like_prefix(token: &str) -> bool {
-    if is_secret_like_token(token) {
-        return true;
-    }
-    token
-        .char_indices()
-        .filter(|(_, character)| matches!(character, '-' | '_' | '.'))
-        .any(|(index, _)| is_secret_like_token(&token[index + 1..]))
-}
-
-fn is_secret_like_token(token: &str) -> bool {
-    [
-        "sk-",
-        "sk-ant-",
-        "ghp_",
-        "github_pat_",
-        "gho_",
-        "ghu_",
-        "ghs_",
-        "ghr_",
-        "glpat-",
-        "gcp-",
-        "ya29.",
-        "aiza",
-    ]
-    .iter()
-    .any(|prefix| token.starts_with(prefix))
-        || (token.len() >= 16 && (token.starts_with("akia") || token.starts_with("asia")))
 }
 
 #[cfg(test)]
@@ -289,6 +233,9 @@ mod tests {
             // Boundary scan must not false-positive on words that merely
             // contain a prefix mid-segment.
             "risk-based task-list check",
+            // #6129 regression: `secret` must not scrub `Secretary`.
+            "Secretary of the Treasury confirmed",
+            "the secretariat meets tuesday",
         ] {
             assert!(SafeSummary::new(ok).is_ok(), "should allow {ok:?}");
         }

@@ -12,22 +12,15 @@ pub(crate) mod onboard;
 pub(crate) mod profile;
 pub(crate) mod repl;
 pub(crate) mod run;
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) mod serve;
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) mod serve_slack;
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) mod serve_sso;
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) mod serve_telegram;
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) mod service;
 pub(crate) mod skills;
 pub(crate) mod status;
 pub(crate) mod traces;
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) mod user_directory;
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) mod webui_auth;
 
 #[derive(Debug, Subcommand)]
@@ -56,17 +49,11 @@ pub(crate) enum Command {
     Repl(repl::ReplCommand),
     /// Initialize the minimal Reborn runtime shell and exit.
     Run(run::RunCommand),
-    /// Start the Reborn WebUI service. Available only when the binary
-    /// is built with the `webui-v2-beta` Cargo feature; off by default
-    /// because the beta HTTP/auth gateway requires explicit opt-in
-    /// before being linked into a production binary.
-    #[cfg(feature = "webui-v2-beta")]
+    /// Start the Reborn WebUI service.
     Serve(serve::ServeCommand),
     /// Install/start/stop/status/uninstall the standalone Reborn binary
-    /// as an OS-native service (launchd on macOS, systemd on Linux).
-    /// Available only when built with the `webui-v2-beta` Cargo feature,
-    /// since the installed unit runs `serve`.
-    #[cfg(feature = "webui-v2-beta")]
+    /// as an OS-native service (launchd on macOS, systemd on Linux). The
+    /// installed unit runs `serve`.
     Service(service::ServiceCommand),
     /// Inspect configured Reborn skills.
     Skills(skills::SkillsCommand),
@@ -103,11 +90,9 @@ impl Command {
             Self::Run(command) => {
                 command.execute(crate::context::RebornCliContext::resolve_from_env()?)
             }
-            #[cfg(feature = "webui-v2-beta")]
             Self::Serve(command) => {
                 command.execute(crate::context::RebornCliContext::resolve_from_env()?)
             }
-            #[cfg(feature = "webui-v2-beta")]
             Self::Service(command) => {
                 command.execute(crate::context::RebornCliContext::resolve_from_env()?)
             }
@@ -125,10 +110,7 @@ impl Command {
 /// Shared boolean parsing for channel-enablement env overrides
 /// (`IRONCLAW_REBORN_SLACK_ENABLED`, `IRONCLAW_REBORN_TELEGRAM_ENABLED`, …).
 ///
-/// Only the `serve_slack` / `serve_telegram` commands consume this, and both are
-/// gated on `webui-v2-beta`; gate the definition identically so default and
-/// `libsql-only` builds don't see it as dead code.
-#[cfg(feature = "webui-v2-beta")]
+/// Only the `serve_slack` / `serve_telegram` commands consume this.
 pub(crate) fn parse_channel_enabled_bool(field: &str, value: &str) -> anyhow::Result<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Ok(true),

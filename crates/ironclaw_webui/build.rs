@@ -1,7 +1,7 @@
 //! Build-time scan of the WebUI static assets.
 //!
-//! Builds the Vite frontend into Cargo's `OUT_DIR` when `webui-v2-beta` is
-//! enabled, then emits Rust source that declares one `ASSETS` slice keyed by
+//! Builds the Vite frontend into Cargo's `OUT_DIR` (unless `SKIP_FRONTEND_BUILD`
+//! is set), then emits Rust source that declares one `ASSETS` slice keyed by
 //! URL path (relative to the gateway root). Each entry pairs an
 //! `include_bytes!` reference with a content-type string picked from the file
 //! extension.
@@ -30,11 +30,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The WebChat v2 route surface + SPA bundle is folded unconditionally into
     // this crate (it is the whole reason `ironclaw_webui` exists), so the
-    // frontend is normally always built — this replaces the former
-    // `webui-v2-beta` feature gate the standalone `ironclaw_webui_v2` crate used
-    // before the merge. `SKIP_FRONTEND_BUILD=1` opts out for environments with
-    // no Node/pnpm toolchain (backend-only dev, docs.rs, minimal CI images); the
-    // Rust crate still compiles, it just embeds no SPA assets.
+    // frontend is always built. `SKIP_FRONTEND_BUILD=1` is the one opt-out, for
+    // environments with no Node/pnpm toolchain (backend-only dev, docs.rs,
+    // minimal CI images); the Rust crate still compiles, it just embeds no SPA
+    // assets.
     let webui_enabled = env::var_os("SKIP_FRONTEND_BUILD").is_none();
 
     let mut entries: Vec<(String, PathBuf)> = Vec::new();

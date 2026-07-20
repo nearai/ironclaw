@@ -37,8 +37,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    DenyReason, DenyRef, FailureKind, GateRef, LoopRef, ModelFailureDiagnostic, OutputDigest,
-    ProcessRef, ResultProgress, ResultRef, ResumeToken, RunId, SafeSummary, TerminateHint,
+    DenyReason, DenyRef, FailureKind, GateRef, LoopRef, ModelFailureDiagnostic, ModelResultPreview,
+    OutputDigest, ProcessRef, ResultProgress, ResultRef, ResumeToken, RunId, SafeSummary,
+    TerminateHint,
 };
 
 /// A pending-gate handle plus the additive context needed to resume and correlate
@@ -108,6 +109,64 @@ impl ProcessWaypoint {
     }
 
     /// Preserve the originating loop process ref.
+    pub fn with_origin(mut self, origin: LoopRef) -> Self {
+        self.origin = Some(origin);
+        self
+    }
+}
+
+/// The dependent child's staged result, carried **inline** on
+/// [`Suspension::DependentRun`] so the loop observes the child's output on
+/// resume without reading host storage — the loop cannot read the durable
+/// [`GateRecord::DependentRun`](crate::GateRecord) sidecar. This mirrors the way
+/// [`Resolution::Done`] carries a spawned child run's content on its [`Outcome`]:
+/// the record is the durable copy, this is the loop-visible one.
+///
+/// Every field is plain redacted vocabulary per the host_api charter — bounded
+/// metadata (`byte_len`), a redacted model-visible [`SafeSummary`], a redacted
+/// model-visible observation preview, and the preserved originating loop result
+/// ref. The full child bytes stay host-owned behind the record's [`ResultRef`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DependentRunResult {
+    /// Size of the staged child output in bytes — pure metadata, no PII. Feeds
+    /// the per-capability byte-cap strategy (was
+    /// `CapabilityResultMessage::byte_len`).
+    pub byte_len: u64,
+    /// Redacted, model-visible summary of the child result.
+    pub summary: SafeSummary,
+    /// Redacted, model-visible observation preview of the child result (was
+    /// `model_observation`, previously dropped on this channel). Redacted by
+    /// construction; the full bytes stay host-owned. `None` when no preview is
+    /// staged or the raw observation failed redaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<SafeSummary>,
+    /// The preserved originating loop result ref, so child output the loop
+    /// staged under its own ref stays reachable once the host [`ResultRef`]
+    /// handle is minted. `None` when there was no originating loop result ref.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<LoopRef>,
+}
+
+impl DependentRunResult {
+    /// A staged result carrying only the byte length and redacted summary. Use
+    /// the `with_*` setters to add the optional observation preview and
+    /// preserved origin (default-backed builder).
+    pub fn new(byte_len: u64, summary: SafeSummary) -> Self {
+        Self {
+            byte_len,
+            summary,
+            observation: None,
+            origin: None,
+        }
+    }
+
+    /// Carry the redacted, model-visible observation preview.
+    pub fn with_observation(mut self, observation: SafeSummary) -> Self {
+        self.observation = Some(observation);
+        self
+    }
+
+    /// Preserve the originating loop result ref.
     pub fn with_origin(mut self, origin: LoopRef) -> Self {
         self.origin = Some(origin);
         self
@@ -191,8 +250,16 @@ impl Blocked {
 pub enum Suspension {
     /// A spawned OS process the turn now waits on.
     Process(ProcessWaypoint),
-    /// A dependent child run this invocation awaits.
-    DependentRun(GateWaypoint),
+    /// A dependent child run this invocation awaits. Carries the gate
+    /// `waypoint` it parks on **and** the child's staged [`DependentRunResult`]
+    /// inline, so the loop observes the child's output on resume without
+    /// reading host storage (mirrors how [`Resolution::Done`] carries a spawned
+    /// child run's content; the durable copy is the
+    /// [`GateRecord::DependentRun`](crate::GateRecord) sidecar).
+    DependentRun {
+        waypoint: GateWaypoint,
+        result: DependentRunResult,
+    },
     /// A client-supplied tool the host does not execute; control returns to the
     /// API client until it submits the output.
     ExternalTool(GateWaypoint),
@@ -203,7 +270,7 @@ impl Suspension {
     pub fn kind(&self) -> &'static str {
         match self {
             Suspension::Process(_) => "process",
-            Suspension::DependentRun(_) => "dependent_run",
+            Suspension::DependentRun { .. } => "dependent_run",
             Suspension::ExternalTool(_) => "external_tool",
         }
     }
@@ -213,7 +280,8 @@ impl Suspension {
     /// record instead — see [`Suspension::process_ref`].
     pub fn gate_ref(&self) -> Option<&GateRef> {
         match self {
-            Suspension::DependentRun(w) | Suspension::ExternalTool(w) => Some(&w.gate),
+            Suspension::DependentRun { waypoint, .. } => Some(&waypoint.gate),
+            Suspension::ExternalTool(w) => Some(&w.gate),
             Suspension::Process(_) => None,
         }
     }
@@ -222,7 +290,7 @@ impl Suspension {
     pub fn process_ref(&self) -> Option<&ProcessRef> {
         match self {
             Suspension::Process(w) => Some(&w.process),
-            Suspension::DependentRun(_) | Suspension::ExternalTool(_) => None,
+            Suspension::DependentRun { .. } | Suspension::ExternalTool(_) => None,
         }
     }
 
@@ -230,7 +298,19 @@ impl Suspension {
     pub fn origin(&self) -> Option<&LoopRef> {
         match self {
             Suspension::Process(w) => w.origin.as_ref(),
-            Suspension::DependentRun(w) | Suspension::ExternalTool(w) => w.origin.as_ref(),
+            Suspension::DependentRun { waypoint, .. } => waypoint.origin.as_ref(),
+            Suspension::ExternalTool(w) => w.origin.as_ref(),
+        }
+    }
+
+    /// The dependent child's staged result, present exactly on
+    /// [`Suspension::DependentRun`]. This is the loop-visible copy the executor
+    /// reads on resume; the durable copy lives in the
+    /// [`GateRecord::DependentRun`](crate::GateRecord) sidecar.
+    pub fn dependent_result(&self) -> Option<&DependentRunResult> {
+        match self {
+            Suspension::DependentRun { result, .. } => Some(result),
+            Suspension::Process(_) | Suspension::ExternalTool(_) => None,
         }
     }
 }
@@ -353,11 +433,22 @@ pub struct OutcomeRefs {
     /// Size of the staged output in bytes — pure metadata, no PII. Used by the
     /// per-capability byte-cap strategy.
     pub byte_len: u64,
-    /// Bounded, model-visible result preview (was `model_observation`). Redacted
-    /// by construction; the full bytes stay host-owned behind `result`. `None`
-    /// when no preview is staged.
+    /// Bounded, model-visible result CONTENT preview — the #5838 first-look
+    /// inline preview (was the `ResultReference` observation's `detail.preview`).
+    /// A [`ModelResultPreview`], NOT a [`SafeSummary`]: it carries the tool's own
+    /// output (delimiters, JSON, newlines), credential-redacted at a word
+    /// boundary, up to 24 KiB — so the model sees the result inline without a
+    /// follow-up `result_read`. The full bytes stay host-owned behind `result`;
+    /// `None` when no preview is staged or the content failed the credential
+    /// redaction contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preview: Option<SafeSummary>,
+    pub preview: Option<ModelResultPreview>,
+    /// Continuation metadata for a TRUNCATED first-look preview so the model can
+    /// read the full result (`result_read`, large results): the referenced ref,
+    /// full byte size, next offset, and JSON-array element count. Empty (all
+    /// `None`) for a complete inline preview or no preview.
+    #[serde(default, skip_serializing_if = "ResultPreviewMeta::is_empty")]
+    pub preview_meta: ResultPreviewMeta,
     /// The preserved originating loop result ref, so output the loop staged under
     /// its own ref stays reachable once `result` (a uuid handle) is minted. `None`
     /// when the outcome had no originating loop result ref (e.g. a recoverable
@@ -369,6 +460,56 @@ pub struct OutcomeRefs {
     /// content. `None` for synthetic results that stage no real output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_digest: Option<OutputDigest>,
+}
+
+/// Continuation metadata for a truncated first-look result preview (§5838). All
+/// fields default to `None` — an empty value means the preview (if any) is the
+/// complete result and needs no `result_read` follow-up.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ResultPreviewMeta {
+    /// The result ref the preview is OF. A `result_read` reading ANOTHER result
+    /// presents that original's ref (so the model continues reading the original,
+    /// not the read's own chunk output); for a normal completed result it equals
+    /// the outcome's own result ref. `None` => the outcome's own result
+    /// (`OutcomeRefs::origin`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub referenced_result_ref: Option<LoopRef>,
+    /// Full byte size of the referenced result when the preview is a truncated
+    /// chunk; `None` for a complete inline preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_bytes: Option<u64>,
+    /// Byte offset to continue reading from for a truncated preview; `None` when
+    /// the preview is the complete result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<u64>,
+    /// Element count when the full result is a top-level JSON array (truncated
+    /// previews only), so the model does not misread a byte-sliced array.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_count: Option<u64>,
+    /// The observation's own model-visible summary caption — the host-authored
+    /// text describing the preview (e.g. "preview truncated, use result_read …").
+    /// It is DISTINCT from the completed [`Outcome::summary`] caption (the result
+    /// message's `safe_summary`, often a generic "capability completed"): the
+    /// producer authors a richer summary on the `ResultReference` observation, and
+    /// the collapse would otherwise drop it, so the reconstructed observation would
+    /// fall back to the generic caption and lose the truncation/continuation hint.
+    /// Carried here so the executor rebuilds the observation with the producer's
+    /// exact summary. `None` when the observation carried none or it failed the
+    /// caption redaction contract (best-effort; the outcome caption stands in).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<SafeSummary>,
+}
+
+impl ResultPreviewMeta {
+    /// True when no continuation metadata is present (the preview is complete or
+    /// absent) — the `skip_serializing_if` predicate keeping the wire clean.
+    pub fn is_empty(&self) -> bool {
+        self.referenced_result_ref.is_none()
+            && self.total_bytes.is_none()
+            && self.next_offset.is_none()
+            && self.item_count.is_none()
+            && self.summary.is_none()
+    }
 }
 
 /// A dispatched capability's result — tool success OR recoverable failure (§3).
@@ -597,6 +738,17 @@ mod tests {
         ProcessWaypoint::new(proc_ref())
     }
 
+    fn dep_result() -> DependentRunResult {
+        DependentRunResult::new(256, SafeSummary::new("child staged 4 rows").unwrap())
+    }
+
+    fn dep_run() -> Suspension {
+        Suspension::DependentRun {
+            waypoint: gate_wp(),
+            result: dep_result(),
+        }
+    }
+
     #[test]
     fn blocked_serde_is_snake_case_tagged_and_roundtrips() {
         let blocked = Blocked::Approval(gate_wp());
@@ -662,7 +814,7 @@ mod tests {
         );
         for (suspension, tag) in [
             (Suspension::Process(proc_wp()), "process"),
-            (Suspension::DependentRun(gate_wp()), "dependent_run"),
+            (dep_run(), "dependent_run"),
             (Suspension::ExternalTool(gate_wp()), "external_tool"),
         ] {
             let wire = serde_json::to_value(&suspension).unwrap();
@@ -800,6 +952,7 @@ mod tests {
                 result: ResultRef::parse("018f6a00-0000-7000-8000-000000000001").unwrap(),
                 byte_len: 4096,
                 preview: None,
+                preview_meta: ResultPreviewMeta::default(),
                 origin: None,
                 output_digest: None,
             },
@@ -824,6 +977,7 @@ mod tests {
                 result: ResultRef::parse("018f6a00-0000-7000-8000-000000000001").unwrap(),
                 byte_len: 10,
                 preview: None,
+                preview_meta: ResultPreviewMeta::default(),
                 origin: Some(LoopRef::new("result:child-1").unwrap()),
                 output_digest: Some(OutputDigest::new(0xABCD)),
             },
@@ -854,7 +1008,9 @@ mod tests {
         let full = OutcomeRefs {
             result,
             byte_len: 128,
-            preview: Some(SafeSummary::new("staged 3 rows").unwrap()),
+            // Content preview carries delimiters/structure (not a caption).
+            preview: Some(ModelResultPreview::new("{\"rows\": 3, \"ok\": true}").unwrap()),
+            preview_meta: ResultPreviewMeta::default(),
             origin: None,
             output_digest: None,
         };
@@ -862,8 +1018,8 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&full).unwrap()).unwrap();
         assert_eq!(back, full);
         assert_eq!(
-            back.preview.as_ref().map(SafeSummary::as_str),
-            Some("staged 3 rows")
+            back.preview.as_ref().map(ModelResultPreview::as_str),
+            Some("{\"rows\": 3, \"ok\": true}")
         );
 
         // Absent: None omitted from the wire (skip_serializing_if), and a
@@ -872,6 +1028,7 @@ mod tests {
             result,
             byte_len: 128,
             preview: None,
+            preview_meta: ResultPreviewMeta::default(),
             origin: None,
             output_digest: None,
         };
@@ -921,6 +1078,7 @@ mod tests {
                 result: ResultRef::parse("018f6a00-0000-7000-8000-000000000001").unwrap(),
                 byte_len: 1,
                 preview: None,
+                preview_meta: ResultPreviewMeta::default(),
                 origin: None,
                 output_digest: None,
             },
@@ -996,7 +1154,18 @@ mod tests {
             ),
             (
                 "AwaitDependentRun",
-                Resolution::Suspended(Suspension::DependentRun(GateWaypoint::new(gate()))),
+                Resolution::Suspended(Suspension::DependentRun {
+                    waypoint: GateWaypoint::new(gate()),
+                    // A fully-populated staged result so the generic round-trip
+                    // below proves byte_len, summary, observation, AND origin
+                    // all survive the wire.
+                    result: DependentRunResult::new(
+                        256,
+                        SafeSummary::new("child staged 4 rows").unwrap(),
+                    )
+                    .with_observation(SafeSummary::new("child preview: 4 rows").unwrap())
+                    .with_origin(LoopRef::new("result:child-1").unwrap()),
+                }),
                 true,
                 true,
             ),
@@ -1048,7 +1217,7 @@ mod tests {
             Resolution::Blocked(Blocked::Auth(gate_wp())),
             Resolution::Blocked(Blocked::Resource(gate_wp())),
             Resolution::Suspended(Suspension::Process(proc_wp())),
-            Resolution::Suspended(Suspension::DependentRun(gate_wp())),
+            Resolution::Suspended(dep_run()),
             Resolution::Suspended(Suspension::ExternalTool(gate_wp())),
         ];
         for resolution in &samples {
@@ -1158,6 +1327,26 @@ mod tests {
                     "suspended": { "process": { "process": "0f0e0d0c-0b0a-4908-8706-050403020100" } }
                 }),
             ),
+            // DependentRun is a struct variant: the parked-on `waypoint` plus the
+            // inline staged `result` (byte_len + redacted summary; observation and
+            // origin omitted here, exercising the skip_serializing_if defaults).
+            (
+                Resolution::Suspended(Suspension::DependentRun {
+                    waypoint: GateWaypoint::new(gate),
+                    result: DependentRunResult::new(
+                        256,
+                        SafeSummary::new("child staged 4 rows").unwrap(),
+                    ),
+                }),
+                serde_json::json!({
+                    "suspended": {
+                        "dependent_run": {
+                            "waypoint": { "gate": "01890a5d-ac96-774b-bcce-b302099a8057" },
+                            "result": { "byte_len": 256, "summary": "child staged 4 rows" }
+                        }
+                    }
+                }),
+            ),
         ];
         for (resolution, expected_wire) in cases {
             let wire = serde_json::to_value(&resolution).unwrap();
@@ -1168,5 +1357,74 @@ mod tests {
                 "round-trip must reconstruct the same channel"
             );
         }
+    }
+
+    /// The inline staged result carries the child's byte_len, redacted summary,
+    /// redacted observation preview, AND the preserved loop result origin across
+    /// the wire — the fields that were previously unreachable on this channel
+    /// (byte_len/summary folded into the host-only record, model_observation
+    /// dropped). Reached through the [`Suspension::dependent_result`] accessor.
+    #[test]
+    fn dependent_run_carries_the_staged_result_inline() {
+        let staged =
+            DependentRunResult::new(2048, SafeSummary::new("child staged 7 rows").unwrap())
+                .with_observation(SafeSummary::new("child preview: 7 rows").unwrap())
+                .with_origin(LoopRef::new("result:child-9").unwrap());
+        let suspension = Suspension::DependentRun {
+            waypoint: gate_wp(),
+            result: staged.clone(),
+        };
+        // The accessor answers only for DependentRun.
+        assert_eq!(suspension.dependent_result(), Some(&staged));
+        assert_eq!(Suspension::ExternalTool(gate_wp()).dependent_result(), None);
+        assert_eq!(Suspension::Process(proc_wp()).dependent_result(), None);
+        // The gate the suspension parks on stays reachable alongside the result.
+        assert_eq!(suspension.gate_ref(), Some(&gate()));
+
+        // Every staged field survives a wire round-trip.
+        let back: Suspension =
+            serde_json::from_value(serde_json::to_value(&suspension).unwrap()).unwrap();
+        assert_eq!(back, suspension);
+        let result = back.dependent_result().expect("staged result");
+        assert_eq!(result.byte_len, 2048);
+        assert_eq!(result.summary.as_str(), "child staged 7 rows");
+        assert_eq!(
+            result.observation.as_ref().map(SafeSummary::as_str),
+            Some("child preview: 7 rows")
+        );
+        assert_eq!(
+            result.origin.as_ref().map(LoopRef::as_str),
+            Some("result:child-9")
+        );
+    }
+
+    /// A hostile persisted staged result cannot rehydrate: the redacted
+    /// [`SafeSummary`] fields reject sensitive-marker / path-shaped content on the
+    /// wire, so the model-visible child text stays plain redacted vocabulary.
+    #[test]
+    fn dependent_run_result_rejects_an_unsafe_summary_on_the_wire() {
+        // A leaked secret in the summary is rejected at the SafeSummary boundary.
+        let json = serde_json::json!({
+            "byte_len": 1,
+            "summary": "api key: sk-ant-leak"
+        });
+        let err = serde_json::from_value::<DependentRunResult>(json)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("sensitive marker"),
+            "rejection must be for the summary redaction contract: {err}"
+        );
+
+        // A path-shaped observation is likewise rejected on the wire.
+        let json = serde_json::json!({
+            "byte_len": 1,
+            "summary": "ok",
+            "observation": "leaked path /etc/passwd"
+        });
+        assert!(
+            serde_json::from_value::<DependentRunResult>(json).is_err(),
+            "a path-shaped observation must not rehydrate into the staged result"
+        );
     }
 }

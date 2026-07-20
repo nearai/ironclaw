@@ -136,10 +136,10 @@ impl GitHubProvider {
 
     /// Test-only constructor: lets the caller-level test harness
     /// substitute the GitHub endpoints with a local mock server. The
-    /// `dev-in-memory-session` feature gate keeps the helper out of
+    /// `test-support` feature gate keeps the helper out of
     /// production builds for the same reason the in-memory session
     /// store is gated.
-    #[cfg(any(test, feature = "dev-in-memory-session"))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_endpoints(
         config: GitHubOAuthConfig,
         auth_endpoint: impl Into<String>,
@@ -195,10 +195,10 @@ impl GitHubProvider {
     /// Test / dev-only: shrink the overall exchange budget so the
     /// timeout branch can be exercised against a blackhole endpoint
     /// without a 20-second wait. Gated like [`Self::with_endpoints`]
-    /// (the `dev-in-memory-session` feature) rather than `#[cfg(test)]`
+    /// (the `test-support` feature) rather than `#[cfg(test)]`
     /// so caller-level tests in `tests/` — a separate crate that cannot
     /// see `#[cfg(test)]` items — can reach it too.
-    #[cfg(any(test, feature = "dev-in-memory-session"))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_exchange_budget(mut self, budget: Duration) -> Self {
         self.exchange_budget = budget;
         self

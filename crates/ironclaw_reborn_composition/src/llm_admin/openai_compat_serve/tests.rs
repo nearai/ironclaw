@@ -1160,7 +1160,6 @@ async fn read_run_output_in_progress_surfaces_tool_output_without_final_message(
     ));
 }
 
-#[cfg(feature = "root-llm-provider")]
 fn provider_view(
     id: &str,
     default_model: &str,
@@ -1183,7 +1182,6 @@ fn provider_view(
     }
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[test]
 fn model_entries_list_active_first_then_providers_deduped() {
     let snapshot = ironclaw_product_workflow::LlmConfigSnapshot {
@@ -1208,7 +1206,6 @@ fn model_entries_list_active_first_then_providers_deduped() {
     assert_eq!(entries[1].owned_by.as_deref(), Some("anthropic"));
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[test]
 fn model_entries_fall_back_to_default_model_when_no_active_selection() {
     let snapshot = ironclaw_product_workflow::LlmConfigSnapshot {
@@ -1264,7 +1261,6 @@ fn response_usage_adds_cache_creation_on_top_of_input() {
     assert!(built.input_tokens_details.is_none());
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[test]
 fn response_cost_prices_input_output_and_discounts_cached_tokens() {
     // gpt-4o rates: input 0.0000025/tok, output 0.00001/tok; OpenAI cache-read
@@ -1289,7 +1285,6 @@ fn response_cost_prices_input_output_and_discounts_cached_tokens() {
     assert_eq!(cost.total_cost_usd, "0.01");
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[test]
 fn response_cost_bills_cache_creation_at_full_input_rate() {
     // gpt-4o input rate 0.0000025/tok. cache_creation is a write-side count
@@ -1307,7 +1302,6 @@ fn response_cost_bills_cache_creation_at_full_input_rate() {
     assert_eq!(cost.cached_input_cost_usd, "0");
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[test]
 fn response_cost_applies_claude_cache_read_discount() {
     // claude-opus-4-6 input rate 0.000015/tok; the Claude cache-read discount is
@@ -1326,7 +1320,6 @@ fn response_cost_applies_claude_cache_read_discount() {
     assert_eq!(cost.cached_input_cost_usd, "0.003");
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[test]
 fn response_cost_falls_back_to_default_rate_for_unknown_model() {
     // Unknown models must not price at zero — the cost table default (~GPT-4o)

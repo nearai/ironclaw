@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use ironclaw_host_api::{
-    AgentId, CapabilityId, ProjectId, ProviderToolName, TenantId, ThreadId, UserId,
+    AgentId, CapabilityId, ProjectId, ProviderToolName, Resolution, TenantId, ThreadId, UserId,
 };
 use ironclaw_host_runtime::SHELL_CAPABILITY_ID;
 use ironclaw_loop_host::{
@@ -10,8 +10,8 @@ use ironclaw_loop_host::{
 use ironclaw_turns::{
     RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
     run_profile::{
-        CapabilityInvocation, CapabilityOutcome, InMemoryLoopHostMilestoneSink,
-        InMemoryRunProfileResolver, LoopRunContext, ProviderToolCall, VisibleCapabilityRequest,
+        CapabilityInvocation, InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver,
+        LoopRunContext, ProviderToolCall, VisibleCapabilityRequest,
     },
 };
 
@@ -176,11 +176,18 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         .await
         .expect("shell invocation");
 
-    let CapabilityOutcome::Completed(completed) = outcome else {
+    let Resolution::Done(completed) = outcome else {
         panic!("expected completed shell invocation");
     };
+    // The minted `refs.result` is an opaque uuid; the loop result ref the io
+    // staged the output under is preserved on `refs.origin`.
+    let result_ref = completed
+        .refs
+        .origin
+        .as_ref()
+        .expect("completed shell invocation preserves the originating loop result ref");
     let output = capability_io
-        .result_output(completed.result_ref.as_str())
+        .result_output(result_ref.as_str())
         .expect("result output lookup")
         .expect("result output");
     assert_eq!(output["exit_code"], serde_json::json!(0));

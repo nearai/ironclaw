@@ -1,11 +1,10 @@
 use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
-use ironclaw_host_api::InvocationId;
+use ironclaw_host_api::{InvocationId, Resolution};
 use ironclaw_loop_host::{CapabilityResultWrite, DurablePersistence};
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailure, CapabilityFailureKind,
-    CapabilityOutcome, CapabilityResultMessage, ConcurrencyHint,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureKind, ConcurrencyHint, resolution,
 };
 
 use crate::runtime::{
@@ -55,7 +54,7 @@ impl SyntheticCapabilityHandler for SkillActivationHandler {
     async fn invoke(
         &self,
         invocation: SyntheticCapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         // Normalise to lowercase at the parse boundary so that `names` (passed
         // to `activate_skills_for_run`) and the response-filter set both use the
         // same canonical form. `activate_skills_for_run` matches with
@@ -107,15 +106,15 @@ impl SyntheticCapabilityHandler for SkillActivationHandler {
                 durable_persistence: DurablePersistence::Persist,
             })
             .await?;
-        Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
-            result_ref: write_result.result_ref,
-            safe_summary: format!("activated {} skill(s)", activated.len()),
-            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-            terminate_hint: false,
-            byte_len: write_result.byte_len,
-            output_digest: write_result.output_digest,
-            model_observation: write_result.model_observation,
-        }))
+        Ok(resolution::completed(
+            write_result.result_ref,
+            format!("activated {} skill(s)", activated.len()),
+            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            false,
+            write_result.byte_len,
+            write_result.output_digest,
+            write_result.model_observation,
+        ))
     }
 }
 
@@ -226,20 +225,19 @@ fn skill_activation_host_error(
 ///   adjusting its request.
 fn skill_activation_selection_outcome(
     error: ironclaw_first_party_extension_ports::SkillActivationSelectionError,
-) -> Result<CapabilityOutcome, AgentLoopHostError> {
+) -> Result<Resolution, AgentLoopHostError> {
     use ironclaw_first_party_extension_ports::SkillActivationSelectionError as SelectionError;
     match error {
-        SelectionError::ContextBudgetExceeded => Ok(CapabilityOutcome::Failed(CapabilityFailure {
-            error_kind: CapabilityFailureKind::InvalidInput,
-            safe_summary: "skill activation exceeds the per-run skill context budget; activate fewer or smaller skills".to_string(),
-            detail: None,
-        })),
-        SelectionError::AmbiguousSkill { .. } => Ok(CapabilityOutcome::Failed(CapabilityFailure {
-            error_kind: CapabilityFailureKind::InvalidInput,
-            safe_summary: "ambiguous skill name; specify a single unique skill to activate"
-                .to_string(),
-            detail: None,
-        })),
+        SelectionError::ContextBudgetExceeded => Ok(resolution::failed(
+            CapabilityFailureKind::InvalidInput,
+            "skill activation exceeds the per-run skill context budget; activate fewer or smaller skills".to_string(),
+            None,
+        )),
+        SelectionError::AmbiguousSkill { .. } => Ok(resolution::failed(
+            CapabilityFailureKind::InvalidInput,
+            "ambiguous skill name; specify a single unique skill to activate".to_string(),
+            None,
+        )),
         other => Err(skill_activation_host_error(other)),
     }
 }
@@ -289,12 +287,7 @@ mod tests {
         )
         .expect("budget-exceeded must be a model-visible failure, not a terminal host error");
 
-        match outcome {
-            CapabilityOutcome::Failed(failure) => {
-                assert_eq!(failure.error_kind, CapabilityFailureKind::InvalidInput);
-            }
-            other => panic!("expected CapabilityOutcome::Failed, got {other:?}"),
-        }
+        assert_recoverable_invalid_input(&outcome);
     }
 
     #[test]
@@ -307,11 +300,21 @@ mod tests {
         )
         .expect("ambiguous skill must be a model-visible failure, not a terminal host error");
 
-        match outcome {
-            CapabilityOutcome::Failed(failure) => {
-                assert_eq!(failure.error_kind, CapabilityFailureKind::InvalidInput);
-            }
-            other => panic!("expected CapabilityOutcome::Failed, got {other:?}"),
+        assert_recoverable_invalid_input(&outcome);
+    }
+
+    /// A recoverable model-visible failure is `Resolution::Done` carrying a
+    /// `RecoverableFailure(InvalidInput)` verdict (the §5.3 collapse of the old
+    /// `CapabilityOutcome::Failed { InvalidInput }`).
+    fn assert_recoverable_invalid_input(resolution: &ironclaw_host_api::Resolution) {
+        match resolution {
+            ironclaw_host_api::Resolution::Done(outcome) => assert_eq!(
+                outcome.verdict,
+                ironclaw_host_api::ToolVerdict::recoverable_failure(
+                    ironclaw_host_api::FailureKind::InvalidInput
+                )
+            ),
+            other => panic!("expected Resolution::Done recoverable failure, got {other:?}"),
         }
     }
 

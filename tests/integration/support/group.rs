@@ -332,6 +332,17 @@ impl GroupCapability {
         }
     }
 
+    /// The durable gate-record store this backend's capability port persists
+    /// `GateRecord::Auth` into (§5.2.9) — the SAME `Arc` the turn executor must
+    /// re-read an auth block's `credential_requirements` from. `None` for the
+    /// echo backend and for host-runtime backends without approval parts.
+    pub(crate) fn gate_record_store(&self) -> Option<Arc<dyn ironclaw_run_state::GateRecordStore>> {
+        match self {
+            Self::HostRuntime(harness) => harness.gate_record_store(),
+            Self::Recording => None,
+        }
+    }
+
     /// E-DURABLE core: assert `extension_id` is present in a FRESHLY reopened
     /// `ExtensionInstallationStore` at this backend's on-disk `storage_root`
     /// (a handle independent of the live `Arc`) — proving the install
@@ -1000,6 +1011,12 @@ impl RebornIntegrationGroupBuilder {
             attachment_read_port: capability_recorder
                 .attachment_test_support()
                 .map(|support| support.read_port),
+            // §5.2.9 render-from-record: the SAME durable gate-record store this
+            // group's capability port persists `GateRecord::Auth` into, so the
+            // turn executor re-reads an auth block's `credential_requirements`
+            // from the exact record the port saved (mirrors production
+            // `runtime.rs`'s `local_runtime.gate_record_store`).
+            gate_record_store: capability.gate_record_store(),
             scheduler_wake_wiring: None,
         };
         let planned_runtime_parts_shape = harness_planned_runtime_parts_shape(&parts);

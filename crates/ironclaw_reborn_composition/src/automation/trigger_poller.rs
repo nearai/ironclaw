@@ -1,15 +1,10 @@
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 use std::collections::VecDeque;
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 use std::future::Future;
 use std::sync::Arc;
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_triggers::{
@@ -17,7 +12,6 @@ use ironclaw_triggers::{
     TriggerPollerWorkerDeps, TriggerPromptMaterializer, TriggerRepository,
     TrustedTriggerFireSubmitter,
 };
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 use ironclaw_triggers::{TriggerAcceptedFireSettlement, TriggerFireSettlementObserver};
 use rand::RngExt;
 use tokio::task::JoinHandle;
@@ -28,7 +22,6 @@ pub(crate) use crate::automation::trigger_poller_trusted_submit::ConversationCon
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use crate::automation::trigger_poller_trusted_submit::TenantScopedTrustedTriggerFireAuthorizer;
 use crate::runtime_input::TriggerPollerSettings;
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 use ironclaw_channel_delivery::PostSubmitDeliveryHook;
 
 mod active_run_lookup;
@@ -39,7 +32,6 @@ pub(crate) const TRIGGER_POLLER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs
 pub(crate) struct TriggerPollerRuntimeHandle {
     cancel: CancellationToken,
     handle: JoinHandle<()>,
-    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     post_submit_tasks: Arc<PostSubmitDeliveryTaskOwner>,
 }
 
@@ -69,7 +61,6 @@ impl TriggerPollerRuntimeHandle {
                 }
             }
         }
-        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         self.post_submit_tasks.drain(timeout).await;
     }
 }
@@ -81,7 +72,6 @@ pub(crate) struct TriggerPollerCompositionDeps {
     pub(crate) trusted_submitter: Arc<dyn TrustedTriggerFireSubmitter>,
     pub(crate) active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
     /// Late-binding slot for the post-submit delivery hook.
-    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     pub(crate) post_submit_hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
 }
 
@@ -94,21 +84,12 @@ pub(crate) fn spawn_trigger_poller(
     }
     settings.worker.validate()?;
     let cancel = CancellationToken::new();
-    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     let post_submit_observer = Arc::new(PostSubmitHookObserver::new(
         deps.post_submit_hook_slot,
         cancel.clone(),
     ));
-    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     let post_submit_tasks = Arc::clone(&post_submit_observer.task_owner);
-    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     let fire_settlement_observer: Arc<dyn TriggerFireSettlementObserver> = post_submit_observer;
-    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
-    let trusted_submitter = deps.trusted_submitter;
-    #[cfg(not(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")))]
-    let fire_settlement_observer: Arc<dyn ironclaw_triggers::TriggerFireSettlementObserver> =
-        Arc::new(ironclaw_triggers::NoopTriggerFireSettlementObserver);
-    #[cfg(not(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")))]
     let trusted_submitter = deps.trusted_submitter;
     let worker = TriggerPollerWorker::new(
         settings.worker.clone(),
@@ -128,21 +109,17 @@ pub(crate) fn spawn_trigger_poller(
     Ok(Some(TriggerPollerRuntimeHandle {
         cancel,
         handle,
-        #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
         post_submit_tasks,
     }))
 }
 
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 const POST_SUBMIT_HOOK_PENDING_CAPACITY: usize = 256;
 
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 #[derive(Default)]
 struct PostSubmitDeliveryTaskOwner {
     tasks: tokio::sync::Mutex<tokio::task::JoinSet<()>>,
 }
 
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 impl PostSubmitDeliveryTaskOwner {
     async fn spawn(
         &self,
@@ -195,7 +172,6 @@ impl PostSubmitDeliveryTaskOwner {
     }
 }
 
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 async fn run_post_submit_hook(
     hook: Arc<dyn PostSubmitDeliveryHook>,
     event: TriggerAcceptedFireSettlement,
@@ -217,7 +193,6 @@ async fn run_post_submit_hook(
 /// Bridges trigger-domain settlement notifications to the composition-owned
 /// Slack delivery hook. Delivery is detached from the poller tick only after the
 /// worker has persisted the accepted run/thread mapping.
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 pub(crate) struct PostSubmitHookObserver {
     pub(crate) hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
     pending: Arc<Mutex<VecDeque<TriggerAcceptedFireSettlement>>>,
@@ -226,7 +201,6 @@ pub(crate) struct PostSubmitHookObserver {
     task_owner: Arc<PostSubmitDeliveryTaskOwner>,
 }
 
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 impl PostSubmitHookObserver {
     fn new(
         hook_slot: Arc<OnceLock<Arc<dyn PostSubmitDeliveryHook>>>,
@@ -312,7 +286,6 @@ impl PostSubmitHookObserver {
     }
 }
 
-#[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 #[async_trait]
 impl TriggerFireSettlementObserver for PostSubmitHookObserver {
     async fn on_accepted_fire_settled(&self, event: TriggerAcceptedFireSettlement) {
@@ -426,7 +399,6 @@ mod tests {
         let runtime_handle = TriggerPollerRuntimeHandle {
             cancel,
             handle,
-            #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
             post_submit_tasks: Arc::new(PostSubmitDeliveryTaskOwner::default()),
         };
 
@@ -435,7 +407,6 @@ mod tests {
 
     // ── PostSubmitHookObserver tests ────────────────────────────────────────
 
-    #[cfg(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
     mod post_submit_observer {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{Arc, Mutex};

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{DispatchInputIssueCode, InvocationId, UserId};
+use ironclaw_host_api::{DispatchInputIssueCode, InvocationId, Resolution, UserId};
 use ironclaw_loop_host::{CapabilityResultWrite, DurablePersistence};
 use ironclaw_threads::{
     MessageKind, MessageStatus, ReadToolResultRecordRequest, SessionThreadError,
@@ -9,11 +9,11 @@ use ironclaw_threads::{
     ToolResultReferenceEnvelope,
 };
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailure, CapabilityFailureDetail,
-    CapabilityFailureKind, CapabilityInputIssue, CapabilityOutcome, CapabilityProgress,
-    CapabilityResultMessage, ConcurrencyHint, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
-    ModelVisibleArtifact, ModelVisibleToolObservation, ObservationTrust, ToolObservationDetail,
-    ToolObservationStatus, sanitize_model_visible_text,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityFailureKind,
+    CapabilityInputIssue, CapabilityProgress, ConcurrencyHint,
+    MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleArtifact,
+    ModelVisibleToolObservation, ObservationTrust, ToolObservationDetail, ToolObservationStatus,
+    resolution, sanitize_model_visible_text,
 };
 
 use super::{
@@ -111,10 +111,10 @@ impl SyntheticCapabilityHandler for ResultReadHandler {
     async fn invoke(
         &self,
         invocation: SyntheticCapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         let input = match parse_result_read_input(&invocation.input) {
             Ok(input) => input,
-            Err(failure) => return Ok(CapabilityOutcome::Failed(failure)),
+            Err(resolution) => return Ok(*resolution),
         };
         let scope = local_dev_thread_scope_for_run(&invocation.run_context, &self.fallback_user_id)
             .ok_or_else(|| {
@@ -206,15 +206,15 @@ impl SyntheticCapabilityHandler for ResultReadHandler {
             next_offset,
             sanitize_model_visible_text(content),
         ));
-        Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
-            result_ref: write.result_ref,
-            safe_summary: "result chunk returned".to_string(),
-            progress: CapabilityProgress::MadeProgress,
-            terminate_hint: false,
-            byte_len: write.byte_len,
-            output_digest: write.output_digest,
-            model_observation: write.model_observation,
-        }))
+        Ok(resolution::completed(
+            write.result_ref,
+            "result chunk returned".to_string(),
+            CapabilityProgress::MadeProgress,
+            false,
+            write.byte_len,
+            write.output_digest,
+            write.model_observation,
+        ))
     }
 }
 
@@ -247,20 +247,20 @@ fn result_read_observation(
     }
 }
 
-fn unavailable_result_reference() -> CapabilityOutcome {
-    CapabilityOutcome::Failed(CapabilityFailure {
-        error_kind: CapabilityFailureKind::InvalidInput,
-        safe_summary: "result reference is unavailable in this thread".to_string(),
-        detail: None,
-    })
+fn unavailable_result_reference() -> Resolution {
+    resolution::failed(
+        CapabilityFailureKind::InvalidInput,
+        "result reference is unavailable in this thread".to_string(),
+        None,
+    )
 }
 
-fn non_text_result_content() -> CapabilityOutcome {
-    CapabilityOutcome::Failed(CapabilityFailure {
-        error_kind: CapabilityFailureKind::InvalidInput,
-        safe_summary: "stored tool result cannot be returned as text".to_string(),
-        detail: None,
-    })
+fn non_text_result_content() -> Resolution {
+    resolution::failed(
+        CapabilityFailureKind::InvalidInput,
+        "stored tool result cannot be returned as text".to_string(),
+        None,
+    )
 }
 
 fn storage_unavailable_error(
@@ -280,17 +280,18 @@ struct ResultReadInput {
     max_bytes: u64,
 }
 
-/// Builds the `InvalidInput` `CapabilityFailure` every
+/// Builds the `InvalidInput` recoverable-failure `Resolution` every
 /// `parse_result_read_input` error arm returns, carrying one structured
-/// repair issue.
-fn invalid_input_failure(safe_summary: &str, issue: CapabilityInputIssue) -> CapabilityFailure {
-    CapabilityFailure {
-        error_kind: CapabilityFailureKind::InvalidInput,
-        safe_summary: safe_summary.to_string(),
-        detail: Some(CapabilityFailureDetail::InvalidInput {
+/// repair issue. Boxed because a `Resolution` in the `Err` position of the
+/// parse result is large (`clippy::result_large_err`).
+fn invalid_input_failure(safe_summary: &str, issue: CapabilityInputIssue) -> Box<Resolution> {
+    Box::new(resolution::failed(
+        CapabilityFailureKind::InvalidInput,
+        safe_summary.to_string(),
+        Some(CapabilityFailureDetail::InvalidInput {
             issues: vec![issue],
         }),
-    }
+    ))
 }
 
 /// JSON type name for a `CapabilityInputIssue::received` value, distinct from
@@ -328,9 +329,7 @@ fn safe_issue_path(key: &str) -> String {
     }
 }
 
-fn parse_result_read_input(
-    value: &serde_json::Value,
-) -> Result<ResultReadInput, CapabilityFailure> {
+fn parse_result_read_input(value: &serde_json::Value) -> Result<ResultReadInput, Box<Resolution>> {
     let object = value.as_object().ok_or_else(|| {
         invalid_input_failure(
             "result_read arguments must be an object",

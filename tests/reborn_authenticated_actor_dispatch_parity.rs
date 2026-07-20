@@ -10,7 +10,8 @@ use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
     ExtensionId, GrantConstraints, MountView, NetworkPolicy, PackageId, PackageSource, Principal,
-    ProviderToolName, ResourceScope, ResourceUsage, RuntimeKind, ThreadId, TrustClass, UserId,
+    ProviderToolName, Resolution, ResourceScope, ResourceUsage, RuntimeKind, ThreadId, TrustClass,
+    UserId,
 };
 use ironclaw_host_runtime::{
     BUILTIN_FIRST_PARTY_PROVIDER, CapabilitySurfacePolicy, CapabilitySurfaceVersion,
@@ -30,7 +31,7 @@ use ironclaw_turns::{
     InMemoryRunProfileResolver, LoopResultRef, RunProfileResolutionRequest, RunProfileResolver,
     TurnActor, TurnId, TurnRunId, TurnScope,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInvocation, CapabilityOutcome,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInvocation,
         InMemoryLoopHostMilestoneSink, LoopCapabilityPort, LoopRunContext, ProviderToolCall,
         RegisterProviderToolCallRequest, VisibleCapabilityRequest,
     },
@@ -154,7 +155,7 @@ async fn loop_run_dispatch_preserves_authenticated_actor_distinct_from_shared_su
         .await
         .expect("real first-party dispatch succeeds");
 
-    assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+    assert!(matches!(outcome, Resolution::Done(_)));
     let (subject, actor) = recorded
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())

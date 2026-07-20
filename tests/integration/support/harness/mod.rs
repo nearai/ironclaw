@@ -178,6 +178,14 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// `io`/`result_writer_io` document above `install_durable_capability_io`.
     runtime: Mutex<Arc<dyn HostRuntime>>,
     approval_parts: Option<RebornApprovalTestParts>,
+    /// The durable gate-record store BOTH this harness's capability port
+    /// (`GateRecord::Auth` save) and the turn executor (render-from-record read)
+    /// use — resolved ONCE here so the two never diverge onto separate
+    /// in-memory backends. Shares `approval_parts.gate_record_store` when present
+    /// (group case), else a per-harness `FilesystemGateRecordStore` over a fresh
+    /// in-memory backend (single-shot case) — the same store the executor is
+    /// handed via `gate_record_store()`.
+    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
     auto_approve_settings: Option<Arc<dyn ironclaw_approvals::AutoApproveSettingStore>>,
     pending_approval_scopes: Arc<Mutex<HashMap<ApprovalRequestId, ResourceScope>>>,
     /// Input-resolver half of this harness's capability io. Default (every
@@ -319,6 +327,31 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// decide whether to call `install_trigger_active_run_lookup_for_test` once
     /// the caller's real shared turn-state store is available.
     trigger_active_run_lookup_requested: bool,
+}
+
+/// Resolve the durable gate-record store a `HostRuntimeCapabilityHarness` shares
+/// between its capability-port save and the turn executor's render-from-record
+/// read (§5.2.9): the group-shared `approval_parts` store when present, else a
+/// per-harness `FilesystemGateRecordStore` over a fresh in-memory backend. Used
+/// by every `HostRuntimeCapabilityHarness` constructor so the save and read
+/// halves can never land on separate backends.
+pub(super) fn resolve_harness_gate_record_store(
+    approval_parts: &Option<RebornApprovalTestParts>,
+) -> Arc<dyn ironclaw_run_state::GateRecordStore> {
+    approval_parts
+        .as_ref()
+        .map(|parts| Arc::clone(&parts.gate_record_store))
+        .unwrap_or_else(fresh_in_memory_gate_record_store)
+}
+
+/// A per-harness `FilesystemGateRecordStore` over a fresh in-memory backend —
+/// the `approval_parts`-less fallback used by single-shot profile constructors.
+pub(super) fn fresh_in_memory_gate_record_store() -> Arc<dyn ironclaw_run_state::GateRecordStore> {
+    Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+        ironclaw_reborn_composition::wrap_scoped(Arc::new(
+            ironclaw_filesystem::InMemoryBackend::new(),
+        )),
+    ))
 }
 
 impl HostRuntimeCapabilityHarness {
@@ -733,9 +766,17 @@ impl HostRuntimeCapabilityHarness {
             runtime,
             Arc::clone(&pending_approval_scopes),
         ));
+        // Resolve the durable gate-record store ONCE (§5.2.9): the capability
+        // port's `GateRecord::Auth` save and the turn executor's
+        // render-from-record read MUST hit the same store, so a single-shot
+        // harness (no `approval_parts`) cannot mint a fresh fallback per
+        // capability-port build — it would strand the saved record where the
+        // executor never reads.
+        let gate_record_store = resolve_harness_gate_record_store(&approval_parts);
         Ok(Self {
             runtime: Mutex::new(runtime),
             approval_parts,
+            gate_record_store,
             auto_approve_settings,
             pending_approval_scopes,
             io: Mutex::new(io),
@@ -1136,6 +1177,17 @@ impl HostRuntimeCapabilityHarness {
             .map(|parts| Arc::clone(&parts.approval_requests))
     }
 
+    /// The durable gate-record store this harness's capability port persists
+    /// `GateRecord::Auth` into (§5.2.9). The group threads this SAME `Arc` into
+    /// `DefaultPlannedRuntimeParts.gate_record_store` so the turn executor
+    /// re-reads an auth block's `credential_requirements` from the exact record
+    /// the capability port saved. Always `Some` — resolved once at construction
+    /// (shared `approval_parts` store, or a per-harness fallback) — mirroring
+    /// production, where `local_runtime` always wires it.
+    pub(crate) fn gate_record_store(&self) -> Option<Arc<dyn ironclaw_run_state::GateRecordStore>> {
+        Some(Arc::clone(&self.gate_record_store))
+    }
+
     /// The user id this capability harness's first-party tools execute under.
     /// The dispatch-time auto-approve check is keyed `(tenant, user)` on THIS
     /// user (not the run's binding owner), so the group derives the auto-approve
@@ -1490,22 +1542,13 @@ impl HostRuntimeCapabilityHarness {
             .unwrap_or_else(|| {
                 Arc::new(ironclaw_authorization::in_memory_backed_capability_lease_store())
             });
-        // Durable gate-record + host-private replay-payload stores (§5.3 Stage
-        // 2a-i). Shared via `approval_parts` (built once per group over the shared
-        // composite root) so a gate raised on one thread/turn is reconstituted on
-        // resume; harnesses without approval_parts never raise a resumable gate, so
-        // the fresh in-memory-backed fallback is never exercised on resume.
-        let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore> = self
-            .approval_parts
-            .as_ref()
-            .map(|parts| Arc::clone(&parts.gate_record_store))
-            .unwrap_or_else(|| {
-                Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
-                    ironclaw_reborn_composition::wrap_scoped(Arc::new(
-                        ironclaw_filesystem::InMemoryBackend::new(),
-                    )),
-                ))
-            });
+        // Durable gate-record store (§5.3 Stage 2a-i) — the SAME `Arc` resolved
+        // once at construction and handed to the turn executor via
+        // `gate_record_store()`, so the capability port's `GateRecord::Auth` save
+        // and the executor's render-from-record read never split onto separate
+        // backends (even for a single-shot harness with no `approval_parts`).
+        let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore> =
+            Arc::clone(&self.gate_record_store);
         let replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore> = self
             .approval_parts
             .as_ref()
