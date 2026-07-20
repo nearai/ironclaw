@@ -36,7 +36,7 @@ mod journal;
 mod traits;
 
 use delta::{
-    RowPersistError, RowSnapshotState, RowStoreMeta, SnapshotDelta, active_lock_record_key,
+    RowSnapshotState, RowStoreMeta, SnapshotDelta, active_lock_record_key,
     event_record_key, keyed_records, preserve_loop_checkpoints, row_store_durable_delta,
     row_store_hot_cache_snapshot, snapshot_delta,
 };
@@ -106,12 +106,12 @@ where
 
 struct PendingRowCommit<T> {
     value: T,
+    /// `Some` only for a critical write-behind barrier that `commit_pending`
+    /// must await; `None` for a no-op commit or a non-critical write-behind op
+    /// already tracked in the bounded pending window by `apply`. Criticality is
+    /// decided upstream by `track_write_behind_ack_if_async`, which nulls the
+    /// ack on the non-critical path — so this field alone drives the await.
     ack: Option<DeltaAck>,
-    /// Whether the resulting run status is recoverability-critical (gate-park,
-    /// terminal, or brand-new run creation). A critical commit awaits its
-    /// durable ack synchronously (a barrier); a non-critical one registers for
-    /// backpressure and returns without awaiting.
-    critical: bool,
 }
 
 enum RowApplyOutcome<T> {
@@ -338,13 +338,6 @@ where
         }
     }
 
-    /// Whether this commit takes the async (non-awaited) write-behind path:
-    /// only non-critical transitions (write-behind is unconditional; every
-    /// commit takes this path unless it is recoverability-critical).
-    fn write_behind_async(&self, critical: bool) -> bool {
-        !critical
-    }
-
     /// Whether reads must serve from the process-local hot snapshot to honor
     /// read-your-writes. A non-critical mutation returns `Ok` after updating
     /// the hot cache but before its durable append, so a durable-row read
@@ -408,11 +401,8 @@ where
         }
         // A durable ack is present ⇒ a critical write-behind barrier: await
         // it. A non-critical write-behind commit never reaches here —
-        // `track_write_behind_ack_if_async` returned `ack: None` above.
-        debug_assert!(
-            !self.write_behind_async(pending.critical),
-            "non-critical write-behind commit must be tracked in apply, not awaited",
-        );
+        // `track_write_behind_ack_if_async` returned `ack: None` above, so the
+        // `ack.is_none()` early return already handled it.
         self.await_pending_commit(pending, timeout_reason).await
     }
 
@@ -459,7 +449,7 @@ where
         critical: bool,
         ack: Option<DeltaAck>,
     ) -> Option<DeltaAck> {
-        if self.write_behind_async(critical) {
+        if !critical {
             if let Some(ack) = ack {
                 self.pending_write_behind.lock().await.push_back(ack);
             }
@@ -658,7 +648,7 @@ where
         }
 
         let delta = snapshot_delta(&TurnPersistenceSnapshot::default(), &legacy)
-            .map_err(RowPersistError::into_turn)?;
+            ?;
         if delta.is_empty() {
             return Ok(current);
         }
@@ -675,10 +665,10 @@ where
         );
         let ack = self
             .enqueue_delta(delta)
-            .map_err(RowPersistError::into_turn)?;
+            ?;
         self.await_delta_ack(ack)
             .await
-            .map_err(RowPersistError::into_turn)?;
+            ?;
         materialize_delta_log(self.filesystem.as_ref(), &self.materialize_gate, None).await?;
         let migrated = self.read_materialized_row_snapshot().await?;
         tracing::debug!(
@@ -868,7 +858,7 @@ where
                 .await?,
             &event_record_key,
         )
-        .map_err(RowPersistError::into_turn)?;
+        ?;
         let retention_floor = self.read_meta().await?.event_retention_floor;
         let mut events = events.into_values().collect::<Vec<_>>();
         events.sort_by_key(|event| event.cursor);
@@ -1130,7 +1120,7 @@ where
 
                 let delta = match snapshot_delta(&baseline, &new_snapshot) {
                     Ok(delta) => delta,
-                    Err(RowPersistError::Turn(error)) => {
+                    Err(error) => {
                         *guard = None;
                         return Err(error);
                     }
@@ -1162,7 +1152,7 @@ where
                 // journal channel past the cap while the flusher is stalled.
                 // A degraded reservation → clear the hot cache (next read
                 // reloads from durable) and fail fast.
-                if self.write_behind_async(delta_critical)
+                if !delta_critical
                     && let Err(error) = self.reserve_write_behind_slot().await
                 {
                     *guard = None;
@@ -1170,7 +1160,7 @@ where
                 }
                 let ack = match self.enqueue_delta(persist_delta) {
                     Ok(ack) => ack,
-                    Err(RowPersistError::Turn(error)) => {
+                    Err(error) => {
                         *guard = None;
                         return Err(error);
                     }
@@ -1182,7 +1172,6 @@ where
                 return Ok(RowApplyOutcome::Pending(PendingRowCommit {
                     value,
                     ack,
-                    critical: delta_critical,
                 }));
             }
         };
@@ -1205,16 +1194,16 @@ where
         }
     }
 
-    fn enqueue_delta(&self, delta: SnapshotDelta) -> Result<Option<DeltaAck>, RowPersistError> {
+    fn enqueue_delta(&self, delta: SnapshotDelta) -> Result<Option<DeltaAck>, TurnError> {
         self.delta_journal
             .enqueue(delta)
-            .map_err(RowPersistError::Turn)
+            
     }
 
-    async fn await_delta_ack(&self, ack: Option<DeltaAck>) -> Result<(), RowPersistError> {
+    async fn await_delta_ack(&self, ack: Option<DeltaAck>) -> Result<(), TurnError> {
         DeltaJournal::await_ack(ack)
             .await
-            .map_err(RowPersistError::Turn)
+            
     }
 
     async fn await_pending_commit<T>(
@@ -1226,7 +1215,7 @@ where
             Ok(Ok(())) => Ok(pending.value),
             Ok(Err(error)) => {
                 self.clear_snapshot_cache().await;
-                Err(error.into_turn())
+                Err(error)
             }
             Err(_) => {
                 self.clear_snapshot_cache().await;
@@ -1341,7 +1330,6 @@ where
                     return Ok(PendingRowCommit {
                         value,
                         ack: None,
-                        critical: delta_critical,
                     });
                 }
                 if let Some(state) = guard.as_mut() {
@@ -1364,7 +1352,7 @@ where
                 }
                 // Bound the pending window BEFORE enqueue (#6263 Step 3): see the
                 // twin reservation in the whole-snapshot apply path above.
-                if self.write_behind_async(delta_critical)
+                if !delta_critical
                     && let Err(error) = self.reserve_write_behind_slot().await
                 {
                     *guard = None;
@@ -1372,7 +1360,7 @@ where
                 }
                 let ack = match self.enqueue_delta(persist_delta) {
                     Ok(ack) => ack,
-                    Err(RowPersistError::Turn(error)) => {
+                    Err(error) => {
                         *guard = None;
                         return Err(error);
                     }
@@ -1383,7 +1371,6 @@ where
                 return Ok(PendingRowCommit {
                     value,
                     ack,
-                    critical: delta_critical,
                 });
             }
         };
