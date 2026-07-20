@@ -356,7 +356,7 @@ async def test_reborn_legacy_tool_permission_retains_selection_while_saving(
         await asyncio.wait_for(harness["permission_save_started"].wait(), timeout=5)
 
         select = _tool_row(page, "echo").locator(
-            "[data-testid='settings-tool-permission-select']"
+            SEL_V2["settings_tool_permission_select"]
         )
         await expect(select).to_have_attribute("aria-busy", "true")
         await expect(button).to_contain_text("Ask each time")
