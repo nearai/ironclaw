@@ -469,6 +469,12 @@ function mergeFullRefresh(fresh, current, options = {}) {
     current,
   );
   const ids = new Set(hydratedFresh.map((m) => m?.id).filter(Boolean));
+  const finalizedRunIds = new Set(
+    hydratedFresh
+      .filter(isFinalAssistantMessage)
+      .map((message) => message?.turnRunId)
+      .filter((runId) => typeof runId === "string"),
+  );
   const freshSequenceWindow =
     rawFreshSequenceWindow || timelineSequenceWindow(hydratedFresh);
   const currentSequenceWindow =
@@ -493,6 +499,12 @@ function mergeFullRefresh(fresh, current, options = {}) {
     ) {
       return false;
     }
+    if (
+      isLiveAssistantMessage(message) &&
+      !finalizedRunIds.has(message.turnRunId)
+    ) {
+      return true;
+    }
     if (isSeededOptimisticMessage(message)) return true;
     if (
       preserveLoadedOlderTimelineMessages &&
@@ -505,6 +517,16 @@ function mergeFullRefresh(fresh, current, options = {}) {
   return preserved.length > 0
     ? insertPreservedAtOriginalPositions(hydratedFresh, preserved, current)
     : hydratedFresh;
+}
+
+function isLiveAssistantMessage(message) {
+  return (
+    message?.role === "assistant" &&
+    message?.isFinalReply === false &&
+    typeof message?.turnRunId === "string" &&
+    typeof message?.id === "string" &&
+    message.id.startsWith("text-")
+  );
 }
 
 function isSeededOptimisticMessage(message) {

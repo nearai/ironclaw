@@ -97,6 +97,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
     let reconnectWatchdog = null;
     let reconnectAttempts = 0;
     let disposed = false;
+    let terminalErrorReceived = false;
     const maxReconnectDelay = 30_000;
     const nativeReconnectWatchdogDelay = 10_000;
 
@@ -169,7 +170,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
       };
 
       source.onerror = () => {
-        if (disposed || es !== source) return;
+        if (disposed || terminalErrorReceived || es !== source) return;
         if (!isEventSourceClosed(source)) {
           setStatus(CONNECTION_STATUS.RECONNECTING);
           scheduleNativeReconnectWatchdog(source);
@@ -200,6 +201,24 @@ export function useSSE({ threadId, onEvent, enabled }) {
           frame,
           lastEventId: event.lastEventId || null,
         });
+        // The server has already classified this failure as permanent for
+        // this subscription (for example, a thread that no longer exists).
+        // EventSource reports the subsequent clean server close through
+        // `onerror`; remember the terminal frame and close locally so that
+        // callback cannot turn a non-retryable response into an infinite
+        // reconnect loop.
+        if (type === "error" && frame.retryable === false && es === source) {
+          terminalErrorReceived = true;
+          clearReconnectWatchdog();
+          if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+          }
+          es = null;
+          source.close();
+          setStatus(CONNECTION_STATUS.DISCONNECTED);
+          return;
+        }
         // A replay-unavailable response means retrying the same cursor can
         // never make progress. Replace this EventSource so the browser drops
         // its internal Last-Event-ID, and reconnect from the projection origin
