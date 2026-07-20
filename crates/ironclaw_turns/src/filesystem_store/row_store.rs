@@ -318,6 +318,16 @@ where
         self.is_write_behind() && !critical
     }
 
+    /// Whether reads must serve from the process-local hot snapshot to honor
+    /// read-your-writes. Under `WriteBehind` a non-critical mutation returns
+    /// `Ok` after updating the hot cache but before its durable append, so a
+    /// durable-row read could miss it. The hot cache is the single-writer
+    /// authority under write-behind. Once the journal has degraded the cache is
+    /// cleared and reads must fall back to the last consistent durable point.
+    fn is_write_behind_healthy(&self) -> bool {
+        self.is_write_behind() && !self.delta_journal.is_degraded()
+    }
+
     /// Whether to pre-append cross-store row reservations for this commit.
     ///
     /// Pre-append reservations are a WRITE-THROUGH / strict cross-store-CAS
@@ -378,65 +388,71 @@ where
     /// * `WriteThrough` — always await the durable ack (unchanged behavior).
     /// * `WriteBehind` + critical — await the ack (a barrier: awaiting a critical
     ///   op's ack implies the whole preceding async tail is durable).
-    /// * `WriteBehind` + non-critical — register the ack for bounded backpressure
-    ///   and return without awaiting.
+    /// * `WriteBehind` + non-critical — already enqueued and tracked in the
+    ///   bounded pending window by `apply` (returns `ack: None`), so nothing is
+    ///   awaited here.
     async fn commit_pending<T>(
         &self,
         pending: PendingRowCommit<T>,
         timeout_reason: &'static str,
     ) -> Result<T, TurnError> {
+        // `ack` is `None` for a no-op/empty commit AND for a non-critical
+        // write-behind commit (enqueued + tracked in `apply` under the
+        // `snapshot_state` lock): either way there is nothing to flush here.
         if pending.ack.is_none() {
-            // No durable delta (no-op / empty commit): nothing to flush.
             return Ok(pending.value);
         }
-        if self.write_behind_async(pending.critical) {
-            self.register_write_behind_commit(pending).await
-        } else {
-            self.await_pending_commit(pending, timeout_reason).await
-        }
+        // A durable ack is present ⇒ write-through, or a critical write-behind
+        // barrier: await it. A non-critical write-behind commit never reaches
+        // here — `track_write_behind_ack_if_async` returned `ack: None` above.
+        debug_assert!(
+            !self.write_behind_async(pending.critical),
+            "non-critical write-behind commit must be tracked in apply, not awaited",
+        );
+        self.await_pending_commit(pending, timeout_reason).await
     }
 
-    /// Non-critical write-behind commit: the hot cache is already updated
-    /// synchronously (reads stay correct), so return `Ok` without awaiting the
-    /// durable ack — only durability lags. Bound the enqueued-but-un-acked window
-    /// with [`InMemoryTurnStateStoreLimits::max_pending_write_behind_deltas`]: at
-    /// the cap, await the OLDEST pending ack first, which bounds both memory and
-    /// the crash-loss window.
-    async fn register_write_behind_commit<T>(
-        &self,
-        pending: PendingRowCommit<T>,
-    ) -> Result<T, TurnError> {
-        let PendingRowCommit {
-            value,
-            ack,
-            active_lock_reservations,
-            run_row_reservations,
-            critical: _,
-        } = pending;
-        debug_assert!(
-            active_lock_reservations.is_empty() && run_row_reservations.is_empty(),
-            "write-behind non-critical commits must not pre-append row reservations",
-        );
-        let Some(ack) = ack else {
-            return Ok(value);
-        };
+    /// Reserve a slot in the bounded write-behind pending window BEFORE the
+    /// journal enqueue, so a stalled flusher cannot let concurrent callers grow
+    /// the unbounded journal channel without bound (#6263 Step 3). Called under
+    /// the `snapshot_state` lock, which serializes enqueue; the flusher drains
+    /// the journal independently of that lock, so awaiting the oldest pending
+    /// ack here is backpressure, not deadlock. At the cap, await (and drop) the
+    /// OLDEST pending ack first, bounding both memory and the crash-loss window.
+    /// A degraded (append-failure) ack propagates; the caller clears the hot
+    /// cache and fails fast.
+    async fn reserve_write_behind_slot(&self) -> Result<(), TurnError> {
         let cap = self.limits.max_pending_write_behind_deltas.max(1);
         let mut window = self.pending_write_behind.lock().await;
         while window.len() >= cap {
             let Some(oldest) = window.pop_front() else {
                 break;
             };
-            if let Err(error) = DeltaJournal::await_ack(Some(oldest)).await {
-                // The oldest pending append failed; the flusher has halted and
-                // latched the store degraded. Surface the retryable error and
-                // roll the hot cache back to the last consistent durable point.
-                drop(window);
-                self.clear_snapshot_cache().await;
-                return Err(error);
-            }
+            DeltaJournal::await_ack(Some(oldest)).await?;
         }
-        window.push_back(ack);
-        Ok(value)
+        Ok(())
+    }
+
+    /// For a non-critical write-behind commit, move the durable ack into the
+    /// bounded pending window (its slot was reserved by
+    /// [`reserve_write_behind_slot`](Self::reserve_write_behind_slot) before the
+    /// enqueue) and return `None` so [`commit_pending`](Self::commit_pending)
+    /// returns without awaiting. Otherwise return the ack unchanged for the
+    /// caller to await (write-through / critical barrier). Runs under
+    /// `snapshot_state`, so the reserve→enqueue→track sequence is serialized and
+    /// the window can never exceed the cap.
+    async fn track_write_behind_ack_if_async(
+        &self,
+        critical: bool,
+        ack: Option<DeltaAck>,
+    ) -> Option<DeltaAck> {
+        if self.write_behind_async(critical) {
+            if let Some(ack) = ack {
+                self.pending_write_behind.lock().await.push_back(ack);
+            }
+            return None;
+        }
+        ack
     }
 
     async fn ensure_snapshot_cache_for_mutation(
@@ -742,7 +758,11 @@ where
         Ok(Some(projection::run_state_from_record(run, turn.actor)))
     }
 
-    pub(crate) async fn read_run_state_for_cancellation(
+    /// Read run state from the process-local hot snapshot (the write-behind
+    /// authority). Used by cancellation reads and, under healthy write-behind,
+    /// by [`get_run_state`](crate::TurnStateStore::get_run_state) to honor
+    /// read-your-writes for a not-yet-flushed non-critical mutation.
+    pub(crate) async fn read_run_state_from_hot_cache(
         &self,
         request: &GetRunStateRequest,
     ) -> Result<Option<TurnRunState>, TurnError> {
@@ -1087,6 +1107,19 @@ where
                 } else {
                     (Vec::new(), Vec::new())
                 };
+                // Bound the pending window BEFORE enqueue (#6263 Step 3): a
+                // non-critical write-behind op reserves a slot here, under
+                // `snapshot_state`, so concurrent callers can never grow the
+                // journal channel past the cap while the flusher is stalled.
+                // Write-behind never pre-appends, so there are no reservations to
+                // roll back; a degraded reservation → clear the hot cache (next
+                // read reloads from durable) and fail fast.
+                if self.write_behind_async(delta_critical)
+                    && let Err(error) = self.reserve_write_behind_slot().await
+                {
+                    *guard = None;
+                    return Err(error);
+                }
                 let ack = match self.enqueue_delta(persist_delta) {
                     Ok(ack) => ack,
                     Err(RowPersistError::Turn(error)) => {
@@ -1100,6 +1133,9 @@ where
                     }
                 };
                 *guard = Some(next_state);
+                let ack = self
+                    .track_write_behind_ack_if_async(delta_critical, ack)
+                    .await;
                 return Ok(RowApplyOutcome::Pending(PendingRowCommit {
                     value,
                     ack,
@@ -1995,6 +2031,14 @@ where
                     };
                     *guard = Some(next_state);
                 }
+                // Bound the pending window BEFORE enqueue (#6263 Step 3): see the
+                // twin reservation in the whole-snapshot apply path above.
+                if self.write_behind_async(delta_critical)
+                    && let Err(error) = self.reserve_write_behind_slot().await
+                {
+                    *guard = None;
+                    return Err(error);
+                }
                 let ack = match self.enqueue_delta(persist_delta) {
                     Ok(ack) => ack,
                     Err(RowPersistError::Turn(error)) => {
@@ -2007,6 +2051,9 @@ where
                         return Err(error);
                     }
                 };
+                let ack = self
+                    .track_write_behind_ack_if_async(delta_critical, ack)
+                    .await;
                 return Ok(PendingRowCommit {
                     value,
                     ack,

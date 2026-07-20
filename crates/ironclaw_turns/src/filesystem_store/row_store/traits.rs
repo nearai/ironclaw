@@ -200,16 +200,25 @@ where
     }
 
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        self.read_run_state_from_durable_rows(&request)
-            .await?
-            .ok_or(TurnError::ScopeNotFound)
+        // Read-your-writes (#6263 Step 3): under healthy write-behind a
+        // non-critical mutation returns `Ok` after updating the hot snapshot but
+        // before its durable append, so a durable-row read here could miss it
+        // (`ScopeNotFound` or a stale status). Serve from the hot snapshot — the
+        // single-writer authority under write-behind. Write-through (durable ==
+        // cache) and the degraded path (cache cleared) read the durable rows.
+        let state = if self.is_write_behind_healthy() {
+            self.read_run_state_from_hot_cache(&request).await?
+        } else {
+            self.read_run_state_from_durable_rows(&request).await?
+        };
+        state.ok_or(TurnError::ScopeNotFound)
     }
 
     async fn get_run_state_for_cancellation(
         &self,
         request: GetRunStateRequest,
     ) -> Result<TurnRunState, TurnError> {
-        self.read_run_state_for_cancellation(&request)
+        self.read_run_state_from_hot_cache(&request)
             .await?
             .ok_or(TurnError::ScopeNotFound)
     }

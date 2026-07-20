@@ -2936,3 +2936,145 @@ async fn write_behind_backpressure_bounds_the_unacked_window() {
     );
     check_internal_invariants(&snapshot).unwrap();
 }
+
+/// #6263 Step 3 (IronLoop f1) — `CancelRequested` is recoverability-critical.
+/// Under write-behind, `request_cancel` on a Running run is a durability
+/// barrier: a crash immediately after the (acked) cancel must recover the run
+/// still cancelled, never revert it to Running and re-execute work the caller
+/// was told was cancelled. Before the fix `CancelRequested` was non-critical, so
+/// the acked cancel rode the async tail and a crash lost it.
+#[tokio::test]
+async fn write_behind_cancel_of_running_run_survives_crash() {
+    let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
+    let scoped = fault_scoped(Arc::clone(&backend));
+    let scope = only_scope();
+
+    let run_id = {
+        let store =
+            open_row_store_with_policy(Arc::clone(&scoped), TurnStateDurabilityPolicy::WriteBehind);
+        let run_id = submit_one(&store, &scope, "idem-wb-cancel").await;
+        store
+            .claim_next_run(ClaimRunRequest {
+                runner_id: TurnRunnerId::new(),
+                lease_token: TurnLeaseToken::new(),
+                scope_filter: None,
+            })
+            .await
+            .unwrap()
+            .expect("claim the queued run to Running");
+        // Submit (Queued) and claim (Running) are non-critical → async under
+        // write-behind. `request_cancel` → CancelRequested is now critical: it
+        // awaits its durable ack, a barrier that flushes the whole prior tail.
+        // Drop the store synchronously right after it returns (a crash) with no
+        // intervening await, so only the cancel barrier's own synchronous
+        // durability can save the run.
+        store
+            .request_cancel(CancelRunRequest {
+                scope: scope.clone(),
+                actor: turn_actor(),
+                run_id,
+                reason: SanitizedCancelReason::UserRequested,
+                idempotency_key: IdempotencyKey::new("idem-wb-cancel-req").unwrap(),
+            })
+            .await
+            .expect("request_cancel accepted");
+        drop(store);
+        run_id
+    };
+
+    let recovered =
+        open_row_store_with_policy(Arc::clone(&scoped), TurnStateDurabilityPolicy::WriteBehind);
+    let state = recovered
+        .get_run_state(GetRunStateRequest {
+            scope: scope.clone(),
+            run_id,
+        })
+        .await
+        .expect("a cancelled run must survive the crash, not vanish or revert to Running");
+    assert_eq!(
+        state.status,
+        TurnStatus::CancelRequested,
+        "a write-behind crash must not drop an acked cancel back to Running",
+    );
+    check_internal_invariants(&recovered.persistence_snapshot().await.unwrap()).unwrap();
+}
+
+/// #6263 Step 3 (IronLoop f2) — read-your-writes under write-behind. A
+/// non-critical submit returns `Ok` after updating the hot snapshot but before
+/// its durable append; an immediate same-store `get_run_state` must still see it
+/// (served from the hot snapshot), not miss it as `ScopeNotFound` while the
+/// flusher lags. Before the fix `get_run_state` read only durable rows.
+#[tokio::test]
+async fn write_behind_get_run_state_reflects_unflushed_submit() {
+    let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
+    let scoped = fault_scoped(Arc::clone(&backend));
+    let scope = only_scope();
+    let store =
+        open_row_store_with_policy(Arc::clone(&scoped), TurnStateDurabilityPolicy::WriteBehind);
+
+    let run_id = submit_one(&store, &scope, "idem-wb-ryw").await;
+    // No await for a flush between the submit's Ok and this read.
+    let state = store
+        .get_run_state(GetRunStateRequest {
+            scope: scope.clone(),
+            run_id,
+        })
+        .await
+        .expect("read-your-writes: an unflushed write-behind submit must be visible");
+    assert_eq!(state.run_id, run_id);
+    assert_eq!(state.status, TurnStatus::Queued);
+}
+
+/// #6263 Step 3 (IronLoop f3) — the pending-window slot is now reserved BEFORE
+/// the journal enqueue, under the `snapshot_state` lock that serializes enqueue,
+/// so concurrent callers can never grow the journal channel past the cap while a
+/// flush is in flight. This exercises that concurrent reserve→enqueue→track path
+/// under a small cap: it must not deadlock, and every acked submit must be
+/// visible via read-your-writes (the strict peak-depth bound is structural — the
+/// journal channel length is not externally observable).
+#[tokio::test]
+async fn write_behind_concurrent_writers_under_cap_stay_consistent() {
+    let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
+    let scoped = fault_scoped(Arc::clone(&backend));
+    const K: usize = 12;
+
+    let store = Arc::new(
+        FilesystemTurnStateRowStore::new(Arc::clone(&scoped))
+            .with_limits(limits().set_max_pending_write_behind_deltas(2))
+            .with_durability_policy(TurnStateDurabilityPolicy::WriteBehind),
+    );
+
+    let mut tasks = Vec::new();
+    let mut run_ids = Vec::new();
+    for i in 0..K {
+        let run_id = TurnRunId::new();
+        run_ids.push(run_id);
+        let store = Arc::clone(&store);
+        tasks.push(tokio::spawn(async move {
+            store
+                .submit_turn(
+                    submit_request(scope_bp(i), run_id, &format!("idem-cc-{i}")),
+                    &AllowAllTurnAdmissionPolicy,
+                    &InMemoryRunProfileResolver::default(),
+                )
+                .await
+        }));
+    }
+    for task in tasks {
+        task.await
+            .expect("no panic/deadlock in a concurrent write-behind writer")
+            .expect("concurrent write-behind submit returns Ok");
+    }
+
+    for (i, run_id) in run_ids.iter().enumerate() {
+        let state = store
+            .get_run_state(GetRunStateRequest {
+                scope: scope_bp(i),
+                run_id: *run_id,
+            })
+            .await
+            .expect("every acked concurrent submit is visible via read-your-writes");
+        assert_eq!(state.status, TurnStatus::Queued);
+    }
+    check_internal_invariants(&store.persistence_snapshot().await.unwrap()).unwrap();
+}
