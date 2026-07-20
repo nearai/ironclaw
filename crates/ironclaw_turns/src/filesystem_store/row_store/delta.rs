@@ -3,18 +3,18 @@ use std::{
     sync::Arc,
 };
 
-use chrono::Utc;
 use ironclaw_filesystem::SeqNo;
 use serde::Serialize;
 
 use crate::{
-    EventCursor, IdempotencyKey, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits,
-    LoopCheckpointRecord, PutLoopCheckpointRequest, SpawnTreeReservation, SubmitTurnResponse,
-    TurnActiveLockRecord, TurnAdmissionReservationRecord, TurnCheckpointId, TurnCheckpointRecord,
-    TurnError, TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyRecord,
+    EventCursor, IdempotencyKey, LoopCheckpointRecord, SpawnTreeReservation, SubmitTurnResponse,
+    TurnActiveLockRecord, TurnAdmissionReservationRecord, TurnCheckpointRecord, TurnError,
+    TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyRecord,
     TurnIdempotencyReplay, TurnLifecycleEvent, TurnPersistenceSnapshot, TurnRecord, TurnRunId,
-    TurnRunRecord, TurnRunState, TurnScope, runner::ClaimedTurnRun,
+    TurnRunRecord, TurnRunState, TurnScope, TurnStateStoreLimits, runner::ClaimedTurnRun,
 };
+
+use crate::filesystem_store::turn_state_engine::TurnStateEngine;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub(super) struct RowStoreMeta {
@@ -38,7 +38,7 @@ fn zero_seq_no() -> SeqNo {
 
 pub(super) struct RowSnapshotState {
     pub(super) snapshot: TurnPersistenceSnapshot,
-    pub(super) store: Arc<InMemoryTurnStateStore>,
+    pub(super) store: Arc<TurnStateEngine>,
     pub(super) journal_seq: SeqNo,
     latest_event_cursor: EventCursor,
     indexes: RowSnapshotIndexes,
@@ -47,7 +47,7 @@ pub(super) struct RowSnapshotState {
 impl RowSnapshotState {
     pub(super) fn new(
         snapshot: TurnPersistenceSnapshot,
-        store: Arc<InMemoryTurnStateStore>,
+        store: Arc<TurnStateEngine>,
         journal_seq: SeqNo,
     ) -> Result<Self, TurnError> {
         let latest_event_cursor = latest_event_cursor(&snapshot);
@@ -545,7 +545,7 @@ where
 pub(super) fn submit_turn_targeted_delta(
     snapshot: &TurnPersistenceSnapshot,
     latest_event_cursor: EventCursor,
-    store: &InMemoryTurnStateStore,
+    store: &TurnStateEngine,
     response: &SubmitTurnResponse,
     idempotency_key: &IdempotencyKey,
 ) -> Result<SnapshotDelta, TurnError> {
@@ -594,10 +594,33 @@ pub(super) fn submit_turn_targeted_delta(
 
 pub(super) fn full_snapshot_delta(
     snapshot: &TurnPersistenceSnapshot,
-    store: &InMemoryTurnStateStore,
+    store: &TurnStateEngine,
 ) -> Result<SnapshotDelta, TurnError> {
     let mut new_snapshot = store.persistence_snapshot();
     preserve_loop_checkpoints(snapshot, &mut new_snapshot);
+    snapshot_delta(snapshot, &new_snapshot).map_err(|error| match error {
+        RowPersistError::Turn(error) => error,
+    })
+}
+
+/// Full diff of the engine's post-retry state that — unlike
+/// [`full_snapshot_delta`] — does NOT clobber loop checkpoints.
+///
+/// `retry_turn` links a NEW loop checkpoint to the spawned run *through the
+/// engine*, so that checkpoint must reach the durable rows; preserving the
+/// baseline's loop checkpoints (as the generic path does, because
+/// `put_loop_checkpoint` owns that write) would strip it and leave the retry
+/// run's checkpoint metadata unlinked. `row_store_durable_delta` still clears
+/// cache-eviction-driven row/event/loop-checkpoint deletes, so evictions never
+/// become durable deletions. Used for both the success arm (new run + linked
+/// loop checkpoint + retry idempotency record + events) and the rejection arm
+/// (the retry idempotency record the engine persists on `ThreadBusy` /
+/// `RunNotRetryable`, which the plain `apply` `Err` path used to discard).
+pub(super) fn retry_turn_full_delta(
+    snapshot: &TurnPersistenceSnapshot,
+    store: &TurnStateEngine,
+) -> Result<SnapshotDelta, TurnError> {
+    let new_snapshot = store.persistence_snapshot();
     snapshot_delta(snapshot, &new_snapshot).map_err(|error| match error {
         RowPersistError::Turn(error) => error,
     })
@@ -611,6 +634,12 @@ pub(super) fn row_store_durable_delta(mut delta: SnapshotDelta) -> SnapshotDelta
     delta.runs_delete.clear();
     delta.events_delete.clear();
     delta.event_retention_floor = None;
+    // Loop checkpoints are durable rows the engine only ever inserts (never
+    // deletes). The hot cache evicts them alongside their evicted terminal run
+    // (`row_store_hot_cache_snapshot`), so a full-snapshot diff can surface a
+    // loop-checkpoint delete that is pure cache eviction — which, like the row
+    // deletes above, must not become durable data deletion (#6263).
+    delta.loop_checkpoints_delete.clear();
     // Admission reservations are coordination scaffolding. The in-memory store
     // rebuilds them from non-terminal run records during snapshot load, so
     // keeping them in every submit/complete journal entry only adds write
@@ -622,7 +651,7 @@ pub(super) fn row_store_durable_delta(mut delta: SnapshotDelta) -> SnapshotDelta
 
 pub(super) fn row_store_hot_cache_snapshot(
     mut snapshot: TurnPersistenceSnapshot,
-    limits: InMemoryTurnStateStoreLimits,
+    limits: TurnStateStoreLimits,
 ) -> TurnPersistenceSnapshot {
     let mut terminal_runs = snapshot
         .runs
@@ -710,27 +739,10 @@ pub(super) fn preserve_loop_checkpoints(
     new_snapshot.loop_checkpoints = baseline.loop_checkpoints.clone();
 }
 
-pub(super) fn loop_checkpoint_record_from_request(
-    request: PutLoopCheckpointRequest,
-) -> LoopCheckpointRecord {
-    LoopCheckpointRecord {
-        checkpoint_id: TurnCheckpointId::new(),
-        scope: request.scope,
-        turn_id: request.turn_id,
-        run_id: request.run_id,
-        state_ref: request.state_ref,
-        schema_id: request.schema_id,
-        schema_version: request.schema_version,
-        kind: request.kind,
-        gate_ref: request.gate_ref,
-        created_at: Utc::now(),
-    }
-}
-
 pub(super) fn claimed_run_targeted_delta(
     snapshot: &TurnPersistenceSnapshot,
     latest_event_cursor: EventCursor,
-    store: &InMemoryTurnStateStore,
+    store: &TurnStateEngine,
     claimed: &Option<ClaimedTurnRun>,
 ) -> Result<SnapshotDelta, TurnError> {
     let Some(claimed) = claimed else {
@@ -748,7 +760,7 @@ pub(super) fn claimed_run_targeted_delta(
 pub(super) fn run_state_targeted_delta(
     snapshot: &TurnPersistenceSnapshot,
     latest_event_cursor: EventCursor,
-    store: &InMemoryTurnStateStore,
+    store: &TurnStateEngine,
     run_id: TurnRunId,
     scope: &TurnScope,
 ) -> Result<SnapshotDelta, TurnError> {
@@ -794,7 +806,7 @@ pub(super) fn run_state_targeted_delta(
 pub(super) fn run_state_with_idempotency_targeted_delta(
     snapshot: &TurnPersistenceSnapshot,
     latest_event_cursor: EventCursor,
-    store: &InMemoryTurnStateStore,
+    store: &TurnStateEngine,
     run_id: TurnRunId,
     scope: &TurnScope,
     operation: crate::TurnIdempotencyOperationKind,
@@ -807,7 +819,7 @@ pub(super) fn run_state_with_idempotency_targeted_delta(
 pub(super) fn blocked_run_targeted_delta(
     snapshot: &TurnPersistenceSnapshot,
     latest_event_cursor: EventCursor,
-    store: &InMemoryTurnStateStore,
+    store: &TurnStateEngine,
     state: &TurnRunState,
 ) -> Result<SnapshotDelta, TurnError> {
     let mut delta = run_state_targeted_delta(
@@ -831,7 +843,7 @@ pub(super) fn blocked_run_targeted_delta(
 
 fn add_run_idempotency_delta(
     snapshot: &TurnPersistenceSnapshot,
-    store: &InMemoryTurnStateStore,
+    store: &TurnStateEngine,
     delta: &mut SnapshotDelta,
     run_id: TurnRunId,
     operation: crate::TurnIdempotencyOperationKind,
@@ -868,7 +880,7 @@ fn latest_event_cursor_after_delta(current: EventCursor, delta: &SnapshotDelta) 
 fn add_event_delta(
     snapshot: &TurnPersistenceSnapshot,
     latest_event_cursor: EventCursor,
-    store: &InMemoryTurnStateStore,
+    store: &TurnStateEngine,
     delta: &mut SnapshotDelta,
 ) -> Result<(), TurnError> {
     delta

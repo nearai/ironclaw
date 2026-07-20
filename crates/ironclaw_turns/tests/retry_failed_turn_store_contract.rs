@@ -9,16 +9,17 @@ use ironclaw_host_api::{
     AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId, ThreadId,
     UserId, VirtualPath,
 };
+use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
     AcceptedMessageRef, AllowAllTurnAdmissionPolicy, CheckpointSchemaId, FilesystemTurnStateStore,
     GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver,
-    InMemoryTurnStateStore, LoopCheckpointKind, LoopCheckpointStateRef, LoopCheckpointStore,
-    LoopExitMapping, PutLoopCheckpointRequest, ReplyTargetBindingRef, RetryTurnRequest,
-    RunProfileRequest, RunProfileVersion, SanitizedFailure, SourceBindingRef,
-    StaticTurnAdmissionLimitProvider, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
-    TurnAdmissionAxisKind, TurnError, TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind,
-    TurnIdempotencyReplay, TurnLeaseToken, TurnPersistenceSnapshot, TurnRunId, TurnRunnerId,
-    TurnScope, TurnStateStore, TurnStatus,
+    LoopCheckpointKind, LoopCheckpointStateRef, LoopCheckpointStore, LoopExitMapping,
+    PutLoopCheckpointRequest, ReplyTargetBindingRef, RetryTurnRequest, RunProfileRequest,
+    RunProfileVersion, SanitizedFailure, SourceBindingRef, StaticTurnAdmissionLimitProvider,
+    SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor, TurnAdmissionAxisKind, TurnError,
+    TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyReplay,
+    TurnLeaseToken, TurnPersistenceSnapshot, TurnRunId, TurnRunnerId, TurnScope, TurnStateStore,
+    TurnStatus,
     runner::{
         ApplyValidatedLoopExitRequest, ClaimRunRequest, ClaimedTurnRun, FailRunRequest,
         RecoverExpiredLeasesRequest, TurnRunTransitionPort, TurnRunnerOutcome,
@@ -685,7 +686,7 @@ where
 
 #[tokio::test]
 async fn inmemory_retry_failed_turn_spawns_claimable_checkpointed_run() {
-    let store = InMemoryTurnStateStore::default();
+    let store = in_memory_turn_state_store();
     assert_retry_happy_path_spawns_claimable_checkpointed_run(
         &store,
         "thread-memory-retry-happy",
@@ -711,7 +712,7 @@ async fn filesystem_retry_failed_turn_spawns_claimable_checkpointed_run() {
 
 #[tokio::test]
 async fn inmemory_retry_failed_turn_leaves_source_failed_run_unchanged() {
-    let store = InMemoryTurnStateStore::default();
+    let store = in_memory_turn_state_store();
     assert_retry_leaves_source_failed_run_unchanged(
         &store,
         "thread-memory-retry-source-unchanged",
@@ -737,7 +738,7 @@ async fn filesystem_retry_failed_turn_leaves_source_failed_run_unchanged() {
 
 #[tokio::test]
 async fn inmemory_failed_transition_uses_latest_resumable_checkpoint() {
-    let store = InMemoryTurnStateStore::default();
+    let store = in_memory_turn_state_store();
     assert_failed_transition_uses_latest_resumable_checkpoint(
         &store,
         "thread-memory-failed-transition-checkpoint",
@@ -765,7 +766,7 @@ async fn filesystem_failed_transition_uses_latest_resumable_checkpoint() {
 async fn inmemory_retry_admission_rejection_is_not_idempotently_replayed() {
     let limits = StaticTurnAdmissionLimitProvider::default()
         .with_total_limit(TurnAdmissionAxisKind::Tenant, 1);
-    let store = InMemoryTurnStateStore::with_admission_limit_provider(Arc::new(limits));
+    let store = in_memory_turn_state_store().with_admission_limit_provider(Arc::new(limits));
     assert_retry_admission_rejection_is_not_idempotently_replayed(
         &store,
         "thread-memory-retry-admission-failed",
@@ -794,7 +795,7 @@ async fn filesystem_retry_admission_rejection_is_not_idempotently_replayed() {
 
 #[tokio::test]
 async fn inmemory_retry_failed_turn_rejects_invalid_sources_and_replays_idempotency() {
-    let store = InMemoryTurnStateStore::default();
+    let store = in_memory_turn_state_store();
     assert_retry_rejections_and_idempotency(&store, "memory-retry-reject").await;
 }
 
@@ -808,7 +809,7 @@ async fn filesystem_retry_failed_turn_rejects_invalid_sources_and_replays_idempo
 
 #[tokio::test]
 async fn inmemory_retry_failed_turn_reacquires_thread_active_lock() {
-    let store = InMemoryTurnStateStore::default();
+    let store = in_memory_turn_state_store();
     assert_retry_reacquires_thread_active_lock(&store, "memory").await;
 }
 
@@ -822,9 +823,12 @@ async fn filesystem_retry_failed_turn_reacquires_thread_active_lock() {
 
 #[tokio::test]
 async fn inmemory_retry_thread_busy_is_not_permanent_idempotency_replay() {
-    let store = InMemoryTurnStateStore::default();
+    let store = in_memory_turn_state_store();
     let scenario = create_retry_thread_busy_record(&store, "memory").await;
-    assert_retry_busy_record_is_not_permanent_error(&store.persistence_snapshot(), &scenario);
+    assert_retry_busy_record_is_not_permanent_error(
+        &store.persistence_snapshot().await.unwrap(),
+        &scenario,
+    );
     assert_retry_succeeds_after_busy_run_completes(&store, scenario).await;
 }
 
@@ -1000,7 +1004,7 @@ where
 
 #[tokio::test]
 async fn inmemory_external_fail_preserves_retryability() {
-    let store = InMemoryTurnStateStore::default();
+    let store = in_memory_turn_state_store();
     assert_external_fail_preserves_retryability(&store, "memory").await;
 }
 
@@ -1014,7 +1018,7 @@ async fn filesystem_external_fail_preserves_retryability() {
 
 #[tokio::test]
 async fn inmemory_lease_recovery_preserves_retryability() {
-    let store = InMemoryTurnStateStore::default();
+    let store = in_memory_turn_state_store();
     assert_lease_recovery_preserves_retryability(&store, "memory").await;
 }
 

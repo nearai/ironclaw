@@ -12,9 +12,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-#[cfg(feature = "webui-v2-beta")]
-use ironclaw_host_api::TenantId;
-use ironclaw_host_api::{AgentId, ProjectId, UserId};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 
 use crate::runtime_input::{
     TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
@@ -79,7 +77,6 @@ impl TriggerFireAccessChecker for StaticOwnerTriggerFireChecker {
 /// canonical identity directory (the `StoredUser` records SSO login persists),
 /// so a suspended, wrong-tenant, or unknown creator is denied. A directory
 /// backend error surfaces as retryable `Unavailable`, never a hard denial.
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) struct IdentityMembershipTriggerFireChecker {
     directory: Arc<dyn ironclaw_reborn_identity::RebornUserDirectory>,
     tenant_id: TenantId,
@@ -87,7 +84,6 @@ pub(crate) struct IdentityMembershipTriggerFireChecker {
     project: Option<ProjectId>,
 }
 
-#[cfg(feature = "webui-v2-beta")]
 impl IdentityMembershipTriggerFireChecker {
     pub(crate) fn new(
         directory: Arc<dyn ironclaw_reborn_identity::RebornUserDirectory>,
@@ -104,7 +100,6 @@ impl IdentityMembershipTriggerFireChecker {
     }
 }
 
-#[cfg(feature = "webui-v2-beta")]
 #[async_trait]
 impl TriggerFireAccessChecker for IdentityMembershipTriggerFireChecker {
     async fn check_trigger_fire_access(
@@ -178,7 +173,6 @@ impl TriggerFireAccessChecker for CompositeTriggerFireChecker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::TenantId;
 
     fn check(creator: &str, agent: Option<&str>, project: Option<&str>) -> TriggerFireAccessCheck {
         TriggerFireAccessCheck {
@@ -272,7 +266,6 @@ mod tests {
         assert!(matches!(decision, TriggerFireAccessDecision::Denied { .. }));
     }
 
-    #[cfg(feature = "webui-v2-beta")]
     mod identity {
         use super::*;
         use ironclaw_reborn_identity::{

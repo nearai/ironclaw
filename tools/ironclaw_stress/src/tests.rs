@@ -871,7 +871,6 @@ fn human_summary_places_db_probe_errors_in_matching_columns() {
     );
 }
 
-#[cfg(feature = "postgres")]
 #[test]
 fn postgres_probe_error_redacts_resolved_url() {
     let url = "postgresql://postgres:secret@localhost:5432/app";

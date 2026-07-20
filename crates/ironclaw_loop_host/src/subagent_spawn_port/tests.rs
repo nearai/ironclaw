@@ -1,5 +1,5 @@
 use chrono::Utc;
-use ironclaw_host_api::{AgentId, ProviderToolName, TenantId, UserId};
+use ironclaw_host_api::{AgentId, ProviderToolName, SafeSummary, Suspension, TenantId, UserId};
 use ironclaw_threads::{
     AcceptedInboundMessage, AcceptedInboundMessageReplay, AppendAssistantDraftRequest,
     AppendCapabilityDisplayPreviewRequest, AppendToolResultReferenceRequest, ContextMessages,
@@ -17,9 +17,8 @@ use ironclaw_turns::{
     SubmitTurnRequest, TurnId, TurnRunProfile, TurnRunRecord, TurnRunState, TurnStateStore,
     TurnStatus,
     run_profile::{
-        CapabilityResultMessage, CapabilitySurfaceVersion, ModelVisibleToolObservation,
-        ObservationTrust, RegisterProviderToolCallRequest, ToolObservationDetail,
-        ToolObservationStatus,
+        CapabilitySurfaceVersion, ModelVisibleToolObservation, ObservationTrust,
+        RegisterProviderToolCallRequest, ToolObservationDetail, ToolObservationStatus, resolution,
     },
 };
 use serde_json::json;
@@ -287,28 +286,28 @@ impl LoopCapabilityPort for SurfacePrimedSpawnAuthPort {
     async fn invoke_capability(
         &self,
         _request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
-        Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
-            result_ref: LoopResultRef::new("result:auth").unwrap(),
-            safe_summary: "authorized".to_string(),
-            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-            terminate_hint: false,
-            byte_len: 0,
-            output_digest: None,
-            model_observation: None,
-        }))
+    ) -> Result<Resolution, AgentLoopHostError> {
+        Ok(resolution::completed(
+            LoopResultRef::new("result:auth").unwrap(),
+            "authorized".to_string(),
+            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            false,
+            0,
+            None,
+            None,
+        ))
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-        let mut outcomes = Vec::with_capacity(request.invocations.len());
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
+        let mut resolutions = Vec::with_capacity(request.invocations.len());
         for invocation in request.invocations {
-            outcomes.push(self.invoke_capability(invocation).await?);
+            resolutions.push(self.invoke_capability(invocation).await?);
         }
-        Ok(CapabilityBatchOutcome {
-            outcomes,
+        Ok(ResolutionBatch {
+            resolutions,
             stopped_on_suspension: false,
         })
     }
@@ -357,7 +356,7 @@ impl LoopCapabilityPort for StrictSpawnAuthPort {
     async fn invoke_capability(
         &self,
         _request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidInvocation,
             "strict inner should not authorize synthetic spawn provider calls",
@@ -367,13 +366,13 @@ impl LoopCapabilityPort for StrictSpawnAuthPort {
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-        let mut outcomes = Vec::with_capacity(request.invocations.len());
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
+        let mut resolutions = Vec::with_capacity(request.invocations.len());
         for invocation in request.invocations {
-            outcomes.push(self.invoke_capability(invocation).await?);
+            resolutions.push(self.invoke_capability(invocation).await?);
         }
-        Ok(CapabilityBatchOutcome {
-            outcomes,
+        Ok(ResolutionBatch {
+            resolutions,
             stopped_on_suspension: false,
         })
     }
@@ -412,28 +411,28 @@ impl LoopCapabilityPort for AuthPassPort {
     async fn invoke_capability(
         &self,
         _request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
-        Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
-            result_ref: LoopResultRef::new("result:auth").unwrap(),
-            safe_summary: "authorized".to_string(),
-            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-            terminate_hint: false,
-            byte_len: 0,
-            output_digest: None,
-            model_observation: None,
-        }))
+    ) -> Result<Resolution, AgentLoopHostError> {
+        Ok(resolution::completed(
+            LoopResultRef::new("result:auth").unwrap(),
+            "authorized".to_string(),
+            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            false,
+            0,
+            None,
+            None,
+        ))
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-        let mut outcomes = Vec::with_capacity(request.invocations.len());
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
+        let mut resolutions = Vec::with_capacity(request.invocations.len());
         for invocation in request.invocations {
-            outcomes.push(self.invoke_capability(invocation).await?);
+            resolutions.push(self.invoke_capability(invocation).await?);
         }
-        Ok(CapabilityBatchOutcome {
-            outcomes,
+        Ok(ResolutionBatch {
+            resolutions,
             stopped_on_suspension: false,
         })
     }
@@ -472,20 +471,20 @@ impl LoopCapabilityPort for FixedToolPort {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         Ok(completed_outcome(request.capability_id.as_str()))
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-        let mut outcomes = Vec::with_capacity(request.invocations.len());
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
+        let mut resolutions = Vec::with_capacity(request.invocations.len());
         for invocation in request.invocations {
-            outcomes.push(self.invoke_capability(invocation).await?);
+            resolutions.push(self.invoke_capability(invocation).await?);
         }
-        Ok(CapabilityBatchOutcome {
-            outcomes,
+        Ok(ResolutionBatch {
+            resolutions,
             stopped_on_suspension: false,
         })
     }
@@ -507,17 +506,17 @@ impl LoopCapabilityPort for RecordingBatchPort {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         Ok(completed_outcome(request.capability_id.as_str()))
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
         self.batches.lock().unwrap().push(request.clone());
-        Ok(CapabilityBatchOutcome {
-            outcomes: request
+        Ok(ResolutionBatch {
+            resolutions: request
                 .invocations
                 .iter()
                 .map(|invocation| completed_outcome(invocation.capability_id.as_str()))
@@ -543,25 +542,29 @@ impl LoopCapabilityPort for SuspendedBatchPort {
     async fn invoke_capability(
         &self,
         _request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
-        Ok(CapabilityOutcome::ApprovalRequired {
-            gate_ref: LoopGateRef::new("gate:inner-suspended").unwrap(),
-            safe_summary: "approval required".to_string(),
-            approval_resume: None,
-        })
+    ) -> Result<Resolution, AgentLoopHostError> {
+        Ok(resolution::approval_required(
+            LoopGateRef::new("gate:inner-suspended").unwrap(),
+            "approval required".to_string(),
+            None,
+        )
+        .resolution)
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
         self.batches.lock().unwrap().push(request);
-        Ok(CapabilityBatchOutcome {
-            outcomes: vec![CapabilityOutcome::ApprovalRequired {
-                gate_ref: LoopGateRef::new("gate:inner-suspended").unwrap(),
-                safe_summary: "approval required".to_string(),
-                approval_resume: None,
-            }],
+        Ok(ResolutionBatch {
+            resolutions: vec![
+                resolution::approval_required(
+                    LoopGateRef::new("gate:inner-suspended").unwrap(),
+                    "approval required".to_string(),
+                    None,
+                )
+                .resolution,
+            ],
             stopped_on_suspension: true,
         })
     }
@@ -619,14 +622,14 @@ impl LoopCapabilityPort for FailingBatchPort {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         Ok(completed_outcome(request.capability_id.as_str()))
     }
 
     async fn invoke_capability_batch(
         &self,
         _request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
         Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::Unavailable,
             "forced batch failure",
@@ -1320,7 +1323,7 @@ fn authorize_spawn_input_ref(
     activity_id
 }
 
-async fn invoke_spawn(port: &SubagentSpawnCapabilityPort) -> CapabilityOutcome {
+async fn invoke_spawn(port: &SubagentSpawnCapabilityPort) -> Resolution {
     let activity_id = port
         .test_spawn_authorization(&input_ref())
         .unwrap_or_default();
@@ -1330,7 +1333,7 @@ async fn invoke_spawn(port: &SubagentSpawnCapabilityPort) -> CapabilityOutcome {
 async fn invoke_spawn_for_activity(
     port: &SubagentSpawnCapabilityPort,
     activity_id: CapabilityActivityId,
-) -> CapabilityOutcome {
+) -> Resolution {
     port.invoke_capability(CapabilityInvocation {
         activity_id,
         surface_version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
@@ -1343,23 +1346,37 @@ async fn invoke_spawn_for_activity(
     .unwrap()
 }
 
-fn completed_outcome(label: &str) -> CapabilityOutcome {
-    CapabilityOutcome::Completed(CapabilityResultMessage {
-        result_ref: LoopResultRef::new(format!("result:{label}")).unwrap(),
-        safe_summary: "completed".to_string(),
-        progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-        terminate_hint: false,
-        byte_len: 0,
-        output_digest: None,
-        model_observation: None,
-    })
+fn completed_outcome(label: &str) -> Resolution {
+    resolution::completed(
+        LoopResultRef::new(format!("result:{label}")).unwrap(),
+        "completed".to_string(),
+        ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+        false,
+        0,
+        None,
+        None,
+    )
 }
 
-fn denied_reason(outcome: CapabilityOutcome) -> String {
-    let CapabilityOutcome::Denied(denied) = outcome else {
-        panic!("expected denied outcome");
+// After the §5.3 collapse the open-set loop reason_kind no longer survives on
+// the resolution's structured channel (it maps to `DenyReason::PolicyDenied`),
+// but the spawn-specific reason string is preserved verbatim inside the
+// model-visible denial summary (`spawn_rejected` formats it as
+// "subagent spawn rejected: {reason}"). Recover it by stripping that fixed,
+// host-authored prefix so the reason-string assertions still hold.
+fn denied_reason(resolution: Resolution) -> String {
+    let Resolution::Denied(denial) = resolution else {
+        panic!("expected denied resolution");
     };
-    denied.reason_kind.as_str().to_string()
+    let summary = denial
+        .summary
+        .as_ref()
+        .map(ironclaw_host_api::SafeSummary::as_str)
+        .expect("denial carries a model-visible summary");
+    summary
+        .strip_prefix("subagent spawn rejected: ")
+        .unwrap_or(summary)
+        .to_string()
 }
 
 #[tokio::test]
@@ -1919,7 +1936,7 @@ async fn spawn_provider_tool_call_registration_does_not_require_inner_spawn_name
 
     assert!(matches!(
         outcome,
-        CapabilityOutcome::AwaitDependentRun { .. }
+        Resolution::Suspended(Suspension::DependentRun { .. })
     ));
     assert_eq!(child_runs.requests().len(), 1);
 }
@@ -2106,14 +2123,17 @@ async fn invoke_spawn_submits_child_run_through_spawn_tree_port() {
 
     let outcome = invoke_spawn(&port).await;
 
-    let CapabilityOutcome::AwaitDependentRun {
-        gate_ref,
-        result_ref,
-        ..
-    } = outcome
-    else {
+    let Resolution::Suspended(Suspension::DependentRun { waypoint, result }) = outcome else {
         panic!("expected blocking child-run wait");
     };
+    let gate_ref = waypoint
+        .origin
+        .as_ref()
+        .expect("await gate preserves the loop gate ref");
+    let result_ref = result
+        .origin
+        .as_ref()
+        .expect("await result preserves the loop result ref");
     assert_eq!(gate_ref.as_str(), gate_store.records()[0].gate_ref.as_str());
     assert_eq!(result_ref.as_str(), "result:spawn");
 
@@ -2195,7 +2215,10 @@ async fn invoke_spawn_preserves_parents_explicit_owner_on_child_await_edge_scope
 
     let outcome = invoke_spawn(&port).await;
     assert!(
-        matches!(outcome, CapabilityOutcome::AwaitDependentRun { .. }),
+        matches!(
+            outcome,
+            Resolution::Suspended(Suspension::DependentRun { .. })
+        ),
         "expected the spawn to suspend the parent on the child, got {outcome:?}"
     );
 
@@ -2255,14 +2278,17 @@ async fn invoke_spawn_surfaces_scope_recovery_in_progress_as_retryable_capabilit
 
     let outcome = invoke_spawn(&port).await;
 
-    let CapabilityOutcome::Failed(failure) = outcome else {
+    let Resolution::Done(done) = outcome else {
         panic!("expected a retryable capability failure, got {outcome:?}");
     };
-    assert_eq!(failure.error_kind, CapabilityFailureKind::Transient);
+    assert_eq!(
+        done.verdict.error_kind(),
+        Some(&ironclaw_host_api::FailureKind::Transient)
+    );
     assert!(
-        failure.safe_summary.contains("scope recovery in progress"),
-        "safe_summary should explain the retryable condition: {}",
-        failure.safe_summary
+        done.summary.as_str().contains("scope recovery in progress"),
+        "summary should explain the retryable condition: {}",
+        done.summary.as_str()
     );
 }
 
@@ -2309,11 +2335,11 @@ async fn invoke_capability_batch_handles_mixed_spawn_and_non_spawn_invocations()
         .await
         .unwrap();
 
-    assert_eq!(outcome.outcomes.len(), 3);
+    assert_eq!(outcome.resolutions.len(), 3);
     assert!(!outcome.stopped_on_suspension);
     assert!(matches!(
-        outcome.outcomes[1],
-        CapabilityOutcome::AwaitDependentRun { .. }
+        outcome.resolutions[1],
+        Resolution::Suspended(Suspension::DependentRun { .. })
     ));
     let batches = inner.batches.lock().unwrap();
     assert_eq!(batches.len(), 2);
@@ -2417,7 +2443,7 @@ async fn invoke_capability_batch_rolls_back_preceding_spawn_on_inner_batch_failu
     assert!(
         matches!(
             invoke_spawn(&port).await,
-            CapabilityOutcome::AwaitDependentRun { .. }
+            Resolution::Suspended(Suspension::DependentRun { .. })
         ),
         "rolled-back batch spawns must release their per-turn spawn slot"
     );
@@ -2470,7 +2496,7 @@ async fn invoke_capability_batch_stops_on_first_spawn_suspension_when_requested(
         .await
         .unwrap();
 
-    assert_eq!(outcome.outcomes.len(), 1);
+    assert_eq!(outcome.resolutions.len(), 1);
     assert!(outcome.stopped_on_suspension);
     assert!(inner.batches.lock().unwrap().is_empty());
     let child_requests = child_runs.requests();
@@ -2575,7 +2601,7 @@ async fn invoke_capability_batch_preserves_spawns_on_inner_batch_suspension() {
         .await
         .unwrap();
 
-    assert_eq!(outcome.outcomes.len(), 3);
+    assert_eq!(outcome.resolutions.len(), 3);
     assert!(outcome.stopped_on_suspension);
     assert_eq!(inner.batches.lock().unwrap().len(), 1);
     assert_eq!(child_runs.requests().len(), 2);
@@ -3042,13 +3068,24 @@ async fn json_spawn_input_codec_propagates_resolver_error() {
 }
 
 #[test]
-fn spawn_rejected_preserves_spawn_specific_reason_kind() {
-    let CapabilityOutcome::Denied(denied) = spawn_rejected("depth_cap_exceeded") else {
+fn spawn_rejected_preserves_spawn_specific_reason_in_summary() {
+    // The §5.3 collapse maps the open-set loop reason ("depth_cap_exceeded",
+    // which is not a host_api `DenyReason` tag) to the model-visible catch-all
+    // `PolicyDenied`; the spawn-specific reason rides the redacted summary.
+    let ironclaw_host_api::Resolution::Denied(denial) = spawn_rejected("depth_cap_exceeded") else {
         panic!("spawn_rejected should deny");
     };
 
-    assert_eq!(denied.reason_kind.as_str(), "depth_cap_exceeded");
-    assert!(denied.safe_summary.contains("depth_cap_exceeded"));
+    assert_eq!(
+        denial.reason_kind,
+        Some(ironclaw_host_api::DenyReason::PolicyDenied)
+    );
+    assert!(
+        denial
+            .summary
+            .as_ref()
+            .is_some_and(|summary| summary.as_str().contains("depth_cap_exceeded"))
+    );
 }
 
 #[tokio::test]
@@ -3109,17 +3146,21 @@ async fn invoke_batch_coalesces_blocking_spawns_under_single_gate() {
         .await
         .unwrap();
 
-    assert_eq!(batch_outcome.outcomes.len(), 2);
+    assert_eq!(batch_outcome.resolutions.len(), 2);
     assert!(
         !batch_outcome.stopped_on_suspension,
         "shared batch gate must suppress stop_on_first_suspension"
     );
 
     let mut gate_refs = Vec::new();
-    for outcome in &batch_outcome.outcomes {
-        let CapabilityOutcome::AwaitDependentRun { gate_ref, .. } = outcome else {
+    for outcome in &batch_outcome.resolutions {
+        let Resolution::Suspended(Suspension::DependentRun { waypoint, .. }) = outcome else {
             panic!("expected await dependent run, got: {:?}", outcome);
         };
+        let gate_ref = waypoint
+            .origin
+            .as_ref()
+            .expect("await gate preserves the loop gate ref");
         gate_refs.push(gate_ref.as_str().to_string());
     }
     assert_eq!(
@@ -3215,30 +3256,45 @@ async fn invoke_batch_mixed_spawn_and_non_spawn_capabilities() {
         .await
         .unwrap();
 
-    assert_eq!(batch_outcome.outcomes.len(), 3);
+    assert_eq!(batch_outcome.resolutions.len(), 3);
     assert!(
         !batch_outcome.stopped_on_suspension,
         "shared spawn gate must not stop the mixed batch early"
     );
-    let CapabilityOutcome::AwaitDependentRun {
-        gate_ref: first_gate,
-        ..
-    } = &batch_outcome.outcomes[0]
+    let Resolution::Suspended(Suspension::DependentRun {
+        waypoint: first_wp, ..
+    }) = &batch_outcome.resolutions[0]
     else {
         panic!("first outcome should be a blocking spawn");
     };
-    let CapabilityOutcome::Completed(inner_result) = &batch_outcome.outcomes[1] else {
+    let Resolution::Done(inner_result) = &batch_outcome.resolutions[1] else {
         panic!("second outcome should come from the inner non-spawn port");
     };
-    let CapabilityOutcome::AwaitDependentRun {
-        gate_ref: second_gate,
+    let Resolution::Suspended(Suspension::DependentRun {
+        waypoint: second_wp,
         ..
-    } = &batch_outcome.outcomes[2]
+    }) = &batch_outcome.resolutions[2]
     else {
         panic!("third outcome should be a blocking spawn");
     };
+    let first_gate = first_wp
+        .origin
+        .as_ref()
+        .expect("await gate preserves the loop gate ref");
+    let second_gate = second_wp
+        .origin
+        .as_ref()
+        .expect("await gate preserves the loop gate ref");
     assert_eq!(first_gate, second_gate);
-    assert_eq!(inner_result.result_ref.as_str(), "result:auth");
+    assert!(inner_result.verdict.is_success());
+    assert_eq!(
+        inner_result
+            .refs
+            .origin
+            .as_ref()
+            .map(ironclaw_host_api::LoopRef::as_str),
+        Some("result:auth")
+    );
     assert_eq!(child_runs.requests().len(), 2);
     // §3 replacement: `InMemoryAwaitEdgeWriter` keys per-child, not
     // per-`gate_ref` — both batch children sharing this gate_ref get their
@@ -3304,9 +3360,15 @@ async fn invoke_batch_skips_shared_gate_for_single_blocking_spawn() {
         .await
         .unwrap();
 
-    let CapabilityOutcome::AwaitDependentRun { gate_ref, .. } = &batch_outcome.outcomes[0] else {
+    let Resolution::Suspended(Suspension::DependentRun { waypoint, .. }) =
+        &batch_outcome.resolutions[0]
+    else {
         panic!("expected await dependent");
     };
+    let gate_ref = waypoint
+        .origin
+        .as_ref()
+        .expect("await gate preserves the loop gate ref");
     assert!(
         !gate_ref.as_str().contains("subagent-batch"),
         "single blocking spawn must not allocate batch gate: {}",
@@ -3410,20 +3472,23 @@ async fn spawn_subagent_propagates_result_metadata_from_result_writer() {
 
     let outcome = invoke_spawn(&port).await;
 
-    let CapabilityOutcome::AwaitDependentRun {
-        byte_len,
-        model_observation,
-        ..
-    } = outcome
-    else {
+    let Resolution::Suspended(Suspension::DependentRun { result, .. }) = outcome else {
         panic!("expected AwaitDependentRun outcome from blocking spawn");
     };
     assert_eq!(
-        byte_len, fixed_byte_len,
+        result.byte_len, fixed_byte_len,
         "spawn port must propagate the byte_len returned by the result writer \
-         (D2 un-discard regression: byte_len must reach CapabilityOutcome)"
+         (D2 un-discard regression: byte_len must reach the dependent-run channel)"
     );
-    assert_eq!(model_observation.as_ref(), Some(&observation));
+    // The §5.3 collapse folds the structured `ModelVisibleToolObservation` down
+    // to its redacted, model-visible summary preview on the DependentRun channel
+    // (the full structured observation no longer rides here). Assert the surviving
+    // preview equals the observation's summary — still proving the observation was
+    // propagated and not silently discarded.
+    assert_eq!(
+        result.observation.as_ref().map(SafeSummary::as_str),
+        Some(observation.summary.as_str())
+    );
 }
 
 // ── New tests for schema redesign ────────────────────────────────────────────
@@ -3630,7 +3695,10 @@ async fn spawn_provider_tool_call_registration_accepts_subagent_type_wire_key() 
 
     // A child run must have been submitted — the full invoke path ran.
     assert!(
-        matches!(outcome, CapabilityOutcome::AwaitDependentRun { .. }),
+        matches!(
+            outcome,
+            Resolution::Suspended(Suspension::DependentRun { .. })
+        ),
         "invoke must produce AwaitDependentRun, got: {outcome:?}"
     );
     assert_eq!(

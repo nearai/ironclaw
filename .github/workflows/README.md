@@ -25,7 +25,7 @@ they run the lane in the merge queue, before landing, without adding the full
 WASM build to ordinary PR feedback. Push and deep-CI runs remain exhaustive.
 
 History: the slim-vs-full clippy matrix violated this — the queue linted only
-`--all-features` while push linted `all-features`/`default`/`libsql-only`, so
+`--all-features` while push linted a broader matrix, so
 feature-gated dead code (e.g. a `#[cfg(feature = "postgres")]`-constructed enum
 variant) passed the queue and turned main red post-merge.
 
@@ -59,14 +59,33 @@ Rules for a roll-up job that is (or may become) required:
    merge-queue/push run's clippy matrix is missing any of the three feature
    lanes, so a "green but slim" regression cannot come back silently.
 
-## Reborn release binary compile matrix
+## Reborn release and manual compile preflight
 
-`reborn-release-compile.yml` is a compile-and-smoke preflight for the shipping
-Reborn `ironclaw` binary. The tag-only `release.yml` calls it for matching
-release tags and will not run its `host` job unless every target succeeds. The
-preflight workflow can also run directly through `workflow_dispatch`; it is not
-triggered by pull requests, so ordinary CLI and WebUI changes do not start the
-seven-platform release matrix.
+`ironclaw-release.yml` is the tag-only cargo-dist publisher for the shipping Reborn
+`ironclaw` package and binary. Matching `ironclaw-v*` tags build the seven
+release targets, produce archives and checksums plus shell, PowerShell, and MSI
+installers, and create the tag's GitHub Release. cargo-dist derives the
+Release title and body from the release metadata and `CHANGELOG.md`.
+
+cargo-dist 0.31 generates workflow-wide `contents: write` and does not expose a
+setting for built-in job permissions. The checked-in workflow is therefore
+intentionally hardened beyond the generated template: repository access
+defaults to `contents: read`, only `host` receives `contents: write`, and local
+and global build jobs do not receive `GH_TOKEN`. `allow-dirty = ["ci"]` in the
+workspace dist config prevents a later `dist generate` from silently restoring
+the broader permission. When updating cargo-dist or its CI configuration,
+remove that allow-dirty entry temporarily, regenerate the workflow, reapply the
+permission boundary, and verify it with:
+
+```bash
+cargo test -p ironclaw --test smoke release_ci_ -- --nocapture
+rg -n "permissions:|GH_TOKEN" .github/workflows/ironclaw-release.yml
+```
+
+`reborn-release-compile.yml` remains an independent compile-and-smoke preflight
+that runs only through `workflow_dispatch`. It uploads temporary evidence
+artifacts but does not publish a Release, and it is not called by the tag or
+pull-request workflows.
 
 | Rust target | GitHub runner |
 |---|---|
@@ -78,23 +97,15 @@ seven-platform release matrix.
 | `aarch64-apple-darwin` | `macos-15` |
 | `x86_64-pc-windows-msvc` | `windows-2022` |
 
-Each matrix entry performs a final `cargo build --locked --profile dist` link
-for `ironclaw_reborn_cli` / `ironclaw` with an explicit compile feature
-contract owned by this workflow:
-`root-llm-provider,webui-v2-beta,slack-v2-host-beta,libsql,postgres,inmemory-turn-state`.
-Before upload, the workflow executes that exact native binary with `--version`,
-`--help`, and `profile list --json`. The musl entries also use `readelf` to
-reject a program interpreter or dynamic-library dependency, which prevents an
-installed musl loader on the build runner from hiding a non-portable artifact.
-This is shallow CLI startup coverage; it does not validate `serve`, external
-services, installers, or cargo-dist release packaging. The feature list is
-intentionally not inferred from Docker or #6122.
-
-The uploaded `reborn-compile-*` artifacts are short-lived preflight evidence.
-Their prefix deliberately does not match the release host's `artifacts-*`
-download pattern, so they are not attached to the GitHub Release. Until #3483
-defines the canonical Reborn package/tag/installer contract,
-`ironclaw_reborn_cli` remains `dist = false`.
+The cargo-dist release and manual preflight both build the `ironclaw` package
+and binary with the explicit release feature contract
+`libsql,postgres`. In the manual preflight, each matrix
+entry performs a final `cargo build --locked --profile dist` link and executes
+that exact native binary with `--version`, `--help`, and
+`profile list --json`. Its musl entries also use `readelf` to reject a program
+interpreter or dynamic-library dependency, which prevents an installed musl
+loader on the build runner from hiding a non-portable artifact. This is shallow
+CLI startup coverage; it does not validate `serve` or external services.
 
 ## Deep tier (nightly)
 
@@ -151,6 +162,22 @@ alerts can target dedicated channels.
 When adding a new workflow that runs on `push` to `main`, add its workflow
 `name:` to the watched list in `main-ci-slack-alerts.yml`.
 
+## Reborn-only release policy
+
+For #6160, `ironclaw-release.yml` uses cargo-dist to publish only the canonical Reborn
+`ironclaw` package. The active tag DAG consists of cargo-dist planning, the
+seven target builds, universal installer generation, and GitHub Release
+hosting. Legacy v1 artifacts, independently published WASM extensions, Docker
+images, and the old registry-checksum/announcement path are outside this DAG.
+The generated `announce` job remains as cargo-dist's final release step; it does
+not restore any of those retired products.
+
+`docker.yml` keeps its independent manual and hourly entry points; a Reborn
+version tag does not invoke them. The manual `reborn-release-compile.yml`
+preflight is also independent from publishing. Restoring any retired release
+product requires adding it back explicitly instead of making it a dependency
+of the Reborn package by default.
+
 ## Known accepted gaps (deliberate, revisit as needed)
 
 - **Windows clippy** (`code_style.yml` `clippy-windows`) runs on push only;
@@ -176,7 +203,7 @@ When adding a new workflow that runs on `push` to `main`, add its workflow
   boot the legacy binary (see `tests/e2e/CLAUDE.md`, Reborn E2E coverage
   gate) and were frozen with it. A Reborn-native port — same
   install → OAuth → tool call → provider-mutation contract through
-  `ironclaw-reborn serve` — is the follow-up that restores this tier.
+  `ironclaw serve` — is the follow-up that restores this tier.
 - **Scope classifiers** (`scripts/ci/classify-test-scope.sh` and per-workflow
   `changes` jobs) are curated allowlists. Adding a new crate or test directory
   requires updating them, or the queue's scoped checks silently narrow. Keep

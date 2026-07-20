@@ -1,13 +1,11 @@
 # Set Up Slack for the Reborn Binary
 
-This guide is for the standalone `ironclaw-reborn serve` Slack host-beta path,
+This guide is for the standalone `ironclaw serve` Slack host path,
 not the legacy v1 Slack WASM channel.
 
-Slack support has two gates:
-
-1. The binary must be built with the `slack-v2-host-beta` Cargo feature.
-2. Runtime config must set `[slack].enabled = true`, or the deployment env
-   must set `IRONCLAW_REBORN_SLACK_ENABLED=true`.
+Slack support ships in the binary. It has one gate: runtime config must set
+`[slack].enabled = true`, or the deployment env must set
+`IRONCLAW_REBORN_SLACK_ENABLED=true`.
 
 Slack bot token and signing secret are configured in WebUI Slack setup and
 stored in the Reborn secret store. Do not put OAuth client secrets or LLM keys
@@ -19,9 +17,8 @@ For local source runs:
 
 ```bash
 cargo run -q \
-  -p ironclaw_reborn_cli \
-  --features slack-v2-host-beta \
-  --bin ironclaw-reborn \
+  -p ironclaw \
+  --bin ironclaw \
   -- serve
 ```
 
@@ -29,20 +26,11 @@ For a local source build:
 
 ```bash
 cargo build \
-  -p ironclaw_reborn_cli \
-  --features slack-v2-host-beta \
-  --bin ironclaw-reborn
+  -p ironclaw \
+  --bin ironclaw
 ```
 
-`slack-v2-host-beta` includes `webui-v2-beta`, so do not pass both unless you
-prefer to be explicit:
-
-```bash
---features webui-v2-beta,slack-v2-host-beta
-```
-
-`Dockerfile.reborn` already builds with `webui-v2-beta,slack-v2-host-beta`.
-Slack is still disabled unless the mounted or seeded Reborn config enables it.
+Slack is disabled unless the mounted or seeded Reborn config enables it.
 
 ## Public Endpoint
 
@@ -75,7 +63,7 @@ Minimum local env shape:
 export IRONCLAW_REBORN_HOME="$PWD/.reborn-home"
 export IRONCLAW_REBORN_PROFILE="local-dev"
 
-# WebUI env-bearer auth; required by `ironclaw-reborn serve`.
+# WebUI env-bearer auth; required by `ironclaw serve`.
 export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"
 export IRONCLAW_REBORN_WEBUI_USER_ID="reborn-cli"
 
@@ -104,7 +92,7 @@ OPENAI_API_KEY=sk-...
 ## Reborn Config
 
 Edit `$IRONCLAW_REBORN_HOME/config.toml`. If the file does not exist yet, run
-`ironclaw-reborn config init` or start the Docker image once to seed it.
+`ironclaw config init` or start the Docker image once to seed it.
 
 Minimal Slack config:
 
@@ -247,9 +235,8 @@ Start the service:
 
 ```bash
 cargo run -q \
-  -p ironclaw_reborn_cli \
-  --features slack-v2-host-beta \
-  --bin ironclaw-reborn \
+  -p ironclaw \
+  --bin ironclaw \
   -- serve --host 127.0.0.1 --port 3000
 ```
 
@@ -275,13 +262,13 @@ Verification checklist:
 
 ## Troubleshooting
 
-### Slack enablement requires ... slack-v2-host-beta
+### Slack routes are not mounted
 
-Rebuild or rerun ironclaw-reborn with --features slack-v2-host-beta.
+Confirm the Reborn config sets [slack].enabled = true, or that the deployment env sets IRONCLAW_REBORN_SLACK_ENABLED=true, then restart `ironclaw`.
 
 ### Slack route never receives events
 
-Confirm the Slack Request URL is exactly https://<public-host>/webhooks/slack/events, the public URL reaches the Reborn listener, and Socket Mode is disabled for this host-beta path.
+Confirm the Slack Request URL is exactly https://<public-host>/webhooks/slack/events, the public URL reaches the Reborn listener, and Socket Mode is disabled for this host path.
 
 ### Slack URL verification fails
 

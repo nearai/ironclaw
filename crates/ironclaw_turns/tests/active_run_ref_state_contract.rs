@@ -91,7 +91,7 @@ fn submit_request_for(
 
 #[tokio::test]
 async fn active_run_ref_state_classifies_missing_nonterminal_and_terminal() {
-    let store = ironclaw_turns::InMemoryTurnStateStore::default();
+    let store = ironclaw_turns::test_support::in_memory_turn_state_store();
     let resolver = InMemoryRunProfileResolver::default();
     let scope = turn_scope("active-run-ref-state");
 
@@ -142,7 +142,7 @@ async fn active_run_ref_state_classifies_missing_nonterminal_and_terminal() {
 
 #[tokio::test]
 async fn active_run_ref_state_treats_missing_lookup_as_missing() {
-    let store = ironclaw_turns::InMemoryTurnStateStore::default();
+    let store = ironclaw_turns::test_support::in_memory_turn_state_store();
     let scope = turn_scope("active-run-ref-missing");
 
     assert_eq!(

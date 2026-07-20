@@ -1,15 +1,15 @@
 use std::sync::Arc;
 
-use ironclaw_host_api::{CapabilityId, MountView};
+use ironclaw_host_api::{CapabilityId, MountView, Resolution, ResolutionBatch};
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID,
     READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
 };
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityCallCandidate,
-    CapabilityDescriptorView, CapabilityInvocation, CapabilityOutcome, LoopCapabilityPort,
-    ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolDefinition,
-    RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    AgentLoopHostError, CapabilityBatchInvocation, CapabilityCallCandidate,
+    CapabilityDescriptorView, CapabilityInvocation, LoopCapabilityPort, ProviderToolCall,
+    ProviderToolCallCapabilityIds, ProviderToolDefinition, RegisterProviderToolCallRequest,
+    VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
 
 pub(super) fn wrap_surface_disclosure(
@@ -73,14 +73,14 @@ impl LoopCapabilityPort for HostSurfaceDisclosurePort {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         self.inner.invoke_capability(request).await
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
         self.inner.invoke_capability_batch(request).await
     }
 }

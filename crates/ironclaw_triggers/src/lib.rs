@@ -23,10 +23,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use ulid::Ulid;
-
-#[cfg(feature = "libsql")]
 mod libsql;
-#[cfg(feature = "postgres")]
 mod postgres;
 mod trusted_submit;
 mod worker;
@@ -493,8 +490,6 @@ impl TriggerSchedule {
         schedule.validate()?;
         Ok(schedule)
     }
-
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) fn timezone_text(&self) -> &str {
         match self {
             Self::Cron { timezone, .. } | Self::Once { timezone, .. } => timezone.as_str(),
@@ -502,7 +497,6 @@ impl TriggerSchedule {
     }
 
     // Returns (kind, expression, schedule_at)
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) fn to_storage(&self) -> (&'static str, &str, Option<String>) {
         match self {
             Self::Cron { expression, .. } => ("cron", expression.as_str(), None),
@@ -513,8 +507,6 @@ impl TriggerSchedule {
             ),
         }
     }
-
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) fn from_storage(
         kind: &str,
         expression: &str,
@@ -728,8 +720,6 @@ pub enum TriggerRunHistoryStatus {
     Ok,
     Error,
 }
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn trigger_run_history_status_text(value: TriggerRunHistoryStatus) -> &'static str {
     match value {
         TriggerRunHistoryStatus::Running => "running",
@@ -737,8 +727,6 @@ pub(crate) fn trigger_run_history_status_text(value: TriggerRunHistoryStatus) ->
         TriggerRunHistoryStatus::Error => "error",
     }
 }
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn state_text_codec(value: TriggerState) -> &'static str {
     match value {
         TriggerState::Scheduled => "scheduled",
@@ -746,8 +734,6 @@ pub(crate) fn state_text_codec(value: TriggerState) -> &'static str {
         TriggerState::Completed => "completed",
     }
 }
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn parse_state_codec(value: &str) -> Result<TriggerState, TriggerError> {
     match value {
         "scheduled" => Ok(TriggerState::Scheduled),
@@ -759,15 +745,11 @@ pub(crate) fn parse_state_codec(value: &str) -> Result<TriggerState, TriggerErro
         }),
     }
 }
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn source_kind_text_codec(value: TriggerSourceKind) -> &'static str {
     match value {
         TriggerSourceKind::Schedule => "schedule",
     }
 }
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn parse_source_kind_codec(value: &str) -> Result<TriggerSourceKind, TriggerError> {
     match value {
         "schedule" => Ok(TriggerSourceKind::Schedule),
@@ -777,16 +759,12 @@ pub(crate) fn parse_source_kind_codec(value: &str) -> Result<TriggerSourceKind, 
         }),
     }
 }
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn status_text_codec(value: TriggerRunStatus) -> &'static str {
     match value {
         TriggerRunStatus::Ok => "ok",
         TriggerRunStatus::Error => "error",
     }
 }
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn parse_run_status_codec(value: &str) -> Result<TriggerRunStatus, TriggerError> {
     match value {
         "ok" => Ok(TriggerRunStatus::Ok),
@@ -797,8 +775,6 @@ pub(crate) fn parse_run_status_codec(value: &str) -> Result<TriggerRunStatus, Tr
         }),
     }
 }
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn parse_run_history_status_codec(
     value: &str,
 ) -> Result<TriggerRunHistoryStatus, TriggerError> {
@@ -1333,10 +1309,8 @@ pub trait TriggerRepository: Send + Sync {
 }
 
 /// Feature-gated durable libSQL repository type for composition/test wiring.
-#[cfg(feature = "libsql")]
 pub use libsql::LibSqlTriggerRepository;
 /// Feature-gated durable PostgreSQL repository type for composition/test wiring.
-#[cfg(feature = "postgres")]
 pub use postgres::PostgresTriggerRepository;
 pub use worker::{
     ACTIVE_HOLD_ELAPSED_OCCURRENCES_CAP, ACTIVE_HOLD_LOOKUP_TIMEOUT, ActiveHoldProjection,
@@ -3395,8 +3369,6 @@ mod tests {
             other => panic!("expected InvalidSchedule, got {other:?}"),
         }
     }
-
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[test]
     fn once_schedule_storage_round_trip_uses_schedule_at_column() {
         let at = Utc.with_ymd_and_hms(2026, 6, 15, 10, 0, 0).unwrap();

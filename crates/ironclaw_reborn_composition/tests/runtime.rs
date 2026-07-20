@@ -218,6 +218,100 @@ async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation()
     runtime.shutdown().await.unwrap();
 }
 
+/// Minimal completing model gateway: every model call returns a plain assistant
+/// reply, so a turn reaches `TurnStatus::Completed` without needing a real LLM.
+#[derive(Default)]
+struct AlwaysReplyGateway;
+
+#[async_trait]
+impl HostManagedModelGateway for AlwaysReplyGateway {
+    async fn stream_model(
+        &self,
+        _request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Ok(HostManagedModelResponse::assistant_reply(
+            "done".to_string(),
+        ))
+    }
+
+    async fn stream_model_with_capabilities(
+        &self,
+        _request: HostManagedModelRequest,
+        _capabilities: Arc<dyn LoopCapabilityPort>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        Ok(HostManagedModelResponse::assistant_reply(
+            "done".to_string(),
+        ))
+    }
+}
+
+/// #6263 Step 4/5b — production wiring at the composition seam.
+/// `build_reborn_runtime` composes the durable turn-state ROW store
+/// (`factory.rs`) unconditionally, replacing the former in-memory authority +
+/// block-persistence snapshot. This drives a real turn end to end over that
+/// store (submit → claim → terminal, through the production runtime), then
+/// gracefully `shutdown()`s — which routes through `RebornRuntime::shutdown →
+/// FilesystemTurnStateStoreKind::drain`, exercising the write-behind durable
+/// tail drain for real: the test locks that composing the store, serving a
+/// real turn over it, and draining on shutdown all succeed without
+/// error/hang/panic.
+///
+/// Deeper durability is pinned one tier down, over the raw store where
+/// scope/backend are controlled precisely: terminal/gate-park recovery across a
+/// store reopen and the drain-flushes-the-tail contract in
+/// `ironclaw_turns::row_store_crash_consistency` (incl.
+/// `write_behind_drain_flushes_the_async_tail_for_graceful_restart`), and the
+/// block-persistence→row migration in
+/// `filesystem_turn_state_contract::filesystem_turn_state_row_store_migrates_block_persistence_gate_park_snapshot`.
+#[tokio::test]
+async fn inmemory_turn_state_row_store_serves_turn_and_drains_on_shutdown() {
+    let _guard = runtime_composition_test_guard().await;
+    let root = tempfile::tempdir().unwrap();
+    let input = RebornRuntimeInput::from_services(
+        RebornBuildInput::local_dev("wb-durable-owner", root.path().join("local-dev"))
+            .with_runtime_policy(local_dev_runtime_policy()),
+    )
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: "wb-durable-tenant".to_string(),
+        agent_id: "wb-durable-agent".to_string(),
+        source_binding_id: "wb-durable-source".to_string(),
+        reply_target_binding_id: "wb-durable-reply".to_string(),
+    })
+    .with_runner_settings(
+        TurnRunnerSettings::default()
+            .set_heartbeat_interval(Duration::from_secs(60))
+            .set_poll_interval(Duration::from_secs(60)),
+    )
+    .with_model_gateway_override(Arc::new(AlwaysReplyGateway));
+
+    // Compose the durable row store via the production build path and drive a real
+    // turn to Completed over it: proves the flipped store serves the full
+    // submit → claim → terminal transition set through the production runtime.
+    let runtime = build_reborn_runtime(input).await.unwrap();
+    let conversation = runtime.new_conversation().await.unwrap();
+    let reply = tokio::time::timeout(
+        SEND_USER_MESSAGE_TIMEOUT,
+        runtime.send_user_message(&conversation, "durable please"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        reply.status,
+        TurnStatus::Completed,
+        "turn must complete over the WriteBehind store, got {:?} ({:?})",
+        reply.status,
+        reply.failure_category
+    );
+
+    // Graceful shutdown drains the WriteBehind tail through
+    // `FilesystemTurnStateStoreKind::drain`; a broken drain wiring surfaces here.
+    runtime
+        .shutdown()
+        .await
+        .expect("graceful shutdown drains the WriteBehind tail without error");
+}
+
 #[tokio::test]
 async fn send_user_message_with_cancellation_cancels_submitted_run() {
     let _guard = runtime_composition_test_guard().await;
@@ -474,7 +568,7 @@ fn skill_md(name: &str, keyword: &str, prompt: &str) -> String {
 /// `TurnRunnerSettings::max_concurrent_runs_per_user` into the turn-state store.
 ///
 /// Exercises the full `build_reborn_runtime` → `build_reborn_services` →
-/// `InMemoryTurnStateStore::with_limits` wiring path so that a mis-wired or
+/// `FilesystemTurnStateRowStore::with_limits` wiring path so that a mis-wired or
 /// accidentally-dropped limit is caught at the composition boundary, not just in
 /// unit tests that hand-construct the store.
 ///

@@ -825,84 +825,6 @@ impl<F> SlackUserBindingLifecycleStore for FilesystemSlackHostState<F>
 where
     F: RootFilesystem + 'static,
 {
-    async fn begin_connection(
-        &self,
-        owner: &SlackConnectionOwner,
-        epoch: SlackConnectionEpoch,
-        expires_at: ironclaw_auth::Timestamp,
-    ) -> Result<(), SlackUserBindingLifecycleError> {
-        self.validate_connection_owner(owner)?;
-        let path = Self::connection_path(owner).map_err(map_lifecycle_fs_error)?;
-        for _ in 0..LIFECYCLE_CAS_RETRIES {
-            let current = self
-                .read_record::<StoredSlackConnection>(&path)
-                .await
-                .map_err(map_lifecycle_fs_error)?;
-            let (record, cas) = match current {
-                None => (
-                    StoredSlackConnection::new(
-                        owner,
-                        epoch,
-                        SlackConnectionState::Connecting,
-                        Utc::now(),
-                        expires_at,
-                    ),
-                    CasExpectation::Absent,
-                ),
-                Some((record, version)) => {
-                    record.validate(owner)?;
-                    match record.state {
-                        SlackConnectionState::Connecting if record.epoch == epoch => return Ok(()),
-                        SlackConnectionState::Connecting if record.expires_at <= Utc::now() => (
-                            StoredSlackConnection::new(
-                                owner,
-                                epoch,
-                                SlackConnectionState::Connecting,
-                                Utc::now(),
-                                expires_at,
-                            ),
-                            CasExpectation::Version(version),
-                        ),
-                        SlackConnectionState::Connecting => {
-                            return Err(SlackUserBindingLifecycleError::ConnectionInProgress);
-                        }
-                        SlackConnectionState::Active => match record.pending_connection {
-                            Some(pending) if pending.epoch == epoch => return Ok(()),
-                            Some(pending) if pending.expires_at > Utc::now() => {
-                                return Err(SlackUserBindingLifecycleError::ConnectionInProgress);
-                            }
-                            Some(_) | None => (
-                                record.with_pending_connection(epoch, expires_at),
-                                CasExpectation::Version(version),
-                            ),
-                        },
-                        SlackConnectionState::Disconnecting => {
-                            return Err(SlackUserBindingLifecycleError::DisconnectInProgress);
-                        }
-                        SlackConnectionState::Disconnected => (
-                            StoredSlackConnection::new(
-                                owner,
-                                epoch,
-                                SlackConnectionState::Connecting,
-                                Utc::now(),
-                                expires_at,
-                            ),
-                            CasExpectation::Version(version),
-                        ),
-                    }
-                }
-            };
-            match self.write_record(&path, &record, cas).await {
-                Ok(_) => return Ok(()),
-                Err(FilesystemError::VersionMismatch { .. }) => continue,
-                Err(error) => return Err(map_lifecycle_fs_error(error)),
-            }
-        }
-        Err(SlackUserBindingLifecycleError::Backend(
-            "Slack connection state changed concurrently".to_string(),
-        ))
-    }
-
     async fn connection_state(
         &self,
         owner: &SlackConnectionOwner,
@@ -918,68 +840,7 @@ where
             return Ok(None);
         };
         record.validate(owner)?;
-        Ok(Some(record.visible_connection_state()))
-    }
-
-    async fn connection_owner_for_epoch(
-        &self,
-        tenant_id: &TenantId,
-        user_id: &UserId,
-        epoch: SlackConnectionEpoch,
-    ) -> Result<Option<SlackConnectionOwner>, SlackUserBindingLifecycleError> {
-        if tenant_id != &self.scope.tenant_id {
-            return Err(SlackUserBindingLifecycleError::Backend(
-                "Slack connection owner is outside the tenant scope".to_string(),
-            ));
-        }
-        let root = scoped_path(CONNECTION_ROOT).map_err(map_lifecycle_fs_error)?;
-        let installation_entries = match self.filesystem.list_dir(&self.scope, &root).await {
-            Ok(entries) => entries,
-            Err(FilesystemError::NotFound { .. }) => return Ok(None),
-            Err(error) => return Err(map_lifecycle_fs_error(error)),
-        };
-        let mut matched_owner = None;
-        for installation_entry in installation_entries {
-            if installation_entry.file_type != FileType::Directory {
-                continue;
-            }
-            let path = scoped_path(&format!(
-                "{}/{}/{}.json",
-                CONNECTION_ROOT,
-                installation_entry.name,
-                path_segment(user_id.as_str())
-            ))
-            .map_err(map_lifecycle_fs_error)?;
-            let Some((record, _)) = self
-                .read_record::<StoredSlackConnection>(&path)
-                .await
-                .map_err(map_lifecycle_fs_error)?
-            else {
-                continue;
-            };
-            if record.tenant_id != tenant_id.as_str()
-                || record.user_id != user_id.as_str()
-                || !record.owns_connection_epoch(epoch)
-            {
-                continue;
-            }
-            if path_segment(&record.installation_id) != installation_entry.name {
-                return Err(SlackUserBindingLifecycleError::Backend(
-                    "stored Slack connection path does not match its owner".to_string(),
-                ));
-            }
-            let installation_id = AdapterInstallationId::new(record.installation_id.clone())
-                .map_err(|error| SlackUserBindingLifecycleError::Backend(error.to_string()))?;
-            let owner =
-                SlackConnectionOwner::new(tenant_id.clone(), user_id.clone(), installation_id);
-            record.validate(&owner)?;
-            if matched_owner.replace(owner).is_some() {
-                return Err(SlackUserBindingLifecycleError::Backend(
-                    "Slack connection epoch is assigned to multiple owners".to_string(),
-                ));
-            }
-        }
-        Ok(matched_owner)
+        Ok(Some((record.epoch, record.state)))
     }
 
     async fn connection_owners_for_user(
@@ -1081,7 +942,6 @@ where
                             (
                                 record
                                     .with_state(SlackConnectionState::Disconnecting)
-                                    .without_pending_connection()
                                     .with_disconnect_cleanup(StoredSlackDisconnectCleanup::Epoch(
                                         record.epoch,
                                     )),
@@ -1132,7 +992,7 @@ where
         owner: &SlackConnectionOwner,
         epoch: SlackConnectionEpoch,
     ) -> Result<(), SlackUserBindingLifecycleError> {
-        self.transition_connection_to_disconnected(owner, epoch, false)
+        self.transition_connection_to_disconnected(owner, epoch)
             .await
     }
 
@@ -1152,16 +1012,6 @@ where
                 return Err(SlackUserBindingLifecycleError::StaleEpoch);
             };
             record.validate(owner)?;
-            if record.state == SlackConnectionState::Active
-                && record
-                    .pending_connection
-                    .is_some_and(|pending| pending.epoch == epoch)
-            {
-                // A pending replacement is already excluded by the active
-                // epoch check at ingress. Keep it attached so retry can still
-                // recover the owner after an identity-store failure.
-                return Ok(());
-            }
             if record.epoch != epoch {
                 return Err(SlackUserBindingLifecycleError::StaleEpoch);
             }
@@ -1204,18 +1054,10 @@ where
                 return Err(SlackUserBindingLifecycleError::StaleEpoch);
             };
             record.validate(owner)?;
-            let updated = if record.state == SlackConnectionState::Active
-                && record
-                    .pending_connection
-                    .is_some_and(|pending| pending.epoch == epoch)
+            let updated = if record.epoch == epoch
+                && record.state == SlackConnectionState::Disconnecting
             {
-                // A failed reconfigure must leave the previous active epoch
-                // usable after the replacement identity has been removed.
-                record.without_pending_connection()
-            } else if record.epoch == epoch && record.state == SlackConnectionState::Disconnecting {
-                record
-                    .with_state(SlackConnectionState::Disconnected)
-                    .without_pending_connection()
+                record.with_state(SlackConnectionState::Disconnected)
             } else if record.epoch == epoch && record.state == SlackConnectionState::Disconnected {
                 return Ok(());
             } else {
@@ -1233,15 +1075,6 @@ where
         Err(SlackUserBindingLifecycleError::Backend(
             "Slack connection state changed concurrently".to_string(),
         ))
-    }
-
-    async fn abandon_connection(
-        &self,
-        owner: &SlackConnectionOwner,
-        epoch: SlackConnectionEpoch,
-    ) -> Result<(), SlackUserBindingLifecycleError> {
-        self.transition_connection_to_disconnected(owner, epoch, true)
-            .await
     }
 }
 
@@ -1279,7 +1112,18 @@ where
         Ok(record.state == SlackConnectionState::Active && record.epoch == epoch)
     }
 
-    async fn activate_connection(
+    /// Record `epoch` as the owner's active connection generation, creating
+    /// or replacing the connection record. This is the ONLY writer of
+    /// `Active`: the callback's identity bind calls it after the identity row
+    /// is written, so the record mirrors what ingress may authorize. The
+    /// previous record travels back for flow-driven compensation.
+    ///
+    /// Rejects only a running disconnect sweep (`Disconnecting`); any other
+    /// prior state — no record, an older generation (`Active`/`Disconnected`),
+    /// or a legacy pre-slot-deletion `Connecting` record — is replaced.
+    /// Attempt staleness is the auth-flow layer's claim step, not this
+    /// store's.
+    async fn record_active_generation(
         &self,
         owner: &SlackConnectionOwner,
         epoch: SlackConnectionEpoch,
@@ -1287,47 +1131,55 @@ where
         self.validate_connection_owner(owner)?;
         let path = Self::connection_path(owner).map_err(map_lifecycle_fs_error)?;
         for _ in 0..LIFECYCLE_CAS_RETRIES {
-            let Some((record, version)) = self
+            let now = Utc::now();
+            let current = self
                 .read_record::<StoredSlackConnection>(&path)
                 .await
-                .map_err(map_lifecycle_fs_error)?
-            else {
-                return Err(SlackUserBindingLifecycleError::StaleEpoch);
+                .map_err(map_lifecycle_fs_error)?;
+            let (updated, cas, previous) = match current {
+                None => (
+                    StoredSlackConnection::new(
+                        owner,
+                        epoch,
+                        SlackConnectionState::Active,
+                        now,
+                        now,
+                    ),
+                    CasExpectation::Absent,
+                    None,
+                ),
+                Some((record, version)) => {
+                    record.validate(owner)?;
+                    match record.state {
+                        SlackConnectionState::Active if record.epoch == epoch => {
+                            return Ok(SlackConnectionActivation {
+                                previous: None,
+                                written_version: version,
+                            });
+                        }
+                        SlackConnectionState::Disconnecting => {
+                            return Err(SlackUserBindingLifecycleError::StaleEpoch);
+                        }
+                        SlackConnectionState::Active
+                        | SlackConnectionState::Connecting
+                        | SlackConnectionState::Disconnected => (
+                            StoredSlackConnection::new(
+                                owner,
+                                epoch,
+                                SlackConnectionState::Active,
+                                record.created_at,
+                                now,
+                            ),
+                            CasExpectation::Version(version),
+                            Some(record),
+                        ),
+                    }
+                }
             };
-            record.validate(owner)?;
-            let updated = match record.state {
-                SlackConnectionState::Active if record.epoch == epoch => {
-                    return Ok(SlackConnectionActivation {
-                        previous: None,
-                        written_version: version,
-                    });
-                }
-                SlackConnectionState::Active
-                    if record
-                        .pending_connection
-                        .is_some_and(|pending| pending.epoch == epoch) =>
-                {
-                    record
-                        .promote_pending_connection()
-                        .ok_or(SlackUserBindingLifecycleError::StaleEpoch)?
-                }
-                SlackConnectionState::Connecting if record.epoch == epoch => {
-                    record.with_state(SlackConnectionState::Active)
-                }
-                SlackConnectionState::Active
-                | SlackConnectionState::Connecting
-                | SlackConnectionState::Disconnecting
-                | SlackConnectionState::Disconnected => {
-                    return Err(SlackUserBindingLifecycleError::StaleEpoch);
-                }
-            };
-            match self
-                .write_record(&path, &updated, CasExpectation::Version(version))
-                .await
-            {
+            match self.write_record(&path, &updated, cas).await {
                 Ok(written_version) => {
                     return Ok(SlackConnectionActivation {
-                        previous: Some(record),
+                        previous,
                         written_version,
                     });
                 }
@@ -1344,7 +1196,6 @@ where
         &self,
         owner: &SlackConnectionOwner,
         epoch: SlackConnectionEpoch,
-        allow_pre_disconnect_states: bool,
     ) -> Result<(), SlackUserBindingLifecycleError> {
         self.validate_connection_owner(owner)?;
         let path = Self::connection_path(owner).map_err(map_lifecycle_fs_error)?;
@@ -1357,43 +1208,16 @@ where
                 return Err(SlackUserBindingLifecycleError::StaleEpoch);
             };
             record.validate(owner)?;
-            if allow_pre_disconnect_states
-                && record.state == SlackConnectionState::Active
-                && record
-                    .pending_connection
-                    .is_some_and(|pending| pending.epoch == epoch)
-            {
-                match self
-                    .write_record(
-                        &path,
-                        &record.without_pending_connection(),
-                        CasExpectation::Version(version),
-                    )
-                    .await
-                {
-                    Ok(_) => return Ok(()),
-                    Err(FilesystemError::VersionMismatch { .. }) => continue,
-                    Err(error) => return Err(map_lifecycle_fs_error(error)),
-                }
-            }
             if record.epoch != epoch {
                 return Err(SlackUserBindingLifecycleError::StaleEpoch);
             }
             if record.state == SlackConnectionState::Disconnected {
                 return Ok(());
             }
-            if allow_pre_disconnect_states && record.state == SlackConnectionState::Disconnecting {
-                // Disconnect owns this transition and must keep ingress fenced
-                // until all credential, DM, pairing, and identity cleanup has
-                // completed.
-                return Ok(());
-            }
-            if !allow_pre_disconnect_states && record.state != SlackConnectionState::Disconnecting {
+            if record.state != SlackConnectionState::Disconnecting {
                 return Err(SlackUserBindingLifecycleError::StaleEpoch);
             }
-            let updated = record
-                .with_state(SlackConnectionState::Disconnected)
-                .without_pending_connection();
+            let updated = record.with_state(SlackConnectionState::Disconnected);
             match self
                 .write_record(&path, &updated, CasExpectation::Version(version))
                 .await
@@ -1611,12 +1435,14 @@ where
         } = rollback;
         let connection_path = Self::connection_path(&owner)
             .map_err(|error| RebornUserIdentityBindingError::Backend(error.to_string()))?;
+        // A reconnect-over-active bind replaced a working generation: restore
+        // it. Any other predecessor (fresh connect, or a bind over a
+        // Disconnected/legacy record) rolls forward to Disconnected — the
+        // failed generation must not stay active, and there is nothing older
+        // worth reviving.
         let restorable_connection = activation.previous.as_ref().and_then(|previous| {
-            (previous.state == SlackConnectionState::Active
-                && previous
-                    .pending_connection
-                    .is_some_and(|pending| pending.epoch == failed_epoch))
-            .then(|| previous.without_pending_connection())
+            (previous.state == SlackConnectionState::Active && previous.epoch != failed_epoch)
+                .then(|| previous.clone())
         });
 
         let mut restored_epoch = None;
@@ -1634,9 +1460,7 @@ where
             && current_connection.epoch == failed_epoch
         {
             let exact_target = restorable_connection.clone().unwrap_or_else(|| {
-                current_connection
-                    .with_state(SlackConnectionState::Disconnected)
-                    .without_pending_connection()
+                current_connection.with_state(SlackConnectionState::Disconnected)
             });
             match self
                 .write_record(
@@ -1655,9 +1479,8 @@ where
                     if current_connection.state == SlackConnectionState::Active
                         && current_connection.epoch == failed_epoch
                     {
-                        let disconnected = current_connection
-                            .with_state(SlackConnectionState::Disconnected)
-                            .without_pending_connection();
+                        let disconnected =
+                            current_connection.with_state(SlackConnectionState::Disconnected);
                         match self
                             .write_record(
                                 &connection_path,
@@ -1755,30 +1578,35 @@ where
         binding: RebornUserIdentityBinding,
         epoch: Option<SlackConnectionEpoch>,
     ) -> Result<Option<SlackUserIdentityBindingRollback>, RebornUserIdentityBindingError> {
-        let owner =
-            match epoch {
-                Some(epoch) => {
-                    let installation_id = self.binding_installation(&binding)?;
-                    let owner = SlackConnectionOwner::new(
-                        self.scope.tenant_id.clone(),
-                        binding.user_id.clone(),
-                        installation_id,
-                    );
-                    match self.connection_state(&owner).await.map_err(|error| {
+        let owner = match epoch {
+            Some(_) => {
+                let installation_id = self.binding_installation(&binding)?;
+                let owner = SlackConnectionOwner::new(
+                    self.scope.tenant_id.clone(),
+                    binding.user_id.clone(),
+                    installation_id,
+                );
+                // Write-side disconnect fence: a running sweep may hold an
+                // `AllOwned` cleanup selector, so a bind landing mid-sweep
+                // could be deleted by the very sweep that must not race it.
+                // Any other prior state is bindable — attempt staleness is the
+                // auth-flow layer's callback claim, not this store's. The
+                // fence is re-checked under CAS by `record_active_generation`
+                // after the identity write.
+                if matches!(
+                    self.connection_state(&owner).await.map_err(|error| {
                         RebornUserIdentityBindingError::Backend(error.to_string())
-                    })? {
-                        Some((current_epoch, SlackConnectionState::Connecting))
-                            if current_epoch == epoch => {}
-                        _ => {
-                            return Err(RebornUserIdentityBindingError::Backend(
-                                SlackUserBindingLifecycleError::StaleEpoch.to_string(),
-                            ));
-                        }
-                    }
-                    Some(owner)
+                    })?,
+                    Some((_, SlackConnectionState::Disconnecting))
+                ) {
+                    return Err(RebornUserIdentityBindingError::Backend(
+                        SlackUserBindingLifecycleError::DisconnectInProgress.to_string(),
+                    ));
                 }
-                None => None,
-            };
+                Some(owner)
+            }
+            None => None,
+        };
         let path =
             Self::identity_path(binding.provider.as_str(), binding.provider_user_id.as_str())
                 .map_err(map_binding_fs_error)?;
@@ -1801,13 +1629,11 @@ where
                         return Err(RebornUserIdentityBindingError::ProviderIdentityAlreadyBound);
                     }
                     if existing.state == StoredSlackIdentityState::Active {
-                        // When an epoch is requested, `owner` was checked above
-                        // and that epoch currently owns the Connecting lifecycle
-                        // record. A same-user row from another epoch can therefore
-                        // only be stale (for example, a crash after the identity
-                        // write but before lifecycle activation). Replace it with
-                        // this current generation; the cross-user branch above
-                        // remains a hard conflict.
+                        // A same-user row from another generation is either a
+                        // reconnect (this bind replaces the active generation
+                        // below) or a stale crash-window row whose generation
+                        // never activated. Replace it with this generation;
+                        // the cross-user branch above remains a hard conflict.
                     }
                     (
                         StoredSlackUserIdentity::from_binding(&binding, epoch, existing.created_at),
@@ -1826,7 +1652,7 @@ where
             match self.write_record(&path, &record, cas).await {
                 Ok(identity_written_version) => {
                     let rollback = if let (Some(owner), Some(epoch)) = (owner.as_ref(), epoch) {
-                        let activation = match self.activate_connection(owner, epoch).await {
+                        let activation = match self.record_active_generation(owner, epoch).await {
                             Ok(activation) => activation,
                             Err(error) => {
                                 let restored_identity = if let Some(previous) =
@@ -2635,12 +2461,6 @@ enum StoredSlackDisconnectCleanup {
     Epoch(SlackConnectionEpoch),
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-struct StoredSlackPendingConnection {
-    epoch: SlackConnectionEpoch,
-    expires_at: DateTime<Utc>,
-}
-
 struct SlackConnectionActivation {
     previous: Option<StoredSlackConnection>,
     written_version: RecordVersion,
@@ -2656,6 +2476,20 @@ struct SlackIdentityBindingRollbackContext {
     activation: SlackConnectionActivation,
 }
 
+/// Durable per-owner connection-generation record.
+///
+/// `epoch` names the generation the record is about; `state` says what
+/// ingress may do with it (`Active` authorizes bindings stamped with that
+/// generation) and which sweep journal, if any, is in flight
+/// (`Disconnecting` + `disconnect_cleanup`). The record is written by the
+/// callback's identity bind (`record_active_generation`) and by the
+/// disconnect / failed-connection-cleanup journals — never by the OAuth
+/// start path, which keeps no connection state of its own.
+///
+/// Records written before the connect-attempt slot was deleted may carry a
+/// `pending_connection` object and a `connecting` state; the field is
+/// ignored on read (serde tolerates unknown fields) and the state is treated
+/// as a stale, never-activated generation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredSlackConnection {
     tenant_id: String,
@@ -2663,11 +2497,6 @@ struct StoredSlackConnection {
     installation_id: String,
     epoch: SlackConnectionEpoch,
     state: SlackConnectionState,
-    /// A replacement OAuth generation staged while the previous generation
-    /// remains active. Keeping it beside (rather than overwriting) `epoch`
-    /// preserves the working binding until the replacement callback commits.
-    #[serde(default)]
-    pending_connection: Option<StoredSlackPendingConnection>,
     #[serde(default)]
     disconnect_cleanup: Option<StoredSlackDisconnectCleanup>,
     expires_at: DateTime<Utc>,
@@ -2689,7 +2518,6 @@ impl StoredSlackConnection {
             installation_id: owner.installation_id().as_str().to_string(),
             epoch,
             state,
-            pending_connection: None,
             disconnect_cleanup: None,
             expires_at,
             created_at,
@@ -2715,59 +2543,6 @@ impl StoredSlackConnection {
             updated_at: Utc::now(),
             ..self.clone()
         }
-    }
-
-    fn with_pending_connection(
-        &self,
-        epoch: SlackConnectionEpoch,
-        expires_at: DateTime<Utc>,
-    ) -> Self {
-        Self {
-            pending_connection: Some(StoredSlackPendingConnection { epoch, expires_at }),
-            updated_at: Utc::now(),
-            ..self.clone()
-        }
-    }
-
-    fn without_pending_connection(&self) -> Self {
-        Self {
-            pending_connection: None,
-            updated_at: Utc::now(),
-            ..self.clone()
-        }
-    }
-
-    fn promote_pending_connection(&self) -> Option<Self> {
-        let pending = self.pending_connection?;
-        Some(Self {
-            epoch: pending.epoch,
-            state: SlackConnectionState::Active,
-            pending_connection: None,
-            disconnect_cleanup: None,
-            expires_at: pending.expires_at,
-            updated_at: Utc::now(),
-            ..self.clone()
-        })
-    }
-
-    fn visible_connection_state(&self) -> (SlackConnectionEpoch, SlackConnectionState) {
-        match (self.state, self.pending_connection) {
-            (SlackConnectionState::Active, Some(pending)) => {
-                (pending.epoch, SlackConnectionState::Connecting)
-            }
-            _ => (self.epoch, self.state),
-        }
-    }
-
-    fn owns_connection_epoch(&self, epoch: SlackConnectionEpoch) -> bool {
-        if self.state == SlackConnectionState::Disconnected {
-            return false;
-        }
-        self.epoch == epoch
-            || (self.state == SlackConnectionState::Active
-                && self
-                    .pending_connection
-                    .is_some_and(|pending| pending.epoch == epoch))
     }
 
     fn with_disconnect_cleanup(mut self, cleanup: StoredSlackDisconnectCleanup) -> Self {
@@ -3310,78 +3085,22 @@ mod tests {
         SlackConnectionState, SlackUserBindingLifecycleStore,
     };
 
+    /// Records written by the pre-slot-deletion binary can still hold a
+    /// `connecting` state (and a `pending_connection` object serde now
+    /// ignores). They read as a stale, never-activated generation: still
+    /// enumerable for the disconnect union, never authorized by ingress, and
+    /// replaced outright by the next callback's bind.
     #[tokio::test]
-    async fn filesystem_slack_host_state_reclaims_expired_connection_epoch_and_finds_its_owner() {
+    async fn filesystem_slack_host_state_legacy_connecting_record_reads_as_stale_generation() {
         let root = Arc::new(InMemoryBackend::default());
-        let first = state_with_root(Arc::clone(&root));
-        let second = state_with_root(root);
+        let legacy = state_with_root(Arc::clone(&root));
+        let current = state_with_root(root);
         let owner = SlackConnectionOwner::new(
             TenantId::new("tenant-alpha").unwrap(),
             user("user:alice"),
             installation(),
         );
-        let expired_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
-        let current_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
-
-        first
-            .begin_connection(
-                &owner,
-                expired_epoch,
-                Utc::now() - chrono::Duration::seconds(1),
-            )
-            .await
-            .expect("expired attempt is recorded");
-        second
-            .begin_connection(&owner, current_epoch, connection_expiry())
-            .await
-            .expect("a new attempt reclaims the expired gate");
-
-        assert_eq!(
-            first
-                .connection_owners_for_user(owner.tenant_id(), owner.user_id())
-                .await
-                .expect("owner enumeration"),
-            vec![owner.clone()],
-            "owner enumeration must include a Connecting attempt with no identity row"
-        );
-
-        assert_eq!(
-            first
-                .connection_owner_for_epoch(owner.tenant_id(), owner.user_id(), expired_epoch,)
-                .await
-                .expect("expired owner lookup"),
-            None,
-            "the replaced epoch can no longer target the owner"
-        );
-        assert_eq!(
-            first
-                .connection_owner_for_epoch(owner.tenant_id(), owner.user_id(), current_epoch)
-                .await
-                .expect("current owner lookup"),
-            Some(owner.clone())
-        );
-        let competing_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
-        assert_eq!(
-            first
-                .begin_connection(&owner, competing_epoch, connection_expiry())
-                .await
-                .expect_err("a live connection attempt remains exclusive"),
-            SlackUserBindingLifecycleError::ConnectionInProgress
-        );
-    }
-
-    #[tokio::test]
-    async fn filesystem_slack_host_state_reclaimed_epoch_replaces_same_user_crash_window_identity()
-    {
-        let root = Arc::new(InMemoryBackend::default());
-        let first = state_with_root(Arc::clone(&root));
-        let second = state_with_root(root);
-        let owner = SlackConnectionOwner::new(
-            TenantId::new("tenant-alpha").unwrap(),
-            user("user:alice"),
-            installation(),
-        );
-        let expired_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
+        let legacy_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
         let current_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
         let binding = RebornUserIdentityBinding {
             provider: RebornIdentityProviderId::new("slack").unwrap(),
@@ -3389,17 +3108,109 @@ mod tests {
             user_id: user("user:alice"),
         };
 
-        first
-            .begin_connection(
-                &owner,
-                expired_epoch,
-                Utc::now() - chrono::Duration::seconds(1),
+        // A start-time slot record plus its crash-window identity row, exactly
+        // as the old binary could leave them. The record is written as the raw
+        // legacy JSON — including the retired `pending_connection` object no
+        // current struct can express — so this pins serde's unknown-field
+        // tolerance, not just the `connecting` state mapping.
+        let connection_path = FilesystemSlackHostState::<InMemoryBackend>::connection_path(&owner)
+            .expect("connection path");
+        let mut legacy_record = serde_json::to_value(StoredSlackConnection::new(
+            &owner,
+            legacy_epoch,
+            SlackConnectionState::Connecting,
+            Utc::now(),
+            connection_expiry(),
+        ))
+        .expect("legacy record serializes");
+        legacy_record
+            .as_object_mut()
+            .expect("legacy record is a JSON object")
+            .insert(
+                "pending_connection".to_string(),
+                serde_json::json!({
+                    "epoch": legacy_epoch,
+                    "expires_at": connection_expiry(),
+                }),
+            );
+        legacy
+            .write_record(&connection_path, &legacy_record, CasExpectation::Absent)
+            .await
+            .expect("legacy connecting record is durable");
+        let identity_path = FilesystemSlackHostState::<InMemoryBackend>::identity_path(
+            binding.provider.as_str(),
+            binding.provider_user_id.as_str(),
+        )
+        .expect("identity path");
+        legacy
+            .write_record(
+                &identity_path,
+                &StoredSlackUserIdentity::from_binding(&binding, Some(legacy_epoch), Utc::now()),
+                CasExpectation::Absent,
             )
             .await
-            .expect("expired attempt is recorded");
+            .expect("crash-window identity is durable");
+
+        assert_eq!(
+            current
+                .connection_owners_for_user(owner.tenant_id(), owner.user_id())
+                .await
+                .expect("owner enumeration"),
+            vec![owner.clone()],
+            "the disconnect union must still see the legacy owner"
+        );
+        assert!(
+            current
+                .resolve_user_identity_with_binding_epoch("slack", "install-alpha:U123")
+                .await
+                .expect("identity lookup")
+                .is_none(),
+            "a never-activated legacy generation must not authorize ingress"
+        );
+
+        current
+            .bind_user_identity_for_epoch(binding, current_epoch)
+            .await
+            .expect("a reconnect bind replaces the legacy connecting record");
+        assert_eq!(
+            current
+                .connection_state(&owner)
+                .await
+                .expect("connection state"),
+            Some((current_epoch, SlackConnectionState::Active))
+        );
+        let resolved = current
+            .resolve_user_identity_with_binding_epoch("slack", "install-alpha:U123")
+            .await
+            .expect("identity lookup")
+            .expect("current identity resolves");
+        assert_eq!(resolved.0, user("user:alice"));
+        assert_eq!(
+            resolved.1.as_ref().map(ToString::to_string),
+            Some(current_epoch.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_reconnect_bind_replaces_same_user_crash_window_identity() {
+        let root = Arc::new(InMemoryBackend::default());
+        let first = state_with_root(Arc::clone(&root));
+        let second = state_with_root(root);
+        let owner = SlackConnectionOwner::new(
+            TenantId::new("tenant-alpha").unwrap(),
+            user("user:alice"),
+            installation(),
+        );
+        let crashed_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
+        let current_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
+        let binding = RebornUserIdentityBinding {
+            provider: RebornIdentityProviderId::new("slack").unwrap(),
+            provider_user_id: RebornIdentityProviderUserId::new("install-alpha:U123").unwrap(),
+            user_id: user("user:alice"),
+        };
 
         // Model a process crash after the callback wrote the identity row but
-        // before it activated the matching connection record.
+        // before it recorded the active connection generation.
         let identity_path = FilesystemSlackHostState::<InMemoryBackend>::identity_path(
             binding.provider.as_str(),
             binding.provider_user_id.as_str(),
@@ -3408,16 +3219,20 @@ mod tests {
         first
             .write_record(
                 &identity_path,
-                &StoredSlackUserIdentity::from_binding(&binding, Some(expired_epoch), Utc::now()),
+                &StoredSlackUserIdentity::from_binding(&binding, Some(crashed_epoch), Utc::now()),
                 CasExpectation::Absent,
             )
             .await
             .expect("crash-window identity is durable");
+        assert!(
+            first
+                .resolve_user_identity_with_binding_epoch("slack", "install-alpha:U123")
+                .await
+                .expect("identity lookup")
+                .is_none(),
+            "a crash-window row with no recorded generation must not authorize ingress"
+        );
 
-        second
-            .begin_connection(&owner, current_epoch, connection_expiry())
-            .await
-            .expect("new attempt reclaims the expired lifecycle epoch");
         second
             .bind_user_identity_for_epoch(binding, current_epoch)
             .await
@@ -3443,85 +3258,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn filesystem_slack_host_state_reconfigure_keeps_active_identity_until_commit() {
-        let state = state();
-        let owner = SlackConnectionOwner::new(
-            TenantId::new("tenant-alpha").unwrap(),
-            user("user:alice"),
-            installation(),
-        );
-        let active_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
-        let replacement_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
-        let competing_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
-        let binding = RebornUserIdentityBinding {
-            provider: RebornIdentityProviderId::new("slack").unwrap(),
-            provider_user_id: RebornIdentityProviderUserId::new("install-alpha:U123").unwrap(),
-            user_id: user("user:alice"),
-        };
-
-        state
-            .begin_connection(&owner, active_epoch, connection_expiry())
-            .await
-            .expect("initial connection begins");
-        state
-            .bind_user_identity_for_epoch(binding.clone(), active_epoch)
-            .await
-            .expect("initial identity activates");
-
-        state
-            .begin_connection(&owner, replacement_epoch, connection_expiry())
-            .await
-            .expect("an active owner may stage one replacement connection");
-
-        assert_eq!(
-            state
-                .connection_state(&owner)
-                .await
-                .expect("pending replacement state"),
-            Some((replacement_epoch, SlackConnectionState::Connecting)),
-            "OAuth must observe the replacement epoch as the current connection attempt"
-        );
-        let resolved = state
-            .resolve_user_identity_with_binding_epoch("slack", "install-alpha:U123")
-            .await
-            .expect("identity lookup")
-            .expect("the existing active identity stays usable during reauthorization");
-        assert_eq!(resolved.0, user("user:alice"));
-        assert_eq!(
-            resolved.1.as_ref().map(ToString::to_string),
-            Some(active_epoch.to_string())
-        );
-        assert_eq!(
-            state
-                .begin_connection(&owner, competing_epoch, connection_expiry())
-                .await
-                .expect_err("only one replacement attempt may be pending"),
-            SlackUserBindingLifecycleError::ConnectionInProgress
-        );
-
-        state
-            .bind_user_identity_for_epoch(binding, replacement_epoch)
-            .await
-            .expect("replacement callback promotes the new generation");
-        assert_eq!(
-            state
-                .connection_state(&owner)
-                .await
-                .expect("promoted connection state"),
-            Some((replacement_epoch, SlackConnectionState::Active))
-        );
-        let resolved = state
-            .resolve_user_identity_with_binding_epoch("slack", "install-alpha:U123")
-            .await
-            .expect("identity lookup")
-            .expect("replacement identity resolves");
-        assert_eq!(
-            resolved.1.as_ref().map(ToString::to_string),
-            Some(replacement_epoch.to_string())
-        );
-    }
-
-    #[tokio::test]
     async fn filesystem_slack_host_state_failed_reconfigure_restores_active_binding() {
         let state = state();
         let owner = SlackConnectionOwner::new(
@@ -3538,17 +3274,9 @@ mod tests {
         };
 
         state
-            .begin_connection(&owner, active_epoch, connection_expiry())
-            .await
-            .expect("initial connection begins");
-        state
             .bind_user_identity_for_epoch(binding.clone(), active_epoch)
             .await
             .expect("initial identity activates");
-        state
-            .begin_connection(&owner, replacement_epoch, connection_expiry())
-            .await
-            .expect("replacement begins");
         let rollback = state
             .bind_user_identity_for_epoch(binding, replacement_epoch)
             .await
@@ -3589,10 +3317,6 @@ mod tests {
             user_id: user("user:alice"),
         };
         state
-            .begin_connection(&owner, epoch, connection_expiry())
-            .await
-            .expect("connection begins");
-        state
             .bind_user_identity_for_epoch(binding, epoch)
             .await
             .expect("identity activates");
@@ -3622,8 +3346,12 @@ mod tests {
         );
     }
 
+    /// A failed replacement whose rollback already restored the previous
+    /// active generation leaves the failed-cleanup journal with nothing it may
+    /// safely fence: both journal verbs reject the moved-on record instead of
+    /// disturbing the restored generation.
     #[tokio::test]
-    async fn failed_reconfigure_cleanup_preserves_previous_active_epoch() {
+    async fn failed_cleanup_journal_rejects_a_generation_the_record_moved_past() {
         let state = state();
         let owner = SlackConnectionOwner::new(
             TenantId::new("tenant-alpha").unwrap(),
@@ -3638,33 +3366,29 @@ mod tests {
             user_id: user("user:alice"),
         };
         state
-            .begin_connection(&owner, active_epoch, connection_expiry())
-            .await
-            .expect("initial connection begins");
-        state
-            .bind_user_identity_for_epoch(binding, active_epoch)
+            .bind_user_identity_for_epoch(binding.clone(), active_epoch)
             .await
             .expect("initial identity activates");
-        state
-            .begin_connection(&owner, replacement_epoch, connection_expiry())
+        let rollback = state
+            .bind_user_identity_for_epoch(binding, replacement_epoch)
             .await
-            .expect("replacement begins");
+            .expect("replacement identity stages");
+        rollback.into_future().await;
 
-        state
-            .begin_failed_connection_cleanup(&owner, replacement_epoch)
-            .await
-            .expect("pending replacement is already ingress-fenced");
-        state
-            .complete_failed_connection_cleanup(&owner, replacement_epoch)
-            .await
-            .expect("pending replacement cleanup completes");
-
+        assert_eq!(
+            state
+                .begin_failed_connection_cleanup(&owner, replacement_epoch)
+                .await
+                .expect_err("the rolled-back generation no longer owns the record"),
+            SlackUserBindingLifecycleError::StaleEpoch
+        );
         assert_eq!(
             state
                 .connection_state(&owner)
                 .await
                 .expect("restored active state"),
-            Some((active_epoch, SlackConnectionState::Active))
+            Some((active_epoch, SlackConnectionState::Active)),
+            "the journal must not disturb the restored previous generation"
         );
     }
 
@@ -3686,17 +3410,9 @@ mod tests {
         };
 
         state
-            .begin_connection(&owner, active_epoch, connection_expiry())
-            .await
-            .expect("initial connection begins");
-        state
             .bind_user_identity_for_epoch(binding.clone(), active_epoch)
             .await
             .expect("initial identity activates");
-        state
-            .begin_connection(&owner, replacement_epoch, connection_expiry())
-            .await
-            .expect("replacement begins");
         root.fail_next_connection_write();
 
         state
@@ -3704,10 +3420,6 @@ mod tests {
             .await
             .err()
             .expect("activation write failure surfaces");
-        state
-            .abandon_connection(&owner, replacement_epoch)
-            .await
-            .expect("callback failure abandons pending replacement");
 
         assert_eq!(
             state
@@ -3744,17 +3456,9 @@ mod tests {
         };
 
         state
-            .begin_connection(&owner, active_epoch, connection_expiry())
-            .await
-            .expect("initial connection begins");
-        state
             .bind_user_identity_for_epoch(binding.clone(), active_epoch)
             .await
             .expect("initial identity activates");
-        state
-            .begin_connection(&owner, replacement_epoch, connection_expiry())
-            .await
-            .expect("replacement begins");
         let rollback = state
             .bind_user_identity_for_epoch(binding, replacement_epoch)
             .await
@@ -3787,126 +3491,141 @@ mod tests {
             .expect("disconnect completes");
     }
 
+    /// The callback's identity bind is the FIRST lifecycle write of a connect
+    /// attempt: no start-time record exists, and the bind itself records the
+    /// new active generation so ingress can authorize the binding.
     #[tokio::test]
-    async fn filesystem_slack_host_state_abandoned_reconfigure_restores_active_epoch() {
+    async fn filesystem_slack_host_state_callback_bind_creates_the_active_connection_record() {
         let state = state();
         let owner = SlackConnectionOwner::new(
             TenantId::new("tenant-alpha").unwrap(),
             user("user:alice"),
             installation(),
         );
-        let active_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
-        let replacement_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
-        let binding = RebornUserIdentityBinding {
-            provider: RebornIdentityProviderId::new("slack").unwrap(),
-            provider_user_id: RebornIdentityProviderUserId::new("install-alpha:U123").unwrap(),
-            user_id: user("user:alice"),
-        };
+        let epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
+        let provider_user_id = "install-alpha:U123";
 
         state
-            .begin_connection(&owner, active_epoch, connection_expiry())
+            .bind_user_identity_for_epoch(
+                RebornUserIdentityBinding {
+                    provider: RebornIdentityProviderId::new("slack").unwrap(),
+                    provider_user_id: RebornIdentityProviderUserId::new(provider_user_id).unwrap(),
+                    user_id: user("user:alice"),
+                },
+                epoch,
+            )
             .await
-            .expect("initial connection begins");
-        state
-            .bind_user_identity_for_epoch(binding, active_epoch)
-            .await
-            .expect("initial identity activates");
-        state
-            .begin_connection(&owner, replacement_epoch, connection_expiry())
-            .await
-            .expect("replacement begins");
-
-        state
-            .abandon_connection(&owner, replacement_epoch)
-            .await
-            .expect("failed replacement rolls back");
+            .expect("bind without a prior start-time connection record succeeds");
 
         assert_eq!(
             state
                 .connection_state(&owner)
                 .await
-                .expect("restored connection state"),
-            Some((active_epoch, SlackConnectionState::Active))
+                .expect("connection state"),
+            Some((epoch, SlackConnectionState::Active)),
+            "the bind records the active generation itself"
         );
-        let resolved = state
-            .resolve_user_identity_with_binding_epoch("slack", "install-alpha:U123")
-            .await
-            .expect("identity lookup")
-            .expect("the original identity remains active after replacement failure");
         assert_eq!(
-            resolved.1.as_ref().map(ToString::to_string),
-            Some(active_epoch.to_string())
+            state
+                .resolve_user_identity("slack", provider_user_id)
+                .await
+                .expect("ingress lookup"),
+            Some(user("user:alice")),
+            "ingress authorizes the binding against the generation the bind recorded"
         );
     }
 
+    /// A reconnect while a previous generation is active replaces the active
+    /// generation at bind time (there is no staged pending slot): the record
+    /// flips to the new epoch and ingress stops honoring the old one.
     #[tokio::test]
-    async fn filesystem_slack_host_state_disconnect_fences_pending_reconfigure() {
+    async fn filesystem_slack_host_state_reconnect_bind_replaces_the_active_generation() {
         let state = state();
         let owner = SlackConnectionOwner::new(
             TenantId::new("tenant-alpha").unwrap(),
             user("user:alice"),
             installation(),
         );
-        let active_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
-        let replacement_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
-        let binding = RebornUserIdentityBinding {
+        let provider_user_id = "install-alpha:U123";
+        let binding = || RebornUserIdentityBinding {
             provider: RebornIdentityProviderId::new("slack").unwrap(),
-            provider_user_id: RebornIdentityProviderUserId::new("install-alpha:U123").unwrap(),
+            provider_user_id: RebornIdentityProviderUserId::new(provider_user_id).unwrap(),
             user_id: user("user:alice"),
         };
+        let first_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
+        state
+            .bind_user_identity_for_epoch(binding(), first_epoch)
+            .await
+            .expect("first connect binds");
 
+        let second_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
         state
-            .begin_connection(&owner, active_epoch, connection_expiry())
+            .bind_user_identity_for_epoch(binding(), second_epoch)
             .await
-            .expect("initial connection begins");
-        state
-            .bind_user_identity_for_epoch(binding, active_epoch)
-            .await
-            .expect("initial identity activates");
-        state
-            .begin_connection(&owner, replacement_epoch, connection_expiry())
-            .await
-            .expect("replacement begins");
+            .expect("reconnect over an active generation binds");
+
+        assert_eq!(
+            state
+                .connection_state(&owner)
+                .await
+                .expect("connection state"),
+            Some((second_epoch, SlackConnectionState::Active)),
+            "the reconnect's bind replaces the active generation"
+        );
+        let second_binding_epoch =
+            ironclaw_conversations::ExternalActorBindingEpoch::new(second_epoch.to_string())
+                .expect("binding epoch");
+        assert!(
+            state
+                .user_identity_binding_epoch_is_current(
+                    "slack",
+                    provider_user_id,
+                    &user("user:alice"),
+                    &second_binding_epoch,
+                )
+                .await
+                .expect("epoch recheck"),
+            "ingress honors the new generation"
+        );
+        let first_binding_epoch =
+            ironclaw_conversations::ExternalActorBindingEpoch::new(first_epoch.to_string())
+                .expect("binding epoch");
+        assert!(
+            !state
+                .user_identity_binding_epoch_is_current(
+                    "slack",
+                    provider_user_id,
+                    &user("user:alice"),
+                    &first_binding_epoch,
+                )
+                .await
+                .expect("epoch recheck"),
+            "ingress stops honoring the replaced generation"
+        );
+    }
+
+    /// The write-side disconnect fence: while an owner's disconnect sweep is
+    /// running (Disconnecting), a callback bind must be rejected — an
+    /// `AllOwned` sweep would otherwise race the fresh rows it could then
+    /// delete. Once the sweep completes, a reconnect bind succeeds over the
+    /// Disconnected record. An owner with no record at all still gets a
+    /// durable AllOwned fence (legacy rows carry no generation stamp).
+    #[tokio::test]
+    async fn filesystem_slack_host_state_bind_is_fenced_while_disconnect_cleanup_runs() {
+        let state = state();
+        let owner = SlackConnectionOwner::new(
+            TenantId::new("tenant-alpha").unwrap(),
+            user("user:alice"),
+            installation(),
+        );
+        let provider_user_id = "install-alpha:U123";
+        let binding = || RebornUserIdentityBinding {
+            provider: RebornIdentityProviderId::new("slack").unwrap(),
+            provider_user_id: RebornIdentityProviderUserId::new(provider_user_id).unwrap(),
+            user_id: user("user:alice"),
+        };
 
         let fence = state
-            .begin_disconnect(&owner)
-            .await
-            .expect("disconnect fences both active and pending generations");
-
-        assert_eq!(fence.fence_epoch(), active_epoch);
-        assert_eq!(
-            fence.cleanup_selector(),
-            SlackConnectionCleanupSelector::Epoch(active_epoch)
-        );
-        assert_eq!(
-            state
-                .connection_owner_for_epoch(owner.tenant_id(), owner.user_id(), replacement_epoch,)
-                .await
-                .expect("pending owner lookup after disconnect"),
-            None,
-            "a fenced replacement callback must no longer find its lifecycle owner"
-        );
-        assert_eq!(
-            state
-                .connection_state(&owner)
-                .await
-                .expect("disconnecting state"),
-            Some((active_epoch, SlackConnectionState::Disconnecting))
-        );
-    }
-
-    #[tokio::test]
-    async fn filesystem_slack_host_state_absent_owner_disconnect_fences_concurrent_oauth_start() {
-        let root = Arc::new(InMemoryBackend::default());
-        let disconnect = state_with_root(Arc::clone(&root));
-        let oauth_start = state_with_root(root);
-        let owner = SlackConnectionOwner::new(
-            TenantId::new("tenant-alpha").unwrap(),
-            user("user:alice"),
-            installation(),
-        );
-
-        let fence = disconnect
             .begin_disconnect(&owner)
             .await
             .expect("legacy disconnect establishes a fence");
@@ -3916,21 +3635,43 @@ mod tests {
             "legacy cleanup must not mistake the new fence epoch for a binding epoch"
         );
         assert_eq!(
-            disconnect
-                .connection_state(&owner)
-                .await
-                .expect("fence state"),
+            state.connection_state(&owner).await.expect("fence state"),
             Some((fence.fence_epoch(), SlackConnectionState::Disconnecting)),
             "an owner without a lifecycle record still needs a durable disconnect fence"
         );
 
-        let competing_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
-        assert_eq!(
-            oauth_start
-                .begin_connection(&owner, competing_epoch, connection_expiry())
+        let mid_sweep_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
+        assert!(
+            state
+                .bind_user_identity_for_epoch(binding(), mid_sweep_epoch)
                 .await
-                .expect_err("OAuth start must not pass an in-progress legacy cleanup"),
-            SlackUserBindingLifecycleError::DisconnectInProgress
+                .is_err(),
+            "a bind must not land under a running disconnect sweep"
+        );
+        assert_eq!(
+            state
+                .resolve_user_identity("slack", provider_user_id)
+                .await
+                .expect("ingress lookup"),
+            None,
+            "the fenced bind must not leave an identity row behind"
+        );
+
+        state
+            .complete_disconnect(&owner, fence.fence_epoch())
+            .await
+            .expect("sweep completes");
+        let reconnect_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
+        state
+            .bind_user_identity_for_epoch(binding(), reconnect_epoch)
+            .await
+            .expect("a completed disconnect must not fence out a new generation");
+        assert_eq!(
+            state
+                .connection_state(&owner)
+                .await
+                .expect("connection state"),
+            Some((reconnect_epoch, SlackConnectionState::Active))
         );
     }
 
@@ -3945,10 +3686,6 @@ mod tests {
         let epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
         let provider_user_id = "install-alpha:U123";
 
-        state
-            .begin_connection(&owner, epoch, connection_expiry())
-            .await
-            .expect("connection begins");
         state
             .bind_user_identity_for_epoch(
                 RebornUserIdentityBinding {
@@ -4022,10 +3759,6 @@ mod tests {
         };
 
         first
-            .begin_connection(&alice_owner, alice_epoch, connection_expiry())
-            .await
-            .expect("Alice connection begins");
-        first
             .bind_user_identity_for_epoch(alice_binding, alice_epoch)
             .await
             .expect("Alice identity activates");
@@ -4069,10 +3802,6 @@ mod tests {
                 .await
                 .expect("epoch-bound DM target activates");
         }
-        second
-            .begin_connection(&bob_owner, bob_epoch, connection_expiry())
-            .await
-            .expect("Bob may start a competing connection attempt");
         let duplicate = second
             .bind_user_identity_for_epoch(
                 RebornUserIdentityBinding {
@@ -4101,10 +3830,6 @@ mod tests {
                 SlackConnectionCleanupSelector::Epoch(alice_epoch),
             )
         );
-        second
-            .abandon_connection(&alice_owner, alice_epoch)
-            .await
-            .expect("a racing callback rollback defers to disconnect");
         assert_eq!(
             second
                 .connection_state(&alice_owner)
@@ -4168,10 +3893,6 @@ mod tests {
             .expect("Alice disconnect completes");
 
         second
-            .begin_connection(&bob_owner, bob_epoch, connection_expiry())
-            .await
-            .expect("Bob connection begins");
-        second
             .bind_user_identity_for_epoch(
                 RebornUserIdentityBinding {
                     provider: RebornIdentityProviderId::new("slack").unwrap(),
@@ -4182,6 +3903,14 @@ mod tests {
             )
             .await
             .expect("Bob identity activates");
+        assert_eq!(
+            second
+                .connection_state(&bob_owner)
+                .await
+                .expect("Bob state"),
+            Some((bob_epoch, SlackConnectionState::Active)),
+            "Bob's bind records his own active generation"
+        );
 
         first
             .delete_user_identity_bindings_for_user_at_epoch(
@@ -4201,10 +3930,6 @@ mod tests {
         );
 
         let alice_next_epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
-        first
-            .begin_connection(&alice_owner, alice_next_epoch, connection_expiry())
-            .await
-            .expect("Alice N+1 connection begins");
         first
             .bind_user_identity_for_epoch(
                 RebornUserIdentityBinding {

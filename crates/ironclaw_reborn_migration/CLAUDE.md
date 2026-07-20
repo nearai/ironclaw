@@ -3,14 +3,18 @@
 Standalone tool + library that converts **IronClaw v1 / engine-v2 persisted
 state** into the **Reborn** state substrate. Ships as its own binary
 (`ironclaw-reborn-migration`); the conversion engine is a library
-(`run_migration`) so it can later be wired into `ironclaw-reborn` startup.
+(`run_migration`) so it can later be wired into `ironclaw` startup.
 
-- **Read side** = the root `ironclaw` crate (`ironclaw::db::connect_with_handles`)
-  — one v1 database (PostgreSQL **or** libSQL). Engine-v2 state is **not** a
-  separate DB: missions/projects/threads were persisted by the v2 bridge as JSON
-  blobs inside the v1 `memory_documents` table under `engine/…` /
+- **Read side** = `src/legacy_snapshot/` — a self-contained, frozen port of the
+  v1 read path (DB connect, the 7 queries this crate needs, secrets decrypt,
+  wasm tool/channel stores), independent of the live `ironclaw_legacy` crate.
+  Opens one v1 database (PostgreSQL **or** libSQL) directly. Engine-v2 state is
+  **not** a separate DB: missions/projects/threads were persisted by the v2
+  bridge as JSON blobs inside the v1 `memory_documents` table under `engine/…` /
   `.system/engine/…` paths. Parsed via the serde mirrors in `v2_model.rs` (the
   engine-v2 types were deleted; they survive only at git tag `old_engine_v2`).
+  `legacy_snapshot/` applies the same freeze-and-port pattern to the rest of
+  the v1 read surface — see "Decoupled from `ironclaw_legacy`" below.
 - **Write side** = Reborn domain stores built directly over a `RootFilesystem` /
   triggers DB in `target.rs`, without booting a `RebornRuntime`. Threads /
   secrets / identity force a concrete filesystem type, so they are built inside
@@ -75,7 +79,38 @@ a domain fails the build.
   `extension_installation_store_for_migration` (mirrors composition's
   `*_for_test` accessors; ships zero bytes without the feature).
 
-## Remaining follow-up — wire into `ironclaw-reborn` startup
+## Decoupled from `ironclaw_legacy`
+
+This crate's `[dependencies]` no longer include `ironclaw_legacy` (`src/`, the
+v1 monolith). That dependency was tracked debt in
+`crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs`'s
+`LAYER_MATRIX_EXCEPTIONS` (`removes_in: "Tier B"` — full `src/` retirement,
+see `docs/plans/2026-07-02-reborn-internal-module-refactor.md` §8), since
+`Database` is a 9-sub-trait, ~78-method supertrait that can't be partially
+implemented as a trait object. `src/legacy_snapshot/` freezes only the 7
+`Database` methods, the secrets decrypt scheme (AES-256-GCM + HKDF-SHA256,
+byte-for-byte — porting this wrong silently breaks decrypting real secrets),
+and the wasm tool/channel store queries this crate actually calls — the same
+pattern `v2_model.rs` already used for the deleted engine-v2 types.
+
+**One deliberate behavior change**: the original `ironclaw::db::connect_with_handles`
+applied v1 schema migrations as a side effect of connecting.
+`legacy_snapshot::connect` does not — reproducing the full migration-apply
+machinery (refinery + the consolidated libSQL schema) for a one-time cutover
+tool was out of proportion, so this reader instead requires the source
+database to already be at the schema version it was frozen against and fails
+loud with `LegacyError::SchemaMismatch` (naming the missing column) via
+`ensure_schema_current` rather than silently reading a partial row.
+
+**Known gap**: `tests/migration_roundtrip.rs` still seeds its v1 fixture
+through the *real* v1 write path (`ironclaw_legacy` as a `[dev-dependencies]`
+entry — this doesn't need a `LAYER_MATRIX_EXCEPTIONS` entry, that check only
+walks normal dependencies) for fidelity: the fixture must look exactly like
+what a live v1 install produces. When `src/` is actually deleted under Tier B,
+`seed_v1_fixture` and friends need rewriting to insert raw SQL directly
+against the frozen schema instead.
+
+## Remaining follow-up — wire into `ironclaw` startup
 
 Call `run_migration` in `crates/ironclaw_reborn_cli/src/runtime/mod.rs` after the
 storage root is resolved and before `build_reborn_runtime`, mirroring

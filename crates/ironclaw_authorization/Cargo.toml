@@ -8,7 +8,6 @@ publish = false
 layer = "kernel"
 
 [features]
-default = []
 # In-memory-backed capability-lease store constructor for this crate's own tests
 # and downstream integration tiers. The store itself is the production
 # `FilesystemCapabilityLeaseStore<InMemoryBackend>`; the helper just wires the

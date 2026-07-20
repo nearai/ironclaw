@@ -22,11 +22,19 @@
   handler must claim the scoped flow/state/provider through `AuthFlowManager`
   before exchanging provider material through `AuthProviderClient`, then
   complete the flow and emit typed continuations.
-- The first WebUI-mounted OAuth route keeps raw PKCE verifiers in a bounded,
-  expiring process-local cache because `ironclaw_auth` durable records may
-  store hashes only. Do not treat that route as multi-replica/restart-safe
-  until a host-owned encrypted verifier store or equivalent sticky callback
-  mechanism is wired.
+- Raw PKCE verifiers for setup-path OAuth flows live in the injected
+  `SecretStore` under a per-flow handle (`product-auth-setup-pkce-{flow_id}`),
+  written by `RebornProductAuthServices::start_setup_oauth_flow` with
+  TTL = the flow's `expires_at`, and read back once via `lease_once`/`consume`.
+  `ironclaw_auth` durable records still store hashes only. This mirrors the
+  blocked-turn gate driver (`oauth_gate.rs`), so setup callbacks are
+  restart- and replica-safe: the verifier survives anywhere the secret store
+  does. Do not reintroduce a process-local verifier cache — a bounded
+  route-local cache strands a LIVE flow's verifier on eviction or restart, and
+  the callback then fails `unknown_or_expired_flow` on a good flow.
+  The verifier write belongs at the shared start seam, before `create_flow`,
+  so a failed secret write fails the start (fail-closed) rather than minting a
+  flow whose callback can never complete.
 - Manual-token setup routes should call
   `RebornProductAuthServices::request_manual_token_setup` for the typed
   challenge and `RebornProductAuthServices::submit_manual_token` with a
@@ -54,7 +62,7 @@
   calling `SessionThreadService`; do not append with the runtime/base
   `ThreadScope` directly in multi-user WebUI paths.
 
-## WebUI v2 native surface (`webui-v2-beta` feature)
+## WebUI v2 native surface
 
 The Reborn-side host composition for the WebChat v2 HTTP gateway lives
 in this crate. Implements Path A of
@@ -71,7 +79,7 @@ middleware with v1's `src/channels/web/`.
 | `RebornProjectionServices` (in `src/projection.rs`) | Runtime-owned projection/event-stream composition; owns the single local-dev `EventStreamManager` and creates product-specific `ProjectionStream` adapters over it |
 | `WebuiAuthenticator` trait | Host-supplied bearer-token verifier; returns `Option<WebuiAuthentication>` so identity and request-scoped WebUI capabilities travel together |
 | `WebuiServeConfig { tenant_id, authenticator, max_body_bytes, allowed_origins, csp_header }` | Required config for `webui_v2_app`; no defaults that silently disable security |
-| `webui_v2_app(bundle, config) -> Router` | Build the fully-composed axum `Router`. This is the seam between this product/API crate and host-owned HTTP ingress: tests drive it via `tower::ServiceExt::oneshot`; the `ironclaw-reborn serve` subcommand (follow-up PR) hands it to `axum::serve` from a host-owned listener |
+| `webui_v2_app(bundle, config) -> Router` | Build the fully-composed axum `Router`. This is the seam between this product/API crate and host-owned HTTP ingress: tests drive it via `tower::ServiceExt::oneshot`; the `ironclaw serve` subcommand hands it to `axum::serve` from a host-owned listener |
 | `ProtectedRouteMount` | Host-supplied protected API route fragment merged inside the WebUI bearer-auth layer with descriptor-driven body/rate limits. Reborn OpenAI-compatible routes use this seam; do not use it for v1 gateway routers. |
 
 ### Middleware stack composed by `webui_v2_app`
@@ -120,7 +128,7 @@ Inbound order (outer → inner → handler):
    `config.tenant_id` plus the authentication result's `UserId`, and a
    request-scoped `WebUiV2Capabilities` extension from the same
    authentication result.
-   When `openai-compat-beta` is enabled, the same verified bearer result also
+   The same verified bearer result also
    inserts an `OpenAiCompatAuthenticatedCaller` extension with tenant-scoped
    verified auth evidence for protected OpenAI-compatible route mounts; route
    crates must not mint this evidence.
@@ -368,7 +376,7 @@ Per Path A in `docs/reborn/how-to-port-channel-to-reborn.md`:
   `feat/webui-v2-gateway-composition-3580` deliberately keeps the v1
   binary untouched.
 
-### How the standalone `ironclaw-reborn serve` consumes this
+### How the standalone `ironclaw serve` consumes this
 
 The `serve` subcommand builds a full local-dev `RebornRuntime`, asks
 `build_webui_services(&runtime, None)` for the WebUI bundle, and hands

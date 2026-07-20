@@ -18,13 +18,10 @@ mod target;
 
 mod extension_ownership;
 
-#[cfg(feature = "full-migration")]
 mod convert;
-#[cfg(feature = "full-migration")]
+mod legacy_snapshot;
 mod mounts;
-#[cfg(feature = "full-migration")]
 mod source;
-#[cfg(feature = "full-migration")]
 mod v2_model;
 
 pub use extension_ownership::{
@@ -42,7 +39,6 @@ pub use report::{Domain, LossReason, LossyItem, MigrationReport, MigrationStats}
 /// Infrastructure failures (cannot open a store, cannot write a record) abort
 /// with a [`MigrationError`]. Per-item representation gaps do not abort — they
 /// are accumulated as [`LossyItem`]s on the returned report.
-#[cfg(feature = "full-migration")]
 pub async fn run_migration(options: MigrationOptions) -> Result<MigrationReport, MigrationError> {
     let mut report = MigrationReport::new(options.dry_run);
 

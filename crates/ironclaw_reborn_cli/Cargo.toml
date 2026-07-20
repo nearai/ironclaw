@@ -1,6 +1,6 @@
 [package]
-name = "ironclaw_reborn_cli"
-version = "0.1.0"
+name = "ironclaw"
+version = "1.0.0-rc.1"
 edition = "2024"
 rust-version.workspace = true
 description = "Standalone IronClaw Reborn binary"
@@ -13,76 +13,23 @@ publish = false
 [package.metadata.ironclaw]
 layer = "app"
 
-# Keep disabled until #3483 resolves cargo-dist tag/versioning + Windows WiX
-# packaging for the standalone Reborn binary.
 [package.metadata.dist]
-dist = false
+dist = true
+display-name = "ironclaw"
+features = ["libsql", "postgres"]
+
+[package.metadata.wix]
+upgrade-guid = "650712A0-A6B4-4584-829A-03A90CE3D7D9"
+path-guid = "9BB3F0DB-3513-45E6-A23B-CE5A5E5C1759"
+license = false
+eula = false
 
 [features]
 # libsql is the default storage backend: a file-backed local database needs
-# no external server, so a default `ironclaw-reborn` build is runnable as-is.
+# no external server, so a default `ironclaw` build is runnable as-is.
 # `postgres` remains opt-in for deployments that point `[storage]` at a server.
-default = ["root-llm-provider", "libsql"]
-# Everything a full-fat local/desktop build ships: the WebChat v2 HTTP
-# gateway (and with it `serve` + `service`), the Slack and OpenAI-compat
-# host mounts, and every storage backend so the binary can honor whatever
-# `[storage]` the operator's config selects at runtime rather than being
-# pinned at compile time.
-full = [
-    "webui-v2-beta",
-    "slack-v2-host-beta",
-    "libsql",
-    "postgres",
-    "inmemory-turn-state",
-    "openai-compat-beta",
-    "root-llm-provider",
-]
-# Wire a real LLM provider into the assembled runtime. Mirrors the same
-# `root-llm-provider` feature on `ironclaw_reborn_composition` /
-# `ironclaw_runner`, so building without it produces a CLI binary that
-# can still boot the runtime substrate but will surface an "LLM gateway
-# not wired" error on the first `send_user_message`.
-root-llm-provider = [
-    "ironclaw_reborn_composition/root-llm-provider",
-]
-# Compile in the WebChat v2 beta HTTP gateway subcommand
-# (`ironclaw-reborn serve`). Off by default so a default binary build
-# does not link the auth/HTTP middleware stack at all — production
-# binaries that genuinely expose v2 over HTTP must opt in. Pulls in
-# `webui-v2-beta` on the composition crate plus the ingress crate
-# that owns the serve loop. Also enables the WebChat v2 SSO login
-# surface (Google / GitHub OAuth): the CLI reads provider env config
-# (`commands/serve_sso.rs`) and hands it to the ingress crate's
-# `build_signed_session_login`, which owns the stateless HMAC-signed
-# session store — so the login surface works in a normal build with no
-# dev-only feature required.
-webui-v2-beta = [
-    "ironclaw_reborn_composition/webui-v2-beta",
-    "dep:ironclaw_webui",
-    "dep:async-trait",
-]
-# Compile in the Slack Events API host-beta mount for `ironclaw-reborn serve`.
-# Still requires effective Slack enablement at runtime before the route is
-# mounted: either `[slack].enabled = true` or
-# `IRONCLAW_REBORN_SLACK_ENABLED=true`.
-slack-v2-host-beta = [
-    "webui-v2-beta",
-    "ironclaw_reborn_composition/slack-v2-host-beta",
-    "ironclaw_webui/slack-v2-host-beta",
-]
-# Compile in the Telegram webhook channel host. Still requires effective
-# Telegram enablement at runtime before the route is mounted: either
-# `[telegram].enabled = true` or `IRONCLAW_REBORN_TELEGRAM_ENABLED=true`.
-telegram-v2-host-beta = [
-    "webui-v2-beta",
-    "ironclaw_reborn_composition/telegram-v2-host-beta",
-]
-openai-compat-beta = [
-    "webui-v2-beta",
-    "ironclaw_reborn_composition/openai-compat-beta",
-    "ironclaw_webui/openai-compat-beta",
-]
-# Enable production PostgreSQL storage composition for `ironclaw-reborn`.
+default = ["libsql"]
+# Enable production PostgreSQL storage composition for `ironclaw`.
 postgres = [
     "ironclaw_reborn_composition/postgres",
 ]
@@ -90,18 +37,9 @@ postgres = [
 libsql = [
     "ironclaw_reborn_composition/libsql",
 ]
-# Coordinate turn state in a single in-process `InMemoryTurnStateStore` authority
-# instead of the per-user `state.json` filesystem CAS store (the runtime-wedge
-# fix). Forwards to `ironclaw_reborn_composition/inmemory-turn-state`; see that
-# crate's feature doc for the durability trade-off (in-flight turns are volatile
-# across a hard crash, gate-blocked turns are persisted off the hot path and a
-# graceful shutdown flushes the full snapshot).
-inmemory-turn-state = [
-    "ironclaw_reborn_composition/inmemory-turn-state",
-]
 [dependencies]
 anyhow = "1"
-async-trait = { version = "0.1", optional = true }
+async-trait = { version = "0.1" }
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4.3"
 clap = { version = "4", features = ["derive", "env"] }
@@ -114,7 +52,7 @@ dotenvy = "0.15"
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version = "0.1.0" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config", version = "0.1.0" }
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces", version = "0.1.0" }
-ironclaw_webui = { path = "../ironclaw_webui", version = "0.1.0", optional = true }
+ironclaw_webui = { path = "../ironclaw_webui", version = "0.1.0" }
 rand = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
 secrecy = "0.10"
@@ -154,7 +92,7 @@ ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
 # above): `commands::onboard::mod`'s write-first-then-config-ordering test
 # implements a fake `ironclaw_secrets::SecretStore` whose `put` always fails,
 # needing `#[async_trait::async_trait]` in every feature combination `cargo
-# test` runs, not just under `webui-v2-beta`.
+# test` runs.
 async-trait = "0.1"
 # Same fake `SecretStore` impl takes `ResourceScope` / `SecretHandle` /
 # `Timestamp` in its trait method signatures.

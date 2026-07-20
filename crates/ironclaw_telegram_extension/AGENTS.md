@@ -50,6 +50,6 @@ rg -n "pub (struct|enum|trait) Telegram|pub async fn build_telegram_host" crates
 ```bash
 cargo test -p ironclaw_telegram_extension
 cargo clippy -p ironclaw_telegram_extension --all-targets --all-features -- -D warnings
-cargo test -p ironclaw_reborn_composition --features test-support,webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta,libsql --lib telegram
+cargo test -p ironclaw_reborn_composition --features test-support,libsql --lib telegram
 cargo test -p ironclaw_architecture --test telegram_extension_gates
 ```

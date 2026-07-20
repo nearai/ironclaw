@@ -6,7 +6,6 @@ mod file_write;
 mod operator_env;
 mod render;
 mod runtime;
-#[cfg(feature = "webui-v2-beta")]
 mod serve_invocation;
 mod webui_token;
 

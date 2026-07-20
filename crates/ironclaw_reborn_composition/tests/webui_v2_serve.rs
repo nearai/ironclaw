@@ -9,8 +9,6 @@
 //! facade is mocked so the regression target stays the gateway-layer
 //! composition.
 
-#![cfg(feature = "webui-v2-beta")]
-
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -212,7 +210,6 @@ async fn health_route_is_public_for_platform_probes() {
     assert_eq!(json["channel"], "reborn");
 }
 
-#[cfg(feature = "openai-compat-beta")]
 mod openai_compat_mount_tests {
     use super::*;
     use ironclaw_product_adapters::{
@@ -235,10 +232,10 @@ mod openai_compat_mount_tests {
     };
     use ironclaw_threads::InMemorySessionThreadService;
     use ironclaw_turns::runner::{ClaimRunRequest, CompleteRunRequest, TurnRunTransitionPort};
+    use ironclaw_turns::test_support::in_memory_turn_state_store;
     use ironclaw_turns::{
-        AcceptedMessageRef, DefaultTurnCoordinator, InMemoryTurnStateStore,
-        StaticTurnAdmissionLimitProvider, TurnActor, TurnAdmissionAxisKind, TurnLeaseToken,
-        TurnRunId, TurnRunnerId, TurnScope,
+        AcceptedMessageRef, DefaultTurnCoordinator, StaticTurnAdmissionLimitProvider, TurnActor,
+        TurnAdmissionAxisKind, TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope,
     };
 
     const AGENT: &str = "agent-alpha";
@@ -302,9 +299,8 @@ mod openai_compat_mount_tests {
     async fn openai_chat_timeout_keeps_shared_turn_admission_until_terminal_release() {
         let limits = StaticTurnAdmissionLimitProvider::default()
             .with_total_limit(TurnAdmissionAxisKind::Tenant, 1);
-        let turn_state = Arc::new(InMemoryTurnStateStore::with_admission_limit_provider(
-            Arc::new(limits),
-        ));
+        let turn_state =
+            Arc::new(in_memory_turn_state_store().with_admission_limit_provider(Arc::new(limits)));
         let turn_coordinator = Arc::new(DefaultTurnCoordinator::new(turn_state.clone()));
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let binding = AdmissionTestBindingService;
@@ -351,7 +347,14 @@ mod openai_compat_mount_tests {
             .await
             .expect("timed-out chat response");
         assert_eq!(timed_out.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(turn_state.active_admission_reservations().len(), 1);
+        assert_eq!(
+            turn_state
+                .active_admission_reservations()
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
 
         let denied = app
             .clone()
@@ -365,7 +368,14 @@ mod openai_compat_mount_tests {
         let denied_body: serde_json::Value =
             serde_json::from_slice(&denied_body).expect("denied json");
         assert_eq!(denied_body["error"]["code"], "rate_limited");
-        assert_eq!(turn_state.active_admission_reservations().len(), 1);
+        assert_eq!(
+            turn_state
+                .active_admission_reservations()
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
 
         let runner_id = TurnRunnerId::new();
         let lease_token = TurnLeaseToken::new();
@@ -386,7 +396,13 @@ mod openai_compat_mount_tests {
             })
             .await
             .expect("complete active run");
-        assert!(turn_state.active_admission_reservations().is_empty());
+        assert!(
+            turn_state
+                .active_admission_reservations()
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         let accepted_after_release = app
             .oneshot(chat_request(Some(VALID_TOKEN)))
@@ -397,7 +413,14 @@ mod openai_compat_mount_tests {
             StatusCode::SERVICE_UNAVAILABLE,
             "the route still times out waiting for projection, but admission accepted a new turn"
         );
-        assert_eq!(turn_state.active_admission_reservations().len(), 1);
+        assert_eq!(
+            turn_state
+                .active_admission_reservations()
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -3230,7 +3253,6 @@ async fn static_automations_delivery_surfaces_save_error_and_gates_slack_hint() 
 /// as 413 BEFORE verification/parse ever runs) and qa-telegram:S6 (path
 /// probes under the webhook prefix 404 at the router without reaching the
 /// installation resolver — an unmounted path cannot consult any store).
-#[cfg(feature = "telegram-v2-host-beta")]
 #[tokio::test]
 async fn telegram_public_mount_enforces_descriptor_body_limit_and_404s_path_probes() {
     use ironclaw_host_api::{AgentId, UserId};

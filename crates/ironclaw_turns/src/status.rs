@@ -57,6 +57,33 @@ impl TurnStatus {
     }
 }
 
+/// The recoverability-critical transition boundary (#6263 Step 3 / #6284 / Step 5b).
+///
+/// A run status is **recoverability-critical** when it is a gate-park
+/// ([`TurnStatus::is_blocked`]), a terminal ([`TurnStatus::is_terminal`]), or a
+/// [`TurnStatus::CancelRequested`]:
+///
+/// * losing a gate-park strands a run away from the human who must act on it;
+/// * losing a terminal re-runs an already-performed side effect, or loses the
+///   sanitized, model-visible failure cause the model must see;
+/// * losing a `CancelRequested` re-runs work the caller was told was cancelled:
+///   `request_cancel` reports success once the transition is committed, so a
+///   write-behind crash that reverts it to `Running`/`Queued` would execute a
+///   run the caller successfully cancelled (and drop its idempotency record).
+///   The caller is waiting on this transition exactly as on a gate-park.
+///
+/// These transitions MUST stay synchronously durable even under async
+/// write-behind: the async path may move only NON-critical transitions off the
+/// synchronous ack. The row store's `delta_is_recoverability_critical` also
+/// treats a brand-new run (one `baseline` has never seen — `submit_turn`,
+/// `submit_child_turn`, and the runs `resume_turn`/`retry_turn` spawn) as
+/// critical: it has no durable fallback to recover from if lost. The
+/// crash-consistency suite references THIS function (not a copy) as the
+/// single boundary write-behind flips.
+pub fn is_recoverability_critical(status: TurnStatus) -> bool {
+    status.is_blocked() || status.is_terminal() || matches!(status, TurnStatus::CancelRequested)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnActiveRunRefState {
     Missing,

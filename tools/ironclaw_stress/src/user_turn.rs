@@ -29,12 +29,11 @@ use ironclaw_threads::{
     UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, BlockedReason, DefaultTurnCoordinator, FilesystemTurnStateBlockPersistence,
-    FilesystemTurnStateRowStore, FilesystemTurnStateStore, GateRef, IdempotencyKey,
-    InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, LoopCheckpointStateRef,
+    AcceptedMessageRef, BlockedReason, DefaultTurnCoordinator, FilesystemTurnStateRowStore,
+    FilesystemTurnStateStore, GateRef, IdempotencyKey, LoopCheckpointStateRef,
     ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest, SourceBindingRef,
     SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnCoordinator, TurnError,
-    TurnErrorCategory, TurnLeaseToken, TurnRunnerId, TurnStateStore,
+    TurnErrorCategory, TurnLeaseToken, TurnRunnerId, TurnStateStore, TurnStateStoreLimits,
     runner::{
         BlockRunRequest, ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, TurnRunTransitionPort,
     },
@@ -54,14 +53,13 @@ use crate::{
 };
 
 /// Backend-agnostic turn store for the stress workload. Both the durable
-/// `FilesystemTurnStateStore` and the shared `InMemoryTurnStateStore` already
-/// implement the supertraits, so the impls are empty — this lets
+/// `FilesystemTurnStateStore` and the row-store `FilesystemTurnStateRowStore`
+/// already implement the supertraits, so the impls are empty — this lets
 /// `turn_store_for_context` return one `Arc<dyn StressTurnStore>` and the
 /// workload submit/claim/complete against either without per-method dispatch.
 pub(crate) trait StressTurnStore: TurnStateStore + TurnRunTransitionPort {}
 impl<F: RootFilesystem + 'static> StressTurnStore for FilesystemTurnStateStore<F> {}
 impl<F: RootFilesystem + 'static> StressTurnStore for FilesystemTurnStateRowStore<F> {}
-impl StressTurnStore for InMemoryTurnStateStore {}
 
 pub(crate) struct UserTurnServices<F>
 where
@@ -74,11 +72,7 @@ where
     run_id: String,
     target: String,
     turn_state_backend: TurnStateBackend,
-    turn_state_limits: InMemoryTurnStateStoreLimits,
-    /// Single shared in-process turn-state authority, used when
-    /// `turn_state_backend == Memory`. Shared across all workers (one process)
-    /// to faithfully model the production single-process design.
-    memory_turn_store: Arc<InMemoryTurnStateStore>,
+    turn_state_limits: TurnStateStoreLimits,
     /// Shared row-store authorities keyed by tenant/user mount. This preserves
     /// durable filesystem writes while avoiding a full row-set reload for every
     /// measured operation in the same process.
@@ -90,9 +84,7 @@ where
 }
 
 pub(crate) enum UserTurnWorkload {
-    #[cfg(feature = "libsql")]
     Libsql(UserTurnServices<ironclaw_filesystem::LibSqlRootFilesystem>),
-    #[cfg(feature = "postgres")]
     Postgres(UserTurnServices<ironclaw_filesystem::PostgresRootFilesystem>),
 }
 
@@ -207,7 +199,6 @@ pub(crate) async fn build_user_turn_workload(
     }
 }
 
-#[cfg(feature = "libsql")]
 async fn build_libsql_user_turn_workload(
     args: &Args,
     run_id: &str,
@@ -226,15 +217,6 @@ async fn build_libsql_user_turn_workload(
     )?))
 }
 
-#[cfg(not(feature = "libsql"))]
-async fn build_libsql_user_turn_workload(
-    _args: &Args,
-    _run_id: &str,
-) -> Result<UserTurnWorkload, String> {
-    Err("binary was built without the libsql feature".to_string())
-}
-
-#[cfg(feature = "postgres")]
 async fn build_postgres_user_turn_workload(
     args: &Args,
     run_id: &str,
@@ -251,14 +233,6 @@ async fn build_postgres_user_turn_workload(
         args.turn_state_backend,
         args.turn_state_store_limits(),
     )?))
-}
-
-#[cfg(not(feature = "postgres"))]
-async fn build_postgres_user_turn_workload(
-    _args: &Args,
-    _run_id: &str,
-) -> Result<UserTurnWorkload, String> {
-    Err("binary was built without the postgres feature".to_string())
 }
 
 pub(crate) async fn run_user_turn_tasks(
@@ -596,9 +570,7 @@ fn format_prefill_errors(errors: &BTreeMap<String, u64>) -> String {
 impl UserTurnWorkload {
     pub(crate) fn target(&self) -> &str {
         match self {
-            #[cfg(feature = "libsql")]
             Self::Libsql(services) => &services.target,
-            #[cfg(feature = "postgres")]
             Self::Postgres(services) => &services.target,
         }
     }
@@ -612,13 +584,11 @@ impl UserTurnWorkload {
         span_budget: &AtomicUsize,
     ) -> Sample {
         match self {
-            #[cfg(feature = "libsql")]
             Self::Libsql(services) => {
                 services
                     .run_operation(args, identities, worker_index, operation_index, span_budget)
                     .await
             }
-            #[cfg(feature = "postgres")]
             Self::Postgres(services) => {
                 services
                     .run_operation(args, identities, worker_index, operation_index, span_budget)
@@ -635,13 +605,11 @@ impl UserTurnWorkload {
         turn_index: usize,
     ) -> Sample {
         match self {
-            #[cfg(feature = "libsql")]
             Self::Libsql(services) => {
                 services
                     .prefill_turn(args, identities, thread_index, turn_index)
                     .await
             }
-            #[cfg(feature = "postgres")]
             Self::Postgres(services) => {
                 services
                     .prefill_turn(args, identities, thread_index, turn_index)
@@ -657,13 +625,11 @@ impl UserTurnWorkload {
         thread_index: usize,
     ) -> Sample {
         match self {
-            #[cfg(feature = "libsql")]
             Self::Libsql(services) => {
                 services
                     .prefill_thread_list_thread(args, identities, thread_index)
                     .await
             }
-            #[cfg(feature = "postgres")]
             Self::Postgres(services) => {
                 services
                     .prefill_thread_list_thread(args, identities, thread_index)
@@ -1695,14 +1661,6 @@ where
         context: &crate::synthetic::UserTurnContext,
     ) -> Result<Arc<dyn StressTurnStore>, OperationFailure> {
         match self.turn_state_backend {
-            // One shared authority for the whole process — concurrent same-user
-            // writers coordinate in memory (fast lock), never on a per-user
-            // `state.json` CAS, so they don't livelock. `MemoryPersistOnBlock`
-            // shares the same authority; it differs only by the durable block
-            // sink attached at construction.
-            TurnStateBackend::Memory | TurnStateBackend::MemoryPersistOnBlock => {
-                Ok(Arc::clone(&self.memory_turn_store) as Arc<dyn StressTurnStore>)
-            }
             TurnStateBackend::FilesystemRow => {
                 let resource_scope = context.turn_scope.to_resource_scope();
                 self.cached_row_store(&resource_scope, |view| {
@@ -1717,9 +1675,8 @@ where
                 })
             }
             // Same row-store mechanism, but over the shared in-process
-            // in-memory backend — models replacing the direct in-memory
-            // authority in the `inmemory-turn-state` profile with the row
-            // store (journal/delta semantics, no durable-backend cost).
+            // in-memory backend (journal/delta semantics, no durable-backend
+            // cost).
             TurnStateBackend::RowMemory => {
                 let resource_scope = context.turn_scope.to_resource_scope();
                 self.cached_row_store(&resource_scope, |view| {
@@ -1794,6 +1751,8 @@ where
     }
 }
 
+// arch-exempt: too_many_args, stress-harness workload constructor; turn-state axes (backend/limits/durability) would group into a TurnStateWorkloadConfig, plan #6263
+#[allow(clippy::too_many_arguments)]
 fn user_turn_services_from_root<F>(
     root: Arc<F>,
     governor: Arc<dyn ResourceGovernor>,
@@ -1801,7 +1760,7 @@ fn user_turn_services_from_root<F>(
     target: String,
     model_latency: Arc<ModelLatencyDriver>,
     turn_state_backend: TurnStateBackend,
-    turn_state_limits: InMemoryTurnStateStoreLimits,
+    turn_state_limits: TurnStateStoreLimits,
 ) -> Result<UserTurnServices<F>, String>
 where
     F: RootFilesystem + 'static,
@@ -1820,24 +1779,6 @@ where
         target,
         turn_state_backend,
         turn_state_limits,
-        // Constructed once and shared across every worker (the workload is held
-        // behind one Arc), so the Memory backend exercises a single shared
-        // authority exactly as the single-process runtime would. When the
-        // backend persists on block, attach the same durable filesystem sink the
-        // hosted-single-tenant-volume runtime wires so the retest measures the
-        // shipped config (the sink stays idle on this never-blocking workload,
-        // so what it measures is the extra probe cost per terminal transition).
-        memory_turn_store: Arc::new({
-            let store = InMemoryTurnStateStore::with_limits(turn_state_limits);
-            if turn_state_backend.persists_on_block() {
-                let sink = Arc::new(FilesystemTurnStateBlockPersistence::new(Arc::clone(
-                    &scoped,
-                )));
-                store.with_block_persistence(sink)
-            } else {
-                store
-            }
-        }),
         row_turn_stores: Mutex::new(HashMap::new()),
         memory_root: Arc::new(InMemoryBackend::new()),
     })

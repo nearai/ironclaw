@@ -102,8 +102,8 @@ use ironclaw_turns::run_profile::{
     ModelProfileId,
 };
 use ironclaw_turns::{
-    FilesystemTurnStateStore, InMemoryTurnEventSink, InMemoryTurnStateStoreLimits,
-    LoopCheckpointStore, TurnCoordinator, TurnEventSink, TurnScope, TurnStateStore,
+    FilesystemTurnStateStore, InMemoryTurnEventSink, LoopCheckpointStore, TurnCoordinator,
+    TurnEventSink, TurnScope, TurnStateStore, TurnStateStoreLimits,
 };
 
 use super::builder::{
@@ -329,6 +329,18 @@ impl GroupCapability {
                 HarnessCapabilityMode::Recording(RecordingTestCapabilityPort::echo())
             }
             Self::HostRuntime(arc) => HarnessCapabilityMode::HostRuntime(Arc::clone(arc)),
+        }
+    }
+
+    /// The durable gate-record store this backend's capability port persists
+    /// `GateRecord::Auth` into (§5.2.9) — the SAME `Arc` the turn executor must
+    /// re-read an auth block's `credential_requirements` from. `None` only for
+    /// the `Recording` (echo) backend; the host-runtime backend always resolves
+    /// a store (`HostRuntimeCapabilityHarness::gate_record_store` returns `Some`).
+    pub(crate) fn gate_record_store(&self) -> Option<Arc<dyn ironclaw_run_state::GateRecordStore>> {
+        match self {
+            Self::HostRuntime(harness) => harness.gate_record_store(),
+            Self::Recording => None,
         }
     }
 
@@ -732,9 +744,9 @@ impl RebornIntegrationGroupBuilder {
         // public builder method (`ironclaw_turns::filesystem_store`); this only
         // calls it a second time with a shortened `runner_lease_ttl` when a test
         // opts in via `with_runner_lease_ttl_for_test`. `None` (default) leaves
-        // `InMemoryTurnStateStoreLimits::default()` untouched, byte-identical to
+        // `TurnStateStoreLimits::default()` untouched, byte-identical to
         // today's behavior.
-        let mut turn_state_limits = InMemoryTurnStateStoreLimits::default();
+        let mut turn_state_limits = TurnStateStoreLimits::default();
         if let Some(ttl) = self.runner_lease_ttl_override {
             turn_state_limits.runner_lease_ttl = ttl;
         }
@@ -1000,6 +1012,12 @@ impl RebornIntegrationGroupBuilder {
             attachment_read_port: capability_recorder
                 .attachment_test_support()
                 .map(|support| support.read_port),
+            // §5.2.9 render-from-record: the SAME durable gate-record store this
+            // group's capability port persists `GateRecord::Auth` into, so the
+            // turn executor re-reads an auth block's `credential_requirements`
+            // from the exact record the port saved (mirrors production
+            // `runtime.rs`'s `local_runtime.gate_record_store`).
+            gate_record_store: capability.gate_record_store(),
             scheduler_wake_wiring: None,
         };
         let planned_runtime_parts_shape = harness_planned_runtime_parts_shape(&parts);

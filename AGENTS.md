@@ -8,7 +8,8 @@ crate's `AGENTS.md`, then its `CLAUDE.md`, `CONTRACT.md`, or `README.md` when
 present. Cross-crate behavior is specified under `docs/reborn/contracts/`.
 
 All product work belongs in the Reborn workspace under `crates/`. The shipping
-binary is `ironclaw-reborn` from `crates/ironclaw_reborn_cli`. Start with:
+binary is `ironclaw` from the `ironclaw` package in
+`crates/ironclaw_reborn_cli`. Start with:
 
 - `.claude/skills/ironclaw-reborn-orientation/SKILL.md` for ownership and flow.
 - `.claude/skills/reborn-feature/SKILL.md` for cross-layer product work.

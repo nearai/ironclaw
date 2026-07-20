@@ -81,6 +81,14 @@ pub struct RefreshingCapabilityPortTestParts {
         std::sync::Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore>,
     pub approval_requests: std::sync::Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
     pub capability_leases: std::sync::Arc<dyn ironclaw_authorization::CapabilityLeaseStore>,
+    /// Durable model-visible gate-record store the built capability port persists
+    /// pending-gate records into (§5.2.9).
+    pub gate_record_store: std::sync::Arc<dyn ironclaw_run_state::GateRecordStore>,
+    /// Durable host-private replay-payload store the built capability port
+    /// persists gate/auth replay payloads into and reconstitutes on resume
+    /// (§5.3 Stage 2a-i). Must be shared across the harness's turns/threads so a
+    /// resume finds the payload its raise persisted.
+    pub replay_payload_store: std::sync::Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
     /// Test-only config extension (empty = production behavior). See
     /// `RefreshingCapabilityPortConfig::capability_execution_mount_overrides`.
     pub capability_execution_mount_overrides:
