@@ -3880,7 +3880,7 @@ checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
 
 [[package]]
 name = "ironclaw"
-version = "0.99.1-rc.6"
+version = "0.99.1-rc.7"
 dependencies = [
  "aes 0.9.1",
  "aes-gcm",
@@ -4877,7 +4877,7 @@ dependencies = [
 
 [[package]]
 name = "ironclaw_reborn_cli"
-version = "0.99.1-rc.6"
+version = "0.99.1-rc.7"
 dependencies = [
  "anyhow",
  "async-trait",

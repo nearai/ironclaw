@@ -67,7 +67,7 @@ unused_must_use = "deny"
 [package]
 name = "ironclaw"
 autobins = false
-version = "0.99.1-rc.6"
+version = "0.99.1-rc.7"
 edition = "2024"
 rust-version.workspace = true
 description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
