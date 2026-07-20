@@ -93,5 +93,9 @@ tests/fixtures/llm_traces/live/*.log
 test-tools/*.zip
 test-tools/*/wasm-src/target/
 
-# Accidentally-committed vendored frontend deps (#6305/#6298) — never track node_modules
-crates/ironclaw_webui_v2/frontend/node_modules/
+# node_modules must never be committed — vendored JS deps belong to the package
+# manager + lockfile, not git. A bare `node_modules/` (no leading slash) matches
+# a directory of that name at ANY depth, so this catches every frontend
+# (webui_v2, e2e, tooling, …) and stops the recurring accidental adds
+# (#6298/#6305).
+node_modules/
