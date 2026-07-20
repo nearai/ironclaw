@@ -109,6 +109,15 @@ fn holds_running_slot(status: TurnStatus) -> bool {
     matches!(status, TurnStatus::Running | TurnStatus::CancelRequested)
 }
 
+/// Clear the runner-lease fields on a record leaving a runner's control
+/// (terminal, relinquish, or block). Callers stamp the event cursor and handle
+/// the active lock / queue separately — those differ by transition.
+fn clear_runner_lease(record: &mut RunRecord) {
+    record.runner_id = None;
+    record.lease_token = None;
+    record.lease_expires_at = None;
+}
+
 const MAX_EVENTS: usize = 10_000;
 const MAX_TERMINAL_RECORDS: usize = 10_000;
 const MAX_IDEMPOTENCY_RECORDS: usize = 10_000;
@@ -1923,9 +1932,7 @@ impl TurnRunTransitionPort for TurnStateEngine {
                 record.gate_ref = Some(request.reason.gate_ref().clone());
                 record.blocked_activity_id = None;
                 record.credential_requirements = request.reason.credential_requirements().to_vec();
-                record.runner_id = None;
-                record.lease_token = None;
-                record.lease_expires_at = None;
+                clear_runner_lease(&mut record);
                 record.event_cursor = inner.next_cursor();
                 inner.record_checkpoint(
                     &record,
@@ -2525,9 +2532,7 @@ impl Inner {
                     // so the crash-retry bound still advances across cycles.
                     let transition = record.status.set(TurnStatus::Queued);
                     self.apply_status_transition(transition, &record);
-                    record.runner_id = None;
-                    record.lease_token = None;
-                    record.lease_expires_at = None;
+                    clear_runner_lease(&mut record);
                     record.event_cursor = self.next_cursor();
                     self.update_active_lock(&record, request.now);
                     self.queued_runs.push_back(record.run_id);
@@ -2555,12 +2560,7 @@ impl Inner {
                         );
                     }
                     record.failure = outcome.failure;
-                    record.runner_id = None;
-                    record.lease_token = None;
-                    record.lease_expires_at = None;
-                    record.event_cursor = self.next_cursor();
-                    self.release_active_lock(&record);
-                    self.remove_queued_run(record.run_id);
+                    self.release_terminal_lease(&mut record);
                     let state = record.state();
                     let event_detail =
                         failure_detail_for_event(&outcome.event_kind, record.failure.as_ref());
@@ -3030,6 +3030,18 @@ impl Inner {
         result
     }
 
+    /// The identical tail every terminal transition (complete / cancel / fail)
+    /// runs after setting the new status and any failure/checkpoint fields:
+    /// clear the runner lease, stamp a fresh event cursor, and release the
+    /// active-thread lock + queue slot. The caller then reads `state()` and
+    /// pushes its own terminal event.
+    fn release_terminal_lease(&mut self, record: &mut RunRecord) {
+        clear_runner_lease(record);
+        record.event_cursor = self.next_cursor();
+        self.release_active_lock(record);
+        self.remove_queued_run(record.run_id);
+    }
+
     fn cancel_completion_transition(
         &mut self,
         run_id: TurnRunId,
@@ -3050,12 +3062,7 @@ impl Inner {
             let transition = record.status.set(TurnStatus::Cancelled);
             self.apply_status_transition(transition, &record);
             record.failure = None;
-            record.runner_id = None;
-            record.lease_token = None;
-            record.lease_expires_at = None;
-            record.event_cursor = self.next_cursor();
-            self.release_active_lock(&record);
-            self.remove_queued_run(record.run_id);
+            self.release_terminal_lease(&mut record);
             let state = record.state();
             self.push_event(&record, TurnEventKind::Cancelled, None, None);
             self.mark_terminal(record.run_id);
@@ -3105,12 +3112,7 @@ impl Inner {
                 );
             }
             record.failure = failure.clone();
-            record.runner_id = None;
-            record.lease_token = None;
-            record.lease_expires_at = None;
-            record.event_cursor = self.next_cursor();
-            self.release_active_lock(&record);
-            self.remove_queued_run(record.run_id);
+            self.release_terminal_lease(&mut record);
             let state = record.state();
             let event_detail = failure_detail_for_event(&kind, failure.as_ref());
             self.push_event(
@@ -3221,12 +3223,7 @@ impl Inner {
         let transition = record.status.set(TurnStatus::Completed);
         self.apply_status_transition(transition, &record);
         record.failure = None;
-        record.runner_id = None;
-        record.lease_token = None;
-        record.lease_expires_at = None;
-        record.event_cursor = self.next_cursor();
-        self.release_active_lock(&record);
-        self.remove_queued_run(record.run_id);
+        self.release_terminal_lease(&mut record);
         let state = record.state();
         self.push_event(&record, TurnEventKind::Completed, None, None);
         self.mark_terminal(record.run_id);
@@ -3253,12 +3250,7 @@ impl Inner {
         let transition = record.status.set(TurnStatus::Cancelled);
         self.apply_status_transition(transition, &record);
         record.failure = None;
-        record.runner_id = None;
-        record.lease_token = None;
-        record.lease_expires_at = None;
-        record.event_cursor = self.next_cursor();
-        self.release_active_lock(&record);
-        self.remove_queued_run(record.run_id);
+        self.release_terminal_lease(&mut record);
         let state = record.state();
         self.push_event(&record, TurnEventKind::Cancelled, None, None);
         self.mark_terminal(record.run_id);
@@ -3295,9 +3287,7 @@ impl Inner {
         record.gate_ref = Some(reason.gate_ref().clone());
         record.blocked_activity_id = blocked_activity_id;
         record.credential_requirements = reason.credential_requirements().to_vec();
-        record.runner_id = None;
-        record.lease_token = None;
-        record.lease_expires_at = None;
+        clear_runner_lease(&mut record);
         record.event_cursor = self.next_cursor();
         self.record_checkpoint(
             &record,
@@ -3338,12 +3328,7 @@ impl Inner {
         self.apply_status_transition(transition, &record);
         record.checkpoint_id = retry_checkpoint_id;
         record.failure = Some(failure.clone());
-        record.runner_id = None;
-        record.lease_token = None;
-        record.lease_expires_at = None;
-        record.event_cursor = self.next_cursor();
-        self.release_active_lock(&record);
-        self.remove_queued_run(record.run_id);
+        self.release_terminal_lease(&mut record);
         let state = record.state();
         let event_detail = failure.detail().map(str::to_string);
         self.push_event(
@@ -3440,9 +3425,7 @@ impl Inner {
             let transition = record.status.set(new_status);
             self.apply_status_transition(transition, &record);
             record.failure = failure;
-            record.runner_id = None;
-            record.lease_token = None;
-            record.lease_expires_at = None;
+            clear_runner_lease(&mut record);
             record.event_cursor = self.next_cursor();
             if requeue {
                 self.update_active_lock(&record, now);
