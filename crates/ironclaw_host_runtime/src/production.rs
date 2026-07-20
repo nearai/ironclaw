@@ -2706,6 +2706,31 @@ output_schema_ref = "schemas/test.output.json"
             one_comma_scope, two_scopes,
             "OAuth setup scopes must encode injectively: [\"a,b\"] != [\"a\", \"b\"]",
         );
+
+        // The same injective guarantee must hold for the per-requirement
+        // `provider_scopes` list, not only OAuth setup scopes — otherwise a
+        // revert of the `provider_scopes` encoding alone would go uncaught (the
+        // cases above hold `provider_scopes` fixed). Fixed ManualToken setup,
+        // `provider_scopes` `["a,b"]` vs `["a", "b"]`.
+        let provider_scopes_gate = |scopes: Vec<String>| {
+            let requirement = RuntimeCredentialAuthRequirement {
+                provider: RuntimeCredentialAccountProviderId::new("notion").unwrap(),
+                setup: Setup::ManualToken,
+                requester_extension: ExtensionId::new("notion").unwrap(),
+                provider_scopes: scopes,
+            };
+            let RuntimeCapabilityOutcome::AuthRequired(gate) =
+                auth_required_outcome(cap(), Vec::new(), vec![requirement])
+            else {
+                panic!("expected auth gate");
+            };
+            gate.gate_id
+        };
+        assert_ne!(
+            provider_scopes_gate(vec!["a,b".to_string()]),
+            provider_scopes_gate(vec!["a".to_string(), "b".to_string()]),
+            "provider_scopes must encode injectively: [\"a,b\"] != [\"a\", \"b\"]",
+        );
     }
 
     #[test]
