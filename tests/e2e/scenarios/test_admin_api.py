@@ -184,7 +184,7 @@ async def test_admin_user_detail_refreshes_role_and_status_after_mutations(
         )
     ).to_be_visible()
 
-    async def set_role(role_name):
+    async def set_role(role_name) -> None:
         await page.get_by_role(
             "button",
             name=SEL_V2["admin_current_role_button_name"],
@@ -200,7 +200,7 @@ async def test_admin_user_detail_refreshes_role_and_status_after_mutations(
             detail_header.get_by_text(role_name, exact=True)
         ).to_be_visible(timeout=5000)
 
-    async def set_status(action_name, status_name):
+    async def set_status(action_name, status_name) -> None:
         await page.get_by_role(
             "button", name=action_name, exact=True
         ).click()
