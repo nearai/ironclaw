@@ -17,6 +17,16 @@ export function useTools() {
   const [pendingPermissions, setPendingPermissions] = React.useState({});
   const nextRequestId = React.useRef(0);
   const pendingRequestIds = React.useRef({});
+  const savedTimeouts = React.useRef({});
+
+  React.useEffect(() => {
+    return () => {
+      for (const timeoutId of Object.values(savedTimeouts.current)) {
+        clearTimeout(timeoutId);
+      }
+      savedTimeouts.current = {};
+    };
+  }, []);
 
   const clearPendingPermission = React.useCallback((name, requestId) => {
     if (pendingRequestIds.current[name] !== requestId) return;
@@ -35,7 +45,6 @@ export function useTools() {
     mutationFn: async ({ name, state }) =>
       throwIfApiFailed(await updateToolPermission(name, state), "Save failed"),
     onSuccess: (data, { name, state, requestId }) => {
-      if (pendingRequestIds.current[name] !== requestId) return;
       queryClient.setQueryData(["settings-tools"], (old) => {
         if (!old) return old;
         const updatedTool = data?.tool;
@@ -46,9 +55,16 @@ export function useTools() {
           ),
         };
       });
+      if (pendingRequestIds.current[name] !== requestId) return;
       clearPendingPermission(name, requestId);
       setSavedTools((prev) => ({ ...prev, [name]: true }));
-      setTimeout(() => setSavedTools((prev) => ({ ...prev, [name]: false })), 2000);
+      if (savedTimeouts.current[name]) {
+        clearTimeout(savedTimeouts.current[name]);
+      }
+      savedTimeouts.current[name] = setTimeout(() => {
+        setSavedTools((prev) => ({ ...prev, [name]: false }));
+        delete savedTimeouts.current[name];
+      }, 2000);
     },
     onError: (_error, { name, requestId }) => {
       clearPendingPermission(name, requestId);
@@ -67,7 +83,7 @@ export function useTools() {
       }));
       mutation.mutate({ name, state, requestId });
     },
-    [mutation]
+    [mutation.mutate, mutation.reset]
   );
 
   return {
