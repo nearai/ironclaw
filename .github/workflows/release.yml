@@ -13,7 +13,7 @@
 # Note that the GitHub Release will be created with a generated
 # title/body based on your changelogs.
 #
-# Temporary #6160 policy: publish only the Reborn RC binaries built below.
+# Temporary #6160 policy: publish only the Reborn binaries built below.
 # The generated cargo-dist/WASM release chain and Docker jobs stay defined for
 # rollback but are skipped.
 
@@ -45,7 +45,7 @@ permissions:
 on:
   push:
     tags:
-      - 'ironclaw-v1.0.0-rc.*'
+      - 'ironclaw-v*'
 
 jobs:
   # Compile the shipping Reborn binary on every supported release target.

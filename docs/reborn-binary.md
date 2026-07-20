@@ -650,7 +650,7 @@ then runs each native output through config-free CLI startup checks. The musl
 jobs additionally reject `PT_INTERP` and `DT_NEEDED` entries so their outputs
 remain portable to systems without a musl loader.
 
-For `ironclaw-v1.0.0-rc.*` tags, the release workflow packages those seven
+For `ironclaw-v*` tags, the release workflow packages those seven
 outputs as target-qualified `.tar.gz` archives, generates per-archive and
 aggregate SHA-256 files, and creates the GitHub Release. The legacy cargo-dist,
 WASM, registry-checksum, announcement, and release Docker jobs remain skipped.
@@ -658,7 +658,7 @@ The independent manual and hourly entry points in `docker.yml` remain
 available. This path does not claim installer or external-service runtime
 coverage.
 
-Current `dist plan --output-format=json` with `crates/ironclaw_reborn_cli` marked `dist = false` emits only the root legacy package artifacts (`ironclaw` package, `ironclaw-legacy` executable). The Reborn RC publisher is intentionally independent of cargo-dist; removing `dist = false` would instead opt the package into cargo-dist's installer contract and still require separate WiX metadata/template work.
+Current `dist plan --output-format=json` with `crates/ironclaw_reborn_cli` marked `dist = false` emits only the root legacy package artifacts (`ironclaw` package, `ironclaw-legacy` executable). The Reborn publisher is intentionally independent of cargo-dist; removing `dist = false` would instead opt the package into cargo-dist's installer contract and still require separate WiX metadata/template work.
 
 Follow-up issue: #3483 tracks packaging the canonical Reborn binary in release artifacts.
 

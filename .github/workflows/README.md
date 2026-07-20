@@ -63,7 +63,7 @@ Rules for a roll-up job that is (or may become) required:
 
 `reborn-release-compile.yml` is the compile-and-smoke matrix for the shipping
 Reborn `ironclaw` binary. The tag-only `release.yml` calls it for matching
-`ironclaw-v1.0.0-rc.*` tags, then packages the seven outputs and creates the
+`ironclaw-v*` tags, then packages the seven outputs and creates the
 tag's GitHub Release. The reusable workflow can also run directly through
 `workflow_dispatch`; direct runs only upload temporary evidence artifacts and
 do not publish a Release. It is not triggered by pull requests, so ordinary CLI
@@ -92,7 +92,7 @@ services, installers, or cargo-dist release packaging. The feature list is
 intentionally not inferred from Docker or #6122.
 
 The uploaded `reborn-compile-*` artifacts are the handoff from the compile
-matrix to the RC publisher. It creates target-qualified `.tar.gz` archives,
+matrix to the Reborn publisher. It creates target-qualified `.tar.gz` archives,
 per-archive SHA-256 files, and `sha256.sum`. A direct compile-workflow run keeps
 them only as short-lived evidence. The custom publisher does not use cargo-dist,
 so `ironclaw_reborn_cli` remains `dist = false`.
@@ -158,7 +158,7 @@ For #6160, `release.yml` keeps the legacy cargo-dist release chain visible but
 disables its `plan` root with the impossible `github.repository == ''` guard.
 Its dependent local/global artifact, WASM, legacy GitHub Release host,
 registry-checksum, and announcement jobs therefore skip. The Reborn compile
-matrix and `publish-reborn-binaries` job are the only active RC release path.
+matrix and `publish-reborn-binaries` job are the only active release path.
 
 The release Docker caller retains its own impossible guard as an explicit
 defense against image publication. The reusable `docker.yml` workflow is

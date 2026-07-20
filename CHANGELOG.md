@@ -39,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### CI / Release
 
-- *(release)* compile and smoke the canonical Reborn `ironclaw` binary across seven OS/CPU targets, then publish `ironclaw-v1.0.0-rc.*` archives and checksums while skipping legacy cargo-dist, WASM, registry-update, announcement, and Docker jobs ([#6160](https://github.com/nearai/ironclaw/issues/6160)).
+- *(release)* compile and smoke the canonical Reborn `ironclaw` binary across seven OS/CPU targets, then publish `ironclaw-v*` archives and checksums while skipping legacy cargo-dist, WASM, registry-update, announcement, and Docker jobs ([#6160](https://github.com/nearai/ironclaw/issues/6160)).
 
 ### Removed
 

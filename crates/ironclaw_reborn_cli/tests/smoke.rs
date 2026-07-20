@@ -323,11 +323,7 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         "release host must not publish Reborn compile evidence"
     );
 
-    let release_tag_trigger = concat!(
-        "  push:\n",
-        "    tags:\n",
-        "      - 'ironclaw-v1.0.0-rc.*'\n",
-    );
+    let release_tag_trigger = concat!("  push:\n", "    tags:\n", "      - 'ironclaw-v*'\n",);
     assert!(
         release_workflow.contains(release_tag_trigger)
             && release_workflow.contains("uses: ./.github/workflows/reborn-release-compile.yml")
@@ -6847,7 +6843,7 @@ fn release_ci_publishes_reborn_rc_without_enabling_legacy_or_docker_paths() {
             && publish_job.contains("--prerelease")
             && publish_job.contains("release-assets/*")
             && !publish_job.contains("uses: ./.github/workflows/docker.yml"),
-        "release CI must publish the seven Reborn RC binaries without invoking legacy or Docker publication"
+        "release CI must publish the seven Reborn binaries without invoking legacy or Docker publication"
     );
 
     let plan_job = release_job("plan");
