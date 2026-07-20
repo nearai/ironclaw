@@ -31,6 +31,7 @@ const V2_EVENT_NAMES = [
   "stream_error",
 ];
 
+const EVENT_SOURCE_CLOSED = 2;
 const EVENT_SOURCE_OPEN = 1;
 const MAX_CACHED_CURSORS = 30;
 const lastEventIdByThread = new Map<string, string>();
@@ -60,6 +61,13 @@ function deleteLastEventId(threadId: string) {
 
 function eventSourceReadyStateConstant(staticValue: unknown, fallback: number) {
   return typeof staticValue === "number" ? staticValue : fallback;
+}
+
+function isEventSourceClosed(source) {
+  const closedState = typeof EventSource === "function"
+    ? eventSourceReadyStateConstant(EventSource.CLOSED, EVENT_SOURCE_CLOSED)
+    : EVENT_SOURCE_CLOSED;
+  return source?.readyState === closedState;
 }
 
 function isEventSourceOpen(source) {
@@ -98,6 +106,26 @@ export function useSSE({ threadId, onEvent, enabled }) {
         clearTimeout(openWatchdog);
         openWatchdog = null;
       }
+    }
+
+    function markConnected(source) {
+      if (disposed || terminalErrorReceived || es !== source) return;
+      clearOpenWatchdog();
+      reconnectAttempts = 0;
+      setStatus(CONNECTION_STATUS.CONNECTED);
+    }
+
+    function scheduleOpenWatchdog(source) {
+      if (openWatchdog) return;
+      openWatchdog = setTimeout(() => {
+        openWatchdog = null;
+        if (disposed || terminalErrorReceived || es !== source) return;
+        if (isEventSourceOpen(source)) {
+          markConnected(source);
+          return;
+        }
+        reconnectWithTimer(CONNECTION_STATUS.RECONNECTING);
+      }, reconnectOpenDeadline);
     }
 
     function reconnectWithTimer(
@@ -143,19 +171,10 @@ export function useSSE({ threadId, onEvent, enabled }) {
       // not establish the event stream. Bound reconnect attempts explicitly;
       // the initial connection remains browser-managed, while every recovery
       // attempt must prove it opened within this deadline.
-      if (reconnectAttempts > 0) {
-        openWatchdog = setTimeout(() => {
-          openWatchdog = null;
-          if (disposed || terminalErrorReceived || es !== source) return;
-          reconnectWithTimer(CONNECTION_STATUS.RECONNECTING);
-        }, reconnectOpenDeadline);
-      }
+      if (reconnectAttempts > 0) scheduleOpenWatchdog(source);
 
       source.onopen = () => {
-        if (disposed || es !== source) return;
-        clearOpenWatchdog();
-        reconnectAttempts = 0;
-        setStatus(CONNECTION_STATUS.CONNECTED);
+        markConnected(source);
       };
 
       const dispatchFrame = (event, fallbackType) => {
@@ -167,12 +186,16 @@ export function useSSE({ threadId, onEvent, enabled }) {
           return;
         }
         if (!frame || typeof frame !== "object") return;
-        clearOpenWatchdog();
         if (event.lastEventId) {
           setLastEventId(threadId, event.lastEventId);
         }
         const type = frame.type ||
           (fallbackType === "stream_error" ? "error" : fallbackType);
+        // Some browsers resume an interrupted EventSource by delivering the
+        // next frame without a second `open` callback. A normal frame proves
+        // the transport recovered and must clear a stale reconnecting badge.
+        // Classified stream errors keep their own terminal/retry state below.
+        if (type !== "error") markConnected(source);
         onEventRef.current?.({
           // The frame's own `type` field is the canonical source;
           // `event.type` (from the SSE `event:` line) is the
@@ -216,7 +239,6 @@ export function useSSE({ threadId, onEvent, enabled }) {
 
       source.onerror = (event) => {
         if (disposed || terminalErrorReceived || es !== source) return;
-        clearOpenWatchdog();
         // Compatibility with servers that emitted application failures on
         // the reserved `event: error` channel. Those arrive as MessageEvents
         // with data; a native EventSource transport failure has no data.
@@ -226,10 +248,16 @@ export function useSSE({ threadId, onEvent, enabled }) {
           dispatchFrame(event, "error");
           return;
         }
-        // EventSource's native retry state is opaque and can remain CONNECTING
-        // indefinitely after navigation or a rejected HTTP open. We already
-        // persist the last cursor per thread, so replace the source and resume
-        // deterministically instead of waiting for the browser to recover it.
+        // Preserve EventSource's native retry for transient failures. Closing
+        // it immediately creates a fresh HTTP stream for every error, which can
+        // race server-side slot release behind a proxy and strand the client in
+        // a reconnect loop. The watchdog below remains the bounded fallback if
+        // native recovery never opens or delivers another frame.
+        if (!isEventSourceClosed(source)) {
+          setStatus(CONNECTION_STATUS.RECONNECTING);
+          scheduleOpenWatchdog(source);
+          return;
+        }
         reconnectWithTimer(CONNECTION_STATUS.RECONNECTING);
       };
 
@@ -275,13 +303,12 @@ export function useSSE({ threadId, onEvent, enabled }) {
     function handleNetworkOnline() {
       if (disposed || terminalErrorReceived) return;
       if (es && isEventSourceOpen(es)) {
-        reconnectAttempts = 0;
-        setStatus(CONNECTION_STATUS.CONNECTED);
+        markConnected(es);
         return;
       }
       setStatus(CONNECTION_STATUS.RECONNECTING);
       if (es) {
-        reconnectWithTimer(CONNECTION_STATUS.RECONNECTING);
+        scheduleOpenWatchdog(es);
         return;
       }
       if (reconnectTimer) {

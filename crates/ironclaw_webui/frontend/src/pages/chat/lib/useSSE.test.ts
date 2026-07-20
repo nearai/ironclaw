@@ -165,35 +165,72 @@ test("useSSE starts reconnecting when the browser is already offline", () => {
   assert.deepEqual(statuses, ["reconnecting"]);
 });
 
-test("useSSE replaces a failed EventSource and resumes from its cursor", () => {
+test("useSSE resumes delivery after returning to a hidden tab", () => {
+  const events = [];
+  const { context, documentListeners, statuses, streams, timers } = createHarness({
+    onEvent: (event) => events.push(event),
+  });
+
+  const initial = streams[0];
+  initial.readyState = context.EventSource.OPEN;
+  initial.onopen();
+
+  context.document.visibilityState = "hidden";
+  documentListeners.get("visibilitychange")();
+  assert.equal(initial.closeCalls, 1);
+
+  context.document.visibilityState = "visible";
+  documentListeners.get("visibilitychange")();
+  const resumed = streams[1];
+  resumed.readyState = context.EventSource.CONNECTING;
+  resumed.onerror({});
+
+  assert.equal(resumed.closeCalls, 0);
+  assert.equal(timers.filter((timer) => timer.delay === 10_000).length, 1);
+
+  resumed.readyState = context.EventSource.OPEN;
+  resumed.listener("projection_update")({
+    data: JSON.stringify({ type: "projection_update", state: { items: [] } }),
+    lastEventId: "after-tab-resume",
+  });
+
+  assert.equal(streams.length, 2);
+  assert.equal(events.length, 1);
+  assert.deepEqual(statuses, [
+    "connecting",
+    "connected",
+    "paused",
+    "connecting",
+    "reconnecting",
+    "connected",
+  ]);
+});
+
+test("useSSE lets EventSource recover transient failures natively", () => {
   const { context, statuses, streams, timers } = createHarness();
 
   assert.deepEqual(statuses, ["connecting"]);
   const stream = streams[0];
-  stream.listener("projection_update")({
-    data: JSON.stringify({ type: "projection_update", state: { items: [] } }),
-    lastEventId: "resume-cursor",
-  });
   stream.readyState = context.EventSource.CONNECTING;
   stream.onerror({});
 
   assert.deepEqual(statuses, ["connecting", "reconnecting"]);
-  assert.equal(stream.closeCalls, 1);
+  assert.equal(stream.closeCalls, 0);
   assert.equal(timers.length, 1);
-  assert.equal(timers[0].delay, 2000);
+  assert.equal(timers[0].delay, 10_000);
 
-  timers[0].handler();
+  stream.readyState = context.EventSource.OPEN;
+  stream.listener("keep_alive")({
+    data: JSON.stringify({ type: "keep_alive" }),
+    lastEventId: "resume-cursor",
+  });
 
-  assert.equal(streams.length, 2);
-  assert.equal(streams[1].args.afterCursor, "resume-cursor");
-  assert.deepEqual(statuses, [
-    "connecting",
-    "reconnecting",
-    "reconnecting",
-  ]);
+  assert.equal(timers[0].cleared, true);
+  assert.equal(streams.length, 1);
+  assert.deepEqual(statuses, ["connecting", "reconnecting", "connected"]);
 });
 
-test("useSSE ignores repeated errors from the replaced source", () => {
+test("useSSE keeps one watchdog across repeated native errors", () => {
   const { context, statuses, streams, timers } = createHarness();
 
   const stream = streams[0];
@@ -202,8 +239,9 @@ test("useSSE ignores repeated errors from the replaced source", () => {
   stream.onerror({});
 
   assert.equal(timers.length, 1);
-  assert.equal(stream.closeCalls, 1);
-  assert.deepEqual(statuses, ["connecting", "reconnecting"]);
+  assert.equal(timers[0].delay, 10_000);
+  assert.equal(stream.closeCalls, 0);
+  assert.deepEqual(statuses, ["connecting", "reconnecting", "reconnecting"]);
 });
 
 test("useSSE falls back to app reconnect timer for closed streams", () => {
@@ -231,15 +269,19 @@ test("useSSE replaces a reconnect attempt that never finishes opening", () => {
   first.readyState = context.EventSource.CONNECTING;
   first.onerror({});
 
+  const nativeWatchdog = timers.find((timer) => timer.delay === 10_000);
+  assert.ok(nativeWatchdog);
+  nativeWatchdog.handler();
+
   const reconnectTimer = timers.find((timer) => timer.delay === 2000);
   assert.ok(reconnectTimer);
   reconnectTimer.handler();
 
   assert.equal(streams.length, 2);
   const stalledReplacement = streams[1];
-  const openWatchdog = timers.find(
-    (timer) => timer.delay === 10_000 && !timer.cleared,
-  );
+  const openWatchdog = timers
+    .filter((timer) => timer.delay === 10_000 && !timer.cleared)
+    .at(-1);
   assert.ok(openWatchdog);
 
   openWatchdog.handler();
@@ -251,6 +293,7 @@ test("useSSE replaces a reconnect attempt that never finishes opening", () => {
   );
   assert.deepEqual(statuses, [
     "connecting",
+    "reconnecting",
     "reconnecting",
     "reconnecting",
     "reconnecting",
@@ -391,7 +434,7 @@ test("useSSE rebases from origin when the server rejects its replay cursor", () 
   });
 
   assert.equal(stream.closeCalls, 1);
-  assert.deepEqual(statuses, ["connecting", "reconnecting"]);
+  assert.deepEqual(statuses, ["connecting", "connected", "reconnecting"]);
   assert.equal(timers.length, 1);
   assert.equal(timers[0].delay, 2000);
   assert.equal(events.length, 2);
@@ -403,6 +446,7 @@ test("useSSE rebases from origin when the server rejects its replay cursor", () 
   assert.equal(streams[1].args.afterCursor, undefined);
   assert.deepEqual(statuses, [
     "connecting",
+    "connected",
     "reconnecting",
     "reconnecting",
   ]);
