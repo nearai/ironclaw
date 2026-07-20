@@ -4760,21 +4760,17 @@ async fn missing_run_state_for_auth_gate_still_routes_to_auth_interaction_servic
 }
 
 #[tokio::test]
-async fn denied_generic_gate_resolution_forwards_typed_preconditions() {
-    for (case, status, expected) in [
+async fn denied_generic_gate_resolution_remains_unconditioned() {
+    for (case, status, gate_ref) in [
         (
             "resource",
             TurnStatus::BlockedResource,
-            CancelRunPrecondition::BlockedResourceGate {
-                gate_ref: GateRef::new("gate-resource").expect("gate"),
-            },
+            GateRef::new("gate-resource").expect("gate"),
         ),
         (
             "dependent",
             TurnStatus::BlockedDependentRun,
-            CancelRunPrecondition::BlockedDependentRunGate {
-                gate_ref: GateRef::new("gate-dependent").expect("gate"),
-            },
+            GateRef::new("gate-dependent").expect("gate"),
         ),
     ] {
         let coordinator = Arc::new(FakeTurnCoordinator::default());
@@ -4783,11 +4779,6 @@ async fn denied_generic_gate_resolution_forwards_typed_preconditions() {
             coordinator.clone(),
         );
         let thread_id = format!("thread-{case}");
-        let gate_ref = match &expected {
-            CancelRunPrecondition::BlockedResourceGate { gate_ref }
-            | CancelRunPrecondition::BlockedDependentRunGate { gate_ref } => gate_ref.clone(),
-            _ => unreachable!("fixture contains only generic cancellable gates"),
-        };
         create_thread_for(&services, caller(), &thread_id).await;
         coordinator.set_parked_gate(gate_ref.clone());
         coordinator.set_run_state_status(status);
@@ -4809,7 +4800,7 @@ async fn denied_generic_gate_resolution_forwards_typed_preconditions() {
 
         assert!(matches!(response, RebornResolveGateResponse::Cancelled(_)));
         assert_eq!(coordinator.cancellation_count(), 1);
-        assert_eq!(coordinator.last_cancellation_precondition(), Some(expected));
+        assert_eq!(coordinator.last_cancellation_precondition(), None);
     }
 }
 

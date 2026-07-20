@@ -1,5 +1,5 @@
 use ironclaw_auth::{
-    AuthChallenge, AuthContinuationRef, AuthFlowId, AuthFlowRecord, AuthFlowStatus,
+    AuthChallenge, AuthContinuationRef, AuthFlowId, AuthFlowRecord, AuthFlowState,
     AuthProductScope, CredentialAccountId, CredentialAccountStatus, Timestamp,
 };
 use ironclaw_product_adapters::ProductWorkflowRejectionKind;
@@ -159,24 +159,16 @@ pub struct AuthCredentialAccountChoiceView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthInteractionStatus {
-    Pending,
-    AwaitingUser,
-    CallbackReceived,
-    Completing,
+    Open,
+    Processing,
 }
 
 impl AuthInteractionStatus {
-    fn from_flow_status(status: AuthFlowStatus) -> Option<Self> {
-        match status {
-            AuthFlowStatus::Pending => Some(Self::Pending),
-            AuthFlowStatus::AwaitingUser => Some(Self::AwaitingUser),
-            AuthFlowStatus::CallbackReceived => Some(Self::CallbackReceived),
-            AuthFlowStatus::Completing => Some(Self::Completing),
-            AuthFlowStatus::Canceling
-            | AuthFlowStatus::Completed
-            | AuthFlowStatus::Failed
-            | AuthFlowStatus::Expired
-            | AuthFlowStatus::Canceled => None,
+    fn from_flow_state(state: AuthFlowState) -> Option<Self> {
+        match state {
+            AuthFlowState::Open => Some(Self::Open),
+            AuthFlowState::Processing => Some(Self::Processing),
+            AuthFlowState::Resolved(_) => None,
         }
     }
 }
@@ -294,12 +286,12 @@ impl AuthGateRecord {
         &self.flow
     }
 
-    pub fn status(&self) -> AuthFlowStatus {
-        self.flow.status
+    pub fn state(&self) -> AuthFlowState {
+        self.flow.state
     }
 
     pub(super) fn to_view(&self) -> Option<PendingAuthInteractionView> {
-        let status = AuthInteractionStatus::from_flow_status(self.flow.status)?;
+        let status = AuthInteractionStatus::from_flow_state(self.flow.state)?;
         Some(PendingAuthInteractionView {
             scope: self.scope.clone(),
             run_id: self.run_id,
@@ -353,8 +345,8 @@ pub enum ResolveAuthInteractionResponse {
     Canceled(CancelRunResponse),
 }
 
-pub(super) fn is_pending_auth_status(status: AuthFlowStatus) -> bool {
-    AuthInteractionStatus::from_flow_status(status).is_some()
+pub(super) fn is_pending_auth_state(state: AuthFlowState) -> bool {
+    AuthInteractionStatus::from_flow_state(state).is_some()
 }
 
 fn display_safe_auth_summary() -> String {

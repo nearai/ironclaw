@@ -18,6 +18,9 @@ pub enum GateResumeDisposition {
     ///
     /// New variants (e.g. `Deferred`) may be added here as needs arise.
     Denied,
+    /// The auth flow failed or expired. The executor surfaces this as a
+    /// recoverable authentication error instead of retrying the same gate.
+    Error,
 }
 
 impl GateResumeDisposition {
@@ -25,6 +28,7 @@ impl GateResumeDisposition {
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Denied => "denied",
+            Self::Error => "error",
         }
     }
 }
@@ -157,24 +161,18 @@ pub struct CancelRunRequest {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CancelRunPrecondition {
     BlockedAuthGate { gate_ref: GateRef },
-    BlockedResourceGate { gate_ref: GateRef },
-    BlockedDependentRunGate { gate_ref: GateRef },
 }
 
 impl CancelRunPrecondition {
     pub fn required_status(&self) -> TurnStatus {
         match self {
             Self::BlockedAuthGate { .. } => TurnStatus::BlockedAuth,
-            Self::BlockedResourceGate { .. } => TurnStatus::BlockedResource,
-            Self::BlockedDependentRunGate { .. } => TurnStatus::BlockedDependentRun,
         }
     }
 
     pub fn gate_ref(&self) -> &GateRef {
         match self {
-            Self::BlockedAuthGate { gate_ref }
-            | Self::BlockedResourceGate { gate_ref }
-            | Self::BlockedDependentRunGate { gate_ref } => gate_ref,
+            Self::BlockedAuthGate { gate_ref } => gate_ref,
         }
     }
 }
@@ -223,6 +221,16 @@ mod tests {
     }
 
     #[test]
+    fn gate_resume_disposition_error_round_trips() {
+        let disposition = GateResumeDisposition::Error;
+        let json = serde_json::to_string(&disposition).expect("serialize");
+        assert_eq!(disposition.as_str(), "error");
+        assert_eq!(json, "\"error\"");
+        let decoded: GateResumeDisposition = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(disposition, decoded);
+    }
+
+    #[test]
     fn cancel_run_precondition_is_backward_compatible_and_round_trips() {
         let resume = make_resume_request(None);
         let gate_ref = resume.gate_resolution_ref.clone();
@@ -257,6 +265,20 @@ mod tests {
         let decoded_legacy: CancelRunRequest =
             serde_json::from_value(legacy).expect("deserialize legacy unconditional cancel");
         assert_eq!(decoded_legacy.precondition, None);
+    }
+
+    #[test]
+    fn cancel_run_precondition_wire_accepts_only_blocked_auth_gate() {
+        for removed_kind in ["blocked_resource_gate", "blocked_dependent_run_gate"] {
+            let encoded = serde_json::json!({
+                "kind": removed_kind,
+                "gate_ref": "gate:removed-broad-cancel"
+            });
+            assert!(
+                serde_json::from_value::<CancelRunPrecondition>(encoded).is_err(),
+                "{removed_kind} must not remain part of the cancel wire contract"
+            );
+        }
     }
 
     #[test]

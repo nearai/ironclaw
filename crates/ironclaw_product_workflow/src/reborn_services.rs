@@ -37,10 +37,9 @@ use ironclaw_threads::{
     ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunPrecondition, GateRef, GetRunStateRequest, IdempotencyKey,
-    ResumeTurnPrecondition, ResumeTurnRequest, RetryTurnRequest, SanitizedCancelReason,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId,
-    TurnScope, TurnStatus,
+    AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition,
+    ResumeTurnRequest, RetryTurnRequest, SanitizedCancelReason, SubmitTurnRequest,
+    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
 };
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, mpsc};
@@ -6290,23 +6289,23 @@ impl RebornServices {
                 Err(blocked_authentication_unavailable())
             }
             WebUiGateResolution::Declined => {
-                let precondition = assert_generic_run_parked_on_gate(
+                assert_generic_run_parked_on_gate(
                     self.turn_coordinator.as_ref(),
                     &scope,
                     run_id,
                     &gate_ref,
                 )
                 .await?;
-                // Carry the validated gate into the store transition so a
-                // concurrent resume cannot turn this decision into a stale,
-                // unconditional cancellation.
+                // Generic resource/dependent-run decline retains its existing
+                // unconditioned cancellation contract. Auth decline uses the
+                // dedicated exact compare-and-cancel path instead.
                 let response = self
                     .turn_coordinator
                     .cancel_run(ironclaw_turns::CancelRunRequest {
                         scope,
                         actor,
                         run_id,
-                        precondition: Some(precondition),
+                        precondition: None,
                         reason: SanitizedCancelReason::UserRequested,
                         idempotency_key: client_action_id,
                     })
@@ -6428,14 +6427,14 @@ fn participant_denied() -> RebornServicesError {
     )
 }
 
-/// Validate a generic denied/cancelled gate resolution and return the typed
-/// compare-and-cancel condition that the turn store enforces atomically.
+/// Reject generic denied/cancelled resolutions that do not match the gate the
+/// run is currently parked on.
 async fn assert_generic_run_parked_on_gate(
     turn_coordinator: &dyn TurnCoordinator,
     scope: &TurnScope,
     run_id: TurnRunId,
     expected_gate_ref: &GateRef,
-) -> Result<CancelRunPrecondition, RebornServicesError> {
+) -> Result<(), RebornServicesError> {
     let state = turn_coordinator
         .get_run_state(GetRunStateRequest {
             scope: scope.clone(),
@@ -6449,21 +6448,8 @@ async fn assert_generic_run_parked_on_gate(
     if state.status == TurnStatus::BlockedApproval {
         return Err(blocked_approval_unavailable());
     }
-    if state.gate_ref.as_ref() != Some(expected_gate_ref) {
-        return Err(RebornServicesError::from_status_kind(
-            RebornServicesErrorCode::Conflict,
-            RebornServicesErrorKind::Conflict,
-            409,
-            false,
-        ));
-    }
-    match state.status {
-        TurnStatus::BlockedResource => Ok(CancelRunPrecondition::BlockedResourceGate {
-            gate_ref: expected_gate_ref.clone(),
-        }),
-        TurnStatus::BlockedDependentRun => Ok(CancelRunPrecondition::BlockedDependentRunGate {
-            gate_ref: expected_gate_ref.clone(),
-        }),
+    match state.gate_ref.as_ref() {
+        Some(parked) if parked == expected_gate_ref => Ok(()),
         _ => Err(RebornServicesError::from_status_kind(
             RebornServicesErrorCode::Conflict,
             RebornServicesErrorKind::Conflict,
