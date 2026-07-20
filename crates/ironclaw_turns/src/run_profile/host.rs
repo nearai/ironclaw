@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityId, CorrelationId, ExtensionId, HostApiError,
-    INPUT_ENCODE_HUMAN_SUMMARY, ProviderToolName, Resolution, ResolutionBatch,
-    RuntimeKind, ThreadId,
+    INPUT_ENCODE_HUMAN_SUMMARY, ProviderToolName, Resolution, ResolutionBatch, RuntimeKind,
+    ThreadId,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;

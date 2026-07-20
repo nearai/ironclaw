@@ -607,10 +607,10 @@ mod tests {
     use super::*;
 
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
-    use ironclaw_turns::run_profile::resolution;
     use ironclaw_loop_host::{
         CapabilityResultWrite, CapabilityWriteResult, EmptyLoopCapabilityPort,
     };
+    use ironclaw_turns::run_profile::resolution;
     use ironclaw_turns::{
         LoopResultRef, RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId,
         TurnScope,

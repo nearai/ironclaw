@@ -72,8 +72,8 @@ use ironclaw_host_api::{
 
 use super::content_digest::ContentDigest;
 use super::host::{
-    CapabilityApprovalResume, CapabilityAuthResume, CapabilityDeniedReasonKind, CapabilityFailureKind,
-    CapabilityProgress, CapabilityResumeToken, LoopProcessRef,
+    CapabilityApprovalResume, CapabilityAuthResume, CapabilityDeniedReasonKind,
+    CapabilityFailureKind, CapabilityProgress, CapabilityResumeToken, LoopProcessRef,
 };
 use super::model_observation::{
     CapabilityFailureDetail, CapabilityInputIssue, ModelVisibleToolObservation,
@@ -180,9 +180,10 @@ pub fn failed(
             output_digest: None,
         },
         verdict: match model_failure_diagnostic(detail) {
-            Some(diagnostic) => {
-                ToolVerdict::recoverable_failure_with_diagnostic(failure_kind_of(error_kind), diagnostic)
-            }
+            Some(diagnostic) => ToolVerdict::recoverable_failure_with_diagnostic(
+                failure_kind_of(error_kind),
+                diagnostic,
+            ),
             None => ToolVerdict::recoverable_failure(failure_kind_of(error_kind)),
         },
         summary: safe_summary_or_placeholder(safe_summary),
@@ -240,7 +241,11 @@ pub fn approval_required(
     safe_summary: String,
     approval_resume: Option<CapabilityApprovalResume>,
 ) -> GatedResolution {
-    let waypoint = gate_waypoint(GateRef::new(), &gate_ref, approval_resume_token(approval_resume));
+    let waypoint = gate_waypoint(
+        GateRef::new(),
+        &gate_ref,
+        approval_resume_token(approval_resume),
+    );
     GatedResolution::gated(
         Resolution::Blocked(Blocked::Approval(waypoint)),
         GateRecord::Approval {
@@ -827,7 +832,11 @@ mod tests {
                 row.label
             );
             if let Some((_, expected)) = expected_gate_kinds.iter().find(|(l, _)| *l == row.label) {
-                assert_eq!(row.gate_record, *expected, "{}: gate_record kind", row.label);
+                assert_eq!(
+                    row.gate_record, *expected,
+                    "{}: gate_record kind",
+                    row.label
+                );
             }
             assert!(
                 !(row.gate_record.is_some() && row.deny_record),
@@ -1081,7 +1090,10 @@ mod tests {
                     Some("blocked egress")
                 );
                 assert_eq!(denial.reason_kind, Some(denied_res.deny_record.reason));
-                assert_eq!(denial.summary.as_ref(), Some(&denied_res.deny_record.summary));
+                assert_eq!(
+                    denial.summary.as_ref(),
+                    Some(&denied_res.deny_record.summary)
+                );
             }
             other => panic!("expected Denied, got {other:?}"),
         }
@@ -1203,7 +1215,10 @@ mod tests {
     fn spawned_process_preserves_the_loop_process_ref_on_the_channel() {
         match spawned_process(LoopProcessRef::new("process:pid-7").unwrap()) {
             Resolution::Suspended(suspension @ Suspension::Process(_)) => {
-                assert_eq!(suspension.origin().map(LoopRef::as_str), Some("process:pid-7"));
+                assert_eq!(
+                    suspension.origin().map(LoopRef::as_str),
+                    Some("process:pid-7")
+                );
             }
             other => panic!("expected Suspended(Process), got {other:?}"),
         }
@@ -1333,9 +1348,11 @@ mod tests {
             None,
             Some(observation(content)),
         ) {
-            Resolution::Done(outcome) => {
-                outcome.refs.preview.as_ref().map(|p| p.as_str().to_string())
-            }
+            Resolution::Done(outcome) => outcome
+                .refs
+                .preview
+                .as_ref()
+                .map(|p| p.as_str().to_string()),
             other => panic!("expected Done, got {other:?}"),
         };
 

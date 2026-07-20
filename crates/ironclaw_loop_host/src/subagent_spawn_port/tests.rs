@@ -472,9 +472,7 @@ impl LoopCapabilityPort for FixedToolPort {
         &self,
         request: CapabilityInvocation,
     ) -> Result<Resolution, AgentLoopHostError> {
-        Ok(
-            completed_outcome(request.capability_id.as_str()),
-        )
+        Ok(completed_outcome(request.capability_id.as_str()))
     }
 
     async fn invoke_capability_batch(
@@ -509,9 +507,7 @@ impl LoopCapabilityPort for RecordingBatchPort {
         &self,
         request: CapabilityInvocation,
     ) -> Result<Resolution, AgentLoopHostError> {
-        Ok(
-            completed_outcome(request.capability_id.as_str()),
-        )
+        Ok(completed_outcome(request.capability_id.as_str()))
     }
 
     async fn invoke_capability_batch(
@@ -523,11 +519,7 @@ impl LoopCapabilityPort for RecordingBatchPort {
             resolutions: request
                 .invocations
                 .iter()
-                .map(|invocation| {
-                    completed_outcome(
-                        invocation.capability_id.as_str(),
-                    )
-                })
+                .map(|invocation| completed_outcome(invocation.capability_id.as_str()))
                 .collect(),
             stopped_on_suspension: false,
         })
@@ -631,9 +623,7 @@ impl LoopCapabilityPort for FailingBatchPort {
         &self,
         request: CapabilityInvocation,
     ) -> Result<Resolution, AgentLoopHostError> {
-        Ok(
-            completed_outcome(request.capability_id.as_str()),
-        )
+        Ok(completed_outcome(request.capability_id.as_str()))
     }
 
     async fn invoke_capability_batch(

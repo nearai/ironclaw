@@ -65,11 +65,11 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, CapabilityBatchInvocation, CapabilityCallCandidate,
         CapabilityDescriptorView, CapabilityInputRef, CapabilityInvocation,
-        CapabilitySurfaceVersion, ConcurrencyHint,
-        InMemoryLoopHostMilestoneSink, InstructionSafetyContext, LoopCancelReasonKind,
-        LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken, LoopRunContext,
-        NoOpBudgetAccountant, NoOpPolicyGuard, ParentLoopOutput, PromptMode,
-        VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+        CapabilitySurfaceVersion, ConcurrencyHint, InMemoryLoopHostMilestoneSink,
+        InstructionSafetyContext, LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken,
+        LoopInputCursorToken, LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard,
+        ParentLoopOutput, PromptMode, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        resolution,
     },
 };
 use tokio::time::{sleep, timeout};
@@ -955,8 +955,16 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             .lock()
             .expect("harness capability invocation lock poisoned")
             .push(request);
-        let outcome = resolution::completed(LoopResultRef::new(self.capability.result_ref.clone())
-                .expect("valid harness result ref"), self.capability.safe_summary.clone(), ironclaw_turns::run_profile::CapabilityProgress::MadeProgress, self.capability.terminate_hint, 0, None, None);
+        let outcome = resolution::completed(
+            LoopResultRef::new(self.capability.result_ref.clone())
+                .expect("valid harness result ref"),
+            self.capability.safe_summary.clone(),
+            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            self.capability.terminate_hint,
+            0,
+            None,
+            None,
+        );
         Ok(outcome)
     }
 

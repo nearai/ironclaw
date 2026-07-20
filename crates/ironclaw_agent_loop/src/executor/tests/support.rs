@@ -173,10 +173,7 @@ impl MockHost {
         self
     }
 
-    pub(super) fn with_single_outcomes(
-        self,
-        outcomes: Vec<ironclaw_host_api::Resolution>,
-    ) -> Self {
+    pub(super) fn with_single_outcomes(self, outcomes: Vec<ironclaw_host_api::Resolution>) -> Self {
         *self.single_outcomes.lock().expect("lock") = outcomes.into();
         self
     }

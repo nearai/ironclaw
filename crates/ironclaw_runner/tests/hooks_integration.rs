@@ -99,12 +99,11 @@ use ironclaw_turns::{
     TurnStatus,
     run_profile::{
         AgentLoopHostError, CapabilityBatchInvocation, CapabilityDescriptorView,
-        CapabilityInputRef, CapabilityInvocation,
-        CapabilitySurfaceVersion, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
-        LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
-        LoopHostMilestoneKind, LoopModelPort, LoopModelRequest, LoopPromptPort, LoopRunContext,
-        LoopTranscriptPort, RunScopedHookMilestoneSink, VisibleCapabilityRequest,
-        VisibleCapabilitySurface, resolution,
+        CapabilityInputRef, CapabilityInvocation, CapabilitySurfaceVersion,
+        InMemoryLoopHostMilestoneSink, InstructionSafetyContext, LoopCapabilityPort,
+        LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest, LoopHostMilestoneKind,
+        LoopModelPort, LoopModelRequest, LoopPromptPort, LoopRunContext, LoopTranscriptPort,
+        RunScopedHookMilestoneSink, VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
     },
     runner::ClaimedTurnRun,
 };
@@ -224,8 +223,16 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
             .lock()
             .expect("invocations mutex not poisoned")
             .push(request.capability_id.clone());
-        let outcome = resolution::completed(LoopResultRef::new(format!("result:{}", request.capability_id))
-                .expect("result ref literal is valid"), "stub capability completed".to_string(), ironclaw_turns::run_profile::CapabilityProgress::MadeProgress, false, 0, None, None);
+        let outcome = resolution::completed(
+            LoopResultRef::new(format!("result:{}", request.capability_id))
+                .expect("result ref literal is valid"),
+            "stub capability completed".to_string(),
+            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            false,
+            0,
+            None,
+            None,
+        );
         Ok(outcome)
     }
 
@@ -292,8 +299,16 @@ impl LoopCapabilityPort for ProviderAwareCapabilityPort {
             .lock()
             .expect("invocations mutex not poisoned")
             .push(request.capability_id.clone());
-        let outcome = resolution::completed(LoopResultRef::new(format!("result:{}", request.capability_id))
-                .expect("result ref literal is valid"), "stub capability completed".to_string(), ironclaw_turns::run_profile::CapabilityProgress::MadeProgress, false, 0, None, None);
+        let outcome = resolution::completed(
+            LoopResultRef::new(format!("result:{}", request.capability_id))
+                .expect("result ref literal is valid"),
+            "stub capability completed".to_string(),
+            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            false,
+            0,
+            None,
+            None,
+        );
         Ok(outcome)
     }
 

@@ -11,8 +11,8 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::{
-    CapabilityId, InvocationId, LoopRef, ProviderToolName, Resolution, ResolutionBatch, RuntimeKind,
-    Suspension, ThreadId,
+    CapabilityId, InvocationId, LoopRef, ProviderToolName, Resolution, ResolutionBatch,
+    RuntimeKind, Suspension, ThreadId,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, SessionThreadService,

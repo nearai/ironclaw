@@ -20,13 +20,12 @@ use ironclaw_turns::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
         BatchPolicyKind, CapabilityBatchInvocation, CapabilityDeniedReasonKind,
         CapabilityDescriptorView, CapabilityInputRef, CapabilityInvocation, CapabilityProgress,
-        CapabilitySurfaceVersion,
-        CommunicationRuntimeContext, ConcurrencyHint, ConnectedChannelSummary,
-        ConnectedChannelsState, DeliveryTargetState, DeliveryTargetSummary,
-        FinalizeAssistantMessage, HostManagedLoopModelPort, HostManagedLoopPromptPort,
-        InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
-        InstructionBundleBuilder, InstructionBundleFingerprint, InstructionBundleRequest,
-        InstructionMaterializationStore, InstructionSafetyContext,
+        CapabilitySurfaceVersion, CommunicationRuntimeContext, ConcurrencyHint,
+        ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState,
+        DeliveryTargetSummary, FinalizeAssistantMessage, HostManagedLoopModelPort,
+        HostManagedLoopPromptPort, InMemoryInstructionMaterializationStore,
+        InMemoryLoopHostMilestoneSink, InstructionBundleBuilder, InstructionBundleFingerprint,
+        InstructionBundleRequest, InstructionMaterializationStore, InstructionSafetyContext,
         LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LoopCancellationPort, LoopCancellationSignal,
         LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
         LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
@@ -41,8 +40,7 @@ use ironclaw_turns::{
         LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest,
         LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopRuntimeContext, LoopSafeSummary,
         LoopTranscriptPort, ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput, PromptMode,
-        PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface,
-        resolution,
+        PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
     },
     runner::{ClaimRunRequest, TurnRunTransitionPort},
 };
@@ -100,7 +98,14 @@ async fn two_fake_drivers_use_the_same_per_run_agent_loop_host_contract() {
         effective_model_profile_id: host.context.resolved_run_profile.model_profile_id.clone(),
         usage: None,
     });
-    host.push_capability_outcome(resolution::approval_required(LoopGateRef::new("gate:approval-needed").unwrap(), "approval required".to_string(), None).resolution);
+    host.push_capability_outcome(
+        resolution::approval_required(
+            LoopGateRef::new("gate:approval-needed").unwrap(),
+            "approval required".to_string(),
+            None,
+        )
+        .resolution,
+    );
 
     let reply_exit = ReplyDriver
         .run(driver_run_request(&host), host.as_ref())

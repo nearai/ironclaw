@@ -21,8 +21,7 @@ use ironclaw_turns::{
         CancellationPolicy, CapabilityBatchInvocation, CapabilityCallCandidate,
         CapabilityDescriptorView, CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation,
         CapabilityProgress, CapabilitySurfaceProfileId, CapabilitySurfaceVersion, CheckpointPolicy,
-        CheckpointSchemaId,
-        ConcurrencyClass, ConcurrencyHint, ContentDigest, ContextProfileId,
+        CheckpointSchemaId, ConcurrencyClass, ConcurrencyHint, ContentDigest, ContextProfileId,
         FinalizeAssistantMessage, LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind,
         LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome,
         LoopCompactionRequest, LoopCompactionResponse, LoopContextBundle,
@@ -1131,28 +1130,59 @@ fn scripted_capability_outcome(
             progress,
             terminate_hint,
             output_digest,
-        } => Ok(resolution::completed(LoopResultRef::new(result_ref)
-                .unwrap_or_else(|error| panic!("test result ref should be valid: {error}")), "completed".to_string(), progress, terminate_hint, 0, output_digest, None)),
+        } => Ok(resolution::completed(
+            LoopResultRef::new(result_ref)
+                .unwrap_or_else(|error| panic!("test result ref should be valid: {error}")),
+            "completed".to_string(),
+            progress,
+            terminate_hint,
+            0,
+            output_digest,
+            None,
+        )),
         ScriptedCapabilityOutcome::ApprovalRequired { gate_ref } => {
-            Ok(resolution::approval_required(loop_gate_ref(&gate_ref), "approval required".to_string(), None).resolution)
+            Ok(resolution::approval_required(
+                loop_gate_ref(&gate_ref),
+                "approval required".to_string(),
+                None,
+            )
+            .resolution)
         }
-        ScriptedCapabilityOutcome::AuthRequired { gate_ref } => {
-            Ok(resolution::auth_required(loop_gate_ref(&gate_ref), Vec::new(), "auth required".to_string(), None).resolution)
-        }
-        ScriptedCapabilityOutcome::ResourceBlocked { gate_ref } => {
-            Ok(resolution::resource_blocked(loop_gate_ref(&gate_ref), "resource blocked".to_string()).resolution)
-        }
+        ScriptedCapabilityOutcome::AuthRequired { gate_ref } => Ok(resolution::auth_required(
+            loop_gate_ref(&gate_ref),
+            Vec::new(),
+            "auth required".to_string(),
+            None,
+        )
+        .resolution),
+        ScriptedCapabilityOutcome::ResourceBlocked { gate_ref } => Ok(
+            resolution::resource_blocked(loop_gate_ref(&gate_ref), "resource blocked".to_string())
+                .resolution,
+        ),
         ScriptedCapabilityOutcome::AwaitDependentRun {
             gate_ref,
             result_ref,
             byte_len,
-        } => Ok(resolution::await_dependent_run(loop_gate_ref(&gate_ref), loop_result_ref(&result_ref), "await dependent run".to_string(), byte_len, None).resolution),
+        } => Ok(resolution::await_dependent_run(
+            loop_gate_ref(&gate_ref),
+            loop_result_ref(&result_ref),
+            "await dependent run".to_string(),
+            byte_len,
+            None,
+        )
+        .resolution),
         ScriptedCapabilityOutcome::SpawnedChildRun {
             child_run_id,
             result_ref,
             byte_len,
-        } => Ok(resolution::spawned_child_run(child_run_id, LoopResultRef::new(result_ref)
-                .unwrap_or_else(|error| panic!("test result ref should be valid: {error}")), "spawned child run".to_string(), byte_len, None)),
+        } => Ok(resolution::spawned_child_run(
+            child_run_id,
+            LoopResultRef::new(result_ref)
+                .unwrap_or_else(|error| panic!("test result ref should be valid: {error}")),
+            "spawned child run".to_string(),
+            byte_len,
+            None,
+        )),
         ScriptedCapabilityOutcome::Failed { error_kind } => {
             Ok(resolution::failed(error_kind, "failed".to_string(), None))
         }

@@ -11,9 +11,9 @@ use ironclaw_threads::{
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityFailureKind,
     CapabilityInputIssue, CapabilityProgress, ConcurrencyHint,
-    MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleArtifact, ModelVisibleToolObservation,
-    ObservationTrust, ToolObservationDetail, ToolObservationStatus, resolution,
-    sanitize_model_visible_text,
+    MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleArtifact,
+    ModelVisibleToolObservation, ObservationTrust, ToolObservationDetail, ToolObservationStatus,
+    resolution, sanitize_model_visible_text,
 };
 
 use super::{
@@ -329,9 +329,7 @@ fn safe_issue_path(key: &str) -> String {
     }
 }
 
-fn parse_result_read_input(
-    value: &serde_json::Value,
-) -> Result<ResultReadInput, Box<Resolution>> {
+fn parse_result_read_input(value: &serde_json::Value) -> Result<ResultReadInput, Box<Resolution>> {
     let object = value.as_object().ok_or_else(|| {
         invalid_input_failure(
             "result_read arguments must be an object",

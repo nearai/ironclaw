@@ -45,7 +45,6 @@ use ironclaw_turns::{
         AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityBatchInvocation,
         CapabilityDeniedReasonKind, CapabilityInputIssue, CapabilityInputRef, CapabilityInvocation,
         CapabilitySurfaceVersion, FinalizeAssistantMessage, HostManagedLoopPromptPort,
-        resolution,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
         InMemoryRunProfileResolver, LoopCapabilityPort, LoopContextBundle,
         LoopContextCompactionKind, LoopContextMessage, LoopContextPort, LoopContextRequest,
@@ -57,7 +56,7 @@ use ironclaw_turns::{
         ParentLoopOutput, PersonalContextPolicy, PromptMode, PromptSkillContextMetadata,
         ProviderToolCallReference, ProviderToolDefinition, SkillVisibility, ToolObservationDetail,
         ToolObservationStatus, UpdateAssistantDraft, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        VisibleCapabilitySurface, resolution,
     },
 };
 use tracing_test::traced_test;

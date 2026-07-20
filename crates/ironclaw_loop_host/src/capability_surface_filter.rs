@@ -723,11 +723,10 @@ mod tests {
     };
     use ironclaw_turns::run_profile::{
         CancellationPolicy, CapabilityDescriptorView, CapabilityInputRef, CapabilitySurfaceVersion,
-        CheckpointPolicy, CheckpointSchemaId, resolution,
-        ConcurrencyClass, ConcurrencyHint, ContextProfileId, LoopDriverId, ModelProfileId,
-        PersonalContextPolicy, RedactedRunProfileProvenance, ResolvedRunProfile,
-        ResourceBudgetPolicy, ResourceBudgetTier, RuntimeProfileConstraints, SchedulingClass,
-        SteeringPolicy,
+        CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass, ConcurrencyHint, ContextProfileId,
+        LoopDriverId, ModelProfileId, PersonalContextPolicy, RedactedRunProfileProvenance,
+        ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier, RuntimeProfileConstraints,
+        SchedulingClass, SteeringPolicy, resolution,
     };
     use ironclaw_turns::{
         AgentLoopDriverDescriptor, LoopGateRef, LoopResultRef, RunClassId, RunProfileFingerprint,
@@ -950,11 +949,24 @@ mod tests {
     }
 
     fn completed(result_ref: &str) -> Resolution {
-        resolution::completed(LoopResultRef::new(result_ref).expect("test result ref is valid"), "done".to_string(), ironclaw_turns::run_profile::CapabilityProgress::MadeProgress, false, 0, None, None)
+        resolution::completed(
+            LoopResultRef::new(result_ref).expect("test result ref is valid"),
+            "done".to_string(),
+            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            false,
+            0,
+            None,
+            None,
+        )
     }
 
     fn approval_required(gate_ref: &str) -> Resolution {
-        resolution::approval_required(LoopGateRef::new(gate_ref).expect("test gate ref is valid"), "approval needed".to_string(), None).resolution
+        resolution::approval_required(
+            LoopGateRef::new(gate_ref).expect("test gate ref is valid"),
+            "approval needed".to_string(),
+            None,
+        )
+        .resolution
     }
 
     // The §5.3 collapse maps the open-set loop `reason_kind`
@@ -1407,10 +1419,11 @@ mod tests {
     #[tokio::test]
     async fn visible_filter_batches_staged_capability_info_invocation() {
         let inner = Arc::new(SpyPort::default());
-        *inner.batch_outcome.lock().expect("batch outcome lock") = Some(ironclaw_host_api::ResolutionBatch {
-            resolutions: vec![completed("result:capability-info")],
-            stopped_on_suspension: false,
-        });
+        *inner.batch_outcome.lock().expect("batch outcome lock") =
+            Some(ironclaw_host_api::ResolutionBatch {
+                resolutions: vec![completed("result:capability-info")],
+                stopped_on_suspension: false,
+            });
         *inner
             .tool_definitions
             .lock()
@@ -1579,10 +1592,11 @@ mod tests {
     #[tokio::test]
     async fn batch_partitions_correctly() {
         let inner = Arc::new(SpyPort::default());
-        *inner.batch_outcome.lock().expect("batch outcome lock") = Some(ironclaw_host_api::ResolutionBatch {
-            resolutions: vec![completed("result:first"), completed("result:second")],
-            stopped_on_suspension: false,
-        });
+        *inner.batch_outcome.lock().expect("batch outcome lock") =
+            Some(ironclaw_host_api::ResolutionBatch {
+                resolutions: vec![completed("result:first"), completed("result:second")],
+                stopped_on_suspension: false,
+            });
         let filter = CapabilitySurfaceProfileFilter::new(
             inner.clone(),
             Arc::new(CapabilityAllowSet::allowlist([
@@ -1624,10 +1638,11 @@ mod tests {
     #[tokio::test]
     async fn partial_inner_outcomes_truncate_correctly() {
         let inner = Arc::new(SpyPort::default());
-        *inner.batch_outcome.lock().expect("batch outcome lock") = Some(ironclaw_host_api::ResolutionBatch {
-            resolutions: vec![completed("result:first"), completed("result:second")],
-            stopped_on_suspension: true,
-        });
+        *inner.batch_outcome.lock().expect("batch outcome lock") =
+            Some(ironclaw_host_api::ResolutionBatch {
+                resolutions: vec![completed("result:first"), completed("result:second")],
+                stopped_on_suspension: true,
+            });
         let filter = CapabilitySurfaceProfileFilter::new(
             inner,
             Arc::new(CapabilityAllowSet::allowlist([
@@ -1661,10 +1676,11 @@ mod tests {
     #[tokio::test]
     async fn stopped_inner_batch_truncates_denials_after_last_allowed_outcome() {
         let inner = Arc::new(SpyPort::default());
-        *inner.batch_outcome.lock().expect("batch outcome lock") = Some(ironclaw_host_api::ResolutionBatch {
-            resolutions: vec![approval_required("gate:first")],
-            stopped_on_suspension: true,
-        });
+        *inner.batch_outcome.lock().expect("batch outcome lock") =
+            Some(ironclaw_host_api::ResolutionBatch {
+                resolutions: vec![approval_required("gate:first")],
+                stopped_on_suspension: true,
+            });
         let filter = CapabilitySurfaceProfileFilter::new(
             inner.clone(),
             Arc::new(CapabilityAllowSet::allowlist([capability_id("demo.first")])),

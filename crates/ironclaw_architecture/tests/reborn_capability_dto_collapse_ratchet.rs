@@ -141,5 +141,8 @@ fn collapse_dto_predicate_is_exact_name() {
         .into_iter()
         .map(|(ident, _)| ident)
         .collect();
-    assert_eq!(got, vec!["RuntimeCapabilityRequest", "CapabilityDispatchRequest"]);
+    assert_eq!(
+        got,
+        vec!["RuntimeCapabilityRequest", "CapabilityDispatchRequest"]
+    );
 }

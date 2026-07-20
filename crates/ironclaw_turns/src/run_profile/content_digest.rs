@@ -270,5 +270,4 @@ mod tests {
             ContentDigest::from_json_value(&second).expect("digest second")
         );
     }
-
 }

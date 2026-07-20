@@ -243,7 +243,8 @@ impl SyntheticCapabilityHandler for OutboundDeliveryTargetSetHandler {
                     OutboundDeliveryApprovalSettingsDecision::Deny => {
                         return Ok(resolution::failed(
                             CapabilityFailureKind::PolicyDenied,
-                            "outbound delivery target setter is disabled by tool approval settings".to_string(),
+                            "outbound delivery target setter is disabled by tool approval settings"
+                                .to_string(),
                             None,
                         ));
                     }
@@ -778,9 +779,7 @@ fn input_error(error: OutboundDeliveryCapabilityInputError) -> AgentLoopHostErro
 /// Safe summaries stay fixed and host-authored: `RebornServicesError` carries a
 /// free-form `field` that could contain a forbidden delimiter/marker and remap a
 /// recoverable arm into a terminal `HostUnavailable` (Invariant 2).
-fn outbound_delivery_outcome(
-    error: RebornServicesError,
-) -> Result<Resolution, AgentLoopHostError> {
+fn outbound_delivery_outcome(error: RebornServicesError) -> Result<Resolution, AgentLoopHostError> {
     match error.code {
         RebornServicesErrorCode::InvalidRequest | RebornServicesErrorCode::NotFound => {
             Ok(resolution::failed(

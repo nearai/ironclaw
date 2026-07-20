@@ -186,9 +186,7 @@ fn project_create_input_schema() -> serde_json::Value {
 /// genuine internal bug stays terminal — invalid input, conflicts, denials, and
 /// transient unavailability are all surfaced to the model instead of killing
 /// the turn.
-fn project_service_outcome(
-    error: ProjectServiceError,
-) -> Result<Resolution, AgentLoopHostError> {
+fn project_service_outcome(error: ProjectServiceError) -> Result<Resolution, AgentLoopHostError> {
     let (error_kind, safe_summary) = match error {
         // Keep the safe summary fixed and host-authored — `field` is a
         // free-form `String` and could carry a forbidden delimiter/marker

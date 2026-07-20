@@ -29,9 +29,9 @@ use ironclaw_turns::{
         CapabilityInvocation, CapabilityResumeToken, ConcurrencyHint, ContentDigest,
         LoopCapabilityPort, LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink,
         LoopProcessRef, LoopRunContext, LoopSafeSummary, ModelVisibleToolObservation,
-        ProviderToolCall,
-        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
-        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReplay,
+        ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
         resolution::{self, GatedResolution},
         sanitize_model_visible_text,
     },
@@ -3317,16 +3317,14 @@ async fn runtime_outcome_to_loop(
             }
             GatedResolution::bare(class.into_resolution())
         }
-        RuntimeCapabilityOutcome::Unknown(unknown) => {
-            GatedResolution::bare(resolution::failed(
-                capability_failure_kind(unknown.kind)?,
-                runtime_safe_summary(
-                    unknown.message,
-                    "capability invocation returned an unknown outcome",
-                ),
-                None,
-            ))
-        }
+        RuntimeCapabilityOutcome::Unknown(unknown) => GatedResolution::bare(resolution::failed(
+            capability_failure_kind(unknown.kind)?,
+            runtime_safe_summary(
+                unknown.message,
+                "capability invocation returned an unknown outcome",
+            ),
+            None,
+        )),
     })
 }
 

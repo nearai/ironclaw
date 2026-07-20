@@ -533,12 +533,8 @@ impl HookedLoopCapabilityPort {
                     .await
                 {
                     Ok(gate_ref) => Some(
-                        resolution::approval_required(
-                            gate_ref,
-                            reason.as_str().to_string(),
-                            None,
-                        )
-                        .resolution,
+                        resolution::approval_required(gate_ref, reason.as_str().to_string(), None)
+                            .resolution,
                     ),
                     Err(_) => Some(fail_closed_gate_ref_unavailable(reason.as_str())),
                 }
