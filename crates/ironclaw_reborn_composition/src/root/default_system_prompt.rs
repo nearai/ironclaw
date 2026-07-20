@@ -5,9 +5,6 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
-
 use async_trait::async_trait;
 use ironclaw_loop_host::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
@@ -170,20 +167,50 @@ fn migrate_known_prior_default_system_prompt(
         return Ok(());
     }
 
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).truncate(true);
-    #[cfg(unix)]
-    options.custom_flags(libc::O_NOFOLLOW);
-    let mut file = options
-        .open(path)
+    // Write the replacement beside the existing prompt, then rename it only
+    // after a complete, durable write. This keeps the prior trusted prompt
+    // intact if staging fails or the process is interrupted before replacement.
+    let permissions = path
+        .symlink_metadata()
+        .map_err(|source| DefaultSystemPromptError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?
+        .permissions();
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut staged =
+        tempfile::NamedTempFile::new_in(parent).map_err(|source| DefaultSystemPromptError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    staged
+        .write_all(DEFAULT_SYSTEM_PROMPT_EMBEDDED.as_bytes())
         .map_err(|source| DefaultSystemPromptError::Io {
             path: path.to_path_buf(),
             source,
         })?;
-    file.write_all(DEFAULT_SYSTEM_PROMPT_EMBEDDED.as_bytes())
+    staged
+        .as_file_mut()
+        .set_permissions(permissions)
         .map_err(|source| DefaultSystemPromptError::Io {
             path: path.to_path_buf(),
             source,
+        })?;
+    staged
+        .as_file()
+        .sync_all()
+        .map_err(|source| DefaultSystemPromptError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    staged
+        .persist(path)
+        .map_err(|error| DefaultSystemPromptError::Io {
+            path: path.to_path_buf(),
+            source: error.error,
         })?;
     validate_default_system_prompt(storage_root, path)
 }
@@ -524,11 +551,26 @@ mod tests {
         let known_prior_default = format!("{before_policy}{after_policy}");
 
         std::fs::write(&prompt_path, &known_prior_default).expect("prior prompt writes");
+        #[cfg(unix)]
+        let prior_file = std::fs::symlink_metadata(&prompt_path).expect("prior prompt metadata");
         seed_default_system_prompt(&storage_root, &prompt_path).expect("prior prompt migrates");
         assert_eq!(
             std::fs::read_to_string(&prompt_path).expect("migrated prompt reads"),
             DEFAULT_SYSTEM_PROMPT_EMBEDDED
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            let migrated_file =
+                std::fs::symlink_metadata(&prompt_path).expect("migrated prompt metadata");
+            assert_ne!(
+                prior_file.ino(),
+                migrated_file.ino(),
+                "migration should atomically replace, rather than truncate, the prior prompt"
+            );
+            assert_eq!(prior_file.mode(), migrated_file.mode());
+        }
 
         std::fs::write(&prompt_path, "custom edited runtime prompt").expect("custom prompt writes");
         seed_default_system_prompt(&storage_root, &prompt_path).expect("custom prompt validates");
