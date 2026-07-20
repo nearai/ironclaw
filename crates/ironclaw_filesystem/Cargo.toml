@@ -16,7 +16,7 @@ layer = "substrates"
 [dependencies]
 async-trait = "0.1"
 blake3 = "1"
-deadpool = { version = "0.12", default-features = false, features = ["managed", "rt_tokio_1"] }
+deadpool = { version = "0.13", default-features = false, features = ["managed", "rt_tokio_1"] }
 deadpool-postgres = "0.14"
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_observability = { path = "../ironclaw_observability" }
