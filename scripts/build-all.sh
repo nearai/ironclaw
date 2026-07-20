@@ -7,6 +7,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+shipping_features="$(tr -d '\r\n' < scripts/ci/reborn-shipping-features.txt)"
+
 echo "Building bundled first-party extensions..."
 ./scripts/build-wasm-extensions.sh --first-party
 
@@ -14,7 +16,7 @@ echo ""
 echo "Building canonical IronClaw (Reborn)..."
 cargo build --release \
     -p ironclaw_reborn_cli \
-    --features libsql,postgres,inmemory-turn-state \
+    --features "$shipping_features" \
     --bin ironclaw
 
 echo ""

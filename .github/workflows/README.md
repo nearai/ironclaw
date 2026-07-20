@@ -81,16 +81,15 @@ seven-platform release matrix.
 | `x86_64-pc-windows-msvc` | `windows-2022` |
 
 Each matrix entry performs a final `cargo build --locked --profile dist` link
-for `ironclaw_reborn_cli` / `ironclaw` with an explicit compile feature
-contract owned by this workflow:
-`libsql,postgres,inmemory-turn-state`.
+for `ironclaw_reborn_cli` / `ironclaw` with the compile feature contract in
+`scripts/ci/reborn-shipping-features.txt`.
 Before upload, the workflow executes that exact native binary with `--version`,
 `--help`, and `profile list --json`. The musl entries also use `readelf` to
 reject a program interpreter or dynamic-library dependency, which prevents an
 installed musl loader on the build runner from hiding a non-portable artifact.
 This is shallow CLI startup coverage; it does not validate `serve`, external
-services, installers, or cargo-dist release packaging. The feature list is
-intentionally not inferred from Docker or #6122.
+services, installers, or cargo-dist release packaging. Docker, this matrix, and
+the local release helper all consume the same feature-list file.
 
 The uploaded `reborn-compile-*` artifacts are short-lived preflight evidence.
 Their prefix deliberately does not match the release host's `artifacts-*`

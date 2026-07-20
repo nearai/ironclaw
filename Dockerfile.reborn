@@ -52,13 +52,15 @@ ENV CARGO_PROFILE_DIST_PANIC=abort \
 
 COPY --from=planner /app/recipe.json recipe.json
 COPY crates/ironclaw_webui/frontend/ crates/ironclaw_webui/frontend/
+COPY scripts/ci/reborn-shipping-features.txt scripts/ci/reborn-shipping-features.txt
 WORKDIR /app/crates/ironclaw_webui/frontend
 RUN pnpm install --frozen-lockfile
 WORKDIR /app
-RUN cargo chef cook \
+RUN shipping_features="$(cat scripts/ci/reborn-shipping-features.txt)" \
+    && cargo chef cook \
     --profile dist \
     --package ironclaw_reborn_cli \
-    --features libsql,postgres,inmemory-turn-state \
+    --features "$shipping_features" \
     --recipe-path recipe.json
 RUN cargo chef cook \
     --profile dist \
@@ -81,14 +83,11 @@ RUN mkdir -p src \
     && printf 'fn main() {}\n' > src/main.rs \
     && printf '\n' > src/lib.rs
 
-WORKDIR /app/crates/ironclaw_webui/frontend
-RUN pnpm install --frozen-lockfile
-WORKDIR /app
-
-RUN cargo build \
+RUN shipping_features="$(cat scripts/ci/reborn-shipping-features.txt)" \
+    && cargo build \
     --profile dist \
     --package ironclaw_reborn_cli \
-    --features libsql,postgres,inmemory-turn-state \
+    --features "$shipping_features" \
     --bin ironclaw
 
 RUN cargo build \
@@ -132,10 +131,10 @@ WORKDIR /workspace
 
 EXPOSE 3000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
     CMD port="${PORT:-3000}"; \
         case "$port" in ''|*[!0-9]*) exit 1 ;; esac; \
-        curl --fail --silent --show-error --max-time 4 "http://127.0.0.1:${port}/api/health" >/dev/null || exit 1
+        curl --fail --silent --show-error --max-time 5 "http://127.0.0.1:${port}/api/health" >/dev/null || exit 1
 
 USER ironclaw
 

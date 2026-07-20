@@ -57,7 +57,8 @@ primary references during the retirement:
 Run these checks in the retargeting PRs, not only in the final deletion PR:
 
 ```bash
-cargo build -p ironclaw_reborn_cli --features libsql,postgres,inmemory-turn-state --bin ironclaw
+shipping_features="$(cat scripts/ci/reborn-shipping-features.txt)"
+cargo build -p ironclaw_reborn_cli --features "$shipping_features" --bin ironclaw
 cargo test -p ironclaw_architecture
 bash scripts/reborn-e2e-rust.sh
 git diff --check

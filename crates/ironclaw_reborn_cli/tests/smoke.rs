@@ -127,10 +127,10 @@ fn dockerfile_reborn_builds_with_production_features() {
 
     assert!(
         dockerfile
-            .matches("libsql,postgres,inmemory-turn-state")
+            .matches("--features \"$shipping_features\"")
             .count()
             >= 2,
-        "Dockerfile.reborn must compile both cargo-chef deps and final binary with libsql, postgres, and the in-memory turn-state authority: {dockerfile}"
+        "Dockerfile.reborn must compile both cargo-chef deps and the final binary with the canonical shipping features: {dockerfile}"
     );
     assert!(
         dockerfile.contains("--bin ironclaw")
@@ -140,9 +140,9 @@ fn dockerfile_reborn_builds_with_production_features() {
     );
     assert!(
         dockerfile.contains("corepack enable pnpm")
-            && dockerfile.matches("pnpm install --frozen-lockfile").count() >= 2
+            && dockerfile.matches("pnpm install --frozen-lockfile").count() == 1
             && dockerfile.contains("crates/ironclaw_webui/frontend"),
-        "Dockerfile.reborn must install WebUI frontend dependencies before cargo-chef and the final binary build: {dockerfile}"
+        "Dockerfile.reborn must cache WebUI dependencies once before cargo-chef and reuse them in the builder: {dockerfile}"
     );
     assert!(
         dockerfile.contains("config.production.toml"),
@@ -209,16 +209,17 @@ fn default_dockerfile_targets_reborn_runtime() {
     assert!(
         deps_stage.contains("crates/ironclaw_webui/frontend")
             && deps_stage.contains("pnpm install --frozen-lockfile")
-            && builder_stage.contains("crates/ironclaw_webui/frontend")
-            && builder_stage.contains("pnpm install --frozen-lockfile"),
-        "default Dockerfile must prepare the current WebUI in both cargo-chef and final build stages: {dockerfile}"
+            && builder_stage.contains("COPY crates/ crates/")
+            && !builder_stage.contains("pnpm install --frozen-lockfile")
+            && dockerfile.matches("pnpm install --frozen-lockfile").count() == 1,
+        "default Dockerfile must cache frontend dependencies in deps and reuse them in the final build stage: {dockerfile}"
     );
     assert!(
         dockerfile.contains("curl \\")
-            && dockerfile.contains("HEALTHCHECK --interval=30s")
+            && dockerfile.contains("HEALTHCHECK --interval=30s --timeout=10s")
             && dockerfile.contains("port=\"${PORT:-3000}\"")
             && dockerfile.contains("case \"$port\" in ''|*[!0-9]*) exit 1")
-            && dockerfile.contains("--max-time 4")
+            && dockerfile.contains("--max-time 5")
             && dockerfile.contains("http://127.0.0.1:${port}/api/health"),
         "default Dockerfile must include a local HTTP healthcheck for the Reborn service: {dockerfile}"
     );
@@ -235,6 +236,7 @@ fn release_workflows_keep_existing_ironclaw_tags() {
 
     assert!(
         release.contains("ironclaw-v[0-9]*.[0-9]*.[0-9]*")
+            && release.contains("^ironclaw-v[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$")
             && rebuild.contains("EXPECTED_REF=\"ironclaw-v${EXPECTED_TAG}\""),
         "release workflows must keep the existing IronClaw tag family"
     );
@@ -244,22 +246,41 @@ fn release_workflows_keep_existing_ironclaw_tags() {
         "release workflows must not introduce a second Reborn tag family"
     );
     assert!(
-        rebuild.contains("grep -Fqx 'LABEL io.nearai.ironclaw.runtime=\"reborn\"' Dockerfile")
-            && !rebuild.contains("grep -q -- '--package ironclaw_reborn_cli' Dockerfile"),
-        "historical rebuilds must select their manifest from an explicit runtime identity"
+        rebuild.contains("ironclaw_reborn_integration_tests)")
+            && rebuild.contains("MANIFEST=crates/ironclaw_reborn_cli/Cargo.toml")
+            && rebuild.contains("tomllib.load(handle)[\"package\"][\"name\"]")
+            && !rebuild.contains("grep -Fqx 'LABEL io.nearai.ironclaw.runtime"),
+        "historical rebuilds must select their manifest from the explicit root package identity"
     );
 }
 
 #[test]
 fn reborn_shipping_builds_use_current_features() {
-    let manifest =
-        std::fs::read_to_string(workspace_root().join("crates/ironclaw_reborn_cli/Cargo.toml"))
-            .expect("Reborn CLI manifest");
-    let dockerfile =
-        std::fs::read_to_string(workspace_root().join("Dockerfile")).expect("Dockerfile");
-    let build_all =
-        std::fs::read_to_string(workspace_root().join("scripts/build-all.sh")).expect("build-all");
-    let expected_features = ["libsql", "postgres", "inmemory-turn-state"];
+    let root = workspace_root();
+    let manifest = std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/Cargo.toml"))
+        .expect("Reborn CLI manifest");
+    let feature_file = "scripts/ci/reborn-shipping-features.txt";
+    let shipping_features =
+        std::fs::read_to_string(root.join(feature_file)).expect("Reborn shipping feature list");
+    let shipping_features = shipping_features.trim();
+    let consumers = [
+        (
+            "Dockerfile",
+            "shipping_features=\"$(cat scripts/ci/reborn-shipping-features.txt)\"",
+        ),
+        (
+            "Dockerfile.reborn",
+            "shipping_features=\"$(cat scripts/ci/reborn-shipping-features.txt)\"",
+        ),
+        (
+            "scripts/build-all.sh",
+            "shipping_features=\"$(tr -d '\\r\\n' < scripts/ci/reborn-shipping-features.txt)\"",
+        ),
+        (
+            ".github/workflows/reborn-release-compile.yml",
+            "features=\"$(tr -d '\\r\\n' < scripts/ci/reborn-shipping-features.txt)\"",
+        ),
+    ];
     let retired_features = [
         "openai-compat-beta",
         "slack-v2-host-beta",
@@ -268,20 +289,26 @@ fn reborn_shipping_builds_use_current_features() {
         "root-llm-provider",
     ];
 
-    for feature in expected_features {
+    assert!(
+        !shipping_features.is_empty()
+            && shipping_features
+                .split(',')
+                .all(|feature| !feature.is_empty() && feature.trim() == feature),
+        "shipping feature source must be a non-empty comma-separated list: {shipping_features:?}"
+    );
+    for feature in shipping_features.split(',') {
         assert!(
             manifest
                 .lines()
                 .any(|line| line.trim_start().starts_with(&format!("{feature} ="))),
             "Reborn CLI manifest must define shipping feature {feature}: {manifest}"
         );
+    }
+    for (consumer, expected_usage) in consumers {
+        let contents = std::fs::read_to_string(root.join(consumer)).expect("feature consumer");
         assert!(
-            dockerfile.contains(feature),
-            "default Dockerfile must build with shipping feature {feature}: {dockerfile}"
-        );
-        assert!(
-            build_all.contains(feature),
-            "build-all helper must build with shipping feature {feature}: {build_all}"
+            contents.contains(expected_usage),
+            "{consumer} must consume the canonical Reborn shipping feature source: {contents}"
         );
     }
 
@@ -290,8 +317,7 @@ fn reborn_shipping_builds_use_current_features() {
             !manifest
                 .lines()
                 .any(|line| line.trim_start().starts_with(&format!("{feature} =")))
-                && !dockerfile.contains(feature)
-                && !build_all.contains(feature),
+                && !shipping_features.split(',').any(|item| item == feature),
             "shipping builds must not reference retired Cargo feature {feature}"
         );
     }
@@ -363,7 +389,7 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         ("aarch64-apple-darwin", "macos-15"),
         ("x86_64-pc-windows-msvc", "windows-2022"),
     ];
-    let release_features = "libsql,postgres,inmemory-turn-state";
+    let feature_file = "scripts/ci/reborn-shipping-features.txt";
 
     assert_eq!(
         compile_workflow.matches("          - target: ").count(),
@@ -385,8 +411,8 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
             && compile_workflow.contains("            --bin ironclaw \\\n")
             && !compile_workflow.contains("--bin ironclaw-reborn")
             && compile_workflow.contains("--target \"$TARGET\"")
-            && compile_workflow
-                .contains(&format!("  REBORN_RELEASE_FEATURES: {release_features}\n"))
+            && compile_workflow.contains(feature_file)
+            && compile_workflow.contains("REBORN_RELEASE_FEATURES=$features")
             && compile_workflow.contains("            --features \"$REBORN_RELEASE_FEATURES\""),
         "Reborn release CI must fully link the shipping binary and keep all target results"
     );
@@ -497,6 +523,9 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
     );
     assert!(
         release_workflow.contains(release_tag_trigger)
+            && release_workflow.contains("validate-release-tag:")
+            && release_workflow.contains("^ironclaw-v[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$")
+            && release_workflow.contains("needs: validate-release-tag")
             && release_workflow.contains("uses: ./.github/workflows/reborn-release-compile.yml")
             && release_workflow.contains("needs.reborn-binary-compile.result == 'success'")
             && compile_workflow.contains("  workflow_call:\n")

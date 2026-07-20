@@ -151,8 +151,8 @@ fn reborn_dockerfile_uses_feature_matched_cache_and_published_port_default() {
 
     assert!(
         dockerfile.contains(
-            "cargo chef cook \\\n    --profile dist \\\n    --package ironclaw_reborn_cli \\\n    --features libsql,postgres,inmemory-turn-state"
-        ),
+            "COPY scripts/ci/reborn-shipping-features.txt scripts/ci/reborn-shipping-features.txt"
+        ) && dockerfile.contains("--features \"$shipping_features\""),
         "cargo chef cook must target the Reborn CLI package with the same features as the final build"
     );
     assert!(
@@ -162,7 +162,8 @@ fn reborn_dockerfile_uses_feature_matched_cache_and_published_port_default() {
     assert!(
         dockerfile.contains("port=\"${PORT:-3000}\"")
             && dockerfile.contains("case \"$port\" in ''|*[!0-9]*) exit 1")
-            && dockerfile.contains("--max-time 4")
+            && dockerfile.contains("--max-time 5")
+            && dockerfile.contains("--timeout=10s")
             && dockerfile.contains("http://127.0.0.1:${port}/api/health"),
         "container healthcheck must validate and quote PORT while probing loopback"
     );

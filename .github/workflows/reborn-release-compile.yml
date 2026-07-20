@@ -12,13 +12,6 @@ on:
 permissions:
   contents: read
 
-env:
-  # #6160 owns this compile contract. Keep it independent from cargo-dist and
-  # Docker changes so this workflow does not depend on the #6122 migration.
-  # Keep the production LLM provider explicit even though Cargo defaults also
-  # enable it today, so a future default-feature change cannot weaken releases.
-  REBORN_RELEASE_FEATURES: libsql,postgres,inmemory-turn-state
-
 jobs:
   compile:
     name: ironclaw (Reborn, ${{ matrix.target }})
@@ -69,6 +62,16 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
+
+      - name: Load Reborn shipping features
+        shell: bash
+        run: |
+          features="$(tr -d '\r\n' < scripts/ci/reborn-shipping-features.txt)"
+          if [[ ! "$features" =~ ^[a-z0-9-]+(,[a-z0-9-]+)*$ ]]; then
+            echo "::error::Invalid Reborn shipping feature list: '$features'"
+            exit 1
+          fi
+          echo "REBORN_RELEASE_FEATURES=$features" >> "$GITHUB_ENV"
 
       - name: Install Rust target
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
