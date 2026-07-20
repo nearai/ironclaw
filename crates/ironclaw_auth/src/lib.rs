@@ -20,7 +20,10 @@ mod flow;
 mod ids;
 mod interaction;
 pub mod loopback_oauth;
-mod oauth;
+// `pub` for the v1 monolith's historical `ironclaw_auth::oauth::…` loopback
+// re-export path (see the compat note at the top of the module); narrows back
+// to `mod` when v1 retires.
+pub mod oauth;
 mod provider;
 mod scope;
 #[cfg(any(test, feature = "test-support"))]

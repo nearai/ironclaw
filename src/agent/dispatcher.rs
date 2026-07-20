@@ -23,10 +23,7 @@ use crate::agent::agentic_loop::{
 use crate::generated_images::GeneratedImageSentinel;
 use crate::tools::permissions::{PermissionState, effective_permission};
 use crate::tools::redact_params;
-use ironclaw_llm::{
-    ChatMessage, CommunicationPresentationPolicy, Reasoning, ReasoningContext, ReasoningDetails,
-    TokenUsage,
-};
+use ironclaw_llm::{ChatMessage, Reasoning, ReasoningContext, ReasoningDetails, TokenUsage};
 
 fn selected_model_override(value: &serde_json::Value) -> Option<String> {
     ironclaw_llm::normalized_model_override(value.as_str()).map(str::to_string)
@@ -275,9 +272,6 @@ impl Agent {
             .with_model_name(self.llm().active_model_name())
             .with_group_chat(is_group_chat)
             .with_platform_info(self.platform_info().await);
-        if let Some(presentation) = v1_channel_presentation(&message.channel) {
-            reasoning = reasoning.with_presentation(presentation);
-        }
 
         // Pass channel-specific conversation context to the LLM.
         // This helps the agent know who/group it's talking to.
@@ -1887,54 +1881,6 @@ fn image_generation_summary_tool_message(
 
 fn image_generation_record_content(sentinel: &GeneratedImageSentinel) -> String {
     sentinel.record_content_for_thread_state()
-}
-
-/// The v1 monolith's channel-name → presentation-policy map. Prompt
-/// construction (`ironclaw_llm`) renders policy data only; the per-channel
-/// hint strings live here, at the call site that knows the channel registry.
-/// Unknown channels get no formatting section (unchanged behavior).
-fn v1_channel_presentation(channel: &str) -> Option<CommunicationPresentationPolicy> {
-    let policy = match channel {
-        "discord" => CommunicationPresentationPolicy {
-            channel_label: "discord".to_string(),
-            formatting_hints: vec![
-                "No markdown tables (Discord renders them as plaintext). Use bullet lists \
-                 instead."
-                    .to_string(),
-                "Wrap multiple URLs in `<>` to suppress embeds: `<https://example.com>`."
-                    .to_string(),
-            ],
-        },
-        "whatsapp" => CommunicationPresentationPolicy {
-            channel_label: "whatsapp".to_string(),
-            formatting_hints: vec![
-                "No markdown headers or tables (WhatsApp ignores them). Use **bold** for \
-                 emphasis."
-                    .to_string(),
-                "Keep messages concise; long replies get truncated on mobile.".to_string(),
-            ],
-        },
-        "telegram" => CommunicationPresentationPolicy {
-            channel_label: "telegram".to_string(),
-            formatting_hints: vec![
-                "No markdown tables (Telegram strips them). Bullet lists and bold work well."
-                    .to_string(),
-            ],
-        },
-        "slack" => CommunicationPresentationPolicy {
-            channel_label: "slack".to_string(),
-            formatting_hints: vec![
-                "No markdown tables. Use Slack formatting: *bold*, _italic_, `code`.".to_string(),
-                "Prefer threaded replies when responding to older messages.".to_string(),
-            ],
-        },
-        "signal" => CommunicationPresentationPolicy {
-            channel_label: "signal".to_string(),
-            formatting_hints: Vec::new(),
-        },
-        _ => return None,
-    };
-    Some(policy)
 }
 
 #[cfg(test)]

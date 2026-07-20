@@ -1099,7 +1099,6 @@ async fn preview_recorded_trace(options: PreviewOptions) -> anyhow::Result<()> {
                 include_tool_payloads: options.include_tool_payloads,
                 consent_scopes: vec![options.scope.into()],
                 channel: options.channel.into(),
-                channel_origin: None,
                 engine_version: options.engine_version,
                 feature_flags: BTreeMap::new(),
                 pseudonymous_contributor_id: options.contributor_id,

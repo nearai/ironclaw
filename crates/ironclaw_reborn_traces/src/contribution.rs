@@ -1417,8 +1417,6 @@ pub struct RecordedTraceContributionOptions {
     pub include_tool_payloads: bool,
     pub consent_scopes: Vec<ConsentScope>,
     pub channel: TraceChannel,
-    /// Origin id recorded when `channel` is [`TraceChannel::Extension`].
-    pub channel_origin: Option<String>,
     pub engine_version: Option<String>,
     pub feature_flags: BTreeMap<String, String>,
     pub pseudonymous_contributor_id: Option<String>,
@@ -1433,7 +1431,6 @@ impl Default for RecordedTraceContributionOptions {
             include_tool_payloads: false,
             consent_scopes: vec![ConsentScope::DebuggingEvaluation],
             channel: TraceChannel::Cli,
-            channel_origin: None,
             engine_version: None,
             feature_flags: BTreeMap::new(),
             pseudonymous_contributor_id: None,
@@ -1611,7 +1608,9 @@ impl RawTraceContribution {
                 engine_version: options.engine_version,
                 feature_flags: options.feature_flags,
                 channel: options.channel,
-                channel_origin: options.channel_origin.clone(),
+                // Options carry no origin id today; the wire field stays
+                // (compat-pinned) for envelope producers that stamp one.
+                channel_origin: None,
                 model_name: Some(trace.model_name.clone()),
             },
             consent: ConsentMetadata {
@@ -1740,7 +1739,9 @@ impl RawTraceContribution {
                 engine_version: options.engine_version,
                 feature_flags: options.feature_flags,
                 channel: options.channel,
-                channel_origin: options.channel_origin.clone(),
+                // Options carry no origin id today; the wire field stays
+                // (compat-pinned) for envelope producers that stamp one.
+                channel_origin: None,
                 model_name: None,
             },
             consent: ConsentMetadata {

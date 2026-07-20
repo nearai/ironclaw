@@ -225,7 +225,6 @@ pub(crate) async fn capture_turn_trace(
             // (REPL/WebUI/channel) behind the turn, so the channel is the
             // honest catch-all rather than a guess.
             channel: trace::TraceChannel::Other,
-            channel_origin: None,
             messages: &messages,
             policy: &policy,
             max_turns: CAPTURE_MAX_TURNS,

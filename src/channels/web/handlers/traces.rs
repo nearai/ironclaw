@@ -539,7 +539,6 @@ async fn build_redacted_trace_envelope(
         include_tool_payloads: options.include_tool_payloads || policy.include_tool_payloads,
         consent_scopes: vec![options.scope.unwrap_or(policy.default_scope)],
         channel: TraceChannel::Web,
-        channel_origin: None,
         engine_version: None,
         feature_flags: BTreeMap::new(),
         pseudonymous_contributor_id: Some(local_pseudonymous_contributor_id(user_id)),

@@ -37,8 +37,6 @@ impl TraceClientScope {
 pub struct TraceClientAutonomousCaptureRequest<'a> {
     pub scope: TraceClientScope,
     pub channel: trace::TraceChannel,
-    /// Origin id recorded when `channel` is [`trace::TraceChannel::Extension`].
-    pub channel_origin: Option<String>,
     pub messages: &'a [ConversationMessage],
     pub policy: &'a trace::StandingTraceContributionPolicy,
     pub max_turns: usize,
@@ -152,7 +150,6 @@ impl TraceClientHost {
             include_tool_payloads: request.policy.include_tool_payloads,
             consent_scopes: vec![request.policy.default_scope],
             channel: request.channel,
-            channel_origin: request.channel_origin.clone(),
             engine_version: None,
             feature_flags: Default::default(),
             pseudonymous_contributor_id: Some(trace::local_pseudonymous_contributor_id(
@@ -290,16 +287,6 @@ pub fn trace_channel_from_host_channel(channel: &str) -> trace::TraceChannel {
         // identity rides `channel_origin` as data.
         _ => trace::TraceChannel::Extension,
     }
-}
-
-/// The origin id recorded alongside [`trace::TraceChannel::Extension`]
-/// mappings (`None` for host surfaces, which the enum already names).
-pub fn trace_channel_origin_from_host_channel(channel: &str) -> Option<String> {
-    matches!(
-        trace_channel_from_host_channel(channel),
-        trace::TraceChannel::Extension
-    )
-    .then(|| channel.to_string())
 }
 
 pub fn capture_turns_from_conversation_messages_with_outcomes(
@@ -507,7 +494,6 @@ mod tests {
             .build_autonomous_envelope_from_messages(TraceClientAutonomousCaptureRequest {
                 scope: scope.clone(),
                 channel: TraceChannel::Web,
-                channel_origin: None,
                 messages: &messages,
                 policy: &policy,
                 max_turns: 5,
@@ -540,7 +526,6 @@ mod tests {
             .build_autonomous_envelope_from_messages(TraceClientAutonomousCaptureRequest {
                 scope: TraceClientScope::user("user-123"),
                 channel: TraceChannel::Web,
-                channel_origin: None,
                 messages: &messages,
                 policy: &policy,
                 max_turns: 5,
@@ -563,7 +548,6 @@ mod tests {
             .prepare_autonomous_envelope_from_messages(TraceClientAutonomousCaptureRequest {
                 scope: TraceClientScope::user("user-123"),
                 channel: TraceChannel::Web,
-                channel_origin: None,
                 messages: &messages,
                 policy: &policy,
                 max_turns: 5,
