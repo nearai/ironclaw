@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- *(webui-v2)* report settings imports with no supported entries as failures instead of showing a false success message ([#6179](https://github.com/nearai/ironclaw/issues/6179)).
 - *(filesystem)* make libSQL descendant listings seek through the path index instead of scanning the full root-filesystem table, preventing extension-readiness fan-out from stalling unrelated WebUI requests.
 - *(webui-v2)* expose per-user secret provisioning in Admin user details with write-only values, handle-only listings, and confirmed deletion ([#6118](https://github.com/nearai/ironclaw/issues/6118)).
 - *(webui-v2)* render the Extensions Registry as soon as catalog data arrives instead of holding the skeleton screen for slower installed-extension enrichment ([#6052](https://github.com/nearai/ironclaw/issues/6052)).
