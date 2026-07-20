@@ -15,8 +15,8 @@ use ironclaw_attachments::InboundAttachment;
 #[cfg(test)]
 use ironclaw_host_api::UserId;
 use ironclaw_product_adapters::{
-    ProductAdapterId, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
-    ProductRejection,
+    ProductAdapterId, ProductAttachmentDescriptor, ProductInboundAck, ProductInboundEnvelope,
+    ProductInboundPayload, ProductRejection,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest, MessageContent,
@@ -49,6 +49,65 @@ use crate::reborn_services::InboundAttachmentLander;
 const BEFORE_INBOUND_POLICY_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(any(test, feature = "test-support"))]
 const BEFORE_INBOUND_POLICY_TIMEOUT: Duration = Duration::from_millis(10);
+
+/// Whether a provider attachment transfer can safely be retried unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachmentMaterializationFailureKind {
+    Retryable,
+    Permanent,
+}
+
+/// Sanitized provider-transfer failure. Reasons are static by construction so
+/// provider response bodies, source URLs, credentials, and host paths cannot
+/// cross into workflow errors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentMaterializationError {
+    kind: AttachmentMaterializationFailureKind,
+    reason: &'static str,
+}
+
+impl AttachmentMaterializationError {
+    pub const fn retryable(reason: &'static str) -> Self {
+        Self {
+            kind: AttachmentMaterializationFailureKind::Retryable,
+            reason,
+        }
+    }
+
+    pub const fn permanent(reason: &'static str) -> Self {
+        Self {
+            kind: AttachmentMaterializationFailureKind::Permanent,
+            reason,
+        }
+    }
+
+    pub const fn kind(&self) -> AttachmentMaterializationFailureKind {
+        self.kind
+    }
+
+    pub const fn sanitized_reason(&self) -> &'static str {
+        self.reason
+    }
+}
+
+impl std::fmt::Display for AttachmentMaterializationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.reason)
+    }
+}
+
+impl std::error::Error for AttachmentMaterializationError {}
+
+/// Host-side provider seam that turns authenticated attachment descriptors
+/// into bounded bytes before the existing workspace lander runs.
+#[async_trait]
+pub trait InboundAttachmentMaterializer: Send + Sync {
+    async fn materialize(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        descriptors: &[ProductAttachmentDescriptor],
+    ) -> Result<Vec<InboundAttachment>, AttachmentMaterializationError>;
+}
 
 /// Run a before-inbound policy with the workflow-owned wall-clock budget.
 ///
@@ -195,6 +254,7 @@ pub struct DefaultInboundTurnService<B, T, C> {
     thread_service: T,
     turn_coordinator: C,
     inbound_attachments: Option<Arc<dyn InboundAttachmentLander>>,
+    inbound_attachment_materializer: Option<Arc<dyn InboundAttachmentMaterializer>>,
 }
 
 impl<B, T, C> DefaultInboundTurnService<B, T, C>
@@ -209,6 +269,7 @@ where
             thread_service,
             turn_coordinator,
             inbound_attachments: None,
+            inbound_attachment_materializer: None,
         }
     }
 
@@ -220,6 +281,17 @@ where
         inbound_attachments: Arc<dyn InboundAttachmentLander>,
     ) -> Self {
         self.inbound_attachments = Some(inbound_attachments);
+        self
+    }
+
+    /// Wire the host-owned provider transfer seam used for descriptor-backed
+    /// channel attachments. Without it, descriptor-bearing messages fail
+    /// closed instead of entering the turn without their files.
+    pub fn with_inbound_attachment_materializer(
+        mut self,
+        materializer: Arc<dyn InboundAttachmentMaterializer>,
+    ) -> Self {
+        self.inbound_attachment_materializer = Some(materializer);
         self
     }
 }
@@ -329,6 +401,50 @@ where
             BeforeInboundPolicyOutcome::Reject(rejection) => {
                 return Ok(InboundUserMessageDispatch::Rejected(rejection));
             }
+        };
+
+        let ProductInboundPayload::UserMessage(payload_for_turn) = envelope_for_turn.payload()
+        else {
+            return Err(ProductWorkflowError::UnsupportedActionKind {
+                kind: "non_user_message".into(),
+            });
+        };
+        if !attachments.is_empty() && !payload_for_turn.attachments.is_empty() {
+            return Err(ProductWorkflowError::TurnSubmissionRejected {
+                reason: "inbound message cannot mix inline bytes with attachment descriptors"
+                    .into(),
+            });
+        }
+        let attachments = if payload_for_turn.attachments.is_empty() {
+            attachments
+        } else {
+            let materializer = self
+                .inbound_attachment_materializer
+                .as_ref()
+                .ok_or_else(|| ProductWorkflowError::TurnSubmissionRejected {
+                    reason: "inbound attachment materializer not configured".into(),
+                })?;
+            let materialized = materializer
+                .materialize(envelope_for_turn, &payload_for_turn.attachments)
+                .await
+                .map_err(|error| match error.kind() {
+                    AttachmentMaterializationFailureKind::Retryable => {
+                        ProductWorkflowError::Transient {
+                            reason: error.sanitized_reason().into(),
+                        }
+                    }
+                    AttachmentMaterializationFailureKind::Permanent => {
+                        ProductWorkflowError::TurnSubmissionRejected {
+                            reason: error.sanitized_reason().into(),
+                        }
+                    }
+                })?;
+            if materialized.len() != payload_for_turn.attachments.len() {
+                return Err(ProductWorkflowError::TurnSubmissionRejected {
+                    reason: "inbound attachment materializer returned an incomplete batch".into(),
+                });
+            }
+            materialized
         };
 
         self.accept_prepared_user_message(prepared_for_turn, envelope_for_turn, attachments)
@@ -939,7 +1055,8 @@ mod tests {
     use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
     use ironclaw_product_adapters::{
         AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ProductAdapterId,
-        ProductTriggerReason, UserMessagePayload,
+        ProductAttachmentDescriptor, ProductAttachmentKind, ProductTriggerReason,
+        UserMessagePayload,
     };
     use ironclaw_threads::{
         AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -1627,6 +1744,12 @@ mod tests {
     }
 
     fn user_message_envelope() -> ProductInboundEnvelope {
+        user_message_envelope_with_descriptors(Vec::new())
+    }
+
+    fn user_message_envelope_with_descriptors(
+        descriptors: Vec<ProductAttachmentDescriptor>,
+    ) -> ProductInboundEnvelope {
         let installation_id = AdapterInstallationId::new("install_alpha").expect("install");
         let evidence = ProtocolAuthEvidence::test_verified(
             AuthRequirement::SharedSecretHeader {
@@ -1646,12 +1769,108 @@ mod tests {
             ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
             ExternalConversationRef::new(None, "conv1", None, None).expect("conversation"),
             ProductInboundPayload::UserMessage(
-                UserMessagePayload::new("look at this", vec![], ProductTriggerReason::DirectChat)
-                    .expect("payload"),
+                UserMessagePayload::new(
+                    "look at this",
+                    descriptors,
+                    ProductTriggerReason::DirectChat,
+                )
+                .expect("payload"),
             ),
         )
         .expect("parsed inbound");
         ProductInboundEnvelope::from_trusted_parse(context, parsed).expect("envelope")
+    }
+
+    #[derive(Default)]
+    struct CapturingMaterializer {
+        calls: Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl InboundAttachmentMaterializer for CapturingMaterializer {
+        async fn materialize(
+            &self,
+            _envelope: &ProductInboundEnvelope,
+            descriptors: &[ProductAttachmentDescriptor],
+        ) -> Result<Vec<InboundAttachment>, AttachmentMaterializationError> {
+            *self.calls.lock().unwrap() += 1;
+            Ok(descriptors
+                .iter()
+                .map(|descriptor| InboundAttachment {
+                    id: descriptor.external_file_id.clone(),
+                    mime_type: descriptor.mime_type.clone(),
+                    filename: descriptor.filename.clone(),
+                    bytes: vec![0x89, b'P', b'N', b'G'],
+                })
+                .collect())
+        }
+    }
+
+    fn image_descriptor() -> ProductAttachmentDescriptor {
+        ProductAttachmentDescriptor::new(
+            "telegram-file-1",
+            "image/png",
+            Some("channel-image.png".to_string()),
+            Some(4),
+            ProductAttachmentKind::Image,
+        )
+        .expect("valid descriptor")
+    }
+
+    #[tokio::test]
+    async fn descriptor_attachment_materializes_then_lands_before_acceptance() {
+        let thread_service = std::sync::Arc::new(InMemorySessionThreadService::default());
+        let materializer = std::sync::Arc::new(CapturingMaterializer::default());
+        let lander = std::sync::Arc::new(CapturingLander::default());
+        let service = DefaultInboundTurnService::new(
+            LandingBindingStub,
+            thread_service,
+            CapturingTurnCoordinator::default(),
+        )
+        .with_inbound_attachment_materializer(materializer.clone())
+        .with_inbound_attachments(lander.clone());
+
+        let dispatch = service
+            .accept_user_message_with_before_policy(
+                &user_message_envelope_with_descriptors(vec![image_descriptor()]),
+                &NoopBeforeInboundPolicy,
+            )
+            .await
+            .expect("descriptor-backed attachment succeeds");
+
+        assert!(matches!(dispatch, InboundUserMessageDispatch::Accepted(_)));
+        assert_eq!(*materializer.calls.lock().unwrap(), 1);
+        let landed = lander.landed.lock().unwrap();
+        assert_eq!(landed.len(), 1);
+        assert_eq!(landed[0].id, "telegram-file-1");
+        assert_eq!(landed[0].filename.as_deref(), Some("channel-image.png"));
+    }
+
+    #[tokio::test]
+    async fn duplicate_descriptor_event_does_not_materialize_or_land_again() {
+        let thread_service = std::sync::Arc::new(InMemorySessionThreadService::default());
+        let materializer = std::sync::Arc::new(CapturingMaterializer::default());
+        let lander = std::sync::Arc::new(CapturingLander::default());
+        let service = DefaultInboundTurnService::new(
+            LandingBindingStub,
+            thread_service,
+            CapturingTurnCoordinator::default(),
+        )
+        .with_inbound_attachment_materializer(materializer.clone())
+        .with_inbound_attachments(lander.clone());
+        let envelope = user_message_envelope_with_descriptors(vec![image_descriptor()]);
+
+        service
+            .accept_user_message_with_before_policy(&envelope, &NoopBeforeInboundPolicy)
+            .await
+            .expect("first delivery succeeds");
+        service
+            .accept_user_message_with_before_policy(&envelope, &NoopBeforeInboundPolicy)
+            .await
+            .expect("duplicate delivery replays");
+
+        assert_eq!(*materializer.calls.lock().unwrap(), 1);
+        assert_eq!(lander.landed.lock().unwrap().len(), 1);
     }
 
     /// Caller-level coverage for the native vision door: a user message carrying
