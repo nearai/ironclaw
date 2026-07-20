@@ -1282,6 +1282,10 @@ fn approval_turn_locator_unavailable() -> ironclaw_product_workflow::ProductWork
 /// into the filesystem-backed store so an existing SSO user keeps their
 /// `UserId` across upgrade. Idempotent (bind re-points to the same user) and
 /// a no-op when the legacy table is absent (fresh installs).
+///
+/// Reads the legacy libSQL table directly, so it needs this crate's `libsql`
+/// feature.
+#[cfg(feature = "libsql")]
 async fn fold_legacy_webui_identities<R>(
     db: &libsql::Database,
     tenant_id: &TenantId,

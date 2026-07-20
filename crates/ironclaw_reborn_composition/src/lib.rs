@@ -408,6 +408,9 @@ pub fn open_reborn_identity_resolver(
 /// Open the reborn-owned local trigger access store on the substrate DB at
 /// `path`, creating the parent directory and running its idempotent
 /// migrations.
+///
+/// Opens a libSQL handle directly, so it needs this crate's `libsql` feature.
+#[cfg(feature = "libsql")]
 pub async fn open_local_trigger_access_store(
     path: &std::path::Path,
 ) -> Result<std::sync::Arc<RebornLibSqlLocalTriggerAccessStore>, RebornLocalTriggerAccessStoreError>
@@ -727,7 +730,6 @@ fn invocation_mount_view_for_segments(
     MountView::new(grants)
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn slack_host_state_mount_view(
     scope: &ResourceScope,
 ) -> Result<MountView, ironclaw_host_api::HostApiError> {
@@ -769,7 +771,6 @@ pub(crate) fn slack_host_state_mount_view(
     ])
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn telegram_host_state_mount_view(
     scope: &ResourceScope,
 ) -> Result<MountView, ironclaw_host_api::HostApiError> {

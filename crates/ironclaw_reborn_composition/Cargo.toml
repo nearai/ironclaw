@@ -14,7 +14,14 @@ publish = false
 layer = "app"
 
 [features]
-default = []
+# Composition assembles a *runtime*, and several of its parts have no
+# non-durable form: conversation bindings must survive a restart, admin
+# secret provisioning needs the secret-store crypto, and the
+# OpenAI-compatible mount refuses to serve non-durable bindings. Every
+# consumer and every shipped artifact already selects a backend, so the
+# default names one instead of declaring a build shape nothing uses.
+# `--no-default-features --features postgres` selects the other.
+default = ["libsql"]
 # Use the single-process in-memory turn-state authority for the local-dev /
 # hosted runtime family instead of the per-user `state.json` filesystem CAS
 # store, even in libSQL/Postgres builds. This is the runtime-wedge fix: all of a
@@ -97,7 +104,7 @@ ironclaw_outbound = { path = "../ironclaw_outbound" }
 ironclaw_processes = { path = "../ironclaw_processes" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = ["host-auth-mint"] }
 ironclaw_product_adapter_registry = { path = "../ironclaw_product_adapter_registry" }
-ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = ["storage"] }
+ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
 ironclaw_runner = { path = "../ironclaw_runner", features = ["webui-user-store"] }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
 ironclaw_reborn_identity = { path = "../ironclaw_reborn_identity" }

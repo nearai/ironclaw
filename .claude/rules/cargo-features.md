@@ -1,8 +1,6 @@
 ---
 paths:
   - "**/Cargo.toml"
-  - "crates/**/*.rs"
-  - "src/**/*.rs"
 ---
 # Cargo Features — A Feature Must Earn Its Build
 

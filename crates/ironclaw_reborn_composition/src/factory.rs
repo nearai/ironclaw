@@ -1037,7 +1037,6 @@ pub(crate) struct RebornRuntimeSubstrate {
     /// rides the host `RootFilesystem` abstraction like every other durable
     /// Reborn store rather than a raw DB handle. Only the WebUI v2 SSO surface
     /// reads it today, hence `dead_code` when that feature is off.
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[allow(dead_code)]
     pub(crate) identity_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     /// Admin per-user secret provisioner (target-user-scoped secret store over
@@ -1107,15 +1106,12 @@ pub(crate) struct RebornRuntimeSubstrate {
     pub(crate) system_extensions_lifecycle_mounts: MountView,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     pub(crate) workspace_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) host_state_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     /// Telegram analog of `host_state_filesystem`: a `ScopedFilesystem` whose
     /// fixed resolver is [`crate::telegram_host_state_mount_view`], backing the
     /// durable Telegram setup/pairing/binding/DM-target stores plus the
     /// telegram-scoped idempotency ledger and conversation-binding store.
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) telegram_host_state_filesystem: Arc<ScopedFilesystem<dyn RootFilesystem>>,
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) subagent_goal_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     /// Tenant-scoped root filesystem used for third-party extension hook
     /// discovery (`/system/extensions/<tenant>`). The runtime derives the
@@ -1190,6 +1186,9 @@ impl RebornProductionRuntimeServices {
     }
 }
 
+// `trigger_conversation_services` is a `OnceCell<RebornFilesystemConversationServices>`
+// under a durable backend and an `InMemoryConversationServices` without one, so this
+// accessor only exists in the durable shape.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 impl RebornRuntimeSubstrate {
     pub(crate) async fn durable_trigger_conversation_services(
@@ -1687,15 +1686,22 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     let secret_store: Arc<dyn SecretStore> =
         Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral());
     // Admin per-user secret provisioner over the shared root + the SAME crypto
-    // as the runtime's own secret store (composition's own `libsql`/`postgres`
-    // feature supplies the durable bundle above, so it always exists here).
-    let admin_secret_provisioner: Option<Arc<dyn crate::admin_secrets::AdminSecretProvisioner>> =
-        Some(Arc::new(
-            crate::admin_secrets::FilesystemAdminSecretProvisioner::new(
-                Arc::clone(&filesystem),
-                local_dev_secret_bundle.1,
-            ),
-        ));
+    // as the runtime's own secret store. Only a durable backend produces the
+    // secret bundle this reuses, so the no-storage build has no provisioner —
+    // `None` is an ordinary value here (see the in-memory runtime below).
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    let admin_secret_provisioner: Option<
+        Arc<dyn crate::admin_secrets::AdminSecretProvisioner>,
+    > = Some(Arc::new(
+        crate::admin_secrets::FilesystemAdminSecretProvisioner::new(
+            Arc::clone(&filesystem),
+            local_dev_secret_bundle.1,
+        ),
+    ));
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    let admin_secret_provisioner: Option<
+        Arc<dyn crate::admin_secrets::AdminSecretProvisioner>,
+    > = None;
     let local_dev_trust_policy = Arc::new(builtin_first_party_trust_policy()?);
     let local_dev_trust_invalidation_bus = Arc::new(ironclaw_trust::InvalidationBus::new());
     let extension_registry = Arc::new(local_dev_builtin_extension_registry()?);
@@ -1874,10 +1880,6 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 };
                 let services = match provider_composition.gate_registry.clone() {
                     Some(registry) => services.with_oauth_gate_registry(registry),
-                    None => services,
-                };
-                let services = match provider_composition.slack_gate_registry.clone() {
-                    Some(registry) => services.with_slack_oauth_gate_registry(registry),
                     None => services,
                 };
                 Arc::new(services.with_host_managed_nearai_credential_scope(
@@ -2779,6 +2781,14 @@ async fn build_local_runtime_store_graph(
         system_extensions_lifecycle_mounts,
         skill_filesystem,
         workspace_filesystem,
+        host_state_filesystem: local_dev_slack_host_state_filesystem(Arc::clone(&filesystem)),
+        telegram_host_state_filesystem: local_dev_telegram_host_state_filesystem(Arc::clone(
+            &filesystem,
+        )),
+        subagent_goal_filesystem: local_dev_scoped_filesystem(Arc::clone(&filesystem)),
+        identity_filesystem: local_dev_scoped_filesystem(Arc::clone(&filesystem)),
+        // Set later in `build_local_runtime`, once secret-store crypto exists.
+        admin_secret_provisioner: None,
         extension_filesystem: Arc::clone(&filesystem),
         workspace_mounts,
         local_dev_storage_root,
@@ -3968,7 +3978,6 @@ fn local_dev_outbound_store(filesystem: Arc<CompositeRootFilesystem>) -> Outboun
     }
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn local_dev_slack_host_state_filesystem(
     filesystem: Arc<CompositeRootFilesystem>,
 ) -> Arc<ScopedFilesystem<CompositeRootFilesystem>> {
@@ -3978,7 +3987,6 @@ fn local_dev_slack_host_state_filesystem(
     ))
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn local_dev_telegram_host_state_filesystem(
     filesystem: Arc<CompositeRootFilesystem>,
 ) -> Arc<ScopedFilesystem<dyn RootFilesystem>> {
