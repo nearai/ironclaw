@@ -1,3 +1,4 @@
+// arch-exempt: large_file, broad turn-coordinator contract suite; #6284 lease-recovery contract update touches a few recovery cases, plan #6263
 use std::{
     sync::{
         Arc, Mutex,
@@ -1761,7 +1762,10 @@ async fn event_publishing_transition_port_publishes_blocked_and_terminal_events(
 
 #[tokio::test]
 async fn event_publishing_transition_port_publishes_expired_lease_terminal_events() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    // Crash-retry bound 0 so a checkpoint-less abandoned lease terminal-fails
+    // (crash_retry_exhausted) instead of re-queuing (#6284) — the terminal
+    // recovery event this test asserts the publisher emits.
+    let store = store_no_crash_retries();
     let sink = Arc::new(InMemoryTurnEventSink::default());
     let transition_port = lifecycle_publishing_store(store, None, Some(sink.clone()));
     let coordinator = DefaultTurnCoordinator::new(transition_port.clone());
@@ -1822,7 +1826,7 @@ async fn event_publishing_transition_port_publishes_expired_lease_terminal_event
         .iter()
         .filter(|event| {
             event.kind == TurnEventKind::Failed
-                && event.sanitized_reason.as_deref() == Some("lease_expired")
+                && event.sanitized_reason.as_deref() == Some("crash_retry_exhausted")
         })
         .collect::<Vec<_>>();
     assert_eq!(recovered_events.len(), 2);
@@ -1948,8 +1952,11 @@ async fn event_publishing_transition_port_returns_committed_claim_after_required
 }
 
 #[tokio::test]
-async fn event_publishing_transition_port_preserves_lease_expired_recovery_reason() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+async fn event_publishing_transition_port_preserves_terminal_recovery_reason() {
+    // Crash-retry bound 0: a checkpoint-less abandoned lease terminal-fails with
+    // crash_retry_exhausted (#6284). This test asserts the terminal recovery's
+    // failure reason is preserved in the published event.
+    let store = store_no_crash_retries();
     let sink = Arc::new(InMemoryTurnEventSink::default());
     let transition_port = lifecycle_publishing_store(store.clone(), None, Some(sink.clone()));
     let coordinator = DefaultTurnCoordinator::new(transition_port.clone());
@@ -1988,7 +1995,7 @@ async fn event_publishing_transition_port_preserves_lease_expired_recovery_reaso
     assert!(sink.events().iter().any(|event| {
         event.run_id == run_id
             && event.kind == TurnEventKind::Failed
-            && event.sanitized_reason.as_deref() == Some("lease_expired")
+            && event.sanitized_reason.as_deref() == Some("crash_retry_exhausted")
     }));
 }
 
@@ -2057,7 +2064,10 @@ async fn event_publishing_transition_port_attempts_all_expired_lease_events_afte
 
 #[tokio::test]
 async fn event_publishing_transition_port_attempts_all_expired_lease_events_after_observer_error() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    // Crash-retry bound 0: checkpoint-less abandoned leases terminal-fail
+    // (crash_retry_exhausted, a `Failed` status) instead of re-queuing (#6284),
+    // so the observer that fails on the first `Failed` event is exercised.
+    let store = store_no_crash_retries();
     let observer = Arc::new(FailFirstRecordingCommittedEventObserver::failing_on(
         TurnStatus::Failed,
     ));
@@ -5758,7 +5768,10 @@ async fn runner_claim_and_heartbeat_persist_lease_expiry() {
 
 #[tokio::test]
 async fn expired_running_lease_fails_and_releases_thread_lock() {
-    let (coordinator, store) = coordinator();
+    // Crash-retry bound 0: a checkpoint-less abandoned `Running` lease
+    // terminal-fails (crash_retry_exhausted) and releases the thread lock rather
+    // than re-queuing (#6284) — the terminal path this test asserts.
+    let (coordinator, store) = coordinator_no_crash_retries();
     let run_id = accepted_run_id(
         &coordinator
             .submit_turn(submit_request("thread-a", "idem-submit-a"))
@@ -5810,7 +5823,7 @@ async fn expired_running_lease_fails_and_releases_thread_lock() {
         assert_eq!(run.status, TurnStatus::Failed);
         assert_eq!(
             run.failure.as_ref().map(SanitizedFailure::category),
-            Some("lease_expired")
+            Some("crash_retry_exhausted")
         );
     }
     assert!(
@@ -5828,7 +5841,7 @@ async fn expired_running_lease_fails_and_releases_thread_lock() {
     assert!(store.events().iter().any(|event| {
         event.run_id == run_id
             && event.kind == TurnEventKind::Failed
-            && event.sanitized_reason.as_deref() == Some("lease_expired")
+            && event.sanitized_reason.as_deref() == Some("crash_retry_exhausted")
     }));
 }
 
@@ -5896,7 +5909,10 @@ async fn expired_cancel_requested_lease_cancels_and_releases_thread_lock() {
 
 #[tokio::test]
 async fn cancel_after_expired_failed_run_reports_already_terminal_and_allows_new_submit() {
-    let (coordinator, store) = coordinator();
+    // Crash-retry bound 0: a checkpoint-less abandoned lease terminal-fails
+    // (crash_retry_exhausted) instead of re-queuing (#6284), so a subsequent
+    // cancel of the now-terminal run reports `already_terminal`.
+    let (coordinator, store) = coordinator_no_crash_retries();
     let run_id = accepted_run_id(
         &coordinator
             .submit_turn(submit_request("thread-a", "idem-submit-a"))
@@ -6937,6 +6953,26 @@ fn coordinator() -> (
     Arc<InMemoryTurnStateStore>,
 ) {
     let store = Arc::new(InMemoryTurnStateStore::default());
+    (DefaultTurnCoordinator::new(store.clone()), store)
+}
+
+/// A store that never re-drives a crashed checkpoint-less run (#6284): with the
+/// crash-retry bound at 0, lease expiry of a checkpoint-less `Running` run
+/// terminal-fails immediately with the genuine-invariant reason
+/// `crash_retry_exhausted`. Recovery tests that assert the terminal-recovery
+/// publishing/locking path use this, since the default (re-driving) config
+/// re-queues such a run on first expiry instead of terminating it.
+fn store_no_crash_retries() -> Arc<InMemoryTurnStateStore> {
+    Arc::new(InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits::default().set_max_crash_recovery_reclaims(0),
+    ))
+}
+
+fn coordinator_no_crash_retries() -> (
+    DefaultTurnCoordinator<InMemoryTurnStateStore>,
+    Arc<InMemoryTurnStateStore>,
+) {
+    let store = store_no_crash_retries();
     (DefaultTurnCoordinator::new(store.clone()), store)
 }
 
