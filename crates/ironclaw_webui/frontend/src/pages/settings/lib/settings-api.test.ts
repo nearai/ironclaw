@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 
-import { settingsFromOperatorConfig, toolFromConfigEntry } from "./settings-api";
+import {
+  settingsFromOperatorConfig,
+  toolFromConfigEntry,
+} from "./settings-api";
 
 test("settingsFromOperatorConfig maps the global auto-approve key", () => {
   const settings = settingsFromOperatorConfig({

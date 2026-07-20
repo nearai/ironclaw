@@ -28,3 +28,8 @@ export function toast(message: string, opts: ToastOptions = {}) {
   if (tone === "success") return hotToast.success(message, options);
   return hotToast(message, options);
 }
+
+export function dismissToast(id: string | null | undefined) {
+  if (id == null) return;
+  hotToast.dismiss(id);
+}

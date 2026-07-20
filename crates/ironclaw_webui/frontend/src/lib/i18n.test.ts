@@ -230,6 +230,16 @@ test("locale packs include skill auto-activation controls", () => {
   }
 });
 
+test("locale packs include automation action failure copy", () => {
+  const key = "automations.error.actionFailed";
+
+  for (const locale of LOCALES) {
+    const pack = loadLocalePack(locale);
+    assert.equal(typeof pack[key], "string", `${locale} missing ${key}`);
+    assert.notEqual(pack[key].trim(), "", `${locale} has empty ${key}`);
+  }
+});
+
 test("locale packs include admin write-only secret management copy", () => {
   const requiredKeys = [
     "admin.user.secrets.title",
