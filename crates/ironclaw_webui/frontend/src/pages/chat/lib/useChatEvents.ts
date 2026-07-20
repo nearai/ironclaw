@@ -249,12 +249,12 @@ export function useChatEvents({
           onStreamError({
             error: frame.error,
             kind: frame.kind,
-            retryable: frame.retryable === true,
+            retryable: false,
           });
           appendStreamFailureMessage(setMessages, {
             error: frame.error,
             kind: frame.kind,
-            retryable: frame.retryable === true,
+            retryable: false,
           });
           return;
         }
