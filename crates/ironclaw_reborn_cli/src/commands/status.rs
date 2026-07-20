@@ -128,7 +128,6 @@ fn resolve_google_oauth_degraded(
 /// broken `launchctl`/`systemctl` query) folds to `Unknown` rather than
 /// failing `status`: this is diagnostic best-effort, not a hard
 /// requirement.
-#[cfg(feature = "webui-v2-beta")]
 fn resolve_service_state() -> ServiceStateDto {
     let state = crate::commands::service::ServicePlatform::detect()
         .and_then(|platform| platform.current_state());
@@ -141,13 +140,6 @@ fn resolve_service_state() -> ServiceStateDto {
             ServiceStateDto::Unknown
         }
     }
-}
-
-/// `commands::service` (and the OS-service concept it manages) is gated
-/// behind `webui-v2-beta` — a build without it has no service to query.
-#[cfg(not(feature = "webui-v2-beta"))]
-fn resolve_service_state() -> ServiceStateDto {
-    ServiceStateDto::Unknown
 }
 
 /// `status` reprints the CLI-token login link `onboard` originally printed
@@ -164,7 +156,6 @@ fn resolve_service_state() -> ServiceStateDto {
 ///   UTF-8 — see `webui_token::env_token_is_active` — rather than silently
 ///   treating it as inactive, which would let `status` disagree with `serve`
 ///   about which credential source is live.
-#[cfg(feature = "webui-v2-beta")]
 fn resolve_login_link_and_note(
     home: &ironclaw_reborn_config::RebornHome,
     config_path: &std::path::Path,
@@ -183,14 +174,6 @@ fn resolve_login_link_and_note(
             crate::webui_token::LoginLinkAnnouncement::Unavailable => (None, None),
         },
     )
-}
-
-#[cfg(not(feature = "webui-v2-beta"))]
-fn resolve_login_link_and_note(
-    _home: &ironclaw_reborn_config::RebornHome,
-    _config_path: &std::path::Path,
-) -> anyhow::Result<(Option<String>, Option<String>)> {
-    Ok((None, None))
 }
 
 pub(super) fn convert_component_status(status: &RebornRuntimeComponentStatus) -> ComponentStatus {
@@ -310,7 +293,6 @@ mod tests {
     /// printed. Drives `build_status_dto_with_service_state(.., Running)`
     /// rather than `build_status_dto` directly to stay hermetic (no
     /// dependency on the test host's actual OS service install).
-    #[cfg(feature = "webui-v2-beta")]
     #[test]
     fn status_dto_includes_login_link_once_a_valid_webui_token_file_exists() {
         let (_tmp, context) = RebornCliContext::test_context();
@@ -341,7 +323,6 @@ mod tests {
     /// `login_link`'s `/login?token=<bearer>` query string; the text output
     /// legitimately prints it, only JSON is redacted. Pinned to `Running`
     /// so `login_link` isn't suppressed, defeating the test's premise.
-    #[cfg(feature = "webui-v2-beta")]
     #[test]
     fn status_dto_json_excludes_the_login_link_token() {
         let (_tmp, context) = RebornCliContext::test_context();
@@ -585,7 +566,6 @@ redirect_uri = "http://127.0.0.1:3000/oauth/google/callback"
 
     /// Once the service state is known not-running, text output must show
     /// restart guidance instead of a (necessarily stale) login link.
-    #[cfg(feature = "webui-v2-beta")]
     #[test]
     fn status_text_suppresses_login_link_and_shows_restart_guidance_when_service_stopped() {
         let (_tmp, context) = RebornCliContext::test_context();

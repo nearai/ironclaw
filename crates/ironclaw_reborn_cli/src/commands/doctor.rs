@@ -111,7 +111,6 @@ fn check_config_file(path: &std::path::Path) -> DoctorCheck {
     }
 }
 
-#[cfg(feature = "root-llm-provider")]
 fn check_providers_file(path: &std::path::Path) -> DoctorCheck {
     match std::fs::read_to_string(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => DoctorCheck {
@@ -143,16 +142,6 @@ fn check_providers_file(path: &std::path::Path) -> DoctorCheck {
                 },
             }
         }
-    }
-}
-
-#[cfg(not(feature = "root-llm-provider"))]
-fn check_providers_file(_path: &std::path::Path) -> DoctorCheck {
-    DoctorCheck {
-        name: "providers_file".to_string(),
-        category: CheckCategory::Core,
-        outcome: CheckOutcome::Skip,
-        detail: "root LLM provider support not compiled".to_string(),
     }
 }
 
@@ -268,7 +257,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "root-llm-provider")]
     fn doctor_valid_providers_file_is_pass() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("providers.json");
@@ -278,7 +266,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "root-llm-provider")]
     fn doctor_invalid_providers_file_is_fail() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("providers.json");
@@ -288,7 +275,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "root-llm-provider")]
     fn doctor_well_formed_but_invalid_providers_catalog_is_fail() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("providers.json");
@@ -298,7 +284,6 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[cfg(feature = "root-llm-provider")]
     #[test]
     fn doctor_unreadable_providers_file_is_fail() {
         let dir = tempfile::tempdir().expect("tempdir");

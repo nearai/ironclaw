@@ -427,18 +427,17 @@ mod tests {
         LoopMessageRef, RedactedCheckpointPayload, TurnCheckpointId,
         run_profile::{
             AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef,
-            BeginAssistantDraft, CapabilityBatchInvocation, CapabilityBatchOutcome,
-            CapabilityInvocation, CapabilityOutcome, CheckpointSchemaId, FinalizeAssistantMessage,
-            LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCancellationPort,
-            LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest,
-            LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
-            LoopCompactionRequest, LoopContextBundle, LoopContextPort, LoopContextRequest,
-            LoopDriverId, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort,
-            LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent,
-            LoopProgressPort, LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort,
-            LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
-            StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
-            VisibleCapabilitySurface,
+            BeginAssistantDraft, CapabilityBatchInvocation, CapabilityInvocation,
+            CheckpointSchemaId, FinalizeAssistantMessage, LoadCheckpointPayloadRequest,
+            LoadedCheckpointPayload, LoopCancellationPort, LoopCancellationSignal,
+            LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef,
+            LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort, LoopCompactionRequest,
+            LoopContextBundle, LoopContextPort, LoopContextRequest, LoopDriverId,
+            LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort, LoopModelPort,
+            LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort,
+            LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+            LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, StageCheckpointPayloadRequest,
+            UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
         },
     };
     use std::sync::Mutex;
@@ -1080,14 +1079,14 @@ mod tests {
         async fn invoke_capability(
             &self,
             request: CapabilityInvocation,
-        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
             self.inner.invoke_capability(request).await
         }
 
         async fn invoke_capability_batch(
             &self,
             request: CapabilityBatchInvocation,
-        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
             self.inner.invoke_capability_batch(request).await
         }
     }

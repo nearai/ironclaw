@@ -6,13 +6,10 @@
 //! TypeScript/Vite project and the issue #3886 plan for the hard non-goals.
 //!
 //! Folded in from the former `ironclaw_webui_v2_static` crate: the SPA bytes and
-//! the JSON route surface now ship from one crate behind the single
-//! `webui-v2-beta` feature. Bearer auth, CORS, body limits, and rate limits stay
-//! in the composition middleware stack — this module only emits asset bytes and
-//! substitutes a per-request CSP nonce into the SPA shell.
-//!
-//! The whole module is gated behind `webui-v2-beta` (see the parent `lib.rs`),
-//! so a default build carries no asset table and no `axum`/`rand` code.
+//! the JSON route surface now ship from one crate. Bearer auth, CORS, body
+//! limits, and rate limits stay in the composition middleware stack — this
+//! module only emits asset bytes and substitutes a per-request CSP nonce into
+//! the SPA shell.
 
 mod assets;
 mod router;

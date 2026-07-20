@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use ironclaw_authorization::CapabilityLeaseStore;
-use ironclaw_host_api::{CapabilityId, ExtensionId, MountView, UserId};
+use ironclaw_host_api::{
+    CapabilityId, ExtensionId, MountView, Resolution, ResolutionBatch, UserId,
+};
 use ironclaw_host_runtime::HostRuntime;
 use ironclaw_loop_host::{
     HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
@@ -13,11 +15,10 @@ use ironclaw_threads::SessionThreadService;
 use ironclaw_trust::TrustDecision;
 use ironclaw_turns::ExternalToolCatalog;
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityBatchOutcome,
-    CapabilityCallCandidate, CapabilityInvocation, CapabilityOutcome, LoopCapabilityPort,
-    LoopHostMilestoneSink, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
-    ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
-    VisibleCapabilitySurface,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityCallCandidate,
+    CapabilityInvocation, LoopCapabilityPort, LoopHostMilestoneSink, LoopRunContext,
+    ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolDefinition,
+    RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -441,7 +442,7 @@ impl LoopCapabilityPort for RefreshingCapabilityPort {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         self.current_or_refresh()
             .await?
             .invoke_capability(request)
@@ -451,7 +452,7 @@ impl LoopCapabilityPort for RefreshingCapabilityPort {
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
         self.current_or_refresh()
             .await?
             .invoke_capability_batch(request)

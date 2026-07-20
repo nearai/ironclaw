@@ -1,10 +1,9 @@
 # Telegram Channel (Reborn host)
 
-**Status:** Shipped host wiring behind the `telegram-v2-host-beta` cargo
-feature (compile-time gate on `ironclaw_reborn_composition` and
-`ironclaw_reborn_cli`; the CLI additionally requires runtime Telegram
-enablement — `[telegram].enabled = true` / `IRONCLAW_REBORN_TELEGRAM_ENABLED=true`
-— before the routes are mounted). Supersedes the issue #3285 webhook-only
+**Status:** Shipped host wiring, compiled into every build. The CLI requires
+runtime Telegram enablement — `[telegram].enabled = true` /
+`IRONCLAW_REBORN_TELEGRAM_ENABLED=true` — before the routes are mounted.
+Supersedes the issue #3285 webhook-only
 tracer bullet this document previously described (see "What changed from the
 tracer-bullet contract" below).
 **Host crate:** `crates/ironclaw_telegram_extension/` (the Telegram host domain and
@@ -41,7 +40,6 @@ taxonomy, pinned to zero by
 | Admin routes | `GET/PUT/DELETE /api/webchat/v2/channels/telegram/setup` |
 | Pairing routes | `POST/GET/DELETE /api/webchat/v2/channels/telegram/pairing` |
 | Connect strategy | `RebornChannelConnectStrategy::WebGeneratedCode` |
-| Cargo feature | `telegram-v2-host-beta` |
 | Tools | none (negative-pinned) |
 
 The manifest is
@@ -311,9 +309,8 @@ Deltas now shipped:
   mount, pairing, identity binding, the in-chat `BlockedAuth` pairing gate,
   revision workflow and trigger decorator, and the WebUI facades live in
   `crates/ironclaw_telegram_extension/`, mounted/registered by
-  `crates/ironclaw_reborn_composition/src/telegram/telegram_host_beta.rs`
-  behind `telegram-v2-host-beta`; the services below the workflow facade are
-  real, not fakes.
+  `crates/ironclaw_reborn_composition/src/telegram/telegram_host_beta.rs`;
+  the services below the workflow facade are real, not fakes.
 - **The webhook route is pinned** to
   `/webhooks/extensions/telegram/updates` (the unified-extension-runtime
   path), registered with Telegram by the setup pipeline itself.
@@ -332,7 +329,7 @@ Deltas now shipped:
 
 | Surface | Test location | Run |
 |---|---|---|
-| Setup pipeline (fail-closed order, rollback, rotation, clear), pairing state machine (issue/rotate/consume/refusals/unpair/continuation), Bot API envelopes, webhook auth/rate/errors, revision replacement, trigger-cache behavior, gate requirement shape | `crates/ironclaw_telegram_extension/src/` focused module tests, composition `telegram_host_beta_tests.rs` + `extension_host/extension_lifecycle.rs`, `crates/ironclaw_reborn_composition/tests/webui_v2_serve.rs` | `cargo test -p ironclaw_telegram_extension` + `cargo test -p ironclaw_reborn_composition --features telegram-v2-host-beta telegram` |
+| Setup pipeline (fail-closed order, rollback, rotation, clear), pairing state machine (issue/rotate/consume/refusals/unpair/continuation), Bot API envelopes, webhook auth/rate/errors, revision replacement, trigger-cache behavior, gate requirement shape | `crates/ironclaw_telegram_extension/src/` focused module tests, composition `telegram_host_beta_tests.rs` + `extension_host/extension_lifecycle.rs`, `crates/ironclaw_reborn_composition/tests/webui_v2_serve.rs` | `cargo test -p ironclaw_telegram_extension` + `cargo test -p ironclaw_reborn_composition telegram` |
 | Retired-taxonomy zero + no v1 pairing-route literals in the Reborn context | `crates/ironclaw_architecture/tests/telegram_extension_gates.rs` | `cargo test -p ironclaw_architecture --test telegram_extension_gates` (wired into `scripts/reborn-e2e-rust.sh` architecture group) |
 | v1↔v2 exclusivity arbitration + default-off posture | `tests/telegram_v2_default_off_integration.rs` (root crate) | `cargo test --test telegram_v2_default_off_integration` |
 | Adapter parse/render/idempotency/delivery mapping | `ironclaw_telegram_v2_adapter` per-module `mod tests` | `cargo test -p ironclaw_telegram_v2_adapter --lib` |

@@ -26,6 +26,6 @@
 
 ## Validation
 
-- `cargo test -p ironclaw_reborn_openai_compat --features openai-compat-beta`
+- `cargo test -p ironclaw_reborn_openai_compat`
 - `cargo clippy -p ironclaw_reborn_openai_compat --all-targets --all-features -- -D warnings`
 - `cargo test -p ironclaw_architecture reborn_crate_dependency_boundaries_hold`

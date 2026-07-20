@@ -91,7 +91,7 @@ bind sockets or call `axum::serve`.
 
 ## Non-Streaming Chat Completions
 
-With the `openai-compat-beta` feature, `ironclaw-reborn serve` mounts
+`ironclaw-reborn serve` mounts
 `openai_compat_router_with_state(...)` inside the Reborn protected route stack
 with an `OpenAiChatCompletionsWorkflow` for `POST /v1/chat/completions`.
 Default routers remain fail-closed unless host composition injects that
@@ -246,7 +246,7 @@ issue a fresh request.
 
 ## Current Fail-Closed Behavior
 
-With `openai-compat-beta`, the default route fragment can be mounted for
+The default route fragment can be mounted for
 composition tests and returns `501` with code `unsupported` until host
 composition injects workflow state. Host composition can inject Chat
 Completions and Responses workflows, with optional projection streamers for

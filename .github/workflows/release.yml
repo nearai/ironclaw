@@ -12,6 +12,10 @@
 #
 # Note that the GitHub Release will be created with a generated
 # title/body based on your changelogs.
+#
+# Temporary #6160 policy: only the Reborn compile preflight below runs;
+# the generated cargo-dist/WASM/GitHub Release and Docker jobs stay defined
+# for rollback but are skipped.
 
 name: Release
 permissions:
@@ -53,8 +57,11 @@ jobs:
     with:
       ref: ${{ github.sha }}
 
-  # Run 'dist plan' (or host) to determine what tasks we need to do
+  # Keep the legacy cargo-dist/WASM/GitHub Release chain visible for rollback,
+  # but disable its root while #6160 makes this workflow Reborn-compile-only.
+  # The Reborn compile matrix above remains the only active release path.
   plan:
+    if: github.repository == ''
     runs-on: "ubuntu-22.04"
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
@@ -481,10 +488,12 @@ jobs:
           # shellcheck disable=SC2086  # PRERELEASE_FLAG is '--prerelease' or empty
           gh release create "$RELEASE_TAG" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
-  # Build and push Docker Hub images (:version, :latest, :sha-*) after the GitHub Release exists.
+  # Keep release-path Docker build/publish explicitly disabled for #6160 even
+  # though the legacy host chain is also gated. The reusable Docker workflow
+  # remains available through manual and scheduled triggers.
   docker-image:
     needs: host
-    if: ${{ always() && needs.host.result == 'success' }}
+    if: github.repository == ''
     permissions:
       contents: read
       packages: read

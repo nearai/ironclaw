@@ -2,15 +2,21 @@ use std::collections::HashSet;
 use std::ops::ControlFlow;
 
 use async_trait::async_trait;
-use ironclaw_host_api::INPUT_ENCODE_HUMAN_SUMMARY;
+use ironclaw_host_api::{
+    ApprovalRequestId, Blocked, CorrelationId, DenyReason, DependentRunResult, FailureKind,
+    INPUT_ENCODE_HUMAN_SUMMARY, LoopRef, ModelFailureDiagnostic, ModelInputIssue, Outcome,
+    Resolution, ResultProgress, ResumeToken, Suspension, ToolVerdict,
+};
 use ironclaw_turns::{
-    LoopFailureKind, LoopResultRef,
+    LoopFailureKind, LoopGateRef, LoopResultRef,
     run_profile::{
         AuthResumeApprovalIdentity, CapabilityActivityId, CapabilityApprovalResume,
         CapabilityAuthResume, CapabilityBatchInvocation, CapabilityCallCandidate,
-        CapabilityFailureKind, CapabilityOutcome, CapabilityProgress, CapabilityResultMessage,
-        LoopDriverNoteKind, LoopProgressEvent, ModelVisibleToolObservation,
-        VisibleCapabilitySurface,
+        CapabilityFailure, CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue,
+        CapabilityProgress, CapabilityResultMessage, CapabilityResumeToken, ContentDigest,
+        LoopDriverNoteKind, LoopProcessRef, LoopProgressEvent,
+        MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation,
+        ObservationTrust, ToolObservationDetail, ToolObservationStatus, VisibleCapabilitySurface,
     },
 };
 
@@ -339,9 +345,9 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             Err(error) => return Err(capability_host_error(error)),
         };
 
-        if batch.outcomes.is_empty()
-            || batch.outcomes.len() > visible_calls.len()
-            || (!batch.stopped_on_suspension && batch.outcomes.len() != visible_calls.len())
+        if batch.resolutions.is_empty()
+            || batch.resolutions.len() > visible_calls.len()
+            || (!batch.stopped_on_suspension && batch.resolutions.len() != visible_calls.len())
         {
             return Err(AgentLoopExecutorError::PlannerContract {
                 detail: "capability batch outcome count does not match invocations",
@@ -349,7 +355,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         }
 
         let (result_count, denied_count, gated_count, failed_count) =
-            capability_batch_counts(&batch.outcomes);
+            capability_batch_counts(&batch.resolutions);
         CheckpointStage
             .emit_progress(
                 ctx,
@@ -363,7 +369,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             )
             .await;
 
-        let outcomes = batch.outcomes;
+        let resolutions = batch.resolutions;
         // Multiple AwaitDependentRun outcomes that share a single gate_ref
         // must coalesce into ONE gate exit: each outcome's result_ref is
         // appended as a completed result (so the parent observes every
@@ -371,7 +377,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         // the loop to BlockedDependentRun. Firing one gate step per outcome
         // would create duplicate gate records and race the resume attempts.
         let coalesced_gate_step = if !batch.stopped_on_suspension {
-            shared_await_dependent_gate(&visible_calls, &outcomes)
+            shared_await_dependent_gate(&visible_calls, &resolutions)
         } else {
             None
         };
@@ -380,13 +386,14 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             // outcomes before handling any remaining gates so partial parallel
             // progress is durable in any later suspension checkpoint.
             let mut pending_outcomes = Vec::new();
-            for (call, outcome) in visible_calls.into_iter().zip(outcomes) {
-                match outcome {
-                    CapabilityOutcome::Completed(result) => {
+            for (call, resolution) in visible_calls.into_iter().zip(resolutions) {
+                match resolution {
+                    Resolution::Done(outcome) if outcome.verdict.is_success() => {
                         push_call_signature_once(&mut state, &mut signatures, &call)?;
                         clear_matching_pending_approval_resume(&mut state, &call);
                         clear_matching_pending_auth_resume(&mut state, &call);
                         clear_matching_pending_external_tool_resume(&mut state, &call);
+                        let result = capability_result_from_outcome(&outcome)?;
                         append_completed_capability_result(
                             ctx.host,
                             &mut state,
@@ -396,54 +403,33 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                         )
                         .await?;
                     }
-                    CapabilityOutcome::SpawnedChildRun {
-                        result_ref,
-                        safe_summary,
-                        byte_len,
-                        model_observation,
-                        ..
-                    } => {
-                        push_call_signature_once(&mut state, &mut signatures, &call)?;
-                        clear_matching_pending_approval_resume(&mut state, &call);
-                        clear_matching_pending_auth_resume(&mut state, &call);
-                        clear_matching_pending_external_tool_resume(&mut state, &call);
-                        append_spawned_child_result(
-                            ctx.host,
-                            &mut state,
-                            &call,
-                            ChildResultAppendInput {
-                                result_ref,
-                                safe_summary,
-                                byte_len,
-                                model_observation,
-                            },
-                            &mut capability_batch,
-                        )
-                        .await?;
-                    }
-                    CapabilityOutcome::AwaitDependentRun {
-                        gate_ref,
-                        result_ref,
-                        safe_summary,
-                        byte_len,
-                        model_observation,
-                    } if coalesced_gate_step
-                        .as_ref()
-                        .is_some_and(|(gate, _)| gate == &gate_ref) =>
+                    Resolution::Done(outcome)
+                        if matches!(outcome.verdict, ToolVerdict::ChildSpawned { .. }) =>
                     {
                         push_call_signature_once(&mut state, &mut signatures, &call)?;
                         clear_matching_pending_approval_resume(&mut state, &call);
                         clear_matching_pending_auth_resume(&mut state, &call);
                         clear_matching_pending_external_tool_resume(&mut state, &call);
-                        let result = CapabilityResultMessage {
-                            result_ref,
-                            safe_summary,
-                            progress: CapabilityProgress::MadeProgress,
-                            terminate_hint: false,
-                            byte_len,
-                            output_digest: None,
-                            model_observation,
-                        };
+                        let input = child_result_from_outcome(&outcome)?;
+                        append_spawned_child_result(
+                            ctx.host,
+                            &mut state,
+                            &call,
+                            input,
+                            &mut capability_batch,
+                        )
+                        .await?;
+                    }
+                    Resolution::Suspended(Suspension::DependentRun { waypoint, result })
+                        if coalesced_gate_step.as_ref().is_some_and(|(gate, _)| {
+                            waypoint.origin.as_ref().map(LoopRef::as_str) == Some(gate.as_str())
+                        }) =>
+                    {
+                        push_call_signature_once(&mut state, &mut signatures, &call)?;
+                        clear_matching_pending_approval_resume(&mut state, &call);
+                        clear_matching_pending_auth_resume(&mut state, &call);
+                        clear_matching_pending_external_tool_resume(&mut state, &call);
+                        let result = dependent_run_result_message(&result)?;
                         append_completed_capability_result(
                             ctx.host,
                             &mut state,
@@ -501,10 +487,10 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                 }
             }
         } else {
-            for (call, outcome) in visible_calls.into_iter().zip(outcomes) {
+            for (call, resolution) in visible_calls.into_iter().zip(resolutions) {
                 push_call_signature_once(&mut state, &mut signatures, &call)?;
                 match self
-                    .handle_capability_outcome(ctx, state, call, outcome, &mut capability_batch)
+                    .handle_capability_outcome(ctx, state, call, resolution, &mut capability_batch)
                     .await?
                 {
                     BatchStep::Continue(next) => {
@@ -599,54 +585,106 @@ impl CapabilityStage {
         ctx: StageContext<'_>,
         mut state: LoopExecutionState,
         call: CapabilityCallCandidate,
-        outcome: CapabilityOutcome,
+        resolution: Resolution,
         capability_batch: &mut CapabilityBatchTurnSummary,
     ) -> Result<BatchStep, AgentLoopExecutorError> {
-        match outcome {
-            CapabilityOutcome::Completed(result) => {
-                clear_matching_pending_approval_resume(&mut state, &call);
-                clear_matching_pending_auth_resume(&mut state, &call);
-                clear_matching_pending_external_tool_resume(&mut state, &call);
-                append_completed_capability_result(
-                    ctx.host,
-                    &mut state,
-                    &call,
-                    result,
-                    capability_batch,
-                )
-                .await?;
-                Ok(BatchStep::Continue(Box::new(state)))
-            }
-            CapabilityOutcome::SpawnedChildRun {
-                result_ref,
-                safe_summary,
-                byte_len,
-                model_observation,
-                ..
-            } => {
-                clear_matching_pending_approval_resume(&mut state, &call);
-                clear_matching_pending_auth_resume(&mut state, &call);
-                clear_matching_pending_external_tool_resume(&mut state, &call);
-                append_spawned_child_result(
-                    ctx.host,
-                    &mut state,
-                    &call,
-                    ChildResultAppendInput {
-                        result_ref,
-                        safe_summary,
-                        byte_len,
+        // Exhaustive over `Resolution`, no wildcard (§11.9). `Done` re-splits on
+        // its typed `ToolVerdict`; every gate/suspension arm reconstructs the loop
+        // ref from the channel's preserved `origin`. Model-visible content comes
+        // from PR-B (`ToolVerdict::RecoverableFailure.diagnostic`, `Denial`); the
+        // dependent-run staged result comes from `Suspension::dependent_result()`.
+        match resolution {
+            Resolution::Done(outcome) => match outcome.verdict {
+                ToolVerdict::Success => {
+                    clear_matching_pending_approval_resume(&mut state, &call);
+                    clear_matching_pending_auth_resume(&mut state, &call);
+                    clear_matching_pending_external_tool_resume(&mut state, &call);
+                    let result = capability_result_from_outcome(&outcome)?;
+                    append_completed_capability_result(
+                        ctx.host,
+                        &mut state,
+                        &call,
+                        result,
+                        capability_batch,
+                    )
+                    .await?;
+                    Ok(BatchStep::Continue(Box::new(state)))
+                }
+                ToolVerdict::ChildSpawned { .. } => {
+                    clear_matching_pending_approval_resume(&mut state, &call);
+                    clear_matching_pending_auth_resume(&mut state, &call);
+                    clear_matching_pending_external_tool_resume(&mut state, &call);
+                    let input = child_result_from_outcome(&outcome)?;
+                    append_spawned_child_result(
+                        ctx.host,
+                        &mut state,
+                        &call,
+                        input,
+                        capability_batch,
+                    )
+                    .await?;
+                    Ok(BatchStep::Continue(Box::new(state)))
+                }
+                ToolVerdict::RecoverableFailure {
+                    ref error_kind,
+                    ref diagnostic,
+                } => {
+                    let failure = capability_failure_from_recoverable(
+                        error_kind,
+                        diagnostic.as_ref(),
+                        &outcome,
+                    );
+                    if failure.error_kind == CapabilityFailureKind::Cancelled {
+                        return self.cancelled_after_checkpoint(ctx, state).await;
+                    }
+                    state
+                        .recent_failure_kinds
+                        .push(capability_failure_kind(&failure.error_kind));
+                    let model_observation =
+                        Some(model_visible_capability_failure_observation(&failure));
+                    let summary = CapabilityErrorSummary {
+                        class: capability_error_class(&failure.error_kind),
+                        safe_summary: capability_failed_summary(
+                            &failure.error_kind,
+                            failure.safe_summary,
+                        )?,
+                        diagnostic_ref: None,
+                    };
+                    self.handle_capability_error(
+                        ctx,
+                        state,
+                        call,
+                        summary,
                         model_observation,
-                    },
-                    capability_batch,
-                )
-                .await?;
-                Ok(BatchStep::Continue(Box::new(state)))
+                        capability_batch,
+                    )
+                    .await
+                }
+            },
+            Resolution::Denied(denial) => {
+                state
+                    .recent_failure_kinds
+                    .push(LoopFailureKind::PolicyDenied);
+                let reason = denial
+                    .reason_kind
+                    .map(deny_reason_tag)
+                    .unwrap_or("policy_denied");
+                let safe_summary = denial
+                    .summary
+                    .map(|summary| summary.as_str().to_string())
+                    .unwrap_or_default();
+                let summary = CapabilityErrorSummary {
+                    class: CapabilityErrorClass::PolicyDenied,
+                    safe_summary: capability_denied_summary(reason, safe_summary)?,
+                    diagnostic_ref: None,
+                };
+                self.handle_capability_error(ctx, state, call, summary, None, capability_batch)
+                    .await
             }
-            CapabilityOutcome::ApprovalRequired {
-                gate_ref,
-                approval_resume,
-                ..
-            } => {
+            Resolution::Blocked(Blocked::Approval(waypoint)) => {
+                let gate_ref = loop_gate_ref_from_origin(waypoint.origin.as_ref())?;
+                let approval_resume =
+                    approval_resume_from_gate(&gate_ref, waypoint.resume.as_ref(), &call);
                 GateStage
                     .process(
                         ctx,
@@ -662,28 +700,25 @@ impl CapabilityStage {
                     )
                     .await
             }
-            CapabilityOutcome::AuthRequired {
-                gate_ref,
-                credential_requirements,
-                auth_resume,
-                ..
-            } => {
+            Resolution::Blocked(Blocked::Auth(waypoint)) => {
+                let gate_ref = loop_gate_ref_from_origin(waypoint.origin.as_ref())?;
                 // When the invocation already passed an approval gate, carry that
                 // identity into the auth resume contract before handing off to the
-                // generic gate persistence stage.
-                //
-                // Extract BEFORE clearing so the data is still present.
+                // generic gate persistence stage. Extract BEFORE clearing.
                 let prior_approval = state
                     .pending_approval_resume
                     .as_ref()
                     .filter(|r| r.capability_id == call.capability_id)
                     .map(|r| r.to_approval_resume());
-                // Clearing here keeps the clear-on-every-outcome invariant; for auth
-                // outcomes GateStage re-populates the record when it blocks.
                 clear_matching_pending_approval_resume(&mut state, &call);
                 clear_matching_pending_auth_resume(&mut state, &call);
                 clear_matching_pending_external_tool_resume(&mut state, &call);
-                let auth_resume = auth_resume_for_gate(auth_resume, prior_approval.as_ref());
+                let auth_resume =
+                    auth_resume_from_gate(waypoint.resume.as_ref(), prior_approval.as_ref());
+                // `credential_requirements` now ride the host `GateRecord::Auth`
+                // (§5.2.9), not this model-visible channel; the runner re-reads them
+                // from the record at the blocked exit to rebuild
+                // `TurnRunRecord.credential_requirements`.
                 GateStage
                     .process(
                         ctx,
@@ -692,14 +727,15 @@ impl CapabilityStage {
                             call,
                             kind: GateKind::Auth,
                             gate_ref,
-                            credential_requirements,
+                            credential_requirements: Vec::new(),
                             approval_resume: prior_approval,
                             auth_resume,
                         },
                     )
                     .await
             }
-            CapabilityOutcome::ResourceBlocked { gate_ref, .. } => {
+            Resolution::Blocked(Blocked::Resource(waypoint)) => {
+                let gate_ref = loop_gate_ref_from_origin(waypoint.origin.as_ref())?;
                 GateStage
                     .process(
                         ctx,
@@ -715,10 +751,11 @@ impl CapabilityStage {
                     )
                     .await
             }
-            CapabilityOutcome::ExternalToolPending { gate_ref, .. } => {
-                // The model called a client-supplied tool: park the run and
-                // return control to the API client. No resume payload here —
-                // the client submits the tool output on resume.
+            Resolution::Suspended(Suspension::ExternalTool(waypoint)) => {
+                let gate_ref = loop_gate_ref_from_origin(waypoint.origin.as_ref())?;
+                // The model called a client-supplied tool: park the run and return
+                // control to the API client. No resume payload — the client submits
+                // the tool output on resume.
                 GateStage
                     .process(
                         ctx,
@@ -734,22 +771,9 @@ impl CapabilityStage {
                     )
                     .await
             }
-            CapabilityOutcome::AwaitDependentRun {
-                gate_ref,
-                result_ref,
-                safe_summary,
-                byte_len,
-                model_observation,
-            } => {
-                let resolved_result = CapabilityResultMessage {
-                    result_ref,
-                    safe_summary,
-                    progress: CapabilityProgress::MadeProgress,
-                    terminate_hint: false,
-                    byte_len,
-                    output_digest: None,
-                    model_observation,
-                };
+            Resolution::Suspended(Suspension::DependentRun { waypoint, result }) => {
+                let gate_ref = loop_gate_ref_from_origin(waypoint.origin.as_ref())?;
+                let resolved_result = dependent_run_result_message(&result)?;
                 AwaitDependentRunGateStage
                     .process(
                         ctx,
@@ -762,51 +786,10 @@ impl CapabilityStage {
                     )
                     .await
             }
-            CapabilityOutcome::SpawnedProcess(handle) => {
-                self.fail_unsupported_process_wait(ctx, state, &call, &handle.process_ref)
+            Resolution::Suspended(Suspension::Process(waypoint)) => {
+                let process_ref = loop_process_ref_from_origin(waypoint.origin.as_ref())?;
+                self.fail_unsupported_process_wait(ctx, state, &call, &process_ref)
                     .await
-            }
-            CapabilityOutcome::Denied(denied) => {
-                state
-                    .recent_failure_kinds
-                    .push(LoopFailureKind::PolicyDenied);
-                let summary = CapabilityErrorSummary {
-                    class: CapabilityErrorClass::PolicyDenied,
-                    safe_summary: capability_denied_summary(
-                        denied.reason_kind.as_str(),
-                        denied.safe_summary,
-                    )?,
-                    diagnostic_ref: None,
-                };
-                self.handle_capability_error(ctx, state, call, summary, None, capability_batch)
-                    .await
-            }
-            CapabilityOutcome::Failed(failure) => {
-                if failure.error_kind == CapabilityFailureKind::Cancelled {
-                    return self.cancelled_after_checkpoint(ctx, state).await;
-                }
-                state
-                    .recent_failure_kinds
-                    .push(capability_failure_kind(&failure.error_kind));
-                let model_observation =
-                    Some(model_visible_capability_failure_observation(&failure));
-                let summary = CapabilityErrorSummary {
-                    class: capability_error_class(&failure.error_kind),
-                    safe_summary: capability_failed_summary(
-                        &failure.error_kind,
-                        failure.safe_summary,
-                    )?,
-                    diagnostic_ref: None,
-                };
-                self.handle_capability_error(
-                    ctx,
-                    state,
-                    call,
-                    summary,
-                    model_observation,
-                    capability_batch,
-                )
-                .await
             }
         }
     }
@@ -1005,7 +988,23 @@ impl CapabilityStage {
                         Err(error) => return Err(capability_host_error(error)),
                     };
                     match retry {
-                        CapabilityOutcome::Failed(failure) => {
+                        Resolution::Done(outcome)
+                            if matches!(
+                                outcome.verdict,
+                                ToolVerdict::RecoverableFailure { .. }
+                            ) =>
+                        {
+                            let failure = match &outcome.verdict {
+                                ToolVerdict::RecoverableFailure {
+                                    error_kind,
+                                    diagnostic,
+                                } => capability_failure_from_recoverable(
+                                    error_kind,
+                                    diagnostic.as_ref(),
+                                    &outcome,
+                                ),
+                                _ => unreachable!("guarded to RecoverableFailure"),
+                            };
                             if failure.error_kind == CapabilityFailureKind::Cancelled {
                                 return self.cancelled_after_checkpoint(ctx, state).await;
                             }
@@ -1273,6 +1272,299 @@ fn auth_resume_for_gate(
     }
 }
 
+// ---------------------------------------------------------------------------
+// host_api::Resolution -> loop vocabulary reconstruction (§5.3 Stage 2 flip).
+//
+// The loop-facing result IS `Resolution` now; these total helpers reconstruct
+// the loop-side values the existing downstream stages consume, from the
+// channel's preserved `origin` refs and PR-B model-visible content. The
+// producer always populates `origin` (the mapping preserves it), so a missing
+// one is an internal contract violation, not a recoverable model error.
+// ---------------------------------------------------------------------------
+
+fn loop_result_ref_from_origin(
+    origin: Option<&LoopRef>,
+) -> Result<LoopResultRef, AgentLoopExecutorError> {
+    origin
+        .and_then(|loop_ref| LoopResultRef::new(loop_ref.as_str()).ok())
+        .ok_or(AgentLoopExecutorError::PlannerContract {
+            detail: "capability resolution is missing its loop result origin",
+        })
+}
+
+fn loop_gate_ref_from_origin(
+    origin: Option<&LoopRef>,
+) -> Result<LoopGateRef, AgentLoopExecutorError> {
+    origin
+        .and_then(|loop_ref| LoopGateRef::new(loop_ref.as_str()).ok())
+        .ok_or(AgentLoopExecutorError::PlannerContract {
+            detail: "capability resolution is missing its loop gate origin",
+        })
+}
+
+fn loop_process_ref_from_origin(
+    origin: Option<&LoopRef>,
+) -> Result<LoopProcessRef, AgentLoopExecutorError> {
+    origin
+        .and_then(|loop_ref| LoopProcessRef::new(loop_ref.as_str()).ok())
+        .ok_or(AgentLoopExecutorError::PlannerContract {
+            detail: "capability resolution is missing its loop process origin",
+        })
+}
+
+/// Reconstruct the byte-stable approval identity from the deterministic
+/// `gate:approval-{id}` routing ref, so the fingerprinted approval lease claimed
+/// on resume is identical to the pre-flip one.
+fn approval_request_id_from_loop_gate_ref(gate_ref: &LoopGateRef) -> Option<ApprovalRequestId> {
+    gate_ref
+        .as_str()
+        .strip_prefix("gate:approval-")
+        .and_then(|id| ApprovalRequestId::parse(id).ok())
+}
+
+fn capability_progress_from(progress: ResultProgress) -> CapabilityProgress {
+    match progress {
+        ResultProgress::Unknown => CapabilityProgress::Unknown,
+        ResultProgress::MadeProgress => CapabilityProgress::MadeProgress,
+        ResultProgress::NoChange => CapabilityProgress::NoChange,
+        ResultProgress::Blocked => CapabilityProgress::Blocked,
+    }
+}
+
+fn capability_result_from_outcome(
+    outcome: &Outcome,
+) -> Result<CapabilityResultMessage, AgentLoopExecutorError> {
+    Ok(CapabilityResultMessage {
+        result_ref: loop_result_ref_from_origin(outcome.refs.origin.as_ref())?,
+        safe_summary: outcome.summary.as_str().to_string(),
+        progress: capability_progress_from(outcome.progress),
+        terminate_hint: outcome.terminate_hint.should_terminate(),
+        byte_len: outcome.refs.byte_len,
+        model_observation: result_reference_observation_from_outcome(outcome),
+        output_digest: outcome
+            .refs
+            .output_digest
+            .map(|digest| ContentDigest(digest.value())),
+    })
+}
+
+fn child_result_from_outcome(
+    outcome: &Outcome,
+) -> Result<ChildResultAppendInput, AgentLoopExecutorError> {
+    Ok(ChildResultAppendInput {
+        result_ref: loop_result_ref_from_origin(outcome.refs.origin.as_ref())?,
+        safe_summary: outcome.summary.as_str().to_string(),
+        byte_len: outcome.refs.byte_len,
+        model_observation: result_reference_observation_from_outcome(outcome),
+    })
+}
+
+/// Rebuild the `ResultReference` model observation from a completed [`Outcome`],
+/// carrying the #5838 first-look inline preview content the model reads without a
+/// follow-up `result_read`. Reconstructed from the channel's real
+/// [`ModelResultPreview`] (`refs.preview`) — the delimiter/JSON-bearing content
+/// that the collapse now preserves (it rode the caption `SafeSummary` before,
+/// which dropped it). `None` when no preview is staged, in which case
+/// `append_capability_result_ref` synthesizes a bare success observation.
+fn result_reference_observation_from_outcome(
+    outcome: &Outcome,
+) -> Option<ModelVisibleToolObservation> {
+    let preview = outcome.refs.preview.as_ref()?;
+    let meta = &outcome.refs.preview_meta;
+    // The observation references the preview's OWN result: `preview_meta`'s
+    // referenced ref when it differs (a `result_read` presenting another result),
+    // else the outcome's own preserved origin.
+    let result_ref = meta
+        .referenced_result_ref
+        .as_ref()
+        .or(outcome.refs.origin.as_ref())?
+        .as_str()
+        .to_string();
+    Some(ModelVisibleToolObservation {
+        schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+        status: ToolObservationStatus::Success,
+        // The observation's OWN producer-authored summary (carried through the
+        // collapse in `preview_meta`), NOT the generic outcome caption: it holds
+        // the truncation/continuation hint ("preview truncated, use result_read …")
+        // that a completed result message's `safe_summary` ("capability completed")
+        // does not. Falls back to the outcome caption when the producer authored no
+        // observation summary (or it failed the caption contract).
+        summary: meta
+            .summary
+            .as_ref()
+            .map(|summary| summary.as_str().to_string())
+            .unwrap_or_else(|| outcome.summary.as_str().to_string()),
+        detail: ToolObservationDetail::ResultReference {
+            result_ref,
+            byte_len: outcome.refs.byte_len,
+            preview: Some(preview.as_str().to_string()),
+            // Continuation metadata for a truncated first-look preview; falls back
+            // to the full inline size for a complete preview.
+            total_bytes: meta.total_bytes.or(Some(outcome.refs.byte_len)),
+            next_offset: meta.next_offset,
+            item_count: meta.item_count,
+        },
+        artifacts: Vec::new(),
+        recovery: None,
+        trust: ObservationTrust::UntrustedToolOutput,
+    })
+}
+
+/// Rebuild the staged dependent-child result the parent observes on resume from
+/// the inline [`DependentRunResult`] (Stage 1b) — no host-storage read.
+fn dependent_run_result_message(
+    result: &DependentRunResult,
+) -> Result<CapabilityResultMessage, AgentLoopExecutorError> {
+    let result_ref = loop_result_ref_from_origin(result.origin.as_ref())?;
+    // Forward the child's staged observation caption (#6287 IronLoop). The
+    // mapping preserves a bounded `SafeSummary` caption on
+    // `DependentRunResult.observation` — "model_observation now rides the inline
+    // observation preview (was dropped entirely)". Hardcoding `None` here re-drops
+    // it, so `append_capability_result_ref` falls back to a bare synthesized
+    // success observation and the resumed parent loses both the caption and the
+    // staged result reference. Surface it as a `ResultReference` observation
+    // pointing at the staged child result. The full inline first-look preview
+    // content stays host-owned and is the completed-`Outcome` path, not this
+    // suspension channel.
+    let model_observation =
+        result
+            .observation
+            .as_ref()
+            .map(|caption| ModelVisibleToolObservation {
+                schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+                status: ToolObservationStatus::Success,
+                summary: caption.as_str().to_string(),
+                detail: ToolObservationDetail::ResultReference {
+                    result_ref: result_ref.as_str().to_string(),
+                    byte_len: result.byte_len,
+                    preview: None,
+                    total_bytes: None,
+                    next_offset: None,
+                    item_count: None,
+                },
+                artifacts: Vec::new(),
+                recovery: None,
+                trust: ObservationTrust::UntrustedToolOutput,
+            });
+    Ok(CapabilityResultMessage {
+        result_ref,
+        safe_summary: result.summary.as_str().to_string(),
+        progress: CapabilityProgress::MadeProgress,
+        terminate_hint: false,
+        byte_len: result.byte_len,
+        output_digest: None,
+        model_observation,
+    })
+}
+
+fn capability_failure_from_recoverable(
+    error_kind: &FailureKind,
+    diagnostic: Option<&ModelFailureDiagnostic>,
+    outcome: &Outcome,
+) -> CapabilityFailure {
+    CapabilityFailure {
+        error_kind: capability_failure_kind_from(error_kind),
+        safe_summary: outcome.summary.as_str().to_string(),
+        detail: diagnostic.map(capability_failure_detail_from),
+    }
+}
+
+fn capability_failure_kind_from(kind: &FailureKind) -> CapabilityFailureKind {
+    use serde::Deserialize;
+    use serde::de::{IntoDeserializer, value::StrDeserializer};
+    // `FailureKind` and `CapabilityFailureKind` share the same stable tag set
+    // plus an open `Unknown`; deserialize routes any tag (incl. unknowns) losslessly.
+    let deserializer: StrDeserializer<'_, serde::de::value::Error> =
+        kind.as_str().into_deserializer();
+    CapabilityFailureKind::deserialize(deserializer).unwrap_or(CapabilityFailureKind::Internal)
+}
+
+fn capability_failure_detail_from(diagnostic: &ModelFailureDiagnostic) -> CapabilityFailureDetail {
+    match diagnostic {
+        ModelFailureDiagnostic::InvalidInput { issues } => CapabilityFailureDetail::InvalidInput {
+            issues: issues
+                .as_slice()
+                .iter()
+                .map(capability_input_issue_from)
+                .collect(),
+        },
+        ModelFailureDiagnostic::Diagnostic { text } => CapabilityFailureDetail::Diagnostic {
+            text: text.as_str().to_string(),
+        },
+    }
+}
+
+fn capability_input_issue_from(issue: &ModelInputIssue) -> CapabilityInputIssue {
+    CapabilityInputIssue {
+        path: issue.path.as_str().to_string(),
+        code: issue.code,
+        expected: issue
+            .expected
+            .as_ref()
+            .map(|value| value.as_str().to_string()),
+        received: issue
+            .received
+            .as_ref()
+            .map(|value| value.as_str().to_string()),
+        schema_path: issue
+            .schema_path
+            .as_ref()
+            .map(|value| value.as_str().to_string()),
+    }
+}
+
+fn deny_reason_tag(reason: DenyReason) -> &'static str {
+    match reason {
+        DenyReason::MissingGrant => "missing_grant",
+        DenyReason::InvalidPath => "invalid_path",
+        DenyReason::PathOutsideMount => "path_outside_mount",
+        DenyReason::UnknownCapability => "unknown_capability",
+        DenyReason::UnknownSecret => "unknown_secret",
+        DenyReason::NetworkDenied => "network_denied",
+        DenyReason::BudgetDenied => "budget_denied",
+        DenyReason::ApprovalDenied => "approval_denied",
+        DenyReason::PolicyDenied => "policy_denied",
+        DenyReason::ResourceLimitExceeded => "resource_limit_exceeded",
+        DenyReason::InternalInvariantViolation => "internal_invariant_violation",
+    }
+}
+
+/// Reconstruct the loop-facing approval resume from the gate waypoint: the resume
+/// token echoed back, the byte-stable approval id from the routing ref, the
+/// call's own input ref (advisory — the host reconstitutes the authoritative one
+/// from its replay store on resume), and a fresh correlation id (observability
+/// only; not in the idempotency key or lease).
+fn approval_resume_from_gate(
+    gate_ref: &LoopGateRef,
+    resume_token: Option<&ResumeToken>,
+    call: &CapabilityCallCandidate,
+) -> Option<CapabilityApprovalResume> {
+    let resume_token = CapabilityResumeToken::new(resume_token?.as_str()).ok()?;
+    let approval_request_id = approval_request_id_from_loop_gate_ref(gate_ref)?;
+    Some(CapabilityApprovalResume {
+        approval_request_id,
+        resume_token,
+        correlation_id: CorrelationId::new(),
+        input_ref: call.input_ref.clone(),
+    })
+}
+
+/// Reconstruct the loop-facing auth resume from the gate waypoint's token, then
+/// fold in any prior-approval identity (kept on the wire this slice; its host-side
+/// move is deferred to §5.3 Stage 2a-ii).
+fn auth_resume_from_gate(
+    resume_token: Option<&ResumeToken>,
+    prior_approval: Option<&CapabilityApprovalResume>,
+) -> Option<CapabilityAuthResume> {
+    let base = resume_token
+        .and_then(|token| CapabilityResumeToken::new(token.as_str()).ok())
+        .map(|resume_token| CapabilityAuthResume {
+            resume_token,
+            prior_approval: None,
+        });
+    auth_resume_for_gate(base, prior_approval)
+}
+
 struct ChildResultAppendInput {
     result_ref: LoopResultRef,
     safe_summary: String,
@@ -1362,25 +1654,35 @@ async fn append_completed_capability_result(
 
 fn shared_await_dependent_gate(
     calls: &[CapabilityCallCandidate],
-    outcomes: &[CapabilityOutcome],
+    resolutions: &[Resolution],
 ) -> Option<(ironclaw_turns::LoopGateRef, CapabilityCallCandidate)> {
     let mut shared_gate: Option<ironclaw_turns::LoopGateRef> = None;
     let mut first_call: Option<CapabilityCallCandidate> = None;
     let mut count = 0_usize;
-    for (call, outcome) in calls.iter().zip(outcomes.iter()) {
-        match outcome {
-            CapabilityOutcome::AwaitDependentRun { gate_ref, .. } => {
+    for (call, resolution) in calls.iter().zip(resolutions.iter()) {
+        match resolution {
+            Resolution::Suspended(Suspension::DependentRun { waypoint, .. }) => {
+                // Coalesce on the preserved originating loop gate ref; a missing
+                // origin (never produced by the mapping) can't be coalesced.
+                let gate_ref = waypoint
+                    .origin
+                    .as_ref()
+                    .and_then(|origin| LoopGateRef::new(origin.as_str()).ok())?;
                 if let Some(existing) = shared_gate.as_ref() {
-                    if existing != gate_ref {
+                    if existing != &gate_ref {
                         return None;
                     }
                 } else {
-                    shared_gate = Some(gate_ref.clone());
+                    shared_gate = Some(gate_ref);
                     first_call = Some(call.clone());
                 }
                 count += 1;
             }
-            other if other.is_suspension() => {
+            // Any other parked work — a re-entrant gate (`Blocked`) or a
+            // non-dependent-run suspension (process/external-tool) — means the
+            // batch cannot coalesce into a single dependent-run gate. `parks()`,
+            // not `is_suspension()`, to also catch `Blocked` (H1).
+            resolution if resolution.parks() => {
                 return None;
             }
             _ => {}
@@ -1403,7 +1705,7 @@ mod tests {
     use super::*;
     use ironclaw_turns::{
         LoopGateRef, LoopResultRef,
-        run_profile::{CapabilityInputRef, CapabilitySurfaceVersion},
+        run_profile::{CapabilityInputRef, CapabilitySurfaceVersion, resolution},
     };
 
     fn call(input: &str) -> CapabilityCallCandidate {
@@ -1418,26 +1720,30 @@ mod tests {
         }
     }
 
-    fn await_dependent(gate: &str, result: &str) -> CapabilityOutcome {
-        CapabilityOutcome::AwaitDependentRun {
-            gate_ref: LoopGateRef::new(gate).unwrap(),
-            result_ref: LoopResultRef::new(format!("result:{result}")).unwrap(),
-            safe_summary: "summary".to_string(),
-            byte_len: 0,
-            model_observation: None,
-        }
+    // The fixtures build the exact `Resolution` the producer constructors
+    // emit so `shared_await_dependent_gate` sees the flip's channel shape
+    // (origin preserved on the channel).
+    fn await_dependent(gate: &str, result: &str) -> Resolution {
+        resolution::await_dependent_run(
+            LoopGateRef::new(gate).unwrap(),
+            LoopResultRef::new(format!("result:{result}")).unwrap(),
+            "summary".to_string(),
+            0,
+            None,
+        )
+        .resolution
     }
 
-    fn completed(result: &str) -> CapabilityOutcome {
-        CapabilityOutcome::Completed(CapabilityResultMessage {
-            result_ref: LoopResultRef::new(format!("result:{result}")).unwrap(),
-            safe_summary: "summary".to_string(),
-            progress: CapabilityProgress::MadeProgress,
-            terminate_hint: false,
-            byte_len: 0,
-            output_digest: None,
-            model_observation: None,
-        })
+    fn completed(result: &str) -> Resolution {
+        resolution::completed(
+            LoopResultRef::new(format!("result:{result}")).unwrap(),
+            "summary".to_string(),
+            CapabilityProgress::MadeProgress,
+            false,
+            0,
+            None,
+            None,
+        )
     }
 
     #[test]
@@ -1478,11 +1784,12 @@ mod tests {
         let calls = vec![call("a"), call("b")];
         let outcomes = vec![
             await_dependent("gate:1", "r1"),
-            CapabilityOutcome::ApprovalRequired {
-                gate_ref: LoopGateRef::new("gate:approval").unwrap(),
-                safe_summary: "approval".to_string(),
-                approval_resume: None,
-            },
+            resolution::approval_required(
+                LoopGateRef::new("gate:approval").unwrap(),
+                "approval".to_string(),
+                None,
+            )
+            .resolution,
         ];
         assert!(shared_await_dependent_gate(&calls, &outcomes).is_none());
     }

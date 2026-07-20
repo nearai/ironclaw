@@ -44,7 +44,7 @@
 //!    This test exercises the automation-trigger fallback's authorization-denial
 //!    branch end-to-end through the full HTTP stack.
 
-#![cfg(all(feature = "test-support", feature = "webui-v2-beta"))]
+#![cfg(feature = "test-support")]
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

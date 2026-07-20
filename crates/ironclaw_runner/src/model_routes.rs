@@ -111,7 +111,6 @@ impl ActiveModelRouteSettings {
         &self.model_id
     }
 
-    #[cfg(feature = "root-llm-provider")]
     pub fn from_llm_config(config: &ironclaw_llm::LlmConfig) -> Result<Self, ModelRouteError> {
         Self::new(config.active_provider_id(), config.active_model_name())
     }

@@ -20,8 +20,9 @@ Wire-shape assertions (P1, issue #4112):
 - ``account_label`` present for manual-token challenges
 
 Browser tests (P2, issue #4112):
-- Require ``webui-v2-beta`` feature compiled in and ``IRONCLAW_REBORN_WEBUI``
-  env wired; skipped via ``pytest.mark.skip`` until E2E binary is updated.
+- Require ``IRONCLAW_REBORN_WEBUI`` env wired (the WebUI v2 routes are
+  compiled in unconditionally); skipped via ``pytest.mark.skip`` until the
+  E2E binary is updated.
 """
 
 import asyncio
@@ -307,7 +308,7 @@ class TestGitHubPatWireShape:
         if submit_r.status_code == 404:
             pytest.skip(
                 "Reborn product-auth routes not mounted in this binary "
-                "(need webui-v2-beta feature or Reborn binary)"
+                "(need the Reborn binary)"
             )
         if submit_r.status_code in (400, 422):
             # Route mounted but gate not found (expected for dummy IDs).
@@ -322,14 +323,14 @@ class TestGitHubPatWireShape:
 
 
 # ---------------------------------------------------------------------------
-# Browser E2E stubs (skipped until webui-v2-beta E2E binary is available)
+# Browser E2E stubs (skipped until an E2E browser binary is available)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.skip(
     reason=(
-        "Playwright browser test requires ironclaw binary compiled with "
-        "webui-v2-beta feature and IRONCLAW_REBORN_WEBUI_TOKEN env wired. "
-        "Enable by building: cargo build --features libsql,webui-v2-beta"
+        "Playwright browser test requires the ironclaw binary with the "
+        "IRONCLAW_REBORN_WEBUI_TOKEN env wired. "
+        "Build with: cargo build --features libsql"
     )
 )
 async def test_github_pat_browser_auth_card_renders(v2_pat_server, browser):
@@ -350,7 +351,7 @@ async def test_github_pat_browser_auth_card_renders(v2_pat_server, browser):
     await context.close()
 
 
-@pytest.mark.skip(reason="See above — requires webui-v2-beta binary")
+@pytest.mark.skip(reason="See above — requires the WebUI v2 E2E binary")
 async def test_github_pat_browser_no_pat_in_dom(v2_pat_server, browser):
     """After submitting a PAT, it must not appear in the DOM or localStorage."""
     from playwright.async_api import expect
