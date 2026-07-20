@@ -40,7 +40,7 @@ use ironclaw_threads::{
     SummaryModelContextPolicy, ThreadHistoryRequest, ThreadScope, ToolResultSafeSummary,
     UpdateAssistantDraftRequest,
 };
-use tokio::sync::{Barrier, Mutex, OwnedMutexGuard};
+use tokio::sync::{Barrier, Mutex, Notify, OwnedMutexGuard};
 
 #[tokio::test]
 async fn filesystem_delete_thread_removes_owned_thread_and_hides_missing_or_wrong_scope() {
@@ -259,6 +259,377 @@ async fn filesystem_concurrent_duplicate_tool_result_writes_converge() {
         .expect("converged record exists");
     assert_eq!(stored.content, content);
     assert!(stored.next_offset.is_none());
+}
+
+/// Issue #6047: two `accept_inbound_message` calls for the SAME thread raced
+/// on a backend without multi-key transaction support (`begin()` returns
+/// `Unsupported` — this is the shape of the production libSQL backend, see
+/// `crates/ironclaw_filesystem/src/libsql.rs` which has no `begin` override).
+/// On that path `accept_inbound_message` reserves a sequence number and then
+/// writes the message record as two *separate* steps
+/// (`filesystem_service.rs::accept_inbound_message`, the
+/// `TransactionalMessageWrite::Unsupported` arm). Before the fix, nothing
+/// serialized two concurrent callers against the same `(scope, thread_id)`:
+/// the message that reserved the LOWER sequence (called first) could still
+/// be sitting in its `write_new_message` step while a message that reserved
+/// a HIGHER sequence (called second) finished first and became durably
+/// visible — a later message rendered/acted on ahead of an earlier one
+/// (issue #6047).
+///
+/// This test drives message A into that same blocked-mid-write state and
+/// then submits message B concurrently. The fix's invariant: B must not
+/// reserve a sequence or become visible while A — called first — still
+/// holds the per-thread write lock. B only proceeds once A's write
+/// completes and releases it, so the two calls settle in call order.
+#[tokio::test]
+async fn filesystem_accept_inbound_message_serializes_concurrent_calls_for_same_thread() {
+    let backend = Arc::new(SequenceOrderRaceBackend::new());
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-seq-race", "alice");
+    let service = Arc::new(FilesystemSessionThreadService::new(scoped));
+    let scope = scope("fs-seq-race");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-seq-race").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let task_a = {
+        let service = Arc::clone(&service);
+        let scope = scope.clone();
+        let thread_id = thread.thread_id.clone();
+        tokio::spawn(async move {
+            service
+                .accept_inbound_message(AcceptInboundMessageRequest {
+                    scope,
+                    thread_id,
+                    actor_id: "actor-a".into(),
+                    source_binding_id: None,
+                    reply_target_binding_id: None,
+                    external_event_id: None,
+                    content: MessageContent::text(
+                        "check my recent emails and add near.ai senders to Sheet ABC \
+                         RACE-MARKER-A"
+                            .to_string(),
+                    ),
+                })
+                .await
+        })
+    };
+
+    // Wait until message A has reserved its (lower) sequence number and is
+    // now blocked inside its own `put` — i.e. A was unambiguously "first"
+    // and is holding the fix's per-thread write lock.
+    backend.a_reserved.notified().await;
+
+    let mut task_b = {
+        let service = Arc::clone(&service);
+        let scope = scope.clone();
+        let thread_id = thread.thread_id.clone();
+        tokio::spawn(async move {
+            service
+                .accept_inbound_message(AcceptInboundMessageRequest {
+                    scope,
+                    thread_id,
+                    actor_id: "actor-a".into(),
+                    source_binding_id: None,
+                    reply_target_binding_id: None,
+                    external_event_id: None,
+                    content: MessageContent::text(
+                        "every 30 minutes check my inbox and add near.ai senders RACE-MARKER-B"
+                            .to_string(),
+                    ),
+                })
+                .await
+        })
+    };
+
+    // REGRESSION (#6047) check: B (called second) must not be able to
+    // complete — i.e. reserve a sequence and become durable — while A
+    // (called first) is still parked mid-write. Pre-fix, B raced ahead and
+    // finished here; post-fix, B blocks on A's held write lock.
+    let raced_ahead = tokio::time::timeout(std::time::Duration::from_millis(200), &mut task_b)
+        .await
+        .is_ok();
+    assert!(
+        !raced_ahead,
+        "REGRESSION (#6047): message B (called second) completed while message A \
+         (called first) was still mid-write — a later message became durable \
+         ahead of an earlier one instead of waiting its turn"
+    );
+
+    let mid_race = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+        })
+        .await
+        .expect("mid-race history read succeeds");
+    assert!(
+        mid_race.messages.is_empty(),
+        "neither message should be durably visible yet — A is still mid-write and B is \
+         blocked behind it, got {:?}",
+        mid_race.messages
+    );
+
+    // Release A's blocked write and let both calls settle.
+    backend.release_a.notify_one();
+    let accepted_a = task_a
+        .await
+        .expect("task A join")
+        .expect("first call completes");
+    assert_eq!(
+        accepted_a.sequence, 1,
+        "A reserved the lower sequence number"
+    );
+    let accepted_b = task_b
+        .await
+        .expect("task B join")
+        .expect("second call completes once A releases the write lock");
+    assert_eq!(
+        accepted_b.sequence, 2,
+        "B reserves the higher sequence number only after A settles"
+    );
+
+    let settled = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: thread.thread_id.clone(),
+        })
+        .await
+        .expect("settled history read succeeds");
+    assert_eq!(settled.messages.len(), 2);
+    assert_eq!(settled.messages[0].sequence, 1);
+    assert_eq!(settled.messages[1].sequence, 2);
+}
+
+/// Issue #6047 regression: the per-thread write lock guarding the
+/// non-transactional fallback (`inbound_message_write_locks`) must release
+/// via RAII even when the guarded write fails, or every subsequent inbound
+/// message to that thread would hang forever behind the never-released
+/// lock — the same class of production wedge this fix exists to prevent.
+#[tokio::test]
+async fn filesystem_accept_inbound_message_write_lock_releases_after_failed_write() {
+    let backend = Arc::new(SequenceOrderRaceBackend::new());
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-lock-release", "alice");
+    let service = Arc::new(FilesystemSessionThreadService::new(scoped));
+    let scope = scope("fs-lock-release");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-lock-release").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let first = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("this write is engineered to fail FAIL-MARKER"),
+        })
+        .await;
+    assert!(
+        first.is_err(),
+        "the injected backend failure must propagate to the caller"
+    );
+
+    // If the write-lock guard leaked on the error path above, this call
+    // would hang forever waiting on a lock nobody releases.
+    let second = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        service.accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("second message"),
+        }),
+    )
+    .await
+    .expect(
+        "REGRESSION (#6047): write lock was not released after the first call's write \
+         failed — a subsequent call to the same thread hung",
+    )
+    .expect("second call succeeds");
+    assert_eq!(
+        second.sequence, 2,
+        "sequence 1 was reserved-then-burned by the first attempt's failed write"
+    );
+}
+
+/// PR #6096 review gap: the non-transactional fallback's sequence-index
+/// write (`finish_new_message_indexes` -> `write_message_sequence_index`)
+/// runs *after* `put_new_message_record` succeeds and *after* the issue
+/// #6047 per-thread write lock in `accept_inbound_message` has already been
+/// released (see the `{ ... }` block scoping the lock in
+/// `filesystem_service.rs::accept_inbound_message`). That's the opposite of
+/// `filesystem_accept_inbound_message_write_lock_releases_after_failed_write`
+/// above, which fails *inside* the lock. This test proves both halves for
+/// the outside-the-lock failure: the caller still gets the error, and —
+/// because the lock was already released before the sequence-index write
+/// ran — a subsequent call to the SAME thread is not blocked behind it.
+#[tokio::test]
+async fn filesystem_accept_inbound_message_sequence_index_failure_releases_lock() {
+    let backend = Arc::new(SequenceOrderRaceBackend::new());
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-seq-index-fail", "alice");
+    let service = Arc::new(FilesystemSessionThreadService::new(scoped));
+    let scope = scope("fs-seq-index-fail");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-fs-seq-index-fail").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    backend
+        .fail_next_sequence_index_write
+        .store(true, Ordering::SeqCst);
+
+    let first = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text(
+                "message record write succeeds, sequence index write fails",
+            ),
+        })
+        .await;
+    assert!(
+        first.is_err(),
+        "the injected sequence-index write failure must propagate to the caller even though \
+         the message record itself was already durably written"
+    );
+
+    // The write lock releases before `finish_new_message_indexes` runs, so
+    // this call must not be blocked behind the first call's failure.
+    let second = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        service.accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("second message"),
+        }),
+    )
+    .await
+    .expect(
+        "REGRESSION: the sequence-index failure happens after the write lock is released, so \
+         a subsequent call to the same thread must not hang",
+    )
+    .expect("second call succeeds");
+    assert_eq!(
+        second.sequence, 2,
+        "sequence 1 was reserved by the first attempt, whose message record was written \
+         durably before its sequence-index write failed"
+    );
+}
+
+/// Issue #6047: the per-thread write lock must be scoped per `(scope,
+/// thread_id)`, not globally or per-tenant. A regression that widened the
+/// lock's key (e.g. to the scope alone) would serialize unrelated threads'
+/// inbound messages against each other — a throughput regression this test
+/// guards against by proving two different threads never block each other.
+#[tokio::test]
+async fn filesystem_accept_inbound_message_does_not_serialize_across_different_threads() {
+    let backend = Arc::new(SequenceOrderRaceBackend::new());
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-cross-thread", "alice");
+    let service = Arc::new(FilesystemSessionThreadService::new(scoped));
+    let scope = scope("fs-cross-thread");
+    let thread_a = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-cross-a").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    let thread_b = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-cross-b").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let task_a = {
+        let service = Arc::clone(&service);
+        let scope = scope.clone();
+        let thread_id = thread_a.thread_id.clone();
+        tokio::spawn(async move {
+            service
+                .accept_inbound_message(AcceptInboundMessageRequest {
+                    scope,
+                    thread_id,
+                    actor_id: "actor-a".into(),
+                    source_binding_id: None,
+                    reply_target_binding_id: None,
+                    external_event_id: None,
+                    content: MessageContent::text("message to thread A RACE-MARKER-A".to_string()),
+                })
+                .await
+        })
+    };
+
+    // Wait until A is parked mid-write, holding thread A's write lock.
+    backend.a_reserved.notified().await;
+
+    // A message to a DIFFERENT thread must not wait behind A's lock.
+    let accepted_b = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        service.accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread_b.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: None,
+            content: MessageContent::text("message to thread B".to_string()),
+        }),
+    )
+    .await
+    .expect(
+        "REGRESSION: message to a different thread blocked behind another thread's write lock \
+         — the lock key must be scoped per-thread, not globally",
+    )
+    .expect("thread B's message completes");
+    assert_eq!(accepted_b.sequence, 1);
+
+    backend.release_a.notify_one();
+    let accepted_a = task_a
+        .await
+        .expect("task A join")
+        .expect("thread A's message completes once released");
+    assert_eq!(accepted_a.sequence, 1);
 }
 
 #[tokio::test]
@@ -3203,6 +3574,137 @@ impl FailOnceThreadRecordReadBackend {
     fn is_target_thread_record_path(&self, path: &VirtualPath) -> bool {
         path.as_str()
             .contains(&format!("/threads/{}/thread.json", self.thread_id))
+    }
+}
+
+/// Backend deliberately without a `begin()` override, so `RootFilesystem`'s
+/// default impl returns `Unsupported` — matching the production libSQL
+/// backend (`crates/ironclaw_filesystem/src/libsql.rs`), which has no
+/// multi-key transaction support. This forces
+/// `try_write_new_message_transactionally` into its non-transactional
+/// fallback (reserve sequence, then write the message record as a separate
+/// `put`), which is the path issue #6047 targets.
+///
+/// The first `put` of a message record whose body contains `RACE-MARKER-A`
+/// blocks on `release_a` until the test explicitly releases it, after first
+/// signaling `a_reserved` (so the test knows A already reserved its
+/// sequence number and is now stalled on the write). A `put` whose body
+/// contains `FAIL-MARKER` instead fails immediately with a backend error —
+/// used to prove the write lock releases via RAII even when the guarded
+/// write errors out. Setting `fail_next_sequence_index_write` makes the
+/// *next* `put` to a `messages_by_sequence` index path fail once (then
+/// auto-clears) — used to prove the same for a failure that lands after the
+/// write lock has already been released.
+struct SequenceOrderRaceBackend {
+    inner: InMemoryBackend,
+    a_reserved: Notify,
+    release_a: Notify,
+    a_reserve_seen: AtomicBool,
+    fail_next_sequence_index_write: AtomicBool,
+}
+
+impl SequenceOrderRaceBackend {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryBackend::new(),
+            a_reserved: Notify::new(),
+            release_a: Notify::new(),
+            a_reserve_seen: AtomicBool::new(false),
+            fail_next_sequence_index_write: AtomicBool::new(false),
+        }
+    }
+
+    fn is_message_record_path(path: &VirtualPath) -> bool {
+        path.as_str().contains("/messages/") && path.as_str().ends_with(".json")
+    }
+
+    fn is_message_sequence_index_path(path: &VirtualPath) -> bool {
+        path.as_str().contains("/messages_by_sequence/") && path.as_str().ends_with(".json")
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for SequenceOrderRaceBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        // Report CAS-only support (no `TxnCapability::MultiKey`); combined
+        // with not overriding `begin()`, this mirrors the libSQL backend's
+        // shape for the purposes of this test.
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        if Self::is_message_sequence_index_path(path)
+            && self
+                .fail_next_sequence_index_write
+                .swap(false, Ordering::SeqCst)
+        {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::WriteFile,
+                reason: "injected failure for issue #6047 sequence-index lock-release \
+                         regression test"
+                    .to_string(),
+            });
+        }
+        if Self::is_message_record_path(path) {
+            let contains = |marker: &[u8]| {
+                entry
+                    .body
+                    .windows(marker.len())
+                    .any(|window| window == marker)
+            };
+            if contains(b"FAIL-MARKER") {
+                return Err(FilesystemError::Backend {
+                    path: path.clone(),
+                    operation: FilesystemOperation::WriteFile,
+                    reason: "injected failure for issue #6047 lock-release regression test"
+                        .to_string(),
+                });
+            }
+            let is_a = contains(b"RACE-MARKER-A");
+            let is_b = contains(b"RACE-MARKER-B");
+            if is_a && !self.a_reserve_seen.swap(true, Ordering::SeqCst) {
+                self.a_reserved.notify_one();
+                self.release_a.notified().await;
+            } else if is_b {
+                // Let B's write land first; A is (or will be) parked above.
+            }
+        }
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        self.inner.reserve_sequence(path).await
     }
 }
 

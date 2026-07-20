@@ -15,7 +15,7 @@ use crate::{FilesystemSessionThreadService, SessionThreadError, SessionThreadRec
 
 use super::{
     LIST_THREADS_MISSING_INDEX_READ_CONCURRENCY, StoredThreadRecord, deserialize, invalid_path,
-    is_not_found, map_cas_error, scope_axes_string, scoped_path, serialize_pretty,
+    is_not_found, map_cas_error, scope_axes_string, scoped_path, serialize_pretty, weak_keyed_lock,
 };
 
 const THREAD_INDEX_KIND: &str = "thread_index";
@@ -495,18 +495,7 @@ where
     }
 
     fn thread_index_load_lock(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
-        self.thread_index_load_locks
-            .lock()
-            .map(|mut locks| {
-                locks.retain(|_, lock| lock.strong_count() > 0);
-                if let Some(lock) = locks.get(key).and_then(|lock| lock.upgrade()) {
-                    return lock;
-                }
-                let lock = Arc::new(tokio::sync::Mutex::new(()));
-                locks.insert(key.to_string(), Arc::downgrade(&lock));
-                lock
-            })
-            .unwrap_or_else(|_| Arc::new(tokio::sync::Mutex::new(())))
+        weak_keyed_lock(&self.thread_index_load_locks, key.to_string())
     }
 
     async fn thread_source_listing_for_index_load(
