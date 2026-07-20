@@ -1035,6 +1035,24 @@ where
     /// per-op O(store-size) `from_persistence_snapshot` rebuild. Only
     /// [`RunnerLeaseOverlay::All`] (expired-lease recovery) still rebuilds from
     /// an overlaid snapshot clone, because it must overlay every run's lease.
+    /// Capture the runner-lease overlay inputs from the current cached state
+    /// for one `apply` iteration: an `All` overlay needs the whole snapshot
+    /// re-overlaid (baseline `Some`), a `Run` overlay needs just that run's
+    /// record patched onto the shared cached engine, and `None` needs neither.
+    /// Shared by both the whole-snapshot and targeted-delta apply paths.
+    fn overlay_inputs(
+        state: &RowSnapshotState,
+        overlay: RunnerLeaseOverlay,
+    ) -> (Option<TurnPersistenceSnapshot>, Option<TurnRunRecord>) {
+        let overlay_baseline =
+            matches!(overlay, RunnerLeaseOverlay::All).then(|| state.snapshot.clone());
+        let overlay_run = match overlay {
+            RunnerLeaseOverlay::Run(run_id) => state.run_record_by_id(run_id),
+            RunnerLeaseOverlay::None | RunnerLeaseOverlay::All => None,
+        };
+        (overlay_baseline, overlay_run)
+    }
+
     async fn acquire_overlaid_store(
         &self,
         cached_store: Arc<TurnStateEngine>,
@@ -1077,12 +1095,7 @@ where
                     let state = guard.as_ref().ok_or_else(|| TurnError::Unavailable {
                         reason: "row snapshot cache was not initialized".to_string(),
                     })?;
-                    let overlay_baseline =
-                        matches!(overlay, RunnerLeaseOverlay::All).then(|| state.snapshot.clone());
-                    let overlay_run = match overlay {
-                        RunnerLeaseOverlay::Run(run_id) => state.run_record_by_id(run_id),
-                        RunnerLeaseOverlay::None | RunnerLeaseOverlay::All => None,
-                    };
+                    let (overlay_baseline, overlay_run) = Self::overlay_inputs(state, overlay);
                     (
                         state.snapshot.clone(),
                         state.journal_seq,
@@ -1195,15 +1208,11 @@ where
     }
 
     fn enqueue_delta(&self, delta: SnapshotDelta) -> Result<Option<DeltaAck>, TurnError> {
-        self.delta_journal
-            .enqueue(delta)
-            
+        self.delta_journal.enqueue(delta)
     }
 
     async fn await_delta_ack(&self, ack: Option<DeltaAck>) -> Result<(), TurnError> {
-        DeltaJournal::await_ack(ack)
-            .await
-            
+        DeltaJournal::await_ack(ack).await
     }
 
     async fn await_pending_commit<T>(
@@ -1255,12 +1264,7 @@ where
                     let state = guard.as_ref().ok_or_else(|| TurnError::Unavailable {
                         reason: "row snapshot cache was not initialized".to_string(),
                     })?;
-                    let overlay_baseline =
-                        matches!(overlay, RunnerLeaseOverlay::All).then(|| state.snapshot.clone());
-                    let overlay_run = match overlay {
-                        RunnerLeaseOverlay::Run(run_id) => state.run_record_by_id(run_id),
-                        RunnerLeaseOverlay::None | RunnerLeaseOverlay::All => None,
-                    };
+                    let (overlay_baseline, overlay_run) = Self::overlay_inputs(state, overlay);
                     (
                         state.latest_event_cursor(),
                         Arc::clone(&state.store),
