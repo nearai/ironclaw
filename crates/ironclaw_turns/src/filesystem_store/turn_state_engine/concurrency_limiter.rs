@@ -12,7 +12,7 @@ pub(super) enum OriginClass {
 }
 
 /// Limits passed into the limiter. Mirrors the three concurrent-cap fields on
-/// `InMemoryTurnStateStoreLimits`.
+/// `TurnStateStoreLimits`.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ConcurrencyLimits {
     pub max_concurrent_runs_per_user: Option<NonZeroU32>,

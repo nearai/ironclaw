@@ -87,6 +87,7 @@ ironclaw_resources = { path = "../ironclaw_resources", version = "0.1.0" }
 ironclaw_scripts = { path = "../ironclaw_scripts", version = "0.1.0" }
 ironclaw_skills = { path = "../ironclaw_skills", version = "0.3.0", default-features = false }
 ironclaw_trust = { path = "../ironclaw_trust", version = "0.1.0" }
+ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0", features = ["test-support"] }
 rust_decimal = "1"
 serde = "1"
 serde_json = "1"

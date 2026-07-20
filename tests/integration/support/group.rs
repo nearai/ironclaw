@@ -102,8 +102,8 @@ use ironclaw_turns::run_profile::{
     ModelProfileId,
 };
 use ironclaw_turns::{
-    FilesystemTurnStateStore, InMemoryTurnEventSink, InMemoryTurnStateStoreLimits,
-    LoopCheckpointStore, TurnCoordinator, TurnEventSink, TurnScope, TurnStateStore,
+    FilesystemTurnStateStore, InMemoryTurnEventSink, LoopCheckpointStore, TurnCoordinator,
+    TurnEventSink, TurnScope, TurnStateStore, TurnStateStoreLimits,
 };
 
 use super::builder::{
@@ -744,9 +744,9 @@ impl RebornIntegrationGroupBuilder {
         // public builder method (`ironclaw_turns::filesystem_store`); this only
         // calls it a second time with a shortened `runner_lease_ttl` when a test
         // opts in via `with_runner_lease_ttl_for_test`. `None` (default) leaves
-        // `InMemoryTurnStateStoreLimits::default()` untouched, byte-identical to
+        // `TurnStateStoreLimits::default()` untouched, byte-identical to
         // today's behavior.
-        let mut turn_state_limits = InMemoryTurnStateStoreLimits::default();
+        let mut turn_state_limits = TurnStateStoreLimits::default();
         if let Some(ttl) = self.runner_lease_ttl_override {
             turn_state_limits.runner_lease_ttl = ttl;
         }

@@ -572,7 +572,7 @@ fn skill_md(name: &str, keyword: &str, prompt: &str) -> String {
 /// `TurnRunnerSettings::max_concurrent_runs_per_user` into the turn-state store.
 ///
 /// Exercises the full `build_reborn_runtime` → `build_reborn_services` →
-/// `InMemoryTurnStateStore::with_limits` wiring path so that a mis-wired or
+/// `FilesystemTurnStateRowStore::with_limits` wiring path so that a mis-wired or
 /// accidentally-dropped limit is caught at the composition boundary, not just in
 /// unit tests that hand-construct the store.
 ///

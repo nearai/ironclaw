@@ -3,12 +3,13 @@ use std::sync::Arc;
 use chrono::{Duration as ChronoDuration, TimeZone, Utc};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_loop_host::EventPublishingTurnRunTransitionPort;
+use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
     AcceptedMessageRef, BlockedReason, DefaultTurnCoordinator, GateRef, IdempotencyKey,
-    InMemoryTurnEventSink, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits,
-    LoopCheckpointStateRef, ReplyTargetBindingRef, RunProfileRequest, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnCoordinator,
-    TurnEventKind, TurnEventSink, TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope, TurnStatus,
+    InMemoryTurnEventSink, LoopCheckpointStateRef, ReplyTargetBindingRef, RunProfileRequest,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId,
+    TurnCoordinator, TurnEventKind, TurnEventSink, TurnLeaseToken, TurnRunId, TurnRunnerId,
+    TurnScope, TurnStateStoreLimits, TurnStatus,
     runner::{
         BlockRunRequest, ClaimRunRequest, CompleteRunRequest, RecoverExpiredLeasesRequest,
         TurnRunTransitionPort,
@@ -55,7 +56,7 @@ fn accepted_run_id(response: &SubmitTurnResponse) -> TurnRunId {
 
 #[tokio::test]
 async fn event_publishing_transition_port_publishes_blocked_and_terminal_events() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let sink = Arc::new(InMemoryTurnEventSink::default());
     let transition_port = EventPublishingTurnRunTransitionPort::new(
@@ -144,9 +145,10 @@ async fn event_publishing_transition_port_publishes_expired_lease_terminal_event
     // Crash-retry bound 0: a checkpoint-less abandoned lease terminal-fails
     // (crash_retry_exhausted) instead of re-queuing (#6284) — the terminal
     // recovery event this test asserts the publisher emits.
-    let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits::default().set_max_crash_recovery_reclaims(0),
-    ));
+    let store = Arc::new(
+        in_memory_turn_state_store()
+            .with_limits(TurnStateStoreLimits::default().set_max_crash_recovery_reclaims(0)),
+    );
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let sink = Arc::new(InMemoryTurnEventSink::default());
     let transition_port = EventPublishingTurnRunTransitionPort::new(

@@ -14,6 +14,11 @@ publish = false
 [package.metadata.ironclaw]
 layer = "kernel"
 
+[features]
+# In-memory turn-state store double (`test_support::in_memory_turn_state_store`)
+# for cross-crate tests. Enabled via dev-dependencies; never in production.
+test-support = []
+
 [dependencies]
 async-trait = "0.1"
 blake3 = "1"
@@ -34,7 +39,15 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
+# Self-reference so the crate's own integration tests see `test_support`.
+ironclaw_turns = { path = ".", features = ["test-support"] }
 rand = "0.10"
 static_assertions = "1"
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt", "test-util", "time"] }
+tokio = { version = "1", features = [
+    "macros",
+    "rt",
+    "rt-multi-thread",
+    "test-util",
+    "time",
+] }

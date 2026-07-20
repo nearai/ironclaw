@@ -51,6 +51,8 @@ url = "2"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
 [dev-dependencies]
+# Enables the shared in-memory turn-state store double for tests only.
+ironclaw_turns = { path = "../ironclaw_turns", features = ["test-support"] }
 # Enables the in-memory-backed outbound-state store constructor for tests only.
 ironclaw_outbound = { path = "../ironclaw_outbound", version = "0.1.0", features = ["test-support"] }
 # Enables the in-memory-backed approval store constructors for tests only.

@@ -534,9 +534,9 @@ impl Args {
         }
     }
 
-    pub(crate) fn turn_state_store_limits(&self) -> ironclaw_turns::InMemoryTurnStateStoreLimits {
-        let defaults = ironclaw_turns::InMemoryTurnStateStoreLimits::default();
-        ironclaw_turns::InMemoryTurnStateStoreLimits {
+    pub(crate) fn turn_state_store_limits(&self) -> ironclaw_turns::TurnStateStoreLimits {
+        let defaults = ironclaw_turns::TurnStateStoreLimits::default();
+        ironclaw_turns::TurnStateStoreLimits {
             max_events: self.turn_state_max_events.unwrap_or(defaults.max_events),
             max_terminal_records: self
                 .turn_state_max_terminal_records
@@ -623,20 +623,10 @@ pub(crate) enum TurnStateBackend {
     /// Durable typed append-log deltas with one hot in-process store per
     /// tenant/user. Candidate filesystem fix for the blob growth curve.
     FilesystemRow,
-    /// The row store over an in-memory `RootFilesystem` backend — the proposed
-    /// replacement for the direct `InMemoryTurnStateStore` authority in the
-    /// `inmemory-turn-state` profile. Measures the row-store mechanism's
-    /// overhead with the durable backend cost removed.
+    /// The row store over an in-memory `RootFilesystem` backend — the in-memory
+    /// turn-state authority: coordination in memory with the durable backend
+    /// cost removed. Measures the row-store mechanism's overhead in isolation.
     RowMemory,
-    /// One shared in-process `InMemoryTurnStateStore` authority — coordination
-    /// in memory, no per-step CAS. Prototype for the runtime-wedge fix.
-    Memory,
-    /// The shipped hosted-single-tenant-volume config: the shared in-memory
-    /// authority with a durable persist-on-block sink attached. The sink fires
-    /// only when the gate-blocked set changes (off the hot path), so this
-    /// measures the extra cost the durability wiring adds to the normal
-    /// claim/complete path versus plain `Memory`.
-    MemoryPersistOnBlock,
 }
 
 impl TurnStateBackend {
@@ -645,15 +635,7 @@ impl TurnStateBackend {
             Self::Filesystem => "filesystem",
             Self::FilesystemRow => "filesystem-row",
             Self::RowMemory => "row-memory",
-            Self::Memory => "memory",
-            Self::MemoryPersistOnBlock => "memory-persist-on-block",
         }
-    }
-
-    /// Whether a durable persist-on-block sink is attached to the in-memory
-    /// authority.
-    pub(crate) fn persists_on_block(self) -> bool {
-        matches!(self, Self::MemoryPersistOnBlock)
     }
 }
 

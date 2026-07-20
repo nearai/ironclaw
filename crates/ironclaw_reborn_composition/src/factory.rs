@@ -251,7 +251,7 @@ impl ironclaw_network::NetworkHttpEgress for TestNetworkHttpEgress {
 
 // One turn-state store, backend-injected — the production
 // `FilesystemTurnStateStoreKind<F>` (row layout) every deployment uses, never a
-// bespoke `InMemoryTurnStateStore` standalone authority (arch-simplification
+// bespoke private turn-state engine standalone authority (arch-simplification
 // §4.3). The `inmemory-turn-state` feature no longer selects the store TYPE, only
 // the durability POLICY: it flips this store to `WriteBehind` at the build arm.
 // The no-durable-features build backs it with `InMemoryBackend` directly
@@ -1241,7 +1241,7 @@ struct RebornStoreGraphInput {
     trigger_repository: Arc<dyn TriggerRepository>,
     project_repository: Arc<dyn ProjectRepository>,
     /// Concurrency limits for the in-memory (or filesystem-backed) turn-state store.
-    turn_state_store_limits: ironclaw_turns::InMemoryTurnStateStoreLimits,
+    turn_state_store_limits: ironclaw_turns::TurnStateStoreLimits,
     #[cfg(feature = "postgres")]
     postgres_resource_governor_singleton: Option<bool>,
     /// Raw libSQL substrate handle, carried so the canonical Reborn identity
@@ -2399,7 +2399,7 @@ where
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn production_turn_state_store<F>(
     filesystem: Arc<ScopedFilesystem<F>>,
-    limits: ironclaw_turns::InMemoryTurnStateStoreLimits,
+    limits: ironclaw_turns::TurnStateStoreLimits,
 ) -> FilesystemTurnStateStoreKind<F>
 where
     F: RootFilesystem + 'static,
@@ -2711,7 +2711,7 @@ async fn build_local_runtime_store_graph(
     ));
     // Turn state runs the production `FilesystemTurnStateStoreKind` row store over
     // a dedicated volatile `InMemoryBackend` (§4.3) at the `WriteThrough` default —
-    // no bespoke `InMemoryTurnStateStore` standalone authority. Matches the sibling
+    // no bespoke private turn-state engine standalone authority. Matches the sibling
     // run-state/approval stores in this build (volatile, `LocalOnly`); the row
     // store persists every transition synchronously, so this build needs no
     // shutdown drain.
@@ -4691,7 +4691,7 @@ struct RebornProductionBuildContext {
         Option<crate::slack::slack_setup::SlackPersonalSetupServiceSlot>,
     owner_id: String,
     local_runtime_identity: Option<RebornLocalRuntimeIdentity>,
-    turn_state_store_limits: ironclaw_turns::InMemoryTurnStateStoreLimits,
+    turn_state_store_limits: ironclaw_turns::TurnStateStoreLimits,
     /// The pre-minted scheduler wake wiring to carry to `RebornServices` so
     /// `build_reborn_runtime` can hand it to `build_default_planned_runtime` via
     /// `DefaultPlannedRuntimeParts.scheduler_wake_wiring`.
@@ -4969,7 +4969,7 @@ where
         .map_err(crate::RebornCompositionError::Mount)?;
     let turn_state = Arc::new(production_turn_state_store(
         Arc::clone(&turn_state_filesystem),
-        ironclaw_turns::InMemoryTurnStateStoreLimits::default(),
+        ironclaw_turns::TurnStateStoreLimits::default(),
     ));
     let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
     let secret_credentials = build_filesystem_secret_credential_stores(
@@ -5693,7 +5693,7 @@ mod tests {
 
         let store = production_turn_state_store(
             filesystem,
-            ironclaw_turns::InMemoryTurnStateStoreLimits::default(),
+            ironclaw_turns::TurnStateStoreLimits::default(),
         );
 
         assert!(matches!(store, FilesystemTurnStateStoreKind::Row(_)));

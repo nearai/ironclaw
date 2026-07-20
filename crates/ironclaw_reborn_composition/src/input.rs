@@ -18,7 +18,7 @@ use ironclaw_host_runtime::TenantSandboxProcessPort;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_trust::HostTrustPolicy;
-use ironclaw_turns::{InMemoryTurnStateStoreLimits, TurnRunWakeNotifier};
+use ironclaw_turns::{TurnRunWakeNotifier, TurnStateStoreLimits};
 use secrecy::SecretString;
 
 #[cfg(feature = "postgres")]
@@ -236,7 +236,7 @@ pub struct RebornBuildInput {
         Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
     /// Concurrency limits applied to the in-memory turn-state store.
     /// Defaults to no limits (all caps `None` / unlimited).
-    pub(crate) turn_state_store_limits: InMemoryTurnStateStoreLimits,
+    pub(crate) turn_state_store_limits: TurnStateStoreLimits,
 }
 
 #[derive(Clone, Debug)]
@@ -836,10 +836,7 @@ impl RebornBuildInput {
     /// Called by `build_reborn_runtime` after mapping from `TurnRunnerSettings` so the
     /// factory can apply them when constructing the store. Callers should use
     /// `RebornRuntimeInput::with_runner_settings` rather than calling this directly.
-    pub(crate) fn with_turn_state_store_limits(
-        mut self,
-        limits: InMemoryTurnStateStoreLimits,
-    ) -> Self {
+    pub(crate) fn with_turn_state_store_limits(mut self, limits: TurnStateStoreLimits) -> Self {
         self.turn_state_store_limits = limits;
         self
     }
@@ -903,7 +900,7 @@ impl RebornBuildInput {
             slack_host_beta_enabled: false,
             slack_personal_oauth_redirect_uri_configured: false,
             nearai_mcp_bootstrap_config: None,
-            turn_state_store_limits: InMemoryTurnStateStoreLimits::default(),
+            turn_state_store_limits: TurnStateStoreLimits::default(),
         }
     }
 }

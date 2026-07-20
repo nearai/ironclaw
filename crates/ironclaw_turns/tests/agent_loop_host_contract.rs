@@ -7,14 +7,15 @@ use chrono::{TimeZone, Utc};
 use ironclaw_host_api::{
     AgentId, Blocked, CapabilityId, ProjectId, Resolution, RuntimeKind, TenantId, ThreadId, UserId,
 };
+use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
     AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
-    DefaultTurnCoordinator, IdempotencyKey, InMemoryTurnStateStore, LoopBlocked, LoopBlockedKind,
-    LoopCompleted, LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef, LoopMessageRef,
-    ProductTurnContext, ReplyTargetBindingRef, RunOriginAdapter, RunProfileRequest,
-    RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCheckpointId, TurnCoordinator, TurnLeaseToken, TurnOriginKind, TurnOwner, TurnRunId,
-    TurnRunState, TurnRunnerId, TurnStatus,
+    DefaultTurnCoordinator, IdempotencyKey, LoopBlocked, LoopBlockedKind, LoopCompleted,
+    LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef, LoopMessageRef, ProductTurnContext,
+    ReplyTargetBindingRef, RunOriginAdapter, RunProfileRequest, RunProfileVersion,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId,
+    TurnCoordinator, TurnLeaseToken, TurnOriginKind, TurnOwner, TurnRunId, TurnRunState,
+    TurnRunnerId, TurnStatus,
     events::EventCursor,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
@@ -3275,7 +3276,7 @@ async fn claimed_run_context() -> LoopRunContext {
         Some(ProjectId::new("project-loop").unwrap()),
         ThreadId::new("thread-loop-host").unwrap(),
     );
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let response = coordinator
         .submit_turn(SubmitTurnRequest {

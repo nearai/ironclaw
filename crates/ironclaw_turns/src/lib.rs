@@ -16,7 +16,6 @@ mod filesystem_store;
 mod ids;
 mod lifecycle;
 pub mod loop_exit;
-pub(crate) mod memory;
 mod origin;
 mod request;
 mod response;
@@ -25,6 +24,8 @@ pub mod runner;
 pub mod scope;
 mod status;
 mod store;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 pub use admission::{
     AllowAllTurnAdmissionLimitProvider, StaticTurnAdmissionLimitProvider, TurnAdmissionAxisKind,
@@ -58,7 +59,7 @@ pub use external_tool_catalog::{
 };
 pub use filesystem_store::{
     FilesystemTurnStateBlockPersistence, FilesystemTurnStateRowStore, FilesystemTurnStateStore,
-    FilesystemTurnStateStoreKind, TurnStateDurabilityPolicy,
+    FilesystemTurnStateStoreKind, TurnStateDurabilityPolicy, TurnStateStoreLimits,
 };
 pub use ids::{
     AcceptedMessageRef, CapabilityActivityId, GateRef, IdempotencyKey, LoopDiagnosticRef,
@@ -77,7 +78,6 @@ pub use loop_exit::{
     LoopExitEvidencePort, LoopExitMapping, LoopExitValidationDecision, LoopExitViolation,
     LoopExitViolationKind, LoopFailed, LoopFailureKind,
 };
-pub use memory::{InMemoryTurnStateStore, InMemoryTurnStateStoreLimits};
 pub use origin::{
     ProductTurnContext, RunOriginAdapter, TurnOriginKind, TurnOwner, TurnSurfaceType,
 };
