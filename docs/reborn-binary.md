@@ -640,8 +640,9 @@ Do not port the current `src/cli/*` command tree wholesale. Port commands one at
 
 ## Release packaging decision
 
-The canonical Reborn `ironclaw` binary from `ironclaw_reborn_cli` is **not yet
-included in cargo-dist release artifacts**.
+The canonical Reborn `ironclaw` binary from `ironclaw_reborn_cli` is published
+directly by the Reborn release path, but is **not yet included in cargo-dist
+release artifacts or installers**.
 
 The tag-driven release pipeline preflights the shipping binary directly through
 `.github/workflows/reborn-release-compile.yml`. That matrix performs a final
@@ -649,27 +650,32 @@ link on the two GNU Linux, two musl Linux, two macOS, and one Windows target
 configured for releases, then runs the exact native output through config-free
 CLI startup checks. The musl jobs additionally reject `PT_INTERP` and
 `DT_NEEDED` entries so their outputs remain portable to systems without a musl
-loader. Its short-lived `reborn-compile-*` workflow artifacts are preflight
-evidence only and are excluded from the `artifacts-*` set uploaded to the
-GitHub Release. It does not claim `serve`, external-service, installer, or
-canonical Reborn packaging coverage.
+loader. Its short-lived `reborn-compile-*` workflow artifacts remain excluded
+from the legacy cargo-dist `artifacts-*` namespace. For matching tag runs, an
+independent publisher strictly validates all seven staging artifacts, restores
+their binary mode, packages each as `ironclaw-<target>.tar.gz`, adds SHA-256
+files, and creates the tag's GitHub Release. A direct manual run of the reusable
+compile workflow does not publish. This path does not claim `serve`, external
+service, or installer coverage.
 
 While #6160's temporary Reborn-only release policy is active, matching tag runs
-stop after this compile matrix. The legacy cargo-dist plan, WASM build, GitHub
-Release host, registry-checksum, announcement, and release Docker caller all
-skip, so the run creates neither a GitHub Release nor published release assets
-or images. The independent manual and hourly entry points in `docker.yml`
-remain available.
+run the compile matrix and direct Reborn publisher. The legacy cargo-dist plan,
+WASM build, legacy GitHub Release host, registry-checksum, announcement, and
+release Docker caller all skip. The result is a GitHub Release containing only
+the seven Reborn binary archives and checksums; no installers, WASM bundles, or
+images are published. The independent manual and hourly entry points in
+`docker.yml` remain available.
 
-Current `dist plan --output-format=json` with `crates/ironclaw_reborn_cli` marked `dist = false` emits only the root legacy package artifacts (`ironclaw` package, `ironclaw-legacy` executable). Removing `dist = false` alone is not enough to ship the canonical Reborn `ironclaw` executable in the existing `ironclaw-v*` release workflow because that workflow is shaped around the root `ironclaw` package tag. Enabling the `ironclaw_reborn_cli` release also requires cargo-dist WiX metadata/template work and an explicit package/tag/versioning decision.
+Current `dist plan --output-format=json` with `crates/ironclaw_reborn_cli` marked `dist = false` emits only the root legacy package artifacts (`ironclaw` package, `ironclaw-legacy` executable). Removing `dist = false` alone is not enough to ship the canonical Reborn `ironclaw` executable through cargo-dist because that plan is shaped around the root `ironclaw` package tag. The direct archives above do not resolve the remaining crate-version/tag alignment or cargo-dist WiX/installer contract; in particular, the CLI package version is not yet asserted to equal the `ironclaw-v*` tag.
 
-Follow-up issue: #3483 tracks packaging the canonical Reborn binary in release artifacts.
+Follow-up issue: #6079 tracks the remaining Reborn version and installer packaging work.
 
-Until #3483 is resolved, keep:
+Until #6079 is resolved, keep:
 
 ```toml
 [package.metadata.dist]
 dist = false
 ```
 
-in `crates/ironclaw_reborn_cli/Cargo.toml` so releases do not silently claim to ship an unverified Reborn binary package.
+in `crates/ironclaw_reborn_cli/Cargo.toml` so cargo-dist does not claim Reborn
+packages or installers before the version and WiX contracts are aligned.

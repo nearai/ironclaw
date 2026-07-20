@@ -294,19 +294,20 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         .find("name: Smoke compiled binary")
         .expect("binary smoke step");
     let upload_position = compile_workflow
-        .find("name: Upload compile evidence")
-        .expect("compile evidence upload step");
+        .find("name: Upload compiled binary")
+        .expect("compiled binary upload step");
     assert!(
         build_position < linkage_position
             && linkage_position < smoke_position
             && smoke_position < upload_position,
-        "linkage and runtime validation must gate artifact upload"
+        "linkage and runtime validation must gate compiled binary upload"
     );
     assert!(
         compile_workflow.contains("name: reborn-compile-${{ matrix.target }}")
             && compile_workflow.contains("if-no-files-found: error")
+            && compile_workflow.contains("overwrite: true")
             && !compile_workflow.contains("name: artifacts-reborn"),
-        "compile evidence must stay outside cargo-dist's artifacts-* release namespace"
+        "Reborn staging binaries must be rerun-safe and stay outside cargo-dist's artifacts-* release namespace"
     );
     let host_job = release_workflow
         .split_once("\n  host:\n")
@@ -320,7 +321,17 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
     );
     assert!(
         !host_job.contains("reborn-compile-"),
-        "release host must not publish Reborn compile evidence"
+        "legacy release host must not publish Reborn staging binaries"
+    );
+    let reborn_publish_job = release_workflow
+        .split_once("\n  publish-reborn-release:\n")
+        .and_then(|(_, jobs)| jobs.split_once("\n  plan:\n"))
+        .map(|(publisher, _)| publisher)
+        .expect("Reborn release publisher job");
+    assert!(
+        reborn_publish_job.contains("pattern: reborn-compile-*")
+            && !reborn_publish_job.contains("pattern: artifacts-*"),
+        "only the Reborn publisher may consume Reborn staging binaries"
     );
 
     let release_tag_trigger = concat!(
@@ -346,7 +357,7 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
     );
     assert!(
         cli_manifest.contains("[package.metadata.dist]\ndist = false"),
-        "#6160 must not opt Reborn into cargo-dist before #3483 is resolved"
+        "#6160 must not opt Reborn into cargo-dist before #6079 is resolved"
     );
 }
 
@@ -6781,7 +6792,7 @@ api_key_env = "REBORN_TEST_UNSET_BC8F4D_KEY"
 }
 
 #[test]
-fn release_ci_skips_legacy_publish_dag_without_disabling_independent_docker_runs() {
+fn release_ci_publishes_reborn_without_enabling_legacy_or_docker() {
     let root = workspace_root();
     let release_workflow = std::fs::read_to_string(root.join(".github/workflows/release.yml"))
         .expect("release workflow")
@@ -6829,6 +6840,64 @@ fn release_ci_skips_legacy_publish_dag_without_disabling_independent_docker_runs
         "the Reborn compile matrix must remain the active release path"
     );
 
+    let reborn_publish_job = release_job("publish-reborn-release");
+    assert!(
+        reborn_publish_job.contains("needs: reborn-binary-compile")
+            && reborn_publish_job.contains("if: needs.reborn-binary-compile.result == 'success'")
+            && reborn_publish_job.contains("permissions:\n      contents: write")
+            && reborn_publish_job.contains("pattern: reborn-compile-*")
+            && reborn_publish_job.contains("merge-multiple: false")
+            && reborn_publish_job.contains("GH_REPO: ${{ github.repository }}")
+            && reborn_publish_job.contains("RELEASE_COMMIT: ${{ github.sha }}")
+            && reborn_publish_job.contains("RELEASE_TAG: ${{ github.ref_name }}")
+            && !reborn_publish_job.contains("pattern: artifacts-*")
+            && !reborn_publish_job.contains("needs: plan")
+            && !reborn_publish_job.contains("\n      - plan\n")
+            && reborn_publish_job.contains("gh release create")
+            && reborn_publish_job.contains("release-assets/*")
+            && reborn_publish_job.contains("--verify-tag")
+            && reborn_publish_job.contains("--draft")
+            && reborn_publish_job.contains("-F draft=false")
+            && !reborn_publish_job.contains("gh release upload")
+            && !reborn_publish_job.contains("--clobber"),
+        "successful Reborn binaries must publish without enabling or overwriting legacy assets"
+    );
+    let target_allowlist = concat!(
+        "          targets=(\n",
+        "            x86_64-unknown-linux-gnu\n",
+        "            x86_64-unknown-linux-musl\n",
+        "            aarch64-unknown-linux-gnu\n",
+        "            aarch64-unknown-linux-musl\n",
+        "            x86_64-apple-darwin\n",
+        "            aarch64-apple-darwin\n",
+        "            x86_64-pc-windows-msvc\n",
+        "          )\n",
+    );
+    assert!(
+        reborn_publish_job.contains(target_allowlist)
+            && reborn_publish_job.contains("Expected ${#targets[@]} Reborn artifacts")
+            && reborn_publish_job.contains("! -s \"$binary_path\"")
+            && reborn_publish_job.contains("install -m 0755")
+            && reborn_publish_job.contains("package_name=\"ironclaw-$target\"")
+            && reborn_publish_job.contains("$asset_dir/$package_name.tar.gz")
+            && reborn_publish_job.contains("sha256sum ironclaw-*.tar.gz > sha256.sum")
+            && reborn_publish_job.contains("expected-release-assets.tsv")
+            && reborn_publish_job.contains(".digest // \"\"")
+            && reborn_publish_job.contains(".target_commitish // \"\"")
+            && reborn_publish_job.contains(".name // \"\"")
+            && reborn_publish_job.contains("verify_release \"$draft_release\" true")
+            && reborn_publish_job.contains("verify_release \"$published_release\" false")
+            && reborn_publish_job.contains("publish_verified_draft \"${draft_ids[0]}\"")
+            && reborn_publish_job.contains("Multiple draft Releases exist")
+            && reborn_publish_job.matches("verify_tag_commit").count() >= 5
+            && reborn_publish_job.contains("Existing Release assets differ")
+            && reborn_publish_job.contains("${RELEASE_TAG#ironclaw-v}")
+            && reborn_publish_job.contains("${release_version%%+*}")
+            && reborn_publish_job.contains("[[ \"$release_core\" == *-* ]]")
+            && reborn_publish_job.contains("--prerelease"),
+        "publisher must validate seven unique non-empty archives, checksums, reruns, and RC metadata"
+    );
+
     let plan_job = release_job("plan");
     assert!(
         plan_job.contains("if: github.repository == ''")
@@ -6850,6 +6919,46 @@ fn release_ci_skips_legacy_publish_dag_without_disabling_independent_docker_runs
             "legacy release job {legacy_job_name} must remain downstream of the disabled plan root"
         );
     }
+
+    let build_local_job = release_job("build-local-artifacts");
+    assert!(
+        build_local_job.contains("needs.plan.outputs.publishing == 'true'")
+            && !build_local_job
+                .lines()
+                .any(|line| line.starts_with("    if:") && line.contains("always()")),
+        "legacy local artifacts must stay gated by the disabled publishing plan"
+    );
+    let build_global_job = release_job("build-global-artifacts");
+    assert!(
+        !build_global_job
+            .lines()
+            .any(|line| line.starts_with("    if:") && line.contains("always()")),
+        "legacy global artifacts must not bypass a skipped plan/local dependency"
+    );
+    let build_wasm_job = release_job("build-wasm-extensions");
+    assert!(
+        build_wasm_job.contains("if: ${{ needs.plan.outputs.publishing == 'true' }}")
+            && !build_wasm_job
+                .lines()
+                .any(|line| line.starts_with("    if:") && line.contains("always()")),
+        "legacy WASM extensions must stay gated by the disabled publishing plan"
+    );
+    let host_job = release_job("host");
+    assert!(
+        host_job.contains("needs.plan.result == 'success'")
+            && host_job.contains("needs.plan.outputs.publishing == 'true'"),
+        "legacy GitHub Release host must require a successful publishing plan"
+    );
+    let registry_job = release_job("update-registry-checksums");
+    assert!(
+        registry_job.contains("needs.host.result == 'success'"),
+        "legacy registry updates must require the disabled host to succeed"
+    );
+    let announce_job = release_job("announce");
+    assert!(
+        announce_job.contains("needs.host.result == 'success'"),
+        "legacy announcements must require the disabled host to succeed"
+    );
 
     let docker_job = release_job("docker-image");
     assert!(

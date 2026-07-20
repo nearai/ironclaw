@@ -3,23 +3,22 @@
 # Copyright 2022-2024, axodotdev
 # SPDX-License-Identifier: MIT or Apache-2.0
 #
-# CI that:
+# CI that checks for a release tag, compiles and smokes the canonical Reborn
+# binary matrix, and publishes the verified binaries to a GitHub Release. The
+# generated cargo-dist implementation remains below as a disabled rollback path.
 #
-# * checks for a Git Tag that looks like a release
-# * builds artifacts with dist (archives, installers, hashes)
-# * uploads those artifacts to temporary workflow zip
-# * on success, uploads the artifacts to a GitHub Release
-#
-# Note that the GitHub Release will be created with a generated
-# title/body based on your changelogs.
-#
-# Temporary #6160 policy: only the Reborn compile preflight below runs;
-# the generated cargo-dist/WASM/GitHub Release and Docker jobs stay defined
-# for rollback but are skipped.
+# Temporary #6160 policy: compile and smoke the canonical Reborn binary, then
+# publish only those target-qualified archives to the tag's GitHub Release.
+# The generated cargo-dist/WASM and Docker jobs stay defined for rollback but
+# are skipped.
 
 name: Release
 permissions:
   contents: read
+
+concurrency:
+  group: release-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
 
 # This task will run whenever you push a git tag that looks like a version
 # like "1.0.0", "v0.1.0-prerelease.1", "my-app/0.1.0", "releases/v1.0.0", etc.
@@ -49,7 +48,7 @@ on:
 
 jobs:
   # Compile the shipping Reborn binary on every supported release target.
-  # This is intentionally separate from cargo-dist until #3483 resolves the
+  # This is intentionally separate from cargo-dist until #6079 resolves the
   # Reborn package/tag/installer contract.
   reborn-binary-compile:
     name: Reborn binary compile
@@ -57,9 +56,288 @@ jobs:
     with:
       ref: ${{ github.sha }}
 
+  # Package the exact binaries that passed the target matrix and publish them
+  # without enabling the legacy cargo-dist/WASM or Docker release paths.
+  publish-reborn-release:
+    name: Publish Reborn GitHub Release
+    needs: reborn-binary-compile
+    if: needs.reborn-binary-compile.result == 'success'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_COMMIT: ${{ github.sha }}
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Download Reborn compile outputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: reborn-compile-*
+          path: reborn-staging
+          merge-multiple: false
+
+      - id: prepare
+        name: Validate and package Reborn release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$RELEASE_TAG" =~ ^ironclaw-v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Unexpected release tag: $RELEASE_TAG"
+            exit 1
+          fi
+
+          tag_commit="$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)"
+          if [[ "$tag_commit" != "$RELEASE_COMMIT" ]]; then
+            echo "::error::Tag $RELEASE_TAG resolves to $tag_commit, expected $RELEASE_COMMIT"
+            exit 1
+          fi
+
+          targets=(
+            x86_64-unknown-linux-gnu
+            x86_64-unknown-linux-musl
+            aarch64-unknown-linux-gnu
+            aarch64-unknown-linux-musl
+            x86_64-apple-darwin
+            aarch64-apple-darwin
+            x86_64-pc-windows-msvc
+          )
+
+          mapfile -t artifact_dirs < <(
+            find reborn-staging -mindepth 1 -maxdepth 1 -type d -print | sort
+          )
+          if [[ "${#artifact_dirs[@]}" -ne "${#targets[@]}" ]]; then
+            echo "::error::Expected ${#targets[@]} Reborn artifacts, found ${#artifact_dirs[@]}"
+            printf 'Downloaded artifact directory: %s\n' "${artifact_dirs[@]:-<none>}"
+            exit 1
+          fi
+
+          package_parent="$RUNNER_TEMP/reborn-packages"
+          asset_dir="$GITHUB_WORKSPACE/release-assets"
+          mkdir -p "$package_parent" "$asset_dir"
+          source_date_epoch="$(git show -s --format=%ct "$RELEASE_COMMIT")"
+
+          for target in "${targets[@]}"; do
+            artifact_dir="reborn-staging/reborn-compile-$target"
+            binary_name=ironclaw
+            if [[ "$target" == "x86_64-pc-windows-msvc" ]]; then
+              binary_name=ironclaw.exe
+            fi
+            binary_path="$artifact_dir/$binary_name"
+
+            mapfile -t artifact_entries < <(
+              find "$artifact_dir" -mindepth 1 -maxdepth 1 -print | sort
+            )
+            if [[ "${#artifact_entries[@]}" -ne 1 || "${artifact_entries[0]:-}" != "$binary_path" || ! -f "$binary_path" || ! -s "$binary_path" || -L "$binary_path" ]]; then
+              echo "::error::$artifact_dir must contain exactly one non-empty regular file named $binary_name"
+              printf 'Artifact entry: %s\n' "${artifact_entries[@]:-<none>}"
+              exit 1
+            fi
+
+            package_name="ironclaw-$target"
+            package_dir="$package_parent/$package_name"
+            mkdir -p "$package_dir"
+            install -m 0755 "$binary_path" "$package_dir/$binary_name"
+            for document in LICENSE-APACHE LICENSE-MIT README.md CHANGELOG.md; do
+              install -m 0644 "$document" "$package_dir/$document"
+            done
+
+            tar \
+              --sort=name \
+              --mtime="@$source_date_epoch" \
+              --owner=0 \
+              --group=0 \
+              --numeric-owner \
+              -C "$package_parent" \
+              -czf "$asset_dir/$package_name.tar.gz" \
+              "$package_name"
+          done
+
+          (
+            cd "$asset_dir"
+            for archive in ironclaw-*.tar.gz; do
+              sha256sum "$archive" > "$archive.sha256"
+            done
+            sha256sum ironclaw-*.tar.gz > sha256.sum
+          )
+
+          mapfile -t release_assets < <(
+            find "$asset_dir" -mindepth 1 -maxdepth 1 -type f -print | sort
+          )
+          expected_asset_count=$(( ${#targets[@]} * 2 + 1 ))
+          if [[ "${#release_assets[@]}" -ne "$expected_asset_count" ]]; then
+            echo "::error::Expected $expected_asset_count release assets, found ${#release_assets[@]}"
+            exit 1
+          fi
+
+          expected_manifest="$RUNNER_TEMP/expected-release-assets.tsv"
+          : > "$expected_manifest"
+          for asset_path in "${release_assets[@]}"; do
+            if [[ ! -s "$asset_path" ]]; then
+              echo "::error::Release asset is empty: $asset_path"
+              exit 1
+            fi
+            asset_name="$(basename "$asset_path")"
+            asset_digest="$(sha256sum "$asset_path" | awk '{print $1}')"
+            printf '%s\tsha256:%s\n' "$asset_name" "$asset_digest" >> "$expected_manifest"
+          done
+          sort -o "$expected_manifest" "$expected_manifest"
+
+          release_version="${RELEASE_TAG#ironclaw-v}"
+          release_core="${release_version%%+*}"
+          release_is_prerelease=false
+          if [[ "$release_core" == *-* ]]; then
+            release_is_prerelease=true
+          fi
+          echo "version=$release_version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$release_is_prerelease" >> "$GITHUB_OUTPUT"
+
+      - name: Create Reborn GitHub Release
+        shell: bash
+        env:
+          RELEASE_IS_PRERELEASE: ${{ steps.prepare.outputs.prerelease }}
+          RELEASE_VERSION: ${{ steps.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          verify_tag_commit() {
+            local tag_commit
+            tag_commit="$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)"
+            if [[ "$tag_commit" != "$RELEASE_COMMIT" ]]; then
+              echo "::error::Tag $RELEASE_TAG resolves to $tag_commit, expected $RELEASE_COMMIT"
+              return 1
+            fi
+          }
+
+          verify_release() {
+            local release_json="$1"
+            local expected_draft="$2"
+            local actual_manifest="$RUNNER_TEMP/actual-release-assets.tsv"
+            local actual_draft actual_name actual_prerelease actual_target
+            actual_draft="$(jq -r '.draft' "$release_json")"
+            actual_name="$(jq -r '.name // ""' "$release_json")"
+            actual_prerelease="$(jq -r '.prerelease' "$release_json")"
+            actual_target="$(jq -r '.target_commitish // ""' "$release_json")"
+            if [[ "$actual_draft" != "$expected_draft" ]]; then
+              echo "::error::Release draft state is $actual_draft, expected $expected_draft"
+              return 1
+            fi
+            if [[ "$actual_name" != "IronClaw $RELEASE_VERSION (Reborn)" ]]; then
+              echo "::error::Release title is $actual_name, expected IronClaw $RELEASE_VERSION (Reborn)"
+              return 1
+            fi
+            if [[ "$actual_prerelease" != "$RELEASE_IS_PRERELEASE" ]]; then
+              echo "::error::Release prerelease state is $actual_prerelease, expected $RELEASE_IS_PRERELEASE"
+              return 1
+            fi
+            if [[ "$actual_target" != "$RELEASE_COMMIT" ]]; then
+              echo "::error::Release targets $actual_target, expected $RELEASE_COMMIT"
+              return 1
+            fi
+            jq -r '.assets[] | [.name, (.digest // "")] | @tsv' "$release_json" \
+              | sort > "$actual_manifest"
+            if ! cmp -s "$RUNNER_TEMP/expected-release-assets.tsv" "$actual_manifest"; then
+              echo "::error::Existing Release assets differ from the verified Reborn outputs"
+              diff -u "$RUNNER_TEMP/expected-release-assets.tsv" "$actual_manifest" || true
+              return 1
+            fi
+          }
+
+          publish_verified_draft() {
+            local draft_id="$1"
+            local draft_release="$RUNNER_TEMP/draft-release.json"
+            local published_id
+            local published_release="$RUNNER_TEMP/published-release.json"
+
+            gh api "repos/$GH_REPO/releases/$draft_id" > "$draft_release"
+            if ! verify_release "$draft_release" true; then
+              echo "::error::Draft Release $draft_id differs from the verified Reborn outputs; inspect it before retrying"
+              return 1
+            fi
+            verify_tag_commit
+
+            gh api --method PATCH "repos/$GH_REPO/releases/$draft_id" \
+              -F draft=false > "$published_release"
+            verify_tag_commit
+            verify_release "$published_release" false
+
+            published_id="$(gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" --jq .id)"
+            if [[ "$published_id" != "$draft_id" ]]; then
+              echo "::error::Published Release id is $published_id, expected $draft_id"
+              return 1
+            fi
+          }
+
+          verify_tag_commit
+          published_release="$RUNNER_TEMP/published-release.json"
+          if gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" > "$published_release" 2>/dev/null; then
+            verify_release "$published_release" false
+            echo "Release $RELEASE_TAG already contains the verified Reborn assets"
+            exit 0
+          fi
+
+          mapfile -t draft_ids < <(
+            gh api --paginate "repos/$GH_REPO/releases?per_page=100" \
+              | jq -r --arg tag "$RELEASE_TAG" '.[] | select(.tag_name == $tag and .draft) | .id'
+          )
+          if [[ "${#draft_ids[@]}" -gt 1 ]]; then
+            echo "::error::Multiple draft Releases exist for $RELEASE_TAG; inspect them before retrying"
+            printf 'Draft Release id: %s\n' "${draft_ids[@]}"
+            exit 1
+          fi
+          if [[ "${#draft_ids[@]}" -eq 1 ]]; then
+            publish_verified_draft "${draft_ids[0]}"
+            echo "Published the existing verified draft Release for $RELEASE_TAG"
+            exit 0
+          fi
+
+          notes_file="$RUNNER_TEMP/release-notes.md"
+          {
+            echo "Canonical IronClaw Reborn binaries for \`$RELEASE_TAG\`."
+            echo
+            echo "Each target-qualified archive contains the compiled \`ironclaw\` binary that passed the release matrix's native CLI smoke checks. The release also includes per-archive SHA-256 files and an aggregate \`sha256.sum\`."
+            echo
+            echo "Legacy cargo-dist installers, WASM extensions, registry updates, announcements, and Docker images are not published by this workflow. Tag/package version alignment and installer packaging remain tracked by #6079."
+          } > "$notes_file"
+
+          release_args=(
+            "$RELEASE_TAG"
+            --verify-tag
+            --target "$RELEASE_COMMIT"
+            --title "IronClaw $RELEASE_VERSION (Reborn)"
+            --notes-file "$notes_file"
+            --draft
+          )
+          if [[ "$RELEASE_IS_PRERELEASE" == "true" ]]; then
+            release_args+=(--prerelease)
+          fi
+          verify_tag_commit
+          gh release create "${release_args[@]}" release-assets/*
+
+          mapfile -t created_draft_ids < <(
+            gh api --paginate "repos/$GH_REPO/releases?per_page=100" \
+              | jq -r --arg tag "$RELEASE_TAG" '.[] | select(.tag_name == $tag and .draft) | .id'
+          )
+          if [[ "${#created_draft_ids[@]}" -ne 1 ]]; then
+            echo "::error::Expected exactly one draft Release for $RELEASE_TAG after creation"
+            printf 'Draft Release id: %s\n' "${created_draft_ids[@]:-<none>}"
+            exit 1
+          fi
+
+          draft_id="${created_draft_ids[0]}"
+          publish_verified_draft "$draft_id"
+
   # Keep the legacy cargo-dist/WASM/GitHub Release chain visible for rollback,
-  # but disable its root while #6160 makes this workflow Reborn-compile-only.
-  # The Reborn compile matrix above remains the only active release path.
+  # but disable its root while #6160 uses the direct Reborn publisher above.
   plan:
     if: github.repository == ''
     runs-on: "ubuntu-22.04"
