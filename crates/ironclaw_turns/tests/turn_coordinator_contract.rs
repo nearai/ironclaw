@@ -10,14 +10,15 @@ use std::{
 };
 
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, AllowAllTurnAdmissionPolicy,
     BlockedReason, CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator,
-    DefaultTurnLifecycleEventBus, GateRef, GetRunStateRequest, IdempotencyKey,
-    InMemoryRunProfileResolver, InMemoryTurnEventSink, InMemoryTurnStateStore,
-    InMemoryTurnStateStoreLimits, LifecyclePublicationErrorPort, LifecyclePublishingTurnStateStore,
-    LoopBlockedKind, LoopCheckpointStateRef, LoopExitMapping, LoopGateRef, ProductTurnContext,
+    DefaultTurnLifecycleEventBus, FilesystemTurnStateRowStore, GateRef, GetRunStateRequest,
+    IdempotencyKey, InMemoryRunProfileResolver, InMemoryTurnEventSink,
+    LifecyclePublicationErrorPort, LifecyclePublishingTurnStateStore, LoopBlockedKind,
+    LoopCheckpointStateRef, LoopExitMapping, LoopGateRef, ProductTurnContext,
     ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest, RetryTurnRequest,
     RetryTurnResponse, RunOriginAdapter, RunProfileId, RunProfileRequest,
     RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
@@ -32,8 +33,8 @@ use ironclaw_turns::{
     TurnIdempotencyReplay, TurnLeaseToken, TurnLifecycleEvent, TurnLifecycleEventBus,
     TurnLockVersion, TurnOriginKind, TurnOwner, TurnRunId, TurnRunProfile, TurnRunState,
     TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnRunnerId, TurnScope,
-    TurnSpawnTreePort, TurnSpawnTreeStateStore, TurnStateBlockPersistence, TurnStateStore,
-    TurnStatus, TurnSurfaceType,
+    TurnSpawnTreePort, TurnSpawnTreeStateStore, TurnStateStore, TurnStateStoreLimits, TurnStatus,
+    TurnSurfaceType,
     events::EventCursor,
     run_profile::{LoopGateKind, LoopModelRouteSnapshot, LoopModelUsage},
     runner::{
@@ -42,7 +43,40 @@ use ironclaw_turns::{
         RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
         RecoverExpiredLeasesResponse, TurnRunTransitionPort, TurnRunnerOutcome,
     },
+    test_support::{in_memory_turn_state_store, in_memory_turns_filesystem},
 };
+
+type TurnStore = FilesystemTurnStateRowStore<InMemoryBackend>;
+
+/// Seed a fresh `/turns` filesystem with an arbitrary persistence snapshot — the
+/// row-store analog of the deleted whole-snapshot `from_persistence_snapshot`
+/// constructor. The snapshot is written
+/// as the legacy `/turns/state.json` blob; a [`FilesystemTurnStateRowStore`]
+/// opened over the returned filesystem migrates it into durable rows on first
+/// read. This is the only way to feed the load / rehydration path a state the
+/// natural operation sequence cannot produce (cleared or corrupted admission
+/// reservations, legacy idempotency replay records, an overflowed subagent
+/// depth). For a plain restart (unmutated durable bytes) reopen a second store
+/// over a shared `in_memory_turns_filesystem()` instead.
+async fn turns_fs_seeded_with(
+    snapshot: &ironclaw_turns::TurnPersistenceSnapshot,
+) -> Arc<ironclaw_filesystem::ScopedFilesystem<InMemoryBackend>> {
+    use ironclaw_filesystem::{CasExpectation, Entry};
+    use ironclaw_host_api::{ResourceScope, ScopedPath};
+
+    let fs = in_memory_turns_filesystem();
+    let body = serde_json::to_vec(snapshot).expect("serialize seeded turn-state snapshot");
+    let path = ScopedPath::new("/turns/state.json").expect("legacy turn-state blob path");
+    fs.put(
+        &ResourceScope::system(),
+        &path,
+        Entry::bytes(body),
+        CasExpectation::Absent,
+    )
+    .await
+    .expect("write seeded legacy turn-state blob");
+    fs
+}
 
 async fn apply_test_loop_exit<P>(
     port: &P,
@@ -474,6 +508,8 @@ async fn children_of_get_run_record_and_tree_reservation_are_scope_checked() {
     assert_eq!(
         store
             .persistence_snapshot()
+            .await
+            .unwrap()
             .spawn_tree_reservations
             .iter()
             .find(|reservation| reservation.root_run_id == parent)
@@ -544,6 +580,8 @@ async fn spawn_tree_port_submits_child_with_computed_lineage_and_reservation() {
     assert_eq!(
         store
             .persistence_snapshot()
+            .await
+            .unwrap()
             .spawn_tree_reservations
             .iter()
             .find(|reservation| reservation.root_run_id == parent)
@@ -585,6 +623,8 @@ async fn spawn_tree_port_idempotency_replay_does_not_reserve_again() {
     assert_eq!(
         store
             .persistence_snapshot()
+            .await
+            .unwrap()
             .spawn_tree_reservations
             .iter()
             .find(|reservation| reservation.root_run_id == parent)
@@ -633,6 +673,8 @@ async fn spawn_tree_port_releases_reservation_when_child_submit_fails() {
     assert!(
         store
             .persistence_snapshot()
+            .await
+            .unwrap()
             .spawn_tree_reservations
             .is_empty()
     );
@@ -647,7 +689,7 @@ async fn spawn_tree_port_releases_reservation_when_child_submit_fails() {
 
 #[tokio::test]
 async fn spawn_tree_port_rejects_missing_parent_depth_overflow_and_capacity_exceeded() {
-    use ironclaw_turns::{InMemoryTurnStateStoreLimits, TurnPersistenceSnapshot};
+    use ironclaw_turns::TurnPersistenceSnapshot;
 
     let (coordinator, store) = coordinator();
     let missing_parent = coordinator
@@ -709,7 +751,7 @@ async fn spawn_tree_port_rejects_missing_parent_depth_overflow_and_capacity_exce
             .await
             .unwrap(),
     );
-    let mut snapshot: TurnPersistenceSnapshot = store.persistence_snapshot();
+    let mut snapshot: TurnPersistenceSnapshot = store.persistence_snapshot().await.unwrap();
     if let Some(run) = snapshot
         .runs
         .iter_mut()
@@ -717,13 +759,9 @@ async fn spawn_tree_port_rejects_missing_parent_depth_overflow_and_capacity_exce
     {
         run.subagent_depth = u32::MAX;
     }
-    let depth_store = Arc::new(
-        InMemoryTurnStateStore::from_persistence_snapshot(
-            snapshot,
-            InMemoryTurnStateStoreLimits::default(),
-        )
-        .unwrap(),
-    );
+    let depth_store = Arc::new(FilesystemTurnStateRowStore::new(
+        turns_fs_seeded_with(&snapshot).await,
+    ));
     let depth_coordinator = DefaultTurnCoordinator::new(depth_store);
     let depth_error = depth_coordinator
         .submit_child_run(child_run_request(
@@ -888,41 +926,20 @@ async fn blocked_dependent_run_can_resume_and_cancel_directly() {
     assert!(!cancelled.already_terminal);
 }
 
-/// Captures every snapshot the in-memory store hands the durable block sink so
-/// a test can assert both *that* persistence fired and *what* it persisted.
-#[derive(Default)]
-struct RecordingBlockPersistence {
-    snapshots: Mutex<Vec<ironclaw_turns::TurnPersistenceSnapshot>>,
-}
-
-impl RecordingBlockPersistence {
-    fn snapshots(&self) -> Vec<ironclaw_turns::TurnPersistenceSnapshot> {
-        self.snapshots.lock().unwrap().clone()
-    }
-}
-
-#[async_trait::async_trait]
-impl TurnStateBlockPersistence for RecordingBlockPersistence {
-    async fn persist(&self, snapshot: &ironclaw_turns::TurnPersistenceSnapshot) {
-        self.snapshots.lock().unwrap().push(snapshot.clone());
-    }
-}
-
-/// The in-memory turn-state authority is volatile, but a turn parked on a human
+/// The row turn-state authority persists durably, and a turn parked on a human
 /// gate (approval/auth) must survive a process restart. This exercises the
-/// persist-on-block contract end to end: the durable sink fires only when the
-/// gate-blocked set changes (block, then resume) and never on the plain
-/// claim/complete hot path, and the last persisted snapshot rehydrates a fresh
-/// store with the blocked run intact.
+/// persist-on-block contract end to end: blocked runs are durable rows, so a
+/// fresh store reopened over the same filesystem rehydrates the blocked run
+/// intact, and a gate-resumed run that later completes converges to its terminal
+/// state durably so a restart does not resurrect a finished turn.
 #[tokio::test]
 async fn blocked_run_persists_to_sink_and_rehydrates_across_restart() {
-    let sink = Arc::new(RecordingBlockPersistence::default());
-    let store = Arc::new(InMemoryTurnStateStore::default().with_block_persistence(sink.clone()));
+    let fs = in_memory_turns_filesystem();
+    let store = Arc::new(FilesystemTurnStateRowStore::new(fs.clone()));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
 
-    // Hot path: a turn that runs to completion without ever blocking must not
-    // touch the durable sink — that is the contention the sink must not
-    // reintroduce.
+    // Hot path: a turn that runs to completion without ever blocking still
+    // persists durably (WriteThrough), so it needs no special sink path.
     let hot_run_id = accepted_run_id(
         &coordinator
             .submit_turn(submit_request("thread-hot", "idem-hot"))
@@ -930,13 +947,8 @@ async fn blocked_run_persists_to_sink_and_rehydrates_across_restart() {
             .unwrap(),
     );
     complete_queued_run(store.as_ref(), hot_run_id, "thread-hot").await;
-    assert!(
-        sink.snapshots().is_empty(),
-        "claim/complete hot path must not persist to the block sink"
-    );
 
-    // Block a turn on an approval gate — the blocked set changes, so the sink
-    // fires with a snapshot that carries the blocked run.
+    // Block a turn on an approval gate — the blocked run is written durably.
     let run_id = accepted_run_id(
         &coordinator
             .submit_turn(submit_request("thread-gate", "idem-gate"))
@@ -965,26 +977,21 @@ async fn blocked_run_persists_to_sink_and_rehydrates_across_restart() {
     .await
     .unwrap();
 
-    let after_block = sink.snapshots();
-    assert_eq!(
-        after_block.len(),
-        1,
-        "blocking a run must persist exactly once"
-    );
-    let persisted_run = after_block
-        .last()
+    let persisted_run = store
+        .persistence_snapshot()
+        .await
         .unwrap()
         .runs
         .iter()
         .find(|record| record.run_id == run_id)
-        .expect("blocked run present in persisted snapshot")
+        .expect("blocked run present in durable snapshot")
         .clone();
     assert_eq!(persisted_run.status, TurnStatus::BlockedApproval);
 
     // Auth gates take the same durable path: block a second run on an auth gate
     // (via `block_run`, the path a `BlockedReason::Auth` uses) and confirm the
-    // sink fires again with the run recorded as `BlockedAuth`. This is the case
-    // that most needs durability — a turn parked on auth must survive a deploy.
+    // run is recorded as `BlockedAuth`. This is the case that most needs
+    // durability — a turn parked on auth must survive a deploy.
     let auth_run_id = accepted_run_id(
         &coordinator
             .submit_turn(submit_request("thread-gate-auth", "idem-gate-auth"))
@@ -1016,23 +1023,12 @@ async fn blocked_run_persists_to_sink_and_rehydrates_across_restart() {
         })
         .await
         .unwrap();
-    let after_auth_block = sink.snapshots();
-    assert_eq!(
-        after_auth_block.len(),
-        2,
-        "blocking a run on an auth gate must persist"
-    );
 
-    // The latest snapshot now carries both parked runs. Rehydrate a fresh store
-    // from it — both the approval- and auth-blocked runs must come back blocked
-    // so a later "Approve"/token submission lands on a real run.
-    let blocked_snapshot = after_auth_block.last().unwrap().clone();
-    let restored = InMemoryTurnStateStore::from_persistence_snapshot(
-        blocked_snapshot,
-        InMemoryTurnStateStoreLimits::default(),
-    )
-    .unwrap();
-    let restored_runs = restored.persistence_snapshot().runs;
+    // Restart: reopen a fresh store over the same durable filesystem — both the
+    // approval- and auth-blocked runs must come back blocked so a later
+    // "Approve"/token submission lands on a real run.
+    let restored = FilesystemTurnStateRowStore::new(fs.clone());
+    let restored_runs = restored.persistence_snapshot().await.unwrap().runs;
     let restored_approval = restored_runs
         .iter()
         .find(|record| record.run_id == run_id)
@@ -1044,8 +1040,7 @@ async fn blocked_run_persists_to_sink_and_rehydrates_across_restart() {
         .expect("auth-blocked run survives rehydration");
     assert_eq!(restored_auth.status, TurnStatus::BlockedAuth);
 
-    // Resuming the approval gate changes the blocked set, so the sink fires
-    // again with that run no longer blocked.
+    // Resuming the approval gate moves the run back to Queued, durably.
     let resumed = coordinator
         .resume_turn(ResumeTurnRequest {
             scope: scope("thread-gate"),
@@ -1061,17 +1056,10 @@ async fn blocked_run_persists_to_sink_and_rehydrates_across_restart() {
         .await
         .unwrap();
     assert_eq!(resumed.status, TurnStatus::Queued);
-    assert_eq!(
-        sink.snapshots().len(),
-        3,
-        "resuming a blocked run must persist the blocked-set change"
-    );
 
     // A resumed run completes from `Running`, not from a blocked state. The
-    // durable snapshot must still converge to the terminal state so a restart
-    // does not rehydrate an already-finished run as a live `Queued`/`Running`
-    // run — persist-on-block tracks the gate-touched run through its terminal
-    // transition to guarantee this.
+    // durable state must still converge to the terminal state so a restart does
+    // not rehydrate an already-finished run as a live `Queued`/`Running` run.
     let resumed_runner_id = TurnRunnerId::new();
     let resumed_lease_token = TurnLeaseToken::new();
     store
@@ -1091,29 +1079,24 @@ async fn blocked_run_persists_to_sink_and_rehydrates_across_restart() {
         })
         .await
         .unwrap();
-    let after_complete = sink.snapshots();
-    assert_eq!(
-        after_complete.len(),
-        4,
-        "completing a gate-resumed run must persist its terminal state"
-    );
-    let terminal_snapshot = after_complete.last().unwrap().clone();
-    let terminal_run = terminal_snapshot
+    let terminal_run = store
+        .persistence_snapshot()
+        .await
+        .unwrap()
         .runs
         .iter()
         .find(|record| record.run_id == run_id)
-        .expect("resumed run present in terminal snapshot");
+        .expect("resumed run present in terminal snapshot")
+        .clone();
     assert_eq!(terminal_run.status, TurnStatus::Completed);
 
-    // Rehydrate from the terminal snapshot — the run must come back Completed,
-    // not Queued/Running, so recovery does not re-run a finished turn.
-    let restored_terminal = InMemoryTurnStateStore::from_persistence_snapshot(
-        terminal_snapshot,
-        InMemoryTurnStateStoreLimits::default(),
-    )
-    .unwrap();
+    // Reopen once more from the terminal durable state — the run must come back
+    // Completed, not Queued/Running, so recovery does not re-run a finished turn.
+    let restored_terminal = FilesystemTurnStateRowStore::new(fs.clone());
     let restored_terminal_run = restored_terminal
         .persistence_snapshot()
+        .await
+        .unwrap()
         .runs
         .into_iter()
         .find(|record| record.run_id == run_id)
@@ -1233,20 +1216,17 @@ async fn block_resume_complete_reports_cumulative_usage_without_double_counting(
     assert_eq!(state.model_usage, Some(cumulative));
 }
 
-/// A run recovered *from a restart snapshot* while blocked must still receive a
-/// durable terminal-convergence write when it later resumes and completes —
-/// otherwise the next restart would resurrect the finished run as live. This
-/// exercises the seeding of the gate-persisted set on rehydration
-/// (`with_block_persistence` after `from_persistence_snapshot`), the path a live
-/// block never covers.
+/// A run recovered *across a restart* while blocked must still receive a durable
+/// terminal-convergence write when it later resumes and completes — otherwise the
+/// next restart would resurrect the finished run as live. This exercises the
+/// gate-touched tracking a store reopened over durable rows must re-establish,
+/// the path a live block never covers.
 #[tokio::test]
 async fn rehydrated_blocked_run_persists_terminal_state_after_resume() {
-    // Build a durable snapshot that contains a gate-blocked run, as a restart
-    // would recover.
-    let origin = Arc::new(
-        InMemoryTurnStateStore::default()
-            .with_block_persistence(Arc::new(RecordingBlockPersistence::default())),
-    );
+    // Build durable state that contains a gate-blocked run, as a restart would
+    // recover.
+    let fs = in_memory_turns_filesystem();
+    let origin = Arc::new(FilesystemTurnStateRowStore::new(fs.clone()));
     let coordinator = DefaultTurnCoordinator::new(origin.clone());
     let run_id = accepted_run_id(
         &coordinator
@@ -1279,19 +1259,23 @@ async fn rehydrated_blocked_run_persists_terminal_state_after_resume() {
         })
         .await
         .unwrap();
-    let recovery_snapshot = origin.persistence_snapshot();
-
-    // Restart: rehydrate a fresh store from that snapshot and attach a fresh
-    // sink. The recovered blocked run must be seeded into the gate-persisted set.
-    let restored_sink = Arc::new(RecordingBlockPersistence::default());
-    let restored = Arc::new(
-        InMemoryTurnStateStore::from_persistence_snapshot(
-            recovery_snapshot,
-            InMemoryTurnStateStoreLimits::default(),
-        )
-        .unwrap()
-        .with_block_persistence(restored_sink.clone()),
+    // Precondition: the blocked run is durable before the restart.
+    assert_eq!(
+        origin
+            .persistence_snapshot()
+            .await
+            .unwrap()
+            .runs
+            .iter()
+            .find(|record| record.run_id == run_id)
+            .expect("blocked run present before restart")
+            .status,
+        TurnStatus::BlockedApproval,
     );
+
+    // Restart: reopen a fresh store over the same durable filesystem. The
+    // recovered blocked run must be re-established as gate-touched.
+    let restored = Arc::new(FilesystemTurnStateRowStore::new(fs.clone()));
 
     // Resume the recovered gate, then claim + complete it.
     restored
@@ -1330,13 +1314,13 @@ async fn rehydrated_blocked_run_persists_terminal_state_after_resume() {
 
     // Completing the recovered run must have persisted its terminal state, so a
     // subsequent restart rehydrates it as Completed, not live.
-    let terminal_snapshot = restored_sink
-        .snapshots()
-        .pop()
-        .expect("terminal persist after recovery resume/complete");
-    let terminal_run = terminal_snapshot
+    let reopened = FilesystemTurnStateRowStore::new(fs.clone());
+    let terminal_run = reopened
+        .persistence_snapshot()
+        .await
+        .unwrap()
         .runs
-        .iter()
+        .into_iter()
         .find(|record| record.run_id == run_id)
         .expect("recovered run present in terminal snapshot");
     assert_eq!(
@@ -1353,11 +1337,9 @@ async fn rehydrated_blocked_run_persists_terminal_state_after_resume() {
 /// persisted, and every subsequent restart re-runs the finished turn.
 #[tokio::test]
 async fn rehydrated_resumed_run_persists_terminal_state() {
-    // Build a snapshot where a gate-touched run has already resumed (Queued).
-    let origin = Arc::new(
-        InMemoryTurnStateStore::default()
-            .with_block_persistence(Arc::new(RecordingBlockPersistence::default())),
-    );
+    // Build durable state where a gate-touched run has already resumed (Queued).
+    let fs = in_memory_turns_filesystem();
+    let origin = Arc::new(FilesystemTurnStateRowStore::new(fs.clone()));
     let coordinator = DefaultTurnCoordinator::new(origin.clone());
     let run_id = accepted_run_id(
         &coordinator
@@ -1407,10 +1389,12 @@ async fn rehydrated_resumed_run_persists_terminal_state() {
         })
         .await
         .unwrap();
-    let recovery_snapshot = origin.persistence_snapshot();
     // Precondition: the run is captured as Queued (resumed), not Blocked.
     assert_eq!(
-        recovery_snapshot
+        origin
+            .persistence_snapshot()
+            .await
+            .unwrap()
             .runs
             .iter()
             .find(|record| record.run_id == run_id)
@@ -1419,17 +1403,9 @@ async fn rehydrated_resumed_run_persists_terminal_state() {
         TurnStatus::Queued,
     );
 
-    // Restart: rehydrate + attach a fresh sink. The resumed gate-touched run must
-    // be re-tracked from its retained checkpoint marker.
-    let restored_sink = Arc::new(RecordingBlockPersistence::default());
-    let restored = Arc::new(
-        InMemoryTurnStateStore::from_persistence_snapshot(
-            recovery_snapshot,
-            InMemoryTurnStateStoreLimits::default(),
-        )
-        .unwrap()
-        .with_block_persistence(restored_sink.clone()),
-    );
+    // Restart: reopen over the same durable filesystem. The resumed gate-touched
+    // run must be re-tracked from its retained checkpoint marker.
+    let restored = Arc::new(FilesystemTurnStateRowStore::new(fs.clone()));
     let resume_runner = TurnRunnerId::new();
     let resume_lease = TurnLeaseToken::new();
     restored
@@ -1450,12 +1426,12 @@ async fn rehydrated_resumed_run_persists_terminal_state() {
         .await
         .unwrap();
 
-    let terminal_snapshot = restored_sink
-        .snapshots()
-        .pop()
-        .expect("terminal persist after recovered resumed run completes");
+    let reopened = FilesystemTurnStateRowStore::new(fs.clone());
     assert_eq!(
-        terminal_snapshot
+        reopened
+            .persistence_snapshot()
+            .await
+            .unwrap()
             .runs
             .iter()
             .find(|record| record.run_id == run_id)
@@ -1466,14 +1442,15 @@ async fn rehydrated_resumed_run_persists_terminal_state() {
     );
 }
 
-/// Graceful-shutdown flush must durably capture **in-flight, non-blocked** runs,
+/// Graceful-shutdown drain must leave **in-flight, non-blocked** runs durable,
 /// not just gate-blocked ones — that is what makes a planned deploy (SIGTERM)
-/// recover in-progress turns instead of dropping them. Persist-on-block never
-/// fires for a plain running turn, so only `flush()` covers it.
+/// recover in-progress turns instead of dropping them. Under WriteThrough the
+/// claim itself is already durable; `drain()` guarantees no un-acked tail remains
+/// before a reopen recovers the run.
 #[tokio::test]
 async fn flush_persists_in_flight_non_blocked_run() {
-    let sink = Arc::new(RecordingBlockPersistence::default());
-    let store = Arc::new(InMemoryTurnStateStore::default().with_block_persistence(sink.clone()));
+    let fs = in_memory_turns_filesystem();
+    let store = Arc::new(FilesystemTurnStateRowStore::new(fs.clone()));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let run_id = accepted_run_id(
         &coordinator
@@ -1492,49 +1469,43 @@ async fn flush_persists_in_flight_non_blocked_run() {
         .await
         .unwrap()
         .unwrap();
-    // The run is now Running (in-flight) and never blocked, so persist-on-block
-    // has not fired — the hot path stays off the sink.
-    assert!(
-        sink.snapshots().is_empty(),
-        "claim/run must not persist on the hot path"
-    );
 
-    // Graceful shutdown flush captures the in-flight run.
-    store.flush().await;
-    let flushed = sink
-        .snapshots()
-        .pop()
-        .expect("flush must persist a snapshot");
-    let record = flushed
+    // The run is now Running (in-flight) and never blocked.
+    let record = store
+        .persistence_snapshot()
+        .await
+        .unwrap()
         .runs
         .iter()
         .find(|record| record.run_id == run_id)
-        .expect("in-flight run present in flushed snapshot");
+        .expect("in-flight run present in durable snapshot")
+        .clone();
     assert!(
         matches!(record.status, TurnStatus::Running | TurnStatus::Queued),
-        "flush must capture the in-flight non-blocked run, got {:?}",
+        "durable state must carry the in-flight non-blocked run, got {:?}",
         record.status
     );
 
+    // Graceful shutdown drain flushes any write-behind tail durably.
+    store.drain().await.unwrap();
+
     // And it rehydrates, so a restart recovers the in-flight run.
-    let restored = InMemoryTurnStateStore::from_persistence_snapshot(
-        flushed,
-        InMemoryTurnStateStoreLimits::default(),
-    )
-    .unwrap();
+    let restored = FilesystemTurnStateRowStore::new(fs.clone());
     assert!(
         restored
             .persistence_snapshot()
+            .await
+            .unwrap()
             .runs
             .iter()
             .any(|record| record.run_id == run_id),
-        "in-flight run survives flush + rehydration"
+        "in-flight run survives drain + reopen"
     );
 }
 
 #[tokio::test]
 async fn default_turn_coordinator_publishes_lifecycle_events_to_sink() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let sink = Arc::new(InMemoryTurnEventSink::default());
     let store = lifecycle_publishing_store(store, None, Some(sink.clone()));
     let coordinator = DefaultTurnCoordinator::new(store);
@@ -1553,7 +1524,7 @@ async fn default_turn_coordinator_publishes_lifecycle_events_to_sink() {
 
 #[tokio::test]
 async fn default_turn_coordinator_dedupes_idempotency_replay_events_by_cursor() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let sink = Arc::new(InMemoryTurnEventSink::default());
     let publishing_store = lifecycle_publishing_store(store.clone(), None, Some(sink.clone()));
     let coordinator = DefaultTurnCoordinator::new(publishing_store);
@@ -1647,7 +1618,7 @@ async fn default_turn_coordinator_dedupes_idempotency_replay_events_by_cursor() 
 
 #[tokio::test]
 async fn default_turn_coordinator_does_not_publish_cancel_event_for_terminal_retry() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let sink = Arc::new(InMemoryTurnEventSink::default());
     let publishing_store = lifecycle_publishing_store(store.clone(), None, Some(sink.clone()));
     let coordinator = DefaultTurnCoordinator::new(publishing_store);
@@ -1678,7 +1649,7 @@ async fn default_turn_coordinator_does_not_publish_cancel_event_for_terminal_ret
 
 #[tokio::test]
 async fn event_publishing_transition_port_publishes_blocked_and_terminal_events() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let sink = Arc::new(InMemoryTurnEventSink::default());
     let transition_port = lifecycle_publishing_store(store, None, Some(sink.clone()));
     let coordinator = DefaultTurnCoordinator::new(transition_port.clone());
@@ -1836,7 +1807,7 @@ async fn event_publishing_transition_port_publishes_expired_lease_terminal_event
 
 #[tokio::test]
 async fn event_publishing_transition_port_does_not_fail_committed_claim_on_sink_error() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let transition_port =
         lifecycle_publishing_store(store, None, Some(Arc::new(FailingTurnEventSink)));
     let coordinator = DefaultTurnCoordinator::new(transition_port.clone());
@@ -1863,7 +1834,7 @@ async fn event_publishing_transition_port_does_not_fail_committed_claim_on_sink_
 
 #[tokio::test]
 async fn event_publishing_transition_port_required_observer_sees_terminal_state_without_sink() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let observer = Arc::new(RecordingCommittedEventObserver::default());
     let transition_port = lifecycle_publishing_store(
         store,
@@ -1914,7 +1885,7 @@ async fn event_publishing_transition_port_required_observer_sees_terminal_state_
 
 #[tokio::test]
 async fn event_publishing_transition_port_returns_committed_claim_after_required_observer_error() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let observer = Arc::new(FailFirstRecordingCommittedEventObserver::failing_on(
         TurnStatus::Running,
     ));
@@ -1977,6 +1948,8 @@ async fn event_publishing_transition_port_preserves_terminal_recovery_reason() {
         .unwrap();
     let lease_expires_at = store
         .persistence_snapshot()
+        .await
+        .unwrap()
         .runs
         .iter()
         .find(|record| record.run_id == run_id)
@@ -2001,7 +1974,7 @@ async fn event_publishing_transition_port_preserves_terminal_recovery_reason() {
 
 #[tokio::test]
 async fn event_publishing_transition_port_attempts_all_expired_lease_events_after_sink_error() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let sink = Arc::new(FailFirstRecordingTurnEventSink::default());
     let transition_port = lifecycle_publishing_store(store.clone(), None, Some(sink.clone()));
     let coordinator = DefaultTurnCoordinator::new(transition_port.clone());
@@ -2043,6 +2016,8 @@ async fn event_publishing_transition_port_attempts_all_expired_lease_events_afte
         .unwrap();
     let lease_expires_at = store
         .persistence_snapshot()
+        .await
+        .unwrap()
         .runs
         .iter()
         .filter_map(|record| record.lease_expires_at)
@@ -2115,10 +2090,18 @@ async fn event_publishing_transition_port_attempts_all_expired_lease_events_afte
         .unwrap();
     let lease_expires_at = store
         .persistence_snapshot()
+        .await
+        .unwrap()
         .runs
         .iter()
+        // Use the LATEST of the two leases' expiries as the recovery clock so
+        // BOTH runs are unambiguously expired. The two claims commit durable
+        // rows a few ms apart on the row store (vs ~instantly on the in-memory
+        // engine), so the old `min + 1ms` margin covered only the first run's
+        // expiry and left the second not-yet-expired — this test asserts both
+        // are recovered and observed.
         .filter_map(|record| record.lease_expires_at)
-        .min()
+        .max()
         .unwrap();
 
     transition_port
@@ -2149,7 +2132,7 @@ async fn event_publishing_transition_port_attempts_all_expired_lease_events_afte
 
 #[tokio::test]
 async fn default_turn_coordinator_cancel_event_uses_committed_run_owner() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let sink = Arc::new(InMemoryTurnEventSink::default());
     let store = lifecycle_publishing_store(store, None, Some(sink.clone()));
     let coordinator = DefaultTurnCoordinator::new(store);
@@ -2199,7 +2182,7 @@ fn cancel_run_response_serialization_omits_internal_actor() {
 
 #[tokio::test]
 async fn default_turn_coordinator_required_observer_sees_terminal_cancel() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let observer = Arc::new(RecordingCommittedEventObserver::default());
     let store = lifecycle_publishing_store(
         store,
@@ -2240,7 +2223,7 @@ async fn default_turn_coordinator_required_observer_sees_terminal_cancel() {
 
 #[tokio::test]
 async fn lifecycle_publishing_store_propagates_required_observer_error_on_submit() {
-    let raw_store = Arc::new(InMemoryTurnStateStore::default());
+    let raw_store = Arc::new(in_memory_turn_state_store());
     let observer = Arc::new(FailFirstEventKindObserver::failing_on(
         TurnEventKind::Submitted,
     ));
@@ -2267,7 +2250,10 @@ async fn lifecycle_publishing_store_propagates_required_observer_error_on_submit
     let observed_events = observer.events();
     assert_eq!(observed_events.len(), 1);
     assert_eq!(observed_events[0].kind, TurnEventKind::Submitted);
-    assert_eq!(raw_store.persistence_snapshot().runs.len(), 1);
+    assert_eq!(
+        raw_store.persistence_snapshot().await.unwrap().runs.len(),
+        1
+    );
     assert_eq!(
         notifier.wakes().len(),
         1,
@@ -2277,7 +2263,7 @@ async fn lifecycle_publishing_store_propagates_required_observer_error_on_submit
 
 #[tokio::test]
 async fn lifecycle_publishing_store_propagates_required_observer_error_on_resume() {
-    let raw_store = Arc::new(InMemoryTurnStateStore::default());
+    let raw_store = Arc::new(in_memory_turn_state_store());
     let bus = Arc::new(DefaultTurnLifecycleEventBus::new());
     let publishing_store = Arc::new(LifecyclePublishingTurnStateStore::new(
         Arc::clone(&raw_store),
@@ -2361,7 +2347,7 @@ async fn lifecycle_publishing_store_propagates_required_observer_error_on_resume
 
 #[tokio::test]
 async fn lifecycle_publishing_store_publishes_child_submit_event() {
-    let raw_store = Arc::new(InMemoryTurnStateStore::default());
+    let raw_store = Arc::new(in_memory_turn_state_store());
     let sink = Arc::new(InMemoryTurnEventSink::default());
     let publishing_store = lifecycle_publishing_store(raw_store, None, Some(sink.clone()));
     let coordinator = DefaultTurnCoordinator::new(publishing_store);
@@ -2401,7 +2387,7 @@ async fn lifecycle_publishing_store_publishes_child_submit_event() {
 
 #[tokio::test]
 async fn lifecycle_publishing_store_publishes_failed_run_event() {
-    let raw_store = Arc::new(InMemoryTurnStateStore::default());
+    let raw_store = Arc::new(in_memory_turn_state_store());
     let sink = Arc::new(InMemoryTurnEventSink::default());
     let transition_port = lifecycle_publishing_store(raw_store, None, Some(sink.clone()));
     let coordinator = DefaultTurnCoordinator::new(transition_port.clone());
@@ -2446,7 +2432,7 @@ async fn lifecycle_publishing_store_publishes_failed_run_event() {
 
 #[tokio::test]
 async fn lifecycle_publishing_store_publishes_record_runner_failure_as_failed_event() {
-    let raw_store = Arc::new(InMemoryTurnStateStore::default());
+    let raw_store = Arc::new(in_memory_turn_state_store());
     let sink = Arc::new(InMemoryTurnEventSink::default());
     let transition_port = lifecycle_publishing_store(raw_store, None, Some(sink.clone()));
     let coordinator = DefaultTurnCoordinator::new(transition_port.clone());
@@ -2710,7 +2696,8 @@ async fn turn_lifecycle_projection_replays_failed_terminal_with_sanitized_reason
 
     let projection_json = serde_json::to_string(&snapshot).unwrap();
     assert!(projection_json.contains("driver_bug"));
-    let retained_events_json = serde_json::to_string(&store.persistence_snapshot().events).unwrap();
+    let retained_events_json =
+        serde_json::to_string(&store.persistence_snapshot().await.unwrap().events).unwrap();
     let forbidden = [
         "TURN_FAILED_ACCEPTED_SENTINEL_3022",
         "TURN_FAILED_SOURCE_SENTINEL_3022",
@@ -2826,7 +2813,8 @@ async fn turn_lifecycle_projection_replays_cancelled_terminal_without_raw_refs()
 
     let projection_json = serde_json::to_string(&snapshot).unwrap();
     assert!(projection_json.contains("operator_requested"));
-    let retained_events_json = serde_json::to_string(&store.persistence_snapshot().events).unwrap();
+    let retained_events_json =
+        serde_json::to_string(&store.persistence_snapshot().await.unwrap().events).unwrap();
     let forbidden = [
         "TURN_CANCELLED_ACCEPTED_SENTINEL_3022",
         "TURN_CANCELLED_SOURCE_SENTINEL_3022",
@@ -2849,9 +2837,9 @@ async fn turn_lifecycle_projection_replays_cancelled_terminal_without_raw_refs()
 
 #[tokio::test]
 async fn turn_lifecycle_projection_requires_rebase_for_pruned_or_fabricated_cursors() {
-    let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits::default().set_max_events(2),
-    ));
+    let store = Arc::new(
+        in_memory_turn_state_store().with_limits(TurnStateStoreLimits::default().set_max_events(2)),
+    );
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let mut request = submit_request("thread-turn-gap", "idem-turn-gap-submit");
     request.accepted_message_ref =
@@ -2881,7 +2869,14 @@ async fn turn_lifecycle_projection_requires_rebase_for_pruned_or_fabricated_curs
 
     let projection = TurnEventProjectionService::new(store.clone());
     let origin = TurnEventProjectionCursor::origin_for_scope(request.scope.clone());
-    let pruned_origin = projection
+    // The row store retains lifecycle events durably — cache eviction is not
+    // durable deletion (see `..._evicted_terminal_run_remains_queryable` and the
+    // "LLM data is never deleted" rule), and #5452 means the heartbeat above adds
+    // no event — so a real origin cursor is SERVED from durable rows, not
+    // rebased. (The in-memory engine, which prunes to `max_events`, would rebase
+    // here; the row store is deliberately non-lossy.) A rebase is still required
+    // only for a fabricated cursor beyond the actual head, asserted next.
+    let served_from_origin = projection
         .snapshot(TurnEventProjectionRequest {
             scope: request.scope.clone(),
             owner_user_id: None,
@@ -2889,11 +2884,11 @@ async fn turn_lifecycle_projection_requires_rebase_for_pruned_or_fabricated_curs
             limit: 10,
         })
         .await
-        .expect_err("pruned turn lifecycle origin cursor must require rebase");
-    assert!(matches!(
-        pruned_origin,
-        TurnEventProjectionError::RebaseRequired { .. }
-    ));
+        .expect("durably-retained lifecycle events are served from origin");
+    assert!(
+        !served_from_origin.entries.is_empty(),
+        "origin snapshot must serve the retained lifecycle events"
+    );
 
     let fabricated = projection
         .updates(TurnEventProjectionRequest {
@@ -2912,8 +2907,8 @@ async fn turn_lifecycle_projection_requires_rebase_for_pruned_or_fabricated_curs
         TurnEventProjectionError::RebaseRequired { .. }
     ));
 
-    let serialized_events = serde_json::to_string(&store.events()).unwrap();
-    let debug_errors = format!("{pruned_origin:?} {fabricated:?}");
+    let serialized_events = serde_json::to_string(&store.events().await.unwrap()).unwrap();
+    let debug_errors = format!("{served_from_origin:?} {fabricated:?}");
     let forbidden = ["TURN_GAP_RAW_SENTINEL_3022", "/tmp/turn-gap-private"];
     assert_no_forbidden_turn_event_content("retained turn events", &serialized_events, &forbidden);
     assert_no_forbidden_turn_event_content(
@@ -2966,7 +2961,7 @@ async fn submit_turn_accepts_only_canonical_refs_and_returns_redacted_metadata()
     assert_eq!(state.received_at, received_at());
     assert_eq!(state.failure, None);
 
-    let snapshot = _store.persistence_snapshot();
+    let snapshot = _store.persistence_snapshot().await.unwrap();
     let run = snapshot
         .runs
         .iter()
@@ -3015,8 +3010,8 @@ async fn unauthorized_requested_run_profile_rejects_before_persisting_run() {
             AdmissionRejectionReason::Unauthorized
         ))
     );
-    assert!(store.events().is_empty());
-    assert!(store.persistence_snapshot().runs.is_empty());
+    assert!(store.events().await.unwrap().is_empty());
+    assert!(store.persistence_snapshot().await.unwrap().runs.is_empty());
 
     let duplicate = coordinator.submit_turn(request).await.unwrap_err();
     assert_eq!(duplicate, err);
@@ -3082,7 +3077,7 @@ async fn same_thread_active_run_returns_busy_but_different_threads_run_independe
 
 #[tokio::test]
 async fn submit_turn_wakes_runner_only_after_accepting_queued_run() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let notifier = Arc::new(RecordingWakeNotifier::default());
     let coordinator = DefaultTurnCoordinator::new(store)
         .with_wake_notifier(notifier.clone())
@@ -3119,7 +3114,7 @@ async fn submit_turn_wakes_runner_only_after_accepting_queued_run() {
 
 #[tokio::test]
 async fn resume_turn_wakes_runner_for_same_run_after_requeue() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let notifier = Arc::new(RecordingWakeNotifier::default());
     let coordinator =
         DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(notifier.clone());
@@ -3184,7 +3179,7 @@ async fn resume_turn_wakes_runner_for_same_run_after_requeue() {
 
 #[tokio::test]
 async fn cancel_run_wakes_runner_for_active_cancel_requested_run() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let notifier = Arc::new(RecordingWakeNotifier::default());
     let coordinator =
         DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(notifier.clone());
@@ -3223,7 +3218,7 @@ async fn cancel_run_wakes_runner_for_active_cancel_requested_run() {
 
 #[tokio::test]
 async fn submit_turn_ignores_wake_notification_failure_after_persisting_run() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let coordinator = DefaultTurnCoordinator::new(store.clone())
         .with_wake_notifier(Arc::new(FailingWakeNotifier));
 
@@ -3245,7 +3240,7 @@ async fn submit_turn_ignores_wake_notification_failure_after_persisting_run() {
 
 #[tokio::test]
 async fn resume_turn_ignores_wake_notification_panic_after_requeue() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let coordinator = DefaultTurnCoordinator::new(store.clone())
         .with_wake_notifier(Arc::new(PanickingWakeNotifier));
     let run_id = store
@@ -3316,7 +3311,7 @@ async fn submit_turn_persistence_snapshot_has_atomic_success_artifacts() {
         ..
     } = response;
 
-    let snapshot = store.persistence_snapshot();
+    let snapshot = store.persistence_snapshot().await.unwrap();
     assert_eq!(snapshot.turns.len(), 1);
     assert_eq!(snapshot.runs.len(), 1);
     assert_eq!(snapshot.active_locks.len(), 1);
@@ -3385,9 +3380,10 @@ async fn same_thread_lock_excludes_actor_identity() {
 async fn same_thread_busy_is_transient_and_checked_before_admission_capacity() {
     let limits = StaticTurnAdmissionLimitProvider::default()
         .with_total_limit(TurnAdmissionAxisKind::Tenant, 1);
-    let store = Arc::new(InMemoryTurnStateStore::with_admission_limit_provider(
-        Arc::new(limits),
-    ));
+    let store = Arc::new(
+        FilesystemTurnStateRowStore::new(in_memory_turns_filesystem())
+            .with_admission_limit_provider(Arc::new(limits)),
+    );
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let first_run_id = accepted_run_id(
         &coordinator
@@ -3402,8 +3398,19 @@ async fn same_thread_busy_is_transient_and_checked_before_admission_capacity() {
         .await
         .unwrap_err();
     assert!(matches!(busy, TurnError::ThreadBusy(_)));
-    assert_eq!(store.active_admission_reservations().len(), 1);
-    assert_eq!(store.persistence_snapshot().idempotency_records.len(), 1);
+    assert_eq!(
+        store.active_admission_reservations().await.unwrap().len(),
+        1
+    );
+    assert_eq!(
+        store
+            .persistence_snapshot()
+            .await
+            .unwrap()
+            .idempotency_records
+            .len(),
+        1
+    );
 
     let runner_id = TurnRunnerId::new();
     let lease_token = TurnLeaseToken::new();
@@ -3427,16 +3434,17 @@ async fn same_thread_busy_is_transient_and_checked_before_admission_capacity() {
 
     let duplicate_after_unlock = coordinator.submit_turn(busy_request).await.unwrap();
     assert_ne!(accepted_run_id(&duplicate_after_unlock), first_run_id);
-    assert_eq!(store.persistence_snapshot().turns.len(), 2);
+    assert_eq!(store.persistence_snapshot().await.unwrap().turns.len(), 2);
 }
 
 #[tokio::test]
 async fn tenant_capacity_denial_is_structured_idempotent_and_all_or_nothing() {
     let limits = StaticTurnAdmissionLimitProvider::default()
         .with_total_limit(TurnAdmissionAxisKind::Tenant, 1);
-    let store = Arc::new(InMemoryTurnStateStore::with_admission_limit_provider(
-        Arc::new(limits),
-    ));
+    let store = Arc::new(
+        FilesystemTurnStateRowStore::new(in_memory_turns_filesystem())
+            .with_admission_limit_provider(Arc::new(limits)),
+    );
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     coordinator
         .submit_turn(submit_request("thread-a", "idem-submit-a"))
@@ -3462,22 +3470,29 @@ async fn tenant_capacity_denial_is_structured_idempotent_and_all_or_nothing() {
             ..
         })
     ));
-    assert_eq!(store.persistence_snapshot().turns.len(), 1);
-    assert_eq!(store.active_admission_reservations().len(), 1);
+    assert_eq!(store.persistence_snapshot().await.unwrap().turns.len(), 1);
+    assert_eq!(
+        store.active_admission_reservations().await.unwrap().len(),
+        1
+    );
 
     let duplicate_denied = coordinator.submit_turn(denied_request).await.unwrap_err();
     assert_eq!(duplicate_denied, denied);
-    assert_eq!(store.persistence_snapshot().turns.len(), 1);
-    assert_eq!(store.active_admission_reservations().len(), 1);
+    assert_eq!(store.persistence_snapshot().await.unwrap().turns.len(), 1);
+    assert_eq!(
+        store.active_admission_reservations().await.unwrap().len(),
+        1
+    );
 }
 
 #[tokio::test]
 async fn concurrent_submits_cannot_oversubscribe_admission_limit() {
     let limits = StaticTurnAdmissionLimitProvider::default()
         .with_total_limit(TurnAdmissionAxisKind::Tenant, 1);
-    let store = Arc::new(InMemoryTurnStateStore::with_admission_limit_provider(
-        Arc::new(limits),
-    ));
+    let store = Arc::new(
+        FilesystemTurnStateRowStore::new(in_memory_turns_filesystem())
+            .with_admission_limit_provider(Arc::new(limits)),
+    );
     let coordinator = DefaultTurnCoordinator::new(store.clone());
 
     let (first, second) = tokio::join!(
@@ -3495,17 +3510,21 @@ async fn concurrent_submits_cannot_oversubscribe_admission_limit() {
         .count();
     assert_eq!(accepted, 1);
     assert_eq!(rejected, 1);
-    assert_eq!(store.persistence_snapshot().turns.len(), 1);
-    assert_eq!(store.active_admission_reservations().len(), 1);
+    assert_eq!(store.persistence_snapshot().await.unwrap().turns.len(), 1);
+    assert_eq!(
+        store.active_admission_reservations().await.unwrap().len(),
+        1
+    );
 }
 
 #[tokio::test]
 async fn capacity_denial_does_not_advance_event_cursor() {
     let limits = StaticTurnAdmissionLimitProvider::default()
         .with_total_limit(TurnAdmissionAxisKind::Tenant, 1);
-    let store = Arc::new(InMemoryTurnStateStore::with_admission_limit_provider(
-        Arc::new(limits),
-    ));
+    let store = Arc::new(
+        FilesystemTurnStateRowStore::new(in_memory_turns_filesystem())
+            .with_admission_limit_provider(Arc::new(limits)),
+    );
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let first_run_id = accepted_run_id(
         &coordinator
@@ -3549,7 +3568,7 @@ async fn capacity_denial_does_not_advance_event_cursor() {
 
 #[tokio::test]
 async fn snapshot_load_ignores_legacy_submit_thread_busy_replays() {
-    let source_store = Arc::new(InMemoryTurnStateStore::default());
+    let source_store = Arc::new(in_memory_turn_state_store());
     let source_coordinator = DefaultTurnCoordinator::new(source_store.clone());
     let first_run_id = accepted_run_id(
         &source_coordinator
@@ -3557,7 +3576,7 @@ async fn snapshot_load_ignores_legacy_submit_thread_busy_replays() {
             .await
             .unwrap(),
     );
-    let mut snapshot = source_store.persistence_snapshot();
+    let mut snapshot = source_store.persistence_snapshot().await.unwrap();
     let legacy_busy_key = IdempotencyKey::new("idem-legacy-busy").unwrap();
     snapshot.idempotency_records.push(TurnIdempotencyRecord {
         scope: scope("thread-a"),
@@ -3574,13 +3593,9 @@ async fn snapshot_load_ignores_legacy_submit_thread_busy_replays() {
         created_at: received_at(),
         expires_at: None,
     });
-    let restored = Arc::new(
-        InMemoryTurnStateStore::from_persistence_snapshot(
-            snapshot,
-            InMemoryTurnStateStoreLimits::default(),
-        )
-        .unwrap(),
-    );
+    let restored = Arc::new(FilesystemTurnStateRowStore::new(
+        turns_fs_seeded_with(&snapshot).await,
+    ));
     let runner_id = TurnRunnerId::new();
     let lease_token = TurnLeaseToken::new();
     restored
@@ -3611,27 +3626,30 @@ async fn snapshot_load_ignores_legacy_submit_thread_busy_replays() {
 
 #[tokio::test]
 async fn snapshot_load_synthesizes_reservations_for_legacy_active_runs() {
-    let source_store = Arc::new(InMemoryTurnStateStore::default());
+    let source_store = Arc::new(in_memory_turn_state_store());
     let source_coordinator = DefaultTurnCoordinator::new(source_store.clone());
     source_coordinator
         .submit_turn(submit_request("thread-a", "idem-submit-a"))
         .await
         .unwrap();
-    let mut snapshot = source_store.persistence_snapshot();
+    let mut snapshot = source_store.persistence_snapshot().await.unwrap();
     assert_eq!(snapshot.admission_reservations.len(), 1);
     snapshot.admission_reservations.clear();
 
     let limits = StaticTurnAdmissionLimitProvider::default()
         .with_total_limit(TurnAdmissionAxisKind::Tenant, 1);
     let restored = Arc::new(
-        InMemoryTurnStateStore::from_persistence_snapshot_with_admission_limit_provider(
-            snapshot,
-            InMemoryTurnStateStoreLimits::default(),
-            Arc::new(limits),
-        )
-        .unwrap(),
+        FilesystemTurnStateRowStore::new(turns_fs_seeded_with(&snapshot).await)
+            .with_admission_limit_provider(Arc::new(limits)),
     );
-    assert_eq!(restored.active_admission_reservations().len(), 1);
+    assert_eq!(
+        restored
+            .active_admission_reservations()
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 
     let restored_coordinator = DefaultTurnCoordinator::new(restored.clone());
     let denied = restored_coordinator
@@ -3650,18 +3668,21 @@ async fn snapshot_load_synthesizes_reservations_for_legacy_active_runs() {
             ..
         })
     ));
-    assert_eq!(restored.persistence_snapshot().turns.len(), 1);
+    assert_eq!(
+        restored.persistence_snapshot().await.unwrap().turns.len(),
+        1
+    );
 }
 
 #[tokio::test]
 async fn snapshot_load_recovers_released_or_mismatched_reservations_for_active_runs() {
-    let source_store = Arc::new(InMemoryTurnStateStore::default());
+    let source_store = Arc::new(in_memory_turn_state_store());
     let source_coordinator = DefaultTurnCoordinator::new(source_store.clone());
     source_coordinator
         .submit_turn(submit_request("thread-a", "idem-submit-a"))
         .await
         .unwrap();
-    let source_snapshot = source_store.persistence_snapshot();
+    let source_snapshot = source_store.persistence_snapshot().await.unwrap();
     assert_eq!(source_snapshot.admission_reservations.len(), 1);
 
     for corrupt_reservation in ["released", "empty_buckets"] {
@@ -3674,14 +3695,10 @@ async fn snapshot_load_recovers_released_or_mismatched_reservations_for_active_r
         let limits = StaticTurnAdmissionLimitProvider::default()
             .with_total_limit(TurnAdmissionAxisKind::Tenant, 1);
         let restored = Arc::new(
-            InMemoryTurnStateStore::from_persistence_snapshot_with_admission_limit_provider(
-                snapshot,
-                InMemoryTurnStateStoreLimits::default(),
-                Arc::new(limits),
-            )
-            .unwrap(),
+            FilesystemTurnStateRowStore::new(turns_fs_seeded_with(&snapshot).await)
+                .with_admission_limit_provider(Arc::new(limits)),
         );
-        let reservations = restored.active_admission_reservations();
+        let reservations = restored.active_admission_reservations().await.unwrap();
         assert_eq!(reservations.len(), 1, "case {corrupt_reservation}");
         assert!(!reservations[0].released, "case {corrupt_reservation}");
         assert_eq!(
@@ -3720,9 +3737,10 @@ async fn snapshot_load_recovers_released_or_mismatched_reservations_for_active_r
 async fn terminal_run_releases_admission_reservation_for_new_thread() {
     let limits = StaticTurnAdmissionLimitProvider::default()
         .with_total_limit(TurnAdmissionAxisKind::Tenant, 1);
-    let store = Arc::new(InMemoryTurnStateStore::with_admission_limit_provider(
-        Arc::new(limits),
-    ));
+    let store = Arc::new(
+        FilesystemTurnStateRowStore::new(in_memory_turns_filesystem())
+            .with_admission_limit_provider(Arc::new(limits)),
+    );
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let first_run_id = accepted_run_id(
         &coordinator
@@ -3750,18 +3768,27 @@ async fn terminal_run_releases_admission_reservation_for_new_thread() {
         .await
         .unwrap();
 
-    assert!(store.active_admission_reservations().is_empty());
+    assert!(
+        store
+            .active_admission_reservations()
+            .await
+            .unwrap()
+            .is_empty()
+    );
     let second = coordinator
         .submit_turn(submit_request("thread-b", "idem-submit-b"))
         .await
         .unwrap();
     assert_ne!(accepted_run_id(&second), first_run_id);
-    assert_eq!(store.active_admission_reservations().len(), 1);
+    assert_eq!(
+        store.active_admission_reservations().await.unwrap().len(),
+        1
+    );
 }
 
 #[tokio::test]
 async fn snapshot_load_drops_released_reservations_without_retained_run_records() {
-    let source_store = Arc::new(InMemoryTurnStateStore::default());
+    let source_store = Arc::new(in_memory_turn_state_store());
     let source_coordinator = DefaultTurnCoordinator::new(source_store.clone());
     let run_id = accepted_run_id(
         &source_coordinator
@@ -3788,20 +3815,18 @@ async fn snapshot_load_drops_released_reservations_without_retained_run_records(
         })
         .await
         .unwrap();
-    let mut snapshot = source_store.persistence_snapshot();
+    let mut snapshot = source_store.persistence_snapshot().await.unwrap();
     assert_eq!(snapshot.admission_reservations.len(), 1);
     assert!(snapshot.admission_reservations[0].released);
     snapshot.runs.clear();
 
-    let restored = InMemoryTurnStateStore::from_persistence_snapshot(
-        snapshot,
-        InMemoryTurnStateStoreLimits::default(),
-    )
-    .unwrap();
+    let restored = FilesystemTurnStateRowStore::new(turns_fs_seeded_with(&snapshot).await);
 
     assert!(
         restored
             .persistence_snapshot()
+            .await
+            .unwrap()
             .admission_reservations
             .is_empty()
     );
@@ -3809,7 +3834,8 @@ async fn snapshot_load_drops_released_reservations_without_retained_run_records(
 
 #[tokio::test]
 async fn model_route_snapshot_persists_across_snapshot_restore_and_recovery() {
-    let source_store = Arc::new(InMemoryTurnStateStore::default());
+    let fs = in_memory_turns_filesystem();
+    let source_store = Arc::new(FilesystemTurnStateRowStore::new(fs.clone()));
     let source_coordinator = DefaultTurnCoordinator::new(source_store.clone());
     let run_id = accepted_run_id(
         &source_coordinator
@@ -3844,13 +3870,7 @@ async fn model_route_snapshot_persists_across_snapshot_restore_and_recovery() {
         .await
         .unwrap();
 
-    let restored = Arc::new(
-        InMemoryTurnStateStore::from_persistence_snapshot(
-            source_store.persistence_snapshot(),
-            InMemoryTurnStateStoreLimits::default(),
-        )
-        .unwrap(),
-    );
+    let restored = Arc::new(FilesystemTurnStateRowStore::new(fs.clone()));
     assert_eq!(
         restored
             .get_run_state(GetRunStateRequest {
@@ -3876,7 +3896,7 @@ async fn model_route_snapshot_persists_across_snapshot_restore_and_recovery() {
 
 #[tokio::test]
 async fn record_model_route_snapshot_rejects_secret_like_fields() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let run_id = accepted_run_id(
         &coordinator
@@ -3934,7 +3954,7 @@ async fn record_model_route_snapshot_rejects_secret_like_fields() {
 
 #[tokio::test]
 async fn record_model_route_snapshot_is_idempotent_and_rejects_route_changes() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let run_id = accepted_run_id(
         &coordinator
@@ -4011,9 +4031,10 @@ async fn record_model_route_snapshot_is_idempotent_and_rejects_route_changes() {
 
 #[tokio::test]
 async fn terminal_record_pruning_bounds_released_admission_reservations() {
-    let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits::default().set_max_terminal_records(1),
-    ));
+    let store = Arc::new(
+        in_memory_turn_state_store()
+            .with_limits(TurnStateStoreLimits::default().set_max_terminal_records(1)),
+    );
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let first_run_id = accepted_run_id(
         &coordinator
@@ -4067,7 +4088,7 @@ async fn terminal_record_pruning_bounds_released_admission_reservations() {
         .await
         .unwrap();
 
-    let snapshot = store.persistence_snapshot();
+    let snapshot = store.persistence_snapshot().await.unwrap();
     assert!(snapshot.runs.iter().all(|run| run.run_id != first_run_id));
     assert!(
         snapshot
@@ -4080,9 +4101,10 @@ async fn terminal_record_pruning_bounds_released_admission_reservations() {
 
 #[tokio::test]
 async fn terminal_root_with_tree_reservation_survives_terminal_pruning() {
-    let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits::default().set_max_terminal_records(1),
-    ));
+    let store = Arc::new(
+        in_memory_turn_state_store()
+            .with_limits(TurnStateStoreLimits::default().set_max_terminal_records(1)),
+    );
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let parent_scope = scope("thread-tree-root-pruned");
     let parent_run_id = accepted_run_id(
@@ -4133,6 +4155,8 @@ async fn terminal_root_with_tree_reservation_survives_terminal_pruning() {
     assert!(
         store
             .persistence_snapshot()
+            .await
+            .unwrap()
             .spawn_tree_reservations
             .iter()
             .any(|reservation| reservation.root_run_id == parent_run_id)
@@ -4141,9 +4165,10 @@ async fn terminal_root_with_tree_reservation_survives_terminal_pruning() {
 
 #[tokio::test]
 async fn terminal_root_release_does_not_duplicate_pruning_queue() {
-    let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits::default().set_max_terminal_records(1),
-    ));
+    let store = Arc::new(
+        in_memory_turn_state_store()
+            .with_limits(TurnStateStoreLimits::default().set_max_terminal_records(1)),
+    );
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let parent_scope = scope("thread-tree-root-release");
     let parent_run_id = accepted_run_id(
@@ -4178,9 +4203,10 @@ async fn terminal_root_release_does_not_duplicate_pruning_queue() {
 
 #[tokio::test]
 async fn releasing_old_reserved_terminal_root_keeps_newer_terminal_record() {
-    let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits::default().set_max_terminal_records(1),
-    ));
+    let store = Arc::new(
+        in_memory_turn_state_store()
+            .with_limits(TurnStateStoreLimits::default().set_max_terminal_records(1)),
+    );
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let parent_scope = scope("thread-tree-root-release-after-churn");
     let parent_run_id = accepted_run_id(
@@ -4250,9 +4276,10 @@ async fn releasing_old_reserved_terminal_root_keeps_newer_terminal_record() {
 async fn actor_user_capacity_uses_submitting_actor_not_thread_scope() {
     let limits = StaticTurnAdmissionLimitProvider::default()
         .with_total_limit(TurnAdmissionAxisKind::ActorUser, 1);
-    let store = Arc::new(InMemoryTurnStateStore::with_admission_limit_provider(
-        Arc::new(limits),
-    ));
+    let store = Arc::new(
+        FilesystemTurnStateRowStore::new(in_memory_turns_filesystem())
+            .with_admission_limit_provider(Arc::new(limits)),
+    );
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     coordinator
         .submit_turn(submit_request("thread-a", "idem-submit-a"))
@@ -4277,7 +4304,10 @@ async fn actor_user_capacity_uses_submitting_actor_not_thread_scope() {
     let mut different_actor = submit_request("thread-c", "idem-submit-c");
     different_actor.actor = TurnActor::new(UserId::new("user2").unwrap());
     coordinator.submit_turn(different_actor).await.unwrap();
-    assert_eq!(store.active_admission_reservations().len(), 2);
+    assert_eq!(
+        store.active_admission_reservations().await.unwrap().len(),
+        2
+    );
 }
 
 #[tokio::test]
@@ -4287,9 +4317,10 @@ async fn class_capacity_denial_reports_admission_class() {
         TurnAdmissionClass::interactive(),
         1,
     );
-    let store = Arc::new(InMemoryTurnStateStore::with_admission_limit_provider(
-        Arc::new(limits),
-    ));
+    let store = Arc::new(
+        FilesystemTurnStateRowStore::new(in_memory_turns_filesystem())
+            .with_admission_limit_provider(Arc::new(limits)),
+    );
     let coordinator = DefaultTurnCoordinator::new(store);
     coordinator
         .submit_turn(submit_request("thread-a", "idem-submit-a"))
@@ -4329,7 +4360,7 @@ async fn accepted_submit_reserves_unlimited_buckets_and_replay_does_not_reacquir
         .unwrap();
 
     assert_eq!(duplicate, first);
-    let reservations = store.active_admission_reservations();
+    let reservations = store.active_admission_reservations().await.unwrap();
     assert_eq!(reservations.len(), 1);
     assert_eq!(reservations[0].buckets.len(), 8);
     assert_eq!(
@@ -4342,9 +4373,10 @@ async fn accepted_submit_reserves_unlimited_buckets_and_replay_does_not_reacquir
 async fn project_none_consumes_unscoped_project_bucket() {
     let limits = StaticTurnAdmissionLimitProvider::default()
         .with_total_limit(TurnAdmissionAxisKind::Project, 1);
-    let store = Arc::new(InMemoryTurnStateStore::with_admission_limit_provider(
-        Arc::new(limits),
-    ));
+    let store = Arc::new(
+        FilesystemTurnStateRowStore::new(in_memory_turns_filesystem())
+            .with_admission_limit_provider(Arc::new(limits)),
+    );
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let mut first = submit_request("thread-a", "idem-submit-a");
     first.scope.project_id = None;
@@ -4365,7 +4397,7 @@ async fn project_none_consumes_unscoped_project_bucket() {
         })
     ));
     assert!(
-        store.active_admission_reservations()[0]
+        store.active_admission_reservations().await.unwrap()[0]
             .buckets
             .iter()
             .any(|bucket| matches!(
@@ -4382,9 +4414,10 @@ async fn project_none_consumes_unscoped_project_bucket() {
 async fn agent_capacity_is_keyed_by_tenant_and_optional_agent() {
     let limits = StaticTurnAdmissionLimitProvider::default()
         .with_total_limit(TurnAdmissionAxisKind::Agent, 1);
-    let store = Arc::new(InMemoryTurnStateStore::with_admission_limit_provider(
-        Arc::new(limits),
-    ));
+    let store = Arc::new(
+        FilesystemTurnStateRowStore::new(in_memory_turns_filesystem())
+            .with_admission_limit_provider(Arc::new(limits)),
+    );
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let first = submit_request("thread-a", "idem-submit-a");
     coordinator.submit_turn(first).await.unwrap();
@@ -4406,15 +4439,19 @@ async fn agent_capacity_is_keyed_by_tenant_and_optional_agent() {
     let mut no_agent = submit_request("thread-c", "idem-submit-c");
     no_agent.scope.agent_id = None;
     coordinator.submit_turn(no_agent).await.unwrap();
-    assert_eq!(store.active_admission_reservations().len(), 2);
+    assert_eq!(
+        store.active_admission_reservations().await.unwrap().len(),
+        2
+    );
 }
 
 #[tokio::test]
 async fn admission_limit_provider_unavailable_fails_closed_without_run_or_reservation() {
     let limits = StaticTurnAdmissionLimitProvider::default().unavailable();
-    let store = Arc::new(InMemoryTurnStateStore::with_admission_limit_provider(
-        Arc::new(limits),
-    ));
+    let store = Arc::new(
+        FilesystemTurnStateRowStore::new(in_memory_turns_filesystem())
+            .with_admission_limit_provider(Arc::new(limits)),
+    );
     let coordinator = DefaultTurnCoordinator::new(store.clone());
 
     let denied = coordinator
@@ -4428,7 +4465,7 @@ async fn admission_limit_provider_unavailable_fails_closed_without_run_or_reserv
             AdmissionRejectionReason::Unavailable
         ))
     );
-    let snapshot = store.persistence_snapshot();
+    let snapshot = store.persistence_snapshot().await.unwrap();
     assert!(snapshot.turns.is_empty());
     assert!(snapshot.runs.is_empty());
     assert!(snapshot.admission_reservations.is_empty());
@@ -4438,9 +4475,10 @@ async fn admission_limit_provider_unavailable_fails_closed_without_run_or_reserv
 async fn blocked_resume_then_recovery_failure_releases_admission_reservation() {
     let limits = StaticTurnAdmissionLimitProvider::default()
         .with_total_limit(TurnAdmissionAxisKind::Tenant, 1);
-    let store = Arc::new(InMemoryTurnStateStore::with_admission_limit_provider(
-        Arc::new(limits),
-    ));
+    let store = Arc::new(
+        FilesystemTurnStateRowStore::new(in_memory_turns_filesystem())
+            .with_admission_limit_provider(Arc::new(limits)),
+    );
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let run_id = accepted_run_id(
         &coordinator
@@ -4473,7 +4511,10 @@ async fn blocked_resume_then_recovery_failure_releases_admission_reservation() {
         })
         .await
         .unwrap();
-    assert_eq!(store.active_admission_reservations().len(), 1);
+    assert_eq!(
+        store.active_admission_reservations().await.unwrap().len(),
+        1
+    );
 
     let resumed = coordinator
         .resume_turn(ResumeTurnRequest {
@@ -4490,7 +4531,10 @@ async fn blocked_resume_then_recovery_failure_releases_admission_reservation() {
         .await
         .unwrap();
     assert_eq!(resumed.status, TurnStatus::Queued);
-    assert_eq!(store.active_admission_reservations().len(), 1);
+    assert_eq!(
+        store.active_admission_reservations().await.unwrap().len(),
+        1
+    );
 
     store
         .claim_next_run(ClaimRunRequest {
@@ -4510,7 +4554,10 @@ async fn blocked_resume_then_recovery_failure_releases_admission_reservation() {
         })
         .await
         .unwrap();
-    assert_eq!(store.active_admission_reservations().len(), 0);
+    assert_eq!(
+        store.active_admission_reservations().await.unwrap().len(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -4530,7 +4577,7 @@ async fn submit_turn_busy_path_is_transient_without_new_run_or_idempotency_recor
         .unwrap_err();
     assert!(matches!(busy, TurnError::ThreadBusy(_)));
 
-    let snapshot = store.persistence_snapshot();
+    let snapshot = store.persistence_snapshot().await.unwrap();
     assert_eq!(snapshot.turns.len(), 1);
     assert_eq!(snapshot.runs.len(), 1);
     assert!(
@@ -4563,7 +4610,7 @@ async fn submit_turn_busy_path_is_transient_without_new_run_or_idempotency_recor
 
     let accepted_after_unlock = coordinator.submit_turn(busy_request).await.unwrap();
     assert_ne!(accepted_run_id(&accepted_after_unlock), first_run_id);
-    assert_eq!(store.persistence_snapshot().turns.len(), 2);
+    assert_eq!(store.persistence_snapshot().await.unwrap().turns.len(), 2);
 }
 
 #[tokio::test]
@@ -4588,7 +4635,7 @@ async fn runner_claim_and_block_update_persistent_run_lock_and_checkpoint_record
         .unwrap()
         .unwrap();
 
-    let claimed = store.persistence_snapshot();
+    let claimed = store.persistence_snapshot().await.unwrap();
     let run = claimed
         .runs
         .iter()
@@ -4623,7 +4670,7 @@ async fn runner_claim_and_block_update_persistent_run_lock_and_checkpoint_record
         .await
         .unwrap();
 
-    let blocked = store.persistence_snapshot();
+    let blocked = store.persistence_snapshot().await.unwrap();
     let run = blocked
         .runs
         .iter()
@@ -4651,6 +4698,8 @@ async fn runner_claim_and_block_update_persistent_run_lock_and_checkpoint_record
 
     let blocked_event = store
         .events()
+        .await
+        .unwrap()
         .into_iter()
         .find(|event| event.kind == TurnEventKind::Blocked && event.run_id == run_id)
         .unwrap();
@@ -4706,6 +4755,8 @@ async fn block_run_with_reason_yields_expected_blocked_gate(
 
     let blocked_event = store
         .events()
+        .await
+        .unwrap()
         .into_iter()
         .find(|event| event.kind == TurnEventKind::Blocked && event.run_id == run_id)
         .expect("block_run emits a Blocked lifecycle event");
@@ -4794,7 +4845,7 @@ async fn resume_updates_persisted_run_binding_refs_and_replay_envelope() {
         .await
         .unwrap();
 
-    let snapshot = store.persistence_snapshot();
+    let snapshot = store.persistence_snapshot().await.unwrap();
     let run = snapshot
         .runs
         .iter()
@@ -4815,7 +4866,7 @@ async fn resume_updates_persisted_run_binding_refs_and_replay_envelope() {
 
 #[tokio::test]
 async fn persisted_admission_rejection_and_cancel_replay_envelopes_are_reconstructable() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let coordinator =
         DefaultTurnCoordinator::new(store.clone()).with_admission_policy(Arc::new(DenyAll));
     let rejected_request = submit_request("thread-a", "idem-submit-rejected");
@@ -4840,7 +4891,7 @@ async fn persisted_admission_rejection_and_cancel_replay_envelopes_are_reconstru
         .await
         .unwrap();
 
-    let snapshot = store.persistence_snapshot();
+    let snapshot = store.persistence_snapshot().await.unwrap();
     let rejection_record = snapshot
         .idempotency_records
         .iter()
@@ -4909,9 +4960,9 @@ async fn submit_turn_busy_idempotency_does_not_replay_after_thread_unlocks() {
     assert_ne!(accepted_run_id(&accepted_after_unlock), first_run_id);
 }
 
-#[test]
-fn concurrent_duplicate_submit_waits_for_in_flight_admission_result() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_duplicate_submit_waits_for_in_flight_admission_result() {
+    let store = Arc::new(in_memory_turn_state_store());
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let policy = Arc::new(BlockingAdmissionPolicy {
@@ -4960,9 +5011,9 @@ fn concurrent_duplicate_submit_waits_for_in_flight_admission_result() {
     assert_eq!(policy.calls.load(Ordering::SeqCst), 1);
 }
 
-#[test]
-fn cancelled_submit_during_profile_resolution_clears_in_flight_idempotency() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelled_submit_during_profile_resolution_clears_in_flight_idempotency() {
+    let store = Arc::new(in_memory_turn_state_store());
     let (started_tx, started_rx) = mpsc::channel();
     let resolver = Arc::new(BlockingRunProfileResolver::new(started_tx));
     let request = submit_request("thread-a", "idem-submit-cancelled-profile-resolution");
@@ -5003,7 +5054,7 @@ fn cancelled_submit_during_profile_resolution_clears_in_flight_idempotency() {
 
 #[tokio::test]
 async fn submit_turn_idempotency_replays_before_policy_is_rechecked() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let coordinator = DefaultTurnCoordinator::new(store)
         .with_admission_policy(Arc::new(AllowFirstThenDeny::default()));
     let request = submit_request("thread-a", "idem-submit-a");
@@ -5014,16 +5065,19 @@ async fn submit_turn_idempotency_replays_before_policy_is_rechecked() {
     assert_eq!(duplicate, first);
 }
 
-#[test]
-fn submit_turn_admission_policy_can_reenter_store_without_deadlock() {
+#[tokio::test(flavor = "multi_thread")]
+async fn submit_turn_admission_policy_can_reenter_store_without_deadlock() {
     let (sender, receiver) = mpsc::channel();
+    // Build the row store on the reactor thread: its journal spawns tokio tasks
+    // at construction, which requires an entered runtime. The spawned worker
+    // thread below only builds a current-thread runtime to drive `submit_turn`.
+    let store = Arc::new(in_memory_turn_state_store());
 
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        let store = Arc::new(InMemoryTurnStateStore::default());
         let coordinator = DefaultTurnCoordinator::new(store.clone())
             .with_admission_policy(Arc::new(ReentrantStorePolicy { store }));
         let result = runtime
@@ -5039,7 +5093,7 @@ fn submit_turn_admission_policy_can_reenter_store_without_deadlock() {
 
 #[tokio::test]
 async fn submit_turn_idempotency_replays_same_admission_rejection() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let coordinator = DefaultTurnCoordinator::new(store.clone())
         .with_admission_policy(Arc::new(DenyFirstThenAllow::default()));
     let request = submit_request("thread-a", "idem-submit-rejected");
@@ -5054,7 +5108,7 @@ async fn submit_turn_idempotency_replays_same_admission_rejection() {
             AdmissionRejectionReason::TenantLimit
         ))
     );
-    assert!(store.events().is_empty());
+    assert!(store.events().await.unwrap().is_empty());
 }
 
 #[test]
@@ -5086,9 +5140,10 @@ fn capacity_exceeded_idempotency_replay_preserves_resource_and_cap() {
 
 #[tokio::test]
 async fn idempotency_persistence_snapshot_retains_each_operation_kind_capacity() {
-    let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits::default().set_max_idempotency_records(1),
-    ));
+    let store = Arc::new(
+        in_memory_turn_state_store()
+            .with_limits(TurnStateStoreLimits::default().set_max_idempotency_records(1)),
+    );
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let run_id = accepted_run_id(
         &coordinator
@@ -5140,7 +5195,7 @@ async fn idempotency_persistence_snapshot_retains_each_operation_kind_capacity()
         .await
         .unwrap();
 
-    let snapshot = store.persistence_snapshot();
+    let snapshot = store.persistence_snapshot().await.unwrap();
     assert_eq!(snapshot.idempotency_records.len(), 3);
     assert!(snapshot.idempotency_records.iter().any(|record| {
         record.operation == TurnIdempotencyOperationKind::Submit
@@ -5158,9 +5213,10 @@ async fn idempotency_persistence_snapshot_retains_each_operation_kind_capacity()
 
 #[tokio::test]
 async fn idempotency_persistence_snapshot_drops_records_when_replay_cache_prunes_them() {
-    let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits::default().set_max_idempotency_records(1),
-    ));
+    let store = Arc::new(
+        in_memory_turn_state_store()
+            .with_limits(TurnStateStoreLimits::default().set_max_idempotency_records(1)),
+    );
     let coordinator = DefaultTurnCoordinator::new(store.clone());
 
     coordinator
@@ -5172,7 +5228,7 @@ async fn idempotency_persistence_snapshot_drops_records_when_replay_cache_prunes
         .await
         .unwrap();
 
-    let snapshot = store.persistence_snapshot();
+    let snapshot = store.persistence_snapshot().await.unwrap();
     assert!(!snapshot.idempotency_records.iter().any(|record| {
         record.operation == TurnIdempotencyOperationKind::Submit
             && record.key == IdempotencyKey::new("idem-submit-a").unwrap()
@@ -5236,7 +5292,7 @@ async fn idempotency_replay_helpers_require_matching_operation_kind() {
         .await
         .unwrap();
 
-    let snapshot = store.persistence_snapshot();
+    let snapshot = store.persistence_snapshot().await.unwrap();
     let submit = snapshot
         .idempotency_records
         .iter()
@@ -5270,9 +5326,10 @@ async fn idempotency_replay_helpers_require_matching_operation_kind() {
 
 #[tokio::test]
 async fn idempotency_retention_keeps_the_newest_result_when_pruned() {
-    let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits::default().set_max_idempotency_records(2),
-    ));
+    let store = Arc::new(
+        in_memory_turn_state_store()
+            .with_limits(TurnStateStoreLimits::default().set_max_idempotency_records(2)),
+    );
     let coordinator = DefaultTurnCoordinator::new(store);
 
     coordinator
@@ -5380,7 +5437,7 @@ fn admission_rejection_reason_status_mapping_is_user_actionable() {
 
 #[tokio::test]
 async fn admission_policy_rejection_is_typed_and_does_not_create_run() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let coordinator =
         DefaultTurnCoordinator::new(store.clone()).with_admission_policy(Arc::new(DenyAll));
     let request = submit_request("thread-a", "idem-submit-a");
@@ -5396,7 +5453,7 @@ async fn admission_policy_rejection_is_typed_and_does_not_create_run() {
     assert!(err.is_expected_admission_outcome());
     assert_eq!(err.category(), TurnErrorCategory::AdmissionRejected);
     assert_eq!(err.adapter_status_code(), 429);
-    assert!(store.events().is_empty());
+    assert!(store.events().await.unwrap().is_empty());
     assert_eq!(
         TurnError::AdmissionRejected(AdmissionRejection::new(
             AdmissionRejectionReason::Unauthorized
@@ -5456,7 +5513,7 @@ async fn admission_policy_rejection_wins_over_busy_thread_metadata() {
             AdmissionRejectionReason::Unauthorized
         ))
     );
-    assert_eq!(store.persistence_snapshot().turns.len(), 1);
+    assert_eq!(store.persistence_snapshot().await.unwrap().turns.len(), 1);
 }
 
 #[tokio::test]
@@ -5501,14 +5558,18 @@ async fn runner_claims_queued_run_with_lease_and_heartbeat_requires_matching_lea
         })
         .await
         .unwrap();
-    assert!(cursor.0 >= 3);
+    // #5452: a heartbeat emits no durable lifecycle event and therefore does
+    // NOT advance the event cursor — it returns the run's current cursor
+    // (here the RunnerClaimed cursor from the successful claim above). The old
+    // `>= 3` expectation assumed the in-memory engine's advance-on-heartbeat.
+    assert_eq!(cursor, claimed.state.event_cursor);
 }
 
 #[tokio::test]
 async fn cancel_requested_runner_heartbeat_does_not_extend_lease() {
-    let limits = InMemoryTurnStateStoreLimits::default()
-        .set_runner_lease_ttl(ChronoDuration::milliseconds(40));
-    let store = Arc::new(InMemoryTurnStateStore::with_limits(limits));
+    let limits =
+        TurnStateStoreLimits::default().set_runner_lease_ttl(ChronoDuration::milliseconds(40));
+    let store = Arc::new(in_memory_turn_state_store().with_limits(limits));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let request = submit_request("thread-cancel-heartbeat", "idem-submit-cancel-heartbeat");
     let scope = request.scope.clone();
@@ -5565,9 +5626,9 @@ async fn cancel_requested_runner_heartbeat_does_not_extend_lease() {
 
 #[tokio::test]
 async fn expired_runner_lease_rejects_heartbeat_and_terminal_completion_before_recovery_sweep() {
-    let limits = InMemoryTurnStateStoreLimits::default()
-        .set_runner_lease_ttl(ChronoDuration::milliseconds(-1));
-    let store = Arc::new(InMemoryTurnStateStore::with_limits(limits));
+    let limits =
+        TurnStateStoreLimits::default().set_runner_lease_ttl(ChronoDuration::milliseconds(-1));
+    let store = Arc::new(in_memory_turn_state_store().with_limits(limits));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let run_id = accepted_run_id(
         &coordinator
@@ -5629,9 +5690,9 @@ async fn expired_runner_lease_rejects_heartbeat_and_terminal_completion_before_r
 
 #[tokio::test]
 async fn expired_runner_lease_rejects_fail_and_runner_side_cancel_before_recovery_sweep() {
-    let limits = InMemoryTurnStateStoreLimits::default()
-        .set_runner_lease_ttl(ChronoDuration::milliseconds(-1));
-    let store = Arc::new(InMemoryTurnStateStore::with_limits(limits));
+    let limits =
+        TurnStateStoreLimits::default().set_runner_lease_ttl(ChronoDuration::milliseconds(-1));
+    let store = Arc::new(in_memory_turn_state_store().with_limits(limits));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
 
     let failed_run_id = accepted_run_id(
@@ -5732,7 +5793,7 @@ async fn runner_claim_and_heartbeat_persist_lease_expiry() {
         .unwrap()
         .unwrap();
 
-    let claimed = store.persistence_snapshot();
+    let claimed = store.persistence_snapshot().await.unwrap();
     let run = claimed
         .runs
         .iter()
@@ -5756,7 +5817,7 @@ async fn runner_claim_and_heartbeat_persist_lease_expiry() {
         .await
         .unwrap();
 
-    let heartbeat = store.persistence_snapshot();
+    let heartbeat = store.persistence_snapshot().await.unwrap();
     let run = heartbeat
         .runs
         .iter()
@@ -5791,6 +5852,8 @@ async fn expired_running_lease_fails_and_releases_thread_lock() {
         .unwrap();
     let lease_expires_at = store
         .persistence_snapshot()
+        .await
+        .unwrap()
         .runs
         .iter()
         .find(|record| record.run_id == run_id)
@@ -5818,7 +5881,7 @@ async fn expired_running_lease_fails_and_releases_thread_lock() {
     assert_eq!(recovered.recovered[0].run_id, run_id);
     assert_eq!(recovered.recovered[0].status, TurnStatus::Failed);
 
-    let snapshot = store.persistence_snapshot();
+    let snapshot = store.persistence_snapshot().await.unwrap();
     if let Some(run) = snapshot.runs.iter().find(|record| record.run_id == run_id) {
         assert_eq!(run.status, TurnStatus::Failed);
         assert_eq!(
@@ -5838,7 +5901,7 @@ async fn expired_running_lease_fails_and_releases_thread_lock() {
         .await
         .unwrap();
     assert!(matches!(replacement, SubmitTurnResponse::Accepted { .. }));
-    assert!(store.events().iter().any(|event| {
+    assert!(store.events().await.unwrap().iter().any(|event| {
         event.run_id == run_id
             && event.kind == TurnEventKind::Failed
             && event.sanitized_reason.as_deref() == Some("crash_retry_exhausted")
@@ -5867,6 +5930,8 @@ async fn expired_cancel_requested_lease_cancels_and_releases_thread_lock() {
         .unwrap();
     let lease_expires_at = store
         .persistence_snapshot()
+        .await
+        .unwrap()
         .runs
         .iter()
         .find(|record| record.run_id == run_id)
@@ -5891,7 +5956,7 @@ async fn expired_cancel_requested_lease_cancels_and_releases_thread_lock() {
     assert_eq!(recovered.recovered[0].run_id, run_id);
     assert_eq!(recovered.recovered[0].status, TurnStatus::Cancelled);
 
-    let snapshot = store.persistence_snapshot();
+    let snapshot = store.persistence_snapshot().await.unwrap();
     if let Some(run) = snapshot.runs.iter().find(|record| record.run_id == run_id) {
         assert_eq!(run.status, TurnStatus::Cancelled);
     }
@@ -5932,6 +5997,8 @@ async fn cancel_after_expired_failed_run_reports_already_terminal_and_allows_new
         .unwrap();
     let lease_expires_at = store
         .persistence_snapshot()
+        .await
+        .unwrap()
         .runs
         .iter()
         .find(|record| record.run_id == run_id)
@@ -5958,7 +6025,7 @@ async fn cancel_after_expired_failed_run_reports_already_terminal_and_allows_new
         .unwrap();
     assert_eq!(cancelled.status, TurnStatus::Failed);
     assert!(cancelled.already_terminal);
-    let snapshot = store.persistence_snapshot();
+    let snapshot = store.persistence_snapshot().await.unwrap();
     assert!(snapshot.active_locks.is_empty());
     if let Some(run) = snapshot.runs.iter().find(|record| record.run_id == run_id) {
         assert_eq!(run.status, TurnStatus::Failed);
@@ -6032,10 +6099,13 @@ async fn blocked_run_persists_checkpoint_and_keeps_same_thread_lock_until_resume
         .resume_turn(resume_request.clone())
         .await
         .unwrap();
-    let event_count_after_resume = store.events().len();
+    let event_count_after_resume = store.events().await.unwrap().len();
     let duplicate = coordinator.resume_turn(resume_request).await.unwrap();
     assert_eq!(duplicate, resumed);
-    assert_eq!(store.events().len(), event_count_after_resume);
+    assert_eq!(
+        store.events().await.unwrap().len(),
+        event_count_after_resume
+    );
     assert_eq!(resumed.status, TurnStatus::Queued);
 }
 
@@ -6159,7 +6229,7 @@ async fn resume_turn_from_foreign_actor_is_denied_without_requeueing_run() {
 
     assert_eq!(err, TurnError::Unauthorized);
     assert_eq!(err.adapter_status_code(), 403);
-    let snapshot = store.persistence_snapshot();
+    let snapshot = store.persistence_snapshot().await.unwrap();
     let run = snapshot
         .runs
         .iter()
@@ -6400,7 +6470,14 @@ async fn cancel_run_for_queued_run_terminally_cancels_and_releases_lock() {
         .unwrap();
     assert_eq!(cancelled.status, TurnStatus::Cancelled);
     assert_eq!(
-        store.events().last().unwrap().sanitized_reason.as_deref(),
+        store
+            .events()
+            .await
+            .unwrap()
+            .last()
+            .unwrap()
+            .sanitized_reason
+            .as_deref(),
         Some("user_requested")
     );
 
@@ -6751,7 +6828,7 @@ async fn any_blocked_gate_resume_does_not_resume_dependent_run_gate() {
 
 #[tokio::test]
 async fn release_tree_descendants_rejects_over_release() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let coordinator = DefaultTurnCoordinator::new(store.clone());
 
     let root = accepted_run_id(
@@ -6787,7 +6864,7 @@ async fn release_tree_descendants_rejects_over_release() {
 /// twice, while a *different* child's release still counts normally.
 #[tokio::test]
 async fn release_tree_descendants_dedups_repeated_call_for_same_child() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let coordinator = DefaultTurnCoordinator::new(store.clone());
 
     let root = accepted_run_id(
@@ -6861,7 +6938,7 @@ async fn release_tree_descendants_dedups_repeated_call_for_same_child() {
 /// again, not no-op.
 #[tokio::test]
 async fn prune_released_child_allows_idempotency_key_reuse_after_prune() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let coordinator = DefaultTurnCoordinator::new(store.clone());
 
     let root = accepted_run_id(
@@ -6916,7 +6993,7 @@ async fn prune_released_child_allows_idempotency_key_reuse_after_prune() {
 
 #[tokio::test]
 async fn reserve_tree_descendants_rejects_zero_delta() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let owner_scope = scope("thread-tree-zero-reservation");
 
@@ -6943,16 +7020,15 @@ async fn reserve_tree_descendants_rejects_zero_delta() {
     assert!(
         store
             .persistence_snapshot()
+            .await
+            .unwrap()
             .spawn_tree_reservations
             .is_empty()
     );
 }
 
-fn coordinator() -> (
-    DefaultTurnCoordinator<InMemoryTurnStateStore>,
-    Arc<InMemoryTurnStateStore>,
-) {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+fn coordinator() -> (DefaultTurnCoordinator<TurnStore>, Arc<TurnStore>) {
+    let store = Arc::new(in_memory_turn_state_store());
     (DefaultTurnCoordinator::new(store.clone()), store)
 }
 
@@ -6962,25 +7038,23 @@ fn coordinator() -> (
 /// `crash_retry_exhausted`. Recovery tests that assert the terminal-recovery
 /// publishing/locking path use this, since the default (re-driving) config
 /// re-queues such a run on first expiry instead of terminating it.
-fn store_no_crash_retries() -> Arc<InMemoryTurnStateStore> {
-    Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits::default().set_max_crash_recovery_reclaims(0),
-    ))
+fn store_no_crash_retries() -> Arc<TurnStore> {
+    Arc::new(
+        in_memory_turn_state_store()
+            .with_limits(TurnStateStoreLimits::default().set_max_crash_recovery_reclaims(0)),
+    )
 }
 
-fn coordinator_no_crash_retries() -> (
-    DefaultTurnCoordinator<InMemoryTurnStateStore>,
-    Arc<InMemoryTurnStateStore>,
-) {
+fn coordinator_no_crash_retries() -> (DefaultTurnCoordinator<TurnStore>, Arc<TurnStore>) {
     let store = store_no_crash_retries();
     (DefaultTurnCoordinator::new(store.clone()), store)
 }
 
 fn lifecycle_publishing_store(
-    store: Arc<InMemoryTurnStateStore>,
+    store: Arc<TurnStore>,
     required_observer: Option<Arc<dyn TurnCommittedEventObserver>>,
     best_effort_sink: Option<Arc<dyn TurnEventSink>>,
-) -> Arc<LifecyclePublishingTurnStateStore<InMemoryTurnStateStore>> {
+) -> Arc<LifecyclePublishingTurnStateStore<TurnStore>> {
     let bus = Arc::new(DefaultTurnLifecycleEventBus::new());
     if let Some(observer) = required_observer {
         bus.subscribe_required(observer).unwrap();
@@ -6991,7 +7065,7 @@ fn lifecycle_publishing_store(
     Arc::new(LifecyclePublishingTurnStateStore::new(store, bus))
 }
 
-async fn complete_queued_run(store: &InMemoryTurnStateStore, run_id: TurnRunId, thread: &str) {
+async fn complete_queued_run(store: &TurnStore, run_id: TurnRunId, thread: &str) {
     let runner_id = TurnRunnerId::new();
     let lease_token = TurnLeaseToken::new();
     store
@@ -7522,12 +7596,16 @@ impl TurnAdmissionPolicy for BlockingAdmissionPolicy {
 }
 
 struct ReentrantStorePolicy {
-    store: Arc<InMemoryTurnStateStore>,
+    store: Arc<TurnStore>,
 }
 
 impl TurnAdmissionPolicy for ReentrantStorePolicy {
     fn check_submit(&self, _request: &SubmitTurnRequest) -> Result<(), AdmissionRejection> {
-        let _ = self.store.events();
+        // The store's observability reads are async now, and a synchronous
+        // admission policy cannot await one. Building the reentrant read future
+        // from inside `submit_turn` still proves the call site type-checks and
+        // that constructing it against the live store does not deadlock.
+        let _reentrant_read = self.store.events();
         Ok(())
     }
 }
@@ -7892,7 +7970,7 @@ async fn observed_cancelled_loop_exit_without_recorded_cancel_fails_and_releases
         .unwrap();
     assert_eq!(cancelled.status, TurnStatus::Failed);
     assert!(cancelled.already_terminal);
-    let snapshot = store.persistence_snapshot();
+    let snapshot = store.persistence_snapshot().await.unwrap();
     if let Some(run) = snapshot.runs.iter().find(|record| record.run_id == run_id) {
         assert_eq!(
             run.failure.as_ref().map(SanitizedFailure::category),
@@ -7948,7 +8026,7 @@ async fn loop_exit_application_cancels_only_after_public_cancel_request() {
 #[tokio::test]
 async fn lifecycle_publishing_store_publishes_record_runner_failure_as_cancelled_event_when_cancel_requested()
  {
-    let raw_store = Arc::new(InMemoryTurnStateStore::default());
+    let raw_store = Arc::new(in_memory_turn_state_store());
     let sink = Arc::new(InMemoryTurnEventSink::default());
     let transition_port = lifecycle_publishing_store(raw_store, None, Some(sink.clone()));
     let coordinator = DefaultTurnCoordinator::new(transition_port.clone());

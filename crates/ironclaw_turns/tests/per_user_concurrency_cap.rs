@@ -7,14 +7,15 @@
 ///  - A3: claim skips a user at the cap and proceeds with another user / same user after
 ///    the first run finishes.
 use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_turns::test_support::{in_memory_turn_state_store, in_memory_turns_filesystem};
 use ironclaw_turns::{
     AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, GateRef, GetRunStateRequest,
-    IdempotencyKey, InMemoryRunProfileResolver, InMemoryTurnStateStore,
-    InMemoryTurnStateStoreLimits, LoopExitMapping, ReplyTargetBindingRef, ResumeTurnPrecondition,
-    ResumeTurnRequest, RunProfileRequest, SanitizedCancelReason, SanitizedFailure,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId,
-    TurnLeaseToken, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
+    IdempotencyKey, InMemoryRunProfileResolver, LoopExitMapping, ReplyTargetBindingRef,
+    ResumeTurnPrecondition, ResumeTurnRequest, RunProfileRequest, SanitizedCancelReason,
+    SanitizedFailure, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+    TurnCheckpointId, TurnLeaseToken, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     run_profile::LoopCheckpointStateRef,
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
@@ -22,6 +23,7 @@ use ironclaw_turns::{
         RelinquishRunRequest, TurnRunTransitionPort, TurnRunnerOutcome,
     },
 };
+use ironclaw_turns::{FilesystemTurnStateRowStore, TurnStateStoreLimits};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -87,13 +89,30 @@ fn gate_ref_val(s: &str) -> GateRef {
     GateRef::new(s).unwrap()
 }
 
-fn make_store() -> InMemoryTurnStateStore {
-    InMemoryTurnStateStore::default()
+/// The in-memory turn-state store double: a `FilesystemTurnStateRowStore` over
+/// a volatile `InMemoryBackend` at the synchronous WriteThrough default, which
+/// is behaviorally identical to the former in-memory authority for these tests.
+type TurnStore = FilesystemTurnStateRowStore<InMemoryBackend>;
+
+fn make_store() -> TurnStore {
+    // A high, effectively-unlimited per-user cap. Unlike the former live
+    // in-memory authority, the row store maintains no incremental running
+    // counter: `running_count_for_user` rebuilds a transient engine per read
+    // and that rebuild is SKIPPED when no cap is enabled (the counter is only
+    // consulted for admission). Enabling a cap keeps the counter faithfully
+    // populated across the lifecycle without ever gating (1024 ≫ any test's run
+    // count); the uncapped-skip behavior is still asserted by tests that build
+    // an explicitly uncapped store.
+    in_memory_turn_state_store().with_limits(
+        TurnStateStoreLimits::default().set_max_concurrent_runs_per_user(
+            std::num::NonZeroU32::new(1024).expect("nonzero cap"),
+        ),
+    )
 }
 
-fn make_capped_store(cap: u32) -> InMemoryTurnStateStore {
-    InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits::default()
+fn make_capped_store(cap: u32) -> TurnStore {
+    in_memory_turn_state_store().with_limits(
+        TurnStateStoreLimits::default()
             .set_max_concurrent_runs_per_user(std::num::NonZeroU32::new(cap).expect("nonzero cap")),
     )
 }
@@ -102,11 +121,7 @@ fn resolver() -> InMemoryRunProfileResolver {
     InMemoryRunProfileResolver::default()
 }
 
-async fn submit(
-    store: &InMemoryTurnStateStore,
-    scope: TurnScope,
-    key: &str,
-) -> ironclaw_turns::TurnRunId {
+async fn submit(store: &TurnStore, scope: TurnScope, key: &str) -> ironclaw_turns::TurnRunId {
     let resp = store
         .submit_turn(
             submit_request_for(scope, key),
@@ -118,7 +133,7 @@ async fn submit(
     accepted_run_id(&resp)
 }
 
-async fn claim(store: &InMemoryTurnStateStore) -> (TurnRunnerId, TurnLeaseToken) {
+async fn claim(store: &TurnStore) -> (TurnRunnerId, TurnLeaseToken) {
     let runner_id = TurnRunnerId::new();
     let lease_token = TurnLeaseToken::new();
     store
@@ -144,10 +159,22 @@ async fn running_counter_tracks_per_user_across_lifecycle() {
     let scope = owned_scope("cap-lifecycle-basic", &user_u());
 
     let run_id = submit(&store, scope.clone(), "cap-lifecycle-basic").await;
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 0);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        0
+    );
 
     let (runner_id, lease_token) = claim(&store).await;
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 1);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        1
+    );
 
     store
         .complete_run(CompleteRunRequest {
@@ -158,7 +185,13 @@ async fn running_counter_tracks_per_user_across_lifecycle() {
         .await
         .unwrap();
 
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 0);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 /// Fail path decrements.
@@ -169,7 +202,13 @@ async fn running_counter_decrements_on_fail() {
     let run_id = submit(&store, scope, "cap-fail").await;
 
     let (runner_id, lease_token) = claim(&store).await;
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 1);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        1
+    );
 
     store
         .fail_run(FailRunRequest {
@@ -181,7 +220,13 @@ async fn running_counter_decrements_on_fail() {
         .await
         .unwrap();
 
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 0);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 /// Block (Running → Blocked) decrements; resume re-queues; re-claim re-increments; complete
@@ -193,7 +238,13 @@ async fn running_counter_decrements_on_block_and_resets_on_resume() {
     let run_id = submit(&store, scope.clone(), "cap-block-resume").await;
 
     let (runner_id, lease_token) = claim(&store).await;
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 1);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        1
+    );
 
     let gate = gate_ref_val("gate:block-resume");
     store
@@ -210,7 +261,13 @@ async fn running_counter_decrements_on_block_and_resets_on_resume() {
         .await
         .unwrap();
     // After block, counter drops to 0.
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 0);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        0
+    );
 
     // Resume re-queues the run.
     store
@@ -227,11 +284,23 @@ async fn running_counter_decrements_on_block_and_resets_on_resume() {
         })
         .await
         .unwrap();
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 0);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        0
+    );
 
     // Re-claim increments again.
     let (runner_id2, lease_token2) = claim(&store).await;
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 1);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        1
+    );
 
     store
         .complete_run(CompleteRunRequest {
@@ -241,7 +310,13 @@ async fn running_counter_decrements_on_block_and_resets_on_resume() {
         })
         .await
         .unwrap();
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 0);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 /// Running → CancelRequested → Cancelled (runner-held cancel completion) decrements once.
@@ -252,7 +327,13 @@ async fn running_counter_decrements_on_cancel_completion() {
     let run_id = submit(&store, scope.clone(), "cap-cancel-complete").await;
 
     let (runner_id, lease_token) = claim(&store).await;
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 1);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        1
+    );
 
     // Request cancel: Running → CancelRequested. Runner still holds the lease.
     store
@@ -266,7 +347,13 @@ async fn running_counter_decrements_on_cancel_completion() {
         .await
         .unwrap();
     // Counter stays at 1: the runner still holds the run.
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 1);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        1
+    );
 
     // Runner completes the cancellation (CancelRequested → Cancelled).
     store
@@ -278,7 +365,13 @@ async fn running_counter_decrements_on_cancel_completion() {
         .await
         .unwrap();
     // Fully cancelled: counter drops to 0.
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 0);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 /// Lease expiry of a checkpoint-less run: Running → Queued (re-drivable, #6284).
@@ -290,7 +383,13 @@ async fn running_counter_decrements_on_lease_expiry() {
     submit(&store, scope.clone(), "cap-lease-expiry").await;
 
     let (_runner_id, _lease_token) = claim(&store).await;
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 1);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        1
+    );
 
     // Expire the lease by advancing time far into the future.
     store
@@ -301,7 +400,13 @@ async fn running_counter_decrements_on_lease_expiry() {
         .await
         .unwrap();
 
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 0);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 /// Relinquish: Running → Queued. Counter decrements; re-claim re-increments; complete → 0.
@@ -312,7 +417,13 @@ async fn running_counter_decrements_on_relinquish() {
     let run_id = submit(&store, scope.clone(), "cap-relinquish").await;
 
     let (runner_id, lease_token) = claim(&store).await;
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 1);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        1
+    );
 
     store
         .relinquish_run(RelinquishRunRequest {
@@ -324,11 +435,23 @@ async fn running_counter_decrements_on_relinquish() {
         .unwrap();
 
     // After relinquish (Running → Queued), counter drops to 0.
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 0);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        0
+    );
 
     // Run is re-queued; claiming it again should bring count back to 1.
     let (runner_id2, lease_token2) = claim(&store).await;
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 1);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        1
+    );
 
     store
         .complete_run(CompleteRunRequest {
@@ -338,7 +461,13 @@ async fn running_counter_decrements_on_relinquish() {
         })
         .await
         .unwrap();
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 0);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 /// apply_validated_loop_exit → Completed path decrements.
@@ -349,7 +478,13 @@ async fn running_counter_decrements_via_apply_validated_loop_exit_completed() {
     let run_id = submit(&store, scope, "cap-loop-exit-complete").await;
 
     let (runner_id, lease_token) = claim(&store).await;
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 1);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        1
+    );
 
     store
         .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
@@ -362,7 +497,13 @@ async fn running_counter_decrements_via_apply_validated_loop_exit_completed() {
         .await
         .unwrap();
 
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 0);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 /// apply_validated_loop_exit → Cancelled path (via CancelRequested) decrements.
@@ -373,7 +514,13 @@ async fn running_counter_decrements_via_apply_validated_loop_exit_cancelled() {
     let run_id = submit(&store, scope.clone(), "cap-loop-exit-cancel").await;
 
     let (runner_id, lease_token) = claim(&store).await;
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 1);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        1
+    );
 
     // Running → CancelRequested (runner still holds slot).
     store
@@ -386,7 +533,13 @@ async fn running_counter_decrements_via_apply_validated_loop_exit_cancelled() {
         })
         .await
         .unwrap();
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 1);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        1
+    );
 
     // apply_validated_loop_exit with Cancelled routes through cancel_or_fail_claimed_record
     // which calls cancel_claimed_record (CancelRequested → Cancelled).
@@ -401,7 +554,13 @@ async fn running_counter_decrements_via_apply_validated_loop_exit_cancelled() {
         .await
         .unwrap();
 
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 0);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -410,26 +569,40 @@ async fn running_counter_decrements_via_apply_validated_loop_exit_cancelled() {
 
 #[tokio::test]
 async fn snapshot_rebuild_restores_running_counter() {
-    let store = make_store();
+    // Reopen over the same durable rows (WriteThrough rehydration replaced the
+    // old `from_persistence_snapshot` reload): `store` persisted the Queued run,
+    // and a second store over the same backend rehydrates it. Both enable a cap
+    // so the row store's per-read counter rebuild is populated.
+    let cap = || {
+        TurnStateStoreLimits::default()
+            .set_max_concurrent_runs_per_user(std::num::NonZeroU32::new(1024).expect("nonzero cap"))
+    };
+    let scoped = in_memory_turns_filesystem();
+    let store = FilesystemTurnStateRowStore::new(scoped.clone()).with_limits(cap());
     let scope = owned_scope("cap-snapshot", &user_u());
     let run_id = submit(&store, scope.clone(), "cap-snapshot").await;
 
-    // Snapshot BEFORE claiming (run is still Queued).
-    let snapshot = store.persistence_snapshot();
-
-    // Restore from snapshot.
-    let restored = InMemoryTurnStateStore::from_persistence_snapshot(
-        snapshot,
-        InMemoryTurnStateStoreLimits::default(),
-    )
-    .unwrap();
+    // Reopen BEFORE claiming (run is still Queued).
+    let restored = FilesystemTurnStateRowStore::new(scoped.clone()).with_limits(cap());
 
     // Counter is 0 before claim.
-    assert_eq!(restored.running_count_for_user(&tenant(), &user_u()), 0);
+    assert_eq!(
+        restored
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        0
+    );
 
     // Claim in the restored store → counter goes to 1.
     let (runner_id, lease_token) = claim(&restored).await;
-    assert_eq!(restored.running_count_for_user(&tenant(), &user_u()), 1);
+    assert_eq!(
+        restored
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        1
+    );
 
     // Complete → counter drops to 0.
     restored
@@ -440,7 +613,13 @@ async fn snapshot_rebuild_restores_running_counter() {
         })
         .await
         .unwrap();
-    assert_eq!(restored.running_count_for_user(&tenant(), &user_u()), 0);
+    assert_eq!(
+        restored
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -475,7 +654,13 @@ async fn claim_skips_user_at_concurrency_cap() {
         .unwrap()
         .unwrap();
     assert_eq!(claimed1.state.run_id, run1);
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 1);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        1
+    );
 
     // Second claim with no scope filter → should skip U's run2 (U at cap) and return V's run.
     let runner2 = TurnRunnerId::new();
@@ -490,7 +675,13 @@ async fn claim_skips_user_at_concurrency_cap() {
         .unwrap()
         .unwrap();
     assert_eq!(claimed2.state.run_id, run_v);
-    assert_eq!(store.running_count_for_user(&tenant(), &user_v()), 1);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_v())
+            .await
+            .unwrap(),
+        1
+    );
 
     // Third claim → should still skip U's run2 (still capped), nothing left for V → None.
     let runner3 = TurnRunnerId::new();
@@ -524,7 +715,13 @@ async fn claim_skips_user_at_concurrency_cap() {
         })
         .await
         .unwrap();
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 0);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        0
+    );
 
     // Now claim again → should get run2 (U no longer capped).
     let runner4 = TurnRunnerId::new();
@@ -539,7 +736,13 @@ async fn claim_skips_user_at_concurrency_cap() {
         .unwrap()
         .unwrap();
     assert_eq!(claimed4.state.run_id, run2);
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 1);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        1
+    );
 
     // Clean up.
     store
@@ -558,8 +761,20 @@ async fn claim_skips_user_at_concurrency_cap() {
         })
         .await
         .unwrap();
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 0);
-    assert_eq!(store.running_count_for_user(&tenant(), &user_v()), 0);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_v())
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 /// Truly ownerless (`TurnThreadOwner::Ownerless`) runs are never counted against any cap.
@@ -746,7 +961,10 @@ async fn actor_fallback_runs_are_capped_under_actor_user_id() {
         .unwrap();
     assert_eq!(claimed1.state.run_id, run1);
     assert_eq!(
-        store.running_count_for_user(&tenant(), &user_u()),
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
         1,
         "actor-fallback run should be counted under actor's user_id"
     );
@@ -792,7 +1010,13 @@ async fn actor_fallback_runs_are_capped_under_actor_user_id() {
         })
         .await
         .unwrap();
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 0);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        0
+    );
 
     // Now run2 for user_u can be claimed.
     let runner3 = TurnRunnerId::new();
@@ -836,27 +1060,35 @@ async fn actor_fallback_runs_are_capped_under_actor_user_id() {
 /// configured WITH a per-user cap so the rebuild loop runs.
 #[tokio::test]
 async fn snapshot_rebuild_restores_nonzero_running_counter() {
-    let store = make_store();
+    let scoped = in_memory_turns_filesystem();
+    let store = FilesystemTurnStateRowStore::new(scoped.clone()).with_limits(
+        TurnStateStoreLimits::default()
+            .set_max_concurrent_runs_per_user(std::num::NonZeroU32::new(10).expect("nonzero cap")),
+    );
     let scope = owned_scope("cap-snapshot-running", &user_u());
     let run_id = submit(&store, scope.clone(), "cap-snapshot-running").await;
 
     // Claim → run is now Running, counter = 1.
     let (runner_id, lease_token) = claim(&store).await;
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 1);
-
-    // Snapshot WHILE the run is Running.
-    let snapshot = store.persistence_snapshot();
-
-    // Restore with a cap enabled so the rebuild loop executes — counter must
-    // already be 1 without claiming again.
-    let restored = InMemoryTurnStateStore::from_persistence_snapshot(
-        snapshot,
-        InMemoryTurnStateStoreLimits::default()
-            .set_max_concurrent_runs_per_user(std::num::NonZeroU32::new(10).expect("nonzero cap")),
-    )
-    .unwrap();
     assert_eq!(
-        restored.running_count_for_user(&tenant(), &user_u()),
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        1
+    );
+
+    // Reopen WHILE the run is Running, with a cap enabled so the rebuild loop
+    // executes — counter must already be 1 without claiming again.
+    let restored = FilesystemTurnStateRowStore::new(scoped.clone()).with_limits(
+        TurnStateStoreLimits::default()
+            .set_max_concurrent_runs_per_user(std::num::NonZeroU32::new(10).expect("nonzero cap")),
+    );
+    assert_eq!(
+        restored
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
         1,
         "snapshot rebuild must restore non-zero running counter when cap is enabled"
     );
@@ -870,7 +1102,13 @@ async fn snapshot_rebuild_restores_nonzero_running_counter() {
         })
         .await
         .unwrap();
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 0);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 /// When ALL concurrency caps are `None` (the default), restoring from a
@@ -880,25 +1118,35 @@ async fn snapshot_rebuild_restores_nonzero_running_counter() {
 /// are disabled.
 #[tokio::test]
 async fn snapshot_rebuild_skips_counter_when_caps_disabled() {
-    let store = make_store();
+    // Capped `store` (so its counter is populated → 1); a second store reopened
+    // over the same backend with ALL caps None exercises the rebuild-skip.
+    let scoped = in_memory_turns_filesystem();
+    let store = FilesystemTurnStateRowStore::new(scoped.clone()).with_limits(
+        TurnStateStoreLimits::default().set_max_concurrent_runs_per_user(
+            std::num::NonZeroU32::new(1024).expect("nonzero cap"),
+        ),
+    );
     let scope = owned_scope("cap-snapshot-nocap", &user_u());
     let run_id = submit(&store, scope.clone(), "cap-snapshot-nocap").await;
 
     // Claim → run is now Running, live counter = 1.
     let (runner_id, lease_token) = claim(&store).await;
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 1);
-
-    // Snapshot WHILE the run is Running.
-    let snapshot = store.persistence_snapshot();
-
-    // Restore with ALL caps None — rebuild must be skipped, counter stays 0.
-    let restored = InMemoryTurnStateStore::from_persistence_snapshot(
-        snapshot,
-        InMemoryTurnStateStoreLimits::default(),
-    )
-    .unwrap();
     assert_eq!(
-        restored.running_count_for_user(&tenant(), &user_u()),
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        1
+    );
+
+    // Reopen WHILE the run is Running with ALL caps None — the per-read rebuild
+    // must be skipped, so the uncapped counter reads 0.
+    let restored = FilesystemTurnStateRowStore::new(scoped.clone());
+    assert_eq!(
+        restored
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
         0,
         "counter rebuild must be skipped when all concurrency caps are None"
     );
@@ -912,5 +1160,11 @@ async fn snapshot_rebuild_skips_counter_when_caps_disabled() {
         })
         .await
         .unwrap();
-    assert_eq!(store.running_count_for_user(&tenant(), &user_u()), 0);
+    assert_eq!(
+        store
+            .running_count_for_user(&tenant(), &user_u())
+            .await
+            .unwrap(),
+        0
+    );
 }

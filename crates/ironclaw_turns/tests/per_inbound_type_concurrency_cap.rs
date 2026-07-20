@@ -10,15 +10,16 @@
 ///  - B5: runs without product_context are never counted by origin class.
 ///  - B6: snapshot rebuild restores running_by_origin_class.
 use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_turns::test_support::{in_memory_turn_state_store, in_memory_turns_filesystem};
 use ironclaw_turns::{
     AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, GateRef, GetRunStateRequest,
-    IdempotencyKey, InMemoryRunProfileResolver, InMemoryTurnStateStore,
-    InMemoryTurnStateStoreLimits, LoopExitMapping, ProductTurnContext, ReplyTargetBindingRef,
-    ResumeTurnPrecondition, ResumeTurnRequest, RunProfileRequest, SanitizedCancelReason,
-    SanitizedFailure, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCheckpointId, TurnLeaseToken, TurnOriginKind, TurnOwner, TurnRunnerId, TurnScope,
-    TurnStateStore, TurnStatus,
+    IdempotencyKey, InMemoryRunProfileResolver, LoopExitMapping, ProductTurnContext,
+    ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest, RunProfileRequest,
+    SanitizedCancelReason, SanitizedFailure, SourceBindingRef, SubmitTurnRequest,
+    SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnLeaseToken, TurnOriginKind, TurnOwner,
+    TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     run_profile::LoopCheckpointStateRef,
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
@@ -26,6 +27,7 @@ use ironclaw_turns::{
         RelinquishRunRequest, TurnRunTransitionPort, TurnRunnerOutcome,
     },
 };
+use ironclaw_turns::{FilesystemTurnStateRowStore, TurnStateStoreLimits};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -117,16 +119,35 @@ fn resolver() -> InMemoryRunProfileResolver {
     InMemoryRunProfileResolver::default()
 }
 
-fn make_trigger_capped_store(cap: u32) -> InMemoryTurnStateStore {
-    InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits::default()
+/// The in-memory turn-state store double: a `FilesystemTurnStateRowStore` over a
+/// volatile `InMemoryBackend` at the synchronous WriteThrough default.
+type TurnStore = FilesystemTurnStateRowStore<InMemoryBackend>;
+
+/// An effectively-unlimited store. The row store keeps no incremental running
+/// counter — `running_trigger_count`/`running_conversation_count` rebuild a
+/// transient engine per read, and that rebuild is skipped entirely when NO cap
+/// is enabled. Enabling a high cap keeps both origin-class counters faithfully
+/// populated across the lifecycle without ever gating.
+fn make_store() -> TurnStore {
+    in_memory_turn_state_store().with_limits(
+        TurnStateStoreLimits::default()
+            .set_max_concurrent_trigger_runs(std::num::NonZeroU32::new(1024).expect("nonzero cap"))
+            .set_max_concurrent_conversation_runs(
+                std::num::NonZeroU32::new(1024).expect("nonzero cap"),
+            ),
+    )
+}
+
+fn make_trigger_capped_store(cap: u32) -> TurnStore {
+    in_memory_turn_state_store().with_limits(
+        TurnStateStoreLimits::default()
             .set_max_concurrent_trigger_runs(std::num::NonZeroU32::new(cap).expect("nonzero cap")),
     )
 }
 
-fn make_conversation_capped_store(cap: u32) -> InMemoryTurnStateStore {
-    InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits::default().set_max_concurrent_conversation_runs(
+fn make_conversation_capped_store(cap: u32) -> TurnStore {
+    in_memory_turn_state_store().with_limits(
+        TurnStateStoreLimits::default().set_max_concurrent_conversation_runs(
             std::num::NonZeroU32::new(cap).expect("nonzero cap"),
         ),
     )
@@ -146,7 +167,7 @@ fn gate_ref_val(s: &str) -> GateRef {
 }
 
 async fn submit_with_context(
-    store: &InMemoryTurnStateStore,
+    store: &TurnStore,
     scope: TurnScope,
     key: &str,
     ctx: Option<ProductTurnContext>,
@@ -162,18 +183,14 @@ async fn submit_with_context(
     accepted_run_id(&resp)
 }
 
-async fn submit_trigger(
-    store: &InMemoryTurnStateStore,
-    thread: &str,
-    key: &str,
-) -> ironclaw_turns::TurnRunId {
+async fn submit_trigger(store: &TurnStore, thread: &str, key: &str) -> ironclaw_turns::TurnRunId {
     let s = scope(thread, &user_u());
     let ctx = trigger_context(&user_u());
     submit_with_context(store, s, key, Some(ctx)).await
 }
 
 async fn submit_conversation(
-    store: &InMemoryTurnStateStore,
+    store: &TurnStore,
     thread: &str,
     user: &UserId,
     key: &str,
@@ -183,9 +200,7 @@ async fn submit_conversation(
     submit_with_context(store, s, key, Some(ctx)).await
 }
 
-async fn claim(
-    store: &InMemoryTurnStateStore,
-) -> (TurnRunnerId, TurnLeaseToken, ironclaw_turns::TurnRunId) {
+async fn claim(store: &TurnStore) -> (TurnRunnerId, TurnLeaseToken, ironclaw_turns::TurnRunId) {
     let runner_id = TurnRunnerId::new();
     let lease_token = TurnLeaseToken::new();
     let claimed = store
@@ -207,12 +222,12 @@ async fn claim(
 /// Trigger counter increments on claim, decrements on complete.
 #[tokio::test]
 async fn trigger_counter_tracks_complete() {
-    let store = InMemoryTurnStateStore::default();
+    let store = make_store();
     let run_id = submit_trigger(&store, "orig-complete", "orig-complete").await;
 
-    assert_eq!(store.running_trigger_count(&tenant()), 0);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 0);
     let (runner_id, lease_token, _) = claim(&store).await;
-    assert_eq!(store.running_trigger_count(&tenant()), 1);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 1);
 
     store
         .complete_run(CompleteRunRequest {
@@ -223,17 +238,17 @@ async fn trigger_counter_tracks_complete() {
         .await
         .unwrap();
 
-    assert_eq!(store.running_trigger_count(&tenant()), 0);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 0);
 }
 
 /// Trigger counter decrements on fail.
 #[tokio::test]
 async fn trigger_counter_tracks_fail() {
-    let store = InMemoryTurnStateStore::default();
+    let store = make_store();
     let run_id = submit_trigger(&store, "orig-fail", "orig-fail").await;
 
     let (runner_id, lease_token, _) = claim(&store).await;
-    assert_eq!(store.running_trigger_count(&tenant()), 1);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 1);
 
     store
         .fail_run(FailRunRequest {
@@ -245,14 +260,14 @@ async fn trigger_counter_tracks_fail() {
         .await
         .unwrap();
 
-    assert_eq!(store.running_trigger_count(&tenant()), 0);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 0);
 }
 
 /// Trigger counter decrements on block (Running → Blocked) and returns to 0.
 /// After resume + re-claim it increments back to 1. Proves the funnel covers block.
 #[tokio::test]
 async fn trigger_counter_decrements_on_block_and_resets_on_resume() {
-    let store = InMemoryTurnStateStore::default();
+    let store = make_store();
     let s = scope("orig-block-resume", &user_u());
     let run_id = submit_with_context(
         &store,
@@ -263,7 +278,7 @@ async fn trigger_counter_decrements_on_block_and_resets_on_resume() {
     .await;
 
     let (runner_id, lease_token, _) = claim(&store).await;
-    assert_eq!(store.running_trigger_count(&tenant()), 1);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 1);
 
     let gate = gate_ref_val("gate:orig-block-resume");
     store
@@ -280,7 +295,7 @@ async fn trigger_counter_decrements_on_block_and_resets_on_resume() {
         .await
         .unwrap();
     // Counter drops to 0 after block.
-    assert_eq!(store.running_trigger_count(&tenant()), 0);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 0);
 
     // Resume re-queues.
     store
@@ -297,11 +312,11 @@ async fn trigger_counter_decrements_on_block_and_resets_on_resume() {
         })
         .await
         .unwrap();
-    assert_eq!(store.running_trigger_count(&tenant()), 0);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 0);
 
     // Re-claim increments back.
     let (runner_id2, lease_token2, _) = claim(&store).await;
-    assert_eq!(store.running_trigger_count(&tenant()), 1);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 1);
 
     store
         .complete_run(CompleteRunRequest {
@@ -311,13 +326,13 @@ async fn trigger_counter_decrements_on_block_and_resets_on_resume() {
         })
         .await
         .unwrap();
-    assert_eq!(store.running_trigger_count(&tenant()), 0);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 0);
 }
 
 /// Trigger counter decrements on cancel completion (CancelRequested → Cancelled).
 #[tokio::test]
 async fn trigger_counter_decrements_on_cancel_completion() {
-    let store = InMemoryTurnStateStore::default();
+    let store = make_store();
     let s = scope("orig-cancel", &user_u());
     let run_id = submit_with_context(
         &store,
@@ -328,7 +343,7 @@ async fn trigger_counter_decrements_on_cancel_completion() {
     .await;
 
     let (runner_id, lease_token, _) = claim(&store).await;
-    assert_eq!(store.running_trigger_count(&tenant()), 1);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 1);
 
     // Running → CancelRequested. Runner still holds the slot.
     store
@@ -342,7 +357,7 @@ async fn trigger_counter_decrements_on_cancel_completion() {
         .await
         .unwrap();
     // Slot still held (Running → CancelRequested is Unchanged).
-    assert_eq!(store.running_trigger_count(&tenant()), 1);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 1);
 
     // Runner completes cancellation: CancelRequested → Cancelled.
     store
@@ -353,17 +368,17 @@ async fn trigger_counter_decrements_on_cancel_completion() {
         })
         .await
         .unwrap();
-    assert_eq!(store.running_trigger_count(&tenant()), 0);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 0);
 }
 
 /// Trigger counter decrements on lease expiry.
 #[tokio::test]
 async fn trigger_counter_decrements_on_lease_expiry() {
-    let store = InMemoryTurnStateStore::default();
+    let store = make_store();
     submit_trigger(&store, "orig-lease-expiry", "orig-lease-expiry").await;
 
     let _ = claim(&store).await;
-    assert_eq!(store.running_trigger_count(&tenant()), 1);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 1);
 
     store
         .recover_expired_leases(RecoverExpiredLeasesRequest {
@@ -373,17 +388,17 @@ async fn trigger_counter_decrements_on_lease_expiry() {
         .await
         .unwrap();
 
-    assert_eq!(store.running_trigger_count(&tenant()), 0);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 0);
 }
 
 /// Trigger counter decrements on relinquish (Running → Queued), re-increments on re-claim.
 #[tokio::test]
 async fn trigger_counter_decrements_on_relinquish() {
-    let store = InMemoryTurnStateStore::default();
+    let store = make_store();
     let run_id = submit_trigger(&store, "orig-relinquish", "orig-relinquish").await;
 
     let (runner_id, lease_token, _) = claim(&store).await;
-    assert_eq!(store.running_trigger_count(&tenant()), 1);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 1);
 
     store
         .relinquish_run(RelinquishRunRequest {
@@ -393,11 +408,11 @@ async fn trigger_counter_decrements_on_relinquish() {
         })
         .await
         .unwrap();
-    assert_eq!(store.running_trigger_count(&tenant()), 0);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 0);
 
     // Re-queue claim.
     let (runner_id2, lease_token2, _) = claim(&store).await;
-    assert_eq!(store.running_trigger_count(&tenant()), 1);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 1);
 
     store
         .complete_run(CompleteRunRequest {
@@ -407,17 +422,17 @@ async fn trigger_counter_decrements_on_relinquish() {
         })
         .await
         .unwrap();
-    assert_eq!(store.running_trigger_count(&tenant()), 0);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 0);
 }
 
 /// apply_validated_loop_exit → Completed decrements trigger counter.
 #[tokio::test]
 async fn trigger_counter_decrements_via_apply_validated_loop_exit() {
-    let store = InMemoryTurnStateStore::default();
+    let store = make_store();
     let run_id = submit_trigger(&store, "orig-loop-exit", "orig-loop-exit").await;
 
     let (runner_id, lease_token, _) = claim(&store).await;
-    assert_eq!(store.running_trigger_count(&tenant()), 1);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 1);
 
     store
         .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
@@ -430,13 +445,13 @@ async fn trigger_counter_decrements_via_apply_validated_loop_exit() {
         .await
         .unwrap();
 
-    assert_eq!(store.running_trigger_count(&tenant()), 0);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 0);
 }
 
 /// apply_validated_loop_exit → Cancelled path (via CancelRequested) decrements trigger counter.
 #[tokio::test]
 async fn trigger_counter_decrements_via_apply_validated_loop_exit_cancelled() {
-    let store = InMemoryTurnStateStore::default();
+    let store = make_store();
     let s = scope("orig-loop-exit-cancel", &user_u());
     let run_id = submit_with_context(
         &store,
@@ -447,7 +462,7 @@ async fn trigger_counter_decrements_via_apply_validated_loop_exit_cancelled() {
     .await;
 
     let (runner_id, lease_token, _) = claim(&store).await;
-    assert_eq!(store.running_trigger_count(&tenant()), 1);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 1);
 
     // Running → CancelRequested.
     store
@@ -460,7 +475,7 @@ async fn trigger_counter_decrements_via_apply_validated_loop_exit_cancelled() {
         })
         .await
         .unwrap();
-    assert_eq!(store.running_trigger_count(&tenant()), 1);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 1);
 
     // apply_validated_loop_exit Cancelled → cancel_or_fail_claimed_record → cancel_claimed_record.
     store
@@ -474,7 +489,7 @@ async fn trigger_counter_decrements_via_apply_validated_loop_exit_cancelled() {
         .await
         .unwrap();
 
-    assert_eq!(store.running_trigger_count(&tenant()), 0);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -503,7 +518,7 @@ async fn trigger_runs_capped_while_conversation_proceeds() {
         .unwrap()
         .unwrap();
     assert_eq!(claimed1.state.run_id, trigger1);
-    assert_eq!(store.running_trigger_count(&tenant()), 1);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 1);
 
     // Second claim → trigger2 is skipped (cap hit), conversation is returned.
     let runner2 = TurnRunnerId::new();
@@ -518,8 +533,11 @@ async fn trigger_runs_capped_while_conversation_proceeds() {
         .unwrap()
         .unwrap();
     assert_eq!(claimed2.state.run_id, conv);
-    assert_eq!(store.running_trigger_count(&tenant()), 1);
-    assert_eq!(store.running_conversation_count(&tenant()), 1);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 1);
+    assert_eq!(
+        store.running_conversation_count(&tenant()).await.unwrap(),
+        1
+    );
 
     // Third claim → trigger2 still blocked, conv exhausted → None.
     let runner3 = TurnRunnerId::new();
@@ -554,7 +572,7 @@ async fn trigger_runs_capped_while_conversation_proceeds() {
         })
         .await
         .unwrap();
-    assert_eq!(store.running_trigger_count(&tenant()), 0);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 0);
 
     // Now claim succeeds for trigger2.
     let runner4 = TurnRunnerId::new();
@@ -569,7 +587,7 @@ async fn trigger_runs_capped_while_conversation_proceeds() {
         .unwrap()
         .unwrap();
     assert_eq!(claimed4.state.run_id, trigger2);
-    assert_eq!(store.running_trigger_count(&tenant()), 1);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 1);
 
     // Clean up.
     store
@@ -588,8 +606,11 @@ async fn trigger_runs_capped_while_conversation_proceeds() {
         })
         .await
         .unwrap();
-    assert_eq!(store.running_trigger_count(&tenant()), 0);
-    assert_eq!(store.running_conversation_count(&tenant()), 0);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 0);
+    assert_eq!(
+        store.running_conversation_count(&tenant()).await.unwrap(),
+        0
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -618,7 +639,10 @@ async fn conversation_runs_capped_while_triggers_proceed() {
         .unwrap()
         .unwrap();
     assert_eq!(claimed1.state.run_id, conv1);
-    assert_eq!(store.running_conversation_count(&tenant()), 1);
+    assert_eq!(
+        store.running_conversation_count(&tenant()).await.unwrap(),
+        1
+    );
 
     // Second claim → conv2 is skipped (cap hit), trigger is returned.
     let runner2 = TurnRunnerId::new();
@@ -633,8 +657,11 @@ async fn conversation_runs_capped_while_triggers_proceed() {
         .unwrap()
         .unwrap();
     assert_eq!(claimed2.state.run_id, trig);
-    assert_eq!(store.running_conversation_count(&tenant()), 1);
-    assert_eq!(store.running_trigger_count(&tenant()), 1);
+    assert_eq!(
+        store.running_conversation_count(&tenant()).await.unwrap(),
+        1
+    );
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 1);
 
     // Third claim → conv2 still blocked, trig exhausted → None.
     let claimed3 = store
@@ -656,7 +683,10 @@ async fn conversation_runs_capped_while_triggers_proceed() {
         })
         .await
         .unwrap();
-    assert_eq!(store.running_conversation_count(&tenant()), 0);
+    assert_eq!(
+        store.running_conversation_count(&tenant()).await.unwrap(),
+        0
+    );
 
     // Now conv2 can be claimed.
     let runner4 = TurnRunnerId::new();
@@ -671,7 +701,10 @@ async fn conversation_runs_capped_while_triggers_proceed() {
         .unwrap()
         .unwrap();
     assert_eq!(claimed4.state.run_id, conv2);
-    assert_eq!(store.running_conversation_count(&tenant()), 1);
+    assert_eq!(
+        store.running_conversation_count(&tenant()).await.unwrap(),
+        1
+    );
 
     // Clean up.
     store
@@ -690,8 +723,11 @@ async fn conversation_runs_capped_while_triggers_proceed() {
         })
         .await
         .unwrap();
-    assert_eq!(store.running_trigger_count(&tenant()), 0);
-    assert_eq!(store.running_conversation_count(&tenant()), 0);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 0);
+    assert_eq!(
+        store.running_conversation_count(&tenant()).await.unwrap(),
+        0
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -711,12 +747,12 @@ async fn runs_without_product_context_are_not_capped_by_origin() {
     // Claim first — should not affect trigger counter.
     let (runner1, lease1, claimed_run1) = claim(&store).await;
     assert_eq!(claimed_run1, run1);
-    assert_eq!(store.running_trigger_count(&tenant()), 0);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 0);
 
     // Even with cap=1, second no-context run should also be claimable (not counted as trigger).
     let (runner2, lease2, claimed_run2) = claim(&store).await;
     assert_eq!(claimed_run2, run2);
-    assert_eq!(store.running_trigger_count(&tenant()), 0);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 0);
 
     // Clean up.
     store
@@ -743,27 +779,36 @@ async fn runs_without_product_context_are_not_capped_by_origin() {
 
 #[tokio::test]
 async fn snapshot_rebuild_restores_origin_class_counter() {
-    let store = InMemoryTurnStateStore::default();
+    // Reopen over the same durable rows (WriteThrough rehydration replaced the
+    // old snapshot reload). Both stores enable a cap so the row store's
+    // per-read counter rebuild is populated (it is skipped when uncapped).
+    let scoped = in_memory_turns_filesystem();
+    let store = FilesystemTurnStateRowStore::new(scoped.clone()).with_limits(
+        TurnStateStoreLimits::default()
+            .set_max_concurrent_trigger_runs(std::num::NonZeroU32::new(1024).expect("nonzero cap")),
+    );
     let run_id = submit_trigger(&store, "orig-snapshot", "orig-snapshot").await;
 
-    // Snapshot BEFORE claiming (run is still Queued).
-    let snapshot = store.persistence_snapshot();
-
-    // Restore from snapshot.
-    let restored = InMemoryTurnStateStore::from_persistence_snapshot(
-        snapshot,
-        InMemoryTurnStateStoreLimits::default(),
-    )
-    .unwrap();
+    // Reopen BEFORE claiming (run is still Queued).
+    let restored = FilesystemTurnStateRowStore::new(scoped.clone()).with_limits(
+        TurnStateStoreLimits::default()
+            .set_max_concurrent_trigger_runs(std::num::NonZeroU32::new(1024).expect("nonzero cap")),
+    );
 
     // Counter is 0 before claim.
-    assert_eq!(restored.running_trigger_count(&tenant()), 0);
-    assert_eq!(restored.running_conversation_count(&tenant()), 0);
+    assert_eq!(restored.running_trigger_count(&tenant()).await.unwrap(), 0);
+    assert_eq!(
+        restored
+            .running_conversation_count(&tenant())
+            .await
+            .unwrap(),
+        0
+    );
 
     // Claim in the restored store → counter goes to 1.
     let (runner_id, lease_token, claimed_run_id) = claim(&restored).await;
     assert_eq!(claimed_run_id, run_id);
-    assert_eq!(restored.running_trigger_count(&tenant()), 1);
+    assert_eq!(restored.running_trigger_count(&tenant()).await.unwrap(), 1);
 
     // Complete → counter drops to 0.
     restored
@@ -774,7 +819,7 @@ async fn snapshot_rebuild_restores_origin_class_counter() {
         })
         .await
         .unwrap();
-    assert_eq!(restored.running_trigger_count(&tenant()), 0);
+    assert_eq!(restored.running_trigger_count(&tenant()).await.unwrap(), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -813,8 +858,8 @@ async fn trigger_cap_is_per_tenant_not_global() {
         .unwrap()
         .unwrap();
     assert_eq!(claimed1.state.run_id, t1_run);
-    assert_eq!(store.running_trigger_count(&t1), 1);
-    assert_eq!(store.running_trigger_count(&t2), 0);
+    assert_eq!(store.running_trigger_count(&t1).await.unwrap(), 1);
+    assert_eq!(store.running_trigger_count(&t2).await.unwrap(), 0);
 
     // T2's trigger run must still be claimable even though T1 is at cap.
     let runner2 = TurnRunnerId::new();
@@ -829,8 +874,8 @@ async fn trigger_cap_is_per_tenant_not_global() {
         .unwrap()
         .unwrap();
     assert_eq!(claimed2.state.run_id, t2_run);
-    assert_eq!(store.running_trigger_count(&t1), 1);
-    assert_eq!(store.running_trigger_count(&t2), 1);
+    assert_eq!(store.running_trigger_count(&t1).await.unwrap(), 1);
+    assert_eq!(store.running_trigger_count(&t2).await.unwrap(), 1);
 
     // Clean up.
     store
@@ -849,8 +894,8 @@ async fn trigger_cap_is_per_tenant_not_global() {
         })
         .await
         .unwrap();
-    assert_eq!(store.running_trigger_count(&t1), 0);
-    assert_eq!(store.running_trigger_count(&t2), 0);
+    assert_eq!(store.running_trigger_count(&t1).await.unwrap(), 0);
+    assert_eq!(store.running_trigger_count(&t2).await.unwrap(), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -862,30 +907,35 @@ async fn trigger_cap_is_per_tenant_not_global() {
 /// The restored store is configured WITH a trigger cap so the rebuild loop runs.
 #[tokio::test]
 async fn snapshot_rebuild_restores_nonzero_origin_class_counter() {
-    let store = InMemoryTurnStateStore::default();
+    let scoped = in_memory_turns_filesystem();
+    let store = FilesystemTurnStateRowStore::new(scoped.clone()).with_limits(
+        TurnStateStoreLimits::default()
+            .set_max_concurrent_trigger_runs(std::num::NonZeroU32::new(10).expect("nonzero cap")),
+    );
     let run_id = submit_trigger(&store, "orig-snapshot-running", "orig-snapshot-running").await;
 
     // Claim → run is now Running, trigger counter = 1.
     let (runner_id, lease_token, _) = claim(&store).await;
-    assert_eq!(store.running_trigger_count(&tenant()), 1);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 1);
 
-    // Snapshot WHILE the run is Running.
-    let snapshot = store.persistence_snapshot();
-
-    // Restore with a trigger cap enabled so the rebuild loop executes — counter
-    // must already be 1 without claiming again.
-    let restored = InMemoryTurnStateStore::from_persistence_snapshot(
-        snapshot,
-        InMemoryTurnStateStoreLimits::default()
+    // Reopen WHILE the run is Running with a trigger cap enabled so the rebuild
+    // loop executes — counter must already be 1 without claiming again.
+    let restored = FilesystemTurnStateRowStore::new(scoped.clone()).with_limits(
+        TurnStateStoreLimits::default()
             .set_max_concurrent_trigger_runs(std::num::NonZeroU32::new(10).expect("nonzero cap")),
-    )
-    .unwrap();
+    );
     assert_eq!(
-        restored.running_trigger_count(&tenant()),
+        restored.running_trigger_count(&tenant()).await.unwrap(),
         1,
         "snapshot rebuild must restore non-zero trigger counter when cap is enabled"
     );
-    assert_eq!(restored.running_conversation_count(&tenant()), 0);
+    assert_eq!(
+        restored
+            .running_conversation_count(&tenant())
+            .await
+            .unwrap(),
+        0
+    );
 
     // Complete in the original store.
     store
@@ -896,5 +946,5 @@ async fn snapshot_rebuild_restores_nonzero_origin_class_counter() {
         })
         .await
         .unwrap();
-    assert_eq!(store.running_trigger_count(&tenant()), 0);
+    assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 0);
 }

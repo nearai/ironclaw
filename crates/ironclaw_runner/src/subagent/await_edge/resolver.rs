@@ -1,3 +1,4 @@
+// arch-exempt: large_file, pre-existing size; #6263 only migrated 2 test-double lines to in_memory_turn_state_store(), plan #6263
 //! Per-child/per-settle-group settle path (§2, §5.2, §5.5, §8.1) — the
 //! direct successor to `SubagentCompletionObserver` (deleted with this
 //! module). Owner-recovery/reconstruction/framing helpers below are ported
@@ -945,7 +946,7 @@ mod tests {
         let goal_store: Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore> =
             Arc::new(crate::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
         let turn_state_store: Arc<dyn TurnSpawnTreeStateStore> =
-            Arc::new(ironclaw_turns::InMemoryTurnStateStore::default());
+            Arc::new(ironclaw_turns::test_support::in_memory_turn_state_store());
         let result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter> =
             Arc::new(ReconResultWriter);
         AwaitEdgeResolver::new_unbound(
@@ -1354,7 +1355,7 @@ mod tests {
             DefaultTurnCoordinator, SubmitChildRunRequest, SubmitTurnRequest, TurnSpawnTreePort,
         };
 
-        let state_store = Arc::new(ironclaw_turns::InMemoryTurnStateStore::default());
+        let state_store = Arc::new(ironclaw_turns::test_support::in_memory_turn_state_store());
         let coordinator = DefaultTurnCoordinator::new(Arc::clone(&state_store));
         let tenant_id = ironclaw_host_api::TenantId::new("close-edge-tree-root-tenant").unwrap();
         let agent_id = ironclaw_host_api::AgentId::new("close-edge-tree-root-agent").unwrap();

@@ -28,14 +28,15 @@ use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AllowAllTurnAdmissionPolicy, BlockedReason,
     CheckpointSchemaId, FilesystemTurnStateBlockPersistence, FilesystemTurnStateRowStore,
     FilesystemTurnStateStore, GateRef, GetLoopCheckpointRequest, GetRunStateRequest,
-    IdempotencyKey, InMemoryRunProfileResolver, InMemoryTurnStateStoreLimits, LoopCheckpointStore,
-    LoopExitMapping, ProductTurnContext, PutLoopCheckpointRequest, ReplyTargetBindingRef,
-    ResumeTurnPrecondition, ResumeTurnRequest, RunOriginAdapter, RunProfileRequest,
-    RunProfileVersion, SanitizedCancelReason, SanitizedFailure, SourceBindingRef,
-    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy,
-    TurnCheckpointId, TurnError, TurnEventKind, TurnEventProjectionSource, TurnId, TurnLeaseToken,
-    TurnOriginKind, TurnOwner, TurnPersistenceSnapshot, TurnRunId, TurnRunnerId, TurnScope,
-    TurnSpawnTreeStateStore, TurnStateBlockPersistence, TurnStateStore, TurnStatus,
+    IdempotencyKey, InMemoryRunProfileResolver, LoopCheckpointStore, LoopExitMapping,
+    ProductTurnContext, PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnPrecondition,
+    ResumeTurnRequest, RunOriginAdapter, RunProfileRequest, RunProfileVersion,
+    SanitizedCancelReason, SanitizedFailure, SourceBindingRef, SubmitChildRunRequest,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy, TurnCheckpointId,
+    TurnError, TurnEventKind, TurnEventProjectionSource, TurnId, TurnLeaseToken, TurnOriginKind,
+    TurnOwner, TurnPersistenceSnapshot, TurnRunId, TurnRunnerId, TurnScope,
+    TurnSpawnTreeStateStore, TurnStateBlockPersistence, TurnStateStore, TurnStateStoreLimits,
+    TurnStatus,
     run_profile::{LoopCheckpointKind, LoopCheckpointStateRef},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, ClaimRunRequest, CompleteRunRequest,
@@ -2499,7 +2500,7 @@ async fn filesystem_turn_state_row_store_loop_checkpoint_survives_concurrent_ful
 async fn filesystem_turn_state_row_store_evicted_terminal_run_remains_queryable() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let limits = InMemoryTurnStateStoreLimits::default()
+    let limits = TurnStateStoreLimits::default()
         .set_max_events(2)
         .set_max_terminal_records(1)
         .set_max_idempotency_records(1);
@@ -2642,11 +2643,11 @@ async fn filesystem_turn_state_row_store_evicted_terminal_run_remains_queryable(
 async fn filesystem_turn_state_row_store_validated_loop_exit_completion_remains_queryable() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let limits = InMemoryTurnStateStoreLimits {
+    let limits = TurnStateStoreLimits {
         max_events: 2,
         max_terminal_records: 1,
         max_idempotency_records: 1,
-        ..InMemoryTurnStateStoreLimits::default()
+        ..TurnStateStoreLimits::default()
     };
     let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped)).with_limits(limits);
     let resolver = InMemoryRunProfileResolver::default();

@@ -9,9 +9,10 @@ use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_loop_host::FilesystemCheckpointStateStore;
 use ironclaw_threads::ThreadScope;
+use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
-    CheckpointStateRecord, CheckpointStateStore, GetCheckpointStateRequest,
-    InMemoryRunProfileResolver, InMemoryTurnStateStore, LoopCheckpointStateRef,
+    CheckpointStateRecord, CheckpointStateStore, FilesystemTurnStateRowStore,
+    GetCheckpointStateRequest, InMemoryRunProfileResolver, LoopCheckpointStateRef,
     LoopCheckpointStore, PutCheckpointStateRequest, PutLoopCheckpointRequest, RunProfileResolver,
     TurnActor, TurnCheckpointId, TurnError, TurnId, TurnRunId, TurnScope,
     run_profile::{
@@ -42,10 +43,10 @@ fn test_checkpoint_port(
 ) -> (
     HostManagedLoopCheckpointPort,
     Arc<FilesystemCheckpointStateStore<InMemoryBackend>>,
-    Arc<InMemoryTurnStateStore>,
+    Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
 ) {
     let state_store = in_memory_checkpoint_state_store();
-    let checkpoint_store = Arc::new(InMemoryTurnStateStore::default());
+    let checkpoint_store = Arc::new(in_memory_turn_state_store());
     let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopCheckpointPort::new(
         context,
@@ -138,7 +139,7 @@ async fn checkpoint_port_load_payload_roundtrips_staged_payload() {
 async fn checkpoint_port_skips_read_back_for_host_staged_ref() {
     let context = test_run_context().await;
     let state_store = Arc::new(CountingCheckpointStateStore::default());
-    let checkpoint_store = Arc::new(InMemoryTurnStateStore::default());
+    let checkpoint_store = Arc::new(in_memory_turn_state_store());
     let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopCheckpointPort::new(
         context.clone(),

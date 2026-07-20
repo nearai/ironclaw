@@ -355,13 +355,14 @@ mod tests {
     use ironclaw_turns::{
         AcceptedMessageRef, BlockedReason, CancelRunRequest, CancelRunResponse,
         DefaultTurnCoordinator, EventCursor, GetRunStateRequest, IdempotencyKey,
-        InMemoryTurnStateStore, LoopCheckpointStateRef, ReplyTargetBindingRef, ResumeTurnRequest,
+        LoopCheckpointStateRef, ReplyTargetBindingRef, ResumeTurnRequest,
         ResumeTurnResponse, RunProfileId, RunProfileRequest, RunProfileVersion, SourceBindingRef,
         SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnCoordinator,
         TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope,
         TurnStatus,
         runner::{BlockRunRequest, ClaimRunRequest, TurnRunTransitionPort},
     };
+    use ironclaw_turns::test_support::in_memory_turn_state_store;
 
     use super::*;
 
@@ -783,7 +784,7 @@ mod tests {
 
     #[tokio::test]
     async fn turn_gate_continuation_rejects_cross_scope_resume_through_real_coordinator() {
-        let store = Arc::new(InMemoryTurnStateStore::default());
+        let store = Arc::new(in_memory_turn_state_store());
         let coordinator = Arc::new(DefaultTurnCoordinator::new(store.clone()));
         let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator.clone());
         let scope = TurnScope::new(
