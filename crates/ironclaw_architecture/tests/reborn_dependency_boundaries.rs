@@ -2773,12 +2773,15 @@ fn boundary_rules() -> Vec<BoundaryRule> {
     vec![
         BoundaryRule {
             // The v1→Reborn migration tool is an intentional one-way bridge:
-            // it reads through the root `ironclaw_legacy` crate and writes through the
-            // Reborn state substrate + composition's `migration-support` seam.
-            // That bridge must stay a *state* converter — it must not grow
-            // direct deps on the serving/runtime/engine layers (gateway, engine,
-            // runtime lanes, dispatcher, webui) or it would quietly become a
-            // second live entry point into Reborn.
+            // it reads through its own frozen v1 read path
+            // (`crates/ironclaw_reborn_migration/src/legacy_snapshot/`, ported
+            // off the live `ironclaw_legacy` crate so it survives Tier B) and
+            // writes through the Reborn state substrate + composition's
+            // `migration-support` seam. That bridge must stay a *state*
+            // converter — it must not grow direct deps on the serving/
+            // runtime/engine layers (gateway, engine, runtime lanes,
+            // dispatcher, webui) or it would quietly become a second live
+            // entry point into Reborn.
             crate_name: "ironclaw_reborn_migration",
             forbidden: vec![
                 "ironclaw_dispatcher",
@@ -3985,13 +3988,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         introduced: "2026-07-09",
         removes_in: "W3.6",
         reason: "webui ingress still reaches composition until the composition webui module is folded into ingress and runtime handles are inverted",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_reborn_migration",
-        dependency_name: "ironclaw_legacy",
-        introduced: "2026-07-09",
-        removes_in: "Tier B",
-        reason: "the migration app intentionally reads v1 state until the legacy root is retired",
     },
 ];
 

@@ -843,3 +843,63 @@ async fn dry_run_reports_without_writing() {
         "dry run wrote thread docs"
     );
 }
+
+/// `legacy_snapshot::connect` no longer runs v1 schema migrations on connect
+/// (the original `ironclaw::db::connect_with_handles` did, as a side effect).
+/// Against a `routines` table that predates a later v1 migration (missing
+/// `notify_on_attention`), the migration must fail loud naming the gap instead
+/// of silently reading a partial row — regression test for that deliberate
+/// behavior change (see `CLAUDE.md` "Decoupled from `ironclaw_legacy`").
+#[tokio::test]
+async fn migration_fails_loud_on_stale_routines_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v1_stale.db");
+    let dst = dir.path().join("reborn.db");
+
+    let db = libsql::Builder::new_local(&path)
+        .build()
+        .await
+        .expect("open stale fixture");
+    let conn = db.connect().expect("connect");
+    conn.execute(
+        "CREATE TABLE routines (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            enabled INTEGER NOT NULL,
+            trigger_type TEXT NOT NULL,
+            trigger_config TEXT NOT NULL,
+            action_type TEXT NOT NULL,
+            action_config TEXT NOT NULL,
+            cooldown_secs INTEGER NOT NULL,
+            max_concurrent INTEGER NOT NULL,
+            dedup_window_secs INTEGER,
+            notify_channel TEXT,
+            notify_user TEXT,
+            notify_on_success INTEGER NOT NULL,
+            notify_on_failure INTEGER NOT NULL,
+            state TEXT NOT NULL,
+            last_run_at TEXT,
+            next_fire_at TEXT,
+            run_count INTEGER NOT NULL,
+            consecutive_failures INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )",
+        (),
+    )
+    .await
+    .expect("create stale routines table (missing notify_on_attention)");
+    drop(conn);
+    drop(db);
+
+    let error = run_migration(options(path, dst, false))
+        .await
+        .expect_err("migration must fail loud against a stale v1 schema, not silently proceed");
+    let message = error.to_string();
+    assert!(
+        message.contains("routines") && message.contains("notify_on_attention"),
+        "error should name the missing table/column, got: {message}"
+    );
+}

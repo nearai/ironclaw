@@ -5067,11 +5067,14 @@ dependencies = [
 name = "ironclaw_reborn_migration"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "async-trait",
  "chrono",
+ "chrono-tz",
  "clap",
  "deadpool-postgres",
+ "hkdf 0.13.0",
  "ironclaw_common",
  "ironclaw_extensions",
  "ironclaw_filesystem",
@@ -5089,9 +5092,12 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
+ "testcontainers-modules",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-postgres",
  "tracing",
  "tracing-subscriber",
  "ulid",
