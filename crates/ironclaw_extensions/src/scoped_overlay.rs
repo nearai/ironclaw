@@ -152,14 +152,11 @@ impl ScopedPackageOverlay {
         }
         let mut merged = global.as_ref().clone();
         for package in packages {
-            // Replace the static package with the discovered one. Use the
-            // trusted (non-revalidating) insert: the discovered package was
-            // already validated at discovery time against the real host-port
-            // catalog, whereas `insert` re-validates against a default catalog
-            // that does not know the provider's declared host ports (e.g.
-            // `host.runtime.http_egress`) and would spuriously reject it. The
-            // preceding `remove` clears the static capability ids so there is
-            // no id collision to check.
+            // Replace the static package with the discovered one. The
+            // discovered package was already validated at discovery time, so use
+            // the trusted (non-revalidating) insert to keep this off the
+            // per-invocation hot path; the preceding `remove` clears the static
+            // capability ids so there is no id collision to check.
             merged.remove(&package.id);
             merged.insert_validated(package.as_ref().clone());
         }

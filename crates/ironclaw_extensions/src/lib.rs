@@ -345,8 +345,18 @@ impl ExtensionPackage {
         let consistent = match self.descriptor_schema_mode {
             CapabilityDescriptorSchemaMode::ManifestRefs => self.capabilities == expected,
             CapabilityDescriptorSchemaMode::InlineDynamic => {
-                self.manifest.source == ManifestSource::HostBundled
-                    && descriptors_match_except_schema(&self.capabilities, &expected)
+                // Inline dynamic schemas come from hosted-MCP discovery, which
+                // is eligible for both compiled-in (HostBundled) and
+                // operator-installed volume (InstalledLocal) providers — the
+                // same source gate `from_hosted_mcp_manifest_with_inline_dynamic_schemas`
+                // enforces. Restricting to HostBundled here made a discovered
+                // InstalledLocal package (e.g. agent-market's per-user timeless
+                // surface) fail consistency in every validate_package_consistency
+                // caller: registry insert AND trust-input construction.
+                matches!(
+                    self.manifest.source,
+                    ManifestSource::HostBundled | ManifestSource::InstalledLocal
+                ) && descriptors_match_except_schema(&self.capabilities, &expected)
             }
         };
         if !consistent {
