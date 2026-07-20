@@ -224,6 +224,39 @@ test("useSSE falls back to app reconnect timer for closed streams", () => {
   assert.deepEqual(statuses, ["connecting", "reconnecting", "reconnecting"]);
 });
 
+test("useSSE replaces a reconnect attempt that never finishes opening", () => {
+  const { context, statuses, streams, timers } = createHarness();
+
+  const first = streams[0];
+  first.readyState = context.EventSource.CONNECTING;
+  first.onerror({});
+
+  const reconnectTimer = timers.find((timer) => timer.delay === 2000);
+  assert.ok(reconnectTimer);
+  reconnectTimer.handler();
+
+  assert.equal(streams.length, 2);
+  const stalledReplacement = streams[1];
+  const openWatchdog = timers.find(
+    (timer) => timer.delay === 10_000 && !timer.cleared,
+  );
+  assert.ok(openWatchdog);
+
+  openWatchdog.handler();
+
+  assert.equal(stalledReplacement.closeCalls, 1);
+  assert.equal(
+    timers.filter((timer) => timer.delay === 4000 && !timer.cleared).length,
+    1,
+  );
+  assert.deepEqual(statuses, [
+    "connecting",
+    "reconnecting",
+    "reconnecting",
+    "reconnecting",
+  ]);
+});
+
 test("useSSE does not reconnect after a non-retryable server error", () => {
   const events = [];
   const { context, statuses, streams, timers, windowListeners } = createHarness({

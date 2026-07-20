@@ -86,10 +86,19 @@ export function useSSE({ threadId, onEvent, enabled }) {
     }
     let es = null;
     let reconnectTimer = null;
+    let openWatchdog = null;
     let reconnectAttempts = 0;
     let disposed = false;
     let terminalErrorReceived = false;
     const maxReconnectDelay = 30_000;
+    const reconnectOpenDeadline = 10_000;
+
+    function clearOpenWatchdog() {
+      if (openWatchdog) {
+        clearTimeout(openWatchdog);
+        openWatchdog = null;
+      }
+    }
 
     function reconnectWithTimer(
       status: ConnectionStatus = CONNECTION_STATUS.DISCONNECTED,
@@ -103,6 +112,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
       }
+      clearOpenWatchdog();
       setStatus(status);
       reconnectAttempts++;
       const delay = Math.min(1000 * 2 ** reconnectAttempts, maxReconnectDelay);
@@ -128,8 +138,22 @@ export function useSSE({ threadId, onEvent, enabled }) {
       });
       const source = es;
 
+      // A replacement EventSource can remain in CONNECTING forever without
+      // firing either callback when a proxy accepts the HTTP request but does
+      // not establish the event stream. Bound reconnect attempts explicitly;
+      // the initial connection remains browser-managed, while every recovery
+      // attempt must prove it opened within this deadline.
+      if (reconnectAttempts > 0) {
+        openWatchdog = setTimeout(() => {
+          openWatchdog = null;
+          if (disposed || terminalErrorReceived || es !== source) return;
+          reconnectWithTimer(CONNECTION_STATUS.RECONNECTING);
+        }, reconnectOpenDeadline);
+      }
+
       source.onopen = () => {
         if (disposed || es !== source) return;
+        clearOpenWatchdog();
         reconnectAttempts = 0;
         setStatus(CONNECTION_STATUS.CONNECTED);
       };
@@ -143,6 +167,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
           return;
         }
         if (!frame || typeof frame !== "object") return;
+        clearOpenWatchdog();
         if (event.lastEventId) {
           setLastEventId(threadId, event.lastEventId);
         }
@@ -191,6 +216,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
 
       source.onerror = (event) => {
         if (disposed || terminalErrorReceived || es !== source) return;
+        clearOpenWatchdog();
         // Compatibility with servers that emitted application failures on
         // the reserved `event: error` channel. Those arrive as MessageEvents
         // with data; a native EventSource transport failure has no data.
@@ -224,6 +250,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
       }
+      clearOpenWatchdog();
       if (es) {
         es.close();
         es = null;
@@ -275,6 +302,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
       window.removeEventListener("offline", handleNetworkOffline);
       window.removeEventListener("online", handleNetworkOnline);
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      clearOpenWatchdog();
       const source = es;
       es = null;
       source?.close();

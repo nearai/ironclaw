@@ -9,7 +9,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Instant,
 };
@@ -1110,6 +1110,7 @@ fn validate_replay_identity_text(
 struct ProviderStreamSink {
     inner: Arc<dyn HostManagedModelStreamSink>,
     accumulated_text: Mutex<String>,
+    replace_on_next_delta: AtomicBool,
 }
 
 impl ProviderStreamSink {
@@ -1117,6 +1118,7 @@ impl ProviderStreamSink {
         Self {
             inner,
             accumulated_text: Mutex::new(String::new()),
+            replace_on_next_delta: AtomicBool::new(false),
         }
     }
 }
@@ -1132,10 +1134,35 @@ impl CompletionStreamSink for ProviderStreamSink {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
+            if self.replace_on_next_delta.swap(false, Ordering::SeqCst) {
+                guard.clear();
+            }
             guard.push_str(&delta);
             sanitize_model_visible_text(guard.clone())
         };
         self.inner.safe_text_update(safe_text).await;
+    }
+
+    fn supports_text_replacement(&self) -> bool {
+        true
+    }
+
+    async fn replace_on_next_text_delta(&self) {
+        self.replace_on_next_delta.store(true, Ordering::SeqCst);
+    }
+
+    async fn finish_text_replacement(&self) {
+        if !self.replace_on_next_delta.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        {
+            let mut guard = match self.accumulated_text.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.clear();
+        }
+        self.inner.safe_text_update(String::new()).await;
     }
 }
 
@@ -2528,6 +2555,72 @@ fn is_credit_exhaustion_error(error: &LlmError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct RecordingSafeTextSink {
+        updates: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl HostManagedModelStreamSink for RecordingSafeTextSink {
+        async fn safe_text_update(&self, safe_text: String) {
+            self.updates
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(safe_text);
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_stream_sink_replaces_partial_attempt_on_first_new_delta() {
+        let inner = Arc::new(RecordingSafeTextSink::default());
+        let sink = ProviderStreamSink::new(inner.clone());
+
+        sink.text_delta("partial".to_string()).await;
+        sink.replace_on_next_text_delta().await;
+
+        // Replacement is deferred so the UI keeps showing the old draft while
+        // the provider retry is waiting for its first byte.
+        assert_eq!(
+            inner
+                .updates
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_slice(),
+            ["partial"]
+        );
+
+        sink.text_delta("Hel".to_string()).await;
+        sink.text_delta("lo".to_string()).await;
+
+        assert_eq!(
+            inner
+                .updates
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_slice(),
+            ["partial", "Hel", "Hello"]
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_stream_sink_clears_partial_for_textless_replacement() {
+        let inner = Arc::new(RecordingSafeTextSink::default());
+        let sink = ProviderStreamSink::new(inner.clone());
+
+        sink.text_delta("partial".to_string()).await;
+        sink.replace_on_next_text_delta().await;
+        sink.finish_text_replacement().await;
+
+        assert_eq!(
+            inner
+                .updates
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_slice(),
+            ["partial", ""]
+        );
+    }
 
     fn request_failed(reason: &str) -> LlmError {
         LlmError::RequestFailed {

@@ -219,13 +219,51 @@ impl RetryProvider {
         Fut: Future<Output = Result<T, LlmError>>,
     {
         let mut last_error: Option<LlmError> = None;
+        let mut retried_after_partial_text = false;
+        let mut replacement_attempt_active = false;
 
         for attempt in 0..=self.config.max_retries {
             let attempt_sink = Arc::new(StreamingAttemptSink::new(Arc::clone(&sink)));
             match op(attempt_sink.clone()).await {
-                Ok(resp) => return Ok(resp),
+                Ok(resp) => {
+                    if replacement_attempt_active {
+                        sink.finish_text_replacement().await;
+                    }
+                    return Ok(resp);
+                }
                 Err(err) => {
                     if attempt_sink.emitted_text() {
+                        let can_replace_partial = sink.supports_text_replacement()
+                            && !retried_after_partial_text
+                            && is_retryable(&err)
+                            && attempt < self.config.max_retries;
+                        if can_replace_partial {
+                            let delay = match &err {
+                                LlmError::RateLimited {
+                                    retry_after: Some(duration),
+                                    ..
+                                }
+                                | LlmError::BadGateway {
+                                    retry_after: Some(duration),
+                                    ..
+                                } => *duration,
+                                _ => retry_backoff_delay(attempt),
+                            };
+                            tracing::warn!(
+                                provider = %self.inner.model_name(),
+                                attempt = attempt + 1,
+                                max_retries = self.config.max_retries,
+                                delay_ms = delay.as_millis() as u64,
+                                error = %err,
+                                "Retrying interrupted stream with partial-text replacement{label}"
+                            );
+                            last_error = Some(err);
+                            retried_after_partial_text = true;
+                            tokio::time::sleep(delay).await;
+                            sink.replace_on_next_text_delta().await;
+                            replacement_attempt_active = true;
+                            continue;
+                        }
                         tracing::warn!(
                             provider = %self.inner.model_name(),
                             attempt = attempt + 1,
@@ -298,6 +336,18 @@ impl CompletionStreamSink for StreamingAttemptSink {
             self.emitted_text.store(true, Ordering::SeqCst);
         }
         self.inner.text_delta(delta).await;
+    }
+
+    fn supports_text_replacement(&self) -> bool {
+        self.inner.supports_text_replacement()
+    }
+
+    async fn replace_on_next_text_delta(&self) {
+        self.inner.replace_on_next_text_delta().await;
+    }
+
+    async fn finish_text_replacement(&self) {
+        self.inner.finish_text_replacement().await;
     }
 }
 
@@ -410,6 +460,7 @@ mod tests {
     use super::*;
 
     use crate::testing::StubLlm;
+    use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
     use tokio::sync::mpsc;
 
@@ -436,10 +487,56 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct ReplacingCompletionStreamSink {
+        text: Mutex<String>,
+        updates: Mutex<Vec<String>>,
+        replace_on_next_delta: AtomicBool,
+    }
+
+    #[async_trait]
+    impl CompletionStreamSink for ReplacingCompletionStreamSink {
+        async fn text_delta(&self, delta: String) {
+            let update = {
+                let mut text = self.text.lock().expect("replacement sink text lock");
+                if self.replace_on_next_delta.swap(false, Ordering::SeqCst) {
+                    text.clear();
+                }
+                text.push_str(&delta);
+                text.clone()
+            };
+            self.updates
+                .lock()
+                .expect("replacement sink updates lock")
+                .push(update);
+        }
+
+        fn supports_text_replacement(&self) -> bool {
+            true
+        }
+
+        async fn replace_on_next_text_delta(&self) {
+            self.replace_on_next_delta.store(true, Ordering::SeqCst);
+        }
+
+        async fn finish_text_replacement(&self) {
+            if self.replace_on_next_delta.swap(false, Ordering::SeqCst) {
+                let mut text = self.text.lock().expect("replacement sink text lock");
+                text.clear();
+                self.updates
+                    .lock()
+                    .expect("replacement sink updates lock")
+                    .push(String::new());
+            }
+        }
+    }
+
     #[derive(Clone, Copy)]
     enum StreamingRetryScript {
-        FailOnceBeforeTextThenSucceed,
-        FailAfterText,
+        OnceBeforeTextThenSucceed,
+        OnceAfterTextThenSucceed,
+        OnceAfterTextThenSucceedWithoutText,
+        AlwaysAfterText,
     }
 
     struct StreamingRetryLlm {
@@ -472,14 +569,23 @@ mod tests {
         ) -> Result<(), LlmError> {
             let attempt = self.calls.fetch_add(1, Ordering::SeqCst);
             match self.script {
-                StreamingRetryScript::FailOnceBeforeTextThenSucceed if attempt == 0 => {
+                StreamingRetryScript::OnceBeforeTextThenSucceed if attempt == 0 => {
                     Err(Self::retryable_error())
                 }
-                StreamingRetryScript::FailAfterText => {
+                StreamingRetryScript::AlwaysAfterText => {
                     sink.text_delta("partial".to_string()).await;
                     Err(Self::retryable_error())
                 }
-                StreamingRetryScript::FailOnceBeforeTextThenSucceed => {
+                StreamingRetryScript::OnceAfterTextThenSucceed
+                | StreamingRetryScript::OnceAfterTextThenSucceedWithoutText
+                    if attempt == 0 =>
+                {
+                    sink.text_delta("partial".to_string()).await;
+                    Err(Self::retryable_error())
+                }
+                StreamingRetryScript::OnceAfterTextThenSucceedWithoutText => Ok(()),
+                StreamingRetryScript::OnceBeforeTextThenSucceed
+                | StreamingRetryScript::OnceAfterTextThenSucceed => {
                     sink.text_delta("Hel".to_string()).await;
                     sink.text_delta("lo".to_string()).await;
                     Ok(())
@@ -760,7 +866,7 @@ mod tests {
     #[tokio::test]
     async fn complete_with_tools_streaming_retries_before_text_then_forwards_deltas() {
         let inner = Arc::new(StreamingRetryLlm::new(
-            StreamingRetryScript::FailOnceBeforeTextThenSucceed,
+            StreamingRetryScript::OnceBeforeTextThenSucceed,
         ));
         let retry = RetryProvider::new(inner.clone(), fast_config(1));
         let (delta_tx, mut delta_rx) = mpsc::unbounded_channel();
@@ -779,7 +885,9 @@ mod tests {
 
     #[tokio::test]
     async fn complete_streaming_does_not_retry_after_partial_text() {
-        let inner = Arc::new(StreamingRetryLlm::new(StreamingRetryScript::FailAfterText));
+        let inner = Arc::new(StreamingRetryLlm::new(
+            StreamingRetryScript::AlwaysAfterText,
+        ));
         let retry = RetryProvider::new(inner.clone(), fast_config(3));
         let (delta_tx, mut delta_rx) = mpsc::unbounded_channel();
         let sink = Arc::new(RecordingCompletionStreamSink { sender: delta_tx });
@@ -793,6 +901,60 @@ mod tests {
         assert_eq!(inner.calls(), 1);
         assert_eq!(delta_rx.recv().await.as_deref(), Some("partial"));
         assert!(delta_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn complete_streaming_retries_once_when_sink_can_replace_partial_text() {
+        let inner = Arc::new(StreamingRetryLlm::new(
+            StreamingRetryScript::OnceAfterTextThenSucceed,
+        ));
+        let retry = RetryProvider::new(inner.clone(), fast_config(3));
+        let sink = Arc::new(ReplacingCompletionStreamSink::default());
+
+        let response = retry
+            .complete_streaming(make_request(), sink.clone())
+            .await
+            .expect("replacement retry should succeed");
+
+        assert_eq!(inner.calls(), 2);
+        assert_eq!(response.content, "Hello");
+        assert_eq!(
+            *sink.updates.lock().expect("replacement sink updates lock"),
+            ["partial", "Hel", "Hello"]
+        );
+        assert_eq!(
+            sink.text
+                .lock()
+                .expect("replacement sink text lock")
+                .as_str(),
+            "Hello"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_streaming_clears_partial_when_replacement_has_no_text() {
+        let inner = Arc::new(StreamingRetryLlm::new(
+            StreamingRetryScript::OnceAfterTextThenSucceedWithoutText,
+        ));
+        let retry = RetryProvider::new(inner.clone(), fast_config(3));
+        let sink = Arc::new(ReplacingCompletionStreamSink::default());
+
+        retry
+            .complete_streaming(make_request(), sink.clone())
+            .await
+            .expect("textless replacement retry should succeed");
+
+        assert_eq!(inner.calls(), 2);
+        assert_eq!(
+            *sink.updates.lock().expect("replacement sink updates lock"),
+            ["partial", ""]
+        );
+        assert!(
+            sink.text
+                .lock()
+                .expect("replacement sink text lock")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
