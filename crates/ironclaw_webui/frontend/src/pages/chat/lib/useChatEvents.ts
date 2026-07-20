@@ -235,6 +235,12 @@ export function useChatEvents({
         }
 
         case "error": {
+          // An SSE error does not include a run id, but while a run is active it
+          // describes that same execution. Give it the run failure id so a later
+          // terminal projection can replace this provisional transport error with
+          // the run's more actionable failure summary instead of adding a second
+          // error bubble.
+          const runId = activeRunRef?.current?.runId || null;
           setPendingGate(null);
           setIsProcessing(false);
           setActiveRun?.(null);
@@ -244,6 +250,7 @@ export function useChatEvents({
             retryable: frame.retryable === true,
           });
           appendStreamFailureMessage(setMessages, {
+            runId,
             error: frame.error,
             kind: frame.kind,
             retryable: frame.retryable === true,
@@ -856,8 +863,44 @@ function promotedRunFailureMessage(message, messageId) {
     : message;
 }
 
-function appendStreamFailureMessage(setMessages, { error, kind, retryable }) {
+function appendStreamFailureMessage(
+  setMessages,
+  { runId, error, kind, retryable },
+) {
   const baseMessageId = streamFailureMessageId({ error, kind, retryable });
+  if (runId) {
+    const messageId = `${RUN_FAILURE_ID_PREFIX}${runId}`;
+    const content = failureMessageForStreamError({ error, kind, retryable });
+    setMessages((prev) => {
+      const existing = prev.findIndex((message) => message.id === messageId);
+      if (existing >= 0 && prev[existing].failureStatus !== "stream_error") {
+        // A terminal run status already replaced the provisional message.
+        return prev;
+      }
+      if (
+        existing >= 0 &&
+        prev[existing].failureCategory === baseMessageId
+      ) {
+        return prev;
+      }
+      const nextMessage = createErrorChatMessage({
+        id: messageId,
+        content,
+        timestamp: prev[existing]?.timestamp || new Date().toISOString(),
+        // Keep the sanitized stream identity so repeated SSE errors can still
+        // dedupe after the first error clears the active run.
+        failureStatus: "stream_error",
+        failureCategory: baseMessageId,
+        failureSummary: content,
+      });
+      if (existing < 0) return [...prev, nextMessage];
+      const next = [...prev];
+      next[existing] = nextMessage;
+      return next;
+    });
+    return;
+  }
+
   setMessages((prev) => {
     const lastMessage = prev[prev.length - 1];
     if (isSameStreamFailureMessage(lastMessage, baseMessageId)) return prev;
@@ -875,7 +918,12 @@ function appendStreamFailureMessage(setMessages, { error, kind, retryable }) {
 
 function isSameStreamFailureMessage(message, baseMessageId) {
   const id = typeof message?.id === "string" ? message.id : "";
-  return id === baseMessageId || id.startsWith(`${baseMessageId}-`);
+  return (
+    (message?.failureStatus === "stream_error" &&
+      message?.failureCategory === baseMessageId) ||
+    id === baseMessageId ||
+    id.startsWith(`${baseMessageId}-`)
+  );
 }
 
 function uniqueStreamFailureMessageId(baseMessageId, messages) {

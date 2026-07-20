@@ -2537,6 +2537,7 @@ test("useChatEvents: stream error event appends inline error and clears active s
   assert.equal(harness.activeRun, null);
   assert.equal(harness.messages.length, 1);
   assert.equal(harness.messages[0].role, "error");
+  assert.equal(harness.messages[0].id, "err-run-stream-error");
   assert.equal(harness.messages[0].content, "The chat stream failed inline.");
   assert.deepEqual(plain(seenStreamErrors), [
     {
@@ -2557,6 +2558,58 @@ test("useChatEvents: stream error event appends inline error and clears active s
       retryable: true,
     },
   ]);
+});
+
+test("useChatEvents: terminal run failure replaces its provisional stream error", () => {
+  const harness = createUseChatEventsHarness({
+    failureMessageForRunStatus: ({ failureSummary }) =>
+      failureSummary || "The run failed before producing a reply.",
+  });
+  harness.setCurrentActiveRun({
+    runId: "run-context-limit",
+    threadId: "thread-1",
+    status: "running",
+  });
+
+  harness.handleEvent({
+    type: "error",
+    frame: {
+      error: "unavailable",
+      kind: "service_unavailable",
+      retryable: true,
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: "run-context-limit",
+              status: "failed",
+              failure_category: "model_context_limit",
+              failure_summary:
+                "The request exceeded the model's context limit. Start a new chat or shorten the request.",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.deepEqual(plain(harness.messages[0]), {
+    id: "err-run-context-limit",
+    role: "error",
+    content:
+      "The request exceeded the model's context limit. Start a new chat or shorten the request.",
+    timestamp: harness.messages[0].timestamp,
+    failureStatus: "failed",
+    failureCategory: "model_context_limit",
+    failureSummary:
+      "The request exceeded the model's context limit. Start a new chat or shorten the request.",
+  });
 });
 
 test("useChatEvents: stream error dedupe only suppresses adjacent repeats", () => {
