@@ -829,6 +829,33 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply(#[case] storage:
             .contains("https://hooks.example.test/webhooks/extensions/telegram/updates"),
         "setWebhook must register the configured public webhook URL"
     );
+    // The Telegram contract takes `secret_token` (the VALUE Telegram echoes
+    // back on every webhook delivery); the adapter only ever names the
+    // handle, and the host resolves it into the JSON body through the
+    // manifest-declared body-credential binding. Without the real value the
+    // webhook registers secretless and the shared_secret_header verifier
+    // rejects every genuine update.
+    let set_webhook_body = String::from_utf8_lossy(&set_webhook.body);
+    assert!(
+        set_webhook_body.contains(&format!("\"secret_token\":\"{TELEGRAM_WEBHOOK_SECRET}\"")),
+        "setWebhook must carry the configured webhook secret value, resolved host-side; got {set_webhook_body}"
+    );
+    assert!(
+        !set_webhook_body.contains("secret_token_handle"),
+        "the credential handle name must never reach the vendor; got {set_webhook_body}"
+    );
+    // Redaction: the wire carries the secret by contract, but the
+    // model-visible activation result must not.
+    let activation_output = lifecycle
+        .tool_result_output("builtin.extension_activate")
+        .await
+        .expect("activation tool output");
+    assert!(
+        !activation_output
+            .to_string()
+            .contains(TELEGRAM_WEBHOOK_SECRET),
+        "the webhook secret must not appear in model-visible tool output; got {activation_output}"
+    );
 
     // The PRODUCTION assembly reconciled the activation into an ingress
     // registration: dynamic `[channel.config]` verification secrets, the

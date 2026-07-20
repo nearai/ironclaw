@@ -950,8 +950,15 @@ Rules — kept short on purpose:
   entrypoint binding (`crates/ironclaw_reborn_cli/src/runtime/native_extensions.rs`),
   the real channel-egress transport with host-side path-placeholder token
   injection (`HostRuntimeChannelEgressTransport`,
-  `path_placeholder_injection_substitutes_the_secret_host_side`), and the
-  install → activate (`setWebhook` over recorded egress) → signed update →
+  `path_placeholder_injection_substitutes_the_secret_host_side`), the
+  manifest-declared body-credential binding that resolves the webhook shared
+  secret into `setWebhook`'s `secret_token` JSON field host-side
+  (`[[channel.egress]] body_credentials`,
+  `RuntimeCredentialTarget::BodyJsonPointer`,
+  `body_json_pointer_credential_is_resolved_into_the_wire_body`; the adapter
+  names the handle only), and the
+  install → activate (`setWebhook` over recorded egress, wire body carrying
+  the configured secret value and never the handle) → signed update →
   turn → coordinated reply proof through the production router mount:
   `telegram_update_becomes_a_turn_and_a_coordinated_reply`
   (`tests/integration/extension_delivery.rs`, both DBs). The install's

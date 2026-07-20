@@ -482,6 +482,7 @@ impl ironclaw_product_adapters::ChannelAdapter for AcmeFixtureChannelAdapter {
                             )],
                             body: serde_json::to_vec(&body).ok(),
                             credential: None,
+                            body_credentials: Vec::new(),
                         })
                         .await;
                     match response {

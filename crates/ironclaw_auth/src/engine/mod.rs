@@ -467,7 +467,8 @@ impl AuthEngine {
                         .append_pair(name, field.value.expose_secret());
                     url = parsed.to_string();
                 }
-                RuntimeCredentialTarget::PathPlaceholder { .. } => {
+                RuntimeCredentialTarget::PathPlaceholder { .. }
+                | RuntimeCredentialTarget::BodyJsonPointer { .. } => {
                     return Err(AuthProductError::MalformedConfig);
                 }
             }

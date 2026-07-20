@@ -120,6 +120,12 @@ pub struct RestrictedEgressRequest {
     /// Declared credential handle to inject, if the call needs one. An
     /// undeclared handle is rejected before any network activity.
     pub credential: Option<SecretHandle>,
+    /// Declared body-credential handles to inject into the JSON body at
+    /// their manifest-declared RFC 6901 pointers (`[[channel.egress]]
+    /// body_credentials`). A handle without a declared binding for the
+    /// matched target is rejected before any network activity; the adapter
+    /// names handles only and never sees secret bytes.
+    pub body_credentials: Vec<SecretHandle>,
 }
 
 /// Status and size-capped body; response headers are deliberately not

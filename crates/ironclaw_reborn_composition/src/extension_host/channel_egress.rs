@@ -214,34 +214,39 @@ impl ChannelEgressTransport for HostRuntimeChannelEgressTransport {
             }
         })?;
 
-        let credentials = match &approved.credential {
-            None => Vec::new(),
-            Some(credential) => {
-                let material = self
-                    .credentials
-                    .channel_secret(
-                        &approved.extension_id,
-                        &approved.installation_id,
-                        &credential.handle,
-                    )
-                    .await
-                    .map_err(|error| RestrictedEgressError::Transport {
-                        reason: error.to_string(),
-                    })?;
-                let Some(material) = material else {
-                    return Err(RestrictedEgressError::AuthRequired {
-                        required_secrets: vec![credential.handle.clone()],
-                        credential_requirements: Vec::new(),
-                    });
-                };
-                vec![HostRuntimeCredentialMaterial {
-                    handle: credential.handle.clone(),
-                    material,
-                    target: credential.target.clone(),
-                    required: true,
-                }]
-            }
-        };
+        let mut credentials = Vec::new();
+        // The primary declared credential plus every declared body credential
+        // this call opted into resolve through the same port and ride the
+        // same host-runtime injection path; each is required, fail-closed.
+        let approved_credentials = approved
+            .credential
+            .iter()
+            .chain(approved.body_credentials.iter());
+        for credential in approved_credentials {
+            let material = self
+                .credentials
+                .channel_secret(
+                    &approved.extension_id,
+                    &approved.installation_id,
+                    &credential.handle,
+                )
+                .await
+                .map_err(|error| RestrictedEgressError::Transport {
+                    reason: error.to_string(),
+                })?;
+            let Some(material) = material else {
+                return Err(RestrictedEgressError::AuthRequired {
+                    required_secrets: vec![credential.handle.clone()],
+                    credential_requirements: Vec::new(),
+                });
+            };
+            credentials.push(HostRuntimeCredentialMaterial {
+                handle: credential.handle.clone(),
+                material,
+                target: credential.target.clone(),
+                required: true,
+            });
+        }
 
         let response = self
             .host_egress
@@ -442,6 +447,7 @@ mod tests {
             body: b"{}".to_vec(),
             host: host.to_string(),
             credential,
+            body_credentials: Vec::new(),
             response_body_limit: 64 * 1024,
             timeout_ms: 5_000,
         }
@@ -522,6 +528,38 @@ mod tests {
             recorded[0].url, "https://vendor.example/bot123456:telegram-token/sendMessage",
             "the placeholder is substituted host-side; the adapter never saw the token"
         );
+    }
+
+    #[tokio::test]
+    async fn body_json_pointer_credential_is_resolved_into_the_wire_body() {
+        let scope = test_scope();
+        let handle = SecretHandle::new("vendor_webhook_secret").unwrap();
+        let credentials = seeded_credentials(&scope, &handle, "wh-sentinel-secret").await;
+        let (port, requests) = host_egress_port(RecordingNetworkHttpEgress::ok());
+        let transport = HostRuntimeChannelEgressTransport::new(port, credentials, scope);
+
+        let mut plan = approved(
+            "https://vendor.example/api/setWebhook",
+            "vendor.example",
+            None,
+        );
+        plan.body = br#"{"url":"https://hooks.example/updates"}"#.to_vec();
+        plan.body_credentials = vec![ApprovedChannelCredential {
+            handle,
+            target: RuntimeCredentialTarget::BodyJsonPointer {
+                pointer: "/secret_token".to_string(),
+            },
+        }];
+        transport.execute(plan).await.expect("transport executes");
+
+        let recorded = requests.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        let body: serde_json::Value = serde_json::from_slice(&recorded[0].body).unwrap();
+        assert_eq!(
+            body["secret_token"], "wh-sentinel-secret",
+            "the resolved secret VALUE is inserted host-side; the adapter never saw it"
+        );
+        assert_eq!(body["url"], "https://hooks.example/updates");
     }
 
     #[tokio::test]

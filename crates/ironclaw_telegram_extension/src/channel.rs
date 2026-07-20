@@ -71,15 +71,24 @@ impl ChannelAdapter for TelegramChannelAdapter {
             })?;
         let body = serde_json::json!({
             "url": webhook_url,
-            // The vendor echoes this on every webhook delivery; the host's
-            // shared_secret_header recipe verifies it. The VALUE is resolved
-            // host-side at delivery-verification time; registration sends the
-            // handle's stored value via host substitution when real channel
-            // egress lands — the adapter itself only names the handle.
-            "secret_token_handle": TELEGRAM_WEBHOOK_SECRET_HANDLE,
         });
+        // Telegram's contract wants `secret_token` — the VALUE it will echo
+        // back on every webhook delivery, which the host's
+        // shared_secret_header recipe then verifies. The adapter only names
+        // the handle; the manifest's `[[channel.egress]] body_credentials`
+        // binding tells restricted egress to resolve it and insert the value
+        // at `/secret_token` host-side. Secret bytes never enter adapter
+        // scope.
+        let mut request = bot_api_request("setWebhook", body);
+        request.body_credentials = vec![
+            SecretHandle::new(TELEGRAM_WEBHOOK_SECRET_HANDLE).map_err(|error| {
+                ChannelError::VendorWiring {
+                    reason: format!("invalid webhook secret handle: {error}"),
+                }
+            })?,
+        ];
         let response = egress
-            .send(bot_api_request("setWebhook", body))
+            .send(request)
             .await
             .map_err(|error| ChannelError::VendorWiring {
                 reason: format!("setWebhook egress failed: {error}"),
@@ -385,6 +394,7 @@ fn bot_api_request(method: &str, body: serde_json::Value) -> RestrictedEgressReq
         headers: vec![("content-type".to_string(), "application/json".to_string())],
         body: Some(body.to_string().into_bytes()),
         credential: SecretHandle::new(TELEGRAM_BOT_TOKEN_HANDLE).ok(),
+        body_credentials: Vec::new(),
     }
 }
 
@@ -450,7 +460,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn activate_registers_the_webhook_with_the_secret_token_handle() {
+    async fn activate_names_the_webhook_secret_as_a_declared_body_credential() {
         let egress = RecordingEgress::ok();
         let config = vec![(
             TELEGRAM_WEBHOOK_URL_CONFIG.to_string(),
@@ -470,11 +480,29 @@ mod tests {
             Some(TELEGRAM_BOT_TOKEN_HANDLE),
             "the bot token is a host-injected handle, never bytes"
         );
+        assert_eq!(
+            request
+                .body_credentials
+                .iter()
+                .map(SecretHandle::as_str)
+                .collect::<Vec<_>>(),
+            vec![TELEGRAM_WEBHOOK_SECRET_HANDLE],
+            "the webhook secret rides as a declared body-credential handle; \
+             the host inserts its VALUE at the manifest's /secret_token pointer"
+        );
         let body: serde_json::Value =
             serde_json::from_slice(request.body.as_deref().unwrap_or_default()).expect("json");
         assert_eq!(
             body["url"],
             "https://host.example/webhooks/extensions/telegram/updates"
+        );
+        assert!(
+            body.get("secret_token").is_none(),
+            "the adapter must not fabricate the secret field; insertion is host-side"
+        );
+        assert!(
+            body.get("secret_token_handle").is_none(),
+            "the handle name must never be sent to the vendor"
         );
     }
 

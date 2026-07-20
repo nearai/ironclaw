@@ -53,6 +53,14 @@ credential_handle = "telegram_bot_token"
 # adapter writes the `{telegram_bot_token}` placeholder and the host
 # substitutes the secret — token bytes never reach the adapter.
 injection = { type = "path_placeholder", placeholder = "telegram_bot_token" }
+# `setWebhook` takes the webhook shared secret as the `secret_token` JSON
+# body field (the value Telegram echoes on every delivery, verified by the
+# `shared_secret_header` ingress recipe above). The adapter opts in by
+# naming the handle; the host resolves it and inserts the VALUE at the
+# declared pointer — secret bytes never reach the adapter.
+body_credentials = [
+  { handle = "telegram_webhook_secret", pointer = "/secret_token" },
+]
 
 [channel.presentation]
 supports_markdown = false

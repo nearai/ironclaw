@@ -166,12 +166,31 @@ impl ChannelDescriptor {
                                 .chars()
                                 .all(|c| c.is_ascii_alphanumeric() || c == '_')
                     }
+                    crate::RuntimeCredentialTarget::BodyJsonPointer { pointer } => {
+                        pointer.starts_with('/')
+                    }
                 };
                 if !well_formed {
                     return Err(ChannelDescriptorError::InvalidEgressInjection {
                         host: egress.host.clone(),
                     });
                 }
+            }
+            let mut seen_body_handles: Vec<&str> = Vec::new();
+            for body_credential in &egress.body_credentials {
+                if !self.declares_config_handle(&body_credential.handle) {
+                    return Err(ChannelDescriptorError::UndeclaredEgressHandle {
+                        handle: body_credential.handle.as_str().to_string(),
+                    });
+                }
+                if !body_credential.pointer.starts_with('/')
+                    || seen_body_handles.contains(&body_credential.handle.as_str())
+                {
+                    return Err(ChannelDescriptorError::InvalidEgressInjection {
+                        host: egress.host.clone(),
+                    });
+                }
+                seen_body_handles.push(body_credential.handle.as_str());
             }
         }
         Ok(())
@@ -237,6 +256,25 @@ pub struct ChannelEgressDescriptor {
     /// substitutes the secret — bytes never reach the adapter).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub injection: Option<crate::RuntimeCredentialTarget>,
+    /// Body credentials the host may inject for this target: each entry binds
+    /// a secret handle to the RFC 6901 JSON pointer where its resolved value
+    /// is inserted in the request's JSON body (e.g. a vendor
+    /// webhook-registration call whose API takes the shared secret as a body
+    /// field). The manifest is the sole authority for the placement; adapters
+    /// opt in per request by naming the handle and never see bytes. Empty
+    /// means no body credential may be injected for this target.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub body_credentials: Vec<ChannelBodyCredentialDescriptor>,
+}
+
+/// One declared body-credential binding on a channel egress target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelBodyCredentialDescriptor {
+    pub handle: SecretHandle,
+    /// RFC 6901 JSON pointer naming where the resolved secret value is
+    /// inserted in the request's JSON body (must start with `/`).
+    pub pointer: String,
 }
 
 fn default_https() -> NetworkScheme {

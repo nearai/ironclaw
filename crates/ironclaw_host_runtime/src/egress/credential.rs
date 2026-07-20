@@ -456,7 +456,62 @@ fn apply_credential_injection(
                 }
             }
         }
+        RuntimeCredentialTarget::BodyJsonPointer { pointer } => {
+            let mut parsed: serde_json::Value =
+                serde_json::from_slice(&request.body).map_err(|_| {
+                    RuntimeHttpEgressError::Credential {
+                        reason: "credential injection body is not valid JSON".to_string(),
+                    }
+                })?;
+            insert_body_secret_at_pointer(&mut parsed, pointer, value)?;
+            request.body =
+                serde_json::to_vec(&parsed).map_err(|_| RuntimeHttpEgressError::Credential {
+                    reason: "credential injection body did not re-serialize".to_string(),
+                })?;
+        }
     }
+    Ok(())
+}
+
+/// Insert `value` as a JSON string at the RFC 6901 `pointer`. The parent must
+/// be an existing JSON object and the leaf key must be absent: an adapter
+/// that pre-populates the field (or a pointer into a non-object) fails the
+/// request closed rather than silently overwriting or fabricating structure.
+fn insert_body_secret_at_pointer(
+    body: &mut serde_json::Value,
+    pointer: &str,
+    value: &str,
+) -> Result<(), RuntimeHttpEgressError> {
+    fn credential_error(reason: &str) -> RuntimeHttpEgressError {
+        RuntimeHttpEgressError::Credential {
+            reason: reason.to_string(),
+        }
+    }
+    let (parent_pointer, leaf) = pointer
+        .rsplit_once('/')
+        .ok_or_else(|| credential_error("credential injection body pointer is invalid"))?;
+    let leaf = leaf.replace("~1", "/").replace("~0", "~");
+    if leaf.is_empty() {
+        return Err(credential_error(
+            "credential injection body pointer is invalid",
+        ));
+    }
+    let parent = if parent_pointer.is_empty() {
+        &mut *body
+    } else {
+        body.pointer_mut(parent_pointer).ok_or_else(|| {
+            credential_error("credential injection body pointer parent is missing")
+        })?
+    };
+    let object = parent.as_object_mut().ok_or_else(|| {
+        credential_error("credential injection body pointer parent is not an object")
+    })?;
+    if object.contains_key(&leaf) {
+        return Err(credential_error(
+            "credential injection body field is already present",
+        ));
+    }
+    object.insert(leaf, serde_json::Value::String(value.to_string()));
     Ok(())
 }
 
@@ -924,6 +979,78 @@ mod path_placeholder_tests {
             });
         apply_credential_injections(&store, None, &mut request)?;
         Ok(request.url.clone())
+    }
+
+    fn apply_body_pointer(
+        body: &[u8],
+        pointer: &str,
+        secret_value: &str,
+    ) -> Result<Vec<u8>, RuntimeHttpEgressError> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let store = FilesystemSecretStore::ephemeral();
+        let mut request = request_with_url("https://vendor.example/api/setWebhook");
+        request.body = body.to_vec();
+        let handle = SecretHandle::new("body-credential").unwrap();
+        runtime
+            .block_on(store.put(
+                request.scope.clone(),
+                handle.clone(),
+                SecretMaterial::from(secret_value.to_string()),
+                None,
+            ))
+            .unwrap();
+        request
+            .credential_injections
+            .push(RuntimeCredentialInjection {
+                handle,
+                source: RuntimeCredentialSource::SecretStoreLease,
+                target: RuntimeCredentialTarget::BodyJsonPointer {
+                    pointer: pointer.to_string(),
+                },
+                required: true,
+            });
+        apply_credential_injections(&store, None, &mut request)?;
+        Ok(request.body.clone())
+    }
+
+    #[test]
+    fn body_json_pointer_inserts_the_secret_value_into_the_json_body() {
+        let body = apply_body_pointer(
+            br#"{"url":"https://hooks.example/updates"}"#,
+            "/secret_token",
+            "wh-secret-1",
+        )
+        .expect("body injection succeeds");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["secret_token"], "wh-secret-1");
+        assert_eq!(parsed["url"], "https://hooks.example/updates");
+    }
+
+    #[test]
+    fn body_json_pointer_supports_nested_parents_and_escaped_leaves() {
+        let body = apply_body_pointer(br#"{"outer":{}}"#, "/outer/se~1cret~0", "v")
+            .expect("nested injection succeeds");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["outer"]["se/cret~"], "v");
+    }
+
+    #[test]
+    fn body_json_pointer_fails_closed_on_bad_bodies_and_pointers() {
+        for (body, pointer) in [
+            // not JSON at all
+            (&b"not json"[..], "/secret_token"),
+            // the field is already present: never overwrite silently
+            (&br#"{"secret_token":"pre"}"#[..], "/secret_token"),
+            // parent object missing: never fabricate structure
+            (&br#"{}"#[..], "/missing/secret_token"),
+            // top-level is not an object
+            (&br#"[]"#[..], "/secret_token"),
+        ] {
+            let error = apply_body_pointer(body, pointer, "v").expect_err("must fail closed");
+            assert!(matches!(error, RuntimeHttpEgressError::Credential { .. }));
+        }
     }
 
     #[test]

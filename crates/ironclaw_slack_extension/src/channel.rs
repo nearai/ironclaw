@@ -162,6 +162,7 @@ impl ChannelAdapter for SlackChannelAdapter {
                 )],
                 body: Some(body),
                 credential: Some(credential),
+                body_credentials: Vec::new(),
             })
             .await
             .map_err(|error| ChannelError::VendorWiring {
@@ -252,6 +253,7 @@ async fn post_slack_chunk(
             )],
             body: Some(body),
             credential: Some(credential.clone()),
+            body_credentials: Vec::new(),
         })
         .await;
     let response = match response {
@@ -312,6 +314,7 @@ async fn delete_slack_message(
             )],
             body: Some(body),
             credential: Some(credential.clone()),
+            body_credentials: Vec::new(),
         })
         .await;
     let response = match response {

@@ -49,6 +49,10 @@ pub struct DeclaredChannelEgress {
     pub methods: Vec<NetworkMethod>,
     pub credential_handle: Option<SecretHandle>,
     pub injection: Option<RuntimeCredentialTarget>,
+    /// Declared body-credential bindings: each maps a handle to the RFC 6901
+    /// JSON pointer where the host inserts its resolved value. A request
+    /// naming an undeclared handle is rejected before any transport activity.
+    pub body_credentials: Vec<ironclaw_host_api::ChannelBodyCredentialDescriptor>,
 }
 
 /// The credential part of an approved plan: the declared handle plus the
@@ -76,6 +80,10 @@ pub struct ApprovedChannelEgress {
     /// The single host the transport must pin its network policy to.
     pub host: String,
     pub credential: Option<ApprovedChannelCredential>,
+    /// Declared body credentials this call opted into: handle plus its
+    /// manifest-declared `BodyJsonPointer` target. Resolution and insertion
+    /// are the transport's job, host-side.
+    pub body_credentials: Vec<ApprovedChannelCredential>,
     pub response_body_limit: u64,
     pub timeout_ms: u64,
 }
@@ -161,6 +169,32 @@ impl PolicyEnforcedChannelEgress {
                 });
             }
         };
+        let mut body_credentials = Vec::new();
+        for handle in &request.body_credentials {
+            let declared_binding = declared
+                .body_credentials
+                .iter()
+                .find(|binding| &binding.handle == handle)
+                .ok_or_else(|| RestrictedEgressError::UndeclaredCredential {
+                    handle: handle.as_str().to_string(),
+                })?;
+            // A duplicate opt-in would double-insert at the same pointer;
+            // reject it as the adapter bug it is.
+            if body_credentials
+                .iter()
+                .any(|approved: &ApprovedChannelCredential| &approved.handle == handle)
+            {
+                return Err(RestrictedEgressError::UndeclaredCredential {
+                    handle: handle.as_str().to_string(),
+                });
+            }
+            body_credentials.push(ApprovedChannelCredential {
+                handle: handle.clone(),
+                target: RuntimeCredentialTarget::BodyJsonPointer {
+                    pointer: declared_binding.pointer.clone(),
+                },
+            });
+        }
         Ok(ApprovedChannelEgress {
             extension_id: self.extension_id.clone(),
             installation_id: self.installation_id.clone(),
@@ -170,6 +204,7 @@ impl PolicyEnforcedChannelEgress {
             body: request.body.unwrap_or_default(),
             host,
             credential,
+            body_credentials,
             response_body_limit: CHANNEL_EGRESS_RESPONSE_BODY_LIMIT_BYTES,
             timeout_ms: CHANNEL_EGRESS_TIMEOUT_MS,
         })
@@ -202,6 +237,7 @@ impl DeclaredChannelEgress {
             methods: descriptor.methods.clone(),
             credential_handle: descriptor.credential_handle.clone(),
             injection: descriptor.injection.clone(),
+            body_credentials: descriptor.body_credentials.clone(),
         }
     }
 }
@@ -270,6 +306,7 @@ mod tests {
             methods: vec![NetworkMethod::Post],
             credential_handle: Some(SecretHandle::new("vendor_bot_token").unwrap()),
             injection: None,
+            body_credentials: Vec::new(),
         }]
     }
 
@@ -295,6 +332,7 @@ mod tests {
             headers: vec![("content-type".to_string(), "application/json".to_string())],
             body: Some(b"{}".to_vec()),
             credential: Some(SecretHandle::new("vendor_bot_token").unwrap()),
+            body_credentials: Vec::new(),
         }
     }
 
@@ -396,6 +434,83 @@ mod tests {
             approved[0].url.contains("{token}"),
             "placeholder substitution is the transport's job, host-side"
         );
+    }
+
+    #[tokio::test]
+    async fn declared_body_credential_is_approved_with_its_declared_pointer() {
+        let mut declared = declared_vendor();
+        declared[0].body_credentials = vec![ironclaw_host_api::ChannelBodyCredentialDescriptor {
+            handle: SecretHandle::new("vendor_webhook_secret").unwrap(),
+            pointer: "/secret_token".to_string(),
+        }];
+        let (egress, transport) = egress_over(declared);
+        let mut request = post("https://vendor.example/api/setWebhook");
+        request.body_credentials = vec![SecretHandle::new("vendor_webhook_secret").unwrap()];
+        egress.send(request).await.unwrap();
+        let approved = transport.approved.lock().unwrap();
+        assert_eq!(approved[0].body_credentials.len(), 1);
+        assert_eq!(
+            approved[0].body_credentials[0].handle.as_str(),
+            "vendor_webhook_secret"
+        );
+        assert!(
+            matches!(
+                &approved[0].body_credentials[0].target,
+                RuntimeCredentialTarget::BodyJsonPointer { pointer } if pointer == "/secret_token"
+            ),
+            "the pointer comes from the DECLARATION, never from the adapter"
+        );
+    }
+
+    #[tokio::test]
+    async fn undeclared_body_credential_handle_is_rejected_before_transport() {
+        // No body_credentials declared at all: any opt-in is rejected.
+        let (egress, transport) = egress_over(declared_vendor());
+        let mut request = post("https://vendor.example/api/setWebhook");
+        request.body_credentials = vec![SecretHandle::new("vendor_webhook_secret").unwrap()];
+        let error = egress.send(request).await.unwrap_err();
+        assert!(matches!(
+            error,
+            RestrictedEgressError::UndeclaredCredential { .. }
+        ));
+        assert!(transport.approved.lock().unwrap().is_empty());
+
+        // Declared for a DIFFERENT handle: still rejected.
+        let mut declared = declared_vendor();
+        declared[0].body_credentials = vec![ironclaw_host_api::ChannelBodyCredentialDescriptor {
+            handle: SecretHandle::new("vendor_webhook_secret").unwrap(),
+            pointer: "/secret_token".to_string(),
+        }];
+        let (egress, transport) = egress_over(declared);
+        let mut request = post("https://vendor.example/api/setWebhook");
+        request.body_credentials = vec![SecretHandle::new("some_other_secret").unwrap()];
+        let error = egress.send(request).await.unwrap_err();
+        assert!(matches!(
+            error,
+            RestrictedEgressError::UndeclaredCredential { .. }
+        ));
+        assert!(transport.approved.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn duplicate_body_credential_opt_in_is_rejected_before_transport() {
+        let mut declared = declared_vendor();
+        declared[0].body_credentials = vec![ironclaw_host_api::ChannelBodyCredentialDescriptor {
+            handle: SecretHandle::new("vendor_webhook_secret").unwrap(),
+            pointer: "/secret_token".to_string(),
+        }];
+        let (egress, transport) = egress_over(declared);
+        let mut request = post("https://vendor.example/api/setWebhook");
+        request.body_credentials = vec![
+            SecretHandle::new("vendor_webhook_secret").unwrap(),
+            SecretHandle::new("vendor_webhook_secret").unwrap(),
+        ];
+        let error = egress.send(request).await.unwrap_err();
+        assert!(matches!(
+            error,
+            RestrictedEgressError::UndeclaredCredential { .. }
+        ));
+        assert!(transport.approved.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
