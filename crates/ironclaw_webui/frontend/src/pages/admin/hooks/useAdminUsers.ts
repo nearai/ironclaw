@@ -39,14 +39,18 @@ export function useAdminUsers() {
 
   const invalidateUsers = () =>
     queryClient.invalidateQueries({ queryKey: ["admin", "users"] });
-  const invalidateUser = (userId) =>
-    Promise.all([
-      invalidateUsers(),
-      queryClient.invalidateQueries({
-        queryKey: ["admin", "user", userId],
-        exact: true,
-      }),
-    ]);
+  const invalidateUser = (userId) => {
+    const invalidations = [invalidateUsers()];
+    if (userId) {
+      invalidations.push(
+        queryClient.invalidateQueries({
+          queryKey: ["admin", "user", userId],
+          exact: true,
+        }),
+      );
+    }
+    return Promise.all(invalidations);
+  };
 
   const createMut = useMutation({ mutationFn: createAdminUser, onSuccess: invalidateUsers });
   const updateMut = useMutation({

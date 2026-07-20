@@ -5,29 +5,29 @@ import { runVmModuleForTest } from "../../../test-support/vm-module-harness";
 
 function loadUseAdminUsers() {
   const invalidations = [];
-  const mutations = [];
   const context = {
     React: {},
-    activateAdminUser: () => {},
-    createAdminUser: () => {},
-    deleteAdminUser: () => {},
+    activateAdminUser: (id) => ({ id, status: "active" }),
+    createAdminUser: (payload) => ({ id: "created-user", ...payload }),
+    deleteAdminUser: () => ({}),
     deleteUserSecret: () => {},
     fetchAdminUser: () => {},
     fetchAdminUsers: () => {},
     fetchUserSecrets: () => {},
     putUserSecret: () => {},
-    suspendAdminUser: () => {},
-    updateAdminUser: () => {},
-    useMutation: (options) => {
-      mutations.push(options);
-      return {
-        data: null,
-        error: null,
-        isPending: false,
-        mutateAsync: () => Promise.resolve(),
-        reset: () => {},
-      };
-    },
+    suspendAdminUser: (id) => ({ id, status: "suspended" }),
+    updateAdminUser: (id, payload) => ({ id, ...payload }),
+    useMutation: (options) => ({
+      data: null,
+      error: null,
+      isPending: false,
+      mutateAsync: async (variables) => {
+        const data = await options.mutationFn(variables);
+        await options.onSuccess?.(data, variables);
+        return data;
+      },
+      reset: () => {},
+    }),
     useQuery: () => ({ data: { users: [] }, error: null }),
     useQueryClient: () => ({
       invalidateQueries: (request) => {
@@ -46,17 +46,17 @@ function loadUseAdminUsers() {
     context,
     import.meta.url,
   );
-  useAdminUsers();
+  const adminUsers = useAdminUsers();
 
-  return { invalidations, mutations };
+  return { adminUsers, invalidations };
 }
 
 test("role and status mutations invalidate the matching admin user detail", async () => {
-  const { invalidations, mutations } = loadUseAdminUsers();
+  const { adminUsers, invalidations } = loadUseAdminUsers();
 
-  await mutations[1].onSuccess({}, { id: "user-role", payload: { role: "admin" } });
-  await mutations[3].onSuccess({}, "user-suspended");
-  await mutations[4].onSuccess({}, "user-active");
+  await adminUsers.updateUser("user-role", { role: "admin" });
+  await adminUsers.suspendUser("user-suspended");
+  await adminUsers.activateUser("user-active");
 
   assert.deepEqual(invalidations, [
     { queryKey: ["admin", "users"], exact: false },
@@ -69,13 +69,23 @@ test("role and status mutations invalidate the matching admin user detail", asyn
 });
 
 test("create and delete mutations only invalidate the admin user list", async () => {
-  const { invalidations, mutations } = loadUseAdminUsers();
+  const { adminUsers, invalidations } = loadUseAdminUsers();
 
-  await mutations[0].onSuccess({ id: "created-user" });
-  await mutations[2].onSuccess({}, "deleted-user");
+  await adminUsers.createUser({ display_name: "Created User" });
+  await adminUsers.deleteUser("deleted-user");
 
   assert.deepEqual(invalidations, [
     { queryKey: ["admin", "users"], exact: false },
+    { queryKey: ["admin", "users"], exact: false },
+  ]);
+});
+
+test("a missing user id never invalidates an admin user detail query", async () => {
+  const { adminUsers, invalidations } = loadUseAdminUsers();
+
+  await adminUsers.suspendUser();
+
+  assert.deepEqual(invalidations, [
     { queryKey: ["admin", "users"], exact: false },
   ]);
 });
