@@ -44,7 +44,22 @@ export function scrollToBottom(el) {
   el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
 }
 
-export function capturePrependScrollAnchor(el, anchorElement = null) {
+interface ScrollAnchor {
+  scrollHeight: number;
+  scrollTop: number;
+  anchorElement: Element | null;
+  anchorTop: number | null;
+}
+
+interface HistoryPrependAnchor extends ScrollAnchor {
+  firstMessageKey: string | null;
+  threadId: string | null | undefined;
+}
+
+export function capturePrependScrollAnchor(
+  el: HTMLElement | null,
+  anchorElement: Element | null = null,
+): ScrollAnchor | null {
   if (!el) return null;
   const anchorTop = anchorElement
     ? anchorElement.getBoundingClientRect().top - el.getBoundingClientRect().top
@@ -57,7 +72,10 @@ export function capturePrependScrollAnchor(el, anchorElement = null) {
   };
 }
 
-export function restorePrependScrollAnchor(el, anchor) {
+export function restorePrependScrollAnchor(
+  el: HTMLElement | null,
+  anchor: ScrollAnchor | null,
+): void {
   if (!el || !anchor) return;
   if (anchor.anchorElement?.isConnected && Number.isFinite(anchor.anchorTop)) {
     const currentTop =
@@ -73,7 +91,7 @@ export function restorePrependScrollAnchor(el, anchor) {
 function firstVisibleContentElement(
   viewport: HTMLElement | null,
   content: HTMLElement | null,
-) {
+): Element | null {
   if (!viewport || !content) return null;
   const viewportTop = viewport.getBoundingClientRect().top;
   return (
@@ -121,7 +139,7 @@ export function MessageList({
   const scrollRafRef = React.useRef(null);
   const previousScrollTopRef = React.useRef(0);
   const userScrollIntentRef = React.useRef(false);
-  const historyPrependAnchorRef = React.useRef(null);
+  const historyPrependAnchorRef = React.useRef<HistoryPrependAnchor | null>(null);
   const [showJumpToLatest, setShowJumpToLatest] = React.useState(false);
 
   const cancelFollow = React.useCallback(() => {
@@ -204,12 +222,11 @@ export function MessageList({
       previousFirstStillPresent
     ) {
       const el = containerRef.current;
-      restorePrependScrollAnchor(el, anchor);
       historyPrependAnchorRef.current = null;
-      if (el) {
-        previousScrollTopRef.current = el.scrollTop;
-        setShowJumpToLatest(shouldShowJumpToLatest(el));
-      }
+      if (!el) return;
+      restorePrependScrollAnchor(el, anchor);
+      previousScrollTopRef.current = el.scrollTop;
+      setShowJumpToLatest(shouldShowJumpToLatest(el));
       return;
     }
 
