@@ -21,9 +21,13 @@
 //!    while the UX is dead; only "the text is not the placeholder AND contains
 //!    the expected step" catches degradation.
 //!
-//! Coverage cannot silently lapse: the cases come from
-//! [`HostRemediationText::all`], whose exhaustiveness witness fails to COMPILE
-//! when a producer is added without being covered.
+//! Coverage is compiler-nudged, not compiler-proved. The cases come from
+//! [`HostRemediationText::all`]; its exhaustiveness witness match plus the
+//! `[HostRemediationText; 6]` length annotation force an author who adds a
+//! VARIANT to update `ALL`. A new PRODUCER that calls
+//! `dispatch_with_host_remediation` WITHOUT adding a variant is NOT caught by
+//! the compiler and needs a manual audit
+//! (`rg -n dispatch_with_host_remediation crates`).
 
 use ironclaw_host_api::RuntimeDispatchErrorKind;
 use ironclaw_host_api::{DispatchFailureDetail, HostRemediation, Resolution, SafeSummary};
@@ -90,9 +94,13 @@ fn persists_to_thread_history(text: &str, trust: ObservationTrust) -> Result<(),
 /// host_api hop, and the real persistence validator — and never degrades to the
 /// placeholder.
 ///
-/// Adding a `HostRemediationText` variant without covering it fails to compile
-/// (see `HostRemediationText::all`'s exhaustiveness witness), so a sixth
-/// producer cannot ship untested.
+/// Adding a `HostRemediationText` VARIANT without listing it in `ALL` fails to
+/// compile (`HostRemediationText::all`'s exhaustiveness witness plus the
+/// `[HostRemediationText; 6]` length annotation), so an enumerated text cannot
+/// ship untested. A new PRODUCER that calls
+/// `dispatch_with_host_remediation` without adding a variant is NOT compiler-
+/// caught — that case needs a manual audit
+/// (`rg -n dispatch_with_host_remediation crates`).
 #[test]
 fn host_remediation_texts_survive_the_whole_path() {
     for entry in HostRemediationText::all() {

@@ -7,9 +7,7 @@
 //! a per-account credential problem) must fail EARLY at the lifecycle tool
 //! call with a model-visible remediation naming `config set google.client_id`,
 //! run continuing to `Completed` — not park an unresolvable `BlockedAuth`
-//! gate with zero remediation text (today's shape:
-//! `extension_lifecycle_capabilities.rs:189-198` short-circuits into
-//! `auth_required_for_credentials` before any readiness check exists).
+//! gate with zero remediation text.
 //!
 //! **Phase 2** (configured instance — the "config set" + restart arm): once
 //! a Google OAuth backend IS configured, the same readiness check must NOT
@@ -19,10 +17,10 @@
 //! toggle, so Phase 2 builds a genuinely SEPARATE
 //! `RebornIntegrationGroup::extension_lifecycle_google_oauth_configured()`
 //! composition rather than reusing `g` — the honest analog of "restart".
-//! Phase 2 already passes today: with no readiness check yet implemented,
-//! missing-credential activation always falls through to the ordinary
-//! `AuthRequired` short-circuit regardless of `google_oauth_configured`, so
-//! this phase pins the no-false-positive contract rather than starting RED.
+//! Phase 2 pins the no-false-positive contract: the readiness check must not
+//! consume the ordinary per-account gate, so a configured instance with no
+//! credential account still falls through to a real, renderable `BlockedAuth`
+//! gate.
 //!
 //! Uses "google-calendar" for Phase 1 (not "gmail"): the readiness-map
 //! chokepoint gates the "google" PROVIDER build-time-wide on `g` (not a
@@ -40,10 +38,10 @@ use super::reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
 
 pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
-    // Both phases always run, independent of each other's outcome — Phase 1
-    // is RED today (early-return via `?` here would hide whether Phase 2
-    // passes standalone), and Phase 2 is expected to ALREADY pass today (it
-    // pins the no-false-positive contract, not new behavior).
+    // Both phases always run, independent of each other's outcome: they pin
+    // two different halves of the contract (early-fail, and no false
+    // positive), so an early return via `?` would let the first failure mask
+    // whether the second still holds. Running both names which one broke.
     let phase_1 = phase_1_unconfigured_instance_fails_early(g).await;
     let phase_2 = phase_2_configured_instance_falls_through_to_normal_gate().await;
     match (phase_1, phase_2) {
@@ -180,5 +178,14 @@ async fn phase_2_configured_instance_falls_through_to_normal_gate() -> HarnessRe
     activator
         .wait_for_status(run_id, ironclaw_turns::TurnStatus::Completed)
         .await?;
+    activator
+        .assert_conversation_history_contains("gmail needs an account")
+        .await
+        .map_err(|error| {
+            format!(
+                "after denying the ordinary per-account gate the run must continue to the \
+                 scripted recovery reply, not merely reach Completed: {error}"
+            )
+        })?;
     Ok(())
 }

@@ -81,6 +81,13 @@ const SLACK_REDIRECT_URI_STEP: &str = "set IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_
 /// `config set slack.enabled true` and is stuck on the redirect URI is not
 /// told to re-run a command they have already applied.
 ///
+/// The no-gap input (`{ enable: false, redirect_uri: false }`) is DEFINED but
+/// never produced: it yields just the restart and connect steps. Production
+/// guards it at
+/// `ironclaw_reborn_composition::extension_host::provider_instance_readiness`,
+/// which only calls this fn when at least one gap is open. Pinned by
+/// `slack_remediation_text_with_no_gaps_lists_only_restart_and_connect`.
+///
 /// Unlike `google_remediation_text`, this variant embeds its own restart step:
 /// Slack's apply step sits in the MIDDLE of the sequence (the route must mount
 /// before the WebUI can run workspace OAuth), so a trailing
@@ -275,6 +282,23 @@ mod tests {
         let text = apply_step_text();
         assert!(text.contains("ironclaw service restart"));
         assert!(!text.contains("automatically"));
+    }
+
+    /// Pins the behavior of a `SlackSetupGaps` with NO gaps open. Production
+    /// never constructs this input — `provider_instance_readiness` guards the
+    /// call with `if slack_gaps.enable || slack_gaps.redirect_uri` — but the
+    /// combination is reachable through this public API, so its output is
+    /// pinned rather than left undefined.
+    #[test]
+    fn slack_remediation_text_with_no_gaps_lists_only_restart_and_connect() {
+        let text = slack_remediation_text(SlackSetupGaps {
+            enable: false,
+            redirect_uri: false,
+        });
+        assert!(!text.contains("config set slack.enabled"));
+        assert!(!text.contains("REDIRECT_URI"));
+        assert_eq!(text.matches("service restart").count(), 1);
+        assert!(text.contains("/extensions"));
     }
 
     #[test]

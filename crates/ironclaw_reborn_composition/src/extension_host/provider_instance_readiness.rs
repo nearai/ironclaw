@@ -13,8 +13,10 @@
 //! `RebornLocalExtensionManagementPort::activation_credential_requirements`
 //! consults the built map BEFORE the per-account credential gate, so a
 //! never-configured instance fails activation with actionable `config set`
-//! remediation instead of parking an unresolvable `BlockedAuth` gate (design
-//! §B chokepoint).
+//! remediation instead of parking an unresolvable `BlockedAuth` gate. That
+//! call site — `extension_lifecycle.rs::activation_credential_requirements` —
+//! is the single chokepoint for this axis; do not add a second consultation
+//! point elsewhere in the activation path.
 
 use std::collections::BTreeMap;
 

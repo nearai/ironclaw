@@ -147,6 +147,7 @@ fn is_secret_like_token(token: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host_remediation::HostRemediation;
 
     #[test]
     fn markers_match_on_word_boundary_not_substring() {
@@ -185,5 +186,56 @@ mod tests {
         assert!(contains_secret_like_token("memo_sk_test_0123456789abcdef"));
         // A hyphenated ordinary phrase must not false-positive.
         assert!(!contains_secret_like_token("risk-based task-list check"));
+    }
+
+    /// Every prefix `is_secret_like_token` knows, driven as a table so a newly
+    /// added prefix without a literal here is an obvious omission rather than
+    /// a silent coverage hole. Each token is asserted on BOTH ends of the
+    /// contract: the detector sees it, and `HostRemediation::new` refuses to
+    /// carry it — the trusted host-authored channel must never ferry a
+    /// credential-shaped value.
+    ///
+    /// Literals are lowercase because `contains_secret_like_token` receives
+    /// pre-lowercased input (matching the `akia0123…` convention above).
+    #[test]
+    fn every_known_credential_prefix_is_detected_and_blocks_host_remediation() {
+        for token in [
+            "sk-0123456789abcdef",
+            "sk-ant-0123456789abcdef",
+            "sk_live_0123456789abcdef",
+            "sk_test_0123456789abcdef",
+            "pk_live_0123456789abcdef",
+            "pk_test_0123456789abcdef",
+            "rk_live_0123456789abcdef",
+            "rk_test_0123456789abcdef",
+            "ghp_0123456789abcdef",
+            "github_pat_0123456789abcdef",
+            "gho_0123456789abcdef",
+            "ghu_0123456789abcdef",
+            "ghs_0123456789abcdef",
+            "ghr_0123456789abcdef",
+            "glpat-0123456789abcdef",
+            "gcp-0123456789abcdef",
+            "ya29.0123456789abcdef",
+            "aiza0123456789abcdef",
+            "gocspx-0123456789abcdef",
+            "xoxb-1234-5678-abcdefghij",
+            "xoxp-1234-5678-abcdefghij",
+            "xoxa-1234-5678-abcdefghij",
+            "xoxr-1234-5678-abcdefghij",
+            "xoxs-1234-5678-abcdefghij",
+            "xoxe-1234-5678-abcdefghij",
+            "akia0123456789abcdef",
+            "asia0123456789abcdef",
+        ] {
+            assert!(
+                contains_secret_like_token(token),
+                "{token}: known credential prefix must be detected"
+            );
+            assert!(
+                HostRemediation::new(format!("the value is {token}")).is_err(),
+                "{token}: host-authored remediation must refuse a credential-shaped value"
+            );
+        }
     }
 }

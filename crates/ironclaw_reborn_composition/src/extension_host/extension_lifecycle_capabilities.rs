@@ -374,10 +374,15 @@ fn lifecycle_error(error: ProductWorkflowError) -> FirstPartyCapabilityError {
         // The third readiness axis: a provider-instance readiness failure is
         // a build-time configuration fault, not a malformed-input fault, so it
         // maps to `OperationFailed` rather than `InvalidBindingRequest`'s
-        // `InputEncode` (PR #6095 misclassification precedent). Mapped
-        // "exactly like" `InvalidBindingRequest` above — same
-        // host-remediation mechanism, non-terminal — just its own kind and a
-        // fixed safe_summary headline.
+        // `InputEncode` (PR #6095 misclassification precedent). Both arms are
+        // non-terminal, but they deliberately ride DIFFERENT trust channels:
+        // `InvalidBindingRequest` above stays UNTRUSTED
+        // (`dispatch_with_diagnostic`) because its ~40 construction sites
+        // interpolate externally-influenced text — MCP tool names off the
+        // wire, model-supplied `extension_id`, uploaded-zip entry names. This
+        // arm is the one exception routed onto the TRUSTED channel
+        // (`dispatch_with_host_remediation`), because its `reason` is built
+        // entirely from host-authored constants.
         ProductWorkflowError::ProviderInstanceNotConfigured { reason } => {
             FirstPartyCapabilityError::dispatch_with_host_remediation(
                 RuntimeDispatchErrorKind::OperationFailed,

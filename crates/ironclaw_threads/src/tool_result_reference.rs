@@ -524,8 +524,71 @@ fn validate_model_observation(value: &serde_json::Value) -> Result<(), String> {
             "model observation exceeds {MAX_MODEL_OBSERVATION_BYTES} bytes"
         ));
     }
-    validate_model_observation_value(value, observation_trust(value))?;
+    validate_model_observation_strings(value, observation_trust(value))?;
     validate_model_visible_tool_observation_schema(value)
+}
+
+/// Scan every string in the observation, applying the host-authored exemption
+/// to ONE FIELD rather than to the whole object.
+///
+/// The `trust` tag says the host authored the remediation `detail` — nothing
+/// more. `generic_failure.detail` is the only string a host-authored producer
+/// builds through `HostRemediation`'s credential-VALUE guard, so it is the only
+/// string that may claim the exemption. `summary`, `artifacts`, `recovery`,
+/// every object key, and any field added later are ALWAYS scanned as untrusted.
+///
+/// Without this scoping, a `host_authored` tag would relax the credential-
+/// vocabulary scan over fields that were never value-guarded. That the sole
+/// production stamper
+/// (`ironclaw_agent_loop::executor::capability_helpers::model_visible_capability_failure_observation`)
+/// happens to build those fields from fixed host data is a PRODUCER-side
+/// invariant with no enforcement here — and #6299's root cause was exactly a
+/// wrong assumption about how far a trust boundary reached.
+///
+/// Mirrors the rule the `result_reference` arm of
+/// `validate_model_observation_detail` already applies to `preview`.
+fn validate_model_observation_strings(
+    value: &serde_json::Value,
+    provenance: ObservationProvenance,
+) -> Result<(), String> {
+    let Some(object) = value.as_object() else {
+        return validate_model_observation_value(value, ObservationProvenance::Untrusted);
+    };
+    for (key, child) in object {
+        validate_model_observation_text(key, ObservationProvenance::Untrusted)?;
+        if key == "detail" {
+            validate_observation_detail_strings(child, provenance)?;
+        } else {
+            validate_model_observation_value(child, ObservationProvenance::Untrusted)?;
+        }
+    }
+    Ok(())
+}
+
+/// The `detail` subtree: `generic_failure.detail` carries the observation's own
+/// provenance; every other string inside `detail` — including the `preview` of
+/// a `result_reference`, which is capability OUTPUT — stays untrusted.
+fn validate_observation_detail_strings(
+    value: &serde_json::Value,
+    provenance: ObservationProvenance,
+) -> Result<(), String> {
+    let Some(object) = value.as_object() else {
+        return validate_model_observation_value(value, ObservationProvenance::Untrusted);
+    };
+    let is_generic_failure = object
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|kind| kind == "generic_failure");
+    for (key, child) in object {
+        validate_model_observation_text(key, ObservationProvenance::Untrusted)?;
+        let field_provenance = if is_generic_failure && key == "detail" {
+            provenance
+        } else {
+            ObservationProvenance::Untrusted
+        };
+        validate_model_observation_value(child, field_provenance)?;
+    }
+    Ok(())
 }
 
 /// The PROVENANCE of an observation, read once from its `trust` field.
@@ -1209,6 +1272,43 @@ mod tests {
                  rejected — provenance is the only thing that may differ: {text:?}"
             );
         }
+    }
+
+    /// The exemption is FIELD-scoped, not OBJECT-scoped. A `host_authored`
+    /// observation may carry credential vocabulary in the one string that was
+    /// value-guarded at construction (`generic_failure.detail`) — and nowhere
+    /// else. `summary` (and every other field) is scanned as untrusted no
+    /// matter what the top-level `trust` tag says, so a producer bug cannot
+    /// widen the exemption by tagging the object.
+    #[test]
+    fn host_authored_trust_exempts_only_the_generic_failure_detail_field() {
+        let remediation = "run `ironclaw config set google.client_secret` to update it";
+
+        let accepted = serde_json::json!({
+            "schema_version": super::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+            "status": "error",
+            "summary": "the tool call failed",
+            "detail": {"kind": "generic_failure", "failure_kind": "backend", "detail": remediation},
+            "trust": "host_authored",
+        });
+        super::validate_model_observation(&accepted)
+            .expect("host-authored remediation in generic_failure.detail must be accepted");
+
+        // Same trust tag, same text, different field — must still be rejected.
+        let rejected = serde_json::json!({
+            "schema_version": super::MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+            "status": "error",
+            "summary": remediation,
+            "detail": {"kind": "generic_failure", "failure_kind": "backend"},
+            "trust": "host_authored",
+        });
+        let error = super::validate_model_observation(&rejected).expect_err(
+            "a host_authored tag must not exempt `summary` — that field is never value-guarded",
+        );
+        assert!(
+            error.contains("sensitive marker"),
+            "rejection must come from the credential-vocabulary scan: {error}"
+        );
     }
 
     /// The exemption is narrow: it covers the credential-VOCABULARY scan only.
