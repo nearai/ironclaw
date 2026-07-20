@@ -60,12 +60,14 @@ use reborn_support::planned_runtime_parts_shape::DefaultPlannedRuntimePartsShape
 /// below for the exact code path.
 const EXPECTED_PRODUCTION_SHAPE: DefaultPlannedRuntimePartsShape =
     DefaultPlannedRuntimePartsShape {
-        model_route_resolver: false, // :3406 hardcoded None
-        cancellation_factory: false, // :3407 hardcoded None
-        skill_context_source: true,  // :2917-2929 local_dev_filesystem_skill_context_source
-        attachment_read_port: true,  // :3372-3376 local_runtime.map(ProjectScopedAttachmentReader)
-        input_queue: false,          // hardcoded None
-        model_policy_guard: false,   // hardcoded None
+        model_route_resolver: false,    // :3406 hardcoded None
+        cancellation_factory: false,    // :3407 hardcoded None
+        skill_context_source: true,     // :2917-2929 local_dev_filesystem_skill_context_source
+        attachment_read_port: true, // :3372-3376 local_runtime.map(ProjectScopedAttachmentReader)
+        input_queue: false,         // hardcoded None
+        memory_context_service: true, // :3481-3494 local_runtime + native MemoryServiceResolver
+        after_turn_memory_writer: true, // :3500-3509 local_runtime + native MemoryServiceResolver
+        model_policy_guard: false,  // hardcoded None
         // :3027-3073 — scope: this constant models the NO-LLM local-dev
         // shape. When `model_gateway_override` is set (the harness's
         // scripted `TraceLlm` path, and any test build), `llm_cost_table` is
@@ -109,6 +111,18 @@ const ALLOWED_DIVERGENCES: &[(&str, &str)] = &[
          production: always Some, no config gate (runtime.rs:3453)",
     ),
     (
+        "memory_context_service",
+        "harness: None in generic group runtime (group.rs); focused memory/runtime tests \
+         cover this lane directly; production: Some via local_runtime memory_service_resolver \
+         (runtime.rs:3481-3494)",
+    ),
+    (
+        "after_turn_memory_writer",
+        "harness: None in generic group runtime (group.rs); focused memory/runtime tests \
+         cover this lane directly; production: Some via local_runtime memory_service_resolver \
+         (runtime.rs:3500-3509)",
+    ),
+    (
         "communication_context_provider",
         "harness: None unless .communication_context_provider() was called (group.rs); \
          production: always Some whenever local_runtime is present (runtime.rs:3337-3357)",
@@ -137,6 +151,10 @@ fn mask(
         "skill_context_source" => shape.skill_context_source = from.skill_context_source,
         "attachment_read_port" => shape.attachment_read_port = from.attachment_read_port,
         "input_queue" => shape.input_queue = from.input_queue,
+        "memory_context_service" => shape.memory_context_service = from.memory_context_service,
+        "after_turn_memory_writer" => {
+            shape.after_turn_memory_writer = from.after_turn_memory_writer
+        }
         "model_policy_guard" => shape.model_policy_guard = from.model_policy_guard,
         "model_budget_accountant" => shape.model_budget_accountant = from.model_budget_accountant,
         "safety_context" => shape.safety_context = from.safety_context,

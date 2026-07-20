@@ -15,37 +15,64 @@ use ironclaw_memory::{
     MemoryServiceError,
 };
 use ironclaw_turns::run_profile::{
-    AgentLoopHostErrorKind, ContextProfileId, MemoryPromptContextRequest,
-    MemoryPromptContextService, memory_snippet_display_ref,
+    ContextProfileId, MemoryPromptContextRequest, MemoryPromptContextService,
+    memory_snippet_display_ref,
 };
 use ironclaw_turns::scope::{TurnActor, TurnScope};
 
 use ironclaw_host_runtime::memory_context::ProductionMemoryPromptContextService;
 
+/// Per-lane behavior for the mock. `load_memory_snippets` fetches two lanes
+/// (mem0 `on_run_start` shape): a short-term lane with the active thread kept,
+/// and a long-term lane with the thread cleared. The mock returns lane-specific
+/// snippets (or errors) so each lane can be driven independently.
 #[derive(Clone)]
-enum MockMemoryBehavior {
+enum LaneBehavior {
     Snippets(Vec<MemoryServiceContextSnippet>),
     Error,
 }
 
 struct MockMemoryService {
-    behavior: MockMemoryBehavior,
+    /// Behavior for the short-term lane — the invocation carries a `thread_id`.
+    short_term: LaneBehavior,
+    /// Behavior for the long-term lane — the invocation has the thread cleared.
+    long_term: LaneBehavior,
     captured: Mutex<Vec<(MemoryInvocation, MemoryServiceContextRequest)>>,
 }
 
 impl MockMemoryService {
-    fn with_snippets(snippets: Vec<MemoryServiceContextSnippet>) -> Self {
+    fn new(short_term: LaneBehavior, long_term: LaneBehavior) -> Self {
         Self {
-            behavior: MockMemoryBehavior::Snippets(snippets),
+            short_term,
+            long_term,
             captured: Mutex::new(Vec::new()),
         }
     }
 
+    /// Single-lane pipeline tests: the provider returns `snippets` for the
+    /// active-thread (short-term) lane and nothing for the long-term lane, so
+    /// the pipeline observes exactly the configured snippets once.
+    fn with_snippets(snippets: Vec<MemoryServiceContextSnippet>) -> Self {
+        Self::new(
+            LaneBehavior::Snippets(snippets),
+            LaneBehavior::Snippets(Vec::new()),
+        )
+    }
+
     fn with_error() -> Self {
-        Self {
-            behavior: MockMemoryBehavior::Error,
-            captured: Mutex::new(Vec::new()),
-        }
+        Self::new(LaneBehavior::Error, LaneBehavior::Error)
+    }
+
+    /// Two-lane tests: drive the short-term and long-term lanes with distinct
+    /// snippet sets.
+    fn with_lane_snippets(
+        short_term: Vec<MemoryServiceContextSnippet>,
+        long_term: Vec<MemoryServiceContextSnippet>,
+    ) -> Self {
+        Self::new(
+            LaneBehavior::Snippets(short_term),
+            LaneBehavior::Snippets(long_term),
+        )
     }
 
     fn captured(&self) -> Vec<(MemoryInvocation, MemoryServiceContextRequest)> {
@@ -60,10 +87,15 @@ impl MemoryService for MockMemoryService {
         invocation: MemoryInvocation,
         request: MemoryServiceContextRequest,
     ) -> Result<Vec<MemoryServiceContextSnippet>, MemoryServiceError> {
+        let lane = if invocation.scope.thread_id.is_some() {
+            &self.short_term
+        } else {
+            &self.long_term
+        };
         self.captured.lock().unwrap().push((invocation, request));
-        match &self.behavior {
-            MockMemoryBehavior::Snippets(snippets) => Ok(snippets.clone()),
-            MockMemoryBehavior::Error => Err(MemoryServiceError::unavailable()),
+        match lane {
+            LaneBehavior::Snippets(snippets) => Ok(snippets.clone()),
+            LaneBehavior::Error => Err(MemoryServiceError::unavailable()),
         }
     }
 }
@@ -215,19 +247,24 @@ async fn memory_disabled_context_profile_returns_empty_without_memory_service_ca
 }
 
 #[tokio::test]
-async fn unavailable_memory_service_returns_host_error_without_leaking_details() {
+async fn unavailable_memory_service_degrades_both_lanes_to_empty() {
+    // Both lanes failing must NOT error the whole call: memory degrades to empty
+    // so a retrieval outage never breaks the turn (graceful degradation). This
+    // replaces the pre-two-lane contract where an unavailable service surfaced a
+    // host error — memory is now best-effort and never fails the turn.
     let service = make_service(Arc::new(MockMemoryService::with_error()));
-    let err = service
+    let snippets = service
         .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 10))
         .await
-        .unwrap_err();
-    assert_eq!(err.kind, AgentLoopHostErrorKind::Unavailable);
-    assert_eq!(err.safe_summary, "memory context unavailable");
-    assert!(!err.safe_summary.contains("connection refused"));
+        .expect("a memory retrieval outage must not error the whole call");
+    assert!(snippets.is_empty());
 }
 
 #[tokio::test]
-async fn host_derived_scope_is_passed_to_memory_service() {
+async fn host_derived_scope_is_passed_to_both_lanes() {
+    // Both lanes (short-term + long-term) carry the host-derived
+    // tenant/user/agent/project scope; exactly one keeps the thread (short-term)
+    // and one clears it (long-term).
     let memory_service = Arc::new(MockMemoryService::with_snippets(vec![]));
     let service = make_service(memory_service.clone());
 
@@ -243,27 +280,147 @@ async fn host_derived_scope_is_passed_to_memory_service() {
         .unwrap();
 
     let captured = memory_service.captured();
-    assert_eq!(captured.len(), 1);
-    assert_eq!(captured[0].0.scope.tenant_id.as_str(), "tenant-a");
-    assert_eq!(captured[0].0.scope.user_id.as_str(), "user-x");
     assert_eq!(
-        captured[0].0.scope.agent_id.as_ref().map(|id| id.as_str()),
-        Some("agent-1")
+        captured.len(),
+        2,
+        "both lanes must issue a retrieve_context call"
     );
+    for (invocation, request) in &captured {
+        assert_eq!(invocation.scope.tenant_id.as_str(), "tenant-a");
+        assert_eq!(invocation.scope.user_id.as_str(), "user-x");
+        assert_eq!(
+            invocation.scope.agent_id.as_ref().map(|id| id.as_str()),
+            Some("agent-1")
+        );
+        assert_eq!(
+            invocation.scope.project_id.as_ref().map(|id| id.as_str()),
+            Some("project-1")
+        );
+        assert_eq!(request.query, "test query");
+        assert_eq!(request.max_snippets, 10);
+        // The caller's context profile must cross the facade unchanged so
+        // profile-routing regressions are caught at the request boundary.
+        assert_eq!(request.context_profile_id.as_str(), "default");
+    }
+    let mut thread_present: Vec<bool> = captured
+        .iter()
+        .map(|(invocation, _)| invocation.scope.thread_id.is_some())
+        .collect();
+    thread_present.sort_unstable();
     assert_eq!(
-        captured[0]
-            .0
-            .scope
-            .project_id
-            .as_ref()
-            .map(|id| id.as_str()),
-        Some("project-1")
+        thread_present,
+        vec![false, true],
+        "one lane keeps the thread (short-term), one clears it (long-term)"
     );
-    assert_eq!(captured[0].1.query, "test query");
-    assert_eq!(captured[0].1.max_snippets, 10);
-    // The caller's context profile must cross the facade unchanged so
-    // profile-routing regressions are caught at the request boundary.
-    assert_eq!(captured[0].1.context_profile_id.as_str(), "default");
+}
+
+#[tokio::test]
+async fn load_memory_snippets_fetches_both_short_term_and_long_term_lanes() {
+    // The host fetches both lanes once (mem0 `on_run_start` shape): a short-term
+    // lane with the active thread kept and a long-term lane with the thread
+    // cleared. Both lanes' admitted snippets appear in the combined result.
+    let short_term = vec![raw_snippet(
+        "threads/thread-1/scratch.md",
+        "active thread note",
+    )];
+    let long_term = vec![raw_snippet("notes/long-term.md", "long term note")];
+    let memory_service = Arc::new(MockMemoryService::with_lane_snippets(short_term, long_term));
+    let service = make_service(memory_service.clone());
+
+    let snippets = service
+        .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 10))
+        .await
+        .unwrap();
+
+    // Both lanes were fetched: exactly one with a thread_id and one without.
+    let captured = memory_service.captured();
+    assert_eq!(captured.len(), 2);
+    let thread_states: Vec<bool> = captured
+        .iter()
+        .map(|(invocation, _)| invocation.scope.thread_id.is_some())
+        .collect();
+    assert!(
+        thread_states.contains(&true),
+        "short-term lane keeps the thread"
+    );
+    assert!(
+        thread_states.contains(&false),
+        "long-term lane clears the thread"
+    );
+
+    // Both lanes' snippets are returned, short-term first so this conversation
+    // keeps priority under the shared memory budget.
+    assert_eq!(snippets.len(), 2);
+    assert_eq!(
+        snippets[0].snippet_ref,
+        expected_ref("threads/thread-1/scratch.md"),
+        "short-term lane is concatenated first"
+    );
+    assert_eq!(snippets[1].snippet_ref, expected_ref("notes/long-term.md"));
+}
+
+#[tokio::test]
+async fn load_memory_snippets_degrades_when_one_lane_fails() {
+    // A retrieval failure in ONE lane must not error the whole call or drop the
+    // other lane: the surviving lane's snippets still reach the model.
+    let memory_service = Arc::new(MockMemoryService::new(
+        LaneBehavior::Error,
+        LaneBehavior::Snippets(vec![raw_snippet(
+            "notes/long-term.md",
+            "long term survives",
+        )]),
+    ));
+    let service = make_service(memory_service);
+
+    let snippets = service
+        .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 10))
+        .await
+        .expect("one lane failing must not error the whole call");
+
+    assert_eq!(snippets.len(), 1);
+    assert_eq!(snippets[0].snippet_ref, expected_ref("notes/long-term.md"));
+}
+
+#[tokio::test]
+async fn load_memory_snippets_aggregate_budget_bounds_combined_lanes_short_term_first() {
+    // Each lane alone returns enough ~512-byte snippets to exceed the 4 KiB
+    // aggregate budget. Short-term is concatenated first, so active-thread memory
+    // wins under budget pressure and the COMBINED block still stays within the
+    // 4 KiB ceiling.
+    let long_text = "a".repeat(1000);
+    let short_term: Vec<_> = (0..20)
+        .map(|index| raw_snippet(&format!("threads/thread-1/s-{index:02}.md"), &long_text))
+        .collect();
+    let long_term: Vec<_> = (0..20)
+        .map(|index| raw_snippet(&format!("notes/l-{index:02}.md"), &long_text))
+        .collect();
+    let memory_service = Arc::new(MockMemoryService::with_lane_snippets(short_term, long_term));
+    let service = make_service(memory_service);
+
+    let snippets = service
+        .load_memory_snippets(test_request("tenant-a", "user-x", None, None, 40))
+        .await
+        .unwrap();
+
+    assert!(
+        !snippets.is_empty(),
+        "budgeted retrieval must still admit at least one snippet (otherwise the \
+         all-short-term assertion below is vacuously true)"
+    );
+    let total_bytes: usize = snippets.iter().map(|s| s.safe_summary.len()).sum();
+    assert!(
+        total_bytes <= 4 * 1024,
+        "combined block must stay within the 4 KiB ceiling, got {total_bytes}"
+    );
+    let short_term_refs: std::collections::HashSet<String> = (0..20)
+        .map(|index| expected_ref(&format!("threads/thread-1/s-{index:02}.md")))
+        .collect();
+    assert!(
+        snippets
+            .iter()
+            .all(|snippet| short_term_refs.contains(&snippet.snippet_ref)),
+        "short-term lane must win under budget pressure (concatenated first)"
+    );
 }
 
 #[tokio::test]

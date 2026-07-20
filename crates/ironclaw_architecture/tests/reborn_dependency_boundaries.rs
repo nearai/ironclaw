@@ -1863,11 +1863,13 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         },
         BoundaryRule {
             // Provider-neutral memory contract: among internal ironclaw crates
-            // it may depend ONLY on `ironclaw_host_api`. Enforced as an allowlist
-            // so future deps — e.g. `ironclaw_turns`, `ironclaw_product_workflow`,
-            // `ironclaw_reborn` — cannot silently slip in.
+            // it may depend only on host ids plus `ironclaw_prompt_envelope`,
+            // because it owns prompt-safe wrapping for retrieved memory context.
+            // Enforced as an allowlist so future deps — e.g. `ironclaw_turns`,
+            // `ironclaw_product_workflow`, `ironclaw_reborn` — cannot silently
+            // slip in.
             crate_name: "ironclaw_memory",
-            allowed: vec!["ironclaw_host_api"],
+            allowed: vec!["ironclaw_host_api", "ironclaw_prompt_envelope"],
         },
         BoundaryRule {
             // Native memory provider: only the contract + the host/filesystem

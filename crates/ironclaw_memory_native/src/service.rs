@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use chrono_tz::Tz;
 use ironclaw_filesystem::RootFilesystem;
+use ironclaw_host_api::ThreadId;
 use serde_json::{Map, Value, json};
 
 // The host-facing operation shapes + the `MemoryService` trait moved to
@@ -25,13 +26,15 @@ use serde_json::{Map, Value, json};
 // public API stay unchanged while `NativeMemoryService` (below) keeps the native
 // adapter behavior here.
 pub use ironclaw_memory::{
-    MemoryContextProfileId, MemoryInvocation, MemoryProfileSetStatus, MemoryService,
-    MemoryServiceContextRequest, MemoryServiceContextSnippet, MemoryServiceError,
-    MemoryServiceErrorKind, MemoryServiceProfileReadResponse, MemoryServiceProfileSetRequest,
+    MemoryContextProfileId, MemoryInteractionMessage, MemoryInteractionRole, MemoryInvocation,
+    MemoryProfileSetStatus, MemoryService, MemoryServiceContextRequest,
+    MemoryServiceContextSnippet, MemoryServiceError, MemoryServiceErrorKind,
+    MemoryServiceProfileReadResponse, MemoryServiceProfileSetRequest,
     MemoryServiceProfileSetResponse, MemoryServiceReadRequest, MemoryServiceReadResponse,
-    MemoryServiceSearchRequest, MemoryServiceSearchResponse, MemoryServiceSearchResult,
-    MemoryServiceTreeRequest, MemoryServiceTreeResponse, MemoryServiceWriteRequest,
-    MemoryServiceWriteResponse, MemoryWriteStatus, memory_context_disabled,
+    MemoryServiceRecordRequest, MemoryServiceRecordResponse, MemoryServiceSearchRequest,
+    MemoryServiceSearchResponse, MemoryServiceSearchResult, MemoryServiceTreeRequest,
+    MemoryServiceTreeResponse, MemoryServiceWriteRequest, MemoryServiceWriteResponse,
+    MemoryWriteStatus, memory_context_disabled,
 };
 
 const MEMORY_PATH: &str = "MEMORY.md";
@@ -124,6 +127,16 @@ impl MemoryService for NativeMemoryService {
         reject_local_or_traversal_path(&request.target)?;
         let (scope, context) = self.scoped_context(&invocation)?;
         let resolved_path = resolve_target_path(&request.target, request.timezone.as_deref())?;
+        // The `threads/` namespace is reserved for per-thread short-term scratch
+        // written ONLY by the trusted after-turn recorder via `record_interaction`
+        // (which routes through `write_reserved_document`, bypassing this guard). A
+        // tool- or caller-authored `threads/...` document would be excluded from the
+        // long-term lane AND unreachable from every short-term lane but its own
+        // active thread — a silent retrieval black hole. Fail loud instead of
+        // persisting it. (CR review / audit L1.)
+        if is_thread_scoped_path(&resolved_path) {
+            return Err(MemoryServiceError::operation());
+        }
         let path = document_path(&scope, &resolved_path)?;
         let options = write_options(request.metadata.as_ref());
 
@@ -342,9 +355,18 @@ impl MemoryService for NativeMemoryService {
             return Ok(Vec::new());
         }
         let (_, context) = self.scoped_context(&invocation)?;
+        // Over-fetch BEFORE the lane filter below. `backend.search` caps results to
+        // the search limit, so capping at `max_snippets` up front would let general
+        // (long-term) hits in the global top-N starve the thread-scoped
+        // (short-term) lane — a short-term call could come back short or empty
+        // under normal ranking pressure. Fetch a wider candidate set, apply the
+        // scope + lane retains, THEN truncate to `max_snippets` so each lane keeps
+        // its own top results. (CR review: filter before limiting the short-term lane.)
+        let fetch_limit = request.max_snippets.saturating_mul(8).max(64);
         let search_request = MemorySearchRequest::new(&request.query)
             .map_err(|_| MemoryServiceError::input())?
-            .with_limit(request.max_snippets)
+            .with_limit(fetch_limit)
+            .with_pre_fusion_limit(fetch_limit.max(20))
             // Full-text only: the native backend declares vector_search=false and
             // fails closed on a vector request (matches the `search` method).
             //
@@ -360,23 +382,114 @@ impl MemoryService for NativeMemoryService {
             .await
             .map_err(MemoryServiceError::unavailable_from)?;
         results.retain(|result| result.path.scope() == context.scope() && result.score.is_finite());
+        // Thread-aware lane selection. The `thread_id` is supplied by the trusted
+        // host run context on the invocation scope, never by the model.
+        match invocation.scope.thread_id.as_ref() {
+            // Short-term ("run-local") lane: restrict to the active thread's
+            // memory subtree.
+            Some(thread_id) => {
+                let prefix = thread_memory_prefix(thread_id);
+                results
+                    .retain(|result| path_has_thread_prefix(result.path.relative_path(), &prefix));
+            }
+            // Long-term lane: the user's general/durable memory — exclude every
+            // per-thread short-term scratch subtree so the two lanes stay disjoint
+            // when the host concatenates them into one memory block.
+            None => {
+                results.retain(|result| !is_thread_scoped_path(result.path.relative_path()));
+            }
+        }
         results.sort_by(compare_memory_search_results);
+        // Truncate to the requested count AFTER the lane filter so the over-fetch
+        // above never leaks extra candidates and each lane keeps its own top N.
+        results.truncate(request.max_snippets);
 
         // Return raw, ranked, in-scope candidates. The host sanitizes the text,
         // wraps it in the untrusted-memory envelope, builds the `memory-snippet:*`
         // reference, and enforces the per-snippet + aggregate model-visible byte
         // budgets — see `ironclaw_host_runtime::memory_context`. This provider only
         // ranks and scopes; it never shapes model-visible content, so a provider
-        // cannot bypass host prompt safety. (`with_limit` above already bounds the
-        // candidate count to `max_snippets`.)
+        // cannot bypass host prompt safety.
         Ok(results
             .into_iter()
             .map(map_search_result_to_snippet)
             .collect())
     }
+
+    async fn record_interaction(
+        &self,
+        invocation: MemoryInvocation,
+        request: MemoryServiceRecordRequest,
+    ) -> Result<MemoryServiceRecordResponse, MemoryServiceError> {
+        // The native provider stores the FULL turn history verbatim. Short-term
+        // memory is thread-scoped: with no active thread there is no
+        // `threads/<thread_id>/` subtree to record under, so degrade to a no-op
+        // (not an error) — the host's after-turn seam stays best-effort.
+        let Some(thread_id) = invocation.scope.thread_id.clone() else {
+            tracing::debug!("record_interaction skipped: no thread_id on invocation scope");
+            return Ok(MemoryServiceRecordResponse { recorded: false });
+        };
+        // The per-run transcript file is named by `turn_run_id` (provenance). With
+        // no run id there is no per-run doc to write, so degrade to a no-op.
+        let Some(turn_run_id) = request.turn_run_id.as_deref() else {
+            tracing::debug!("record_interaction skipped: no turn_run_id on request");
+            return Ok(MemoryServiceRecordResponse { recorded: false });
+        };
+        if request.messages.is_empty() {
+            return Ok(MemoryServiceRecordResponse { recorded: false });
+        }
+        // Write the full transcript to a PER-RUN file under the SAME `threads/<T>/`
+        // convention `retrieve_context`'s short-term lane filters on (reusing
+        // `thread_memory_prefix`). Using a per-run path
+        // (`threads/<thread_id>/<turn_run_id>.md`) with `append: false` (overwrite)
+        // makes the record idempotent: a scheduler re-run of an already-`Completed`
+        // run overwrites the same file instead of duplicating the exchange into an
+        // unbounded shared `log.md` (CR1). Route through the existing write flow,
+        // which builds the `MemoryDocumentScope`/`MemoryContext` via `scoped_context`.
+        let target = format!("{}{turn_run_id}.md", thread_memory_prefix(&thread_id));
+        let content = format_interaction(&request.messages);
+        // Route through the reserved-namespace writer: `record_interaction` is the
+        // ONLY legitimate writer of `threads/<T>/...`, so it bypasses the public
+        // `write` guard that rejects tool-authored writes to that namespace.
+        self.write_reserved_document(&invocation, &target, &content)
+            .await?;
+        Ok(MemoryServiceRecordResponse { recorded: true })
+    }
 }
 
 impl NativeMemoryService {
+    /// Write `content` to the reserved `threads/` namespace, bypassing the
+    /// `write`-level reservation guard. ONLY the trusted per-run recorder
+    /// ([`MemoryService::record_interaction`]) may write there; the public
+    /// `write` rejects any `threads/`-prefixed target. Mirrors `write`'s
+    /// plain-overwrite path (no append / patch / bootstrap special cases).
+    async fn write_reserved_document(
+        &self,
+        invocation: &MemoryInvocation,
+        target: &str,
+        content: &str,
+    ) -> Result<(), MemoryServiceError> {
+        reject_local_or_traversal_path(target)?;
+        if content.trim().is_empty() {
+            return Err(MemoryServiceError::input());
+        }
+        let (scope, context) = self.scoped_context(invocation)?;
+        let resolved_path = resolve_target_path(target, None)?;
+        // Defense in depth: this bypass writes ONLY the reserved `threads/`
+        // namespace. Reject anything else so a future caller cannot smuggle an
+        // arbitrary path past the public `write` guard through this helper.
+        if !is_thread_scoped_path(&resolved_path) {
+            return Err(MemoryServiceError::operation());
+        }
+        let path = document_path(&scope, &resolved_path)?;
+        let options = write_options(None);
+        self.backend
+            .write_document_with_backend_options(&context, &path, content.as_bytes(), &options)
+            .await
+            .map_err(MemoryServiceError::operation_from)?;
+        Ok(())
+    }
+
     async fn patch_document(
         &self,
         request: PatchDocumentRequest<'_>,
@@ -590,6 +703,49 @@ fn tree_for_paths(paths: &[String], root: &str, max_depth: usize) -> Vec<Value> 
     output
 }
 
+/// Top-level virtual-path namespace reserved for per-thread short-term
+/// ("run-local") memory. Documents under `threads/<thread_id>/` belong to the
+/// short-term lane: included by thread-scoped retrieval, excluded from long-term
+/// (general) retrieval. Reserved — general user memory does not use this prefix.
+///
+/// Enforced reservation (audit L1): a document under `threads/foo.md` is excluded
+/// from the long-term lane AND matched by no short-term lane unless `foo` is the
+/// active thread, so a stray write there is a silent retrieval "black hole". The
+/// public [`MemoryService::write`] rejects any `threads/`-prefixed target; only the
+/// trusted after-turn recorder writes there, via `write_reserved_document`.
+const THREAD_MEMORY_ROOT: &str = "threads/";
+
+/// Virtual-path prefix under which a specific thread's short-term memory lives.
+/// Short-term retrieval (an invocation scope carrying a `thread_id`) restricts to
+/// this prefix; the `thread_id` arrives on the trusted `MemoryInvocation` scope
+/// from the host run context, never from the model.
+fn thread_memory_prefix(thread_id: &ThreadId) -> String {
+    format!("{THREAD_MEMORY_ROOT}{}/", thread_id.as_str())
+}
+
+/// Whether a relative memory path is per-thread short-term scratch (and so is
+/// excluded from the long-term lane).
+fn is_thread_scoped_path(relative_path: &str) -> bool {
+    strip_thread_memory_root(relative_path).is_some()
+}
+
+fn path_has_thread_prefix(relative_path: &str, prefix: &str) -> bool {
+    let Some(relative_tail) = strip_thread_memory_root(relative_path) else {
+        return false;
+    };
+    let Some(prefix_tail) = prefix.strip_prefix(THREAD_MEMORY_ROOT) else {
+        return false;
+    };
+    relative_tail.starts_with(prefix_tail)
+}
+
+fn strip_thread_memory_root(relative_path: &str) -> Option<&str> {
+    let root = relative_path.get(..THREAD_MEMORY_ROOT.len())?;
+    root.eq_ignore_ascii_case(THREAD_MEMORY_ROOT)
+        .then(|| relative_path.get(THREAD_MEMORY_ROOT.len()..))
+        .flatten()
+}
+
 fn compare_memory_search_results(
     left: &MemorySearchResult,
     right: &MemorySearchResult,
@@ -598,6 +754,25 @@ fn compare_memory_search_results(
         .score
         .total_cmp(&left.score)
         .then_with(|| left.path.relative_path().cmp(right.path.relative_path()))
+}
+
+/// Render an interaction exchange into the per-run thread transcript body. Each
+/// message becomes a `## {role}` heading (with the actor `name` in parentheses
+/// when present, e.g. `## user (alice)`) followed by its content, so the per-run
+/// file reads as a simple Markdown transcript.
+fn format_interaction(messages: &[MemoryInteractionMessage]) -> String {
+    messages
+        .iter()
+        .map(|message| match message.name.as_deref() {
+            Some(name) => format!(
+                "## {} ({})\n{}\n",
+                message.role.as_str(),
+                name,
+                message.content
+            ),
+            None => format!("## {}\n{}\n", message.role.as_str(), message.content),
+        })
+        .collect()
 }
 
 fn map_search_result_to_snippet(result: MemorySearchResult) -> MemoryServiceContextSnippet {
