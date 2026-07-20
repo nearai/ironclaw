@@ -917,6 +917,10 @@ async fn snapshot_rebuild_restores_nonzero_origin_class_counter() {
     // Claim → run is now Running, trigger counter = 1.
     let (runner_id, lease_token, _) = claim(&store).await;
     assert_eq!(store.running_trigger_count(&tenant()).await.unwrap(), 1);
+    // The claim (Queued -> Running) is non-critical claim churn — drain it so
+    // its journal append has landed before the reopen below (rebuild forces
+    // materialization from the journal, but the append itself must exist).
+    store.drain().await.expect("drain claim");
 
     // Reopen WHILE the run is Running with a trigger cap enabled so the rebuild
     // loop executes — counter must already be 1 without claiming again.

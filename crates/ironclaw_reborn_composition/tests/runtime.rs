@@ -220,11 +220,9 @@ async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation()
 
 /// Minimal completing model gateway: every model call returns a plain assistant
 /// reply, so a turn reaches `TurnStatus::Completed` without needing a real LLM.
-#[cfg(feature = "inmemory-turn-state")]
 #[derive(Default)]
 struct AlwaysReplyGateway;
 
-#[cfg(feature = "inmemory-turn-state")]
 #[async_trait]
 impl HostManagedModelGateway for AlwaysReplyGateway {
     async fn stream_model(
@@ -247,17 +245,16 @@ impl HostManagedModelGateway for AlwaysReplyGateway {
     }
 }
 
-/// #6263 Step 4 — production-flip wiring at the composition seam. With
-/// `inmemory-turn-state` on, `build_reborn_runtime` composes the durable turn-state
-/// ROW store (`factory.rs`), replacing the former in-memory authority +
-/// block-persistence snapshot. This drives a real turn end to end over that store
-/// (submit → claim → terminal, through the production runtime), then gracefully
-/// `shutdown()`s — which routes through `RebornRuntime::shutdown →
-/// FilesystemTurnStateStoreKind::drain`. The profile ships the row store at the
-/// `WriteThrough` default (WriteBehind is blocked on the row store's non-cache-aware
-/// query paths — see the factory arm), so the shutdown drain is a no-op here; the
-/// test locks that composing the flipped store, serving a real turn over it, and
-/// draining on shutdown all succeed without error/hang/panic.
+/// #6263 Step 4/5b — production wiring at the composition seam.
+/// `build_reborn_runtime` composes the durable turn-state ROW store
+/// (`factory.rs`) unconditionally, replacing the former in-memory authority +
+/// block-persistence snapshot. This drives a real turn end to end over that
+/// store (submit → claim → terminal, through the production runtime), then
+/// gracefully `shutdown()`s — which routes through `RebornRuntime::shutdown →
+/// FilesystemTurnStateStoreKind::drain`, exercising the write-behind durable
+/// tail drain for real: the test locks that composing the store, serving a
+/// real turn over it, and draining on shutdown all succeed without
+/// error/hang/panic.
 ///
 /// Deeper durability is pinned one tier down, over the raw store where
 /// scope/backend are controlled precisely: terminal/gate-park recovery across a
@@ -266,7 +263,6 @@ impl HostManagedModelGateway for AlwaysReplyGateway {
 /// `write_behind_drain_flushes_the_async_tail_for_graceful_restart`), and the
 /// block-persistence→row migration in
 /// `filesystem_turn_state_contract::filesystem_turn_state_row_store_migrates_block_persistence_gate_park_snapshot`.
-#[cfg(feature = "inmemory-turn-state")]
 #[tokio::test]
 async fn inmemory_turn_state_row_store_serves_turn_and_drains_on_shutdown() {
     let _guard = runtime_composition_test_guard().await;

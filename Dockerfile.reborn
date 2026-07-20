@@ -58,7 +58,7 @@ WORKDIR /app
 RUN cargo chef cook \
     --profile dist \
     --package ironclaw \
-    --features libsql,postgres,inmemory-turn-state \
+    --features libsql,postgres \
     --recipe-path recipe.json
 RUN cargo chef cook \
     --profile dist \
@@ -88,7 +88,7 @@ WORKDIR /app
 RUN cargo build \
     --profile dist \
     --package ironclaw \
-    --features libsql,postgres,inmemory-turn-state \
+    --features libsql,postgres \
     --bin ironclaw
 
 RUN cargo build \

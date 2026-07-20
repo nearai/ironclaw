@@ -4866,6 +4866,10 @@ async fn text_only_host_e2e_flow_persists_checkpoint_mapping_in_turn_state_store
 
     let snapshot = turn_state_store.persistence_snapshot().await.unwrap();
     assert_eq!(snapshot.loop_checkpoints.len(), 1);
+    // `BeforeBlock` is a non-critical checkpoint kind (only `BeforeSideEffect`
+    // is a durability barrier) — drain before reopening so its journal append
+    // has landed.
+    turn_state_store.drain().await.expect("drain checkpoint");
     let reopened = FilesystemTurnStateRowStore::new(scoped.clone());
     let checkpoint_record = reopened
         .get_loop_checkpoint(GetLoopCheckpointRequest {
