@@ -11,7 +11,7 @@ use std::{collections::HashMap, fmt, sync::Arc};
 use async_trait::async_trait;
 use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, CapabilityId, DispatchFailureDetail, DispatchInputIssue,
-    MountView, ResourceEstimate, ResourceScope, ResourceUsage, RunId,
+    HostRemediation, MountView, ResourceEstimate, ResourceScope, ResourceUsage, RunId,
     RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, SecretHandle, UserId,
 };
 use serde_json::Value;
@@ -191,16 +191,58 @@ impl FirstPartyCapabilityError {
         }
     }
 
-    /// Construct a dispatch failure carrying free-text remediation on the
+    /// Construct a dispatch failure carrying HOST-AUTHORED operator remediation
+    /// on the trusted text channel.
+    ///
+    /// Use this — not [`Self::dispatch_with_diagnostic`] — whenever the text is
+    /// a host-authored constant (or built entirely from host-authored
+    /// constants): a `config set` instruction, a console URL, an operator
+    /// enable step. Those survive intact here; on the untrusted diagnostic
+    /// channel they collapse to "capability summary unavailable" at the
+    /// host_api boundary, which is the bug this constructor exists to prevent.
+    ///
+    /// **Never** pass capability output, a backend error string, or any other
+    /// untrusted text — that is [`Self::dispatch_with_diagnostic`]'s job. See
+    /// [`HostRemediation`] for the invariant.
+    ///
+    /// Falls back to the untrusted diagnostic channel if the text fails the
+    /// remediation value guard, so a mistake degrades the text rather than
+    /// dropping the whole error. Production strings are pinned against that
+    /// fallback by `host_remediation_texts_survive_the_whole_path`.
+    pub fn dispatch_with_host_remediation(
+        kind: RuntimeDispatchErrorKind,
+        safe_summary: Option<String>,
+        remediation_text: impl Into<String>,
+    ) -> Self {
+        let remediation_text = remediation_text.into();
+        match HostRemediation::new(remediation_text.clone()) {
+            Ok(text) => Self::Dispatch {
+                kind,
+                safe_summary,
+                detail: Some(Box::new(DispatchFailureDetail::HostRemediation { text })),
+                usage: None,
+            },
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    "host-authored remediation failed the trusted-channel value guard; \
+                     falling back to the untrusted diagnostic channel"
+                );
+                Self::dispatch_with_diagnostic(kind, safe_summary, remediation_text)
+            }
+        }
+    }
+
+    /// Construct a dispatch failure carrying an UNTRUSTED free-text cause on the
     /// model-visible diagnostic detail channel rather than `safe_summary`.
     ///
-    /// Use this when the guidance text itself would fail the strict
-    /// `safe_summary` validator (e.g. it names a `config set` key containing
-    /// the substring "secret", or a URL) — the diagnostic channel scrubs
-    /// secret *values*, not vocabulary, so remediation text naming a config
-    /// key or a console URL survives intact. `safe_summary` may still be set
-    /// to a short validator-safe headline; the full guidance always rides in
-    /// `diagnostic_text`.
+    /// Use this for a raw failure cause the strict `safe_summary` validator
+    /// rejects (a path, newlines from a shell error). The text is scrubbed and
+    /// then squeezed through the full `SafeSummary` contract at the host_api
+    /// boundary, so a path- or URL-shaped value degrades to the placeholder —
+    /// which is correct for untrusted output and WRONG for host-authored
+    /// remediation. For the latter use
+    /// [`Self::dispatch_with_host_remediation`].
     pub fn dispatch_with_diagnostic(
         kind: RuntimeDispatchErrorKind,
         safe_summary: Option<String>,

@@ -339,26 +339,29 @@ fn extension_package_ref(
         .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode))
 }
 
-/// Fixed, host-authored, validator-safe headline for the diagnostic-detail
-/// `dispatch_with_diagnostic` call below — the strict `safe_summary`
+/// Fixed, host-authored, validator-safe headline for the
+/// `dispatch_with_host_remediation` call below — the strict `safe_summary`
 /// validator rejects `{}[]<>/` and secret-like vocabulary
 /// (`agent-loop-capabilities` invariant 2), so the full `config set`
-/// remediation text rides the diagnostic channel instead; `safe_summary`
-/// stays this short fixed literal.
+/// remediation text rides the trusted host-remediation channel instead;
+/// `safe_summary` stays this short fixed literal.
 const PROVIDER_INSTANCE_NOT_CONFIGURED_SAFE_SUMMARY: &str =
     "extension activation requires host instance configuration";
 
 fn lifecycle_error(error: ProductWorkflowError) -> FirstPartyCapabilityError {
     match error {
         // Host/manifest/composition-authored reason only (audited) — routes
-        // the reason onto the diagnostic-detail channel instead of silently
-        // dropping it, so a model-visible tool result carries actionable
-        // remediation. Scope deliberately narrow: other reason-bearing
+        // the reason onto the TRUSTED host-remediation channel instead of
+        // silently dropping it, so a model-visible tool result carries
+        // actionable remediation. The trusted channel is correct here
+        // precisely because the reason is host-authored; the untrusted
+        // diagnostic channel would collapse it to the safe-summary
+        // placeholder at the host_api boundary (#6299). Scope deliberately narrow: other reason-bearing
         // variants (e.g. `Transient`) interpolate internal error
         // Display/Debug text at their construction sites and must not ride
         // this channel verbatim.
         ProductWorkflowError::InvalidBindingRequest { reason } => {
-            FirstPartyCapabilityError::dispatch_with_diagnostic(
+            FirstPartyCapabilityError::dispatch_with_host_remediation(
                 RuntimeDispatchErrorKind::InputEncode,
                 None,
                 reason,
@@ -369,10 +372,10 @@ fn lifecycle_error(error: ProductWorkflowError) -> FirstPartyCapabilityError {
         // maps to `OperationFailed` rather than `InvalidBindingRequest`'s
         // `InputEncode` (PR #6095 misclassification precedent). Mapped
         // "exactly like" `InvalidBindingRequest` above — same
-        // diagnostic-detail mechanism, non-terminal — just its own kind and a
+        // host-remediation mechanism, non-terminal — just its own kind and a
         // fixed safe_summary headline.
         ProductWorkflowError::ProviderInstanceNotConfigured { reason } => {
-            FirstPartyCapabilityError::dispatch_with_diagnostic(
+            FirstPartyCapabilityError::dispatch_with_host_remediation(
                 RuntimeDispatchErrorKind::OperationFailed,
                 Some(PROVIDER_INSTANCE_NOT_CONFIGURED_SAFE_SUMMARY.to_string()),
                 reason,
@@ -2031,19 +2034,22 @@ credential_handle = "channel_ext_token"
             safe_summary,
             Some(PROVIDER_INSTANCE_NOT_CONFIGURED_SAFE_SUMMARY.to_string())
         );
-        let detail = detail.expect("diagnostic detail must be present");
-        let ironclaw_host_api::DispatchFailureDetail::Diagnostic { text } = *detail else {
-            panic!("expected a Diagnostic detail, got {detail:?}");
+        let detail = detail.expect("remediation detail must be present");
+        // The TRUSTED channel, not the untrusted diagnostic one: this reason is
+        // host-authored, and the untrusted channel collapses it to the
+        // safe-summary placeholder at the host_api boundary (#6299).
+        let ironclaw_host_api::DispatchFailureDetail::HostRemediation { text } = *detail else {
+            panic!("expected a HostRemediation detail, got {detail:?}");
         };
-        assert!(text.contains("config set google.client_id"));
-        assert_eq!(text, reason);
+        assert!(text.as_str().contains("config set google.client_id"));
+        assert_eq!(text.as_str(), reason);
     }
 
     /// `InvalidBindingRequest` keeps its existing `InputEncode` kind but now
-    /// also carries its reason on the diagnostic channel instead of silently
-    /// dropping it (scope narrowed to this arm alone).
+    /// also carries its reason on the trusted host-remediation channel instead
+    /// of silently dropping it (scope narrowed to this arm alone).
     #[test]
-    fn invalid_binding_request_carries_reason_on_diagnostic_channel() {
+    fn invalid_binding_request_carries_reason_on_host_remediation_channel() {
         let mapped = lifecycle_error(ProductWorkflowError::InvalidBindingRequest {
             reason: "telegram account setup was declared without a mounted host".to_string(),
         });
@@ -2052,10 +2058,10 @@ credential_handle = "channel_ext_token"
             panic!("expected a Dispatch failure, got {mapped:?}");
         };
         assert_eq!(kind, RuntimeDispatchErrorKind::InputEncode);
-        let detail = detail.expect("diagnostic detail must be present");
-        let ironclaw_host_api::DispatchFailureDetail::Diagnostic { text } = *detail else {
-            panic!("expected a Diagnostic detail, got {detail:?}");
+        let detail = detail.expect("remediation detail must be present");
+        let ironclaw_host_api::DispatchFailureDetail::HostRemediation { text } = *detail else {
+            panic!("expected a HostRemediation detail, got {detail:?}");
         };
-        assert!(text.contains("mounted host"));
+        assert!(text.as_str().contains("mounted host"));
     }
 }

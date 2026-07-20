@@ -114,6 +114,20 @@ fn is_secret_like_token(token: &str) -> bool {
         "gcp-",
         "ya29.",
         "aiza",
+        // Google OAuth client secrets and Slack bot/user/app tokens. Added
+        // with `HostRemediation` (the host-authored remediation channel):
+        // remediation text NAMES `google.client_secret` and Slack app
+        // credentials, so the VALUE shapes for exactly those credentials must
+        // be detectable. Strengthening this shared detector also tightens
+        // `SafeSummary`/`ModelResultPreview`, which is the correct direction —
+        // the single definition never forks.
+        "gocspx-",
+        "xoxb-",
+        "xoxp-",
+        "xoxa-",
+        "xoxr-",
+        "xoxs-",
+        "xoxe-",
     ]
     .iter()
     .any(|prefix| token.starts_with(prefix))
@@ -147,6 +161,12 @@ mod tests {
         assert!(contains_secret_like_token("ghp_0123456789abcdef"));
         assert!(contains_secret_like_token("note memo_sk-abc123 saved"));
         assert!(contains_secret_like_token("akia0123456789abcdef"));
+        // Added with the host-remediation channel: the credentials whose KEY
+        // names that channel is allowed to mention must have their VALUE
+        // shapes detected.
+        assert!(contains_secret_like_token("secret gocspx-abc123def456"));
+        assert!(contains_secret_like_token("xoxb-1234-5678-abcdefghij"));
+        assert!(contains_secret_like_token("xoxp-1234-5678-abcdefghij"));
         // A hyphenated ordinary phrase must not false-positive.
         assert!(!contains_secret_like_token("risk-based task-list check"));
     }

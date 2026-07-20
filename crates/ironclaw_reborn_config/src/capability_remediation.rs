@@ -17,12 +17,6 @@
 //! serve base URL. `slack_connect_clause` is the single source of truth both
 //! call through, so the wording cannot drift between the two surfaces.
 //!
-//! `account_setup_host_enable_text` serves a third surface: the fail-closed
-//! reason `extension_lifecycle::map_account_setup_error` builds when a
-//! declared account-setup host is not mounted. That reason became
-//! user-visible when `InvalidBindingRequest` reasons started riding the
-//! model-visible diagnostic-detail channel, so it needs the same "name the
-//! operator step" treatment as the two above.
 //!
 //! `ironclaw_reborn_cli` depends on `ironclaw_reborn_composition`, never the
 //! reverse, so this text cannot live in the CLI crate (composition could not
@@ -130,28 +124,6 @@ pub fn slack_remediation_text_with_base_url(base_url: &str) -> String {
     )
 }
 
-/// Operator enable step for an account-setup host that is compiled in but not
-/// enabled on this instance, keyed by extension id because "how do I turn this
-/// on" is per-extension operator configuration. Returns `None` for hosts with
-/// no config-driven enable step, so the caller keeps the bare fail-closed
-/// reason rather than inventing guidance.
-///
-/// Telegram deliberately names env/config.toml only: there is no
-/// `ironclaw config set telegram.enabled` alias today (`config set` grew only
-/// `slack.enabled`), and naming one that does not exist would send the user
-/// into a second dead end. Telegram's bot token and webhook secret remain user
-/// credentials behind the manual-token gate and are NOT part of this step.
-pub fn account_setup_host_enable_text(extension_id: &str) -> Option<&'static str> {
-    match extension_id {
-        "telegram" => Some(
-            "Enable the Telegram host on this instance: set \
-             IRONCLAW_REBORN_TELEGRAM_ENABLED=true in the service environment, or add \
-             `enabled = true` under the `[telegram]` section of config.toml.",
-        ),
-        _ => None,
-    }
-}
-
 /// Canonical "apply the change" follow-up sentence: `config set` never
 /// restarts the service itself (see the module-level design note in
 /// `google_remediation_text` and `ironclaw_reborn_cli::commands::config::set`),
@@ -159,6 +131,118 @@ pub fn account_setup_host_enable_text(extension_id: &str) -> Option<&'static str
 /// them the explicit next step rather than implying it happens automatically.
 pub fn apply_step_text() -> &'static str {
     "Run `ironclaw service restart` to apply the change, then ask again."
+}
+
+/// Pre-dispatch "no Google OAuth backend configured on this instance at all"
+/// text — distinct from a per-account credential problem. Consumed by
+/// `ironclaw_reborn_composition::extension_host::gsuite`.
+pub fn google_not_configured_text() -> String {
+    format!(
+        "Google Workspace access is not configured on this ironclaw instance.\n\n{}\n\n{}",
+        google_remediation_text(),
+        apply_step_text()
+    )
+}
+
+/// "The account resolved but Google rejected the credentials" text — the
+/// backend-auth arm, distinct from both `google_not_configured_text` (no
+/// backend at all) and an ordinary auth gate (no/expired account).
+///
+/// Phrased to name the config key once and then refer back to it ("to update
+/// it"), rather than repeating "the client secret" in prose — a readability
+/// choice, not a constraint. Host-authored remediation is exempt from the
+/// downstream credential-vocabulary scan by PROVENANCE
+/// (`ObservationTrust::HostAuthored`), so this text may say whatever it needs
+/// to; there is no parser in another crate to appease.
+pub fn google_backend_auth_text() -> String {
+    format!(
+        "Google OAuth is configured but the provider rejected the request while exchanging \
+         or refreshing the token (e.g. invalid_client). Re-run `ironclaw config set \
+         google.client_secret` to update it, then confirm the OAuth client credentials at \
+         https://console.cloud.google.com/apis/credentials. {}",
+        apply_step_text()
+    )
+}
+
+/// Every FIXED host-authored remediation text in the Reborn stack, enumerated
+/// so remediation coverage cannot silently lapse.
+///
+/// This exists because of the #6299 regression: one full-path test covered the
+/// google readiness scenario, so when the host_api hop started collapsing
+/// host-authored text to the safe-summary placeholder, every OTHER producer
+/// degraded silently and nothing went red. A hand-maintained list inside a test
+/// rots the same way. Adding a variant here makes [`Self::text`] and
+/// [`Self::all`] non-exhaustive, so a new producer fails to COMPILE until it is
+/// covered by `host_remediation_texts_survive_the_whole_path`.
+///
+/// Only fixed texts live here. Two producers build their text from a runtime
+/// `reason` string (`ProductWorkflowError::ProviderInstanceNotConfigured` and
+/// `InvalidBindingRequest`); those reasons are themselves assembled from the
+/// constants below, and the composed result is covered at the integration tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostRemediationText {
+    /// `gsuite`: no Google OAuth backend configured on this instance.
+    GoogleNotConfigured,
+    /// `gsuite`: Google rejected the configured credentials.
+    GoogleBackendAuth,
+    /// `provider_instance_readiness`: Slack instance setup, both gaps open.
+    SlackBothGaps,
+    /// `provider_instance_readiness`: Slack instance setup, enable step only.
+    SlackEnableOnly,
+    /// `provider_instance_readiness`: Slack instance setup, redirect URI only.
+    SlackRedirectUriOnly,
+    /// The shared "restart to apply" follow-up sentence.
+    ApplyStep,
+}
+
+impl HostRemediationText {
+    /// The text this producer emits. Exhaustive by construction.
+    pub fn text(self) -> String {
+        match self {
+            Self::GoogleNotConfigured => google_not_configured_text(),
+            Self::GoogleBackendAuth => google_backend_auth_text(),
+            Self::SlackBothGaps => slack_remediation_text(SlackSetupGaps {
+                enable: true,
+                redirect_uri: true,
+            }),
+            Self::SlackEnableOnly => slack_remediation_text(SlackSetupGaps {
+                enable: true,
+                redirect_uri: false,
+            }),
+            Self::SlackRedirectUriOnly => slack_remediation_text(SlackSetupGaps {
+                enable: false,
+                redirect_uri: true,
+            }),
+            Self::ApplyStep => apply_step_text().to_string(),
+        }
+    }
+
+    /// Every variant. The witness match below is what enforces the coverage
+    /// contract: adding a variant without adding it to `ALL` fails to compile.
+    pub fn all() -> Vec<Self> {
+        const ALL: [HostRemediationText; 6] = [
+            HostRemediationText::GoogleNotConfigured,
+            HostRemediationText::GoogleBackendAuth,
+            HostRemediationText::SlackBothGaps,
+            HostRemediationText::SlackEnableOnly,
+            HostRemediationText::SlackRedirectUriOnly,
+            HostRemediationText::ApplyStep,
+        ];
+        for entry in ALL {
+            // Exhaustiveness witness — one arm per variant, no catch-all. A new
+            // variant breaks THIS match, forcing `ALL` (and the coverage test
+            // that reads it) to be updated.
+            match entry {
+                Self::GoogleNotConfigured => {}
+                Self::GoogleBackendAuth => {}
+                Self::SlackBothGaps => {}
+                Self::SlackEnableOnly => {}
+                Self::SlackRedirectUriOnly => {}
+                Self::ApplyStep => {}
+            }
+        }
+        ALL.to_vec()
+    }
 }
 
 #[cfg(test)]
@@ -261,26 +345,5 @@ mod tests {
             "slack_remediation_text_with_base_url must not embed the restart step itself \
              (`set.rs::print_apply_step` appends it exactly once): {slack}"
         );
-    }
-
-    #[test]
-    fn telegram_enable_text_names_both_operator_knobs_and_no_config_set_alias() {
-        let telegram =
-            account_setup_host_enable_text("telegram").expect("telegram enable step present");
-        assert!(telegram.contains("IRONCLAW_REBORN_TELEGRAM_ENABLED=true"));
-        assert!(telegram.contains("[telegram]"));
-        assert!(telegram.contains("enabled = true"));
-        // `config set` grew only `slack.enabled` (PR #6246); naming a telegram
-        // alias that does not exist would send the user into a second dead end.
-        assert!(
-            !telegram.contains("config set telegram"),
-            "there is no `config set telegram.enabled` alias to advertise: {telegram}"
-        );
-    }
-
-    #[test]
-    fn account_setup_host_enable_text_is_absent_for_hosts_without_an_enable_step() {
-        assert!(account_setup_host_enable_text("github").is_none());
-        assert!(account_setup_host_enable_text("gmail").is_none());
     }
 }

@@ -157,21 +157,17 @@ impl FirstPartyCapabilityHandler for GsuiteFirstPartyHandler {
 /// backend configured at all — distinct from `AuthRequired` (an account was
 /// expected but is missing/revoked/needs selection).
 ///
-/// Rides the diagnostic-detail channel (not `safe_summary`) because the
-/// remediation text names `config.toml` keys containing "secret" and console
-/// URLs, which the strict `safe_summary` validator rejects outright; the
-/// diagnostic channel scrubs secret *values*, not vocabulary, so this text
-/// survives intact to the model.
+/// Rides the trusted HOST-REMEDIATION channel (not `safe_summary`, and not the
+/// untrusted diagnostic channel) because the text names `config set` keys
+/// containing "secret" and console URLs: `safe_summary` rejects those outright,
+/// and the untrusted diagnostic channel collapses them to the placeholder at
+/// the host_api boundary. The trusted channel guards credential VALUES instead
+/// of vocabulary, so this host-authored text survives intact to the model.
 fn google_oauth_not_configured_error() -> FirstPartyCapabilityError {
-    let text = format!(
-        "Google Workspace access is not configured on this ironclaw instance.\n\n{}\n\n{}",
-        ironclaw_reborn_config::google_remediation_text(),
-        ironclaw_reborn_config::apply_step_text()
-    );
-    FirstPartyCapabilityError::dispatch_with_diagnostic(
+    FirstPartyCapabilityError::dispatch_with_host_remediation(
         RuntimeDispatchErrorKind::OperationFailed,
         None,
-        text,
+        ironclaw_reborn_config::HostRemediationText::GoogleNotConfigured.text(),
     )
 }
 
@@ -290,20 +286,13 @@ fn gsuite_error(
             // from `AuthRequired` (no/expired account) and the
             // not-configured pre-dispatch check above (no backend at all).
             Some(GsuiteCredentialDispatchReason::BackendAuth) => {
-                FirstPartyCapabilityError::dispatch_with_diagnostic(
+                FirstPartyCapabilityError::dispatch_with_host_remediation(
                     error.kind(),
                     Some(
                         "Google OAuth is configured but the provider rejected the credentials"
                             .to_string(),
                     ),
-                    format!(
-                        "Google OAuth is configured but the provider rejected the request \
-                         while exchanging or refreshing the token (e.g. invalid_client). \
-                         Re-run `ironclaw config set google.client_secret` to update \
-                         the client secret, and confirm the client id/secret at \
-                         https://console.cloud.google.com/apis/credentials. {}",
-                        ironclaw_reborn_config::apply_step_text()
-                    ),
+                    ironclaw_reborn_config::HostRemediationText::GoogleBackendAuth.text(),
                 )
             }
             _ => FirstPartyCapabilityError::new(error.kind()),

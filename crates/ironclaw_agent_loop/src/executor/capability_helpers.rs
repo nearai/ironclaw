@@ -362,11 +362,25 @@ pub(super) fn model_visible_capability_failure_observation(
             invalid_input_observation(bounded_input_issues(issues))
         }
         detail => {
-            let diagnostic = match detail {
-                Some(CapabilityFailureDetail::Diagnostic { text }) => {
-                    Some(bounded_diagnostic_detail(text))
-                }
-                _ => None,
+            // The trusted host-authored channel renders into the SAME
+            // model-visible detail slot as `Diagnostic` — the model reads one
+            // field; the two channels differ in what may reach it, not in where
+            // it lands. The difference that must SURVIVE the render is the
+            // provenance: the detail slot is an untyped `String`, so the trust
+            // bit rides `ObservationTrust` alongside it. Without that, the
+            // persistence validator downstream would have to re-derive trust by
+            // sniffing content — a heuristic that needs a new revision every
+            // time someone rewords a remediation string.
+            let (diagnostic, trust) = match detail {
+                Some(CapabilityFailureDetail::Diagnostic { text }) => (
+                    Some(bounded_diagnostic_detail(text)),
+                    ObservationTrust::UntrustedToolOutput,
+                ),
+                Some(CapabilityFailureDetail::HostRemediation { text }) => (
+                    Some(bounded_diagnostic_detail(text.as_str())),
+                    ObservationTrust::HostAuthored,
+                ),
+                _ => (None, ObservationTrust::UntrustedToolOutput),
             };
             ModelVisibleToolObservation {
                 schema_version:
@@ -379,7 +393,7 @@ pub(super) fn model_visible_capability_failure_observation(
                 },
                 artifacts: Vec::new(),
                 recovery: Some(generic_failure_recovery(&failure.error_kind)),
-                trust: ObservationTrust::UntrustedToolOutput,
+                trust,
             }
         }
     }

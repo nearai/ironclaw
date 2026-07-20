@@ -61,6 +61,13 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     }
 }
 
+/// The exact string a host-authored remediation collapses to when it is routed
+/// through the untrusted `SafeSummary` channel — the #6299 failure signature.
+/// Asserted ABSENT everywhere below: the regression produced a completed run
+/// with a plausible-looking error, so "an error was surfaced" is NOT a
+/// discriminating assertion.
+const DEGRADED_PLACEHOLDER: &str = "capability summary unavailable";
+
 async fn phase_1_unconfigured_instance_fails_early(
     g: &RebornIntegrationGroup,
 ) -> HarnessResult<()> {
@@ -103,6 +110,29 @@ async fn phase_1_unconfigured_instance_fails_early(
                 "activation on an unconfigured instance must surface a model-visible \
                  'config set google.client_id' remediation as a Failed tool result: {error}"
             )
+        })?;
+
+    // The other half of the assertion, and the one that catches #6299: the
+    // remediation must not have DEGRADED. Without this, a run that collapsed
+    // every host-authored string to the placeholder still passes any
+    // "completed" or "an error was surfaced" check.
+    activator
+        .assert_conversation_history_lacks(DEGRADED_PLACEHOLDER)
+        .await
+        .map_err(|error| {
+            format!(
+                "host-authored remediation degraded to the safe-summary placeholder \
+                 instead of reaching the model intact (#6299 regression): {error}"
+            )
+        })?;
+
+    // The full multi-step guidance must arrive, not just the first line — the
+    // restart step is what makes the remediation actionable.
+    activator
+        .assert_conversation_history_contains("ironclaw service restart")
+        .await
+        .map_err(|error| {
+            format!("remediation must name the apply step, not just the config keys: {error}")
         })?;
     Ok(())
 }
