@@ -136,6 +136,17 @@ impl DeltaJournal {
         };
         ack.await.map_err(|_| delta_journal_stopped())?
     }
+
+    /// Await an ack IN PLACE, by mutable reference, so a cancelled await leaves
+    /// the ack owned by the caller (e.g. still tracked in the pending window)
+    /// rather than consuming and dropping it. `DeltaAck` is a `oneshot::Receiver`
+    /// — `Future + Unpin` — so `(&mut *ack).await` polls it without taking
+    /// ownership; the caller removes it only after this resolves. Used by the
+    /// write-behind backpressure reserve, which runs under an outer timeout that
+    /// can cancel it (#6298 IronLoop f7).
+    pub(super) async fn await_ack_ref(ack: &mut DeltaAck) -> Result<(), TurnError> {
+        (&mut *ack).await.map_err(|_| delta_journal_stopped())?
+    }
 }
 
 async fn run_delta_journal_flusher<F>(

@@ -454,10 +454,19 @@ where
         let cap = self.limits.max_pending_write_behind_deltas.max(1);
         let mut window = self.pending_write_behind.lock().await;
         while window.len() >= cap {
-            let Some(oldest) = window.pop_front() else {
+            // Await the OLDEST ack IN PLACE — peek, don't pop first. This runs
+            // under `apply`'s outer timeout, and a cancelled await MUST leave the
+            // ack tracked in the window; popping first would drop it on
+            // cancellation, letting later writes see an empty window and enqueue
+            // behind a stalled append (unbounded again), and letting a read-side
+            // drain falsely succeed while the acknowledged write is still in
+            // flight (#6298 IronLoop f7). Remove it only once it has resolved.
+            let Some(front) = window.front_mut() else {
                 break;
             };
-            DeltaJournal::await_ack(Some(oldest)).await?;
+            let result = DeltaJournal::await_ack_ref(front).await;
+            window.pop_front();
+            result?;
         }
         Ok(())
     }
@@ -512,16 +521,22 @@ where
         if !self.is_write_behind() {
             return Ok(());
         }
-        // Snapshot-and-drain once: awaiting concurrently-registered later writes is
-        // neither required (read-your-writes only covers writes that completed
-        // before this read began, which are already in the window) nor bounded, so
-        // take the current window contents and release the lock before awaiting.
-        let pending: Vec<DeltaAck> = {
-            let mut window = self.pending_write_behind.lock().await;
-            window.drain(..).collect()
-        };
-        for ack in pending {
-            if let Err(error) = DeltaJournal::await_ack(Some(ack)).await {
+        // Await each pending ack IN PLACE under the window lock (peek-await-pop),
+        // removing it only once it resolves. Holding the lock across the awaits
+        // bounds the set to the writes present when the flush began — no later
+        // write can register mid-flush, so this still only covers read-your-writes
+        // writes — AND keeps un-awaited acks tracked if this read is cancelled. A
+        // drain-into-`Vec` would drop the un-awaited acks on cancellation, losing
+        // acknowledged-but-unflushed writes and letting this flush falsely report
+        // success (#6298 IronLoop f7). The journal flusher does not take this
+        // lock, so awaiting under it cannot deadlock; the set is bounded by the
+        // pending cap.
+        let mut window = self.pending_write_behind.lock().await;
+        while let Some(front) = window.front_mut() {
+            let result = DeltaJournal::await_ack_ref(front).await;
+            window.pop_front();
+            if let Err(error) = result {
+                drop(window);
                 self.clear_snapshot_cache().await;
                 return Err(error);
             }

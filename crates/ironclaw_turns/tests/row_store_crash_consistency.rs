@@ -69,9 +69,9 @@ use ironclaw_turns::{
     ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest, RunProfileRequest,
     RunProfileVersion, SanitizedCancelReason, SanitizedFailure, SourceBindingRef,
     SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnError,
-    TurnEventProjectionSource, TurnLeaseToken, TurnPersistenceSnapshot, TurnRunId, TurnRunnerId,
-    TurnScope, TurnSpawnTreeStateStore, TurnStateDurabilityPolicy, TurnStateStore, TurnStatus,
-    is_recoverability_critical,
+    TurnEventProjectionSource, TurnId, TurnLeaseToken, TurnPersistenceSnapshot, TurnRunId,
+    TurnRunnerId, TurnScope, TurnSpawnTreeStateStore, TurnStateDurabilityPolicy, TurnStateStore,
+    TurnStatus, is_recoverability_critical,
     run_profile::{LoopCheckpointKind, LoopCheckpointStateRef},
     runner::{
         BlockRunRequest, ClaimRunRequest, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
@@ -133,6 +133,9 @@ struct FaultBackend {
     write_count: AtomicUsize,
     config: StdMutex<FaultConfig>,
     recorded: StdMutex<Vec<RecordedOp>>,
+    /// Append stall gate: every journal append acquires it. A test holding this
+    /// lock freezes the flusher so pending write-behind acks never resolve.
+    append_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl FaultBackend {
@@ -142,7 +145,15 @@ impl FaultBackend {
             write_count: AtomicUsize::new(0),
             config: StdMutex::new(FaultConfig::default()),
             recorded: StdMutex::new(Vec::new()),
+            append_gate: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    /// Handle to the append stall gate. A test holding this lock (via
+    /// `lock_owned()`) stalls every journal append, freezing the flusher so
+    /// pending write-behind acks never resolve.
+    fn append_gate(&self) -> Arc<tokio::sync::Mutex<()>> {
+        Arc::clone(&self.append_gate)
     }
 
     fn cfg(&self) -> std::sync::MutexGuard<'_, FaultConfig> {
@@ -303,6 +314,7 @@ impl RootFilesystem for FaultBackend {
     }
 
     async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
+        let _gate = self.append_gate.lock().await;
         if let Some(error) = self.maybe_fault(path, true) {
             return Err(error);
         }
@@ -319,6 +331,7 @@ impl RootFilesystem for FaultBackend {
         path: &VirtualPath,
         payloads: Vec<Vec<u8>>,
     ) -> Result<Vec<SeqNo>, FilesystemError> {
+        let _gate = self.append_gate.lock().await;
         if let Some(error) = self.maybe_fault(path, true) {
             return Err(error);
         }
@@ -3215,6 +3228,66 @@ async fn write_behind_get_run_state_finds_evicted_terminal_via_durable_fallback(
         "an evicted-but-durable terminal must stay queryable via the durable fallback, not \
          ScopeNotFound; got {state_a:?}",
     );
+}
+
+/// #6298 IronLoop f7 — a cancelled write-behind flush/reserve must NOT drop the
+/// pending ack. Under a stalled flusher, a read whose flush awaits an un-acked
+/// write and is cancelled by a timeout must leave the ack tracked — so a SECOND
+/// read still blocks on it rather than falsely succeeding (which would lose the
+/// acknowledged-but-unflushed write on a later store drop, and re-open the
+/// unbounded-channel window). Before the fix the flush drained the ack into a
+/// `Vec` (and reserve popped it) before awaiting, so a cancellation dropped it.
+#[tokio::test]
+async fn write_behind_cancelled_flush_preserves_pending_ack() {
+    let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
+    let scoped = fault_scoped(Arc::clone(&backend));
+    let scope = only_scope();
+    let store =
+        open_row_store_with_policy(Arc::clone(&scoped), TurnStateDurabilityPolicy::WriteBehind);
+
+    // Freeze every journal append: pending write-behind acks never resolve.
+    let stall = backend.append_gate().lock_owned().await;
+
+    // A non-critical submit returns Ok (async) with its ack tracked in the window
+    // but its durable append stalled.
+    let run_id = submit_one(&store, &scope, "idem-f7").await;
+    let request = || GetLoopCheckpointRequest {
+        scope: scope.clone(),
+        // The checkpoint need not exist — `get_loop_checkpoint` flushes the
+        // pending write-behind tail BEFORE the durable lookup, and that flush is
+        // what blocks on the stalled ack.
+        turn_id: TurnId::new(),
+        run_id,
+        checkpoint_id: TurnCheckpointId::new(),
+    };
+
+    // First durable read: its flush blocks on the stalled pending ack; the short
+    // timeout CANCELS it mid-await.
+    let first = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        store.get_loop_checkpoint(request()),
+    )
+    .await;
+    assert!(
+        first.is_err(),
+        "the flush must block on the stalled pending ack (first read)",
+    );
+
+    // Second durable read: it must ALSO block. The cancelled flush must have left
+    // the ack tracked; if it had dropped it (the bug), the window would be empty
+    // and this read would return quickly — a drain that falsely succeeded.
+    let second = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        store.get_loop_checkpoint(request()),
+    )
+    .await;
+    assert!(
+        second.is_err(),
+        "a cancelled flush must NOT drop the pending ack — the second read must still block on \
+         it, not falsely succeed while the acknowledged write is unflushed",
+    );
+
+    drop(stall);
 }
 
 /// #6263 Step 3 (IronLoop f2) — read-your-writes under write-behind. A
