@@ -234,14 +234,14 @@ async def test_workspace_deep_link_expands_selected_file_parents(reborn_v2_yolo_
         "workspace/projects/ironclaw",
         "workspace/projects/ironclaw/notes",
     ):
-        expanded_directory = page.locator(
+        expanded_directory = page.get_by_test_id(
             SEL_V2["workspace_tree_entry_for"].format(path=path)
         )
         await expect(expanded_directory).to_have_attribute(
             "aria-expanded", "true", timeout=5000
         )
 
-    selected_file = page.locator(
+    selected_file = page.get_by_test_id(
         SEL_V2["workspace_tree_entry_for"].format(
             path="workspace/projects/ironclaw/notes/plan"
         )

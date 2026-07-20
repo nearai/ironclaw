@@ -43,7 +43,7 @@ function TreeNode({ entry, depth, selectedPath, expandedPaths, filter, onToggleD
       <div>
         <button
           type="button"
-          data-testid="workspace-tree-entry"
+          data-testid={`workspace-tree-entry-${entry.path}`}
           data-entry-path={entry.path}
           onClick={() => {
             // Navigate so the main pane lists this folder, and toggle its
@@ -89,7 +89,7 @@ function TreeNode({ entry, depth, selectedPath, expandedPaths, filter, onToggleD
   return (
     <button
       type="button"
-      data-testid="workspace-tree-entry"
+      data-testid={`workspace-tree-entry-${entry.path}`}
       data-entry-path={entry.path}
       onClick={() => onSelectFile(entry.path)}
       className={[
