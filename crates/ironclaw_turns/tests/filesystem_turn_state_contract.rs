@@ -26,16 +26,16 @@ use ironclaw_host_api::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AllowAllTurnAdmissionPolicy, BlockedReason,
-    CheckpointSchemaId, FilesystemTurnStateRowStore, FilesystemTurnStateStore, GateRef,
-    GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver,
-    InMemoryTurnStateStoreLimits, LoopCheckpointStore, LoopExitMapping, ProductTurnContext,
-    PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
-    RunOriginAdapter, RunProfileRequest, RunProfileVersion, SanitizedCancelReason,
-    SanitizedFailure, SourceBindingRef, SubmitChildRunRequest, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnAdmissionPolicy, TurnCheckpointId, TurnError, TurnEventKind,
-    TurnEventProjectionSource, TurnId, TurnLeaseToken, TurnOriginKind, TurnOwner,
-    TurnPersistenceSnapshot, TurnRunId, TurnRunnerId, TurnScope, TurnSpawnTreeStateStore,
-    TurnStateStore, TurnStatus,
+    CheckpointSchemaId, FilesystemTurnStateBlockPersistence, FilesystemTurnStateRowStore,
+    FilesystemTurnStateStore, GateRef, GetLoopCheckpointRequest, GetRunStateRequest,
+    IdempotencyKey, InMemoryRunProfileResolver, InMemoryTurnStateStoreLimits, LoopCheckpointStore,
+    LoopExitMapping, ProductTurnContext, PutLoopCheckpointRequest, ReplyTargetBindingRef,
+    ResumeTurnPrecondition, ResumeTurnRequest, RunOriginAdapter, RunProfileRequest,
+    RunProfileVersion, SanitizedCancelReason, SanitizedFailure, SourceBindingRef,
+    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy,
+    TurnCheckpointId, TurnError, TurnEventKind, TurnEventProjectionSource, TurnId, TurnLeaseToken,
+    TurnOriginKind, TurnOwner, TurnPersistenceSnapshot, TurnRunId, TurnRunnerId, TurnScope,
+    TurnSpawnTreeStateStore, TurnStateBlockPersistence, TurnStateStore, TurnStatus,
     run_profile::{LoopCheckpointKind, LoopCheckpointStateRef},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, ClaimRunRequest, CompleteRunRequest,
@@ -1811,6 +1811,107 @@ async fn filesystem_turn_state_row_store_migrates_legacy_state_blob() {
             .any(|event| event.run_id == run_id && event.kind == TurnEventKind::Submitted),
         "migrated event rows must remain queryable after reopening the row store"
     );
+}
+
+/// #6263 Step 4 migration proof. An existing `inmemory-turn-state` deployment
+/// persisted its gate-parked (approval/auth) turns through
+/// [`FilesystemTurnStateBlockPersistence`], which writes the full
+/// [`TurnPersistenceSnapshot`] to `/turns/state.json`. After the profile flips
+/// onto the row store, first boot MUST import that exact artifact so no
+/// approval-parked turn is silently dropped. The block-persistence sink and the
+/// row store's legacy-blob importer share `io::snapshot_path()` +
+/// `io::snapshot_entry`, so the migration is automatic — this pins it for the
+/// real gate-parked artifact, not just a generic Queued-run blob.
+#[tokio::test]
+async fn filesystem_turn_state_row_store_migrates_block_persistence_gate_park_snapshot() {
+    // 1) Produce a genuine BlockedApproval run and snapshot it exactly as the old
+    //    in-memory authority did when a run parked on a gate.
+    let source_backend = Arc::new(engine_filesystem());
+    let source_scoped = scoped_turns_fs(Arc::clone(&source_backend));
+    let source = FilesystemTurnStateStore::new(Arc::clone(&source_scoped));
+    let resolver = InMemoryRunProfileResolver::default();
+    let scope = turn_scope("thread-block-persist-migrate");
+    let request = submit_request_for(scope.clone(), "idem-block-persist-migrate");
+    let response = source
+        .submit_turn(request.clone(), &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .unwrap();
+    let run_id = accepted_run_id(&response);
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    source
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope.clone()),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let gate_ref = GateRef::new("gate-block-persist-migrate").unwrap();
+    let checkpoint_id = TurnCheckpointId::new();
+    let blocked = source
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id,
+            state_ref: LoopCheckpointStateRef::new("checkpoint:block-persist-migrate").unwrap(),
+            reason: BlockedReason::Approval {
+                gate_ref: gate_ref.clone(),
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(blocked.status, TurnStatus::BlockedApproval);
+    let gate_parked_snapshot = source.persistence_snapshot().await.unwrap();
+    assert!(
+        gate_parked_snapshot
+            .runs
+            .iter()
+            .any(|record| record.run_id == run_id && record.status == TurnStatus::BlockedApproval),
+        "fixture snapshot must carry the gate-parked run"
+    );
+
+    // 2) Write that snapshot the way the OLD deployment's block-persistence sink
+    //    did, onto a FRESH backend that has no row data (a first boot after the
+    //    flip).
+    let target_backend = Arc::new(engine_filesystem());
+    let target_scoped = scoped_turns_fs(Arc::clone(&target_backend));
+    let block_persistence = FilesystemTurnStateBlockPersistence::new(Arc::clone(&target_scoped));
+    block_persistence.persist(&gate_parked_snapshot).await;
+    assert!(
+        target_backend
+            .get(&snapshot_virtual_path())
+            .await
+            .unwrap()
+            .is_some(),
+        "block-persistence must leave the legacy blob the row store imports from"
+    );
+
+    // 3) Open the row store over the same fresh backend; the first read triggers
+    //    the automatic legacy-blob import, recovering the gate-parked turn.
+    let row_store = FilesystemTurnStateRowStore::new(Arc::clone(&target_scoped));
+    let migrated = row_store
+        .get_run_state(GetRunStateRequest {
+            scope: scope.clone(),
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        migrated.status,
+        TurnStatus::BlockedApproval,
+        "block-persistence gate-parked turn must survive the row-store migration"
+    );
+
+    // 4) The gate-parked run is durable rows now: it rehydrates on a fresh reopen.
+    let reopened = FilesystemTurnStateRowStore::new(target_scoped);
+    let reopened_state = reopened
+        .get_run_state(GetRunStateRequest { scope, run_id })
+        .await
+        .unwrap();
+    assert_eq!(reopened_state.status, TurnStatus::BlockedApproval);
 }
 
 #[tokio::test]
