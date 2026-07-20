@@ -1,5 +1,3 @@
-#![cfg(feature = "openai-compat-beta")]
-
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;

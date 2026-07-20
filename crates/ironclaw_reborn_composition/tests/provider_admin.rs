@@ -1,5 +1,3 @@
-#![cfg(feature = "root-llm-provider")]
-
 use ironclaw_reborn_composition::{RebornProviderAdmin, RebornProviderAdminError, RebornV1State};
 use ironclaw_reborn_config::{RebornBootConfig, RebornHome, RebornProfile};
 

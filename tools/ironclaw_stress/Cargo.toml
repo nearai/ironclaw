@@ -20,7 +20,6 @@ postgres = [
     "dep:deadpool-postgres",
     "dep:tokio-postgres",
     "ironclaw_filesystem/postgres",
-    "ironclaw_resources/postgres",
 ]
 
 [dependencies]

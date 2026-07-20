@@ -12,12 +12,12 @@
 //! about (a session minted for the *verified* email, exchanged for a
 //! usable bearer, then revoked) is end-of-pipeline.
 //!
-//! Gated on `dev-in-memory-session` because the test wires
+//! Gated on `test-support` because the test wires
 //! `InMemorySessionStore` + `EmailUserDirectory` + the test-only
 //! `GitHubProvider::with_endpoints` constructor, all of which only
 //! exist behind that feature.
 
-#![cfg(feature = "dev-in-memory-session")]
+#![cfg(feature = "test-support")]
 
 use std::collections::HashMap;
 use std::net::SocketAddr;

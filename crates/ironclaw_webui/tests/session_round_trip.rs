@@ -20,7 +20,7 @@
 //! stamp) would break exactly the path users hit when they sign in
 //! with Google.
 
-#![cfg(feature = "dev-in-memory-session")]
+#![cfg(feature = "test-support")]
 
 use std::sync::{Arc, Mutex};
 
