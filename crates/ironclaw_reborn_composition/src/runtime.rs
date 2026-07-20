@@ -3985,6 +3985,7 @@ pub async fn build_reborn_runtime(
                 } => {
                     let checker: Arc<dyn TriggerFireAccessChecker> =
                         Arc::new(StaticOwnerTriggerFireChecker::new(
+                            thread_scope.tenant_id.clone(),
                             owner.clone(),
                             agent.clone(),
                             project.clone(),
