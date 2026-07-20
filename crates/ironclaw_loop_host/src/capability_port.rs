@@ -1953,6 +1953,11 @@ impl HostRuntimeLoopCapabilityPort {
             // turns — derives the SAME content-addressed key and an identical
             // record. The write-once store reports `GateRecordAlreadyExists`;
             // that is benign (already persisted, byte-identical), never a fault.
+            // "Byte-identical" holds because the auth-gate fingerprint
+            // (`stable_auth_gate_id`) covers `setup` as well as provider /
+            // requester / scopes (#6299 IronLoop), so two requirements that
+            // differ in their setup flow derive DIFFERENT keys and never reach
+            // this branch with a stale record.
             // Mirrors `persist_replay_payload_for_fresh_gate`'s tolerance of
             // `ReplayPayloadAlreadyExists`. Publish + commit like the success path.
             Err(RunStateError::GateRecordAlreadyExists { .. }) => {

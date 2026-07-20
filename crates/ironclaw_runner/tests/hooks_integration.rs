@@ -413,6 +413,23 @@ fn panicking_dispatcher() -> Arc<HookDispatcher> {
         .build_arc()
 }
 
+/// Extract the loop gate ref from an approval-blocked capability resolution,
+/// centralizing the repeated
+/// `Resolution::Blocked(Blocked::Approval) → origin() → LoopGateRef` shape
+/// (and its panic/expect messages) across these hook-gate tests (CodeRabbit #6299).
+fn approval_gate_ref(outcome: &Resolution) -> ironclaw_turns::LoopGateRef {
+    let Resolution::Blocked(blocked @ Blocked::Approval(_)) = outcome else {
+        panic!("expected ApprovalRequired, got {outcome:?}");
+    };
+    ironclaw_turns::LoopGateRef::new(
+        blocked
+            .origin()
+            .expect("preserved loop gate ref on the approval waypoint")
+            .as_str(),
+    )
+    .expect("loop gate ref")
+}
+
 /// Installed-tier hook that always pause-approves. Used to prove the
 /// hook-middleware seam surfaces `PauseApproval` as
 /// `Resolution::Blocked(Blocked::Approval(..))` (carrying the originating
@@ -3245,23 +3262,15 @@ async fn pause_approval_hook_surfaces_as_approval_required_with_real_gate_ref() 
         .await
         .expect("invoke_capability returns a (suspended) outcome, not an error");
 
-    let gate_ref = match &outcome {
-        Resolution::Blocked(blocked @ Blocked::Approval(_)) => {
-            let origin = blocked
-                .origin()
-                .expect("preserved loop gate ref on the approval waypoint");
-            assert!(
-                origin.as_str().starts_with("gate:hook-approval-"),
-                "gate ref does not match expected prefix: {}",
-                origin.as_str()
-            );
-            // Flip consequence (§5.2.9, confirmed): approval safe_summary now lives on the side GateRecord,
-            // not the returned Resolution::Blocked channel — dropped the
-            // `assert_eq!(safe_summary, "integration-test pause approval")`.
-            ironclaw_turns::LoopGateRef::new(origin.as_str()).expect("loop gate ref")
-        }
-        other => panic!("expected ApprovalRequired, got {other:?}"),
-    };
+    let gate_ref = approval_gate_ref(&outcome);
+    assert!(
+        gate_ref.as_str().starts_with("gate:hook-approval-"),
+        "gate ref does not match expected prefix: {}",
+        gate_ref.as_str()
+    );
+    // Flip consequence (§5.2.9, confirmed): approval safe_summary now lives on the side GateRecord,
+    // not the returned Resolution::Blocked channel — dropped the
+    // `assert_eq!(safe_summary, "integration-test pause approval")`.
     assert!(
         inner.invocations().is_empty(),
         "inner port must NOT be invoked when a hook pauses; got {:?}",
@@ -3322,16 +3331,7 @@ async fn router_backed_pause_approval_gate_ref_rejects_cross_actor_resolution() 
         .await
         .expect("invoke_capability returns a (suspended) outcome, not an error");
 
-    let Resolution::Blocked(blocked @ Blocked::Approval(_)) = &outcome else {
-        panic!("expected ApprovalRequired, got {outcome:?}");
-    };
-    let gate_ref = ironclaw_turns::LoopGateRef::new(
-        blocked
-            .origin()
-            .expect("preserved loop gate ref on the approval waypoint")
-            .as_str(),
-    )
-    .expect("loop gate ref");
+    let gate_ref = approval_gate_ref(&outcome);
 
     let wrong_actor = UserId::new("other-hooks-user").expect("user id literal is valid");
     let cross_actor = HookGateResolutionRequest::for_invocation(
@@ -3413,16 +3413,7 @@ async fn router_backed_gate_ref_factory_sources_context_per_mint_when_reused() {
         .invoke_capability(invocation_a.clone())
         .await
         .expect("first invoke returns outcome");
-    let Resolution::Blocked(blocked_a @ Blocked::Approval(_)) = &outcome_a else {
-        panic!("expected first build ApprovalRequired, got {outcome_a:?}");
-    };
-    let gate_ref_a = ironclaw_turns::LoopGateRef::new(
-        blocked_a
-            .origin()
-            .expect("preserved loop gate ref on the approval waypoint")
-            .as_str(),
-    )
-    .expect("loop gate ref");
+    let gate_ref_a = approval_gate_ref(&outcome_a);
     router
         .resolve(
             HookGateResolutionRequest::for_invocation(
@@ -3463,16 +3454,7 @@ async fn router_backed_gate_ref_factory_sources_context_per_mint_when_reused() {
         .invoke_capability(invocation_b.clone())
         .await
         .expect("second invoke returns outcome");
-    let Resolution::Blocked(blocked_b @ Blocked::Approval(_)) = &outcome_b else {
-        panic!("expected second build ApprovalRequired, got {outcome_b:?}");
-    };
-    let gate_ref_b = ironclaw_turns::LoopGateRef::new(
-        blocked_b
-            .origin()
-            .expect("preserved loop gate ref on the approval waypoint")
-            .as_str(),
-    )
-    .expect("loop gate ref");
+    let gate_ref_b = approval_gate_ref(&outcome_b);
 
     router
         .resolve(
@@ -3533,32 +3515,21 @@ async fn router_backed_pause_approval_gate_ref_expires_after_ttl() {
         .await
         .expect("invoke_capability returns a (suspended) outcome, not an error");
 
-    match &outcome {
-        Resolution::Blocked(blocked @ Blocked::Approval(_)) => {
-            let gate_ref = ironclaw_turns::LoopGateRef::new(
-                blocked
-                    .origin()
-                    .expect("preserved loop gate ref on the approval waypoint")
-                    .as_str(),
+    let gate_ref = approval_gate_ref(&outcome);
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let err = router
+        .resolve(
+            HookGateResolutionRequest::for_invocation(
+                gate_ref,
+                HookGateActorBinding::new(fixture.actor_id.clone()),
+                fixture.context.clone(),
+                &request,
             )
-            .expect("loop gate ref");
-            tokio::time::sleep(Duration::from_millis(5)).await;
-            let err = router
-                .resolve(
-                    HookGateResolutionRequest::for_invocation(
-                        gate_ref,
-                        HookGateActorBinding::new(fixture.actor_id.clone()),
-                        fixture.context.clone(),
-                        &request,
-                    )
-                    .expect("resolution request can be derived from invocation"),
-                )
-                .await
-                .expect_err("expired gate ref must be rejected");
-            assert!(err.is_expired(), "expected expired error, got {err:?}");
-        }
-        other => panic!("expected ApprovalRequired, got {other:?}"),
-    }
+            .expect("resolution request can be derived from invocation"),
+        )
+        .await
+        .expect_err("expired gate ref must be rejected");
+    assert!(err.is_expired(), "expected expired error, got {err:?}");
     assert!(
         inner.invocations().is_empty(),
         "inner port must NOT be invoked when a hook pauses; got {:?}",
@@ -3599,16 +3570,7 @@ async fn router_backed_pause_approval_gate_ref_rejects_backdated_resolution_afte
         .await
         .expect("invoke_capability returns a (suspended) outcome, not an error");
 
-    let Resolution::Blocked(blocked @ Blocked::Approval(_)) = &outcome else {
-        panic!("expected ApprovalRequired, got {outcome:?}");
-    };
-    let gate_ref = ironclaw_turns::LoopGateRef::new(
-        blocked
-            .origin()
-            .expect("preserved loop gate ref on the approval waypoint")
-            .as_str(),
-    )
-    .expect("loop gate ref");
+    let gate_ref = approval_gate_ref(&outcome);
     // serrrfirat HIGH regression: `HookGateResolutionRequest` no longer
     // exposes a caller-controllable `resolved_at`. Time authority lives on
     // the router's own wall clock — see `InMemoryHookGateRouter::resolve_gate`

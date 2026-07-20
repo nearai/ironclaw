@@ -245,6 +245,7 @@ fn effective_user_id(run_context: &LoopRunContext, fallback_user_id: &UserId) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::local_dev::assert_recoverable_failure;
 
     #[test]
     fn parse_project_create_input_rejects_missing_name() {
@@ -295,22 +296,6 @@ mod tests {
             .expect("transient unavailability must not kill the run");
 
         assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::Unavailable);
-    }
-
-    /// A recoverable model-visible failure is `Resolution::Done` carrying the
-    /// expected `RecoverableFailure` verdict (the §5.3 collapse of the old
-    /// `CapabilityOutcome::Failed`).
-    fn assert_recoverable_failure(
-        resolution: &ironclaw_host_api::Resolution,
-        expected: ironclaw_host_api::FailureKind,
-    ) {
-        match resolution {
-            ironclaw_host_api::Resolution::Done(outcome) => assert_eq!(
-                outcome.verdict,
-                ironclaw_host_api::ToolVerdict::recoverable_failure(expected)
-            ),
-            other => panic!("expected Resolution::Done recoverable failure, got {other:?}"),
-        }
     }
 
     #[test]

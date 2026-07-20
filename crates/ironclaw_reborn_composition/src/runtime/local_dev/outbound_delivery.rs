@@ -873,6 +873,7 @@ fn approval_lease_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::local_dev::assert_recoverable_failure;
     use ironclaw_product_workflow::RebornServicesErrorKind;
     use ironclaw_turns::run_profile::LoopSafeSummary;
 
@@ -893,22 +894,6 @@ mod tests {
     fn lease_error_unknown() -> CapabilityLeaseError {
         CapabilityLeaseError::ExpiredLease {
             lease_id: CapabilityGrantId::new(),
-        }
-    }
-
-    /// The §5.3 collapse maps a recoverable service failure onto
-    /// `Resolution::Done` with a `RecoverableFailure` verdict; the redacted
-    /// summary rides the outcome (already a host_api `SafeSummary`).
-    fn assert_recoverable_failure(
-        resolution: &Resolution,
-        expected: ironclaw_host_api::FailureKind,
-    ) {
-        match resolution {
-            Resolution::Done(outcome) => assert_eq!(
-                outcome.verdict,
-                ironclaw_host_api::ToolVerdict::recoverable_failure(expected)
-            ),
-            other => panic!("expected Resolution::Done recoverable failure, got {other:?}"),
         }
     }
 
