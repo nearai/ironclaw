@@ -1,11 +1,11 @@
 [workspace]
-# GitHub Releases are created by cargo-dist (release.yml), not release-plz.
-# release-plz only creates git tags and publishes to crates.io.
+# Reborn RC GitHub Releases are created by release.yml, not release-plz.
+# release-plz still creates legacy git tags and publishes eligible crates.
 git_release_enable = false
 
 # ── Main binary ─────────────────────────────────────────────
-# Not published to crates.io. Still create git tags so cargo-dist builds
-# binaries and creates GitHub Releases.
+# Not published to crates.io. Keep its legacy tags until stable Release
+# ownership moves to Reborn; they do not match release.yml's RC-only filter.
 [[package]]
 name = "ironclaw"
 publish = false

@@ -159,8 +159,7 @@ jobs:
 
       # The tag-driven caller packages these target-scoped staging artifacts into
       # the Reborn GitHub Release. A direct workflow_dispatch leaves them as
-      # short-lived compile evidence. The prefix keeps the legacy cargo-dist host
-      # from publishing six colliding files named `ironclaw`.
+      # short-lived compile evidence.
       - id: upload
         name: Upload compiled binary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
