@@ -46,15 +46,44 @@ use io::{
 };
 use journal::{DeltaAck, DeltaJournal, materialize_delta_log};
 
-const TURN_ROWS: &str = "turns";
-const RUN_ROWS: &str = "runs";
-const ACTIVE_LOCK_ROWS: &str = "active-locks";
-const CHECKPOINT_ROWS: &str = "checkpoints";
-const LOOP_CHECKPOINT_ROWS: &str = "loop-checkpoints";
-const IDEMPOTENCY_ROWS: &str = "idempotency";
-const EVENT_ROWS: &str = "events";
-const ADMISSION_RESERVATION_ROWS: &str = "admission-reservations";
-const SPAWN_TREE_RESERVATION_ROWS: &str = "spawn-tree-reservations";
+/// The nine persisted row collections. A fixed dispatch set is an enum, not
+/// stringly-typed `&'static str` constants (`.claude/rules/types.md`).
+///
+/// [`as_str`](RowCollection::as_str) returns the on-disk path segment for each
+/// variant. Those strings are part of the durable layout — the row directory
+/// name and legacy-migration compatibility depend on them — and MUST stay
+/// byte-identical to the historical constant values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RowCollection {
+    Turns,
+    Runs,
+    ActiveLocks,
+    Checkpoints,
+    LoopCheckpoints,
+    Idempotency,
+    Events,
+    AdmissionReservations,
+    SpawnTreeReservations,
+}
+
+impl RowCollection {
+    /// The on-disk path segment for this collection. These strings are durable
+    /// layout and MUST NOT change (see the type-level note).
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Turns => "turns",
+            Self::Runs => "runs",
+            Self::ActiveLocks => "active-locks",
+            Self::Checkpoints => "checkpoints",
+            Self::LoopCheckpoints => "loop-checkpoints",
+            Self::Idempotency => "idempotency",
+            Self::Events => "events",
+            Self::AdmissionReservations => "admission-reservations",
+            Self::SpawnTreeReservations => "spawn-tree-reservations",
+        }
+    }
+}
+
 const ROW_COLLECTION_READ_CONCURRENCY: usize = 32;
 
 // #6263 Step 5b: `FilesystemTurnStateRowStore` no longer has a durability-mode
@@ -548,16 +577,20 @@ where
 
     async fn read_materialized_row_snapshot(&self) -> Result<TurnPersistenceSnapshot, TurnError> {
         let meta = self.read_meta().await?;
-        let turns = self.read_row_collection(TURN_ROWS).await?;
-        let runs = self.read_row_collection(RUN_ROWS).await?;
-        let active_locks = self.read_row_collection(ACTIVE_LOCK_ROWS).await?;
-        let checkpoints = self.read_row_collection(CHECKPOINT_ROWS).await?;
-        let loop_checkpoints = self.read_row_collection(LOOP_CHECKPOINT_ROWS).await?;
-        let idempotency_records = self.read_row_collection(IDEMPOTENCY_ROWS).await?;
-        let events = self.read_row_collection(EVENT_ROWS).await?;
-        let admission_reservations = self.read_row_collection(ADMISSION_RESERVATION_ROWS).await?;
+        let turns = self.read_row_collection(RowCollection::Turns).await?;
+        let runs = self.read_row_collection(RowCollection::Runs).await?;
+        let active_locks = self.read_row_collection(RowCollection::ActiveLocks).await?;
+        let checkpoints = self.read_row_collection(RowCollection::Checkpoints).await?;
+        let loop_checkpoints = self
+            .read_row_collection(RowCollection::LoopCheckpoints)
+            .await?;
+        let idempotency_records = self.read_row_collection(RowCollection::Idempotency).await?;
+        let events = self.read_row_collection(RowCollection::Events).await?;
+        let admission_reservations = self
+            .read_row_collection(RowCollection::AdmissionReservations)
+            .await?;
         let spawn_tree_reservations = self
-            .read_row_collection(SPAWN_TREE_RESERVATION_ROWS)
+            .read_row_collection(RowCollection::SpawnTreeReservations)
             .await?;
 
         Ok(TurnPersistenceSnapshot {
@@ -585,7 +618,7 @@ where
                 continue;
             }
             let key = active_lock_record_key(&lock)?;
-            let path = row_path(ACTIVE_LOCK_ROWS, &key)?;
+            let path = row_path(RowCollection::ActiveLocks.as_str(), &key)?;
             match self
                 .filesystem
                 .delete(&ResourceScope::system(), &path)
@@ -717,7 +750,7 @@ where
         Ok(head.unwrap_or(SeqNo::ZERO))
     }
 
-    async fn read_row_collection<T>(&self, collection: &'static str) -> Result<Vec<T>, TurnError>
+    async fn read_row_collection<T>(&self, collection: RowCollection) -> Result<Vec<T>, TurnError>
     where
         T: DeserializeOwned,
     {
@@ -727,14 +760,14 @@ where
 
     async fn read_row_collection_filtered<T, P>(
         &self,
-        collection: &'static str,
+        collection: RowCollection,
         include_key: P,
     ) -> Result<Vec<T>, TurnError>
     where
         T: DeserializeOwned,
         P: Fn(&str) -> bool,
     {
-        let dir = row_dir(collection)?;
+        let dir = row_dir(collection.as_str())?;
         let entries = match self
             .filesystem
             .list_dir(&ResourceScope::system(), &dir)
@@ -749,13 +782,13 @@ where
             .filter(|entry| entry.file_type == FileType::File)
             .filter_map(|entry| entry.name.strip_suffix(".json").map(ToString::to_string))
             .filter(|key| include_key(key))
-            .map(|key| row_path(collection, &key))
+            .map(|key| row_path(collection.as_str(), &key))
             .collect::<Result<Vec<_>, _>>()?;
         let records = stream::iter(paths)
             .map(|path| async move {
                 match self.filesystem.get(&ResourceScope::system(), &path).await {
                     Ok(Some(versioned)) => {
-                        deserialize_materialized_row(&versioned.entry.body, collection)
+                        deserialize_materialized_row(&versioned.entry.body, collection.as_str())
                     }
                     Ok(None) | Err(FilesystemError::NotFound { .. }) => Ok(None),
                     Err(error) => Err(fs_error(error)),
@@ -769,15 +802,17 @@ where
 
     async fn read_row_by_key<T>(
         &self,
-        collection: &'static str,
+        collection: RowCollection,
         key: &str,
     ) -> Result<Option<T>, TurnError>
     where
         T: DeserializeOwned,
     {
-        let path = row_path(collection, key)?;
+        let path = row_path(collection.as_str(), key)?;
         match self.filesystem.get(&ResourceScope::system(), &path).await {
-            Ok(Some(versioned)) => deserialize_materialized_row(&versioned.entry.body, collection),
+            Ok(Some(versioned)) => {
+                deserialize_materialized_row(&versioned.entry.body, collection.as_str())
+            }
             Ok(None) | Err(FilesystemError::NotFound { .. }) => Ok(None),
             Err(error) => Err(fs_error(error)),
         }
@@ -792,7 +827,7 @@ where
         self.ensure_legacy_blob_migrated_for_direct_row_read()
             .await?;
         let run = self
-            .read_row_by_key::<TurnRunRecord>(RUN_ROWS, &request.run_id.to_string())
+            .read_row_by_key::<TurnRunRecord>(RowCollection::Runs, &request.run_id.to_string())
             .await?;
 
         let Some(run) = run.filter(|record| record.scope == request.scope) else {
@@ -800,7 +835,7 @@ where
         };
         let turn_key = run.turn_id.to_string();
         let turn = self
-            .read_row_by_key::<TurnRecord>(TURN_ROWS, &turn_key)
+            .read_row_by_key::<TurnRecord>(RowCollection::Turns, &turn_key)
             .await?
             .ok_or_else(|| TurnError::Unavailable {
                 reason: "turn run references missing durable turn row".to_string(),
@@ -850,7 +885,7 @@ where
         let after_key = after.map(|cursor| format!("{:020}", cursor.0));
         let events = keyed_records(
             &self
-                .read_row_collection_filtered(EVENT_ROWS, |key| {
+                .read_row_collection_filtered(RowCollection::Events, |key| {
                     after_key
                         .as_ref()
                         .is_none_or(|after_key| key > after_key.as_str())
@@ -882,7 +917,7 @@ where
             .await?;
         let key = request.checkpoint_id.as_uuid().to_string();
         let checkpoint = self
-            .read_row_by_key::<LoopCheckpointRecord>(LOOP_CHECKPOINT_ROWS, &key)
+            .read_row_by_key::<LoopCheckpointRecord>(RowCollection::LoopCheckpoints, &key)
             .await?;
         Ok(checkpoint.filter(|record| {
             record.scope == request.scope
@@ -1550,4 +1585,32 @@ fn turn_state_write_span(
     }
 
     span
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RowCollection;
+
+    /// The on-disk path segment for every collection is durable layout: it names
+    /// the row directory and legacy-blob migration depends on it. These strings
+    /// MUST stay byte-identical to the historical `&'static str` constants the
+    /// enum replaced. Pin each one.
+    #[test]
+    fn row_collection_as_str_matches_historical_path_segments() {
+        assert_eq!(RowCollection::Turns.as_str(), "turns");
+        assert_eq!(RowCollection::Runs.as_str(), "runs");
+        assert_eq!(RowCollection::ActiveLocks.as_str(), "active-locks");
+        assert_eq!(RowCollection::Checkpoints.as_str(), "checkpoints");
+        assert_eq!(RowCollection::LoopCheckpoints.as_str(), "loop-checkpoints");
+        assert_eq!(RowCollection::Idempotency.as_str(), "idempotency");
+        assert_eq!(RowCollection::Events.as_str(), "events");
+        assert_eq!(
+            RowCollection::AdmissionReservations.as_str(),
+            "admission-reservations"
+        );
+        assert_eq!(
+            RowCollection::SpawnTreeReservations.as_str(),
+            "spawn-tree-reservations"
+        );
+    }
 }
