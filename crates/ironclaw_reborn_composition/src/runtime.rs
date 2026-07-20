@@ -145,9 +145,12 @@ use crate::automation::trigger_poller::{
     TriggerPollerRuntimeHandle, spawn_trigger_poller,
 };
 use crate::runtime_input::{
-    PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerAuthorizerConfig,
-    TriggerPollerSettings,
+    PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessChecker,
+    TriggerFireAccessGrant, TriggerPollerAuthorizerConfig, TriggerPollerSettings,
 };
+#[cfg(feature = "webui-v2-beta")]
+use crate::trigger_fire_access::IdentityMembershipTriggerFireChecker;
+use crate::trigger_fire_access::{CompositeTriggerFireChecker, StaticOwnerTriggerFireChecker};
 use crate::{
     RebornBuildError, RebornProductAuthServices, RebornReadiness, RebornServices,
     build_reborn_services,
@@ -3107,6 +3110,7 @@ pub async fn build_reborn_runtime(
         trigger_poller,
         credential_refresh,
         trigger_fire_access_checker,
+        trigger_fire_access,
         poll,
         identity,
         default_project_id,
@@ -4014,16 +4018,81 @@ pub async fn build_reborn_runtime(
         let local_runtime = local_runtime.ok_or(RebornRuntimeError::InvalidArgument {
             reason: "trigger poller is not wired for production runtime launch".to_string(),
         })?;
+        // Fire-time authorizer: an explicit override wins (tests/advanced),
+        // otherwise build one from the deployment's `TriggerFireAccessPolicy`
+        // (arch-simplification §4.4 — the former `local_trigger_access` store is
+        // now a config value, not a per-deployment store type). Grants are
+        // OR-combined, preserving the union the single store expressed.
+        let mut grant_checkers: Vec<Arc<dyn TriggerFireAccessChecker>> = Vec::new();
+        for grant in trigger_fire_access.grants() {
+            match grant {
+                TriggerFireAccessGrant::StaticOwner {
+                    owner,
+                    agent,
+                    project,
+                } => {
+                    let checker: Arc<dyn TriggerFireAccessChecker> =
+                        Arc::new(StaticOwnerTriggerFireChecker::new(
+                            owner.clone(),
+                            agent.clone(),
+                            project.clone(),
+                        ));
+                    grant_checkers.push(checker);
+                }
+                #[cfg(feature = "webui-v2-beta")]
+                TriggerFireAccessGrant::TenantMembership { agent, project } => {
+                    // Membership is resolved against the canonical identity
+                    // directory the SSO login path populates — the same store
+                    // `reborn_user_directory` opens, built here from the
+                    // runtime's own identity filesystem.
+                    let store = ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
+                        Arc::clone(&local_runtime.identity_filesystem),
+                        thread_scope.tenant_id.clone(),
+                        actor_user_id.clone(),
+                        thread_scope.agent_id.clone(),
+                        thread_scope.project_id.clone(),
+                    );
+                    let directory: Arc<dyn ironclaw_reborn_identity::RebornUserDirectory> =
+                        Arc::new(store);
+                    let checker: Arc<dyn TriggerFireAccessChecker> =
+                        Arc::new(IdentityMembershipTriggerFireChecker::new(
+                            directory,
+                            thread_scope.tenant_id.clone(),
+                            agent.clone(),
+                            project.clone(),
+                        ));
+                    grant_checkers.push(checker);
+                }
+                #[cfg(not(feature = "webui-v2-beta"))]
+                TriggerFireAccessGrant::TenantMembership { .. } => {
+                    return Err(RebornRuntimeError::InvalidArgument {
+                        reason:
+                            "tenant-membership trigger-fire access requires the webui-v2-beta feature"
+                                .to_string(),
+                    });
+                }
+            }
+        }
+        let policy_checker: Option<Arc<dyn TriggerFireAccessChecker>> = if grant_checkers.len() <= 1
+        {
+            grant_checkers.into_iter().next()
+        } else {
+            let composite: Arc<dyn TriggerFireAccessChecker> =
+                Arc::new(CompositeTriggerFireChecker::new(grant_checkers));
+            Some(composite)
+        };
+        let effective_trigger_fire_access_checker =
+            trigger_fire_access_checker.clone().or(policy_checker);
         validate_trigger_poller_authorization(
             &trigger_poller,
-            trigger_fire_access_checker.as_ref(),
+            effective_trigger_fire_access_checker.as_ref(),
         )?;
         let trigger_poller_services = build_trigger_poller_services(
             local_runtime,
             Arc::clone(&planned_turn_coordinator),
             Arc::clone(&thread_service),
             trigger_poller.authorizer,
-            trigger_fire_access_checker.clone(),
+            effective_trigger_fire_access_checker.clone(),
             thread_scope.tenant_id.clone(),
             validated_identity.agent_id.clone(),
         )

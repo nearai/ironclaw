@@ -138,7 +138,8 @@ pub use runtime_input::{
     CredentialRefreshSettings, DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL,
     DEFAULT_TURN_RUNNER_POLL_INTERVAL, PollSettings, RebornRuntimeIdentity, RebornRuntimeInput,
     TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
-    TriggerFireAccessError, TriggerPollerSettings, TurnRunnerSettings,
+    TriggerFireAccessError, TriggerFireAccessGrant, TriggerFireAccessPolicy, TriggerPollerSettings,
+    TurnRunnerSettings,
 };
 #[cfg(feature = "root-llm-provider")]
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
@@ -205,14 +206,6 @@ pub use webui::facade::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
 pub use webui::route_mounts::{
     ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount,
-};
-#[cfg(all(feature = "webui-v2-beta", feature = "postgres"))]
-pub use ironclaw_runner::local_trigger_access::RebornFilesystemLocalTriggerAccessStore;
-#[cfg(feature = "webui-v2-beta")]
-pub use ironclaw_runner::local_trigger_access::{
-    LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSeed,
-    LocalTriggerAccessSource, LocalTriggerAccessStore, RebornLibSqlLocalTriggerAccessStore,
-    RebornLocalTriggerAccessStoreError,
 };
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_reborn_identity::{

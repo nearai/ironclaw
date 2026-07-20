@@ -66,7 +66,6 @@ webui-v2-beta = [
     # that route crate. Composition keeps this feature to gate the WebUI facade,
     # identity, admin, and route-mount vocabulary it still owns.
     "dep:ironclaw_reborn_identity",
-    "ironclaw_runner/webui-user-store",
     "libsql",
     "dep:axum",
     "dep:tower",
@@ -116,7 +115,6 @@ postgres = [
     "ironclaw_filesystem/postgres",
     "ironclaw_host_runtime/postgres",
     "ironclaw_runner/filesystem-goal-store",
-    "ironclaw_runner/filesystem-local-trigger-access",
     "ironclaw_reborn_event_store/postgres",
     "ironclaw_resources/postgres",
     "ironclaw_run_state/postgres",
