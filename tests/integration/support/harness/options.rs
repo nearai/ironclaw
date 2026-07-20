@@ -65,6 +65,11 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// — the same seam the binary uses).
     pub(crate) native_extension_factories:
         Vec<Arc<dyn ironclaw_extension_host::NativeExtensionFactory>>,
+    /// Channel-adapter bindings for non-`first_party`-runtime channel
+    /// extensions (`RebornBuildInput::with_channel_extension_bindings` — the
+    /// same seam the binary uses for Slack's WASM-runtime package).
+    pub(crate) channel_extension_bindings:
+        Vec<ironclaw_reborn_composition::ChannelExtensionBinding>,
     /// Binary-parity account-setup declarations (extension-runtime §5.5),
     /// the `RebornBuildInput::with_account_setup_descriptors` seam.
     pub(crate) account_setup_descriptors:
@@ -127,6 +132,7 @@ impl HostRuntimeHarnessOptions {
             activate_bundled_extensions_for_test: Vec::new(),
             fixture_extension_dirs: Vec::new(),
             native_extension_factories: Vec::new(),
+            channel_extension_bindings: Vec::new(),
             account_setup_descriptors: Vec::new(),
             recording_network_egress: None,
             project_service_fault_injection: false,
@@ -197,6 +203,20 @@ impl HostRuntimeHarnessOptions {
         factory: Arc<dyn ironclaw_extension_host::NativeExtensionFactory>,
     ) -> Self {
         self.native_extension_factories.push(factory);
+        self
+    }
+
+    /// Binary-parity channel-adapter binding for channel extensions whose
+    /// runtime is NOT `first_party` (extension-runtime P6): mirrors
+    /// `RebornBuildInput::with_channel_extension_bindings` the same way the
+    /// native factories mirror the CLI assembly. Without it, composition
+    /// binds the transitional `HostServedChannelBridge`, whose `inbound`
+    /// rejects every verified request with `ChannelError::Unsupported`.
+    pub(crate) fn with_channel_extension_binding(
+        mut self,
+        binding: ironclaw_reborn_composition::ChannelExtensionBinding,
+    ) -> Self {
+        self.channel_extension_bindings.push(binding);
         self
     }
 

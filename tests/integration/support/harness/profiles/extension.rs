@@ -702,8 +702,33 @@ pub(crate) fn extension_delivery_tools_profile() -> HarnessResult<ToolsProfile> 
         .options
         .with_native_extension_factory(Arc::new(TelegramFixtureFactory))
         .with_account_setup_descriptor(telegram_account_setup_descriptor())
+        .with_channel_extension_binding(slack_channel_extension_binding())
         .with_recording_network_egress(network_egress);
     Ok(profile)
+}
+
+/// Slack's channel-adapter binding, mirrored from the binary assembly
+/// (`ironclaw_reborn_cli::runtime::native_extensions::bundled_channel_extension_bindings`)
+/// the same way [`TelegramFixtureFactory`] mirrors the native factory: the
+/// harness composes its own runtime and cannot depend on the CLI crate.
+/// Slack's WASM-runtime package cannot ride a native factory, so without
+/// this binding composition serves its `[channel]` surface with the
+/// transitional `HostServedChannelBridge`, which rejects every verified
+/// inbound request.
+fn slack_channel_extension_binding() -> ironclaw_reborn_composition::ChannelExtensionBinding {
+    ironclaw_reborn_composition::ChannelExtensionBinding {
+        extension_id: "slack".to_string(),
+        adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
+        inbound_payload_classifier: Some(Arc::new(|message| {
+            ironclaw_slack_extension::classify_interaction_resolution(
+                &message.text,
+                message.trigger,
+            )
+        })),
+        preference_target_codec: Some(Arc::new(
+            ironclaw_slack_extension::SlackPreferenceTargetCodec,
+        )),
+    }
 }
 
 /// Telegram's account-setup declaration, mirrored from the binary assembly
