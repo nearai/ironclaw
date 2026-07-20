@@ -81,11 +81,22 @@ pub struct RebornOAuthCallbackRequest {
     pub outcome: RebornOAuthCallbackOutcome,
 }
 
+/// Handle-label prefix for setup-path PKCE verifiers, mirroring the gate
+/// driver's `OAuthGateProvider::pkce_secret_handle_label`. Provider-agnostic:
+/// the flow id alone disambiguates, and a distinct label keeps setup verifiers
+/// in their own namespace, separate from gate and DCR ones.
+const SETUP_PKCE_SECRET_HANDLE_LABEL: &str = "product-auth-setup-pkce";
+
 /// Typed setup OAuth start request after host-route parsing and hashing.
 ///
 /// The browser-facing route chooses neither flow kind nor continuation. Those
 /// product-auth semantics stay here with the auth service boundary.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Deliberately not serializable and not comparable: it carries the raw
+/// `pkce_verifier` as a one-shot input to the auth service boundary. Its
+/// `Debug` redacts the secret (`SecretString`), and equality is not derived so
+/// the verifier cannot be probed by comparison.
+#[derive(Debug, Clone)]
 pub(crate) struct RebornOAuthStartFlowRequest {
     pub(crate) flow_id: Option<AuthFlowId>,
     pub(crate) scope: AuthProductScope,
@@ -93,6 +104,11 @@ pub(crate) struct RebornOAuthStartFlowRequest {
     pub(crate) authorization_url: OAuthAuthorizationUrl,
     pub(crate) opaque_state_hash: OpaqueStateHash,
     pub(crate) pkce_verifier_hash: PkceVerifierHash,
+    /// The raw verifier, stored durably by `start_setup_oauth_flow` next to
+    /// flow creation. Only its hash lives on the flow record; the secret itself
+    /// goes to the injected `SecretStore` so the callback can read it back
+    /// after a restart or on another replica.
+    pub(crate) pkce_verifier: SecretString,
     pub(crate) continuation: AuthContinuationRef,
     pub(crate) update_binding: Option<CredentialAccountUpdateBinding>,
     pub(crate) expires_at: ironclaw_auth::Timestamp,
@@ -509,6 +525,26 @@ impl RebornProductAuthServicePorts {
         ));
         self.provider_client = provider_client;
         self
+    }
+}
+
+/// Expiry-honest state projection shared by the OAuth flow-status and
+/// reconcile reads.
+///
+/// A non-terminal flow whose `expires_at` has passed is dead — its popup can
+/// never complete a callback (`ensure_oauth_callback_flow_known` already
+/// rejects it) — but nothing sweeps the durable record to `Expired`. Reporting
+/// its stored `Open` state forever leaves the browser's popup watcher with no
+/// signal but its own timeout. A resolved record keeps its real outcome: a
+/// `Failed` flow can still owe provider-owned cleanup that polling must
+/// converge, and relabelling it `Expired` would hide that.
+///
+/// Projection only — callers must not write the projected state back.
+fn project_flow_state(record: &AuthFlowRecord, now: Timestamp) -> AuthFlowState {
+    if !ironclaw_auth::is_terminal_state(record.state) && record.expires_at <= now {
+        AuthFlowState::Resolved(AuthFlowOutcome::Expired)
+    } else {
+        record.state
     }
 }
 
@@ -1033,6 +1069,13 @@ impl RebornProductAuthServices {
                 .map_err(ContinuationDispatchFailure::into_auth_error)
                 .map_err(RebornCredentialLifecycleError::from)?;
         }
+        for canceled in &report.canceled_flows {
+            // A terminal flow's callback can never claim, so its stored setup
+            // verifier is dead material — drop it eagerly (idempotent,
+            // best-effort) instead of leaving it to TTL expiry.
+            self.delete_setup_pkce_verifier(&canceled.scope, canceled.flow_id)
+                .await;
+        }
         Ok(report)
     }
 
@@ -1290,7 +1333,10 @@ impl RebornProductAuthServices {
         }
     }
 
-    #[allow(dead_code, reason = "used by upcoming Reborn OAuth setup route wiring")]
+    #[allow(
+        dead_code,
+        reason = "used by the feature-scoped webui-v2-beta OAuth setup routes"
+    )]
     pub(crate) async fn ensure_oauth_callback_flow_known(
         &self,
         scope: &AuthProductScope,
@@ -1314,10 +1360,14 @@ impl RebornProductAuthServices {
         Ok(record.provider)
     }
 
-    /// Load a caller-scoped flow for status reconciliation without applying the
-    /// interactive callback expiry check. Failed terminal cleanup remains owed
-    /// after `expires_at`, and status polling must be able to finish it without
+    /// Load a caller-scoped flow for status reconciliation without rejecting an
+    /// expired flow outright. Failed terminal cleanup remains owed after
+    /// `expires_at`, and status polling must be able to finish it without
     /// exposing cross-scope flow existence.
+    ///
+    /// The record's state is projected through [`project_flow_state`], so a
+    /// non-terminal flow past its deadline reads as `Expired` while a terminal
+    /// flow keeps its real status (and its owed cleanup).
     #[allow(
         dead_code,
         reason = "used by the WebUI v2 OAuth status route through product-auth route composition"
@@ -1328,7 +1378,10 @@ impl RebornProductAuthServices {
         flow_id: AuthFlowId,
     ) -> Result<AuthFlowRecord, RebornOAuthCallbackError> {
         match self.flow_manager.get_flow(scope, flow_id).await {
-            Ok(Some(record)) => Ok(record),
+            Ok(Some(mut record)) => {
+                record.state = project_flow_state(&record, Utc::now());
+                Ok(record)
+            }
             Ok(None) | Err(AuthProductError::CrossScopeDenied) => {
                 Err(AuthProductError::UnknownOrExpiredFlow.into())
             }
@@ -1370,7 +1423,10 @@ impl RebornProductAuthServices {
                         .map_err(ContinuationDispatchFailure::into_auth_error)
                         .map_err(RebornOAuthCallbackError::from);
                 }
-                Ok(record.state)
+                // Same projection as `flow_record_for_status`: every early
+                // return above is resolved, so this is the only branch that can
+                // still hold a non-terminal record past its deadline.
+                Ok(project_flow_state(&record, Utc::now()))
             }
             Ok(None) => Err(AuthProductError::UnknownOrExpiredFlow.into()),
             // Never distinguish "owned by another scope" from "unknown": both
@@ -1392,6 +1448,17 @@ impl RebornProductAuthServices {
         provider: &AuthProviderId,
         flow_id: AuthFlowId,
     ) -> Result<Option<SecretString>, RebornOAuthCallbackError> {
+        // Setup-path flows keep their verifier under a per-flow handle in the
+        // injected secret store (see `store_setup_pkce_verifier`). Handles are
+        // label-prefixed per source, so a gate/DCR flow simply has no setup
+        // secret and falls through to its own registry.
+        if let Some(pkce) = self
+            .setup_pkce_verifier_for_flow(scope, flow_id)
+            .await
+            .map_err(RebornOAuthCallbackError::from)?
+        {
+            return Ok(Some(pkce));
+        }
         if let Some(registry) = &self.oauth_gate_registry
             && let Some(pkce) = registry
                 .pkce_verifier_for_flow(scope, provider, flow_id)
@@ -1409,15 +1476,42 @@ impl RebornProductAuthServices {
             .map_err(RebornOAuthCallbackError::from)
     }
 
-    #[allow(dead_code, reason = "used by upcoming Reborn OAuth setup route wiring")]
+    #[allow(
+        dead_code,
+        reason = "used by the feature-scoped webui-v2-beta OAuth setup routes"
+    )]
     pub(crate) async fn start_setup_oauth_flow(
         &self,
         request: RebornOAuthStartFlowRequest,
     ) -> Result<AuthFlowRecord, AuthProductError> {
-        self.flow_manager
+        // Supersede-on-start is `create_flow`'s own contract now (see
+        // `AuthFlowManager::create_flow`): minting the setup-class flow below cancels any prior live
+        // setup-class flow for the same owner+provider, so a re-opened connect
+        // popup cannot leave two live authorization requests racing to write
+        // the same credential. A superseded flow's stored verifier is dead
+        // material; its store TTL (the dead flow's own `expires_at`) reclaims
+        // it.
+
+        // Mint the id up front so the verifier can be stored BEFORE the flow
+        // exists, mirroring the gate driver: a flow is never visible without
+        // its verifier, and a failed secret write fails the start (fail-closed)
+        // instead of leaving a live flow whose callback can never complete.
+        // `AuthFlowId::default()` mints a fresh v4 id (see the `uuid_id!` macro),
+        // so this is "the caller's id, or a new one" — never a nil sentinel.
+        let flow_id = request.flow_id.unwrap_or_default();
+        self.store_setup_pkce_verifier(
+            &request.scope,
+            flow_id,
+            request.pkce_verifier,
+            request.expires_at,
+        )
+        .await?;
+
+        let flow = self
+            .flow_manager
             .create_flow(NewAuthFlow {
-                id: request.flow_id,
-                scope: request.scope,
+                id: Some(flow_id),
+                scope: request.scope.clone(),
                 kind: AuthFlowKind::IntegrationCredential,
                 provider: request.provider,
                 challenge: AuthChallenge::OAuthUrl {
@@ -1430,7 +1524,122 @@ impl RebornProductAuthServices {
                 pkce_verifier_hash: Some(request.pkce_verifier_hash),
                 expires_at: request.expires_at,
             })
+            .await;
+        if flow.is_err() {
+            // No flow exists to own the secret; don't strand it until TTL.
+            self.delete_setup_pkce_verifier(&request.scope, flow_id)
+                .await;
+        }
+        flow
+    }
+
+    /// Per-flow handle for a setup-path PKCE verifier. Mirrors the gate
+    /// driver's `{label}-{flow_id}` handle shape; the distinct label keeps
+    /// setup, gate, and DCR verifiers in separate namespaces so a lookup for
+    /// one source can never read another's secret.
+    fn setup_pkce_secret_handle(
+        &self,
+        flow_id: AuthFlowId,
+    ) -> Result<ironclaw_host_api::SecretHandle, AuthProductError> {
+        ironclaw_host_api::SecretHandle::new(format!("{SETUP_PKCE_SECRET_HANDLE_LABEL}-{flow_id}"))
+            .map_err(|error| {
+                tracing::debug!(
+                    flow_id = %flow_id,
+                    error = %error,
+                    "failed to build setup OAuth PKCE secret handle"
+                );
+                AuthProductError::BackendUnavailable
+            })
+    }
+
+    /// Persist a setup flow's raw PKCE verifier for the life of the flow.
+    ///
+    /// TTL is the flow's own `expires_at`: once the flow is dead the secret is
+    /// worthless, and the store expires it even if no terminal transition ever
+    /// runs. Only the hash goes on the flow record — the raw verifier lives
+    /// here and nowhere else.
+    async fn store_setup_pkce_verifier(
+        &self,
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+        verifier: SecretString,
+        expires_at: Timestamp,
+    ) -> Result<(), AuthProductError> {
+        let handle = self.setup_pkce_secret_handle(flow_id)?;
+        self.secret_store
+            .put(scope.resource.clone(), handle, verifier, Some(expires_at))
             .await
+            .map(|_| ())
+            .map_err(|error| {
+                tracing::debug!(
+                    flow_id = %flow_id,
+                    error = %error,
+                    "failed to store setup OAuth PKCE verifier"
+                );
+                AuthProductError::BackendUnavailable
+            })
+    }
+
+    /// Read back a setup flow's verifier exactly once.
+    ///
+    /// Uses the same one-shot lease/consume the gate driver uses, so a
+    /// successful callback consumes the secret and single-use is enforced by
+    /// the store rather than by a caller remembering to delete it.
+    async fn setup_pkce_verifier_for_flow(
+        &self,
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+    ) -> Result<Option<SecretString>, AuthProductError> {
+        let handle = self.setup_pkce_secret_handle(flow_id)?;
+        let lease = match self.secret_store.lease_once(&scope.resource, &handle).await {
+            Ok(lease) => lease,
+            Err(error) if error.is_unknown_secret() => return Ok(None),
+            Err(error) => {
+                tracing::debug!(
+                    flow_id = %flow_id,
+                    error = %error,
+                    "failed to lease setup OAuth PKCE verifier"
+                );
+                return Err(AuthProductError::BackendUnavailable);
+            }
+        };
+        self.secret_store
+            .consume(&scope.resource, lease.id)
+            .await
+            .map(Some)
+            .map_err(|error| {
+                tracing::debug!(
+                    flow_id = %flow_id,
+                    error = %error,
+                    "failed to consume setup OAuth PKCE verifier"
+                );
+                AuthProductError::BackendUnavailable
+            })
+    }
+
+    /// Drop a setup flow's verifier on a terminal transition. Best-effort: the
+    /// stored TTL is the backstop, and a consumed lease has already removed it.
+    pub(crate) async fn delete_setup_pkce_verifier(
+        &self,
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+    ) {
+        let Ok(handle) = self.setup_pkce_secret_handle(flow_id) else {
+            return;
+        };
+        if let Err(error) = self.secret_store.delete(&scope.resource, &handle).await {
+            // Already consumed by the callback's one-shot `lease_once`/
+            // `consume` read (or a prior cleanup) — deletion is idempotent,
+            // so an unknown handle is success, not noise.
+            if error.is_unknown_secret() {
+                return;
+            }
+            tracing::debug!(
+                flow_id = %flow_id,
+                error = %error,
+                "failed to delete setup OAuth PKCE verifier"
+            );
+        }
     }
 
     #[allow(
@@ -1444,6 +1653,12 @@ impl RebornProductAuthServices {
         let Some(registry) = &self.dcr_oauth_registry else {
             return Ok(None);
         };
+        // Supersede-on-start is `create_flow`'s own contract (see
+        // `AuthFlowManager::create_flow`): DCR providers (e.g. Notion) reach flow creation through
+        // the registry rather than the plain setup seam, and inherit it there
+        // — the exact per-route omission #6130 had to patch here is now
+        // structurally impossible. Superseded flows' verifier material ages
+        // out by its own store TTL.
         registry
             .start_setup_flow(
                 &self.flow_manager,

@@ -1,263 +1,31 @@
-//! Reborn integration-test framework — slice 7: OAuth connect-flow.
+//! The OAuth connect-POPUP user journeys over the real product-auth boundary
+//! (same seam as `oauth_connect.rs`: real flow + account stores, token
+//! exchange captured by `ScriptedOAuthTokenEgress`):
 //!
-//! Drives a real OAuth connect flow through the Reborn product-auth boundary:
-//! `create_flow` → `handle_oauth_callback` → assert `CredentialAccount`
-//! persisted and readable.  The token-exchange HTTP is captured by a
-//! `ScriptedOAuthTokenEgress` (no real network); all other stores (flow +
-//! account persistence) are real `FilesystemAuthProductServices<InMemoryBackend>`.
-//!
-//! This proves design-spec §3.8 coverage: real stores, mock only the OAuth HTTP
-//! seam at the `RuntimeHttpEgress` boundary.
+//! - the user abandons the popup and the flow lapses — a LATE callback is
+//!   rejected terminally and a fresh retry connects cleanly;
+//! - the browser REPLAYS a completed callback (back-button / duplicated
+//!   redirect) — idempotent, no second account, and a later reconnect works;
+//! - the user CLOSES the popup and clicks Connect again — creating the
+//!   reopened flow supersedes the abandoned one at the `create_flow` seam,
+//!   and the abandoned tab's late callback dies at claim as terminal;
+//! - the user DENIES consent on the provider page — the flow terminalizes as
+//!   as `ProviderDenied` with no exchange and no account, and an immediate fresh Connect
+//!   succeeds.
 
-use chrono::{DateTime, Duration, Utc};
+#[path = "common.rs"]
+mod common;
+
+use chrono::{Duration, Utc};
+use common::{authorized_callback_request, hex64, new_flow_request, test_scope};
 use ironclaw_auth::{
-    AuthChallenge, AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowKind, AuthFlowOutcome,
-    AuthFlowState, AuthProductScope, AuthProviderId, AuthSurface, AuthorizationCodeHash,
-    CredentialAccountLabel, CredentialAccountListRequest, CredentialAccountLookupRequest,
-    NewAuthFlow, OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthProviderCallbackRequest,
-    OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret, ProviderScope,
+    AuthErrorCode, AuthFlowOutcome, AuthFlowState, AuthProviderId, AuthorizationCodeHash,
+    CredentialAccountListRequest, OpaqueStateHash, PkceVerifierHash,
 };
-use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
 use ironclaw_reborn_composition::{
     RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
     test_support::build_oauth_product_auth_for_test,
 };
-use secrecy::SecretString;
-
-/// Build a 64-character hex string from a repeated byte value.
-fn hex64(fill: u8) -> String {
-    format!("{fill:02x}").repeat(32)
-}
-
-fn test_scope() -> AuthProductScope {
-    let resource =
-        ResourceScope::local_default(UserId::new("test-user").unwrap(), InvocationId::new())
-            .expect("local_default scope must build");
-    AuthProductScope::new(resource, AuthSurface::Callback)
-}
-
-/// A `NewAuthFlow` for the connect-flow tests; only identity hashes and the
-/// expiry vary between scenarios.
-fn new_flow_request(
-    scope: &AuthProductScope,
-    provider: &AuthProviderId,
-    state_hash: &OpaqueStateHash,
-    pkce_hash: &PkceVerifierHash,
-    expires_at: DateTime<Utc>,
-) -> NewAuthFlow {
-    NewAuthFlow {
-        id: None,
-        scope: scope.clone(),
-        kind: AuthFlowKind::IntegrationCredential,
-        provider: provider.clone(),
-        challenge: AuthChallenge::OAuthUrl {
-            authorization_url: OAuthAuthorizationUrl::new(
-                "https://accounts.example.com/o/oauth2/auth",
-            )
-            .unwrap(),
-            expires_at,
-        },
-        continuation: AuthContinuationRef::SetupOnly,
-        update_binding: None,
-        opaque_state_hash: Some(state_hash.clone()),
-        pkce_verifier_hash: Some(pkce_hash.clone()),
-        expires_at,
-    }
-}
-
-/// An `Authorized` provider-callback request matching `new_flow_request`'s
-/// hashes — the "user completed the provider consent page" leg.
-fn authorized_callback_request(
-    scope: &AuthProductScope,
-    flow_id: AuthFlowId,
-    provider: &AuthProviderId,
-    state_hash: &OpaqueStateHash,
-    pkce_hash: &PkceVerifierHash,
-    code_hash: &AuthorizationCodeHash,
-    label: &str,
-) -> RebornOAuthCallbackRequest {
-    RebornOAuthCallbackRequest {
-        scope: scope.clone(),
-        flow_id,
-        opaque_state_hash: state_hash.clone(),
-        outcome: RebornOAuthCallbackOutcome::Authorized {
-            provider_request: OAuthProviderCallbackRequest {
-                provider: provider.clone(),
-                account_label: CredentialAccountLabel::new(label).unwrap(),
-                authorization_code: OAuthAuthorizationCode::new(SecretString::from(format!(
-                    "auth-code-{label}"
-                )))
-                .unwrap(),
-                authorization_code_hash: code_hash.clone(),
-                pkce_verifier: PkceVerifierSecret::new(SecretString::from(format!(
-                    "pkce-verifier-{label}"
-                )))
-                .unwrap(),
-                pkce_verifier_hash: pkce_hash.clone(),
-                scopes: vec![ProviderScope::new("test.readonly").unwrap()],
-            },
-        },
-    }
-}
-
-/// Core slice-7 scenario: a real OAuth connect flow produces a persisted
-/// `CredentialAccount` that reads back correctly, and exactly one
-/// token-exchange HTTP call was made to the scripted egress.
-#[tokio::test]
-async fn oauth_connect_flow_persists_credential_account() {
-    let bundle = build_oauth_product_auth_for_test();
-    let scope = test_scope();
-    let provider = AuthProviderId::new("test-oauth-provider").unwrap();
-
-    // Stable hash values shared across flow creation and callback claim.
-    let state_hash = OpaqueStateHash::new(hex64(0xaa)).unwrap();
-    let pkce_hash = PkceVerifierHash::new(hex64(0xbb)).unwrap();
-    let code_hash = AuthorizationCodeHash::new(hex64(0xcc)).unwrap();
-
-    let flow = bundle
-        .services
-        .flow_manager()
-        .create_flow(new_flow_request(
-            &scope,
-            &provider,
-            &state_hash,
-            &pkce_hash,
-            Utc::now() + Duration::minutes(5),
-        ))
-        .await
-        .expect("create_flow must succeed");
-
-    // Drives claim → token exchange → complete. The scripted egress returns a
-    // fixed access-token JSON body; no real network call is made.
-    let response = bundle
-        .services
-        .handle_oauth_callback(authorized_callback_request(
-            &scope,
-            flow.id,
-            &provider,
-            &state_hash,
-            &pkce_hash,
-            &code_hash,
-            "Test Account",
-        ))
-        .await
-        .expect("handle_oauth_callback must succeed");
-
-    let account_id = response
-        .credential_account_id
-        .expect("completed callback must carry a credential_account_id");
-
-    let account = bundle
-        .services
-        .credential_account_service()
-        .get_account(CredentialAccountLookupRequest::new(scope, account_id))
-        .await
-        .expect("get_account must not error")
-        .expect("credential account must be persisted after a successful OAuth callback");
-
-    assert_eq!(
-        account.id, account_id,
-        "account id matches the callback response"
-    );
-    assert_eq!(
-        account.provider, provider,
-        "account provider matches the flow provider"
-    );
-
-    assert_eq!(
-        bundle.egress.captured_count(),
-        1,
-        "exactly one token-exchange HTTP call must be captured by the scripted egress"
-    );
-
-    // Must use authorization_code, not the refresh grant — proves the right
-    // OAuth flow crossed the egress.
-    let grant_types = bundle.egress.captured_grant_types();
-    assert_eq!(
-        grant_types.first().map(String::as_str),
-        Some("authorization_code"),
-        "connect-flow token exchange must use the authorization_code grant; grant_types: {grant_types:?}"
-    );
-}
-
-/// Cross-implementation conformance: the durable `FilesystemAuthProductServices`
-/// must satisfy the same observable OAuth-callback state machine
-/// (`ironclaw_auth::test_support::conformance`) as the in-memory fake most consumer tests
-/// run against; the fake's invocation lives in
-/// `crates/ironclaw_auth/tests/auth_product_contract/oauth_flow_contract.rs`.
-/// The suite drives `AuthFlowManager` directly with pre-exchanged outcomes,
-/// so no token-exchange egress is involved — the exchange leg is covered by
-/// the surrounding tests in this file.
-#[tokio::test]
-async fn durable_flow_manager_satisfies_shared_oauth_flow_conformance() {
-    let bundle = build_oauth_product_auth_for_test();
-    let scope = test_scope();
-    let provider = AuthProviderId::new("test-oauth-provider").unwrap();
-    ironclaw_auth::test_support::conformance::assert_auth_flow_callback_conformance(
-        bundle.services.flow_manager().as_ref(),
-        &scope,
-        &provider,
-    )
-    .await;
-}
-
-/// Guard test: attempting an OAuth callback for a non-existent flow must fail
-/// with `UnknownOrExpiredFlow`.  No credential account must be created, and no
-/// token-exchange call should be made.
-///
-/// Both guarantees are verified: `captured_count()` asserts no token-exchange
-/// HTTP call was made; `list_accounts` asserts no credential account was
-/// persisted to the durable store.
-#[tokio::test]
-async fn oauth_callback_without_prior_flow_fails() {
-    let bundle = build_oauth_product_auth_for_test();
-    let scope = test_scope();
-    let state_hash = OpaqueStateHash::new(hex64(0xdd)).unwrap();
-    let pkce_hash = PkceVerifierHash::new(hex64(0xee)).unwrap();
-    let code_hash = AuthorizationCodeHash::new(hex64(0xff)).unwrap();
-
-    let error = bundle
-        .services
-        .handle_oauth_callback(authorized_callback_request(
-            &scope,
-            AuthFlowId::new(), // no flow was created for this id
-            &AuthProviderId::new("test-oauth-provider").unwrap(),
-            &state_hash,
-            &pkce_hash,
-            &code_hash,
-            "Guard Account",
-        ))
-        .await
-        .expect_err("callback with no prior flow must return an error");
-
-    assert_eq!(
-        error.code,
-        AuthErrorCode::UnknownOrExpiredFlow,
-        "missing flow must surface as UnknownOrExpiredFlow"
-    );
-
-    // The claim step fails before any token-exchange — egress must be clean.
-    assert_eq!(
-        bundle.egress.captured_count(),
-        0,
-        "no token-exchange call should be made when the flow is missing"
-    );
-
-    let page = bundle
-        .services
-        .credential_account_service()
-        .list_accounts(CredentialAccountListRequest::new(
-            scope,
-            AuthProviderId::new("test-oauth-provider").unwrap(),
-        ))
-        .await
-        .expect("list_accounts must not error after a failed callback");
-    assert!(
-        page.accounts.is_empty(),
-        "no credential account must be created when the flow is missing; got {} accounts",
-        page.accounts.len()
-    );
-}
 
 /// T4 of the #6105 lifecycle transitions (issues #2858/#2534/#6043 shape): a
 /// callback that lands AFTER the flow lapsed (the user abandoned or lost the
@@ -552,4 +320,242 @@ async fn replayed_callback_is_idempotent_then_fresh_flow_reconnects() {
             "account {expected:?} must be listed after the reconnect"
         );
     }
+}
+
+/// The connect-popup journey: the user opens the OAuth popup (flow A), closes
+/// it without authorizing, and clicks Connect again (flow B). Creating flow B
+/// supersedes the abandoned attempt at the `create_flow` seam itself — A reads
+/// back resolved as aborted — and completing B mints exactly one credential
+/// account. The abandoned tab's LATE callback for A (the user finds the old
+/// popup and finishes it anyway) must die at the claim: no
+/// token exchange runs for it and no second account appears.
+#[tokio::test]
+async fn closed_popup_reopen_supersedes_abandoned_flow_then_completes() {
+    let bundle = build_oauth_product_auth_for_test();
+    let scope = test_scope();
+    let provider = AuthProviderId::new("test-oauth-provider").unwrap();
+
+    let abandoned_state = OpaqueStateHash::new(hex64(0x91)).unwrap();
+    let abandoned_pkce = PkceVerifierHash::new(hex64(0x92)).unwrap();
+    let abandoned_code = AuthorizationCodeHash::new(hex64(0x93)).unwrap();
+    let abandoned_flow = bundle
+        .services
+        .flow_manager()
+        .create_flow(new_flow_request(
+            &scope,
+            &provider,
+            &abandoned_state,
+            &abandoned_pkce,
+            Utc::now() + Duration::minutes(5),
+        ))
+        .await
+        .expect("the first Connect click must mint flow A");
+
+    // The user closes the popup — nothing calls back — and clicks Connect
+    // again. Minting flow B is itself the supersede seam.
+    let reopened_state = OpaqueStateHash::new(hex64(0x94)).unwrap();
+    let reopened_pkce = PkceVerifierHash::new(hex64(0x95)).unwrap();
+    let reopened_code = AuthorizationCodeHash::new(hex64(0x96)).unwrap();
+    let reopened_flow = bundle
+        .services
+        .flow_manager()
+        .create_flow(new_flow_request(
+            &scope,
+            &provider,
+            &reopened_state,
+            &reopened_pkce,
+            Utc::now() + Duration::minutes(5),
+        ))
+        .await
+        .expect("re-opening the popup must mint flow B");
+    let abandoned_record = bundle
+        .services
+        .flow_manager()
+        .get_flow(&scope, abandoned_flow.id)
+        .await
+        .expect("get_flow must not error")
+        .expect("the abandoned flow record must remain readable");
+    assert_eq!(
+        abandoned_record.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::UserAborted),
+        "creating the reopened flow must supersede (cancel) the abandoned popup's flow"
+    );
+
+    // The reopened popup completes normally.
+    let response = bundle
+        .services
+        .handle_oauth_callback(authorized_callback_request(
+            &scope,
+            reopened_flow.id,
+            &provider,
+            &reopened_state,
+            &reopened_pkce,
+            &reopened_code,
+            "Reopened Grant",
+        ))
+        .await
+        .expect("the reopened popup's callback must complete");
+    let reopened_account = response
+        .credential_account_id
+        .expect("the reopened callback must mint a credential account");
+    assert_eq!(
+        bundle.egress.captured_count(),
+        1,
+        "only the reopened flow's token exchange may cross the egress"
+    );
+
+    // The abandoned tab resurfaces and finishes the provider consent — the
+    // late callback must be rejected at claim, before any exchange.
+    let error = bundle
+        .services
+        .handle_oauth_callback(authorized_callback_request(
+            &scope,
+            abandoned_flow.id,
+            &provider,
+            &abandoned_state,
+            &abandoned_pkce,
+            &abandoned_code,
+            "Abandoned Grant",
+        ))
+        .await
+        .expect_err("the superseded popup's late callback must be rejected");
+    assert_eq!(
+        error.code,
+        AuthErrorCode::Canceled,
+        "a superseded flow's callback must surface the canceled state, not a generic failure"
+    );
+    assert_eq!(
+        bundle.egress.captured_count(),
+        1,
+        "no token exchange may run for the superseded popup's late callback"
+    );
+    let page = bundle
+        .services
+        .credential_account_service()
+        .list_accounts(CredentialAccountListRequest::new(scope, provider))
+        .await
+        .expect("list_accounts must not error after the late callback");
+    assert_eq!(
+        page.accounts.len(),
+        1,
+        "the superseded popup must not mint a second credential account"
+    );
+    assert_eq!(
+        page.accounts[0].id, reopened_account,
+        "the surviving account is the reopened popup's account"
+    );
+}
+
+/// Denied consent: the user clicks "Deny" on the provider page. The flow
+/// terminalizes durably as Failed with no token exchange and no credential
+/// account — the route-visible outcome is the sanitized non-retryable
+/// `ProviderDenied` error — and an immediate fresh Connect succeeds cleanly
+/// (denial leaves a clean retry path, not a wedge).
+#[tokio::test]
+async fn denied_consent_terminalizes_flow_and_fresh_retry_connects() {
+    let bundle = build_oauth_product_auth_for_test();
+    let scope = test_scope();
+    let provider = AuthProviderId::new("test-oauth-provider").unwrap();
+
+    let denied_state = OpaqueStateHash::new(hex64(0xa1)).unwrap();
+    let denied_pkce = PkceVerifierHash::new(hex64(0xa2)).unwrap();
+    let denied_flow = bundle
+        .services
+        .flow_manager()
+        .create_flow(new_flow_request(
+            &scope,
+            &provider,
+            &denied_state,
+            &denied_pkce,
+            Utc::now() + Duration::minutes(5),
+        ))
+        .await
+        .expect("create_flow must succeed");
+
+    let denial = bundle
+        .services
+        .handle_oauth_callback(RebornOAuthCallbackRequest {
+            scope: scope.clone(),
+            flow_id: denied_flow.id,
+            opaque_state_hash: denied_state.clone(),
+            outcome: RebornOAuthCallbackOutcome::ProviderDenied,
+        })
+        .await
+        .expect_err("a denied consent surfaces as the sanitized ProviderDenied error");
+    assert_eq!(
+        denial.code,
+        AuthErrorCode::ProviderDenied,
+        "denied consent must render as ProviderDenied, not a generic failure"
+    );
+    assert!(
+        !denial.retryable,
+        "denied consent is terminal for THIS flow; retry means a fresh Connect"
+    );
+    let denied_record = bundle
+        .services
+        .flow_manager()
+        .get_flow(&scope, denied_flow.id)
+        .await
+        .expect("get_flow must not error")
+        .expect("the denied flow record must remain readable");
+    assert_eq!(
+        denied_record.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::ProviderDenied),
+        "denied consent must preserve the provider-denied outcome durably"
+    );
+    assert_eq!(
+        bundle.egress.captured_count(),
+        0,
+        "no token exchange may run for a denied consent"
+    );
+
+    // Immediate retry: a fresh Connect completes.
+    let retry_state = OpaqueStateHash::new(hex64(0xa4)).unwrap();
+    let retry_pkce = PkceVerifierHash::new(hex64(0xa5)).unwrap();
+    let retry_code = AuthorizationCodeHash::new(hex64(0xa6)).unwrap();
+    let retry_flow = bundle
+        .services
+        .flow_manager()
+        .create_flow(new_flow_request(
+            &scope,
+            &provider,
+            &retry_state,
+            &retry_pkce,
+            Utc::now() + Duration::minutes(5),
+        ))
+        .await
+        .expect("a fresh Connect after denial must mint a flow");
+    let retry = bundle
+        .services
+        .handle_oauth_callback(authorized_callback_request(
+            &scope,
+            retry_flow.id,
+            &provider,
+            &retry_state,
+            &retry_pkce,
+            &retry_code,
+            "Post-Denial Grant",
+        ))
+        .await
+        .expect("the retry after denial must complete; denial must not wedge reconnects");
+    let retry_account = retry
+        .credential_account_id
+        .expect("the retry must mint a credential account");
+    let page = bundle
+        .services
+        .credential_account_service()
+        .list_accounts(CredentialAccountListRequest::new(scope, provider))
+        .await
+        .expect("list_accounts must not error after the retry");
+    assert_eq!(
+        page.accounts.len(),
+        1,
+        "only the retry's account may exist after a denial"
+    );
+    assert_eq!(page.accounts[0].id, retry_account);
+    assert_eq!(
+        bundle.egress.captured_count(),
+        1,
+        "exactly the retry's token exchange may cross the egress"
+    );
 }

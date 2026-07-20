@@ -5,10 +5,10 @@ use ironclaw_filesystem::{CasExpectation, RootFilesystem};
 use super::FilesystemAuthProductServices;
 use ironclaw_auth::{
     AuthContinuationRef, AuthFlowManager, AuthFlowOutcome, AuthFlowState, AuthProductError,
-    AuthResolved, CredentialAccountId, CredentialAccountOwnerScope, CredentialAccountStatus,
-    CredentialOwnership, OAuthCompletionCompensationOutcome, OAuthCompletionCompensationRequest,
-    OAuthExchangeCleanupRequest, SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest,
-    SecretCleanupService,
+    AuthResolved, CanceledCleanupFlow, CredentialAccountId, CredentialAccountOwnerScope,
+    CredentialAccountStatus, CredentialOwnership, OAuthCompletionCompensationOutcome,
+    OAuthCompletionCompensationRequest, OAuthExchangeCleanupRequest, SecretCleanupAction,
+    SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
 };
 
 #[async_trait]
@@ -102,16 +102,36 @@ where
         // compensation this closes both interleavings: a callback that wins
         // before cancellation is found by the account scan, while a callback
         // that loses after cancellation rolls back its own late account write.
-        if matches!(request.action, SecretCleanupAction::Uninstall)
-            && let Some(provider) = request.provider.as_ref()
-        {
-            for flow in self
-                .lifecycle_flows_for_owner_provider(&request.scope.resource, provider)
-                .await?
-            {
+        if matches!(request.action, SecretCleanupAction::Uninstall) {
+            let mut flows = Vec::new();
+            if let Some(provider) = request.provider.as_ref() {
+                flows.extend(
+                    self.lifecycle_flows_for_owner_provider(&request.scope.resource, provider)
+                        .await?,
+                );
+            }
+            // Package-keyed selection is independent of the provider selector:
+            // uninstall passes it even when the provider is shared with (and
+            // therefore retained for) another installed extension.
+            if let Some(package) = request.lifecycle_package.as_ref() {
+                for flow in self
+                    .lifecycle_flows_for_owner_package(&request.scope.resource, package)
+                    .await?
+                {
+                    if !flows.iter().any(|existing| existing.id == flow.id) {
+                        flows.push(flow);
+                    }
+                }
+            }
+            for flow in flows {
                 let canceled = match flow.state {
                     AuthFlowState::Resolved(_) => flow,
-                    _ => self.cancel_flow(&flow.scope, flow.id).await?,
+                    _ => match self.cancel_flow(&flow.scope, flow.id).await {
+                        Ok(canceled) => canceled,
+                        Err(AuthProductError::Canceled) => flow,
+                        Err(AuthProductError::FlowAlreadyTerminal) => flow,
+                        Err(error) => return Err(error),
+                    },
                 };
                 if canceled.resolution_delivered_at.is_none()
                     && matches!(
@@ -131,6 +151,12 @@ where
                         resolved_at: canceled.updated_at,
                     });
                 }
+                // Name every walked terminal flow so the composition wrapper
+                // can eagerly drop its durable setup PKCE verifier.
+                report.canceled_flows.push(CanceledCleanupFlow {
+                    scope: canceled.scope.clone(),
+                    flow_id: canceled.id,
+                });
             }
         }
 

@@ -131,6 +131,39 @@ impl InMemoryAuthProductServices {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+
+    /// The supersede walk over already-locked state used by `create_flow`,
+    /// which must run walk + insert inside one lock acquisition — two racing
+    /// setup creates could otherwise both observe "no live predecessor" and
+    /// both survive.
+    ///
+    /// Owner granularity (tenant/user/agent/project + surface + session):
+    /// setup flows are thread-less and each re-opened connect popup mints a
+    /// fresh invocation, so `flow_shares_setup_owner_root` — not full scope
+    /// equality — is the correct predicate here, mirroring the durable
+    /// store's per-owner+surface+session flow-root listing. Records are
+    /// mutated in place rather than routed through `cancel_flow`, whose
+    /// full-scope check would reject the prior invocation's scope.
+    fn supersede_setup_flows_locked(
+        state: &mut AuthState,
+        scope: &crate::AuthProductScope,
+        provider: &crate::AuthProviderId,
+    ) -> Vec<AuthFlowId> {
+        let now = Utc::now();
+        let mut superseded = Vec::new();
+        for record in state.flows.values_mut() {
+            if crate::flow_shares_setup_owner_root(&record.scope, scope)
+                && &record.provider == provider
+                && crate::is_setup_class_continuation(&record.continuation)
+                && !crate::is_terminal_state(record.state)
+            {
+                record.state = AuthFlowState::Resolved(AuthFlowOutcome::UserAborted);
+                record.updated_at = now;
+                superseded.push(record.id);
+            }
+        }
+        superseded
+    }
 }
 
 #[async_trait]
@@ -180,6 +213,13 @@ impl AuthFlowRecordSource for InMemoryAuthProductServices {
 impl AuthFlowManager for InMemoryAuthProductServices {
     async fn create_flow(&self, request: NewAuthFlow) -> Result<AuthFlowRecord, AuthProductError> {
         let mut state = self.lock_state();
+        // Supersede-on-start happens at the creation seam itself (see the
+        // `AuthFlowManager::create_flow` contract), under the SAME lock
+        // acquisition as the insert below: walk + insert must be one critical
+        // section or two racing creates both observe "no live predecessor".
+        if crate::is_setup_class_continuation(&request.continuation) {
+            Self::supersede_setup_flows_locked(&mut state, &request.scope, &request.provider);
+        }
         if let Some(binding) = &request.update_binding {
             let account = state
                 .accounts
@@ -859,6 +899,34 @@ impl CredentialAccountService for InMemoryAuthProductServices {
                     refreshed: false,
                 })
             }
+            Err(AuthProductError::InvalidGrant) => {
+                // Fidelity with production
+                // `ProviderBackedCredentialAccountService::refresh_account`: a
+                // provider `invalid_grant` means the refresh token is
+                // permanently revoked, so the account becomes `Revoked`
+                // (reauthorize-required), not merely `RefreshFailed`. Without
+                // this arm the fake left the account status unchanged and
+                // propagated the raw error, hiding the divergence from the
+                // production path.
+                let mut state = self.lock_state();
+                let account = state
+                    .accounts
+                    .get_mut(&request.account_id)
+                    .ok_or(AuthProductError::CredentialMissing)?;
+                validate_refresh_target(account, &request)?;
+                if account.refresh_secret.as_ref() == Some(&refresh_secret_used) {
+                    account.status = CredentialAccountStatus::Revoked;
+                    account.updated_at = Utc::now();
+                }
+                Ok(CredentialRefreshReport {
+                    account: account.projection(),
+                    recovery: recovery_projection_for_single_account(
+                        account.provider.clone(),
+                        account,
+                    ),
+                    refreshed: false,
+                })
+            }
             Err(error) => Err(error),
         }
     }
@@ -1214,16 +1282,33 @@ impl SecretCleanupService for InMemoryAuthProductServices {
             }
         }
         if matches!(request.action, SecretCleanupAction::Uninstall)
-            && let Some(provider) = request.provider.as_ref()
+            && (request.provider.is_some() || request.lifecycle_package.is_some())
         {
             let owner = &request.scope.resource;
             for flow in state.flows.values_mut().filter(|flow| {
                 let resource = &flow.scope.resource;
-                &flow.provider == provider
-                    && resource.tenant_id == owner.tenant_id
+                let owner_matches = resource.tenant_id == owner.tenant_id
                     && resource.user_id == owner.user_id
                     && resource.agent_id == owner.agent_id
-                    && resource.project_id == owner.project_id
+                    && resource.project_id == owner.project_id;
+                let provider_selected = request.provider.as_ref() == Some(&flow.provider);
+                // Package-keyed selection mirrors the durable store: the
+                // removed extension's own LifecycleActivation flows die with
+                // it even when the provider is shared with another extension.
+                let package_selected = matches!(
+                    (&flow.continuation, request.lifecycle_package.as_ref()),
+                    (
+                        AuthContinuationRef::LifecycleActivation { package_ref },
+                        Some(package),
+                    ) if package_ref == package
+                );
+                let requires_cleanup = !crate::is_terminal_state(flow.state)
+                    || (flow.resolution_delivered_at.is_none()
+                        && matches!(
+                            flow.continuation,
+                            AuthContinuationRef::TurnGateResume { .. }
+                        ));
+                owner_matches && (provider_selected || package_selected) && requires_cleanup
             }) {
                 if !crate::is_terminal_state(flow.state) {
                     flow.state = AuthFlowState::Resolved(AuthFlowOutcome::UserAborted);
@@ -1247,6 +1332,10 @@ impl SecretCleanupService for InMemoryAuthProductServices {
                         resolved_at: Utc::now(),
                     });
                 }
+                report.canceled_flows.push(crate::CanceledCleanupFlow {
+                    scope: flow.scope.clone(),
+                    flow_id: flow.id,
+                });
             }
         }
         Ok(report)

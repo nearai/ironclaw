@@ -202,13 +202,14 @@ impl AuthInteractionService for DefaultAuthInteractionService {
         request: ListPendingAuthInteractionsRequest,
     ) -> Result<ListPendingAuthInteractionsResponse, ProductWorkflowError> {
         let scope = AuthInteractionScope::from_turn(&request.scope, &request.actor);
-        let mut auth = self
-            .read_model
-            .auth_gates(&scope)
-            .await?
+        let gates = self.read_model.auth_gates(&scope).await?;
+        // Capture `now` after the read: a slow read with a pre-read timestamp
+        // would render gates as unexpired that already expired mid-await.
+        let now = chrono::Utc::now();
+        let mut auth = gates
             .into_iter()
             .filter(|gate| gate.scope() == &scope && is_pending_auth_state(gate.state()))
-            .filter_map(|gate| gate.to_view())
+            .filter_map(|gate| gate.to_view(now))
             .collect::<Vec<_>>();
         auth.sort_by(|left, right| {
             left.run_id

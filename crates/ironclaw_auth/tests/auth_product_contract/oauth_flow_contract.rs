@@ -19,234 +19,6 @@ async fn oauth_flow_state_machine_conformance_holds_for_in_memory_fake() {
 }
 
 #[tokio::test]
-async fn auth_flow_uses_open_processing_and_exact_resolved_outcomes() {
-    let services = InMemoryAuthProductServices::new();
-    let owner = scope("state-contract");
-    let flow = oauth_flow(&services, owner.clone()).await;
-    assert_eq!(flow.state, AuthFlowState::Open);
-
-    let claimed = services
-        .claim_oauth_callback(
-            &owner,
-            ironclaw_auth::OAuthCallbackClaimRequest {
-                flow_id: flow.id,
-                opaque_state_hash: state_hash("state-hash"),
-                provider: provider(),
-                pkce_verifier_hash: pkce_hash("pkce-hash"),
-            },
-        )
-        .await
-        .expect("callback claim");
-    assert_eq!(claimed.state, AuthFlowState::Processing);
-
-    let denied = services
-        .complete_oauth_callback(
-            &owner,
-            OAuthCallbackInput {
-                flow_id: flow.id,
-                opaque_state_hash: state_hash("state-hash"),
-                outcome: ProviderCallbackOutcome::Denied,
-            },
-        )
-        .await
-        .expect_err("provider denial remains a product error");
-    assert_eq!(denied, AuthProductError::ProviderDenied);
-    let resolved = services
-        .get_flow(&owner, flow.id)
-        .await
-        .expect("flow lookup")
-        .expect("flow remains durable");
-    assert_eq!(
-        resolved.state,
-        AuthFlowState::Resolved(AuthFlowOutcome::ProviderDenied)
-    );
-}
-
-#[tokio::test]
-async fn terminal_actions_resolve_to_their_exact_outcomes() {
-    let services = InMemoryAuthProductServices::new();
-
-    let authorized_owner = scope("authorized");
-    let authorized_flow = oauth_flow(&services, authorized_owner.clone()).await;
-    let account_id = services
-        .complete_oauth_callback(
-            &authorized_owner,
-            OAuthCallbackInput {
-                flow_id: authorized_flow.id,
-                opaque_state_hash: state_hash("state-hash"),
-                outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: Box::new(OAuthProviderExchange {
-                        provider: provider(),
-                        account_label: label("authorized account"),
-                        authorization_code_hash: code_hash("code-hash"),
-                        pkce_verifier_hash: pkce_hash("pkce-hash"),
-                        access_secret: SecretHandle::new("authorized-access").unwrap(),
-                        refresh_secret: None,
-                        scopes: provider_scopes(&["repo"]),
-                        account_id: None,
-                        provider_identity: None,
-                    }),
-                },
-            },
-        )
-        .await
-        .expect("authorization resolves")
-        .state;
-    assert!(matches!(
-        account_id,
-        AuthFlowState::Resolved(AuthFlowOutcome::Authorized { .. })
-    ));
-
-    let aborted_owner = scope("aborted");
-    let aborted_flow = oauth_flow(&services, aborted_owner.clone()).await;
-    let aborted = services
-        .cancel_flow(&aborted_owner, aborted_flow.id)
-        .await
-        .expect("user abort resolves");
-    assert_eq!(
-        aborted.state,
-        AuthFlowState::Resolved(AuthFlowOutcome::UserAborted)
-    );
-
-    let failed_owner = scope("failed");
-    let failed_flow = oauth_flow(&services, failed_owner.clone()).await;
-    let failed = services
-        .fail_oauth_callback(
-            &failed_owner,
-            ironclaw_auth::OAuthCallbackFailureInput {
-                flow_id: failed_flow.id,
-                opaque_state_hash: state_hash("state-hash"),
-                error: AuthErrorCode::TokenExchangeFailed,
-            },
-        )
-        .await
-        .expect("callback failure resolves");
-    assert_eq!(
-        failed.state,
-        AuthFlowState::Resolved(AuthFlowOutcome::Failed {
-            error: AuthErrorCode::TokenExchangeFailed,
-        })
-    );
-}
-
-#[tokio::test]
-async fn callback_claim_replay_rejects_every_non_authorized_terminal_outcome() {
-    let services = InMemoryAuthProductServices::new();
-
-    let denied_owner = scope("claim-provider-denied");
-    let denied = oauth_flow(&services, denied_owner.clone()).await;
-    let denial = services
-        .complete_oauth_callback(
-            &denied_owner,
-            OAuthCallbackInput {
-                flow_id: denied.id,
-                opaque_state_hash: state_hash("state-hash"),
-                outcome: ProviderCallbackOutcome::Denied,
-            },
-        )
-        .await
-        .expect_err("provider denial resolves the flow");
-    assert_eq!(denial, AuthProductError::ProviderDenied);
-
-    let aborted_owner = scope("claim-user-aborted");
-    let aborted = oauth_flow(&services, aborted_owner.clone()).await;
-    services
-        .cancel_flow(&aborted_owner, aborted.id)
-        .await
-        .expect("user abort resolves the flow");
-
-    let failed_owner = scope("claim-failed");
-    let failed = oauth_flow(&services, failed_owner.clone()).await;
-    services
-        .fail_oauth_callback(
-            &failed_owner,
-            ironclaw_auth::OAuthCallbackFailureInput {
-                flow_id: failed.id,
-                opaque_state_hash: state_hash("state-hash"),
-                error: AuthErrorCode::TokenExchangeFailed,
-            },
-        )
-        .await
-        .expect("callback failure resolves the flow");
-
-    let expired_owner = scope("claim-expired");
-    let expired = services
-        .create_flow(NewAuthFlow {
-            id: None,
-            scope: expired_owner.clone(),
-            kind: AuthFlowKind::IntegrationCredential,
-            provider: provider(),
-            challenge: AuthChallenge::OAuthUrl {
-                authorization_url: authorization_url("https://provider.example/oauth"),
-                expires_at: Utc::now() - Duration::minutes(1),
-            },
-            continuation: AuthContinuationRef::LifecycleActivation {
-                package_ref: LifecyclePackageRef::new("github-extension").expect("valid package"),
-            },
-            update_binding: None,
-            opaque_state_hash: Some(state_hash("state-hash")),
-            pkce_verifier_hash: Some(pkce_hash("pkce-hash")),
-            expires_at: Utc::now() - Duration::minutes(1),
-        })
-        .await
-        .expect("expired flow record is created");
-    let first_expired_claim = services
-        .claim_oauth_callback(
-            &expired_owner,
-            ironclaw_auth::OAuthCallbackClaimRequest {
-                flow_id: expired.id,
-                opaque_state_hash: state_hash("state-hash"),
-                provider: provider(),
-                pkce_verifier_hash: pkce_hash("pkce-hash"),
-            },
-        )
-        .await
-        .expect_err("first claim marks an expired flow terminal");
-    assert_eq!(first_expired_claim, AuthProductError::UnknownOrExpiredFlow);
-
-    for (label, owner, flow_id, expected_error) in [
-        (
-            "provider denied",
-            denied_owner,
-            denied.id,
-            AuthProductError::FlowAlreadyTerminal,
-        ),
-        (
-            "user aborted",
-            aborted_owner,
-            aborted.id,
-            AuthProductError::Canceled,
-        ),
-        (
-            "failed",
-            failed_owner,
-            failed.id,
-            AuthProductError::FlowAlreadyTerminal,
-        ),
-        (
-            "expired",
-            expired_owner,
-            expired.id,
-            AuthProductError::FlowAlreadyTerminal,
-        ),
-    ] {
-        let error = services
-            .claim_oauth_callback(
-                &owner,
-                ironclaw_auth::OAuthCallbackClaimRequest {
-                    flow_id,
-                    opaque_state_hash: state_hash("state-hash"),
-                    provider: provider(),
-                    pkce_verifier_hash: pkce_hash("pkce-hash"),
-                },
-            )
-            .await
-            .expect_err("every non-authorized terminal outcome rejects callback claims");
-        assert_eq!(error, expected_error, "{label}");
-    }
-}
-
-#[tokio::test]
 async fn auth_flow_wire_writes_only_the_canonical_state_and_resolution_marker() {
     let services = InMemoryAuthProductServices::new();
     let owner = scope("wire");
@@ -1351,4 +1123,217 @@ async fn get_flow_returns_none_owner_record_and_cross_scope_denial() {
         .await
         .expect_err("cross scope");
     assert_eq!(cross_scope, AuthProductError::CrossScopeDenied);
+}
+
+/// Create a setup flow with an explicit continuation and provider — the shape
+/// the web "Connect" and extension-card connect buttons both mint.
+async fn setup_flow_with(
+    services: &InMemoryAuthProductServices,
+    owner: AuthProductScope,
+    flow_provider: AuthProviderId,
+    continuation: AuthContinuationRef,
+) -> ironclaw_auth::AuthFlowRecord {
+    services
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: owner,
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: flow_provider,
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: authorization_url("https://provider.example/oauth"),
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+            continuation,
+            update_binding: None,
+            opaque_state_hash: Some(state_hash("state-hash")),
+            pkce_verifier_hash: Some(pkce_hash("pkce-hash")),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .expect("setup flow")
+}
+
+fn turn_gate_continuation(gate: &str) -> AuthContinuationRef {
+    AuthContinuationRef::TurnGateResume {
+        turn_run_ref: TurnRunRef::new(uuid::Uuid::new_v4().to_string()).expect("turn run ref"),
+        gate_ref: AuthGateRef::new(gate).expect("gate ref"),
+    }
+}
+
+fn lifecycle_continuation() -> AuthContinuationRef {
+    AuthContinuationRef::LifecycleActivation {
+        package_ref: LifecyclePackageRef::new("github-extension").expect("valid package"),
+    }
+}
+
+async fn flow_state(
+    services: &InMemoryAuthProductServices,
+    owner: &AuthProductScope,
+    flow_id: ironclaw_auth::AuthFlowId,
+) -> AuthFlowState {
+    services
+        .get_flow(owner, flow_id)
+        .await
+        .expect("lookup")
+        .expect("record")
+        .state
+}
+
+/// Supersede-on-start lives INSIDE `create_flow`: minting a setup-class flow
+/// is itself the seam that cancels the prior live setup-class flows for the
+/// same owner root + provider, so no start route can forget to supersede
+/// (the #6130 DCR/Notion gap class becomes unrepresentable). Gate flows, other
+/// providers, and other owners are bystanders the creation must not disturb.
+#[tokio::test]
+async fn create_flow_supersedes_prior_live_setup_class_flows() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let bob = scope("bob");
+    let other_provider = AuthProviderId::new("gmail").expect("valid provider");
+
+    let setup_only = setup_flow_with(
+        &services,
+        owner.clone(),
+        provider(),
+        AuthContinuationRef::SetupOnly,
+    )
+    .await;
+    let lifecycle = setup_flow_with(
+        &services,
+        owner.clone(),
+        provider(),
+        lifecycle_continuation(),
+    )
+    .await;
+    let turn_gate = setup_flow_with(
+        &services,
+        owner.clone(),
+        provider(),
+        turn_gate_continuation("gate:parked-turn"),
+    )
+    .await;
+    let other_prov = setup_flow_with(
+        &services,
+        owner.clone(),
+        other_provider,
+        AuthContinuationRef::SetupOnly,
+    )
+    .await;
+    let other_owner = setup_flow_with(
+        &services,
+        bob.clone(),
+        provider(),
+        AuthContinuationRef::SetupOnly,
+    )
+    .await;
+
+    // The re-opened "Connect" popup mints its flow: creation supersedes.
+    let reopened = setup_flow_with(
+        &services,
+        owner.clone(),
+        provider(),
+        AuthContinuationRef::SetupOnly,
+    )
+    .await;
+
+    assert_eq!(
+        flow_state(&services, &owner, reopened.id).await,
+        AuthFlowState::Open,
+        "the freshly created flow must not supersede itself"
+    );
+    assert_eq!(
+        flow_state(&services, &owner, setup_only.id).await,
+        AuthFlowState::Resolved(AuthFlowOutcome::UserAborted),
+        "creating a setup-class flow must cancel the prior SetupOnly flow"
+    );
+    assert_eq!(
+        flow_state(&services, &owner, lifecycle.id).await,
+        AuthFlowState::Resolved(AuthFlowOutcome::UserAborted),
+        "creating a setup-class flow must cancel the prior LifecycleActivation flow"
+    );
+    assert_eq!(
+        flow_state(&services, &owner, turn_gate.id).await,
+        AuthFlowState::Open,
+        "a parked turn's auth gate is not a setup flow and must survive creation"
+    );
+    assert_eq!(
+        flow_state(&services, &owner, other_prov.id).await,
+        AuthFlowState::Open
+    );
+    assert_eq!(
+        flow_state(&services, &bob, other_owner.id).await,
+        AuthFlowState::Open
+    );
+}
+
+/// The exclusion that keeps parked turns alive cuts both ways: creating a
+/// `TurnGateResume` flow is not a setup start, so it must not cancel a live
+/// setup-class flow for the same owner+provider (and vice versa is pinned
+/// above). Both classes stay live side by side.
+#[tokio::test]
+async fn create_flow_for_a_parked_turn_gate_does_not_supersede_setup_flows() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+
+    let setup_only = setup_flow_with(
+        &services,
+        owner.clone(),
+        provider(),
+        AuthContinuationRef::SetupOnly,
+    )
+    .await;
+    let turn_gate = setup_flow_with(
+        &services,
+        owner.clone(),
+        provider(),
+        turn_gate_continuation("gate:parked-turn"),
+    )
+    .await;
+
+    assert_eq!(
+        flow_state(&services, &owner, setup_only.id).await,
+        AuthFlowState::Open,
+        "a gate flow's creation must never cancel the setup surface's flow"
+    );
+    assert_eq!(
+        flow_state(&services, &owner, turn_gate.id).await,
+        AuthFlowState::Open
+    );
+}
+
+/// The `create_flow` supersede contract must hold under CONCURRENCY, not just
+/// sequentially: two Connect clicks racing each other must still leave
+/// exactly one live setup-class flow. The cancel walk and the insert happen
+/// under one state lock, so no interleaving can let two creates each observe
+/// "no live predecessor" and both survive. Multi-threaded runtime + a start
+/// barrier + repeated rounds to actually exercise the interleavings.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_setup_creates_leave_exactly_one_live_flow() {
+    for round in 0..20 {
+        let services = std::sync::Arc::new(InMemoryAuthProductServices::new());
+        let owner = scope("alice");
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+        let mut racers = Vec::new();
+        for _ in 0..8 {
+            let services = std::sync::Arc::clone(&services);
+            let owner = owner.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            racers.push(tokio::spawn(async move {
+                barrier.wait().await;
+                setup_flow_with(&services, owner, provider(), AuthContinuationRef::SetupOnly).await
+            }));
+        }
+        for racer in racers {
+            racer.await.expect("racer task completes");
+        }
+        let live = services
+            .flow_records_snapshot()
+            .into_iter()
+            .filter(|flow| flow.state == AuthFlowState::Open)
+            .count();
+        assert_eq!(
+            live, 1,
+            "round {round}: concurrent setup creates must leave exactly one live flow"
+        );
+    }
 }
