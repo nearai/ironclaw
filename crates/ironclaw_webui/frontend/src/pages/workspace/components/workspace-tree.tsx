@@ -173,6 +173,7 @@ export function WorkspaceTree({
 }) {
   const t = useT();
   const treeRef = React.useRef<HTMLDivElement>(null);
+  const previousSelectedPathRef = React.useRef(selectedPath);
   const [focusedPath, setFocusedPath] = React.useState("");
 
   const rootEntries = sortEntries(
@@ -250,6 +251,17 @@ export function WorkspaceTree({
       treeRef.current?.querySelectorAll<HTMLElement>('[role="treeitem"]') || [],
     );
     if (!items.length) return;
+
+    const selectedPathChanged = previousSelectedPathRef.current !== selectedPath;
+    previousSelectedPathRef.current = selectedPath;
+    if (selectedPathChanged) {
+      const selected = items.find((item) => item.dataset.treePath === selectedPath);
+      if (selected) {
+        setFocusedPath(selectedPath);
+        return;
+      }
+    }
+
     if (items.some((item) => item.dataset.treePath === focusedPath)) return;
     const selected = items.find((item) => item.dataset.treePath === selectedPath);
     setFocusedPath(selected?.dataset.treePath || items[0].dataset.treePath || "");
