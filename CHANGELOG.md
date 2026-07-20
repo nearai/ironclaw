@@ -81,6 +81,7 @@ The itemized changes since 0.29.1 follow.
 
 ### Fixed
 
+- *(reborn)* route Rig-backed model calls through provider streaming for WebUI v2 runs, cover delayed/broken/cancelled/transient mock LLM behavior in served E2E tests, and verify failed runs can retry after a transient checkpoint-state outage, including failures before the first checkpoint.
 - *(reborn)* activating an extension whose OAuth provider was never configured on the instance now fails immediately with the exact `ironclaw config set` commands and restart step, instead of parking an unresolvable auth gate ([#6335](https://github.com/nearai/ironclaw/issues/6335)).
 - *(reborn)* host-authored remediation text reaches the model intact again instead of degrading to "capability summary unavailable" ([#6335](https://github.com/nearai/ironclaw/issues/6335)).
 - *(webui-v2)* report settings imports with no supported entries as failures instead of showing a false success message ([#6179](https://github.com/nearai/ironclaw/issues/6179)).
