@@ -75,7 +75,10 @@ export function pathSegments(path) {
 // Expand every directory above the selected path while retaining branches the
 // user opened manually. Returning the existing Set when nothing changes keeps
 // route updates idempotent and avoids an unnecessary tree render.
-export function expandWorkspaceSelection(expandedPaths, selectedPath) {
+export function expandWorkspaceSelection(
+  expandedPaths: Set<string>,
+  selectedPath: string | undefined,
+): Set<string> {
   const parentSegments = pathSegments(selectedPath).slice(0, -1);
   const parentPaths = parentSegments.map((_, index) =>
     parentSegments.slice(0, index + 1).join("/"),
