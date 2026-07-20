@@ -11,7 +11,7 @@ use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::{
     BackendCapabilities, BackendId, BackendKind, CompositeRootFilesystem, ContentKind,
-    InMemoryBackend, IndexPolicy, LocalFilesystem, MountDescriptor, RootFilesystem, StorageClass,
+    DiskFilesystem, InMemoryBackend, IndexPolicy, MountDescriptor, RootFilesystem, StorageClass,
 };
 use ironclaw_host_api::{
     CapabilityId, CredentialStageError, EffectKind, ExtensionId, HostPath, MountAlias, MountGrant,
@@ -26,7 +26,7 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_network::{PolicyNetworkHttpEgress, ReqwestNetworkTransport};
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_secrets::{InMemorySecretStore, SecretMaterial};
+use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial};
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use ironclaw_wasm::{WitToolHost, WitToolRuntimeConfig};
 
@@ -42,7 +42,7 @@ use super::HarnessResult;
 /// resolver + result writer). Every `HostRuntimeCapabilityHarness`
 /// constructor that does not opt into `.with_durable_capability_io()`
 /// (issue #5838) uses this so both roles keep sharing one underlying object,
-/// matching production's `LocalDevCapabilityIo` invariant.
+/// matching production's `StagedCapabilityIo` invariant.
 pub(crate) fn default_capability_io_pair() -> (
     Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
     Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
@@ -102,7 +102,7 @@ pub(crate) fn local_dev_host_runtime_with_registry_and_runtime_http_egress(
     .with_first_party_http_egress(egress)
     .with_trust_policy(Arc::new(first_party_trust_policy()?));
     // Inject the recording process port when provided; `None` defaults to
-    // `LocalHostProcessPort` (real execution).
+    // `HostProcessPort` (real execution).
     if let Some(port) = process_port {
         services = services.with_runtime_process_port_dyn(port);
     }
@@ -216,7 +216,7 @@ pub(crate) fn local_dev_host_runtime_with_live_http_egress(
         ironclaw_processes::ProcessServices::in_memory(),
         HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
-    .with_secret_store(Arc::new(InMemorySecretStore::new()))
+    .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers(Arc::new(
         ironclaw_triggers::InMemoryTriggerRepository::default(),
     ))?))
@@ -257,7 +257,7 @@ pub(crate) fn local_dev_host_runtime_with_real_egress_pipeline(
         ironclaw_processes::ProcessServices::in_memory(),
         HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
-    .with_secret_store(Arc::new(InMemorySecretStore::new()))
+    .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers(Arc::new(
         ironclaw_triggers::InMemoryTriggerRepository::default(),
     ))?))
@@ -272,7 +272,7 @@ pub(crate) fn local_dev_host_runtime_with_real_egress_pipeline(
     })?
     .with_trust_policy(Arc::new(first_party_trust_policy()?));
     // Inject the recording process port when provided; `None` defaults to
-    // `LocalHostProcessPort` (real execution).
+    // `HostProcessPort` (real execution).
     if let Some(port) = process_port {
         services = services.with_runtime_process_port_dyn(port);
     }
@@ -284,7 +284,7 @@ pub(crate) fn local_dev_root_filesystem(
     storage_root: PathBuf,
     mounts: LocalDevRootMounts,
 ) -> HarnessResult<Arc<CompositeRootFilesystem>> {
-    let mut local = LocalFilesystem::new();
+    let mut local = DiskFilesystem::new();
     local.mount_local(
         VirtualPath::new("/projects")?,
         HostPath::from_path_buf(storage_root),
@@ -308,7 +308,7 @@ pub(crate) fn local_dev_root_filesystem(
         local_dev_mount_descriptor(
             "/projects",
             "local-dev-projects",
-            BackendKind::LocalFilesystem,
+            BackendKind::DiskFilesystem,
             StorageClass::FileContent,
             ContentKind::ProjectFile,
             IndexPolicy::NotIndexed,
@@ -321,7 +321,7 @@ pub(crate) fn local_dev_root_filesystem(
             local_dev_mount_descriptor(
                 "/system/extensions/github",
                 "local-dev-github-assets",
-                BackendKind::LocalFilesystem,
+                BackendKind::DiskFilesystem,
                 StorageClass::FileContent,
                 ContentKind::ExtensionPackage,
                 IndexPolicy::NotIndexed,
@@ -335,7 +335,7 @@ pub(crate) fn local_dev_root_filesystem(
             local_dev_mount_descriptor(
                 "/system/extensions/web-access",
                 "local-dev-web-access-assets",
-                BackendKind::LocalFilesystem,
+                BackendKind::DiskFilesystem,
                 StorageClass::FileContent,
                 ContentKind::ExtensionPackage,
                 IndexPolicy::NotIndexed,

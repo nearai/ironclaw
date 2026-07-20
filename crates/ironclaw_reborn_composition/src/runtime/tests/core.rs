@@ -1,3 +1,7 @@
+// arch-exempt: large_file, pre-existing ~6.9K-line composition runtime test suite; this change only repoints existing cutover-gate cases at DeploymentConfig plus one shared helper, plan #6168
+//
+// Decomposition into per-concern test modules is tracked with the composition
+// god-crate shrink (#6168); this file is not the place to add unrelated cases.
 use std::sync::{
     Arc, Mutex as StdMutex,
     atomic::{AtomicUsize, Ordering},
@@ -263,6 +267,18 @@ fn readiness_for_runtime_gate(
     }
 }
 
+/// Drive the cutover gate the way production does: build the deployment from
+/// the profile, then gate on its `TrafficPolicy`.
+fn cutover_gate(
+    profile: RebornCompositionProfile,
+    readiness: &crate::RebornReadiness,
+) -> Result<(), RebornRuntimeError> {
+    super::enforce_runtime_cutover_gate(
+        &crate::deployment::DeploymentConfig::for_profile(profile, false),
+        readiness,
+    )
+}
+
 #[test]
 fn runtime_cutover_gate_allows_validated_production_readiness() {
     let readiness = readiness_for_runtime_gate(
@@ -271,7 +287,7 @@ fn runtime_cutover_gate_allows_validated_production_readiness() {
         Vec::new(),
     );
 
-    super::enforce_runtime_cutover_gate(RebornCompositionProfile::Production, &readiness)
+    cutover_gate(RebornCompositionProfile::Production, &readiness)
         .expect("validated production runtime can start");
 }
 
@@ -290,9 +306,8 @@ fn runtime_cutover_gate_rejects_blocking_production_diagnostic() {
         ],
     );
 
-    let error =
-        super::enforce_runtime_cutover_gate(RebornCompositionProfile::Production, &readiness)
-            .expect_err("blocking production diagnostic prevents runtime start");
+    let error = cutover_gate(RebornCompositionProfile::Production, &readiness)
+        .expect_err("blocking production diagnostic prevents runtime start");
     let RebornRuntimeError::InvalidArgument { reason } = error else {
         panic!("expected invalid argument, got {error:?}");
     };
@@ -308,9 +323,8 @@ fn runtime_cutover_gate_rejects_migration_dry_run_runtime_start() {
         Vec::new(),
     );
 
-    let error =
-        super::enforce_runtime_cutover_gate(RebornCompositionProfile::MigrationDryRun, &readiness)
-            .expect_err("migration-dry-run cannot start live runtime");
+    let error = cutover_gate(RebornCompositionProfile::MigrationDryRun, &readiness)
+        .expect_err("migration-dry-run cannot start live runtime");
     let RebornRuntimeError::InvalidArgument { reason } = error else {
         panic!("expected invalid argument, got {error:?}");
     };
@@ -325,7 +339,7 @@ fn runtime_cutover_gate_allows_local_dev_readiness() {
         vec![crate::RebornReadinessDiagnostic::local_dev()],
     );
 
-    super::enforce_runtime_cutover_gate(RebornCompositionProfile::LocalDev, &readiness)
+    cutover_gate(RebornCompositionProfile::LocalDev, &readiness)
         .expect("local-dev runtime is not production traffic");
 }
 
@@ -337,7 +351,7 @@ fn runtime_cutover_gate_allows_hosted_single_tenant_readiness() {
         Vec::new(),
     );
 
-    super::enforce_runtime_cutover_gate(RebornCompositionProfile::HostedSingleTenant, &readiness)
+    cutover_gate(RebornCompositionProfile::HostedSingleTenant, &readiness)
         .expect("validated hosted single-tenant runtime can start");
 }
 
@@ -349,11 +363,8 @@ fn runtime_cutover_gate_rejects_local_dev_readiness_for_hosted_single_tenant() {
         vec![crate::RebornReadinessDiagnostic::local_dev()],
     );
 
-    let error = super::enforce_runtime_cutover_gate(
-        RebornCompositionProfile::HostedSingleTenant,
-        &readiness,
-    )
-    .expect_err("hosted single-tenant runtime requires hosted readiness");
+    let error = cutover_gate(RebornCompositionProfile::HostedSingleTenant, &readiness)
+        .expect_err("hosted single-tenant runtime requires hosted readiness");
     let RebornRuntimeError::InvalidArgument { reason } = error else {
         panic!("expected invalid argument, got {error:?}");
     };
@@ -415,7 +426,7 @@ fn production_scheduler_wake_guard_passes_local_dev_with_absent_wiring() {
 
 use ironclaw_authorization::CapabilityLeaseStore;
 use ironclaw_events::{EventStreamKey, ReadScope};
-#[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
+#[cfg(feature = "libsql")]
 use ironclaw_host_api::ProjectId;
 use ironclaw_host_api::{
     Action, AgentId, ApprovalRequest, ApprovalRequestId, AuditStage, CapabilityId, CorrelationId,
@@ -476,6 +487,8 @@ use crate::runtime_input::{
 };
 use crate::webui::facade::build_webui_services;
 use crate::{RebornCompositionProfile, RebornReadiness, RebornReadinessState, RebornRuntimeError};
+#[cfg(feature = "libsql")]
+use ironclaw_reborn_config::{RebornBootConfig, RebornHome, RebornProfile};
 
 use super::{
     RebornSkillSourceKind, TRUSTED_LAPTOP_ACCESS_AUDIT_KIND, TRUSTED_LAPTOP_ACCESS_AUDIT_STATUS,
@@ -1048,10 +1061,8 @@ fn model_capability_error(error: impl std::fmt::Display) -> HostManagedModelErro
     HostManagedModelError::safe(HostManagedModelErrorKind::Unavailable, safe_summary)
 }
 
-#[cfg(feature = "root-llm-provider")]
 static RUNTIME_ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-#[cfg(feature = "root-llm-provider")]
 struct RuntimeEnvGuard {
     // Serializes tokio tests that mutate the runtime env overlay. The
     // set/remove helpers lock only the separate override map, not
@@ -1061,7 +1072,6 @@ struct RuntimeEnvGuard {
     previous: Vec<(&'static str, Option<String>)>,
 }
 
-#[cfg(feature = "root-llm-provider")]
 impl RuntimeEnvGuard {
     async fn set(name: &'static str, value: &str) -> Self {
         Self::with([(name, Some(value))]).await
@@ -1088,7 +1098,6 @@ impl RuntimeEnvGuard {
     }
 }
 
-#[cfg(feature = "root-llm-provider")]
 impl Drop for RuntimeEnvGuard {
     fn drop(&mut self) {
         for (name, previous) in self.previous.iter().rev() {
@@ -1107,14 +1116,10 @@ impl Drop for RuntimeEnvGuard {
     }
 }
 
-#[cfg(feature = "root-llm-provider")]
 const NEARAI_AUTH_CAPTURE_MAX_REQUEST_BYTES: usize = 50 * 1024 * 1024;
-#[cfg(feature = "root-llm-provider")]
 const NEARAI_AUTH_CAPTURE_IO_TIMEOUT: Duration = Duration::from_secs(5);
-#[cfg(feature = "root-llm-provider")]
 const NEARAI_AUTH_CAPTURE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
-#[cfg(feature = "root-llm-provider")]
 async fn write_nearai_auth_capture_bytes(
     stream: &mut tokio::net::TcpStream,
     response: &[u8],
@@ -1131,7 +1136,6 @@ async fn write_nearai_auth_capture_bytes(
     }
 }
 
-#[cfg(feature = "root-llm-provider")]
 async fn write_nearai_auth_capture_response(
     stream: &mut tokio::net::TcpStream,
     status: &str,
@@ -1145,7 +1149,6 @@ async fn write_nearai_auth_capture_response(
     write_nearai_auth_capture_bytes(stream, response.as_bytes()).await
 }
 
-#[cfg(feature = "root-llm-provider")]
 async fn start_nearai_auth_capture_server() -> (String, tokio::sync::oneshot::Receiver<String>) {
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpSocket;
@@ -1392,7 +1395,6 @@ async fn start_nearai_auth_capture_server() -> (String, tokio::sync::oneshot::Re
     (base_url, auth_rx)
 }
 
-#[cfg(feature = "root-llm-provider")]
 async fn send_nearai_auth_capture_raw_request(base_url: &str, request: String) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -1416,7 +1418,6 @@ async fn send_nearai_auth_capture_raw_request(base_url: &str, request: String) -
     response
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[tokio::test]
 async fn nearai_auth_capture_server_rejects_incomplete_body() {
     let (base_url, _auth_rx) = start_nearai_auth_capture_server().await;
@@ -1433,7 +1434,6 @@ async fn nearai_auth_capture_server_rejects_incomplete_body() {
     );
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[tokio::test]
 async fn nearai_auth_capture_server_rejects_oversized_content_length() {
     let (base_url, _auth_rx) = start_nearai_auth_capture_server().await;
@@ -1452,7 +1452,6 @@ async fn nearai_auth_capture_server_rejects_oversized_content_length() {
     );
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[tokio::test]
 async fn nearai_auth_capture_server_rejects_missing_content_length() {
     let (base_url, _auth_rx) = start_nearai_auth_capture_server().await;
@@ -1472,7 +1471,6 @@ async fn nearai_auth_capture_server_rejects_missing_content_length() {
     );
 }
 
-#[cfg(feature = "root-llm-provider")]
 fn nearai_gateway_test_request() -> HostManagedModelRequest {
     HostManagedModelRequest {
         model_profile_id: ironclaw_turns::run_profile::ModelProfileId::new("interactive_model")
@@ -1495,14 +1493,12 @@ fn nearai_gateway_test_request() -> HostManagedModelRequest {
     }
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[derive(Debug)]
 struct RecordingLlmProvider {
     active_model: StdMutex<String>,
     requests: StdMutex<Vec<Option<String>>>,
 }
 
-#[cfg(feature = "root-llm-provider")]
 impl RecordingLlmProvider {
     fn new(active_model: &str) -> Self {
         Self {
@@ -1512,7 +1508,6 @@ impl RecordingLlmProvider {
     }
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[async_trait]
 impl ironclaw_llm::LlmProvider for RecordingLlmProvider {
     fn model_name(&self) -> &str {
@@ -1579,7 +1574,6 @@ impl ironclaw_llm::LlmProvider for RecordingLlmProvider {
     }
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[tokio::test]
 async fn swappable_gateway_uses_current_active_model_for_requests() {
     let provider = Arc::new(RecordingLlmProvider::new("boot-model"));
@@ -1653,7 +1647,6 @@ fn recorded_request_count(requests: &StdMutex<Vec<HostManagedModelRequest>>) -> 
         .len()
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[tokio::test]
 async fn root_llm_gateway_bootstraps_nearai_session_token_from_env() {
     let _token_guard = RuntimeEnvGuard::set("NEARAI_SESSION_TOKEN", "sess_reborn_env_token").await;
@@ -1696,9 +1689,11 @@ async fn root_llm_gateway_bootstraps_nearai_session_token_from_env() {
         response_cache_ttl_secs: 3600,
         response_cache_max_entries: 1000,
     };
-    let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config);
-
-    let bundle = super::build_llm_gateway(llm).await.expect("gateway builds");
+    let session = ironclaw_llm::create_session_manager(config.session.clone()).await;
+    let built = ironclaw_llm::build_static_provider_chain(&config, Arc::clone(&session))
+        .await
+        .expect("provider chain builds from config");
+    let bundle = super::wrap_swappable_gateway(built, session, None).expect("gateway builds");
     let response = bundle
         .gateway
         .stream_model(nearai_gateway_test_request())
@@ -1713,7 +1708,6 @@ async fn root_llm_gateway_bootstraps_nearai_session_token_from_env() {
     assert_eq!(auth_header, "Bearer sess_reborn_env_token");
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[tokio::test]
 async fn runtime_nearai_mcp_bootstraps_from_nearai_session_token() {
     let _token_guard = RuntimeEnvGuard::set("NEARAI_SESSION_TOKEN", "sess_reborn_mcp_token").await;
@@ -1805,7 +1799,7 @@ async fn runtime_nearai_mcp_bootstraps_from_nearai_session_token() {
     stop_turn_runner_worker_for_manual_state_test(&runtime).await;
 }
 
-#[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
+#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
     let _env_guard =
@@ -1913,7 +1907,7 @@ async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
     stop_turn_runner_worker_for_manual_state_test(&runtime).await;
 }
 
-#[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
+#[cfg(feature = "libsql")]
 async fn nearai_mcp_runtime_access_secret(
     runtime: &super::RebornRuntime,
     owner_scope: ResourceScope,
@@ -1958,7 +1952,7 @@ async fn nearai_mcp_runtime_access_secret(
     secrecy::ExposeSecret::expose_secret(&material).to_string()
 }
 
-#[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
+#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn runtime_nearai_mcp_prebuild_api_key_is_not_replaced_by_stored_key() {
     let _env_guard =
@@ -2054,12 +2048,10 @@ async fn runtime_nearai_mcp_prebuild_api_key_is_not_replaced_by_stored_key() {
 /// Counts how many times the runtime drives this provider and answers with a
 /// fixed sentinel, so a test can prove an injected provider — not one built
 /// from config — is the one the gateway actually calls.
-#[cfg(feature = "root-llm-provider")]
 struct CountingOverrideProvider {
     calls: Arc<std::sync::atomic::AtomicUsize>,
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[async_trait::async_trait]
 impl ironclaw_llm::LlmProvider for CountingOverrideProvider {
     fn model_name(&self) -> &str {
@@ -2112,9 +2104,8 @@ impl ironclaw_llm::LlmProvider for CountingOverrideProvider {
 /// factory ignores the config-built provider and returns a counting mock, so
 /// if the factory were not applied the gateway would drive the config-built
 /// provider (dead endpoint) instead of returning the mock's sentinel.
-#[cfg(feature = "root-llm-provider")]
 #[tokio::test]
-async fn build_llm_gateway_applies_provider_factory() {
+async fn wrap_swappable_gateway_applies_provider_factory() {
     let session_dir = tempfile::tempdir().expect("session tempdir");
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mock: Arc<dyn ironclaw_llm::LlmProvider> = Arc::new(CountingOverrideProvider {
@@ -2159,11 +2150,16 @@ async fn build_llm_gateway_applies_provider_factory() {
     };
 
     let factory_mock = Arc::clone(&mock);
-    let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config)
-        .with_provider_factory(Arc::new(move |_built| Arc::clone(&factory_mock)));
-    let bundle = super::build_llm_gateway(llm)
+    let session = ironclaw_llm::create_session_manager(config.session.clone()).await;
+    let built = ironclaw_llm::build_static_provider_chain(&config, Arc::clone(&session))
         .await
-        .expect("gateway builds with the provider factory");
+        .expect("provider chain builds from config");
+    let bundle = super::wrap_swappable_gateway(
+        built,
+        session,
+        Some(Arc::new(move |_built| Arc::clone(&factory_mock))),
+    )
+    .expect("gateway builds with the provider factory");
 
     let response = bundle
         .gateway
@@ -2187,13 +2183,11 @@ async fn build_llm_gateway_applies_provider_factory() {
 /// stand-in for the bench's instrumentation wrapper. Unlike
 /// `CountingOverrideProvider`, it wraps `inner` so swapping the inner (via a
 /// live reload of a `SwappableLlmProvider`) is observable through it.
-#[cfg(feature = "root-llm-provider")]
 struct CountingWrapperProvider {
     inner: Arc<dyn ironclaw_llm::LlmProvider>,
     calls: Arc<std::sync::atomic::AtomicUsize>,
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[async_trait::async_trait]
 impl ironclaw_llm::LlmProvider for CountingWrapperProvider {
     fn model_name(&self) -> &str {
@@ -2224,7 +2218,6 @@ impl ironclaw_llm::LlmProvider for CountingWrapperProvider {
 /// Minimal nearai `LlmConfig` pointed at a dead endpoint: it *builds* lazily
 /// (no connection at construction) but any model call errors. Enough to
 /// exercise gateway/reload wiring without a network.
-#[cfg(feature = "root-llm-provider")]
 fn dead_endpoint_nearai_config(session_path: std::path::PathBuf) -> ironclaw_llm::LlmConfig {
     ironclaw_llm::LlmConfig {
         backend: "nearai".to_string(),
@@ -2265,13 +2258,12 @@ fn dead_endpoint_nearai_config(session_path: std::path::PathBuf) -> ironclaw_llm
 }
 
 /// Regression guard for Firat's review: the provider factory (caller
-/// instrumentation) must survive a live config reload. `build_llm_gateway`
+/// instrumentation) must survive a live config reload. `wrap_swappable_gateway`
 /// wraps the factory over the `SwappableLlmProvider`, so reloading — which
 /// swaps the swappable's *inner* — keeps the wrapper in the call path. If the
 /// factory were applied to the bare provider instead, the first reload would
 /// silently drop instrumentation and this test's post-reload count would stay
 /// at 1.
-#[cfg(feature = "root-llm-provider")]
 #[tokio::test]
 async fn provider_factory_survives_live_reload() {
     let session_dir = tempfile::tempdir().expect("session tempdir");
@@ -2285,10 +2277,11 @@ async fn provider_factory_survives_live_reload() {
     });
 
     let config = dead_endpoint_nearai_config(session_dir.path().join("session.json"));
-    let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config.clone())
-        .with_provider_factory(factory);
-    let bundle = super::build_llm_gateway(llm)
+    let session = ironclaw_llm::create_session_manager(config.session.clone()).await;
+    let built = ironclaw_llm::build_static_provider_chain(&config, Arc::clone(&session))
         .await
+        .expect("provider chain builds from config");
+    let bundle = super::wrap_swappable_gateway(built, session, Some(factory))
         .expect("gateway builds with the provider factory");
 
     // First model call routes through the instrumentation wrapper. The dead
@@ -2328,15 +2321,92 @@ async fn provider_factory_survives_live_reload() {
     );
 }
 
-#[cfg(all(feature = "root-llm-provider", feature = "libsql"))]
+/// Regression guard for the benchmark instrumentation seam: a
+/// `ResolvedRebornLlm` carrying a `provider_factory` must have that factory
+/// invoked during `build_reborn_runtime`, i.e. the caller's instrumentation
+/// wrapper is threaded into the cold-boot gateway.
+///
+/// PR #6174 collapsed the boot path to `build_placeholder_llm_gateway()`, which
+/// hardcoded `None` for the factory, so `ResolvedRebornLlm::with_provider_factory`
+/// silently never ran on the production path — the benchmark harness saw every
+/// task fail with zero model calls (no instrumented provider). The
+/// `provider_factory_survives_live_reload` test above exercises the
+/// `wrap_swappable_gateway` helper directly with `Some(..)`, so it cannot catch
+/// a boot path that never calls the helper with a factory at all. This drives
+/// the real caller (`build_reborn_runtime`) instead.
+#[tokio::test]
+async fn provider_factory_runs_during_production_boot() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let session_dir = tempfile::tempdir().expect("session tempdir");
+    let local_dev_root = root.path().join("local-dev");
+
+    let factory_ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let factory_ran_for_closure = Arc::clone(&factory_ran);
+    // Identity decorator that only records that it was constructed: the factory
+    // runs once, at gateway construction, to wrap the swappable provider.
+    let factory: crate::runtime_input::RebornProviderFactory = Arc::new(move |inner| {
+        factory_ran_for_closure.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        inner
+    });
+
+    let config = dead_endpoint_nearai_config(session_dir.path().join("session.json"));
+    let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config)
+        .with_provider_factory(factory);
+
+    // No `boot` config is supplied, so the boot-time reload is skipped and the
+    // dead endpoint is never contacted; the factory still wraps the swappable
+    // at cold-boot construction.
+    let input = RebornRuntimeInput::from_services(
+        RebornBuildInput::local_dev("provider-factory-boot-owner", local_dev_root)
+            .with_runtime_policy(local_dev_runtime_policy()),
+    )
+    .with_resolved_llm(llm)
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: "provider-factory-boot-tenant".to_string(),
+        agent_id: "provider-factory-boot-agent".to_string(),
+        source_binding_id: "provider-factory-boot-source".to_string(),
+        reply_target_binding_id: "provider-factory-boot-reply".to_string(),
+    });
+
+    let _runtime = build_reborn_runtime(input).await.expect("runtime builds");
+
+    assert_eq!(
+        factory_ran.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the caller's provider_factory must be invoked once during boot so \
+         instrumentation wraps the swappable gateway (regression: #6174 dropped it)"
+    );
+}
+
+/// Regression pin for the journey-critical fix (PR #6174): a provider
+/// selected purely through `config.toml` + a stored API key (no env var set)
+/// must reach the turn-serving provider. This exercises the ONLY mechanism
+/// that now applies a stored key to the live gateway — the post-construction
+/// `RebornLlmReloadAdapter::reload()` invoked once inside
+/// `build_reborn_runtime` — by supplying a real `boot` config (so the
+/// reload adapter can re-resolve `[llm.default]` from disk) instead of
+/// pre-baking the stored key into a directly-supplied `ResolvedRebornLlm`
+/// (which no longer feeds the gateway at all).
+#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart() {
+    // NOTE on isolation: this test does not need to override
+    // `NEARAI_SESSION_PATH` / `NEARAI_AUTH_URL` (both env-only inputs to
+    // `ironclaw_llm::resolution::nearai_session_config`, which the reload
+    // adapter's config-file re-resolution invokes). `NearAiChatProvider::
+    // resolve_bearer_token` checks `config.nearai.api_key` FIRST, before
+    // ever touching the session manager — and `apply_stored_api_key` (called
+    // by `RebornLlmReloadAdapter::reload`) sets exactly that field from the
+    // seeded key below. So the session/auth-url defaults are constructed but
+    // never read from disk or contacted over the network.
     let _env_guard =
         RuntimeEnvGuard::with([("NEARAI_SESSION_TOKEN", None), ("NEARAI_API_KEY", None)]).await;
+    let (base_url, auth_rx) = start_nearai_auth_capture_server().await;
+
     let root = tempfile::tempdir().expect("tempdir");
     let local_dev_root = root.path().join("local-dev");
-    let session_dir = tempfile::tempdir().expect("session tempdir");
-    let (base_url, auth_rx) = start_nearai_auth_capture_server().await;
+    let config_home_dir = root.path().join("config-home");
+    std::fs::create_dir_all(&config_home_dir).expect("config home dir");
 
     let services = crate::build_reborn_services(
         RebornBuildInput::local_dev("runtime-nearai-stored-key-owner", local_dev_root.clone())
@@ -2353,49 +2423,39 @@ async fn local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart() {
         .expect("stored key seeded");
     drop(services);
 
-    let config = ironclaw_llm::LlmConfig {
-        backend: "nearai".to_string(),
-        session: ironclaw_llm::SessionConfig {
-            auth_base_url: base_url.clone(),
-            session_path: session_dir.path().join("session.json"),
-        },
-        nearai: ironclaw_llm::NearAiConfig {
-            model: "test-model".to_string(),
-            cheap_model: None,
-            base_url,
-            api_key: None,
-            fallback_model: None,
-            max_retries: 0,
-            circuit_breaker_threshold: None,
-            circuit_breaker_recovery_secs: 30,
-            response_cache_enabled: false,
-            response_cache_ttl_secs: 3600,
-            response_cache_max_entries: 1000,
-            failover_cooldown_secs: 300,
-            failover_cooldown_threshold: 3,
-            smart_routing_cascade: false,
-        },
-        provider: None,
-        bedrock: None,
-        gemini_oauth: None,
-        openai_codex: None,
-        request_timeout_secs: 5,
-        cheap_model: None,
-        smart_routing_cascade: false,
-        max_retries: 0,
-        circuit_breaker_threshold: None,
-        circuit_breaker_recovery_secs: 30,
-        response_cache_enabled: false,
-        response_cache_ttl_secs: 3600,
-        response_cache_max_entries: 1000,
-    };
-    let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config);
+    // Provider selection lives entirely in config.toml (mirrors an
+    // onboard-style setup): no env var carries the key, only the
+    // encrypted secret store does. `base_url` is overridden to the local
+    // capture server so the live reload's re-built provider chain actually
+    // calls it.
+    std::fs::write(
+        RebornHome::resolve_from_env_parts(
+            Some(config_home_dir.as_os_str().to_os_string()),
+            None,
+            None,
+        )
+        .expect("valid reborn home")
+        .config_file_path(),
+        format!(
+            "[llm.default]\nprovider_id = \"nearai\"\nmodel = \"test-model\"\nbase_url = \"{base_url}\"\n"
+        ),
+    )
+    .expect("write config.toml");
+    let boot = RebornBootConfig::new(
+        RebornHome::resolve_from_env_parts(
+            Some(config_home_dir.as_os_str().to_os_string()),
+            None,
+            None,
+        )
+        .expect("valid reborn home"),
+        RebornProfile::LocalDev,
+    );
 
     let input = RebornRuntimeInput::from_services(
         RebornBuildInput::local_dev("runtime-nearai-stored-key-owner", local_dev_root)
             .with_runtime_policy(local_dev_runtime_policy()),
     )
-    .with_resolved_llm(llm)
+    .with_boot_config(boot)
     .with_identity(RebornRuntimeIdentity {
         tenant_id: "runtime-nearai-stored-key-tenant".to_string(),
         agent_id: "runtime-nearai-stored-key-agent".to_string(),
@@ -3795,7 +3855,7 @@ async fn local_dev_runtime_exposes_host_runtime_capabilities_to_model_calls() {
 /// Records both trajectory callbacks so the e2e test can assert the
 /// observer fires through a real `build_reborn_runtime` turn — driving the
 /// input hook (`HostRuntimeLoopCapabilityPort`) and the result hook
-/// (`LocalDevCapabilityIo::write_capability_result`) on the actual dispatch
+/// (`StagedCapabilityIo::write_capability_result`) on the actual dispatch
 /// path, not a direct helper call.
 #[derive(Debug, Default)]
 struct RecordingTrajectoryObserver {
@@ -5177,7 +5237,6 @@ async fn local_dev_webui_bundle_exposes_outbound_preferences_facade() {
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
-#[cfg(feature = "webui-v2-beta")]
 #[tokio::test]
 async fn webui_route_rejects_list_automations_without_agent_binding() {
     use axum::body::Body;
@@ -5241,7 +5300,6 @@ async fn webui_route_rejects_list_automations_without_agent_binding() {
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
-#[cfg(feature = "webui-v2-beta")]
 #[tokio::test]
 async fn open_reborn_identity_resolver_migrates_legacy_webui_identities_through_runtime() {
     use ironclaw_reborn_identity::{
@@ -5339,7 +5397,6 @@ async fn open_reborn_identity_resolver_migrates_legacy_webui_identities_through_
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
-#[cfg(feature = "webui-v2-beta")]
 #[tokio::test]
 async fn webui_operator_diagnostics_route_exposes_composed_readiness_evidence() {
     use axum::body::{Body, to_bytes};
@@ -5432,7 +5489,6 @@ async fn webui_operator_diagnostics_route_exposes_composed_readiness_evidence() 
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
-#[cfg(feature = "webui-v2-beta")]
 #[tokio::test]
 async fn open_reborn_identity_resolver_migrates_legacy_verified_email_linking() {
     use ironclaw_reborn_identity::{

@@ -274,11 +274,11 @@ async def test_reborn_gateway_persists_text_and_tool_turns_without_duplicate_res
 #
 # These exercise the Reborn *v2* surface (`/api/webchat/v2/*`) the React SPA
 # at `/v2` uses, not the v1 `/api/chat/*` shim above. The v2 routes + SPA are
-# compiled behind the `webui-v2-beta` Cargo feature, which the default e2e
-# binary (`--features libsql`) does not enable, so every test here probes the
-# session endpoint first and skips when v2 is not mounted — the same
-# convention as the other `test_v2_*` scenarios. Build to run them:
-#   cargo build --features libsql,webui-v2-beta
+# compiled into every binary, but the e2e server under test may still be a v1
+# gateway, so every test here probes the session endpoint first and skips when
+# v2 is not mounted — the same convention as the other `test_v2_*` scenarios.
+# Build to run them:
+#   cargo build --features libsql
 # --------------------------------------------------------------------------
 
 V2_BASE = "/api/webchat/v2"
@@ -298,7 +298,7 @@ async def _require_v2(base_url: str) -> None:
     """Skip the test unless the v2 native routes are compiled in."""
     response = await api_get(base_url, f"{V2_BASE}/session", timeout=15)
     if response.status_code == 404:
-        pytest.skip("webui-v2-beta routes not mounted (build with --features webui-v2-beta)")
+        pytest.skip("WebChat v2 routes not mounted on this server")
     response.raise_for_status()
 
 

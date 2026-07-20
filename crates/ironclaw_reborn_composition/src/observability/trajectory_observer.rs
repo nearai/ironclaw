@@ -38,7 +38,7 @@
 //! Callbacks fire inline on the per-capability hot path and are best-effort:
 //! implementations must never block and must not rely on being called (a
 //! panicking observer is caught and dropped at the call site — see
-//! `HostRuntimeLoopCapabilityPort` / `LocalDevCapabilityIo`). An observer that
+//! `HostRuntimeLoopCapabilityPort` / `StagedCapabilityIo`). An observer that
 //! needs to do I/O or contend on a lock must hand the event to its own
 //! non-blocking queue and return immediately.
 
@@ -204,7 +204,7 @@ impl RebornTrajectoryObserver for SafePreviewTrajectoryObserver {
 /// [`CapabilityTrajectoryObserver`] the loop-host capability port consumes,
 /// so the facade trait never appears in this crate's loop-host boundary. The
 /// substrate trait is input-only; the composition observer's result half is
-/// driven separately by `LocalDevCapabilityIo`.
+/// driven separately by `StagedCapabilityIo`.
 #[derive(Debug)]
 struct CapabilityTrajectoryObserverAdapter {
     inner: Arc<dyn RebornTrajectoryObserver>,
@@ -224,7 +224,7 @@ impl CapabilityTrajectoryObserver for CapabilityTrajectoryObserverAdapter {
 
 /// Adapt a composition observer to the substrate observer the loop-host
 /// capability port (the input hook) drives. The result hook lives on
-/// `LocalDevCapabilityIo`, which calls the composition trait directly.
+/// `StagedCapabilityIo`, which calls the composition trait directly.
 pub(crate) fn as_capability_observer(
     observer: Arc<dyn RebornTrajectoryObserver>,
 ) -> Arc<dyn CapabilityTrajectoryObserver> {

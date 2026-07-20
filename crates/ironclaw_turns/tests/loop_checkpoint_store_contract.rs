@@ -10,9 +10,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_turns::{
     CheckpointSchemaId, FilesystemTurnStateRowStore, FilesystemTurnStateStore,
-    GetLoopCheckpointRequest, InMemoryLoopCheckpointStore, InMemoryTurnStateStore,
-    LoopCheckpointStateRef, LoopCheckpointStore, PutLoopCheckpointRequest, RunProfileVersion,
-    TurnId, TurnRunId, TurnScope, run_profile::LoopCheckpointKind,
+    GetLoopCheckpointRequest, InMemoryTurnStateStore, LoopCheckpointStateRef, LoopCheckpointStore,
+    PutLoopCheckpointRequest, RunProfileVersion, TurnId, TurnRunId, TurnScope,
+    run_profile::LoopCheckpointKind,
 };
 
 fn test_scope(thread: &str) -> TurnScope {
@@ -96,13 +96,6 @@ async fn assert_loop_checkpoint_store_cross_scope_and_run_miss(
         .await
         .unwrap();
     assert!(cross_run.is_none(), "cross-run lookup must fail closed");
-}
-
-#[tokio::test]
-async fn inmemory_standalone_loop_checkpoint_roundtrip() {
-    let store = InMemoryLoopCheckpointStore::default();
-    assert_loop_checkpoint_store_roundtrip(&store).await;
-    assert_loop_checkpoint_store_cross_scope_and_run_miss(&store).await;
 }
 
 #[tokio::test]

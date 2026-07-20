@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::*;
 use ironclaw_filesystem::{
-    DirEntry, FileStat, FilesystemError, InMemoryBackend, LocalFilesystem, RootFilesystem,
+    DirEntry, DiskFilesystem, FileStat, FilesystemError, InMemoryBackend, RootFilesystem,
     ScopedFilesystem,
 };
 use ironclaw_host_api::*;
@@ -740,7 +740,7 @@ async fn filesystem_lease_store_persists_and_reloads_issued_leases() {
 
 #[tokio::test]
 async fn filesystem_lease_store_lists_from_owner_index_without_scanning_invocation_roots() {
-    // Wrap the underlying [`LocalFilesystem`] in a [`CountingFilesystem`]
+    // Wrap the underlying [`DiskFilesystem`] in a [`CountingFilesystem`]
     // so we can assert that `leases_for_scope` reads the owner index
     // rather than fanning out to `list_dir` per invocation. The
     // [`ScopedFilesystem`] layer on top binds the `/authorization` alias
@@ -1164,12 +1164,12 @@ async fn revoked_lease_no_longer_authorizes_dispatch() {
 }
 
 struct CountingFilesystem {
-    inner: LocalFilesystem,
+    inner: DiskFilesystem,
     list_dir_calls: Arc<AtomicUsize>,
 }
 
 impl CountingFilesystem {
-    fn new(inner: LocalFilesystem) -> Self {
+    fn new(inner: DiskFilesystem) -> Self {
         Self {
             inner,
             list_dir_calls: Arc::new(AtomicUsize::new(0)),
@@ -1217,7 +1217,7 @@ impl RootFilesystem for CountingFilesystem {
     }
 
     // After PR #3659 the trait default `get`/`put` are `Unsupported`.
-    // Forward to the inner LocalFilesystem (which implements them
+    // Forward to the inner DiskFilesystem (which implements them
     // natively) so this counting wrapper keeps participating in the
     // unified surface used by FilesystemCapabilityLeaseStore's read_lease
     // / write_lease / read_lease_index / write_lease_index ops.
@@ -1295,20 +1295,20 @@ fn timestamp(value: &str) -> Timestamp {
     serde_json::from_value(serde_json::Value::String(value.to_string())).unwrap()
 }
 
-fn engine_filesystem() -> Arc<ScopedFilesystem<LocalFilesystem>> {
+fn engine_filesystem() -> Arc<ScopedFilesystem<DiskFilesystem>> {
     build_scoped_fs(
         Arc::new(local_filesystem_with_engine_mount()),
         "/engine/tenants/test/users/test/authorization",
     )
 }
 
-/// Build a [`LocalFilesystem`] with a temp directory mounted at `/engine`
+/// Build a [`DiskFilesystem`] with a temp directory mounted at `/engine`
 /// so tests can target paths beneath it via `ScopedFilesystem`.
-fn local_filesystem_with_engine_mount() -> LocalFilesystem {
+fn local_filesystem_with_engine_mount() -> DiskFilesystem {
     let storage = tempfile::tempdir().unwrap().keep();
     let engine_root = storage.join("engine");
     std::fs::create_dir_all(&engine_root).unwrap();
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/engine").unwrap(),
         HostPath::from_path_buf(engine_root),

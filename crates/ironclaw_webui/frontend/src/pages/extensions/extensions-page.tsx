@@ -9,17 +9,22 @@ import { McpTab } from "./components/mcp-tab";
 import { RegistryTab } from "./components/registry-tab";
 import { useExtensions } from "./hooks/useExtensions";
 
-function CatalogErrorBanner({ isPartial = false, isRefetching, onRetry }) {
+// The banner text/tone follows the *cause* of the failure, not which tab it is
+// shown on: a failed catalog (registry) request is always "Extension catalog
+// unavailable" (danger), while a failed installed-extension enrichment request
+// is "Some extension data is unavailable" (warning). Whether the banner blocks
+// the whole tab or renders inline above still depends on the tab (see below).
+function CatalogErrorBanner({ isCatalogError = true, isRefetching, onRetry }) {
   const t = useT();
-  const toneClass = isPartial
-    ? "border-[color-mix(in_srgb,var(--v2-warning-text)_30%,transparent)] bg-[var(--v2-warning-soft)] text-[var(--v2-warning-text)]"
-    : "border-[color-mix(in_srgb,var(--v2-danger-text)_30%,transparent)] bg-[var(--v2-danger-soft)] text-[var(--v2-danger-text)]";
-  const titleKey = isPartial
-    ? "ext.catalog.partialErrorTitle"
-    : "ext.catalog.loadErrorTitle";
-  const descriptionKey = isPartial
-    ? "ext.catalog.partialErrorDesc"
-    : "ext.catalog.loadErrorDesc";
+  const toneClass = isCatalogError
+    ? "border-[color-mix(in_srgb,var(--v2-danger-text)_30%,transparent)] bg-[var(--v2-danger-soft)] text-[var(--v2-danger-text)]"
+    : "border-[color-mix(in_srgb,var(--v2-warning-text)_30%,transparent)] bg-[var(--v2-warning-soft)] text-[var(--v2-warning-text)]";
+  const titleKey = isCatalogError
+    ? "ext.catalog.loadErrorTitle"
+    : "ext.catalog.partialErrorTitle";
+  const descriptionKey = isCatalogError
+    ? "ext.catalog.loadErrorDesc"
+    : "ext.catalog.partialErrorDesc";
 
   return (
     <div
@@ -135,7 +140,11 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     return (
       <div className="flex h-full flex-col overflow-y-auto">
         <div className="v2-page-entrance flex-1 p-4 sm:p-6">
-          <CatalogErrorBanner isRefetching={isRefetching} onRetry={refetch} />
+          <CatalogErrorBanner
+            isCatalogError={tab === "registry"}
+            isRefetching={isRefetching}
+            onRetry={refetch}
+          />
         </div>
       </div>
     );
@@ -175,16 +184,19 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     />),
   };
 
-  const partialError = tab === "registry" ? extensionsError : registryError;
+  // The secondary (non-primary) query for this tab. On the registry tab that is
+  // the installed-extension enrichment; on the channels/mcp tabs it is the
+  // catalog. Render it inline above the tab content, with cause-driven text.
+  const secondaryError = tab === "registry" ? extensionsError : registryError;
 
   return (
     <div className="flex h-full flex-col overflow-y-auto">
       <div className="v2-page-entrance flex-1 p-4 sm:p-6">
         <div className="space-y-5">
           <ActionToast result={actionResult} onDismiss={clearResult} />
-          {partialError &&
+          {secondaryError &&
           (<CatalogErrorBanner
-            isPartial
+            isCatalogError={tab !== "registry"}
             isRefetching={isRefetching}
             onRetry={refetch}
           />)}

@@ -200,16 +200,37 @@ where
     }
 
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        self.read_run_state_from_durable_rows(&request)
-            .await?
-            .ok_or(TurnError::ScopeNotFound)
+        // Read-your-writes (#6263 Step 3): under healthy write-behind a
+        // non-critical mutation returns `Ok` after updating the hot snapshot but
+        // before its durable append, so a durable-row read here could miss it
+        // (`ScopeNotFound` or a stale status). Serve from the hot snapshot — the
+        // single-writer authority under write-behind. Write-through (durable ==
+        // cache) and the degraded path (cache cleared) read the durable rows.
+        let state = if self.is_write_behind_healthy() {
+            match self.read_run_state_from_hot_cache(&request).await? {
+                Some(state) => Some(state),
+                // Hot-cache miss under healthy write-behind: the hot snapshot is
+                // bounded and evicts OLD TERMINAL runs, whose durable rows still
+                // persist and must stay queryable (the eviction contract). Flush
+                // our pending write-behind tail (so a not-yet-durable own write
+                // can't be a false miss) then read the durable rows (#6298
+                // IronLoop f6).
+                None => {
+                    self.flush_pending_write_behind_for_read().await?;
+                    self.read_run_state_from_durable_rows(&request).await?
+                }
+            }
+        } else {
+            self.read_run_state_from_durable_rows(&request).await?
+        };
+        state.ok_or(TurnError::ScopeNotFound)
     }
 
     async fn get_run_state_for_cancellation(
         &self,
         request: GetRunStateRequest,
     ) -> Result<TurnRunState, TurnError> {
-        self.read_run_state_for_cancellation(&request)
+        self.read_run_state_from_hot_cache(&request)
             .await?
             .ok_or(TurnError::ScopeNotFound)
     }
@@ -362,24 +383,69 @@ where
             Some(&request.run_id),
         );
         async move {
+            self.ensure_not_degraded().await?;
             let record = loop_checkpoint_record_from_request(request);
             let delta = SnapshotDelta::default().set_loop_checkpoints_upsert(vec![record.clone()]);
+            // A loop checkpoint is normally non-critical — under write-behind it
+            // lazy-flushes, and a gate-park's checkpoint is flushed by the block
+            // transition's synchronous barrier. The EXCEPTION is
+            // `BeforeSideEffect`: it is written immediately before a capability's
+            // external side effect, and expired-lease recovery treats the ABSENCE
+            // of a durable checkpoint as proof no side effect occurred (and
+            // requeues the run). If it lazy-flushed, a crash after the capability
+            // ran but before the flush would replay a non-idempotent side effect
+            // (#6298 IronLoop f5). Keep it synchronous (critical) so it is durable
+            // BEFORE the capability executes.
+            let checkpoint_critical = matches!(
+                record.kind,
+                crate::run_profile::LoopCheckpointKind::BeforeSideEffect
+            );
             let ack = {
-                let _commit_guard = self.commit_gate.lock().await;
+                // Serialize the durable enqueue on the shared snapshot-state lock
+                // — the same lock every apply path holds across its
+                // read-seq -> enqueue window — so the delta journal observes a
+                // consistent append order without a separate commit gate.
+                let mut guard = self.snapshot_state.lock().await;
+                // Bound the pending window BEFORE enqueue on the async path
+                // (#6263 Step 3): reserve a slot here, under snapshot_state, so
+                // concurrent checkpoints can't grow the journal channel past the
+                // cap while a flush is in flight — the same reserve→enqueue→track
+                // flow every other async commit uses.
+                if self.write_behind_async(checkpoint_critical)
+                    && let Err(error) = self.reserve_write_behind_slot().await
+                {
+                    *guard = None;
+                    return Err(error);
+                }
                 let ack = self
                     .enqueue_delta(row_store_durable_delta(delta.clone()))
                     .map_err(|error| match error {
                         RowPersistError::Turn(error) => error,
                     })?;
-                self.apply_cached_delta(delta).await?;
-                ack
+                if let Some(state) = guard.as_mut()
+                    && let Err(error) = state.apply_delta(delta, state.journal_seq)
+                {
+                    // A failed in-memory apply may leave the cached snapshot
+                    // partially mutated; drop it so the next read rebuilds from
+                    // durable state, matching `apply` / `apply_with_targeted_delta`.
+                    // (The durable enqueue already succeeded, so recovery replays
+                    // it — the cache is the only thing to invalidate.)
+                    *guard = None;
+                    return Err(error);
+                }
+                // Track the ack in the bounded window and return `None` on the
+                // async path so `commit_pending` lazy-flushes (no await); on
+                // write-through it returns the ack unchanged to be awaited.
+                self.track_write_behind_ack_if_async(checkpoint_critical, ack)
+                    .await
             };
-            self.await_pending_commit(
+            self.commit_pending(
                 PendingRowCommit {
                     value: record,
                     ack,
                     active_lock_reservations: Vec::new(),
                     run_row_reservations: Vec::new(),
+                    critical: checkpoint_critical,
                 },
                 "timed out waiting for loop checkpoint row-store append",
             )

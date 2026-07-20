@@ -35,11 +35,9 @@ pub use admission::{
 pub use block_persistence::TurnStateBlockPersistence;
 pub use checkpoint_state::{
     CheckpointStateMatchMetadata, CheckpointStateRecord, CheckpointStateStore,
-    GetCheckpointStateRequest, GetLoopCheckpointRequest, InMemoryCheckpointStateStore,
-    InMemoryLoopCheckpointStore, LoopCheckpointRecord, LoopCheckpointStore,
+    GetCheckpointStateRequest, GetLoopCheckpointRequest, LoopCheckpointRecord, LoopCheckpointStore,
     MAX_CHECKPOINT_STATE_PAYLOAD_BYTES, PutCheckpointStateRequest, PutLoopCheckpointRequest,
-    RedactedCheckpointPayload, checkpoint_state_metadata_matches_request,
-    checkpoint_state_record_matches_request, new_checkpoint_state_ref,
+    RedactedCheckpointPayload, checkpoint_state_metadata_matches_request, new_checkpoint_state_ref,
 };
 pub use coordinator::{
     AllowAllTurnAdmissionPolicy, DefaultTurnCoordinator, NoopTurnRunWakeNotifier,
@@ -60,7 +58,7 @@ pub use external_tool_catalog::{
 };
 pub use filesystem_store::{
     FilesystemTurnStateBlockPersistence, FilesystemTurnStateRowStore, FilesystemTurnStateStore,
-    FilesystemTurnStateStoreKind,
+    FilesystemTurnStateStoreKind, TurnStateDurabilityPolicy,
 };
 pub use ids::{
     AcceptedMessageRef, CapabilityActivityId, GateRef, IdempotencyKey, LoopDiagnosticRef,
@@ -109,6 +107,7 @@ pub use status::{
     AdmissionRejection, AdmissionRejectionReason, BlockedReason, ModelInvalidOutputDetailReason,
     SanitizedCancelReason, SanitizedFailure, TurnActiveRunRefState, TurnCapacityResource,
     TurnError, TurnErrorCategory, TurnRunProfile, TurnRunState, TurnStatus,
+    is_recoverability_critical,
 };
 pub use store::{
     SpawnTreeReservation, SpawnTreeReservationKey, TurnActiveLockKey, TurnActiveLockRecord,

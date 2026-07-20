@@ -75,6 +75,7 @@ registerPack("zh-CN", {
   "login.connect": "连接",
   "login.oauthDivider": "或继续使用",
   "login.oauthProvider": "通过 {provider} 继续",
+  "login.localDevHint": "在本地运行 IronClaw？获取你的登录链接：",
 
   // Chat — empty state
   "chat.heroTitle": "你好，需要我帮你做什么？",
@@ -278,6 +279,7 @@ registerPack("zh-CN", {
   "settings.exportSuccess": "设置已导出",
   "settings.importSuccess": "设置已导入",
   "settings.importInvalid": "所选文件必须包含设置对象",
+  "settings.importNoSupported": "所选文件中没有受支持的设置",
   "settings.importFailed": "导入失败：{message}",
 
   // Settings — restart banner
@@ -486,6 +488,9 @@ registerPack("zh-CN", {
   "channels.slack": "Slack",
   "channels.slackDesc": "用于私信和应用提及的租户应用频道",
   "channels.slackDetail": "租户 Slack 应用安装",
+  "channels.telegram": "Telegram",
+  "channels.telegramDesc": "用于已配对私信的租户机器人频道",
+  "channels.telegramDetail": "BotFather 机器人令牌",
   "channels.statusOn": "开",
   "channels.statusOff": "关",
   "channels.ready": "就绪",
@@ -740,6 +745,7 @@ registerPack("zh-CN", {
   "automations.filter.completed": "已完成",
   "automations.refresh": "更新最新自动化",
   "automations.error.loadFailed": "提取系统自动化计划列表不成功！",
+  "automations.error.actionFailed": "无法更新自动化。请重试。",
   "automations.rename.action": "重命名自动化",
   "automations.rename.nameLabel": "自动化名称",
   "automations.rename.nameRequired": "自动化名称不能为空。",
@@ -1440,5 +1446,36 @@ registerPack("zh-CN", {
   "slackSetup.example.sharedSubject": "示例：user:slack-shared",
   "slackSetup.example.botToken": "示例：xoxb-...",
   "slackSetup.placeholder.defaultOperator": "默认操作者",
-  "slackSetup.placeholder.keepSecret": "已配置；留空则保留"
+  "slackSetup.placeholder.keepSecret": "已配置；留空则保留",
+
+  // Telegram setup + pairing
+  "telegramSetup.title": "Telegram 设置",
+  "telegramSetup.instructions": "使用 @BotFather 创建机器人并粘贴其令牌。IronClaw 会自动注册 Webhook。",
+  "telegramSetup.save": "保存设置",
+  "telegramSetup.saved": "Telegram 设置已保存。",
+  "telegramSetup.saveFailed": "Telegram 设置更新失败。",
+  "telegramSetup.field.botToken": "机器人令牌",
+  "telegramSetup.field.webhookUrl": "公共 Webhook URL 覆盖",
+  "telegramSetup.help.botToken": "来自 @BotFather（/newbot 或 /token）的令牌。",
+  "telegramSetup.help.webhookUrl": "可选。Telegram 调用的公共 HTTPS URL；留空则使用检测到的公共 URL。",
+  "telegramSetup.example.botToken": "示例：123456789:AA...",
+  "telegramSetup.example.webhookUrl": "示例：https://assistant.example.com",
+  "telegramSetup.placeholder.keepSecret": "••• 已保存 — 留空以保留",
+  "telegramSetup.connectedAs": "已连接的机器人：",
+  "telegramSetup.remove": "移除机器人",
+  "telegramSetup.removeConfirm": "移除 Telegram 机器人？在保存新令牌之前该频道将停止工作。",
+  "telegramSetup.removeFailed": "移除 Telegram 机器人失败。",
+  "telegramPairing.title": "连接 Telegram",
+  "telegramPairing.instructions": "扫描二维码或打开链接，然后在 Telegram 中点击“开始”以配对此账户。",
+  "telegramPairing.copyCode": "复制代码",
+  "telegramPairing.copyUsername": "复制机器人用户名",
+  "telegramPairing.openInTelegram": "在 Telegram 中打开",
+  "telegramPairing.qrAlt": "Telegram 配对二维码",
+  "telegramPairing.expiresIn": "{time} 后过期",
+  "telegramPairing.expired": "此配对代码已过期。",
+  "telegramPairing.getNewCode": "获取新代码",
+  "telegramPairing.paired": "Telegram 已配对",
+  "telegramPairing.disconnect": "断开连接",
+  "telegramPairing.disconnectFailed": "断开 Telegram 连接失败。",
+  "telegramPairing.loadFailed": "无法获取 Telegram 配对代码。"
 });

@@ -19,13 +19,8 @@ default = []
 # FakeIdempotencyLedger, etc.). Off by default so production binaries don't carry
 # the fake state machinery; downstream crates enable it from `[dev-dependencies]`.
 test-support = ["ironclaw_product_adapters/test-support"]
-# Durable filesystem-backed IdempotencyLedger. `storage` pulls the universal
-# filesystem port; `libsql`/`postgres` additionally compile the concrete-backend
-# convenience wrappers. Contract-only consumers stay on `default` and carry no
-# `ironclaw_filesystem` dependency.
-storage = ["dep:ironclaw_filesystem"]
-libsql = ["storage", "ironclaw_filesystem/libsql"]
-postgres = ["storage", "ironclaw_filesystem/postgres"]
+libsql = ["ironclaw_filesystem/libsql"]
+postgres = ["ironclaw_filesystem/postgres"]
 
 [dependencies]
 async-trait = "0.1"
@@ -34,7 +29,7 @@ chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
 ironclaw_common = { path = "../ironclaw_common", version = "0.4.1" }
 ironclaw_attachments = { path = "../ironclaw_attachments", version = "0.1.0" }
-ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0", optional = true }
+ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_approvals = { path = "../ironclaw_approvals", version = "0.1.0" }
 ironclaw_authorization = { path = "../ironclaw_authorization", version = "0.1.0" }
 ironclaw_auth = { path = "../ironclaw_auth", version = "0.1.0" }
@@ -59,21 +54,29 @@ url = "2"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
 [dev-dependencies]
+# Enables the in-memory-backed outbound-state store constructor for tests only.
+ironclaw_outbound = { path = "../ironclaw_outbound", version = "0.1.0", features = ["test-support"] }
 # Enables the in-memory-backed approval store constructors for tests only.
 ironclaw_approvals = { path = "../ironclaw_approvals", features = ["test-support"] }
 # Enables the in-memory-backed capability-lease store constructor for tests only.
 ironclaw_authorization = { path = "../ironclaw_authorization", features = ["test-support"] }
+# Enables the in-memory-backed run-state/approval store constructors for tests only.
+ironclaw_run_state = { path = "../ironclaw_run_state", features = ["test-support"] }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
+# ProductLive planned-loop harness builds a `FilesystemReplayPayloadStore` over
+# an in-memory filesystem so approval/auth resumes reconstitute their replay
+# input (mirrors production's capability-store wiring).
+ironclaw_capabilities = { path = "../ironclaw_capabilities", version = "0.1.0" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
-ironclaw_loop_host = { path = "../ironclaw_loop_host" }
+ironclaw_loop_host = { path = "../ironclaw_loop_host", features = ["test-support"] }
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
-ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", features = ["test-support"] }
+ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", features = ["test-support", "libsql"] }
 # `filesystem-goal-store` needed for test-only construction of
 # `ironclaw_runner::subagent::await_edge`'s CAS-backed test fixtures
 # (in-memory `FilesystemAwaitEdgeStore`) in this crate's own test harnesses.
 ironclaw_runner = { path = "../ironclaw_runner", features = ["filesystem-goal-store"] }
 ironclaw_trust = { path = "../ironclaw_trust" }
-ironclaw_product_workflow = { path = ".", features = ["test-support", "storage"] }
+ironclaw_product_workflow = { path = ".", features = ["test-support"] }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = ["test-support", "host-auth-mint"] }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0", features = ["test-support"] }
 ironclaw_telegram_v2_adapter = { path = "../ironclaw_telegram_v2_adapter" }

@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical InMemoryOutboundStateStore -> FilesystemOutboundStateStore<InMemoryBackend> §4.3 store consolidation, no logic change, plan #6168
 //! Minimal Slack Reborn E2E routing tests.
 //!
 //! These drive the real Slack route, native adapter runner, ProductWorkflow,
@@ -5,9 +6,7 @@
 //! turn/outbound ports. They intentionally do not reuse the legacy Slack channel
 //! or legacy pairing store.
 
-// arch-exempt: large_file, triggered Slack gate-route e2e coverage stays with
-// the existing Slack harness; decomposition tracked in
-// docs/plans/2026-07-02-reborn-internal-module-refactor.md.
+// arch-exempt: large_file, existing Slack gate-route E2E corpus only changes imports to the shared delivery owner, plan #6159
 
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -21,10 +20,10 @@ use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
 use ironclaw_conversations::InMemoryConversationServices;
 use ironclaw_host_api::{AgentId, ApprovalRequestId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
 use ironclaw_outbound::{
     CommunicationPreferenceRecord, CommunicationPreferenceRepository, DeliveredGateRouteStore,
-    DeliveryDefaultScope, InMemoryOutboundStateStore, InMemoryTriggeredRunDeliveryStore,
-    OutboundStateStore, WriteCommunicationPreferenceRequest,
+    DeliveryDefaultScope, OutboundStateStore, WriteCommunicationPreferenceRequest,
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, AuthResolutionPayload, AuthResolutionResult,
@@ -68,13 +67,13 @@ use ironclaw_wasm_product_adapters::{
 use tower::ServiceExt;
 
 use super::*;
-use crate::slack::slack_delivery::{
-    PostSubmitDeliveryHook, SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
-    SlackFinalReplyDeliverySettings, TriggeredRunDeliveryDriver,
-};
 use crate::{
     AuthChallengeProvider, RebornUserIdentityLookup, RebornUserIdentityLookupError,
     SlackUserIdentityActorResolver,
+};
+use ironclaw_channel_delivery::{
+    FinalReplyDeliveryObserver, FinalReplyDeliveryServices, FinalReplyDeliverySettings,
+    TriggeredRunDeliveryDriver,
 };
 
 #[path = "e2e_auth_challenge.rs"]
@@ -290,7 +289,7 @@ async fn build_harness_with_full_settings(
     ));
     let auths = Arc::new(RecordingAuthInteractionService::new(coordinator.clone()));
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
 
     let inbound = Arc::new(DefaultInboundTurnService::new(
         binding.clone(),
@@ -323,13 +322,14 @@ async fn build_harness_with_full_settings(
         ),
     ));
 
-    let outbound = Arc::new(InMemoryOutboundStateStore::default());
+    let outbound = Arc::new(in_memory_backed_outbound_state_store());
     let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
     let egress = RecordingEgress::default();
     let sink = RecordingDeliverySink::default();
-    let observer = Arc::new(SlackFinalReplyDeliveryObserver::with_settings(
-        SlackFinalReplyDeliveryServices {
+    let observer = Arc::new(FinalReplyDeliveryObserver::with_settings(
+        FinalReplyDeliveryServices {
+            channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
             binding_service: Arc::new(binding),
             thread_service: Arc::new(threads),
             turn_coordinator: Arc::new(coordinator.clone()),
@@ -343,7 +343,7 @@ async fn build_harness_with_full_settings(
             auth_flow_canceller: None,
             approval_requests: None,
         },
-        SlackFinalReplyDeliverySettings {
+        FinalReplyDeliverySettings {
             poll_interval: Duration::from_millis(1),
             max_wait,
             max_concurrent_deliveries: std::num::NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
@@ -426,7 +426,8 @@ impl ApprovalInteractionService for ForeignScopeApprovalService {
 /// fallback path. Returns the harness (with `route_store` accessible) and the
 /// underlying recording approval service for request assertions.
 ///
-/// By default, two separate `InMemoryDeliveredGateRouteStore` instances are used:
+/// By default, two separate in-memory-backed `FilesystemOutboundStateStore`
+/// instances serve the route-store role:
 ///
 /// - `workflow_route_store` (exposed via `harness.route_store`): the store the
 ///   workflow queries when resolving delivered-gate-route fallback paths.  Tests
@@ -497,7 +498,7 @@ async fn build_harness_for_delivered_route_tests_with_store_mode(
     // workflow_route_store: queried by the workflow during delivered-route fallback.
     // Tests seed records here to control the outcome (Miss / Single / Ambiguous).
     let workflow_route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     // observer_route_store: written by the delivery observer when it auto-records a
     // gate route after posting an approval prompt.  Kept separate so auto-created
     // routes never bleed into the workflow's index.
@@ -505,7 +506,7 @@ async fn build_harness_for_delivered_route_tests_with_store_mode(
         if share_observer_and_workflow_route_store {
             workflow_route_store.clone()
         } else {
-            Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default())
+            Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store())
         };
 
     let inbound = Arc::new(DefaultInboundTurnService::new(
@@ -539,13 +540,14 @@ async fn build_harness_for_delivered_route_tests_with_store_mode(
         ),
     ));
 
-    let outbound = Arc::new(InMemoryOutboundStateStore::default());
+    let outbound = Arc::new(in_memory_backed_outbound_state_store());
     let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
     let egress = RecordingEgress::default();
     let sink = RecordingDeliverySink::default();
-    let observer = Arc::new(SlackFinalReplyDeliveryObserver::with_settings(
-        SlackFinalReplyDeliveryServices {
+    let observer = Arc::new(FinalReplyDeliveryObserver::with_settings(
+        FinalReplyDeliveryServices {
+            channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
             binding_service: Arc::new(binding),
             thread_service: Arc::new(threads),
             turn_coordinator: Arc::new(coordinator.clone()),
@@ -559,7 +561,7 @@ async fn build_harness_for_delivered_route_tests_with_store_mode(
             auth_flow_canceller: None,
             approval_requests: None,
         },
-        SlackFinalReplyDeliverySettings {
+        FinalReplyDeliverySettings {
             poll_interval: Duration::from_millis(1),
             max_wait: Duration::from_secs(2),
             max_concurrent_deliveries: std::num::NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
@@ -987,7 +989,7 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
 
     // Seed the creator's personal DM preference so the triggered approval prompt
     // resolves to team T-A / channel D123 — the same DM the inbound approve uses.
-    let outbound = Arc::new(InMemoryOutboundStateStore::default());
+    let outbound = Arc::new(in_memory_backed_outbound_state_store());
     let dm_target = dm_reply_target_binding_ref();
     outbound
         .write_communication_preference(WriteCommunicationPreferenceRequest {
@@ -1058,7 +1060,8 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
     let driver_egress = RecordingEgress::default();
     let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
-    let services = SlackFinalReplyDeliveryServices {
+    let services = FinalReplyDeliveryServices {
+        channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
         turn_coordinator: coordinator,
@@ -1076,13 +1079,13 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
     };
     let driver = TriggeredRunDeliveryDriver::with_settings(
         services,
-        SlackFinalReplyDeliverySettings {
+        FinalReplyDeliverySettings {
             poll_interval: Duration::from_millis(1),
             max_wait: Duration::from_secs(2),
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
             max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
         },
-        Arc::new(InMemoryTriggeredRunDeliveryStore::default()),
+        Arc::new(in_memory_backed_outbound_state_store()),
         harness.route_store.clone(),
         AgentId::new(AGENT).expect("agent"), // safety: static test agent id is valid.
     );
@@ -1245,7 +1248,7 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
 
     // Seed the creator's personal auth-prompt preference so the triggered auth
     // prompt resolves to team T-A / channel D123 — a personal DM.
-    let outbound = Arc::new(InMemoryOutboundStateStore::default());
+    let outbound = Arc::new(in_memory_backed_outbound_state_store());
     let dm_target = dm_reply_target_binding_ref();
     outbound
         .write_communication_preference(WriteCommunicationPreferenceRequest {
@@ -1317,8 +1320,9 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
     let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
     let route_store: Arc<dyn DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
-    let services = SlackFinalReplyDeliveryServices {
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let services = FinalReplyDeliveryServices {
+        channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
         turn_coordinator: coordinator,
@@ -1334,13 +1338,13 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
     };
     let driver = TriggeredRunDeliveryDriver::with_settings(
         services,
-        SlackFinalReplyDeliverySettings {
+        FinalReplyDeliverySettings {
             poll_interval: Duration::from_millis(1),
             max_wait: Duration::from_secs(2),
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
             max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
         },
-        Arc::new(InMemoryTriggeredRunDeliveryStore::default()),
+        Arc::new(in_memory_backed_outbound_state_store()),
         route_store,
         AgentId::new(AGENT).expect("agent"), // safety: static test agent id is valid.
     );
@@ -1406,7 +1410,7 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
 
     // auth_prompt_target resolves to a shared channel (not a DM); final_reply_target
     // stays the DM so the follow-up deny notice can still be delivered and inspected.
-    let outbound = Arc::new(InMemoryOutboundStateStore::default());
+    let outbound = Arc::new(in_memory_backed_outbound_state_store());
     let dm_target = dm_reply_target_binding_ref();
     let channel_target = non_dm_channel_reply_target_binding_ref();
     outbound
@@ -1453,8 +1457,9 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
     let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
     let route_store: Arc<dyn DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
-    let services = SlackFinalReplyDeliveryServices {
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let services = FinalReplyDeliveryServices {
+        channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
         binding_service: Arc::new(NoopTriggeredBindingService),
         thread_service: Arc::new(threads),
         turn_coordinator: Arc::clone(&coordinator) as Arc<dyn TurnCoordinator>,
@@ -1470,13 +1475,13 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
     };
     let driver = TriggeredRunDeliveryDriver::with_settings(
         services,
-        SlackFinalReplyDeliverySettings {
+        FinalReplyDeliverySettings {
             poll_interval: Duration::from_millis(1),
             max_wait: Duration::from_secs(2),
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
             max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
         },
-        Arc::new(InMemoryTriggeredRunDeliveryStore::default()),
+        Arc::new(in_memory_backed_outbound_state_store()),
         route_store,
         AgentId::new(AGENT).expect("agent"), // safety: static test agent id is valid.
     );
@@ -3261,7 +3266,7 @@ fn auth_resolution_allowed_envelope(callback_ref: &str) -> ProductInboundEnvelop
 /// the resolution ack without going through the Slack route.
 async fn build_harness_for_auth_fanout_test(
     max_wait: Duration,
-) -> (Harness, Arc<SlackFinalReplyDeliveryObserver>) {
+) -> (Harness, Arc<FinalReplyDeliveryObserver>) {
     let auth_provider = Arc::new(FakeAuthChallengeProvider::default());
     let auth_challenges: Arc<dyn AuthChallengeProvider> = auth_provider;
 
@@ -3301,7 +3306,7 @@ async fn build_harness_for_auth_fanout_test(
     ));
     let auths = Arc::new(RecordingAuthInteractionService::new(coordinator.clone()));
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
 
     let inbound = Arc::new(DefaultInboundTurnService::new(
         binding.clone(),
@@ -3334,13 +3339,14 @@ async fn build_harness_for_auth_fanout_test(
         ),
     ));
 
-    let outbound = Arc::new(InMemoryOutboundStateStore::default());
+    let outbound = Arc::new(in_memory_backed_outbound_state_store());
     let outbound_store: Arc<dyn OutboundStateStore> = outbound.clone();
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound;
     let egress = RecordingEgress::default();
     let sink = RecordingDeliverySink::default();
-    let observer = Arc::new(SlackFinalReplyDeliveryObserver::with_settings(
-        SlackFinalReplyDeliveryServices {
+    let observer = Arc::new(FinalReplyDeliveryObserver::with_settings(
+        FinalReplyDeliveryServices {
+            channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
             binding_service: Arc::new(binding),
             thread_service: Arc::new(threads),
             turn_coordinator: Arc::new(coordinator.clone()),
@@ -3354,7 +3360,7 @@ async fn build_harness_for_auth_fanout_test(
             auth_flow_canceller: None,
             approval_requests: None,
         },
-        SlackFinalReplyDeliverySettings {
+        FinalReplyDeliverySettings {
             poll_interval: Duration::from_millis(1),
             max_wait,
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: 4 is non-zero.
@@ -3386,7 +3392,6 @@ async fn build_harness_for_auth_fanout_test(
     (harness, observer)
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 #[tokio::test]
 async fn auth_prompt_is_posted_exactly_once_when_auth_resolution_ack_races_live_delivery_loop() {
     // Long max_wait keeps L1 alive (polling) when the auth-resolution ack arrives.

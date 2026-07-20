@@ -1,6 +1,8 @@
 import { StatusPill } from "../../../design-system/primitives";
 import { useT } from "../../../lib/i18n";
 import { SlackAdminManagedSection } from "../../../components/slack-setup-panel";
+import { TelegramPairingPanel } from "../../../components/telegram-pairing-panel";
+import { TelegramAdminManagedSection } from "../../../components/telegram-setup-panel";
 import { ExtensionCard, RegistryCard } from "./extension-card";
 import { PairingSection } from "./pairing-section";
 import { redeemPairingCode } from "../lib/pairing-api";
@@ -21,12 +23,24 @@ export function isInboundProofCodeAction(connectAction) {
   return connectAction?.strategy === "inbound_proof_code";
 }
 
+export function isWebGeneratedCodeAction(connectAction) {
+  return connectAction?.strategy === "web_generated_code";
+}
+
 export function isGenericInboundProofCodeAction(connectAction) {
   return connectAction?.channel !== "slack" && isInboundProofCodeAction(connectAction);
 }
 
 export function isSlackAdminManagedAction(connectAction) {
   return connectAction?.channel === "slack" && isAdminManagedChannelsAction(connectAction);
+}
+
+export function isTelegramAdminManagedAction(connectAction) {
+  return connectAction?.channel === "telegram" && isAdminManagedChannelsAction(connectAction);
+}
+
+export function isTelegramWebGeneratedCodeAction(connectAction) {
+  return connectAction?.channel === "telegram" && isWebGeneratedCodeAction(connectAction);
 }
 
 export function findSlackConnectAction(connectableChannels) {
@@ -57,6 +71,10 @@ export function connectActionsForChannel(connectableChannels, channel) {
       (connectAction) =>
         connectAction?.channel === channel && isInboundProofCodeAction(connectAction)
     ),
+    channels.find(
+      (connectAction) =>
+        connectAction?.channel === channel && isWebGeneratedCodeAction(connectAction)
+    ),
   ].filter(Boolean);
   if (actions.length > 0) return actions;
   const fallback = channels.find((connectAction) => connectAction?.channel === channel);
@@ -74,6 +92,12 @@ export function ChannelConnectActionSections({
       const key = `${action.channel}-${action.strategy}`;
       if (isSlackAdminManagedAction(action)) {
         return (<SlackAdminManagedSection key={key} action={action.action} />);
+      }
+      if (isTelegramAdminManagedAction(action)) {
+        return (<TelegramAdminManagedSection key={key} action={action.action} />);
+      }
+      if (isTelegramWebGeneratedCodeAction(action)) {
+        return (<TelegramPairingPanel key={key} />);
       }
       if (isGenericInboundProofCodeAction(action)) {
         return (
@@ -127,6 +151,16 @@ export function ChannelsTab({
   const hasInstalledSlackPackage = installedChannels.some(isSlackPackage);
   const showBuiltinSlackConnectActions =
     slackConnectActions.length > 0 && !hasInstalledSlackPackage;
+  // Telegram mirrors the Slack shape: before the extension is installed, the
+  // operator's bot-setup card (admin_managed_channels) renders as a built-in
+  // row; once installed, the Messaging section's card owns the connect
+  // actions instead.
+  const telegramConnectActions = connectActionsForChannel(connectableChannels, "telegram");
+  const hasInstalledTelegramPackage = installedChannels.some(
+    (item) => packageId(item) === "telegram"
+  );
+  const showBuiltinTelegramConnectActions =
+    telegramConnectActions.length > 0 && !hasInstalledTelegramPackage;
 
   return (
     <div className="space-y-5">
@@ -178,6 +212,21 @@ export function ChannelsTab({
             />
           </BuiltinRow>
         )}
+        {showBuiltinTelegramConnectActions &&
+        (
+          <BuiltinRow
+            name={t("channels.telegram")}
+            description={t("channels.telegramDesc")}
+            enabled={false}
+            statusLabel={t("channels.setup")}
+            statusTone="muted"
+            detail={t("channels.telegramDetail")}
+          >
+            <ChannelConnectActionSections
+              connectActions={telegramConnectActions}
+            />
+          </BuiltinRow>
+        )}
       </div>
 
       {installedChannels.length > 0 &&
@@ -194,7 +243,8 @@ export function ChannelsTab({
                 const connectActions = connectActionsForPackage(connectableChannels, ch);
                 const isSlack = isSlackPackage(ch);
                 const pairingHandledByConnectAction =
-                  connectActions.some(isGenericInboundProofCodeAction);
+                  connectActions.some(isGenericInboundProofCodeAction) ||
+                  connectActions.some(isTelegramWebGeneratedCodeAction);
                 return (
                   <div key={packageId(ch)} className="flex flex-col gap-3">
                     <ExtensionCard

@@ -4,8 +4,8 @@
 //!
 //! - **Phase 1 — install parks activation at the provider's auth gate, and a
 //!   same-provider account with the WRONG scopes must not satisfy it.** The
-//!   group already holds a `google` account carrying only gmail scopes
-//!   (seeded by scenario 5). Installing google-calendar from chat and
+//!   scenario seeds a `google` account carrying only gmail scopes. Installing
+//!   google-calendar from chat and
 //!   activating must park `BlockedAuth` with a renderable requirement naming
 //!   provider `google` and the CALENDAR capability scopes — reusing a shared
 //!   Google account is only allowed after the selected capability scope is
@@ -21,13 +21,17 @@
 //!   the credential-appears → activation-completes arm, and the
 //!   one-account-many-extensions shape.
 //!
-//! Uses "google-calendar" and "google-drive" (untouched by scenarios 1-9;
-//! the only shared state deliberately consumed is scenario 5's gmail-scoped
-//! `google` account, which phase 1 must NOT accept and phase 4 revokes).
+//! Uses "google-calendar" and "google-drive" in its own
+//! Google-OAuth-configured group. The isolated composition is required by the
+//! provider-instance readiness contract: this scenario tests per-account
+//! gating, not the earlier missing-instance remediation path.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
-use ironclaw_auth::{GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE};
+use ironclaw_auth::{
+    GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_MODIFY_SCOPE,
+    GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
+};
 use ironclaw_turns::TurnStatus;
 use serde_json::json;
 
@@ -36,7 +40,9 @@ use serde_json::json;
 const GOOGLE_DRIVE_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/drive.readonly";
 const GOOGLE_DRIVE_SCOPE: &str = "https://www.googleapis.com/auth/drive";
 
-pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
+    let g = RebornIntegrationGroup::extension_lifecycle_google_oauth_configured().await?;
+    let g = &g;
     let google_provider = ironclaw_host_api::RuntimeCredentialAccountProviderId::new("google")
         .map_err(|error| error.to_string())?;
 
@@ -57,6 +63,17 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
             RebornScriptedReply::text("calendar needs authorization"),
         ])
         .build()
+        .await?;
+    calendar
+        .seed_capability_credential_account(
+            "google",
+            "itest gmail-only account",
+            &[
+                GOOGLE_GMAIL_MODIFY_SCOPE,
+                GOOGLE_GMAIL_READONLY_SCOPE,
+                GOOGLE_GMAIL_SEND_SCOPE,
+            ],
+        )
         .await?;
     let (calendar_run, calendar_gate) = calendar
         .submit_turn_until_auth_blocked("set up google calendar")

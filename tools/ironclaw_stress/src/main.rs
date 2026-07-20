@@ -156,6 +156,15 @@ pub(crate) struct Args {
     #[arg(long, value_enum, default_value_t = TurnStateBackend::Filesystem)]
     pub(crate) turn_state_backend: TurnStateBackend,
 
+    /// Durable-commit policy for the row-store backends (`filesystem-row`,
+    /// `row-memory`). `write-through` (default) awaits every delta's durable ack;
+    /// `write-behind` returns non-critical transitions (Queued/Running) before
+    /// their ack while keeping gate-park + terminal transitions synchronously
+    /// durable — the `inmemory-turn-state` production profile's policy. No effect
+    /// on the `filesystem`/`memory` backends.
+    #[arg(long, value_enum, default_value_t = TurnStateDurability::WriteThrough)]
+    pub(crate) turn_state_durability: TurnStateDurability,
+
     /// Override max retained terminal run records in the turn-state store.
     /// Useful for measuring filesystem snapshot growth sensitivity.
     #[arg(long)]
@@ -615,6 +624,11 @@ pub(crate) enum TurnStateBackend {
     /// Durable typed append-log deltas with one hot in-process store per
     /// tenant/user. Candidate filesystem fix for the blob growth curve.
     FilesystemRow,
+    /// The row store over an in-memory `RootFilesystem` backend — the proposed
+    /// replacement for the direct `InMemoryTurnStateStore` authority in the
+    /// `inmemory-turn-state` profile. Measures the row-store mechanism's
+    /// overhead with the durable backend cost removed.
+    RowMemory,
     /// One shared in-process `InMemoryTurnStateStore` authority — coordination
     /// in memory, no per-step CAS. Prototype for the runtime-wedge fix.
     Memory,
@@ -631,6 +645,7 @@ impl TurnStateBackend {
         match self {
             Self::Filesystem => "filesystem",
             Self::FilesystemRow => "filesystem-row",
+            Self::RowMemory => "row-memory",
             Self::Memory => "memory",
             Self::MemoryPersistOnBlock => "memory-persist-on-block",
         }
@@ -640,6 +655,36 @@ impl TurnStateBackend {
     /// authority.
     pub(crate) fn persists_on_block(self) -> bool {
         matches!(self, Self::MemoryPersistOnBlock)
+    }
+}
+
+/// Durable-commit policy for the row-store turn-state backends. Mirrors
+/// `ironclaw_turns::TurnStateDurabilityPolicy` as a `ValueEnum` for the CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum TurnStateDurability {
+    /// Await every delta's durable ack (current default; byte-for-byte the
+    /// pre-#6263-Step-3 behavior).
+    WriteThrough,
+    /// Non-critical transitions return before their durable ack; gate-park and
+    /// terminal transitions stay synchronously durable. The `inmemory-turn-state`
+    /// production profile's policy.
+    WriteBehind,
+}
+
+impl TurnStateDurability {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::WriteThrough => "write-through",
+            Self::WriteBehind => "write-behind",
+        }
+    }
+
+    pub(crate) fn to_policy(self) -> ironclaw_turns::TurnStateDurabilityPolicy {
+        match self {
+            Self::WriteThrough => ironclaw_turns::TurnStateDurabilityPolicy::WriteThrough,
+            Self::WriteBehind => ironclaw_turns::TurnStateDurabilityPolicy::WriteBehind,
+        }
     }
 }
 
@@ -839,6 +884,7 @@ struct RunSummary {
     active_thread_count: usize,
     threads_per_owner: usize,
     turn_state_backend: TurnStateBackend,
+    turn_state_durability: TurnStateDurability,
     turn_state_max_terminal_records: Option<usize>,
     turn_state_max_events: Option<usize>,
     turn_state_max_idempotency_records: Option<usize>,
@@ -1494,6 +1540,8 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
             .arg(args.scenario.as_str())
             .arg("--turn-state-backend")
             .arg(args.turn_state_backend.as_str())
+            .arg("--turn-state-durability")
+            .arg(args.turn_state_durability.as_str())
             .arg("--postgres-pool-size")
             .arg(args.postgres_pool_size.to_string())
             .arg("--progress-interval-seconds")
@@ -2224,6 +2272,7 @@ fn summarize(args: &Args, run_id: &str, input: SummaryInput) -> RunSummary {
         active_thread_count: args.active_thread_count,
         threads_per_owner: args.threads_per_owner,
         turn_state_backend: args.turn_state_backend,
+        turn_state_durability: args.turn_state_durability,
         turn_state_max_terminal_records: args.turn_state_max_terminal_records,
         turn_state_max_events: args.turn_state_max_events,
         turn_state_max_idempotency_records: args.turn_state_max_idempotency_records,

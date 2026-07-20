@@ -1,7 +1,7 @@
 //! Test helpers for `ironclaw_llm`.
 //!
 //! Gated behind the `testing` feature (or `cfg(test)`). Downstream test code
-//! can opt in by depending on this crate with `features = ["testing"]`.
+//! can opt in by depending on this crate with `features = ["test-support"]`.
 
 pub mod fault_injection;
 

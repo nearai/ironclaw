@@ -9,7 +9,7 @@ Tests the MCP + OAuth integration path:
    ``provider: "notion"``, ``authorization_url``
 6. No raw token appears in SSE, history, or DOM
 
-Browser tests are skipped until the ``webui-v2-beta`` binary is available.
+Browser tests are skipped until an E2E browser binary is available.
 
 Note: The Notion MCP OAuth path requires the Reborn composition's MCP adapter
 (``ironclaw_reborn_composition::nearai_mcp``) to be active. Tests that
@@ -217,7 +217,7 @@ class TestNotionMcpOAuthRoutes:
         if r.status_code == 404:
             pytest.skip(
                 "Reborn product-auth routes not mounted; "
-                "need webui-v2-beta feature or Reborn binary"
+                "need the Reborn binary"
             )
         assert r.status_code != 405, "405 means route is not mounted"
         assert r.status_code in (200, 400, 422)
@@ -393,14 +393,14 @@ class TestNotionMcpOAuthRoutes:
 
 
 # ---------------------------------------------------------------------------
-# Browser E2E stubs (skipped until webui-v2-beta E2E binary is available)
+# Browser E2E stubs (skipped until an E2E browser binary is available)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.skip(
     reason=(
-        "Playwright browser test requires ironclaw binary compiled with "
-        "webui-v2-beta feature. Enable by building with: "
-        "cargo build --features libsql,webui-v2-beta"
+        "Playwright browser test requires the ironclaw binary; the WebUI v2 "
+        "routes are compiled in unconditionally. Build with: "
+        "cargo build --features libsql"
     )
 )
 async def test_notion_browser_oauth_card_renders(v2_notion_server, browser):
@@ -424,7 +424,7 @@ async def test_notion_browser_oauth_card_renders(v2_notion_server, browser):
     await context.close()
 
 
-@pytest.mark.skip(reason="See above — requires webui-v2-beta binary")
+@pytest.mark.skip(reason="See above — requires the WebUI v2 E2E binary")
 async def test_notion_browser_bearer_injected_after_oauth(
     v2_notion_server, mock_notion, mock_notion_idp, browser
 ):

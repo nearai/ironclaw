@@ -1452,6 +1452,9 @@ pub enum RebornExtensionCredentialSetup {
         scopes: Vec<String>,
         invocation_id: String,
     },
+    /// Channel pairing: the setup card routes to the channel's pairing panel
+    /// (host-issued code + deep link), never a token-submit form.
+    Pairing,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

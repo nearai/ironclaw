@@ -24,7 +24,7 @@ async fn mcp_adapter_maps_executor_auth_required_to_dispatch_auth_required() {
         requirement: requirement.clone(),
     }));
     let descriptor = test_descriptor(RuntimeKind::Mcp, Vec::new());
-    let filesystem = LocalFilesystem::new();
+    let filesystem = DiskFilesystem::new();
     let governor = InMemoryResourceGovernor::new();
     let package = test_package(MCP_MANIFEST, "test");
     let policy = policy_with(

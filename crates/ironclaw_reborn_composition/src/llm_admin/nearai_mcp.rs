@@ -91,17 +91,29 @@ pub(crate) fn nearai_mcp_endpoint_from_env() -> Result<NearAiMcpEndpoint, String
 
 pub fn nearai_mcp_bootstrap_config_from_env()
 -> Result<Option<NearAiMcpBootstrapConfig>, NearAiMcpBootstrapConfigError> {
-    let configured_base = ironclaw_common::env_helpers::env_or_override("NEARAI_BASE_URL")
+    nearai_mcp_bootstrap_config_from_lookup(ironclaw_common::env_helpers::env_or_override)
+}
+
+/// Env-shape parsing behind [`nearai_mcp_bootstrap_config_from_env`], with the
+/// variable lookup injected so tests stay hermetic. `env_or_override` consults
+/// the real process environment before the runtime overlay, so a developer
+/// shell exporting a real `NEARAI_API_KEY` cannot be masked by overlay
+/// mutation, and this `#![forbid(unsafe_code)]` crate cannot call
+/// `std::env::remove_var`. Tests therefore drive this function with an
+/// in-memory lookup instead of mutating process state.
+fn nearai_mcp_bootstrap_config_from_lookup(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<Option<NearAiMcpBootstrapConfig>, NearAiMcpBootstrapConfigError> {
+    let configured_base = lookup("NEARAI_BASE_URL")
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let api_key = ironclaw_common::env_helpers::env_or_override("NEARAI_API_KEY")
+    let api_key = lookup("NEARAI_API_KEY")
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .map(SecretString::from);
     NearAiMcpBootstrapConfig::from_optional_parts(configured_base, api_key)
 }
 
-#[cfg(feature = "root-llm-provider")]
 pub(crate) async fn nearai_mcp_bootstrap_config_from_llm_config(
     config: &ironclaw_llm::LlmConfig,
 ) -> Result<Option<NearAiMcpBootstrapConfig>, NearAiMcpBootstrapConfigError> {
@@ -453,39 +465,16 @@ mod tests {
     use super::*;
     use ironclaw_host_api::{InvocationId, UserId};
 
-    struct NearAiEnvGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl NearAiEnvGuard {
-        fn new() -> Self {
-            let lock = ironclaw_common::env_helpers::lock_env();
-            assert!(
-                std::env::var_os("NEARAI_BASE_URL").is_none(),
-                "NEARAI_BASE_URL must be unset for deterministic env tests"
-            );
-            assert!(
-                std::env::var_os("NEARAI_API_KEY").is_none(),
-                "NEARAI_API_KEY must be unset for deterministic env tests"
-            );
-            ironclaw_common::env_helpers::remove_runtime_env("NEARAI_BASE_URL");
-            ironclaw_common::env_helpers::remove_runtime_env("NEARAI_API_KEY");
-            Self { _lock: lock }
-        }
-
-        fn set_base_url(&self, value: &str) {
-            ironclaw_common::env_helpers::set_runtime_env("NEARAI_BASE_URL", value);
-        }
-
-        fn set_api_key(&self, value: &str) {
-            ironclaw_common::env_helpers::set_runtime_env("NEARAI_API_KEY", value);
-        }
-    }
-
-    impl Drop for NearAiEnvGuard {
-        fn drop(&mut self) {
-            ironclaw_common::env_helpers::remove_runtime_env("NEARAI_BASE_URL");
-            ironclaw_common::env_helpers::remove_runtime_env("NEARAI_API_KEY");
+    /// Hermetic stand-in for the env lookup injected into
+    /// [`nearai_mcp_bootstrap_config_from_lookup`]: tests must not depend on
+    /// (or mutate) the process environment, where a developer shell may
+    /// legitimately export a real `NEARAI_API_KEY`.
+    fn lookup_from<'a>(entries: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |key| {
+            entries
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| (*value).to_string())
         }
     }
 
@@ -677,12 +666,12 @@ mod tests {
 
     #[test]
     fn bootstrap_config_from_env_defaults_base_url_when_only_api_key_set() {
-        let env = NearAiEnvGuard::new();
-        env.set_api_key("nearai-test-key");
-
-        let config = nearai_mcp_bootstrap_config_from_env()
-            .expect("env config")
-            .expect("present config");
+        let config = nearai_mcp_bootstrap_config_from_lookup(lookup_from(&[(
+            "NEARAI_API_KEY",
+            "nearai-test-key",
+        )]))
+        .expect("env config")
+        .expect("present config");
 
         assert_eq!(config.base_url, DEFAULT_NEARAI_MCP_BASE_URL);
         assert_eq!(config.api_key.expose_secret(), "nearai-test-key");
@@ -690,13 +679,12 @@ mod tests {
 
     #[test]
     fn bootstrap_config_from_env_uses_both_env_vars_when_set() {
-        let env = NearAiEnvGuard::new();
-        env.set_base_url(" https://search.example.test/v1/ ");
-        env.set_api_key(" nearai-test-key ");
-
-        let config = nearai_mcp_bootstrap_config_from_env()
-            .expect("env config")
-            .expect("present config");
+        let config = nearai_mcp_bootstrap_config_from_lookup(lookup_from(&[
+            ("NEARAI_BASE_URL", " https://search.example.test/v1/ "),
+            ("NEARAI_API_KEY", " nearai-test-key "),
+        ]))
+        .expect("env config")
+        .expect("present config");
 
         assert_eq!(config.base_url, "https://search.example.test/v1/");
         assert_eq!(config.api_key.expose_secret(), "nearai-test-key");
@@ -708,10 +696,8 @@ mod tests {
 
     #[test]
     fn bootstrap_config_from_env_returns_none_when_no_env_vars() {
-        let _env = NearAiEnvGuard::new();
-
         assert!(
-            nearai_mcp_bootstrap_config_from_env()
+            nearai_mcp_bootstrap_config_from_lookup(lookup_from(&[]))
                 .expect("env config")
                 .is_none()
         );

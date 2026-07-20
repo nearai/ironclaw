@@ -474,7 +474,7 @@ fn large_durable_file_content() -> String {
 }
 
 /// Durable tool-result projection (issue #5838 / PR #5902): a `read_file`
-/// result routed through the REAL `LocalDevCapabilityIo`
+/// result routed through the REAL `StagedCapabilityIo`
 /// (`.with_durable_capability_io_file_tools()`, which wires
 /// `new_with_durable_previews` over this harness's own local-dev session
 /// thread service — mirrors production's `capability_wiring`) must reach the
@@ -528,7 +528,7 @@ async fn durable_large_read_file_result_reaches_model_as_truncated_preview() {
     // messages (not ANY role): the model's OWN `write_file` tool-call
     // arguments legitimately echo the full content elsewhere in history —
     // this asserts the absence specifically from the persisted TOOL RESULT
-    // side, which is what `LocalDevCapabilityIo` controls.
+    // side, which is what `StagedCapabilityIo` controls.
     assert!(
         h.assert_conversation_history_role_contains(MessageKind::ToolResultReference, TAIL_MARKER)
             .await

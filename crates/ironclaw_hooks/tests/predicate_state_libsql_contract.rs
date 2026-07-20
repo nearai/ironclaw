@@ -34,7 +34,7 @@
 //! macro we cannot gate. So we own the runner: cases run **serially** by
 //! default (one heavy fill at a time), and the cases that intentionally
 //! exercise concurrency get their own multi-thread Tokio runtime. The
-//! `contract-tests` feature on the `ironclaw_hooks` dev-dependency exposes the
+//! `test-support` feature on the `ironclaw_hooks` dev-dependency exposes the
 //! `predicate_state::contract` functions we call directly here instead of
 //! through the `predicate_backend_contract_test!` macro.
 

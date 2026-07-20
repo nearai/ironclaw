@@ -246,6 +246,114 @@ test("OnboardingPairingCard holds a connecting state after a successful pair ins
   );
 });
 
+test("OnboardingPairingCard renders the Telegram pairing panel for web_generated_code instead of a paste box", () => {
+  let stateIndex = 0;
+  const context = {
+    Button() {},
+    TelegramPairingPanel() {},
+    channelConnectionDisplayName,
+    globalThis: {},
+    html: (strings, ...values) => ({ strings: Array.from(strings), values }),
+    React: {
+      useState: (initial) => {
+        const index = stateIndex++;
+        return [["", "", "idle"][index] ?? initial, () => {}];
+      },
+    },
+    useT: () => tForTest,
+  };
+  vm.runInNewContext(onboardingPairingCardSourceForTest(), context);
+
+  let dismissed = false;
+  const rendered = context.globalThis.__testExports.OnboardingPairingCard({
+    onboarding: { extensionName: "telegram", strategy: "web_generated_code" },
+    onSubmit: async () => ({ success: true }),
+    onCancel: () => {
+      dismissed = true;
+    },
+  });
+
+  const panel = findComponent(rendered, context.TelegramPairingPanel);
+  assert.ok(panel, "web_generated_code renders the Telegram pairing panel");
+  assert.equal(componentProps(panel, context.TelegramPairingPanel).compact, true);
+  const body = JSON.stringify(rendered);
+  assert.ok(!body.includes("<input"), "no paste-code input for a web-generated code");
+  assert.ok(body.includes("Connect Telegram"), "keeps the connect title");
+
+  // The dismiss affordance stays wired.
+  const button = findComponent(rendered, context.Button);
+  const props = componentProps(button, context.Button);
+  props.onClick();
+  assert.equal(dismissed, true);
+});
+
+test("OnboardingPairingCard never renders the Telegram panel for a non-Telegram web_generated_code channel", () => {
+  let stateIndex = 0;
+  const context = {
+    Button() {},
+    TelegramPairingPanel() {},
+    channelConnectionDisplayName,
+    globalThis: {},
+    html: (strings, ...values) => ({ strings: Array.from(strings), values }),
+    React: {
+      useState: (initial) => {
+        const index = stateIndex++;
+        return [["", "", "idle"][index] ?? initial, () => {}];
+      },
+    },
+    useT: () => tForTest,
+  };
+  vm.runInNewContext(onboardingPairingCardSourceForTest(), context);
+
+  // The strategy string is generic; only the telegram channel owns the
+  // Telegram-specific QR/deep-link panel.
+  const rendered = context.globalThis.__testExports.OnboardingPairingCard({
+    onboarding: { extensionName: "signal", strategy: "web_generated_code" },
+    onSubmit: async () => ({ success: true }),
+  });
+
+  assert.equal(
+    findComponent(rendered, context.TelegramPairingPanel),
+    null,
+    "a non-Telegram web_generated_code channel must not get the Telegram panel",
+  );
+  assert.ok(
+    !JSON.stringify(rendered).includes("<input"),
+    "web-generated codes still never get a paste box",
+  );
+});
+
+test("OnboardingPairingCard keeps the paste box for inbound_proof_code", () => {
+  let stateIndex = 0;
+  const context = {
+    Button() {},
+    TelegramPairingPanel() {},
+    channelConnectionDisplayName,
+    globalThis: {},
+    html: (strings, ...values) => ({ strings: Array.from(strings), values }),
+    React: {
+      useState: (initial) => {
+        const index = stateIndex++;
+        return [["", "", "idle"][index] ?? initial, () => {}];
+      },
+    },
+    useT: () => tForTest,
+  };
+  vm.runInNewContext(onboardingPairingCardSourceForTest(), context);
+
+  const rendered = context.globalThis.__testExports.OnboardingPairingCard({
+    onboarding: { extensionName: "whatsapp", strategy: "inbound_proof_code" },
+    onSubmit: async () => ({ success: true }),
+  });
+
+  assert.equal(
+    findComponent(rendered, context.TelegramPairingPanel),
+    null,
+    "proof-code channels never render the Telegram panel",
+  );
+  assert.ok(JSON.stringify(rendered).includes("<input"), "paste-code input stays");
+});
+
 test("OnboardingPairingCard shows a spinner and disables submit while busy, not while idle", () => {
   const renderWithStatus = (status) => {
     let stateIndex = 0;

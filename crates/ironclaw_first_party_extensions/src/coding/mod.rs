@@ -266,7 +266,7 @@ fn bound_safe_summary(summary: String) -> String {
 mod tests {
     use std::sync::Arc;
 
-    use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
+    use ironclaw_filesystem::{DiskFilesystem, RootFilesystem};
     use ironclaw_host_api::{
         CapabilityId, HostPath, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
         ResourceScope, RuntimeDispatchErrorKind, UserId, VirtualPath,
@@ -306,7 +306,7 @@ mod tests {
     #[tokio::test]
     async fn coding_file_tools_treat_bare_workspace_prefix_as_scoped_alias() {
         let temp_root = tempfile::TempDir::new().expect("temp root");
-        let mut local_filesystem = LocalFilesystem::new();
+        let mut local_filesystem = DiskFilesystem::new();
         local_filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("virtual path"),
@@ -471,7 +471,7 @@ mod tests {
             let temp_root = tempfile::TempDir::new().expect("temp root");
             let workspace_dir = temp_root.path().join("workspace");
             std::fs::create_dir_all(&workspace_dir).expect("workspace dir");
-            let mut local_filesystem = LocalFilesystem::new();
+            let mut local_filesystem = DiskFilesystem::new();
             local_filesystem
                 .mount_local(
                     VirtualPath::new("/projects").expect("virtual path"),
@@ -671,7 +671,7 @@ mod tests {
         // raw-path summary would silently degrade to the generic category
         // sentence at the runtime boundary.
         let temp_root = tempfile::TempDir::new().expect("temp root");
-        let mut local_filesystem = LocalFilesystem::new();
+        let mut local_filesystem = DiskFilesystem::new();
         local_filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("virtual path"),
@@ -732,7 +732,7 @@ mod tests {
         // detail channel.
         let temp_root = tempfile::TempDir::new().expect("temp root");
         std::fs::create_dir_all(temp_root.path().join("workspace")).expect("workspace dir");
-        let mut local_filesystem = LocalFilesystem::new();
+        let mut local_filesystem = DiskFilesystem::new();
         local_filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("virtual path"),

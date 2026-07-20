@@ -6,6 +6,6 @@
 //! only the facade (`RebornWebuiBundle`) and the mount vocabulary that
 //! composition's own route builders need stay here.
 
+pub(crate) mod composite_channels;
 pub(crate) mod facade;
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) mod route_mounts;

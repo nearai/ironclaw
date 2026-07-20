@@ -500,7 +500,10 @@ where
         }
         if !matches!(
             record.status,
-            AuthFlowStatus::Completed | AuthFlowStatus::Canceled | AuthFlowStatus::Failed
+            AuthFlowStatus::Completed
+                | AuthFlowStatus::Canceled
+                | AuthFlowStatus::Failed
+                | AuthFlowStatus::Expired
         ) {
             return Err(AuthProductError::FlowAlreadyTerminal);
         }

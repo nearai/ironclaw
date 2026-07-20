@@ -26,7 +26,6 @@ use ironclaw_auth::{
 };
 use ironclaw_events::{SecurityAuditEvent, SecurityAuditSink, SecurityBoundary, SecurityDecision};
 use ironclaw_product_adapters::AuthPromptChallengeKind;
-use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
@@ -55,34 +54,7 @@ use crate::{AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller};
 
 pub(crate) const AUTH_CONTINUATION_DISPATCH_FAILED_CODE: &str = "auth_continuation_dispatch_failed";
 
-/// Dispatches a typed continuation event once an OAuth callback flow has
-/// completed.
-///
-/// # Idempotency contract
-///
-/// Implementations MUST be idempotent on `flow_id`.  The product-auth layer
-/// guarantees *at-least-once* delivery: if `dispatch_auth_continuation`
-/// succeeds but the subsequent `mark_continuation_dispatched` call fails
-/// (e.g. a transient `BackendConflict` or `BackendUnavailable`), the caller
-/// will retry the full callback path and dispatch the same `flow_id` again.
-/// An implementation that assumes exactly-once delivery will process duplicate
-/// continuations and is incorrect.
-#[async_trait]
-pub trait RebornAuthContinuationDispatcher: Send + Sync {
-    async fn dispatch_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError>;
-
-    /// Deny a turn gate whose backing auth flow was canceled by lifecycle
-    /// cleanup. Non-turn continuations remain cancel-only.
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        _event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        Err(AuthProductError::BackendUnavailable)
-    }
-}
+use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
 
 #[cfg(test)]
 #[derive(Debug, Default)]
@@ -96,23 +68,6 @@ impl RebornAuthContinuationDispatcher for NoopAuthContinuationDispatcher {
         _event: AuthContinuationEvent,
     ) -> Result<(), AuthProductError> {
         Ok(())
-    }
-}
-
-#[async_trait]
-impl RebornAuthContinuationDispatcher for ProductAuthTurnGateResumeDispatcher {
-    async fn dispatch_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        ProductAuthTurnGateResumeDispatcher::dispatch_auth_continuation(self, event).await
-    }
-
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        ProductAuthTurnGateResumeDispatcher::dispatch_canceled_auth_continuation(self, event).await
     }
 }
 
@@ -168,7 +123,7 @@ pub(crate) struct RebornOAuthStartFlowRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(
     dead_code,
-    reason = "used by the webui-v2-beta extension OAuth route through product-auth route composition"
+    reason = "used by the WebUI v2 extension OAuth route through product-auth route composition"
 )]
 pub(crate) struct RebornDcrOAuthStartFlowRequest {
     pub(crate) scope: AuthProductScope,
@@ -733,7 +688,9 @@ impl RebornProductAuthServices {
             cleanup_service,
             continuation_dispatcher,
             security_audit_sink: None,
-            secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+            // §4.3: volatile default — the production encrypted filesystem
+            // secret store over an in-memory backend (ephemeral master key).
+            secret_store: Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
             host_managed_nearai_credential_scope: None,
             dcr_oauth_registry: None,
             oauth_gate_registry: None,
@@ -949,6 +906,15 @@ impl RebornProductAuthServices {
     ) -> Self {
         self.continuation_dispatcher = dispatcher;
         self
+    }
+
+    /// The composed auth-continuation dispatcher (turn-gate resume + lifecycle
+    /// continuations). Channel hosts (today the Telegram pairing service —
+    /// hence the feature gate) reuse it so a pairing completion resumes
+    /// blocked turns through the same path as OAuth callbacks and
+    /// manual-token submissions.
+    pub(crate) fn continuation_dispatcher(&self) -> Arc<dyn RebornAuthContinuationDispatcher> {
+        Arc::clone(&self.continuation_dispatcher)
     }
 
     pub fn with_security_audit_sink(mut self, sink: Arc<dyn SecurityAuditSink>) -> Self {
@@ -1515,7 +1481,7 @@ impl RebornProductAuthServices {
     /// flow keeps its real status (and its owed cleanup).
     #[allow(
         dead_code,
-        reason = "used by the feature-scoped webui-v2-beta OAuth status route"
+        reason = "used by the WebUI v2 OAuth status route through product-auth route composition"
     )]
     pub(crate) async fn flow_record_for_status(
         &self,
@@ -1545,7 +1511,7 @@ impl RebornProductAuthServices {
     /// [`Self::flow_record_for_status`] instead.
     #[allow(
         dead_code,
-        reason = "used by the webui-v2-beta OAuth reconciliation command"
+        reason = "used by the WebUI v2 OAuth reconciliation command"
     )]
     pub(crate) async fn reconcile_oauth_flow(
         &self,
@@ -1601,7 +1567,7 @@ impl RebornProductAuthServices {
 
     #[allow(
         dead_code,
-        reason = "used by the webui-v2-beta OAuth callback route when DCR fallback PKCE storage is enabled"
+        reason = "used by the WebUI v2 OAuth callback route when DCR fallback PKCE storage is enabled"
     )]
     pub(crate) async fn oauth_pkce_verifier_for_flow(
         &self,
@@ -1805,7 +1771,7 @@ impl RebornProductAuthServices {
 
     #[allow(
         dead_code,
-        reason = "used by the webui-v2-beta extension OAuth route through product-auth route composition"
+        reason = "used by the WebUI v2 extension OAuth route through product-auth route composition"
     )]
     pub(crate) async fn start_dcr_setup_oauth_flow(
         &self,
@@ -2148,7 +2114,7 @@ impl RebornProductAuthServices {
         RebornProductAuthServicePorts::from_shared(services.clone())
             .into_services(
                 continuation_dispatcher,
-                Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+                Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
             )
             .with_flow_record_source(services)
     }
@@ -2453,7 +2419,7 @@ mod tests {
     #[tokio::test]
     async fn lifecycle_cleanup_drops_setup_pkce_verifiers_for_canceled_flows() {
         let services = Arc::new(InMemoryAuthProductServices::new());
-        let secret_store = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
+        let secret_store = Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral());
         let product_auth = RebornProductAuthServicePorts::from_shared(services.clone())
             .into_services(
                 Arc::new(NoopAuthContinuationDispatcher),
@@ -2917,7 +2883,7 @@ mod tests {
             RebornProductAuthServicePorts::from_shared_with_provider(shared, provider_client);
         let services = ports.into_services(
             Arc::new(NoopAuthContinuationDispatcher),
-            Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+            Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
         );
 
         assert_eq!(arc_data_ptr(&services.flow_manager()), shared_ptr);

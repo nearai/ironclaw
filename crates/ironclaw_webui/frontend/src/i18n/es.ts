@@ -75,6 +75,7 @@ registerPack("es", {
   "login.connect": "Conectar",
   "login.oauthDivider": "o continuar con",
   "login.oauthProvider": "Continuar con {provider}",
+  "login.localDevHint": "¿Ejecutas IronClaw en local? Obtén tu enlace de acceso:",
 
   // Chat — empty state
   "chat.heroTitle": "Hola, ¿en que necesitas ayuda?",
@@ -278,6 +279,7 @@ registerPack("es", {
   "settings.exportSuccess": "Configuración exportada",
   "settings.importSuccess": "Configuración importada",
   "settings.importInvalid": "El archivo seleccionado debe contener un objeto de configuración",
+  "settings.importNoSupported": "El archivo seleccionado no contiene ajustes compatibles",
   "settings.importFailed": "Importación fallida: {message}",
 
   // Settings — restart banner
@@ -483,6 +485,9 @@ registerPack("es", {
   "channels.slack": "Slack",
   "channels.slackDesc": "Canal de app del tenant para DMs y menciones de la app",
   "channels.slackDetail": "Instalación de la app de Slack del tenant",
+  "channels.telegram": "Telegram",
+  "channels.telegramDesc": "Canal de bot del tenant para mensajes directos emparejados",
+  "channels.telegramDetail": "Token del bot de BotFather",
   "channels.statusOn": "encendido",
   "channels.statusOff": "apagado",
   "channels.ready": "listo",
@@ -740,6 +745,7 @@ registerPack("es", {
   "automations.filter.completed": "Completadas",
   "automations.refresh": "Actualizar automatizaciones",
   "automations.error.loadFailed": "No se pueden cargar automatizaciones",
+  "automations.error.actionFailed": "No se pudo actualizar la automatización. Inténtalo de nuevo.",
   "automations.rename.action": "Cambiar nombre de automatización",
   "automations.rename.nameLabel": "Nombre de automatización",
   "automations.rename.nameRequired": "El nombre de la automatización es obligatorio.",
@@ -1441,5 +1447,36 @@ registerPack("es", {
   "slackSetup.example.sharedSubject": "Ejemplo: user:slack-shared",
   "slackSetup.example.botToken": "Ejemplo: xoxb-...",
   "slackSetup.placeholder.defaultOperator": "operador predeterminado",
-  "slackSetup.placeholder.keepSecret": "Configurado; deja en blanco para conservarlo"
+  "slackSetup.placeholder.keepSecret": "Configurado; deja en blanco para conservarlo",
+
+  // Telegram setup + pairing
+  "telegramSetup.title": "Configuración de Telegram",
+  "telegramSetup.instructions": "Crea un bot con @BotFather y pega su token. IronClaw registra el webhook automáticamente.",
+  "telegramSetup.save": "Guardar configuración",
+  "telegramSetup.saved": "Configuración de Telegram guardada.",
+  "telegramSetup.saveFailed": "No se pudo actualizar la configuración de Telegram.",
+  "telegramSetup.field.botToken": "Token del bot",
+  "telegramSetup.field.webhookUrl": "URL pública de webhook (anulación)",
+  "telegramSetup.help.botToken": "Token de @BotFather (/newbot o /token).",
+  "telegramSetup.help.webhookUrl": "Opcional. URL HTTPS pública a la que Telegram envía actualizaciones; en blanco usa la URL pública detectada.",
+  "telegramSetup.example.botToken": "Ejemplo: 123456789:AA...",
+  "telegramSetup.example.webhookUrl": "Ejemplo: https://assistant.example.com",
+  "telegramSetup.placeholder.keepSecret": "••• guardado — deja en blanco para mantenerlo",
+  "telegramSetup.connectedAs": "Bot conectado:",
+  "telegramSetup.remove": "Quitar bot",
+  "telegramSetup.removeConfirm": "¿Quitar el bot de Telegram? El canal se detiene hasta guardar un token nuevo.",
+  "telegramSetup.removeFailed": "No se pudo quitar el bot de Telegram.",
+  "telegramPairing.title": "Conectar Telegram",
+  "telegramPairing.instructions": "Escanea el código QR o abre el enlace y pulsa Iniciar en Telegram para vincular esta cuenta.",
+  "telegramPairing.copyCode": "Copiar código",
+  "telegramPairing.copyUsername": "Copiar nombre del bot",
+  "telegramPairing.openInTelegram": "Abrir en Telegram",
+  "telegramPairing.qrAlt": "QR de vinculación de Telegram",
+  "telegramPairing.expiresIn": "Caduca en {time}",
+  "telegramPairing.expired": "Este código de vinculación caducó.",
+  "telegramPairing.getNewCode": "Obtener un código nuevo",
+  "telegramPairing.paired": "Telegram vinculado",
+  "telegramPairing.disconnect": "Desconectar",
+  "telegramPairing.disconnectFailed": "No se pudo desconectar Telegram.",
+  "telegramPairing.loadFailed": "No se pudo obtener un código de vinculación de Telegram."
 });

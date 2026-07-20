@@ -15,7 +15,7 @@ use ironclaw_host_api::{
     RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
-use ironclaw_secrets::InMemorySecretStore;
+use ironclaw_secrets::FilesystemSecretStore;
 use ironclaw_turns::{
     AcceptedMessageRef, BlockedReason, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
     GetRunStateRequest, IdempotencyKey, LoopCheckpointStateRef, ReplyTargetBindingRef,
@@ -540,7 +540,7 @@ async fn oauth_callback_exchanges_notion_through_reborn_product_auth_boundary() 
     let provider_client = HostOAuthProviderClient::new(
         notion_provider_spec(),
         egress.clone(),
-        Arc::new(InMemorySecretStore::new()),
+        Arc::new(FilesystemSecretStore::ephemeral()),
         Arc::new(NoopObligationHandler),
         OAuthClientId::new("notion-client-123").expect("client id"),
         OAuthRedirectUri::new("https://app.example/oauth/notion/callback").expect("redirect uri"),
@@ -711,7 +711,6 @@ async fn oauth_callback_with_lifecycle_activation_activates_and_publishes_extens
     );
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 #[tokio::test]
 async fn slack_oauth_callback_activates_and_publishes_all_personal_tools() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -720,7 +719,21 @@ async fn slack_oauth_callback_activates_and_publishes_all_personal_tools() {
             "local-dev-slack-auth-lifecycle-owner",
             dir.path().join("local-dev"),
         )
-        .with_product_auth_ports(in_memory_product_auth_ports()),
+        .with_product_auth_ports(in_memory_product_auth_ports())
+        // This test exercises the Slack personal OAuth callback's activation
+        // path (per-account credential completion), not the provider-instance
+        // readiness map — without these, the callback's internal
+        // `extension_activate` fails closed with
+        // `ProviderInstanceNotConfigured` before it ever reaches OAuth
+        // completion. Slack readiness has TWO axes and this fixture must
+        // satisfy both.
+        //
+        // The redirect-URI axis is declared as a FACT here, not wired through
+        // `with_slack_personal_oauth_lazy`: the slot would additionally switch
+        // the provider client to lazy setup-service credentials that nothing
+        // fills in this test, failing the callback with `BackendUnavailable`.
+        .with_slack_host_beta_enabled(true)
+        .with_slack_personal_oauth_redirect_uri_configured(true),
     )
     .await
     .expect("local-dev services build");
@@ -1070,7 +1083,7 @@ fn provider_scope(value: &str) -> ProviderScope {
 #[cfg(test)]
 async fn submit_and_block_auth_run(
     turn_coordinator: &dyn ironclaw_turns::TurnCoordinator,
-    local_runtime: &RebornLocalRuntimeServices,
+    local_runtime: &RebornRuntimeSubstrate,
     scope: TurnScope,
     actor: TurnActor,
     gate_ref: &str,

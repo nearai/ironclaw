@@ -12,7 +12,9 @@ use ironclaw_product_adapters::{
 use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId};
 
 use crate::payload::{GroupTriggerPolicy, TELEGRAM_API_HOST, parse_telegram_update};
-use crate::render::{render_final_reply, render_progress_typing};
+use crate::render::{
+    render_auth_prompt, render_final_reply, render_gate_prompt, render_progress_typing,
+};
 
 /// Configuration for a Telegram v2 adapter installation.
 #[derive(Debug, Clone)]
@@ -190,32 +192,40 @@ impl ProductAdapter for TelegramV2Adapter {
         let run_id: Option<TurnRunId> = match &envelope.payload {
             ProductOutboundPayload::FinalReply(view) => Some(view.turn_run_id),
             ProductOutboundPayload::Progress(view) => Some(view.turn_run_id),
+            ProductOutboundPayload::GatePrompt(view) => Some(view.turn_run_id),
+            ProductOutboundPayload::AuthPrompt(view) => Some(view.turn_run_id),
             _ => None,
         };
 
-        let request = match envelope.payload {
-            ProductOutboundPayload::FinalReply(view) => match render_final_reply(
-                &envelope.target.reply_target_binding_ref,
-                &view,
-                self.config.egress_credential_handle.clone(),
-            ) {
-                Ok(req) => req,
-                Err(render_err) => {
-                    // Malformed reply target is a permanent data-shape
-                    // failure; retrying won't help.
-                    record_status(
-                        delivery_sink,
-                        DeliveryStatus::FailedPermanent {
-                            attempt_id,
-                            target: target_binding.clone(),
-                            run_id,
-                            reason: RedactedString::new(render_err.to_string()),
-                        },
-                    )
-                    .await;
-                    return Err(map_render_error(render_err));
+        // Resolve the concrete chat target once, preferring the host-resolved
+        // conversation ref (populated on the live reply path) over the opaque
+        // `reply:` binding token. A resolution failure folds into the same
+        // permanent-failure handling as a render failure per payload below.
+        let resolved_target = crate::render::resolve_reply_target(&envelope.target);
+
+        let requests = match envelope.payload {
+            ProductOutboundPayload::FinalReply(view) => {
+                match resolved_target.clone().and_then(|reply| {
+                    render_final_reply(&reply, &view, self.config.egress_credential_handle.clone())
+                }) {
+                    Ok(reqs) => reqs,
+                    Err(render_err) => {
+                        // Malformed reply target is a permanent data-shape
+                        // failure; retrying won't help.
+                        record_status(
+                            delivery_sink,
+                            DeliveryStatus::FailedPermanent {
+                                attempt_id,
+                                target: target_binding.clone(),
+                                run_id,
+                                reason: RedactedString::new(render_err.to_string()),
+                            },
+                        )
+                        .await;
+                        return Err(map_render_error(render_err));
+                    }
                 }
-            },
+            }
             ProductOutboundPayload::Progress(view) => {
                 if !self
                     .capabilities
@@ -237,12 +247,14 @@ impl ProductAdapter for TelegramV2Adapter {
                     .await;
                     return Ok(ProductRenderOutcome::Deferred);
                 }
-                match render_progress_typing(
-                    &envelope.target.reply_target_binding_ref,
-                    &view,
-                    self.config.egress_credential_handle.clone(),
-                ) {
-                    Ok(Some(req)) => req,
+                match resolved_target.clone().and_then(|reply| {
+                    render_progress_typing(
+                        &reply,
+                        &view,
+                        self.config.egress_credential_handle.clone(),
+                    )
+                }) {
+                    Ok(Some(req)) => vec![req],
                     Ok(None) => {
                         record_status(
                             delivery_sink,
@@ -273,23 +285,49 @@ impl ProductAdapter for TelegramV2Adapter {
                     }
                 }
             }
-            ProductOutboundPayload::GatePrompt(_) | ProductOutboundPayload::AuthPrompt(_) => {
-                // Deferred to #3094. The workflow renders a placeholder body
-                // via this branch in fake contract tests; real production
-                // flows do not produce gate envelopes for Telegram yet.
-                record_status(
-                    delivery_sink,
-                    DeliveryStatus::Deferred {
-                        attempt_id,
-                        target: target_binding.clone(),
-                        run_id: None,
-                        reason: RedactedString::new(
-                            "gate/auth prompts deferred to #3094 on Telegram",
-                        ),
-                    },
-                )
-                .await;
-                return Ok(ProductRenderOutcome::Deferred);
+            ProductOutboundPayload::AuthPrompt(view) => {
+                // The shared channel delivery driver produces these for every
+                // Telegram run that parks `BlockedAuth` with a link-shaped
+                // challenge. Deferring here left the DM silent after the
+                // working message was deleted (Ben's 2026-07-17 regression).
+                match resolved_target.clone().and_then(|reply| {
+                    render_auth_prompt(&reply, &view, self.config.egress_credential_handle.clone())
+                }) {
+                    Ok(reqs) => reqs,
+                    Err(render_err) => {
+                        record_status(
+                            delivery_sink,
+                            DeliveryStatus::FailedPermanent {
+                                attempt_id,
+                                target: target_binding.clone(),
+                                run_id,
+                                reason: RedactedString::new(render_err.to_string()),
+                            },
+                        )
+                        .await;
+                        return Err(map_render_error(render_err));
+                    }
+                }
+            }
+            ProductOutboundPayload::GatePrompt(view) => {
+                match resolved_target.clone().and_then(|reply| {
+                    render_gate_prompt(&reply, &view, self.config.egress_credential_handle.clone())
+                }) {
+                    Ok(reqs) => reqs,
+                    Err(render_err) => {
+                        record_status(
+                            delivery_sink,
+                            DeliveryStatus::FailedPermanent {
+                                attempt_id,
+                                target: target_binding.clone(),
+                                run_id,
+                                reason: RedactedString::new(render_err.to_string()),
+                            },
+                        )
+                        .await;
+                        return Err(map_render_error(render_err));
+                    }
+                }
             }
             ProductOutboundPayload::CapabilityActivity(_)
             | ProductOutboundPayload::CapabilityDisplayPreview(_)
@@ -314,70 +352,109 @@ impl ProductAdapter for TelegramV2Adapter {
             }
         };
 
-        let response = match egress.send(request).await {
-            Ok(resp) => resp,
-            Err(egress_err) => {
-                record_status(
-                    delivery_sink,
-                    egress_err_to_delivery_status(
+        // Chunked final replies send SEQUENTIALLY and stop at the first
+        // failure (qa-telegram:C3): ordering is user-visible, and one honest
+        // failure status per attempt beats a hole in the middle of a reply.
+        // Chunks already delivered stand — Telegram has no transaction — so
+        // the failure status is the truthful record of a partial delivery.
+        // Once ANY chunk has been delivered, every subsequent failure is
+        // TERMINAL for the attempt (FailedPermanent + a non-transient
+        // error): re-delivering the envelope restarts from chunk zero and
+        // would duplicate user-visible text. Only a first-chunk failure —
+        // which delivered nothing — keeps its normal retryable mapping.
+        let mut any_chunk_delivered = false;
+        for request in requests {
+            let response = match egress.send(request).await {
+                Ok(resp) => resp,
+                Err(egress_err) => {
+                    let status = egress_err_to_delivery_status(
                         &egress_err,
                         attempt_id,
                         target_binding.clone(),
                         run_id,
-                    ),
-                )
-                .await;
-                return Err(map_egress_error(egress_err));
-            }
-        };
+                    );
+                    let status = if any_chunk_delivered {
+                        demote_to_permanent_after_partial_delivery(status)
+                    } else {
+                        status
+                    };
+                    record_status(delivery_sink, status).await;
+                    if any_chunk_delivered {
+                        return Err(ProductAdapterError::EgressDenied {
+                            reason: RedactedString::new(egress_err.to_string()),
+                        });
+                    }
+                    return Err(map_egress_error(egress_err));
+                }
+            };
 
-        if !(200..300).contains(&response.status()) {
-            let reason = RedactedString::new(format!(
-                "telegram bot api returned status {}",
-                response.status()
-            ));
-            // Group transient HTTP outcomes (5xx, 429) into the retryable
-            // bucket so the host glue can re-deliver. 4xx (except 429) is
-            // a deterministic policy-denied result and should NOT be
-            // retried. 401/403 surface as FailedUnauthorized so the host
-            // can pause re-delivery until credentials change.
-            if response.status() >= 500 || response.status() == 429 {
-                record_status(
-                    delivery_sink,
-                    DeliveryStatus::FailedRetryable {
-                        attempt_id,
-                        target: target_binding.clone(),
-                        run_id,
-                        reason: reason.clone(),
-                    },
-                )
-                .await;
-                return Err(ProductAdapterError::WorkflowTransient { reason });
+            if !(200..300).contains(&response.status()) {
+                // On a multi-chunk reply the failure stops the sequence here;
+                // the recorded status is the honest report of the partial
+                // delivery (chunk position is deliberately not interpolated —
+                // the reason string is a stable category).
+                let reason = RedactedString::new(format!(
+                    "telegram bot api returned status {}",
+                    response.status()
+                ));
+                if any_chunk_delivered {
+                    // Partial delivery: terminal, never re-deliverable.
+                    record_status(
+                        delivery_sink,
+                        DeliveryStatus::FailedPermanent {
+                            attempt_id,
+                            target: target_binding.clone(),
+                            run_id,
+                            reason: reason.clone(),
+                        },
+                    )
+                    .await;
+                    return Err(ProductAdapterError::EgressDenied { reason });
+                }
+                // Group transient HTTP outcomes (5xx, 429) into the retryable
+                // bucket so the host glue can re-deliver. 4xx (except 429) is
+                // a deterministic policy-denied result and should NOT be
+                // retried. 401/403 surface as FailedUnauthorized so the host
+                // can pause re-delivery until credentials change.
+                if response.status() >= 500 || response.status() == 429 {
+                    record_status(
+                        delivery_sink,
+                        DeliveryStatus::FailedRetryable {
+                            attempt_id,
+                            target: target_binding.clone(),
+                            run_id,
+                            reason: reason.clone(),
+                        },
+                    )
+                    .await;
+                    return Err(ProductAdapterError::WorkflowTransient { reason });
+                }
+                if response.status() == 401 || response.status() == 403 {
+                    record_status(
+                        delivery_sink,
+                        DeliveryStatus::FailedUnauthorized {
+                            attempt_id,
+                            target: target_binding.clone(),
+                            run_id,
+                            reason: reason.clone(),
+                        },
+                    )
+                    .await;
+                } else {
+                    record_status(
+                        delivery_sink,
+                        DeliveryStatus::FailedPermanent {
+                            attempt_id,
+                            target: target_binding.clone(),
+                            run_id,
+                            reason: reason.clone(),
+                        },
+                    )
+                    .await;
+                }
+                return Err(ProductAdapterError::EgressDenied { reason });
             }
-            if response.status() == 401 || response.status() == 403 {
-                record_status(
-                    delivery_sink,
-                    DeliveryStatus::FailedUnauthorized {
-                        attempt_id,
-                        target: target_binding.clone(),
-                        run_id,
-                        reason: reason.clone(),
-                    },
-                )
-                .await;
-            } else {
-                record_status(
-                    delivery_sink,
-                    DeliveryStatus::FailedPermanent {
-                        attempt_id,
-                        target: target_binding.clone(),
-                        run_id,
-                        reason: reason.clone(),
-                    },
-                )
-                .await;
-            }
-            return Err(ProductAdapterError::EgressDenied { reason });
+            any_chunk_delivered = true;
         }
 
         record_status(
@@ -390,6 +467,32 @@ impl ProductAdapter for TelegramV2Adapter {
         )
         .await;
         Ok(ProductRenderOutcome::DeliveryRecorded)
+    }
+}
+
+/// After a chunk has already been delivered, retryable statuses demote to
+/// permanent: automatic re-delivery restarts from chunk zero and would
+/// duplicate the already-delivered text. Non-retryable statuses pass through.
+fn demote_to_permanent_after_partial_delivery(status: DeliveryStatus) -> DeliveryStatus {
+    match status {
+        DeliveryStatus::FailedRetryable {
+            attempt_id,
+            target,
+            run_id,
+            reason,
+        }
+        | DeliveryStatus::FailedUnauthorized {
+            attempt_id,
+            target,
+            run_id,
+            reason,
+        } => DeliveryStatus::FailedPermanent {
+            attempt_id,
+            target,
+            run_id,
+            reason,
+        },
+        other => other,
     }
 }
 
@@ -587,6 +690,164 @@ mod tests {
             .parse_inbound(b"{\"update_id\":1}", &unverified)
             .expect_err("must fail");
         assert!(matches!(err, ProductAdapterError::Authentication(_)));
+    }
+
+    /// qa-telegram:C3 — an over-4096-unit final reply egresses as ORDERED
+    /// sequential sendMessage chunks and records exactly one Delivered for
+    /// the attempt once every chunk lands.
+    #[tokio::test]
+    async fn render_outbound_sends_chunks_sequentially_and_records_one_delivered() {
+        let adapter = TelegramV2Adapter::new(config(false));
+        let egress = FakeProtocolHttpEgress::new(["api.telegram.org".to_string()]);
+        egress.allow_credential_handle("telegram_bot_token");
+        let sink = ironclaw_product_adapters::FakeOutboundDeliverySink::new();
+        let envelope = ProductOutboundEnvelope {
+            adapter_id: adapter.adapter_id().clone(),
+            installation_id: adapter.installation_id().clone(),
+            target: test_outbound_target(),
+            projection_cursor: test_projection_cursor(),
+            payload: ProductOutboundPayload::FinalReply(
+                ironclaw_product_adapters::FinalReplyView {
+                    turn_run_id: ironclaw_turns::TurnRunId::new(),
+                    text: "x".repeat(9000),
+                    generated_at: chrono::Utc::now(),
+                },
+            ),
+            delivery_attempt_id: uuid::Uuid::new_v4(),
+        };
+        adapter
+            .render_outbound(envelope, &egress, &sink)
+            .await
+            .expect("render ok");
+        let calls = egress.calls();
+        assert_eq!(
+            calls.len(),
+            3,
+            "9000 units -> three sequential sendMessage calls"
+        );
+        let mut reassembled = String::new();
+        for call in &calls {
+            assert_eq!(call.path.as_str(), "/sendMessage");
+            let body: serde_json::Value = serde_json::from_slice(&call.body).expect("body json");
+            reassembled.push_str(body["text"].as_str().expect("text"));
+        }
+        assert_eq!(reassembled.len(), 9000, "ordered chunks are lossless");
+        let statuses = sink.statuses();
+        assert_eq!(statuses.len(), 1, "one status per delivery attempt");
+        assert!(
+            matches!(statuses[0], DeliveryStatus::Delivered { .. }),
+            "all chunks landed -> Delivered, got {:?}",
+            statuses[0]
+        );
+    }
+
+    /// qa-telegram:C3 — once ANY chunk has been delivered, a later failure
+    /// is TERMINAL for the attempt (FailedPermanent): re-delivering the
+    /// envelope would resend the already-delivered chunks and duplicate
+    /// user-visible text, so the host must never auto-retry it.
+    #[tokio::test]
+    async fn render_outbound_partial_chunk_failure_is_terminal_not_retryable() {
+        let adapter = TelegramV2Adapter::new(config(false));
+        let egress = FakeProtocolHttpEgress::new(["api.telegram.org".to_string()]);
+        egress.allow_credential_handle("telegram_bot_token");
+        // First chunk lands, second hits a 500; a third response staying
+        // queued would prove an unwanted third send.
+        egress.program_response(
+            "api.telegram.org",
+            Ok(ironclaw_product_adapters::EgressResponse::new(
+                200,
+                br#"{"ok":true,"result":{"message_id":1}}"#.to_vec(),
+            )),
+        );
+        egress.program_response(
+            "api.telegram.org",
+            Ok(ironclaw_product_adapters::EgressResponse::new(
+                500,
+                br#"{"ok":false,"description":"scripted outage"}"#.to_vec(),
+            )),
+        );
+        let sink = ironclaw_product_adapters::FakeOutboundDeliverySink::new();
+        let envelope = ProductOutboundEnvelope {
+            adapter_id: adapter.adapter_id().clone(),
+            installation_id: adapter.installation_id().clone(),
+            target: test_outbound_target(),
+            projection_cursor: test_projection_cursor(),
+            payload: ProductOutboundPayload::FinalReply(
+                ironclaw_product_adapters::FinalReplyView {
+                    turn_run_id: ironclaw_turns::TurnRunId::new(),
+                    text: "y".repeat(9000),
+                    generated_at: chrono::Utc::now(),
+                },
+            ),
+            delivery_attempt_id: uuid::Uuid::new_v4(),
+        };
+        let error = adapter
+            .render_outbound(envelope, &egress, &sink)
+            .await
+            .expect_err("mid-sequence failure surfaces");
+        assert!(
+            !matches!(error, ProductAdapterError::WorkflowTransient { .. }),
+            "a partial delivery must not surface as transient/retryable: {error:?}"
+        );
+        assert_eq!(
+            egress.calls().len(),
+            2,
+            "the failed second chunk stops the sequence"
+        );
+        let statuses = sink.statuses();
+        assert_eq!(statuses.len(), 1, "one honest status for the attempt");
+        assert!(
+            matches!(statuses[0], DeliveryStatus::FailedPermanent { .. }),
+            "500 AFTER a delivered chunk -> FailedPermanent (re-delivery would duplicate text), got {:?}",
+            statuses[0]
+        );
+    }
+
+    /// qa-telegram:C3 — a FIRST-chunk failure delivered nothing, so it stays
+    /// honestly retryable: re-delivery cannot duplicate anything.
+    #[tokio::test]
+    async fn render_outbound_first_chunk_failure_stays_retryable() {
+        let adapter = TelegramV2Adapter::new(config(false));
+        let egress = FakeProtocolHttpEgress::new(["api.telegram.org".to_string()]);
+        egress.allow_credential_handle("telegram_bot_token");
+        egress.program_response(
+            "api.telegram.org",
+            Ok(ironclaw_product_adapters::EgressResponse::new(
+                500,
+                br#"{"ok":false,"description":"scripted outage"}"#.to_vec(),
+            )),
+        );
+        let sink = ironclaw_product_adapters::FakeOutboundDeliverySink::new();
+        let envelope = ProductOutboundEnvelope {
+            adapter_id: adapter.adapter_id().clone(),
+            installation_id: adapter.installation_id().clone(),
+            target: test_outbound_target(),
+            projection_cursor: test_projection_cursor(),
+            payload: ProductOutboundPayload::FinalReply(
+                ironclaw_product_adapters::FinalReplyView {
+                    turn_run_id: ironclaw_turns::TurnRunId::new(),
+                    text: "z".repeat(9000),
+                    generated_at: chrono::Utc::now(),
+                },
+            ),
+            delivery_attempt_id: uuid::Uuid::new_v4(),
+        };
+        let error = adapter
+            .render_outbound(envelope, &egress, &sink)
+            .await
+            .expect_err("first-chunk failure surfaces");
+        assert!(matches!(
+            error,
+            ProductAdapterError::WorkflowTransient { .. }
+        ));
+        assert_eq!(egress.calls().len(), 1, "nothing delivered, sequence stops");
+        let statuses = sink.statuses();
+        assert_eq!(statuses.len(), 1);
+        assert!(
+            matches!(statuses[0], DeliveryStatus::FailedRetryable { .. }),
+            "500 with zero delivered chunks stays retryable, got {:?}",
+            statuses[0]
+        );
     }
 
     #[tokio::test]
@@ -955,5 +1216,167 @@ mod tests {
             statuses[0],
             DeliveryStatus::FailedPermanent { .. }
         ));
+    }
+
+    /// Ben's regression (2026-07-17): a Telegram run parked `BlockedAuth`
+    /// with an OAuth-shaped challenge produced SILENCE — the shared channel
+    /// delivery driver built an `AuthPrompt` (authorization URL and all), but
+    /// this adapter's stub arm recorded `Deferred` and rendered nothing, so
+    /// the DM saw "thinking…" get deleted and then no message. An auth prompt
+    /// must deliver a `sendMessage` carrying the authorization link.
+    #[tokio::test]
+    async fn render_outbound_auth_prompt_sends_link_message_and_records_delivered() {
+        let adapter = TelegramV2Adapter::new(config(false));
+        let egress = FakeProtocolHttpEgress::new(["api.telegram.org".to_string()]);
+        egress.allow_credential_handle("telegram_bot_token");
+        let sink = ironclaw_product_adapters::FakeOutboundDeliverySink::new();
+        let run_id = ironclaw_turns::TurnRunId::new();
+        let envelope = ProductOutboundEnvelope {
+            adapter_id: adapter.adapter_id().clone(),
+            installation_id: adapter.installation_id().clone(),
+            target: test_outbound_target(),
+            projection_cursor: test_projection_cursor(),
+            payload: ProductOutboundPayload::AuthPrompt(
+                ironclaw_product_adapters::AuthPromptView {
+                    turn_run_id: run_id,
+                    auth_request_ref: "auth:flow-1".into(),
+                    invocation_id: None,
+                    headline: "Authorization needed".into(),
+                    body: "Connect your Google account to continue this run.".into(),
+                    challenge_kind: None,
+                    provider: Some("google".into()),
+                    account_label: None,
+                    authorization_url: Some(
+                        "https://accounts.google.com/o/oauth2/v2/auth?client_id=test".into(),
+                    ),
+                    expires_at: None,
+                    connection: None,
+                },
+            ),
+            delivery_attempt_id: uuid::Uuid::new_v4(),
+        };
+
+        adapter
+            .render_outbound(envelope, &egress, &sink)
+            .await
+            .expect("auth prompt renders");
+
+        let calls = egress.calls();
+        assert_eq!(calls.len(), 1, "auth prompt is one sendMessage");
+        assert_eq!(calls[0].path.as_str(), "/sendMessage");
+        let body: serde_json::Value = serde_json::from_slice(&calls[0].body).expect("body json");
+        assert_eq!(body["chat_id"], -100);
+        let text = body["text"].as_str().expect("text");
+        assert!(text.contains("Authorization needed"), "headline: {text}");
+        assert!(
+            text.contains("https://accounts.google.com/o/oauth2/v2/auth?client_id=test"),
+            "the authorization URL is the actionable part of the prompt: {text}"
+        );
+        assert!(
+            body.get("parse_mode").is_none(),
+            "prompts are plain text — no parse_mode (qa-telegram:C4)"
+        );
+        let statuses = sink.statuses();
+        assert_eq!(statuses.len(), 1);
+        assert!(
+            matches!(
+                statuses[0],
+                DeliveryStatus::Delivered {
+                    run_id: Some(recorded),
+                    ..
+                } if recorded == run_id
+            ),
+            "delivered with the originating run id for correlation, got {:?}",
+            statuses[0]
+        );
+    }
+
+    /// Companion to the auth-prompt regression: a `BlockedApproval` run's
+    /// `GatePrompt` also rendered to nothing. The prompt advertises the
+    /// in-chat `approve`/`deny` reply (parsed by the shared grammar in
+    /// `ironclaw_product_adapters::interaction_commands`) plus the web-app
+    /// fallback — and the advertised command is round-tripped through that
+    /// grammar below so copy and parser cannot drift.
+    #[tokio::test]
+    async fn render_outbound_gate_prompt_sends_webapp_redirect_and_records_delivered() {
+        let adapter = TelegramV2Adapter::new(config(false));
+        let egress = FakeProtocolHttpEgress::new(["api.telegram.org".to_string()]);
+        egress.allow_credential_handle("telegram_bot_token");
+        let sink = ironclaw_product_adapters::FakeOutboundDeliverySink::new();
+        let run_id = ironclaw_turns::TurnRunId::new();
+        let envelope = ProductOutboundEnvelope {
+            adapter_id: adapter.adapter_id().clone(),
+            installation_id: adapter.installation_id().clone(),
+            target: test_outbound_target(),
+            projection_cursor: test_projection_cursor(),
+            payload: ProductOutboundPayload::GatePrompt(
+                ironclaw_product_adapters::GatePromptView {
+                    turn_run_id: run_id,
+                    gate_ref: "gate:approval-1".into(),
+                    invocation_id: None,
+                    headline: "Approval needed".into(),
+                    body: "I want to write notes.md to your workspace.".into(),
+                    allow_always: false,
+                    approval_context: None,
+                },
+            ),
+            delivery_attempt_id: uuid::Uuid::new_v4(),
+        };
+
+        adapter
+            .render_outbound(envelope, &egress, &sink)
+            .await
+            .expect("gate prompt renders");
+
+        let calls = egress.calls();
+        assert_eq!(calls.len(), 1, "gate prompt is one sendMessage");
+        assert_eq!(calls[0].path.as_str(), "/sendMessage");
+        let body: serde_json::Value = serde_json::from_slice(&calls[0].body).expect("body json");
+        assert_eq!(body["chat_id"], -100);
+        let text = body["text"].as_str().expect("text");
+        assert!(text.contains("Approval needed"), "headline: {text}");
+        assert!(
+            text.contains("Reply approve or deny in this chat"),
+            "the prompt advertises the in-chat reply: {text}"
+        );
+        assert!(
+            text.contains("IronClaw web app"),
+            "the prompt keeps the web-app fallback: {text}"
+        );
+        // Drift guard at the adapter tier: the targeted command this copy
+        // advertises must parse through the shared interaction grammar.
+        let start = text
+            .find("approve gate:")
+            .expect("advertised targeted command");
+        let advertised: String = text[start..]
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let parsed = ironclaw_product_adapters::parse_interaction_resolution_text(
+            &advertised,
+            ironclaw_product_adapters::ProductTriggerReason::DirectChat,
+        )
+        .expect("advertised command is grammatical");
+        assert!(
+            matches!(
+                parsed,
+                Some(ironclaw_product_adapters::ProductInboundPayload::ApprovalResolution(_))
+            ),
+            "advertised command parses as an approval resolution, got {parsed:?}"
+        );
+        let statuses = sink.statuses();
+        assert_eq!(statuses.len(), 1);
+        assert!(
+            matches!(
+                statuses[0],
+                DeliveryStatus::Delivered {
+                    run_id: Some(recorded),
+                    ..
+                } if recorded == run_id
+            ),
+            "delivered with the originating run id for correlation, got {:?}",
+            statuses[0]
+        );
     }
 }

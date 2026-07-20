@@ -66,6 +66,7 @@ function renderModal({
     }),
     Button() {},
     Icon() {},
+    TelegramPairingPanel() {},
     console: { error() {} },
     React: {
       useState: (initial) => [
@@ -152,6 +153,7 @@ function renderModal({
   return {
     calls,
     context,
+    TelegramPairingPanel: context.TelegramPairingPanel,
     invalidations,
     mutationConfig,
     notifications,
@@ -197,18 +199,72 @@ function findHandler(node, bodyMarker, seen = new Set()) {
   return null;
 }
 
+
+function renderedContainsComponent(rendered, component) {
+  if (!rendered || typeof rendered !== "object") {
+    return rendered === component;
+  }
+  if (Array.isArray(rendered)) {
+    return rendered.some((value) => renderedContainsComponent(value, component));
+  }
+  if (Array.isArray(rendered.values)) {
+    return rendered.values.some((value) => renderedContainsComponent(value, component));
+  }
+  return false;
+}
+
 test("ConfigureModal renders the code-entry panel for a channel extension that uses manual setup", () => {
+  // A generic proof-code channel — NOT telegram, whose WebGeneratedCode flow
+  // renders the minted-code pairing panel instead of a paste box.
   const { rendered, mutationConfig } = renderModal({
     kind: "channel",
-    packageRef: { kind: "extension", id: "telegram" },
-    channel: "telegram",
-    displayName: "Telegram",
+    packageRef: { kind: "extension", id: "whatsapp" },
+    channel: "whatsapp",
+    displayName: "WhatsApp",
     onboardingState: "pairing_required",
   });
   assert.ok(mutationConfig, "a pairing mutation must be configured");
   const body = JSON.stringify(rendered);
   assert.match(body, /pairing\.placeholder/);
   assert.match(body, /pairing\.instructions/);
+});
+
+test("ConfigureModal hosts the Telegram pairing panel instead of a paste box or no-config fallback", () => {
+  const view = renderModal({
+    kind: "channel",
+    packageRef: { kind: "extension", id: "telegram" },
+    displayName: "Telegram",
+    // Even a pairing_required lifecycle state must not fall into the
+    // proof-code paste box: WebGeneratedCode mints the code on this side.
+    onboardingState: "pairing_required",
+  });
+
+  assert.equal(
+    renderedContainsComponent(view.rendered, view.TelegramPairingPanel),
+    true,
+    "telegram Configure must render the WebGeneratedCode pairing panel",
+  );
+  const body = JSON.stringify(view.rendered);
+  assert.ok(!body.includes("pairing.placeholder"), "no proof-code paste box for telegram");
+  assert.ok(
+    !body.includes("extensions.noConfigRequired"),
+    "telegram Configure must never claim no configuration is required",
+  );
+});
+
+test("ConfigureModal keeps the Telegram panel for an installed (non-pairing) lifecycle state", () => {
+  const view = renderModal({
+    kind: "channel",
+    packageRef: { kind: "extension", id: "telegram" },
+    displayName: "Telegram",
+    onboardingState: "installed",
+  });
+
+  assert.equal(
+    renderedContainsComponent(view.rendered, view.TelegramPairingPanel),
+    true,
+    "the empty-secrets fallback must not swallow the telegram panel",
+  );
 });
 
 test("ConfigureModal renders Slack OAuth without opening the popup automatically", () => {
@@ -481,9 +537,9 @@ test("ConfigureModal does not route setup-required channels to the pairing panel
 test("ConfigureModal localizes channel pairing copy", () => {
   const { rendered } = renderModal({
     kind: "channel",
-    packageRef: { kind: "extension", id: "telegram" },
-    channel: "telegram",
-    displayName: "Telegram",
+    packageRef: { kind: "extension", id: "whatsapp" },
+    channel: "whatsapp",
+    displayName: "WhatsApp",
     onboardingState: "pairing_required",
     translate: (key) =>
       ({

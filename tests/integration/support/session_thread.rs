@@ -25,7 +25,7 @@ pub enum RebornThreadHarnessError {
 /// Thin harness over `FilesystemSessionThreadService<F>` for asserting thread history.
 ///
 /// Defaults to `InMemoryBackend` (CAS-capable, models the production DB-backed filesystem)
-/// rather than the byte-only `LocalFilesystem` (see e3e155803). The integration tier uses
+/// rather than the byte-only `DiskFilesystem` (see e3e155803). The integration tier uses
 /// `RebornThreadHarness<CompositeRootFilesystem>` via `filesystem_shared_composite`, mounted
 /// on the per-`build()` production-path composite.
 pub struct RebornThreadHarness<F = InMemoryBackend>

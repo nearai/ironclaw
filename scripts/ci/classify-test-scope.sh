@@ -78,6 +78,9 @@ is_reborn_test_path() {
     crates/ironclaw_product_*/*|crates/ironclaw_slack_v2_adapter/*|crates/ironclaw_telegram_v2_adapter/*)
       return 0
       ;;
+    crates/ironclaw_channel_host/*|crates/ironclaw_channel_delivery/*|crates/ironclaw_telegram_extension/*)
+      return 0
+      ;;
     crates/ironclaw_wasm_product_adapters/*|crates/ironclaw_webui/*)
       return 0
       ;;

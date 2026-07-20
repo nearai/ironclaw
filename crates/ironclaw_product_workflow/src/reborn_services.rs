@@ -2716,7 +2716,7 @@ pub struct RebornServices {
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
     llm_config: Option<Arc<dyn LlmConfigService>>,
-    // arch-exempt: optional_arc, genuinely optional — the active-model reader is wired only under the root-llm-provider feature; cold-boot/no-LLM builds and tests run without it (mirrors the sibling optional llm_config field), plan #5985
+    // arch-exempt: optional_arc, genuinely optional — the active-model reader is wired only when the runtime has an LLM reload handle; runtimes built without one, and tests, run without it (mirrors the sibling optional llm_config field), plan #5985
     active_model_reader: Option<Arc<dyn ActiveModelReader>>,
     operator_approval_config: Option<RebornOperatorApprovalConfig>,
     thread_operation_locks: Arc<ThreadOperationLocks>,

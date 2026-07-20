@@ -31,5 +31,7 @@ tracing = "0.1"
 [dev-dependencies]
 # Enables the in-memory-backed capability-lease store constructor for tests only.
 ironclaw_authorization = { path = "../ironclaw_authorization", features = ["test-support"] }
+# Enables the in-memory-backed run-state/approval store constructors for tests only.
+ironclaw_run_state = { path = "../ironclaw_run_state", features = ["test-support"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

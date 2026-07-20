@@ -77,6 +77,7 @@ registerPack("en", {
   "login.connect": "Connect",
   "login.oauthDivider": "or continue with",
   "login.oauthProvider": "Continue with {provider}",
+  "login.localDevHint": "Running IronClaw locally? Get your sign-in link:",
 
   // Chat — empty state
   "chat.heroTitle": "Hello, what do you need help with?",
@@ -287,6 +288,7 @@ registerPack("en", {
   "settings.exportSuccess": "Settings exported",
   "settings.importSuccess": "Settings imported",
   "settings.importInvalid": "Selected file must contain a settings object",
+  "settings.importNoSupported": "No supported settings found in the selected file",
   "settings.importFailed": "Import failed: {message}",
 
   // Settings — restart banner
@@ -503,6 +505,9 @@ registerPack("en", {
   "channels.slack": "Slack",
   "channels.slackDesc": "Tenant app channel for DMs and app mentions",
   "channels.slackDetail": "Tenant Slack app install",
+  "channels.telegram": "Telegram",
+  "channels.telegramDesc": "Tenant bot channel for paired direct messages",
+  "channels.telegramDetail": "BotFather bot token",
   "channels.statusOn": "on",
   "channels.statusOff": "off",
   "channels.ready": "ready",
@@ -787,6 +792,7 @@ registerPack("en", {
   "automations.filter.completed": "Completed",
   "automations.refresh": "Refresh automations",
   "automations.error.loadFailed": "Unable to load automations",
+  "automations.error.actionFailed": "Unable to update the automation. Please try again.",
   "automations.rename.action": "Rename automation",
   "automations.rename.nameLabel": "Automation name",
   "automations.rename.nameRequired": "Automation name is required.",
@@ -1492,5 +1498,36 @@ registerPack("en", {
   "slackSetup.example.sharedSubject": "Example: user:slack-shared",
   "slackSetup.example.botToken": "Example: xoxb-...",
   "slackSetup.placeholder.defaultOperator": "default operator",
-  "slackSetup.placeholder.keepSecret": "Configured; leave blank to keep"
+  "slackSetup.placeholder.keepSecret": "Configured; leave blank to keep",
+
+  // Telegram setup + pairing
+  "telegramSetup.title": "Telegram setup",
+  "telegramSetup.instructions": "Create a bot with @BotFather and paste its token. IronClaw registers the webhook for you.",
+  "telegramSetup.save": "Save setup",
+  "telegramSetup.saved": "Telegram setup saved.",
+  "telegramSetup.saveFailed": "Telegram setup update failed.",
+  "telegramSetup.field.botToken": "Bot token",
+  "telegramSetup.field.webhookUrl": "Public webhook URL override",
+  "telegramSetup.help.botToken": "Token from @BotFather (/newbot or /token).",
+  "telegramSetup.help.webhookUrl": "Optional. Public HTTPS URL Telegram calls with updates; blank uses the detected public URL.",
+  "telegramSetup.example.botToken": "Example: 123456789:AA...",
+  "telegramSetup.example.webhookUrl": "Example: https://assistant.example.com",
+  "telegramSetup.placeholder.keepSecret": "••• saved — leave blank to keep",
+  "telegramSetup.connectedAs": "Connected bot:",
+  "telegramSetup.remove": "Remove bot",
+  "telegramSetup.removeConfirm": "Remove the Telegram bot? The channel stops until a new token is saved.",
+  "telegramSetup.removeFailed": "Removing the Telegram bot failed.",
+  "telegramPairing.title": "Connect Telegram",
+  "telegramPairing.instructions": "Scan the QR code or open the link, then press Start in Telegram to pair this account.",
+  "telegramPairing.copyCode": "Copy code",
+  "telegramPairing.copyUsername": "Copy bot username",
+  "telegramPairing.openInTelegram": "Open in Telegram",
+  "telegramPairing.qrAlt": "Telegram pairing QR",
+  "telegramPairing.expiresIn": "Expires in {time}",
+  "telegramPairing.expired": "This pairing code expired.",
+  "telegramPairing.getNewCode": "Get a new code",
+  "telegramPairing.paired": "Telegram paired",
+  "telegramPairing.disconnect": "Disconnect",
+  "telegramPairing.disconnectFailed": "Disconnecting Telegram failed.",
+  "telegramPairing.loadFailed": "Could not get a Telegram pairing code."
 });

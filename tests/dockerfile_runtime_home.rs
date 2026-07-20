@@ -51,7 +51,7 @@ fn setup_fake_entrypoint() -> FakeEntrypoint {
 
     std::fs::create_dir_all(&bin_dir).expect("bin dir");
     write_executable(
-        &bin_dir.join("ironclaw-reborn"),
+        &bin_dir.join("ironclaw"),
         "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$IRONCLAW_REBORN_TEST_ARGS_FILE\"\n",
     );
     write_executable(
@@ -77,7 +77,7 @@ fn setup_fake_entrypoint_recording_cp() -> FakeEntrypoint {
 
     std::fs::create_dir_all(&bin_dir).expect("bin dir");
     write_executable(
-        &bin_dir.join("ironclaw-reborn"),
+        &bin_dir.join("ironclaw"),
         "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$IRONCLAW_REBORN_TEST_ARGS_FILE\"\n",
     );
     write_executable(
@@ -151,7 +151,7 @@ fn reborn_dockerfile_uses_feature_matched_cache_and_loopback_default() {
 
     assert!(
         dockerfile.contains(
-            "cargo chef cook \\\n    --profile dist \\\n    --package ironclaw_reborn_cli \\\n    --features webui-v2-beta,slack-v2-host-beta"
+            "cargo chef cook \\\n    --profile dist \\\n    --package ironclaw_reborn_cli \\\n    --features libsql,postgres,inmemory-turn-state"
         ),
         "cargo chef cook must target the Reborn CLI package with the same features as the final build"
     );

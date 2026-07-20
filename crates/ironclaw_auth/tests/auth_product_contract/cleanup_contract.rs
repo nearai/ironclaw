@@ -834,6 +834,83 @@ async fn completed_unacknowledged_turn_gate_cleanup_emits_once_then_converges() 
     assert!(retry.canceled_turn_gate_continuations.is_empty());
 }
 
+#[tokio::test]
+async fn expired_unacknowledged_turn_gate_cleanup_emits_once_then_converges() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let flow = services
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: owner.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: provider(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new(
+                    "https://example.com/oauth/authorize",
+                )
+                .unwrap(),
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+            continuation: AuthContinuationRef::TurnGateResume {
+                turn_run_ref: TurnRunRef::new(uuid::Uuid::new_v4().to_string())
+                    .expect("turn run ref"),
+                gate_ref: AuthGateRef::new("gate:cleanup-expired").expect("gate ref"),
+            },
+            update_binding: None,
+            opaque_state_hash: Some(state_hash("expired-state")),
+            pkce_verifier_hash: Some(pkce_hash("expired-pkce")),
+            expires_at: Utc::now() - Duration::seconds(1),
+        })
+        .await
+        .expect("flow");
+    let expiry_error = services
+        .claim_oauth_callback(
+            &owner,
+            ironclaw_auth::OAuthCallbackClaimRequest {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash("expired-state"),
+                provider: provider(),
+                pkce_verifier_hash: pkce_hash("expired-pkce"),
+            },
+        )
+        .await
+        .expect_err("expired callback must terminalize the flow");
+    assert_eq!(expiry_error, AuthProductError::UnknownOrExpiredFlow);
+
+    let request = SecretCleanupRequest {
+        scope: owner.clone(),
+        extension_id: ExtensionId::new("github").expect("extension"),
+        provider: Some(provider()),
+        lifecycle_package: None,
+        action: SecretCleanupAction::Uninstall,
+    };
+    let report = services
+        .cleanup_for_lifecycle(request.clone())
+        .await
+        .expect("cleanup");
+    assert_eq!(report.canceled_turn_gate_continuations.len(), 1);
+    let event = &report.canceled_turn_gate_continuations[0];
+    assert_eq!(event.flow_id, flow.id);
+
+    services
+        .mark_continuation_dispatched(&owner, flow.id, event.emitted_at)
+        .await
+        .expect("acknowledge expired cleanup continuation");
+    let acknowledged = services
+        .get_flow(&owner, flow.id)
+        .await
+        .expect("expired flow lookup")
+        .expect("expired flow remains durable");
+    assert_eq!(acknowledged.status, AuthFlowStatus::Expired);
+    assert!(acknowledged.continuation_emitted_at.is_some());
+
+    let retry = services
+        .cleanup_for_lifecycle(request)
+        .await
+        .expect("cleanup retry");
+    assert!(retry.canceled_turn_gate_continuations.is_empty());
+}
+
 /// Uninstall's package selector cancels the removed extension's own
 /// `LifecycleActivation` flows even with NO provider selector — the shape the
 /// production removal path uses when the provider is shared with another

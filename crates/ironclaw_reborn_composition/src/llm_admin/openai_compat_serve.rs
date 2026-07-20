@@ -1,3 +1,4 @@
+// arch-exempt: large_file, §4.4.1 mechanical inline of the redundant LocalDevRootFilesystem alias -> CompositeRootFilesystem (de-prefix, no logic change), plan #6168
 //! Reborn host composition for OpenAI-compatible API routes.
 //!
 //! The route crate owns DTOs and HTTP handlers, but the Reborn host owns the
@@ -29,7 +30,6 @@ use ironclaw_product_workflow::{
     ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
     ResolvedProductActorUser, StaticProductInstallationResolver,
 };
-#[cfg(feature = "root-llm-provider")]
 use ironclaw_product_workflow::{
     LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, WebUiAuthenticatedCaller,
 };
@@ -53,7 +53,6 @@ use ironclaw_reborn_openai_compat::{
     OpenAiCompatExternalToolResume, OpenAiCompatExternalToolResumeRequest,
     OpenAiCompatExternalToolSpec, OpenAiCompatExternalToolStore, OpenAiCompatTurnRunRef,
 };
-#[cfg(feature = "root-llm-provider")]
 use ironclaw_reborn_openai_compat::{OpenAiCompatModelCatalog, OpenAiCompatModelEntry};
 use ironclaw_threads::{
     FinalizedAssistantMessageByRunRequest, LoadContextMessagesRequest, MessageKind, MessageStatus,
@@ -82,6 +81,23 @@ const OPENAI_COMPAT_PENDING_EXTERNAL_TOOL_FALLBACK_DELAY: Duration = Duration::f
 const OPENAI_COMPAT_EXTERNAL_TOOL_RESUME_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const OPENAI_COMPAT_EXTERNAL_TOOL_RESUME_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// OpenAI-compatible conversation bindings must survive a restart, so these
+/// routes need a durable backend. Without one the mount is refused rather than
+/// served over non-durable bindings.
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+pub async fn build_openai_compat_route_mount(
+    _runtime: &RebornRuntime,
+    _tenant_id: TenantId,
+    _default_agent_id: AgentId,
+    _default_project_id: Option<ProjectId>,
+) -> Result<ProtectedRouteMount, RebornBuildError> {
+    Err(RebornBuildError::InvalidConfig {
+        reason: "OpenAI-compatible routes require durable conversation bindings;                  configure a storage backend"
+            .to_string(),
+    })
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub async fn build_openai_compat_route_mount(
     runtime: &RebornRuntime,
     tenant_id: TenantId,
@@ -224,7 +240,6 @@ pub async fn build_openai_compat_route_mount(
     // `GET /v1/models` lists the deployment's configured models from the same
     // LLM-config source the operator WebUI uses. Wired only when the root LLM
     // provider is compiled in; otherwise the route stays fail-closed (501).
-    #[cfg(feature = "root-llm-provider")]
     let router_state = match crate::webui::facade::build_llm_config_service(runtime) {
         Some(llm_config) => {
             let catalog: Arc<dyn OpenAiCompatModelCatalog> =
@@ -244,7 +259,6 @@ pub async fn build_openai_compat_route_mount(
 /// The active selection (if any) is listed first, then every configured
 /// provider's active or default model, de-duplicated by model id while
 /// preserving order. Each entry's `owned_by` is the provider id.
-#[cfg(feature = "root-llm-provider")]
 fn model_entries_from_snapshot(snapshot: &LlmConfigSnapshot) -> Vec<OpenAiCompatModelEntry> {
     let mut candidates: Vec<(String, String)> = Vec::new();
     if let Some(active) = &snapshot.active
@@ -269,19 +283,16 @@ fn model_entries_from_snapshot(snapshot: &LlmConfigSnapshot) -> Vec<OpenAiCompat
 
 /// [`OpenAiCompatModelCatalog`] backed by the runtime's operator LLM-config
 /// service. Lists the deployment's configured models for `GET /v1/models`.
-#[cfg(feature = "root-llm-provider")]
 struct LlmConfigModelCatalog {
     llm_config: Arc<dyn LlmConfigService>,
 }
 
-#[cfg(feature = "root-llm-provider")]
 impl LlmConfigModelCatalog {
     fn new(llm_config: Arc<dyn LlmConfigService>) -> Self {
         Self { llm_config }
     }
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[async_trait]
 impl OpenAiCompatModelCatalog for LlmConfigModelCatalog {
     async fn list_models(
@@ -305,7 +316,6 @@ impl OpenAiCompatModelCatalog for LlmConfigModelCatalog {
     }
 }
 
-#[cfg(feature = "root-llm-provider")]
 fn map_llm_config_error_to_openai(error: LlmConfigServiceError) -> OpenAiCompatHttpError {
     match error {
         LlmConfigServiceError::InvalidRequest { .. } => {
@@ -1503,9 +1513,7 @@ fn response_object(
 }
 
 /// Build the OpenAI-compatible `usage` object from a run's cumulative token
-/// totals, pricing it (when the LLM cost table is compiled in) for the given
-/// effective model. Token counts are always reported; `cost` is present only
-/// under `root-llm-provider`.
+/// totals, pricing it for the given effective model.
 fn response_usage_from_model_usage(usage: &LoopModelUsage, model: &str) -> OpenAiResponseUsage {
     // OpenAI reports total input (including cache) as `input_tokens`, with the
     // cached subset broken out under `input_tokens_details`. `cache_read` is
@@ -1533,7 +1541,6 @@ fn response_usage_from_model_usage(usage: &LoopModelUsage, model: &str) -> OpenA
 /// provider's cache-read discount; output at the output rate. Unknown models
 /// fall back to the cost table's default (≈GPT-4o), so a new paid model never
 /// silently prices at zero.
-#[cfg(feature = "root-llm-provider")]
 fn response_cost_from_model_usage(usage: &LoopModelUsage, model: &str) -> Option<OpenAiCompatCost> {
     use ironclaw_common::llm_costs::{format_usd, price_usage};
 
@@ -1551,14 +1558,6 @@ fn response_cost_from_model_usage(usage: &LoopModelUsage, model: &str) -> Option
         total_cost_usd: format_usd(cost.total_cost),
         currency: OpenAiCompatCost::USD.to_string(),
     })
-}
-
-#[cfg(not(feature = "root-llm-provider"))]
-fn response_cost_from_model_usage(
-    _usage: &LoopModelUsage,
-    _model: &str,
-) -> Option<OpenAiCompatCost> {
-    None
 }
 
 fn thread_scope_from_projection_read(
@@ -1581,9 +1580,9 @@ fn thread_scope_from_projection_read(
 }
 
 fn openai_compat_ledger_filesystem(
-    root: Arc<crate::factory::LocalDevRootFilesystem>,
+    root: Arc<ironclaw_filesystem::CompositeRootFilesystem>,
     tenant_id: &TenantId,
-) -> Result<Arc<ScopedFilesystem<crate::factory::LocalDevRootFilesystem>>, RebornBuildError> {
+) -> Result<Arc<ScopedFilesystem<ironclaw_filesystem::CompositeRootFilesystem>>, RebornBuildError> {
     Ok(Arc::new(ScopedFilesystem::with_fixed_view(
         root,
         MountView::new(vec![MountGrant::new(

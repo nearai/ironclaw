@@ -75,6 +75,7 @@ registerPack("ar", {
   "login.connect": "اتصال",
   "login.oauthDivider": "أو المتابعة مع",
   "login.oauthProvider": "المتابعة مع {provider}",
+  "login.localDevHint": "هل تشغّل IronClaw محليًا؟ احصل على رابط تسجيل الدخول الخاص بك:",
 
   // Chat — empty state
   "chat.heroTitle": "مرحبًا، بماذا تحتاج إلى المساعدة؟",
@@ -278,6 +279,7 @@ registerPack("ar", {
   "settings.exportSuccess": "تم تصدير الإعدادات",
   "settings.importSuccess": "تم استيراد الإعدادات",
   "settings.importInvalid": "يجب أن يحتوي الملف المحدد على كائن إعدادات",
+  "settings.importNoSupported": "لا يحتوي الملف المحدد على إعدادات مدعومة",
   "settings.importFailed": "فشل الاستيراد: {message}",
 
   // Settings — restart banner
@@ -483,6 +485,9 @@ registerPack("ar", {
   "channels.slack": "Slack",
   "channels.slackDesc": "قناة تطبيق المستأجر للرسائل المباشرة وإشارات التطبيق",
   "channels.slackDetail": "تثبيت تطبيق Slack للمستأجر",
+  "channels.telegram": "Telegram",
+  "channels.telegramDesc": "قناة بوت المستأجر للرسائل المباشرة المقترنة",
+  "channels.telegramDetail": "رمز بوت BotFather",
   "channels.statusOn": "تشغيل",
   "channels.statusOff": "إيقاف",
   "channels.ready": "جاهز",
@@ -740,6 +745,7 @@ registerPack("ar", {
   "automations.filter.completed": "مكتمل",
   "automations.refresh": "تحديث عمليات الأتمتة",
   "automations.error.loadFailed": "غير قادر على تحميل عمليات الأتمتة",
+  "automations.error.actionFailed": "تعذّر تحديث الأتمتة. يُرجى المحاولة مرة أخرى.",
   "automations.rename.action": "إعادة تسمية الأتمتة",
   "automations.rename.nameLabel": "اسم الأتمتة",
   "automations.rename.nameRequired": "اسم الأتمتة مطلوب.",
@@ -1440,5 +1446,36 @@ registerPack("ar", {
   "slackSetup.example.sharedSubject": "مثال: user:slack-shared",
   "slackSetup.example.botToken": "مثال: xoxb-...",
   "slackSetup.placeholder.defaultOperator": "المشغّل الافتراضي",
-  "slackSetup.placeholder.keepSecret": "مكوّن؛ اتركه فارغًا للإبقاء عليه"
+  "slackSetup.placeholder.keepSecret": "مكوّن؛ اتركه فارغًا للإبقاء عليه",
+
+  // Telegram setup + pairing
+  "telegramSetup.title": "إعداد تيليجرام",
+  "telegramSetup.instructions": "أنشئ بوتًا عبر @BotFather والصق رمزه المميز. يسجّل IronClaw الويب هوك تلقائيًا.",
+  "telegramSetup.save": "حفظ الإعداد",
+  "telegramSetup.saved": "تم حفظ إعداد تيليجرام.",
+  "telegramSetup.saveFailed": "فشل تحديث إعداد تيليجرام.",
+  "telegramSetup.field.botToken": "رمز البوت",
+  "telegramSetup.field.webhookUrl": "تجاوز عنوان الويب هوك العام",
+  "telegramSetup.help.botToken": "الرمز من @BotFather (/newbot أو /token).",
+  "telegramSetup.help.webhookUrl": "اختياري. عنوان HTTPS عام يستدعيه تيليجرام؛ اتركه فارغًا لاستخدام العنوان العام المكتشف.",
+  "telegramSetup.example.botToken": "مثال: 123456789:AA...",
+  "telegramSetup.example.webhookUrl": "مثال: https://assistant.example.com",
+  "telegramSetup.placeholder.keepSecret": "••• محفوظ — اتركه فارغًا للإبقاء عليه",
+  "telegramSetup.connectedAs": "البوت المتصل:",
+  "telegramSetup.remove": "إزالة البوت",
+  "telegramSetup.removeConfirm": "هل تريد إزالة بوت تيليجرام؟ ستتوقف القناة حتى يُحفظ رمز جديد.",
+  "telegramSetup.removeFailed": "فشلت إزالة بوت تيليجرام.",
+  "telegramPairing.title": "ربط تيليجرام",
+  "telegramPairing.instructions": "امسح رمز QR أو افتح الرابط ثم اضغط «ابدأ» في تيليجرام لإقران هذا الحساب.",
+  "telegramPairing.copyCode": "نسخ الرمز",
+  "telegramPairing.copyUsername": "نسخ اسم البوت",
+  "telegramPairing.openInTelegram": "فتح في تيليجرام",
+  "telegramPairing.qrAlt": "رمز QR لإقران تيليجرام",
+  "telegramPairing.expiresIn": "تنتهي الصلاحية خلال {time}",
+  "telegramPairing.expired": "انتهت صلاحية رمز الإقران هذا.",
+  "telegramPairing.getNewCode": "الحصول على رمز جديد",
+  "telegramPairing.paired": "تم إقران تيليجرام",
+  "telegramPairing.disconnect": "قطع الاتصال",
+  "telegramPairing.disconnectFailed": "فشل قطع اتصال تيليجرام.",
+  "telegramPairing.loadFailed": "تعذّر الحصول على رمز إقران تيليجرام."
 });

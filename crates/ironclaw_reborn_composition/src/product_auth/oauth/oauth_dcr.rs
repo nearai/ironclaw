@@ -219,7 +219,7 @@ impl OAuthDcrProvider {
 
     #[allow(
         dead_code,
-        reason = "used by the webui-v2-beta extension OAuth route through RebornProductAuthServices"
+        reason = "used by the WebUI v2 extension OAuth route through RebornProductAuthServices"
     )]
     pub(crate) async fn start_setup_flow(
         &self,
@@ -313,7 +313,7 @@ impl OAuthDcrProvider {
 
     #[allow(
         dead_code,
-        reason = "used by the webui-v2-beta OAuth callback route through RebornProductAuthServices"
+        reason = "used by the WebUI v2 OAuth callback route through RebornProductAuthServices"
     )]
     pub(crate) async fn pkce_verifier_for_flow(
         &self,
@@ -910,7 +910,7 @@ impl OAuthDcrProviderRegistry {
 
     #[allow(
         dead_code,
-        reason = "used by the webui-v2-beta OAuth callback route through RebornProductAuthServices"
+        reason = "used by the WebUI v2 OAuth callback route through RebornProductAuthServices"
     )]
     pub(crate) async fn pkce_verifier_for_flow(
         &self,
@@ -926,7 +926,7 @@ impl OAuthDcrProviderRegistry {
 
     #[allow(
         dead_code,
-        reason = "used by the webui-v2-beta extension OAuth route through RebornProductAuthServices"
+        reason = "used by the WebUI v2 extension OAuth route through RebornProductAuthServices"
     )]
     pub(crate) async fn start_setup_flow(
         &self,
@@ -959,7 +959,7 @@ enum DcrFlowContext<'a> {
     },
     #[allow(
         dead_code,
-        reason = "used by the webui-v2-beta extension OAuth route through RebornProductAuthServices"
+        reason = "used by the WebUI v2 extension OAuth route through RebornProductAuthServices"
     )]
     Setup {
         account_label: &'a CredentialAccountLabel,
@@ -1064,7 +1064,6 @@ impl DcrOAuthCallbackState {
     }
 }
 
-#[cfg(any(test, feature = "webui-v2-beta"))]
 impl DcrOAuthCallbackState {
     pub(crate) fn has_prefix(raw: &str) -> bool {
         raw.starts_with(Self::PREFIX)
@@ -1179,7 +1178,7 @@ mod tests {
                 scopes: Vec::new(),
             },
             Arc::new(DcrSetupEgress),
-            Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+            Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
             Arc::new(TestObligationHandler),
         )
         .unwrap();
@@ -1545,7 +1544,7 @@ mod tests {
         let provider = OAuthDcrProvider::new(
             test_config(),
             egress.clone(),
-            Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+            Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
             Arc::new(TestObligationHandler),
         )
         .unwrap();
@@ -1617,7 +1616,7 @@ mod tests {
                 scopes: vec![ProviderScope::new("read").unwrap()],
             },
             Arc::new(TestEgress),
-            Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+            Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
             Arc::new(TestObligationHandler),
         )
         .unwrap();
@@ -1656,7 +1655,7 @@ mod tests {
         OAuthDcrProvider::new(
             test_config(),
             egress,
-            Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+            Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
             Arc::new(TestObligationHandler),
         )
         .unwrap()
@@ -1823,7 +1822,7 @@ mod tests {
 
     #[derive(Debug)]
     struct SecondPutFailingSecretStore {
-        inner: ironclaw_secrets::InMemorySecretStore,
+        inner: ironclaw_secrets::FilesystemSecretStore<ironclaw_filesystem::InMemoryBackend>,
         put_count: AtomicUsize,
         put_handles: Mutex<Vec<SecretHandle>>,
         deleted_handles: Mutex<Vec<SecretHandle>>,
@@ -1832,7 +1831,7 @@ mod tests {
     impl SecondPutFailingSecretStore {
         fn new() -> Self {
             Self {
-                inner: ironclaw_secrets::InMemorySecretStore::new(),
+                inner: ironclaw_secrets::FilesystemSecretStore::ephemeral(),
                 put_count: AtomicUsize::new(0),
                 put_handles: Mutex::new(Vec::new()),
                 deleted_handles: Mutex::new(Vec::new()),

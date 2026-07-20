@@ -93,5 +93,9 @@ tests/fixtures/llm_traces/live/*.log
 test-tools/*.zip
 test-tools/*/wasm-src/target/
 
-# Frontend package installs are never committed; builds restore them.
+# node_modules must never be committed — vendored JS deps belong to the package
+# manager + lockfile, not git. A bare `node_modules/` (no leading slash) matches
+# a directory of that name at ANY depth, so this catches every frontend
+# (webui_v2, e2e, tooling, …) and stops the recurring accidental adds
+# (#6298/#6305).
 node_modules/

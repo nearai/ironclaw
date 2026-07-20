@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::{
-    DirEntry, FileStat, FileType, FilesystemError, FilesystemOperation, LocalFilesystem,
+    DirEntry, DiskFilesystem, FileStat, FileType, FilesystemError, FilesystemOperation,
     RootFilesystem,
 };
 use ironclaw_host_api::runtime_policy::{
@@ -23,10 +23,7 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_triggers::InMemoryTriggerRepository;
-use ironclaw_trust::{
-    AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
-    HostTrustPolicy, TrustDecision, TrustProvenance,
-};
+use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use ironclaw_turns::run_profile::LoopSafeSummary;
 use serde_json::{Value, json};
 
@@ -1518,7 +1515,6 @@ async fn invoke_with_context<R: HostRuntime + ?Sized>(
             CapabilityId::new(capability).unwrap(),
             ResourceEstimate::default(),
             input,
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -1541,7 +1537,6 @@ async fn invoke_completed_with_context<R: HostRuntime + ?Sized>(
             CapabilityId::new(capability).unwrap(),
             ResourceEstimate::default(),
             input,
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -1563,7 +1558,6 @@ async fn invoke_failure_with_context<R: HostRuntime + ?Sized>(
             CapabilityId::new(capability).unwrap(),
             ResourceEstimate::default(),
             input,
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -1809,8 +1803,8 @@ fn coding_capability_ids() -> [&'static str; 6] {
     ]
 }
 
-fn mounted_filesystem(path: &Path, permissions: MountPermissions) -> (LocalFilesystem, MountView) {
-    let mut filesystem = LocalFilesystem::new();
+fn mounted_filesystem(path: &Path, permissions: MountPermissions) -> (DiskFilesystem, MountView) {
+    let mut filesystem = DiskFilesystem::new();
     filesystem
         .mount_local(
             VirtualPath::new("/projects/coding-pack").unwrap(),
@@ -1827,7 +1821,7 @@ fn mounted_filesystem(path: &Path, permissions: MountPermissions) -> (LocalFiles
 }
 
 struct StatFailureFilesystem {
-    inner: LocalFilesystem,
+    inner: DiskFilesystem,
     fail_suffix: &'static str,
 }
 
@@ -1862,7 +1856,7 @@ impl RootFilesystem for StatFailureFilesystem {
 }
 
 struct StatLenOverrideFilesystem {
-    inner: LocalFilesystem,
+    inner: DiskFilesystem,
     suffix: &'static str,
     len: u64,
 }
@@ -1895,7 +1889,7 @@ impl RootFilesystem for StatLenOverrideFilesystem {
 }
 
 struct ReadFailureFilesystem {
-    inner: LocalFilesystem,
+    inner: DiskFilesystem,
     fail_suffix: &'static str,
 }
 
@@ -1930,7 +1924,7 @@ impl RootFilesystem for ReadFailureFilesystem {
 }
 
 struct WriteFailureFilesystem {
-    inner: LocalFilesystem,
+    inner: DiskFilesystem,
     fail_suffix: &'static str,
 }
 
@@ -1965,7 +1959,7 @@ impl RootFilesystem for WriteFailureFilesystem {
 }
 
 struct ReadInfrastructureFailureFilesystem {
-    inner: LocalFilesystem,
+    inner: DiskFilesystem,
     fail_suffix: &'static str,
 }
 
@@ -2113,16 +2107,4 @@ fn trust_policy() -> HostTrustPolicy {
         ),
     ]))])
     .unwrap()
-}
-
-fn trust_decision() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: builtin_effects(),
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::Default,
-        evaluated_at: chrono::Utc::now(),
-    }
 }

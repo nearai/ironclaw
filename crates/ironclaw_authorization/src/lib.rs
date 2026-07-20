@@ -403,7 +403,7 @@ where
     /// other writer can collide with.
     /// Write the lease through the backend with the given CAS expectation.
     ///
-    /// Backends that don't track per-row versions (e.g. `LocalFilesystem`)
+    /// Backends that don't track per-row versions (e.g. `DiskFilesystem`)
     /// reject `CasExpectation::Version(_)` with `Unsupported`. For those,
     /// fall back to `CasExpectation::Any` and carry the safety invariant
     /// via the per-owner `mutation_lock` — same trade-off documented on
@@ -432,7 +432,7 @@ where
             &lease_owner_prefix(&lease.scope)?,
         )
         .await?;
-        // Byte-only backends (LocalFilesystem) reject BOTH non-`Any` CAS
+        // Byte-only backends (DiskFilesystem) reject BOTH non-`Any` CAS
         // AND entries with a populated `indexed` projection in a single
         // `Unsupported` response. Strip the projection and downgrade CAS
         // to `Any` so byte-only mounts stay writeable — the per-owner
@@ -543,7 +543,7 @@ where
                 IndexValue::Text(scope.tenant_id.as_str().to_string()),
             );
         ensure_tenant_id_index(&self.filesystem, scope, &lease_owner_prefix(scope)?).await?;
-        // Byte-only backends (LocalFilesystem) reject entries with a
+        // Byte-only backends (DiskFilesystem) reject entries with a
         // populated `indexed` projection. Fall back to the plain-bytes
         // shape for those — the tenant projection is best-effort defense
         // in depth, and dropping it on byte-only mounts is acceptable
@@ -1648,7 +1648,7 @@ fn index_name_authorization_tenant() -> IndexName {
 }
 
 /// Declare the `tenant_id` exact-equality index on `prefix`, tolerating
-/// backends that don't materialize indexes (LocalFilesystem). Idempotent
+/// backends that don't materialize indexes (DiskFilesystem). Idempotent
 /// across the mount lifetime; mirrors the engine/processes stores'
 /// `ensure_*_index` shape so byte-only backends degrade gracefully
 /// instead of failing closed.

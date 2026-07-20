@@ -391,11 +391,17 @@ class ManagedIronclawServer:
 def ironclaw_binary():
     """Ensure ironclaw binary is built. Returns the binary path."""
     target_dir = _cargo_target_dir()
-    binary = target_dir / "debug" / "ironclaw"
+    binary = target_dir / "debug" / "ironclaw-legacy"
     if _binary_needs_rebuild(binary):
         print("Building ironclaw (this may take a while)...")
         subprocess.run(
-            ["cargo", "build", "--no-default-features", "--features", "libsql"],
+            [
+                "cargo", "build",
+                "-p", "ironclaw",
+                "--bin", "ironclaw-legacy",
+                "--no-default-features",
+                "--features", "libsql",
+            ],
             cwd=ROOT,
             check=True,
             timeout=600,
@@ -411,20 +417,20 @@ def ironclaw_binary():
 def ironclaw_reborn_binary():
     """Ensure the `ironclaw-reborn` binary is built with the WebChat v2 surface.
 
-    Distinct from `ironclaw_binary` (the legacy `ironclaw` web channel): the
-    Reborn WebUI v2 SPA and `serve` subcommand are gated behind the
-    `webui-v2-beta` Cargo feature, which transitively enables `libsql`. Returns
-    the binary path. Used by the Reborn WebUI v2 smoke scenario.
+    Distinct from `ironclaw_binary` (the legacy `ironclaw` web channel): this is
+    the Reborn CLI, whose WebUI v2 SPA and `serve` subcommand are compiled
+    unconditionally. Returns the binary path. Used by the Reborn WebUI v2 smoke
+    scenario.
     """
     target_dir = _cargo_target_dir()
-    binary = target_dir / "debug" / "ironclaw-reborn"
+    binary = target_dir / "debug" / "ironclaw"
     if _binary_needs_rebuild(binary):
-        print("Building ironclaw-reborn (webui-v2-beta; this may take a while)...")
+        print("Building ironclaw-reborn (this may take a while)...")
         subprocess.run(
             [
                 "cargo", "build",
                 "-p", "ironclaw_reborn_cli",
-                "--features", "webui-v2-beta",
+                "--bin", "ironclaw",
             ],
             cwd=ROOT,
             check=True,
@@ -439,15 +445,15 @@ def ironclaw_reborn_binary():
 
 @pytest.fixture(scope="session")
 def ironclaw_reborn_openai_compat_binary():
-    """Ensure `ironclaw-reborn` is built with the OpenAI-compatible routes.
+    """Ensure `ironclaw-reborn` is built for the OpenAI-compatible scenarios.
 
-    `openai-compat-beta` is a strict superset of `webui-v2-beta`, but it is not
-    enabled by the generic Reborn WebUI fixture. Keep this separate so the
-    OpenAI-compatible E2E explicitly proves the route-bearing binary.
+    The OpenAI-compatible routes are compiled unconditionally, so this builds
+    the same binary as the generic Reborn WebUI fixture. It is kept separate so
+    the OpenAI-compatible E2E owns its own build/staleness stamp.
     """
     target_dir = _cargo_target_dir()
-    binary = target_dir / "debug" / "ironclaw-reborn"
-    stamp = target_dir / "debug" / ".ironclaw-reborn-openai-compat-beta.stamp"
+    binary = target_dir / "debug" / "ironclaw"
+    stamp = target_dir / "debug" / ".ironclaw-reborn-openai-compat.stamp"
     input_mtime = max(
         _latest_mtime(ROOT / "Cargo.toml"),
         _latest_mtime(ROOT / "Cargo.lock"),
@@ -462,12 +468,12 @@ def ironclaw_reborn_openai_compat_binary():
         or not stamp.exists()
         or stamp.stat().st_mtime < input_mtime
     ):
-        print("Building ironclaw-reborn (openai-compat-beta; this may take a while)...")
+        print("Building ironclaw-reborn (OpenAI-compatible E2E; this may take a while)...")
         subprocess.run(
             [
                 "cargo", "build",
                 "-p", "ironclaw_reborn_cli",
-                "--features", "openai-compat-beta",
+                "--bin", "ironclaw",
             ],
             cwd=ROOT,
             check=True,

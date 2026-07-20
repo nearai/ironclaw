@@ -5,13 +5,14 @@ use thiserror::Error;
 use ironclaw_approvals::FilesystemPersistentApprovalPolicyStore;
 use ironclaw_authorization::FilesystemCapabilityLeaseStore;
 use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore};
+use ironclaw_run_state::{FilesystemApprovalRequestStore, FilesystemRunStateStore};
 
 use super::{
-    DurableAuditSink, DurableEventSink, EmptyWasmRuntimeCredentials, InMemoryApprovalRequestStore,
-    InMemoryAuditSink, InMemoryCredentialBroker, InMemoryDurableAuditLog, InMemoryDurableEventLog,
-    InMemoryEventSink, InMemoryProcessResultStore, InMemoryProcessStore, InMemoryResourceGovernor,
-    InMemoryRunStateStore, InMemorySecretStore, InMemoryTurnStateStore, LocalFilesystem,
-    LocalHostProcessPort, NoopTurnRunWakeNotifier, RebornEventStoreError, RuntimeKind,
+    DiskFilesystem, DurableAuditSink, DurableEventSink, EmptyWasmRuntimeCredentials,
+    FilesystemSecretStore, HostProcessPort, InMemoryAuditSink, InMemoryCredentialBroker,
+    InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink, InMemoryResourceGovernor,
+    InMemoryTurnStateStore, NoopTurnRunWakeNotifier, RebornEventStoreError, RuntimeKind,
 };
 
 #[derive(Debug, Error)]
@@ -289,12 +290,22 @@ pub(super) fn component_name(component: Option<ProductionComponentType>) -> Opti
 fn classify_component_type<T: ?Sized + 'static>() -> ProductionImplementationReadiness {
     let type_id = TypeId::of::<T>();
     match () {
-        () if type_id == TypeId::of::<LocalFilesystem>()
+        () if type_id == TypeId::of::<DiskFilesystem>()
             || type_id == TypeId::of::<InMemoryResourceGovernor>()
-            || type_id == TypeId::of::<InMemoryProcessStore>()
-            || type_id == TypeId::of::<InMemoryProcessResultStore>()
-            || type_id == TypeId::of::<InMemoryRunStateStore>()
-            || type_id == TypeId::of::<InMemoryApprovalRequestStore>()
+            // The process lifecycle/result stores no longer have bespoke
+            // in-memory implementations; "in-memory" is the `InMemoryBackend`
+            // behind the one production `FilesystemProcess*Store<F>`
+            // (arch-simplification §4.3). A store backed by `InMemoryBackend` is
+            // still local-only; libSQL/Postgres monomorphizations are distinct.
+            || type_id == TypeId::of::<FilesystemProcessStore<InMemoryBackend>>()
+            || type_id == TypeId::of::<FilesystemProcessResultStore<InMemoryBackend>>()
+            // The run-state and approval-request stores no longer have bespoke
+            // in-memory implementations; "in-memory" is the `InMemoryBackend`
+            // behind the one production `Filesystem*Store<F>` (arch-simplification
+            // §4.3). A store backed by `InMemoryBackend` is still local-only;
+            // libSQL/Postgres monomorphizations are distinct.
+            || type_id == TypeId::of::<FilesystemRunStateStore<InMemoryBackend>>()
+            || type_id == TypeId::of::<FilesystemApprovalRequestStore<InMemoryBackend>>()
             // The persistent-approval and capability-lease stores no longer have
             // bespoke in-memory implementations; "in-memory" is now the
             // `InMemoryBackend` behind the one production `Filesystem*Store<F>`
@@ -307,12 +318,18 @@ fn classify_component_type<T: ?Sized + 'static>() -> ProductionImplementationRea
             || type_id == TypeId::of::<InMemoryDurableEventLog>()
             || type_id == TypeId::of::<InMemoryAuditSink>()
             || type_id == TypeId::of::<InMemoryDurableAuditLog>()
-            || type_id == TypeId::of::<InMemorySecretStore>()
+            // The secret store no longer has a bespoke in-memory implementation;
+            // "in-memory" is the `InMemoryBackend` behind the one production
+            // encrypted `FilesystemSecretStore<F>` (arch-simplification §4.3).
+            // A store backed by `InMemoryBackend` is still local-only; the
+            // durable libSQL/Postgres monomorphizations are distinct types and
+            // correctly classify as production candidates.
+            || type_id == TypeId::of::<FilesystemSecretStore<InMemoryBackend>>()
             || type_id == TypeId::of::<InMemoryCredentialBroker>()
             || type_id == TypeId::of::<EmptyWasmRuntimeCredentials>()
             || type_id == TypeId::of::<InMemoryTurnStateStore>()
             || type_id == TypeId::of::<NoopTurnRunWakeNotifier>()
-            || type_id == TypeId::of::<LocalHostProcessPort>() =>
+            || type_id == TypeId::of::<HostProcessPort>() =>
         {
             ProductionImplementationReadiness::LocalOnly
         }

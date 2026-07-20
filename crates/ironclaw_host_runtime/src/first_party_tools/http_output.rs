@@ -28,6 +28,9 @@ pub(super) fn shape_response(
     let body_was_truncated_by_egress = response.response_bytes > response_body_limit;
     let mut output = Map::new();
     output.insert("status".to_string(), json!(response.status));
+    if let Some(hint) = unauthorized_extension_hint(response.status) {
+        output.insert("auth_hint".to_string(), json!(hint));
+    }
     let (headers, headers_truncated) = response_headers(response.headers);
     let inline_body_budget = inline_body_budget(response_body_limit, &headers);
     output.insert("headers".to_string(), headers);
@@ -68,6 +71,21 @@ pub(super) fn shape_response(
         output: Value::Object(output),
         network_egress_bytes: response.request_bytes,
     }
+}
+
+/// When an outbound `builtin.http` request is rejected for missing or invalid
+/// authorization, nudge the model toward the extension that can inject
+/// credentials for the host, rather than concluding the resource is
+/// inaccessible and giving up. Hint-only: the model still drives the
+/// install/activate flow.
+fn unauthorized_extension_hint(status: u16) -> Option<&'static str> {
+    matches!(status, 401 | 403 | 407).then_some(
+        "This request was rejected for authentication/authorization. If this host is served by \
+         an installable extension, that extension injects the required credentials for you: \
+         search for it with builtin.extension_search (by the service or domain name), then \
+         builtin.extension_install and builtin.extension_activate, and retry through the \
+         extension's tools instead of an unauthenticated builtin.http call.",
+    )
 }
 
 fn response_headers(headers: Vec<(String, String)>) -> (Value, bool) {
@@ -305,4 +323,45 @@ fn mark_inline_body_truncated(output: &mut Map<String, Value>, returned_body_byt
         "body_truncation_hint".to_string(),
         Value::String(HTTP_TRUNCATION_HINT.to_string()),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_host_api::RuntimeHttpEgressResponse;
+
+    fn response_with_status(status: u16) -> RuntimeHttpEgressResponse {
+        RuntimeHttpEgressResponse {
+            status,
+            headers: Vec::new(),
+            body: Vec::new(),
+            saved_body: None,
+            request_bytes: 0,
+            response_bytes: 0,
+            redaction_applied: false,
+        }
+    }
+
+    #[test]
+    fn unauthorized_responses_carry_an_extension_install_hint() {
+        for status in [401, 403, 407] {
+            let shaped = shape_response(response_with_status(status), 1024);
+            let hint = shaped.output.get("auth_hint").and_then(Value::as_str);
+            assert!(
+                hint.is_some_and(|hint| hint.contains("builtin.extension_search")),
+                "status {status} should nudge the model to install an extension"
+            );
+        }
+    }
+
+    #[test]
+    fn successful_and_not_found_responses_have_no_auth_hint() {
+        for status in [200, 204, 404, 500] {
+            let shaped = shape_response(response_with_status(status), 1024);
+            assert!(
+                shaped.output.get("auth_hint").is_none(),
+                "status {status} must not carry an auth hint"
+            );
+        }
+    }
 }

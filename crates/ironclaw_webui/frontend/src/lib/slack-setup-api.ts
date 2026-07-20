@@ -1,5 +1,6 @@
 // @ts-nocheck
 import { apiFetch } from "./api";
+import { channelSetupError, optionalString } from "./channel-setup-api";
 
 export const SLACK_SETUP_PATH = "/api/webchat/v2/channels/slack/setup";
 
@@ -29,11 +30,4 @@ export function saveSlackSetup(setup) {
   });
 }
 
-export function slackSetupError(error, fallback) {
-  return error?.payload?.error || error?.payload?.message || error?.message || fallback;
-}
-
-function optionalString(value) {
-  const normalized = String(value || "").trim();
-  return normalized ? normalized : null;
-}
+export const slackSetupError = channelSetupError;

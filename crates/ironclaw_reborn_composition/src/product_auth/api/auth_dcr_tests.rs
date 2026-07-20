@@ -10,13 +10,14 @@ use ironclaw_host_api::{
     RuntimeCredentialAuthRequirement, RuntimeHttpEgress, RuntimeHttpEgressRequest,
     RuntimeHttpEgressResponse, TenantId, ThreadId, UserId,
 };
-use ironclaw_secrets::InMemorySecretStore;
+use ironclaw_secrets::FilesystemSecretStore;
 use ironclaw_turns::{TurnRunId, TurnScope};
 
-use crate::product_auth::api::auth::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
+use crate::product_auth::api::auth::RebornProductAuthServices;
 use crate::product_auth::oauth::oauth_dcr::{
     OAuthDcrProvider, OAuthDcrProviderConfig, OAuthDcrProviderRegistry,
 };
+use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
 
 #[tokio::test]
 async fn dcr_challenge_errors_propagate_through_product_auth_provider() {
@@ -31,7 +32,7 @@ async fn dcr_challenge_errors_propagate_through_product_auth_provider() {
                 scopes: Vec::new(),
             },
             Arc::new(FailingDcrEgress),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
             Arc::new(NoopObligationHandler),
         )
         .unwrap(),
@@ -86,7 +87,7 @@ async fn dcr_registry_returns_none_for_zero_and_multiple_requirements() {
                 scopes: Vec::new(),
             },
             Arc::new(PanickingDcrEgress),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
             Arc::new(NoopObligationHandler),
         )
         .unwrap(),
@@ -212,7 +213,7 @@ async fn dcr_setup_restart_supersedes_prior_flow() {
                 scopes: Vec::new(),
             },
             Arc::new(ScriptedDcrSetupEgress),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
             Arc::new(NoopObligationHandler),
         )
         .unwrap(),

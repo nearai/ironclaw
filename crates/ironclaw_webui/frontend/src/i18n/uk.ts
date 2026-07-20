@@ -75,6 +75,7 @@ registerPack("uk", {
   "login.connect": "Підключитися",
   "login.oauthDivider": "або продовжити",
   "login.oauthProvider": "Продовжити з {provider}",
+  "login.localDevHint": "Запускаєте IronClaw локально? Отримайте своє посилання для входу:",
 
   // Chat — empty state
   "chat.heroTitle": "Привіт, з чим потрібна допомога?",
@@ -278,6 +279,7 @@ registerPack("uk", {
   "settings.exportSuccess": "Налаштування експортовано",
   "settings.importSuccess": "Налаштування імпортовано",
   "settings.importInvalid": "Вибраний файл має містити об’єкт налаштувань",
+  "settings.importNoSupported": "У вибраному файлі немає підтримуваних налаштувань",
   "settings.importFailed": "Помилка імпорту: {message}",
 
   // Settings — restart banner
@@ -483,6 +485,9 @@ registerPack("uk", {
   "channels.slack": "Slack",
   "channels.slackDesc": "Канал застосунку орендаря для особистих повідомлень і згадок",
   "channels.slackDetail": "Встановлення застосунку Slack орендаря",
+  "channels.telegram": "Telegram",
+  "channels.telegramDesc": "Бот-канал тенанта для зпарованих особистих повідомлень",
+  "channels.telegramDetail": "Токен бота BotFather",
   "channels.statusOn": "увімкнено",
   "channels.statusOff": "вимкнено",
   "channels.ready": "готово",
@@ -740,6 +745,7 @@ registerPack("uk", {
   "automations.filter.completed": "Завершені",
   "automations.refresh": "Оновити автоматизації",
   "automations.error.loadFailed": "Неможливо завантажити автоматизації",
+  "automations.error.actionFailed": "Не вдалося оновити автоматизацію. Спробуйте ще раз.",
   "automations.rename.action": "Перейменувати автоматизацію",
   "automations.rename.nameLabel": "Назва автоматизації",
   "automations.rename.nameRequired": "Назва автоматизації обов'язкова.",
@@ -1440,5 +1446,36 @@ registerPack("uk", {
   "slackSetup.example.sharedSubject": "Приклад: user:slack-shared",
   "slackSetup.example.botToken": "Приклад: xoxb-...",
   "slackSetup.placeholder.defaultOperator": "типовий оператор",
-  "slackSetup.placeholder.keepSecret": "Налаштовано; залиште порожнім, щоб зберегти"
+  "slackSetup.placeholder.keepSecret": "Налаштовано; залиште порожнім, щоб зберегти",
+
+  // Telegram setup + pairing
+  "telegramSetup.title": "Налаштування Telegram",
+  "telegramSetup.instructions": "Створіть бота через @BotFather і вставте його токен. IronClaw реєструє вебхук автоматично.",
+  "telegramSetup.save": "Зберегти налаштування",
+  "telegramSetup.saved": "Налаштування Telegram збережено.",
+  "telegramSetup.saveFailed": "Не вдалося оновити налаштування Telegram.",
+  "telegramSetup.field.botToken": "Токен бота",
+  "telegramSetup.field.webhookUrl": "Публічна URL-адреса вебхука (заміна)",
+  "telegramSetup.help.botToken": "Токен від @BotFather (/newbot або /token).",
+  "telegramSetup.help.webhookUrl": "Необов'язково. Публічна HTTPS-адреса, яку викликає Telegram; порожнє поле використовує виявлену публічну адресу.",
+  "telegramSetup.example.botToken": "Приклад: 123456789:AA...",
+  "telegramSetup.example.webhookUrl": "Приклад: https://assistant.example.com",
+  "telegramSetup.placeholder.keepSecret": "••• збережено — залиште порожнім, щоб зберегти",
+  "telegramSetup.connectedAs": "Підключений бот:",
+  "telegramSetup.remove": "Видалити бота",
+  "telegramSetup.removeConfirm": "Видалити бота Telegram? Канал зупиниться, доки не буде збережено новий токен.",
+  "telegramSetup.removeFailed": "Не вдалося видалити бота Telegram.",
+  "telegramPairing.title": "Підключити Telegram",
+  "telegramPairing.instructions": "Проскануйте QR-код або відкрийте посилання, потім натисніть «Почати» в Telegram, щоб зв'язати цей обліковий запис.",
+  "telegramPairing.copyCode": "Копіювати код",
+  "telegramPairing.copyUsername": "Копіювати ім'я бота",
+  "telegramPairing.openInTelegram": "Відкрити в Telegram",
+  "telegramPairing.qrAlt": "QR-код зв'язування Telegram",
+  "telegramPairing.expiresIn": "Спливає через {time}",
+  "telegramPairing.expired": "Термін дії цього коду зв'язування минув.",
+  "telegramPairing.getNewCode": "Отримати новий код",
+  "telegramPairing.paired": "Telegram зв'язано",
+  "telegramPairing.disconnect": "Відключити",
+  "telegramPairing.disconnectFailed": "Не вдалося відключити Telegram.",
+  "telegramPairing.loadFailed": "Не вдалося отримати код зв'язування Telegram."
 });

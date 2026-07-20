@@ -19,8 +19,8 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{
-    BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError,
-    FilesystemOperation, Filter, InMemoryBackend, LocalFilesystem, Page, RecordVersion,
+    BackendCapabilities, CasExpectation, DirEntry, DiskFilesystem, Entry, FileStat,
+    FilesystemError, FilesystemOperation, Filter, InMemoryBackend, Page, RecordVersion,
     RootFilesystem, ScopedFilesystem, SeqNo, StorageTxn, TxnCapability, VersionedEntry,
 };
 use ironclaw_host_api::{
@@ -3000,7 +3000,7 @@ async fn legacy_deferred_busy_message_round_trips_through_filesystem_store() {
 /// byte-only/`Unsupported` fail-closed branch for thread creation was
 /// unpinned.
 ///
-/// `LocalFilesystem` is the canonical byte-only `RootFilesystem`: its
+/// `DiskFilesystem` is the canonical byte-only `RootFilesystem`: its
 /// `put` impl rejects entries with `kind.is_some()`, which `cas_update`
 /// surfaces as `CasUnsupported`. This mirrors
 /// `filesystem_approval_store_fails_closed_on_byte_only_backend` in
@@ -3008,7 +3008,7 @@ async fn legacy_deferred_busy_message_round_trips_through_filesystem_store() {
 #[tokio::test]
 async fn filesystem_session_thread_ensure_thread_fails_closed_on_byte_only_backend() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let mut local_fs = LocalFilesystem::new();
+    let mut local_fs = DiskFilesystem::new();
     local_fs
         .mount_local(
             VirtualPath::new("/tenants").expect("virtual root"),
@@ -3030,7 +3030,7 @@ async fn filesystem_session_thread_ensure_thread_fails_closed_on_byte_only_backe
         .expect_err("ensure_thread must fail closed on a byte-only backend");
     assert!(
         matches!(&err, SessionThreadError::Backend(msg) if msg.contains("compare-and-swap")),
-        "expected Backend(CasUnsupported) from byte-only LocalFilesystem but got {err:?}",
+        "expected Backend(CasUnsupported) from byte-only DiskFilesystem but got {err:?}",
     );
 }
 

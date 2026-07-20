@@ -18,8 +18,8 @@ async fn capability_host_blocks_spawn_for_approval_without_starting_process() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
     let process_manager = RecordingProcessManager::default();
-    let run_state = InMemoryRunStateStore::new();
-    let approval_requests = InMemoryApprovalRequestStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let host = CapabilityHost::new(&registry, &dispatcher, &SpawnApprovalAuthorizer)
         .with_process_manager(&process_manager)
         .with_run_state(&run_state)
@@ -102,8 +102,8 @@ output_schema_ref = "schemas/shell.output.v1.json"
     registry.insert(package).unwrap();
     let dispatcher = RecordingDispatcher::default();
     let process_manager = RecordingProcessManager::default();
-    let run_state = InMemoryRunStateStore::new();
-    let approval_requests = InMemoryApprovalRequestStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let host = CapabilityHost::new(&registry, &dispatcher, &ShellSpawnApprovalAuthorizer)
         .with_process_manager(&process_manager)
         .with_run_state(&run_state)
@@ -165,8 +165,8 @@ async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
     let process_manager = RecordingProcessManager::default();
-    let run_state = InMemoryRunStateStore::new();
-    let approval_requests = InMemoryApprovalRequestStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
     let block_host = CapabilityHost::new(&registry, &dispatcher, &SpawnApprovalAuthorizer)
         .with_process_manager(&process_manager)
@@ -416,13 +416,13 @@ impl RecordingProcessManager {
 }
 
 struct FailCompleteRunStateStore {
-    inner: InMemoryRunStateStore,
+    inner: ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>,
 }
 
 impl FailCompleteRunStateStore {
     fn new() -> Self {
         Self {
-            inner: InMemoryRunStateStore::new(),
+            inner: ironclaw_run_state::in_memory_backed_run_state_store(),
         }
     }
 }

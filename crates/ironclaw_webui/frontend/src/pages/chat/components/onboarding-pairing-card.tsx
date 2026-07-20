@@ -1,13 +1,15 @@
 import React from "react";
 import { Button } from "../../../design-system/button";
+import { TelegramPairingPanel } from "../../../components/telegram-pairing-panel";
 import { useT } from "../../../lib/i18n";
 import { channelConnectionDisplayName } from "../../../lib/channel-connection-events";
 
 // Strategies whose in-chat affordance is "paste a code". OAuth gets a direct
-// configure button; QR/admin-managed channels render guidance instead of a code
-// box they can't use. An absent strategy defaults to the paste panel for
-// backward compatibility.
-const PASTE_CODE_STRATEGIES = new Set(["inbound_proof_code", "web_generated_code"]);
+// configure button; `web_generated_code` shows the web-minted code/QR pairing
+// panel (the code travels web -> channel, so a paste box is meaningless);
+// admin-managed channels render guidance instead of a code box they can't use.
+// An absent strategy defaults to the paste panel for backward compatibility.
+const PASTE_CODE_STRATEGIES = new Set(["inbound_proof_code"]);
 
 function acceptsPastedCode(strategy) {
   return !strategy || PASTE_CODE_STRATEGIES.has(strategy);
@@ -70,6 +72,39 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onConfigure, onCan
       setIsConfiguring(false);
     }
   };
+
+  // Web-minted code strategy: this side generates the code, so render the
+  // pairing panel (code + deep link + QR + live connect detection) instead of
+  // an input asking the user to paste a code that doesn't exist yet. Gated by
+  // channel as well as strategy (mirroring channels-tab): the strategy string
+  // is generic, and a future non-Telegram web_generated_code channel must not
+  // inherit the Telegram-specific panel.
+  if (onboarding?.strategy === "web_generated_code" && onboarding?.extensionName === "telegram") {
+    const instructions = onboarding?.instructions || onboarding?.message || "";
+    return (
+      <div
+        data-testid="onboarding-pairing-card"
+        className="mx-auto mt-4 w-full max-w-lg rounded-lg border border-signal/25 bg-signal/5 p-4"
+      >
+        <h3 className="text-sm font-semibold text-iron-100">{copy.title}</h3>
+        {instructions &&
+        (<p className="mt-1 text-sm leading-6 text-iron-300">{instructions}</p>)}
+        <TelegramPairingPanel compact />
+        {onCancel &&
+        (
+          <div className="mt-3">
+            <Button
+              variant="ghost"
+              className="h-9 px-3 text-xs"
+              onClick={onCancel}
+            >
+              {t("common.dismiss")}
+            </Button>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   // Non-paste strategy: render the channel's configured connection action rather
   // than a code box that would submit a meaningless value.

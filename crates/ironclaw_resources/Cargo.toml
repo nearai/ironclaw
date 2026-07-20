@@ -16,8 +16,9 @@ layer = "kernel"
 
 [features]
 default = []
-libsql = []
-postgres = []
+# Exposes `test_support` in-memory-backed store constructors for downstream
+# crates' tests. Disabled by default; enable only from [dev-dependencies].
+test-support = []
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }

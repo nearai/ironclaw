@@ -137,7 +137,7 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
   `CommandExecutionRequest.command` and returns exit 0 / empty output without
   spawning any OS process. Injected by default when `with_builtin_http_tools()` is
   used; the `.with_live_shell()` opt-in skips injection so the real
-  `LocalHostProcessPort` executes instead.
+  `HostProcessPort` executes instead.
 - `http_matcher.rs` — `ScriptedHttpResponse`, the URL/method/capability-keyed
   HTTP scripting layer over `RecordingRuntimeHttpEgress` (install via
   `.with_keyed_http_responses([..])`).
@@ -267,7 +267,7 @@ spawning any OS process.
 - `assert_shell_ran_through_inert_port()` — at least one shell command was recorded by the inert port (proves no real OS process ran).
 
 **`.with_live_shell()`** — opt-in; skips recording-port injection so the real
-`LocalHostProcessPort` executes instead. Use only for hermetic commands
+`HostProcessPort` executes instead. Use only for hermetic commands
 (no network, no external state, reproducible on any machine).
 Implies `.with_builtin_http_tools()`.
 
@@ -386,7 +386,7 @@ On a harness built from a `live_approvals` group:
 
 `ironclaw_reborn_composition::test_support` exposes:
 
-- `build_local_dev_secret_store_for_test(root, scoped)` — constructs the `LocalDevSecretStore` used by production local-dev composition; for store read-back in secrets tests.
+- `build_secret_store_for_test(root, scoped)` — constructs the `LocalDevSecretStore` used by production local-dev composition; for store read-back in secrets tests.
 
 `RebornServices` (returned by `build_reborn_services`/exposed via `RebornRuntime::services()`, methods defined in `crates/ironclaw_reborn_composition/src/runtime/test_support.rs`) exposes:
 

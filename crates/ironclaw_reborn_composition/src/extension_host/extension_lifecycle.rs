@@ -1,4 +1,4 @@
-// arch-exempt: large_file, shared extension removal convergence and compatibility tests, plan #5905
+// arch-exempt: large_file, shared extension removal convergence and compatibility tests, plan #6329
 use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
@@ -15,12 +15,14 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, NetworkTargetPattern,
-    PermissionMode, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement,
-    RuntimeHttpEgress, UserId, VirtualPath, sha256_digest_token,
+    PermissionMode, ResourceScope, RuntimeCredentialAccountProviderId,
+    RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement, RuntimeHttpEgress, UserId,
+    VirtualPath, sha256_digest_token,
 };
 use ironclaw_product_adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use ironclaw_product_workflow::{
-    ChannelConnectionRequirement, LifecycleBlockerRef, LifecycleExtensionSummary,
+    ChannelConnectionRequirement, ExtensionAccountSetupDescriptor, ExtensionAccountSetupError,
+    ExtensionAccountSetupRegistry, LifecycleBlockerRef, LifecycleExtensionSummary,
     LifecycleExtensionSurfaceKind, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
     LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload, LifecycleProductResponse,
     LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, ProductWorkflowError,
@@ -132,6 +134,20 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     /// not re-derive admin-ness.
     tenant_operator_user_id: UserId,
     removal_cleanup: Arc<ExtensionRemovalCleanupRegistry>,
+    /// Product-owned setup metadata and extension-owned connection-status
+    /// sources. Descriptors are declared during composition; sources connect
+    /// only when their host surface is mounted.
+    account_setups: ExtensionAccountSetupRegistry,
+    /// Static per-provider instance-config readiness map. Opt-in, defaults
+    /// empty via `new` — a third readiness axis alongside `account_setups`
+    /// (per-user) and the package-level
+    /// requirements `activation_credential_requirements` computes below; see
+    /// `provider_instance_readiness.rs` module doc for the full distinction.
+    /// Defaulting empty keeps every direct `::new(...)` construction outside
+    /// the factory (e.g. test fixtures) unaffected until they opt in via
+    /// `with_provider_instance_readiness`.
+    provider_instance_readiness:
+        std::collections::BTreeMap<RuntimeCredentialAccountProviderId, String>,
 }
 
 /// Concurrent `import_bundle` decodes allowed before further uploads wait.
@@ -151,7 +167,7 @@ pub(crate) struct ActiveExtensionCapability {
     pub(crate) network_targets: Vec<NetworkTargetPattern>,
     /// Who the providing extension's installation belongs to (#5459 P1).
     /// Tenant-owned capabilities are grant-minted for every user; user-owned
-    /// ones only for their owner (filtered in `LocalDevExtensionSurface`).
+    /// ones only for their owner (filtered in `ExtensionCapabilitySurface`).
     pub(crate) owner: InstallationOwner,
 }
 
@@ -317,7 +333,37 @@ impl RebornLocalExtensionManagementPort {
             import_decode_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORT_DECODES)),
             tenant_operator_user_id,
             removal_cleanup: Arc::new(ExtensionRemovalCleanupRegistry::empty()),
+            account_setups: ExtensionAccountSetupRegistry::default(),
+            provider_instance_readiness: std::collections::BTreeMap::new(),
         }
+    }
+
+    pub(crate) fn with_account_setup_registry(
+        mut self,
+        account_setups: ExtensionAccountSetupRegistry,
+    ) -> Self {
+        self.account_setups = account_setups;
+        self
+    }
+
+    /// Install the static per-provider instance-config readiness map.
+    /// Defaults empty from `new`, so callers that never opt in (test
+    /// fixtures, any composition without the build-time signal) see no
+    /// behavior change.
+    pub(crate) fn with_provider_instance_readiness(
+        mut self,
+        provider_instance_readiness: std::collections::BTreeMap<
+            RuntimeCredentialAccountProviderId,
+            String,
+        >,
+    ) -> Self {
+        self.provider_instance_readiness = provider_instance_readiness;
+        self
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn account_setup_registry(&self) -> ExtensionAccountSetupRegistry {
+        self.account_setups.clone()
     }
 
     pub(crate) fn with_removal_cleanup_registry(
@@ -356,7 +402,7 @@ impl RebornLocalExtensionManagementPort {
     /// host activations (e.g. Slack host-beta channel setup) that operate a
     /// shared install and therefore act as the operator rather than any
     /// individual member.
-    #[cfg(feature = "slack-v2-host-beta")]
+    #[allow(dead_code)]
     pub(crate) fn tenant_operator_user_id(&self) -> &UserId {
         &self.tenant_operator_user_id
     }
@@ -531,7 +577,35 @@ impl RebornLocalExtensionManagementPort {
         // confirms a private credentialed install exists (#5525 review).
         ensure_caller_may_operate(&installation, caller)?;
         let package = self.lifecycle_package(&extension_id).await?;
-        let requirements = package_runtime_credential_auth_requirements(&package);
+        let mut requirements = package_runtime_credential_auth_requirements(&package);
+        if let Some(requirement) = self
+            .account_setups
+            .missing_requirement(&extension_id, caller)
+            .await
+            .map_err(map_account_setup_error)?
+        {
+            requirements.push(requirement);
+        }
+        // Third readiness axis: a provider whose OPERATOR-level instance
+        // config is missing entirely (no OAuth backend registered on this
+        // build at all) fails here, before the per-user credential gate below
+        // ever runs — distinct from `account_setups` (per-user account state)
+        // and the package-level `requirements` just computed (per-package
+        // static declarations). Mirrors the same three-axis distinction drawn
+        // in `gsuite.rs:69-73` for the dispatch-time backstop that shares
+        // this build-time signal. Both callers of this function share this
+        // one chokepoint: the LLM tool handler's own `missing_requirements`
+        // short-circuit (`extension_lifecycle_capabilities.rs`) and the
+        // WebUI card's `activate_inner` credential gate never see a
+        // requirement shape for an unconfigured provider — they see this
+        // `Err` instead.
+        if let Some(reason) = requirements.iter().find_map(|requirement| {
+            self.provider_instance_readiness
+                .get(&requirement.provider)
+                .cloned()
+        }) {
+            return Err(ProductWorkflowError::ProviderInstanceNotConfigured { reason });
+        }
         Ok(requirements)
     }
 
@@ -1033,7 +1107,11 @@ impl RebornLocalExtensionManagementPort {
             // claimant already activated this exact package. Treat that state
             // as the authoritative success instead of re-publishing and
             // risking a conflicting failure followed by credential rollback.
-            return Ok(activation_success_response(package_ref, &active_package));
+            return Ok(activation_success_response(
+                package_ref,
+                &active_package,
+                self.account_setups.descriptor(extension_id),
+            ));
         }
         self.enable_lifecycle_package(extension_id).await?;
         if let Err(error) = self
@@ -1074,7 +1152,11 @@ impl RebornLocalExtensionManagementPort {
             return Err(error);
         }
 
-        Ok(activation_success_response(package_ref, &active_package))
+        Ok(activation_success_response(
+            package_ref,
+            &active_package,
+            self.account_setups.descriptor(extension_id),
+        ))
     }
 
     pub(crate) async fn package_requires_hosted_mcp_discovery(
@@ -2144,13 +2226,20 @@ fn package_visible_capability_ids(package: &ExtensionPackage) -> Vec<String> {
 fn activation_success_response(
     package_ref: LifecyclePackageRef,
     package: &ExtensionPackage,
+    account_setup: Option<ExtensionAccountSetupDescriptor>,
 ) -> LifecycleProductResponse {
     let visible_capability_ids = package_visible_capability_ids(package);
-    let message = activation_success_message(&package_ref, package, &visible_capability_ids);
+    let message = activation_success_message(
+        &package_ref,
+        package,
+        &visible_capability_ids,
+        account_setup.as_ref(),
+    );
     let connection_required = if package_declares_inbound_product_adapter(package) {
         Some(channel_connection_requirement(
             package_ref.id.as_str(),
             package.manifest.name.as_str(),
+            account_setup.as_ref(),
         ))
     } else {
         None
@@ -2203,8 +2292,12 @@ fn activation_success_message(
     package_ref: &LifecyclePackageRef,
     package: &ExtensionPackage,
     visible_capability_ids: &[String],
+    account_setup: Option<&ExtensionAccountSetupDescriptor>,
 ) -> String {
     if package_declares_inbound_product_adapter(package) {
+        if let Some(account_setup) = account_setup {
+            return account_setup.activation_success_message.clone();
+        }
         if package_ref.id.as_str() == "slack_bot" {
             return "Slack is installed as an inbound entrypoint. If WebChat shows a Slack account connection panel, tell the user to configure Slack OAuth for this extension rather than pasting anything into normal chat. If the user's Slack account is already connected, continue the user's original request; Slack DMs and WebUI chat can use the same user-scoped Slack tools.".to_string();
         }
@@ -2239,7 +2332,11 @@ fn activation_success_message(
 pub(crate) fn channel_connection_requirement(
     channel_id: &str,
     display_name: &str,
+    account_setup: Option<&ExtensionAccountSetupDescriptor>,
 ) -> ChannelConnectionRequirement {
+    if let Some(account_setup) = account_setup {
+        return account_setup.connection_requirement.clone();
+    }
     if channel_id == "slack_bot" {
         ChannelConnectionRequirement {
             channel: "slack".to_string(),
@@ -2403,6 +2500,35 @@ fn map_search_credential_stage_error(
     }
 }
 
+fn map_account_setup_error(error: ExtensionAccountSetupError) -> ProductWorkflowError {
+    match error {
+        ExtensionAccountSetupError::HostUnavailable { extension_id } => {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "the account setup host for extension {} is not enabled on this deployment",
+                    extension_id.as_str()
+                ),
+            }
+        }
+        ExtensionAccountSetupError::StatusUnavailable {
+            extension_id,
+            source,
+        } => {
+            tracing::debug!(
+                extension_id = %extension_id,
+                error = %source,
+                "extension account connection status read failed during activation"
+            );
+            ProductWorkflowError::Transient {
+                reason: format!(
+                    "account connection status is temporarily unavailable for extension {}",
+                    extension_id.as_str()
+                ),
+            }
+        }
+    }
+}
+
 fn map_extension_error(error: ExtensionError) -> ProductWorkflowError {
     match error {
         ExtensionError::Filesystem(_) | ExtensionError::LifecycleEventSink { .. } => {
@@ -2532,7 +2658,7 @@ mod tests {
         SharedExtensionRegistry,
     };
     use ironclaw_filesystem::{
-        DirEntry, FileStat, FilesystemError, FilesystemOperation, LocalFilesystem,
+        DirEntry, DiskFilesystem, FileStat, FilesystemError, FilesystemOperation,
     };
     use ironclaw_host_api::{
         AgentId, CapabilityId, ExtensionLifecycleOperation, HostPath, HostPortCatalog,
@@ -2694,7 +2820,8 @@ mod tests {
             .expect("valid package ref");
         let package = fixture_extension_package().package;
         let visible_capability_ids = vec!["fixture.search".to_string()];
-        let message = activation_success_message(&package_ref, &package, &visible_capability_ids);
+        let message =
+            activation_success_message(&package_ref, &package, &visible_capability_ids, None);
         assert!(message.contains("fixture.search"));
         assert!(
             message.contains("callable by exact name"),
@@ -2713,7 +2840,7 @@ mod tests {
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid package ref");
         let package = fixture_extension_package().package;
-        let message = activation_success_message(&package_ref, &package, &[]);
+        let message = activation_success_message(&package_ref, &package, &[], None);
         assert!(message.contains("Extension activation succeeded"));
         assert!(
             !message.contains("callable by exact name"),
@@ -3145,15 +3272,20 @@ output_schema_ref = "schemas/run.output.json"
 
     #[tokio::test]
     async fn extension_activate_returns_generic_pairing_guidance_for_external_channel_package() {
+        // Deliberately a channel with NO native host in this crate: `telegram`
+        // now routes through the telegram-v2 host's own activation copy when
+        // that feature is compiled in, so a `telegram`-named fixture would no
+        // longer exercise the surface-generic external-channel path this test
+        // pins.
         let (_dir, _storage_root, facade, _active_registry, _installation_store) =
             extension_lifecycle_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_packages(vec![fixture_external_channel_package(
-                    "telegram", "Telegram",
+                    "signal", "Signal",
                 )]),
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
-        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
-            .expect("valid ref");
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "signal").expect("valid ref");
         facade
             .execute(
                 lifecycle_surface_context(),
@@ -3175,7 +3307,7 @@ output_schema_ref = "schemas/run.output.json"
         assert_eq!(activate.phase, LifecyclePhase::Active);
         let message = activate.message.as_deref().expect("activation message");
         assert!(
-            message.contains("Telegram is installed as an external channel")
+            message.contains("Signal is installed as an external channel")
                 && message.contains("app or bot")
                 && message.contains("pairing code")
                 && message.contains("WebChat connection panel")
@@ -3195,13 +3327,13 @@ output_schema_ref = "schemas/run.output.json"
         let requirement = connection_required
             .as_ref()
             .expect("external channel activation must carry a structured connection requirement");
-        assert_eq!(requirement.channel, "telegram");
+        assert_eq!(requirement.channel, "signal");
         assert_eq!(
             requirement.strategy,
             RebornChannelConnectStrategy::InboundProofCode
         );
         assert!(
-            requirement.instructions.contains("Telegram"),
+            requirement.instructions.contains("Signal"),
             "generic channel copy should name the channel: {}",
             requirement.instructions
         );
@@ -4007,7 +4139,6 @@ output_schema_ref = "schemas/run.output.json"
         assert_eq!(example.installation_phase, Some(LifecyclePhase::Active));
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_tools_extension_installs_activates_and_publishes_capabilities() {
         let (_dir, _storage_root, port, _active_registry, installation_store) =
@@ -4094,7 +4225,6 @@ output_schema_ref = "schemas/run.output.json"
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn slack_tools_extension_activation_requires_personal_oauth() {
         let (_dir, _storage_root, port, _active_registry, _installation_store) =
@@ -4150,7 +4280,95 @@ output_schema_ref = "schemas/run.output.json"
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
+    /// A declared account-setup extension whose host was not mounted must fail
+    /// closed instead of parking a run that no connection surface can resume.
+    /// A pairing-status store outage during telegram activation preflight is
+    /// an availability fault: it must classify as retryable `Transient` (not
+    /// the non-retryable `InvalidBindingRequest` reserved for the unmounted
+    /// host / configuration fault) and must not leak the store error text into
+    /// the product-facing reason.
+    #[tokio::test]
+    async fn telegram_declared_without_mounted_host_fails_closed_through_activation_requirements() {
+        let (_dir, _storage_root, port, _active_registry, _installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let telegram_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
+            .expect("telegram ref");
+        port.install(telegram_ref.clone(), &lifecycle_owner())
+            .await
+            .expect("install telegram extension");
+        assert!(
+            port.account_setup_registry().declare(
+                ironclaw_telegram_extension::telegram_account_setup_descriptor()
+                    .expect("Telegram account setup descriptor")
+            )
+        );
+
+        let error = port
+            .activation_credential_requirements(&telegram_ref, &lifecycle_owner())
+            .await
+            .expect_err("a declared setup without its mounted host must fail closed");
+
+        assert!(
+            matches!(error, ProductWorkflowError::InvalidBindingRequest { .. }),
+            "an unmounted host is a non-retryable composition fault, got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_pairing_status_outage_is_transient_through_activation_requirements() {
+        #[derive(Debug)]
+        struct FailingPairedSource;
+
+        #[async_trait::async_trait]
+        impl ironclaw_product_workflow::AccountConnectionStatusSource for FailingPairedSource {
+            async fn connected(
+                &self,
+                _user_id: &UserId,
+            ) -> Result<bool, ironclaw_product_workflow::AccountConnectionStatusError> {
+                Err(
+                    ironclaw_product_workflow::AccountConnectionStatusError::new(
+                        "test pairing store outage",
+                    ),
+                )
+            }
+        }
+
+        let (_dir, _storage_root, port, _active_registry, _installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let telegram_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "telegram")
+            .expect("telegram ref");
+        port.install(telegram_ref.clone(), &lifecycle_owner())
+            .await
+            .expect("install telegram extension");
+        let descriptor = ironclaw_telegram_extension::telegram_account_setup_descriptor()
+            .expect("Telegram account setup descriptor");
+        let extension_id = descriptor.extension_id.clone();
+        assert!(port.account_setup_registry().declare(descriptor));
+        assert!(
+            port.account_setup_registry()
+                .connect(&extension_id, Arc::new(FailingPairedSource))
+        );
+
+        let error = port
+            .activation_credential_requirements(&telegram_ref, &lifecycle_owner())
+            .await
+            .expect_err("a status outage is an error, not an empty requirement list");
+        assert!(
+            matches!(error, ProductWorkflowError::Transient { .. }),
+            "availability faults must stay retryable, got {error:?}"
+        );
+        assert!(
+            !error.to_string().contains("test pairing store outage"),
+            "store error text must not reach the product-facing reason"
+        );
+    }
+
     #[tokio::test]
     async fn slack_tools_extension_removal_fails_closed_without_channel_cleanup() {
         let (_dir, _storage_root, port, _active_registry, installation_store) =
@@ -4939,7 +5157,7 @@ output_schema_ref = "schemas/run.output.json"
         );
         let installation_store_trait: Arc<dyn ExtensionInstallationStore> =
             installation_store.clone();
-        let filesystem: Arc<dyn RootFilesystem> = Arc::new(LocalFilesystem::new());
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(DiskFilesystem::new());
 
         restore_extension_lifecycle_state(
             &AvailableExtensionCatalog::from_packages(Vec::new()),
@@ -5238,7 +5456,7 @@ output_schema_ref = "schemas/run.output.json"
             Arc::clone(&restored_trust_policy),
         );
         let installation_store: Arc<dyn ExtensionInstallationStore> = installation_store;
-        let filesystem: Arc<dyn RootFilesystem> = Arc::new(LocalFilesystem::new());
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(DiskFilesystem::new());
 
         let error = restore_extension_lifecycle_state(
             &catalog,
@@ -5941,7 +6159,7 @@ output_schema_ref = "schemas/run.output.json"
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/system/extensions").expect("valid virtual path"),
@@ -7135,7 +7353,7 @@ output_schema_ref = "schemas/run.output.json"
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
 
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("valid virtual path"),
@@ -7182,7 +7400,7 @@ output_schema_ref = "schemas/run.output.json"
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("valid virtual path"),
@@ -7386,7 +7604,7 @@ output_schema_ref = "schemas/run.output.json"
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
 
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("valid virtual path"),
@@ -7422,6 +7640,169 @@ output_schema_ref = "schemas/run.output.json"
             active_registry,
             installation_store,
         )
+    }
+
+    /// Same assembly as [`extension_management_port_fixture_with_catalog_service_and_trust_policy`],
+    /// plus an opted-in provider-instance readiness map — the port variants
+    /// `google_family_activation_fails_closed_when_provider_instance_not_configured`
+    /// and `slack_family_activation_fails_closed_when_provider_instance_not_configured`
+    /// below need to exercise the readiness-map chokepoint in
+    /// `activation_credential_requirements` directly, since the OTHER port
+    /// fixtures in this module deliberately build with
+    /// `RebornLocalExtensionManagementPort::new` alone (proving the opt-in
+    /// default stays empty for them).
+    fn extension_management_port_fixture_with_readiness_map(
+        catalog: AvailableExtensionCatalog,
+        lifecycle_service: ExtensionLifecycleService,
+        provider_instance_readiness: std::collections::BTreeMap<
+            RuntimeCredentialAccountProviderId,
+            String,
+        >,
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        Arc<RebornLocalExtensionManagementPort>,
+        Arc<SharedExtensionRegistry>,
+        Arc<InMemoryExtensionInstallationStore>,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
+
+        let mut filesystem = DiskFilesystem::new();
+        filesystem
+            .mount_local(
+                VirtualPath::new("/projects").expect("valid virtual path"),
+                HostPath::from_path_buf(storage_root.clone()),
+            )
+            .expect("mount storage root");
+        filesystem
+            .mount_local(
+                VirtualPath::new("/system/extensions").expect("valid virtual path"),
+                HostPath::from_path_buf(storage_root.join("system/extensions")),
+            )
+            .expect("mount system extensions");
+        let filesystem = Arc::new(filesystem);
+        let root_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
+        let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
+        let extension_management = Arc::new(
+            RebornLocalExtensionManagementPort::new(
+                root_filesystem,
+                catalog,
+                installation_store.clone(),
+                Arc::new(Mutex::new(lifecycle_service)),
+                test_active_extension_publisher(
+                    Arc::clone(&active_registry),
+                    test_extension_trust_policy(),
+                ),
+                None,
+                lifecycle_owner(),
+            )
+            .with_provider_instance_readiness(provider_instance_readiness),
+        );
+        (
+            dir,
+            storage_root,
+            extension_management,
+            active_registry,
+            installation_store,
+        )
+    }
+
+    /// A provider-instance readiness-map entry (the operator never
+    /// configured this provider's OAuth backend on this instance at all)
+    /// must fail `activation_credential_requirements`
+    /// BEFORE the per-account credential gate, naming the exact `config set`
+    /// remediation in the error — the one chokepoint both the LLM tool
+    /// handler and the WebUI card path call through. The integration-tier
+    /// regression for this exact user-visible behavior lives in
+    /// `tests/integration/group_extensions/scenario_extension_activation_instance_not_configured.rs`;
+    /// this crate-tier test pins the underlying port contract directly.
+    #[tokio::test]
+    async fn google_family_activation_fails_closed_when_provider_instance_not_configured() {
+        let mut readiness = std::collections::BTreeMap::new();
+        readiness.insert(
+            RuntimeCredentialAccountProviderId::new(ironclaw_auth::GOOGLE_PROVIDER_ID)
+                .expect("valid provider id"),
+            "ironclaw config set google.client_id <id>.apps.googleusercontent.com".to_string(),
+        );
+        let (_dir, _storage_root, port, _active_registry, _installation_store) =
+            extension_management_port_fixture_with_readiness_map(
+                AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+                readiness,
+            );
+        let gcal_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "google-calendar")
+            .expect("google-calendar ref");
+        port.install(gcal_ref.clone(), &lifecycle_owner())
+            .await
+            .expect("install google-calendar");
+
+        let error = port
+            .activation_credential_requirements(&gcal_ref, &lifecycle_owner())
+            .await
+            .expect_err("an unconfigured provider instance must fail closed");
+
+        let ProductWorkflowError::ProviderInstanceNotConfigured { reason } = error else {
+            panic!("expected ProviderInstanceNotConfigured, got {error:?}");
+        };
+        assert!(reason.contains("config set google.client_id"));
+    }
+
+    // Default-empty-map regression: every OTHER
+    // `activation_credential_requirements` test in this module (e.g.
+    // `slack_tools_extension_activation_requires_personal_oauth` above, the
+    // telegram tests below) builds its port via
+    // `RebornLocalExtensionManagementPort::new` with no
+    // `.with_provider_instance_readiness` call and keeps passing unchanged —
+    // proving the opt-in default-empty map is a true no-op for every port
+    // that never opts in. No new test is added for this: it is exactly what
+    // those pre-existing tests already demonstrate.
+
+    /// Slack mirror of `google_family_activation_fails_closed_when_provider_instance_not_configured`:
+    /// a readiness-map entry for `slack_personal` must fail
+    /// `activation_credential_requirements` for the Slack extension BEFORE
+    /// the per-account credential gate, naming the `config set slack.enabled`
+    /// remediation. See
+    /// `slack_tools_extension_activation_requires_personal_oauth` above for
+    /// the ungated-readiness-map counterpart.
+    #[tokio::test]
+    async fn slack_family_activation_fails_closed_when_provider_instance_not_configured() {
+        let mut readiness = std::collections::BTreeMap::new();
+        readiness.insert(
+            RuntimeCredentialAccountProviderId::new(ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID)
+                .expect("valid provider id"),
+            // Built from the real helper, not a hand-copied string: a literal
+            // here drifts silently from the text production actually emits.
+            ironclaw_reborn_config::slack_remediation_text(
+                ironclaw_reborn_config::SlackSetupGaps {
+                    enable: true,
+                    redirect_uri: true,
+                },
+            ),
+        );
+        let (_dir, _storage_root, port, _active_registry, _installation_store) =
+            extension_management_port_fixture_with_readiness_map(
+                AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+                readiness,
+            );
+        let slack_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("slack ref");
+        port.install(slack_ref.clone(), &lifecycle_owner())
+            .await
+            .expect("install public Slack extension");
+
+        let error = port
+            .activation_credential_requirements(&slack_ref, &lifecycle_owner())
+            .await
+            .expect_err("an unconfigured Slack instance must fail closed");
+
+        let ProductWorkflowError::ProviderInstanceNotConfigured { reason } = error else {
+            panic!("expected ProviderInstanceNotConfigured, got {error:?}");
+        };
+        assert!(reason.contains("config set slack.enabled"));
     }
 
     fn extension_lifecycle_fixture_with_catalog_and_service(
@@ -7476,7 +7857,7 @@ output_schema_ref = "schemas/run.output.json"
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
 
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("valid virtual path"),
@@ -7607,7 +7988,7 @@ output_schema_ref = "schemas/run.output.json"
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("valid virtual path"),
@@ -7651,7 +8032,7 @@ output_schema_ref = "schemas/run.output.json"
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
-        let mut filesystem = LocalFilesystem::new();
+        let mut filesystem = DiskFilesystem::new();
         filesystem
             .mount_local(
                 VirtualPath::new("/projects").expect("valid virtual path"),

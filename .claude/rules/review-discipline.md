@@ -28,6 +28,16 @@ regression-check exemption rather than silently omitting coverage.
   `--all-targets --all-features -- -D warnings`. Before committing, run the
   Reborn workspace-wide command below and fix every warning it surfaces,
   including pre-existing warnings outside the immediate files.
+- **Feature matrix, not just `--all-features`:** `--all-features` cannot catch
+  feature-gated dead code — a `#[cfg(feature = "x")]`-only caller makes its
+  helper *live* under `--all-features` and *dead* (a `-D warnings` error)
+  everywhere the feature is off. **PR CI runs only the slim `all-features` lane;
+  the full `default` / `libsql-only` matrix runs post-merge**, so this class
+  breaks `main` after a green PR. If you add or move a `#[cfg(feature = ...)]`
+  gate, or touch a helper only reachable through one, run the full matrix
+  locally before merging (see "Required checks"). When you gate the only
+  caller(s) of a helper behind a feature, gate the helper's definition with the
+  same `#[cfg]`.
 - **UTF-8:** never byte-slice user or external strings with `&value[..n]`.
   Use `char_indices()`, `chars()`, or an `is_char_boundary()`-checked boundary.
   Search changed Rust files for suspicious `[..` slicing.
@@ -60,6 +70,16 @@ Workspace-wide zero-warning clippy:
 
 ```bash
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+```
+
+Full feature matrix — reproduces the post-merge `Code Style` gate that PR CI
+skips (it only runs the `all-features` lane). Run all three whenever a change
+adds, moves, or relies on a `#[cfg(feature = ...)]` gate:
+
+```bash
+cargo clippy --all --tests --examples -- -D warnings                              # default
+cargo clippy --all --tests --examples --no-default-features --features libsql -- -D warnings  # libsql-only
+cargo clippy --all --tests --examples --all-features -- -D warnings               # all-features
 ```
 
 Run the Reborn integration or E2E harness when the change crosses turns,

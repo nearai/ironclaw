@@ -11,24 +11,22 @@ layer = "substrates"
 
 [features]
 default = []
-libsql = ["dep:libsql"]
-postgres = ["dep:deadpool-postgres", "dep:tokio-postgres"]
+# Exposes `test_support` in-memory-backed store constructors for downstream
+# crates' tests. Ships zero bytes in production binaries.
+test-support = []
 
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
-deadpool-postgres = { version = "0.14", optional = true }
 hex = "0.4"
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_turns = { path = "../ironclaw_turns" }
-libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 thiserror = "2"
-tokio-postgres = { version = "0.7", optional = true }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 

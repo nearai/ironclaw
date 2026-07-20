@@ -75,6 +75,7 @@ registerPack("hi", {
   "login.connect": "कनेक्ट",
   "login.oauthDivider": "या जारी रखें",
   "login.oauthProvider": "{provider} के साथ जारी रखें",
+  "login.localDevHint": "IronClaw को लोकल पर चला रहे हैं? अपना साइन-इन लिंक पाएं:",
 
   // Chat — empty state
   "chat.heroTitle": "नमस्ते, आपको किसमें मदद चाहिए?",
@@ -278,6 +279,7 @@ registerPack("hi", {
   "settings.exportSuccess": "निर्यात की गई सेटिंग्स",
   "settings.importSuccess": "आयातित सेटिंग्स",
   "settings.importInvalid": "चयनित फ़ाइल में एक सेटिंग ऑब्जेक्ट होना चाहिए",
+  "settings.importNoSupported": "चयनित फ़ाइल में कोई समर्थित सेटिंग नहीं मिली",
   "settings.importFailed": "आयात विफल: {message}",
 
   // Settings — restart banner
@@ -483,6 +485,9 @@ registerPack("hi", {
   "channels.slack": "Slack",
   "channels.slackDesc": "DM और ऐप मेंशन के लिए टेनेंट ऐप चैनल",
   "channels.slackDetail": "टेनेंट Slack ऐप इंस्टॉल",
+  "channels.telegram": "Telegram",
+  "channels.telegramDesc": "पेयर किए गए डायरेक्ट मैसेज के लिए टेनेंट बॉट चैनल",
+  "channels.telegramDetail": "BotFather बॉट टोकन",
   "channels.statusOn": "on",
   "channels.statusOff": "off",
   "channels.ready": "तैयार",
@@ -740,6 +745,7 @@ registerPack("hi", {
   "automations.filter.completed": "पूर्ण",
   "automations.refresh": "ऑटोमेशन ताज़ा करें",
   "automations.error.loadFailed": "ऑटोमेशन लोड करने में असमर्थ",
+  "automations.error.actionFailed": "ऑटोमेशन अपडेट नहीं किया जा सका। फिर से कोशिश करें।",
   "automations.rename.action": "ऑटोमेशन का नाम बदलें",
   "automations.rename.nameLabel": "ऑटोमेशन नाम",
   "automations.rename.nameRequired": "ऑटोमेशन नाम आवश्यक है.",
@@ -1440,5 +1446,36 @@ registerPack("hi", {
   "slackSetup.example.sharedSubject": "उदाहरण: user:slack-shared",
   "slackSetup.example.botToken": "उदाहरण: xoxb-...",
   "slackSetup.placeholder.defaultOperator": "डिफ़ॉल्ट ऑपरेटर",
-  "slackSetup.placeholder.keepSecret": "कॉन्फ़िगर है; बनाए रखने के लिए खाली छोड़ें"
+  "slackSetup.placeholder.keepSecret": "कॉन्फ़िगर है; बनाए रखने के लिए खाली छोड़ें",
+
+  // Telegram setup + pairing
+  "telegramSetup.title": "Telegram सेटअप",
+  "telegramSetup.instructions": "@BotFather से एक बॉट बनाएँ और उसका टोकन चिपकाएँ। IronClaw वेबहुक अपने आप पंजीकृत करता है।",
+  "telegramSetup.save": "सेटअप सहेजें",
+  "telegramSetup.saved": "Telegram सेटअप सहेजा गया।",
+  "telegramSetup.saveFailed": "Telegram सेटअप अपडेट विफल रहा।",
+  "telegramSetup.field.botToken": "बॉट टोकन",
+  "telegramSetup.field.webhookUrl": "सार्वजनिक वेबहुक URL ओवरराइड",
+  "telegramSetup.help.botToken": "@BotFather (/newbot या /token) से मिला टोकन।",
+  "telegramSetup.help.webhookUrl": "वैकल्पिक। सार्वजनिक HTTPS URL जिसे Telegram कॉल करता है; खाली रहने पर पहचाना गया सार्वजनिक URL उपयोग होता है।",
+  "telegramSetup.example.botToken": "उदाहरण: 123456789:AA...",
+  "telegramSetup.example.webhookUrl": "उदाहरण: https://assistant.example.com",
+  "telegramSetup.placeholder.keepSecret": "••• सहेजा गया — बनाए रखने के लिए खाली छोड़ें",
+  "telegramSetup.connectedAs": "कनेक्टेड बॉट:",
+  "telegramSetup.remove": "बॉट हटाएँ",
+  "telegramSetup.removeConfirm": "Telegram बॉट हटाएँ? नया टोकन सहेजे जाने तक चैनल रुक जाएगा।",
+  "telegramSetup.removeFailed": "Telegram बॉट हटाना विफल रहा।",
+  "telegramPairing.title": "Telegram कनेक्ट करें",
+  "telegramPairing.instructions": "QR कोड स्कैन करें या लिंक खोलें, फिर इस खाते को पेयर करने के लिए Telegram में Start दबाएँ।",
+  "telegramPairing.copyCode": "कोड कॉपी करें",
+  "telegramPairing.copyUsername": "बॉट का नाम कॉपी करें",
+  "telegramPairing.openInTelegram": "Telegram में खोलें",
+  "telegramPairing.qrAlt": "Telegram पेयरिंग QR",
+  "telegramPairing.expiresIn": "{time} में समाप्त",
+  "telegramPairing.expired": "यह पेयरिंग कोड समाप्त हो गया।",
+  "telegramPairing.getNewCode": "नया कोड प्राप्त करें",
+  "telegramPairing.paired": "Telegram पेयर हो गया",
+  "telegramPairing.disconnect": "डिस्कनेक्ट करें",
+  "telegramPairing.disconnectFailed": "Telegram डिस्कनेक्ट करना विफल रहा।",
+  "telegramPairing.loadFailed": "Telegram पेयरिंग कोड प्राप्त नहीं हो सका।"
 });

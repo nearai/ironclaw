@@ -1,4 +1,4 @@
-//! `ironclaw-reborn service` — install/manage the standalone Reborn
+//! `ironclaw service` — install/manage the standalone Reborn
 //! binary as an OS-native service.
 //!
 //! - **macOS**: launchd user agent at
@@ -21,7 +21,7 @@
 //!
 //! [`SERVICE_LABEL`] and [`SYSTEMD_UNIT`] name the **one** OS service
 //! identity for the standalone Reborn binary. Two surfaces install and
-//! manage it today: this CLI (`ironclaw-reborn service install`), and the
+//! manage it today: this CLI (`ironclaw service install`), and the
 //! WebUI operator facade (`RebornLocalServiceLifecycle` in
 //! `ironclaw_reborn_composition::observability::operator_service_lifecycle`,
 //! behind `POST /api/webchat/v2/operator/service`). Both target the same
@@ -115,14 +115,17 @@ impl ServiceCommand {
 /// The two supported service-management targets. Detected once per
 /// invocation via [`ServicePlatform::detect`]; every verb dispatches
 /// off the resolved variant instead of re-checking `cfg!(target_os)`.
+///
+/// pub(super): `commands::status` queries [`Self::current_state`] to check
+/// whether the installed service is actually running, not just present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ServicePlatform {
+pub(super) enum ServicePlatform {
     MacOs,
     Linux,
 }
 
 impl ServicePlatform {
-    fn detect() -> Result<Self> {
+    pub(super) fn detect() -> Result<Self> {
         if cfg!(target_os = "macos") {
             Ok(Self::MacOs)
         } else if cfg!(target_os = "linux") {
@@ -161,7 +164,9 @@ impl ServicePlatform {
             Self::MacOs => {
                 launchd::install_with_runner(context, &invocation, runner).map(|_replaced| ())?
             }
-            Self::Linux => systemd::install_with_runner(&invocation, runner).map(|_replaced| ())?,
+            Self::Linux => {
+                systemd::install_with_runner(context, &invocation, runner).map(|_replaced| ())?
+            }
         }
         Ok(warnings)
     }
@@ -228,6 +233,32 @@ impl ServicePlatform {
             Self::Linux => systemd::uninstall_with_runner(runner),
         }
     }
+
+    /// Production service-state query: real `launchctl`/`systemctl` via
+    /// [`OsServiceCommandRunner`]. Used by `commands::status` so `status`
+    /// reports the service as actually running, not just installed.
+    pub(super) fn current_state(&self) -> Result<ServiceState> {
+        self.current_state_with_runner(&mut OsServiceCommandRunner)
+    }
+
+    /// Runner-injectable variant of [`Self::current_state`] for tests.
+    pub(super) fn current_state_with_runner(
+        &self,
+        runner: &mut dyn ServiceCommandRunner,
+    ) -> Result<ServiceState> {
+        match self {
+            Self::MacOs => launchd::current_state_with_runner(runner),
+            Self::Linux => systemd::current_state_with_runner(runner),
+        }
+    }
+}
+
+/// Install then start the OS service in one call — used by `onboard`'s
+/// finale so a fresh install ends with `serve` actually running.
+pub(crate) fn install_and_start(context: &RebornCliContext) -> Result<()> {
+    let platform = ServicePlatform::detect()?;
+    platform.install(context)?;
+    platform.start()
 }
 
 // ── Path helpers ────────────────────────────────────────────────
@@ -246,12 +277,43 @@ fn home_dir() -> Result<PathBuf> {
     Ok(path)
 }
 
+/// The `serve` process's launched cwd, shared by both platforms' installers.
+///
+/// - Not the Reborn home itself: composition's default skill/extension
+///   roots live under `<reborn_home>/...`, so the home is an *ancestor* of
+///   them and trips `paths_overlap` (prefix match, not just equality).
+/// - `<reborn_home>/workspace` is a leaf dir, neither ancestor nor
+///   descendant of any skill root, so it never overlaps.
+fn service_working_directory(reborn_home: &Path) -> PathBuf {
+    reborn_home.join("workspace")
+}
+
+/// Creates [`service_working_directory`] (0700, `create_dir_all` — a no-op
+/// if it already exists) and returns its path. Called by both platforms'
+/// `install_with_runner` before writing the unit/plist, so the directory
+/// exists by the time `serve` is ever launched with it as cwd.
+///
+/// 0700, not 0755: this is a single-user local service directory, not a
+/// shared or world-readable path, so other local accounts must not be able
+/// to list or read it.
+fn ensure_service_working_directory(reborn_home: &Path) -> Result<PathBuf> {
+    let dir = service_working_directory(reborn_home);
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("set permissions on {}", dir.display()))?;
+    }
+    Ok(dir)
+}
+
 // ── Preflight ───────────────────────────────────────────────────
 
 /// Non-fatal readiness warnings for `service install`: warn, don't
 /// fail, when onboarding hasn't run yet — the service can still be
 /// installed, but `serve` starts without config, providers, or a valid
-/// WebUI token until `ironclaw-reborn onboard` runs. Checks the
+/// WebUI token until `ironclaw onboard` runs. Checks the
 /// onboarding marker, `config.toml`, and the WebUI token file's entropy
 /// floor.
 ///
@@ -267,7 +329,7 @@ fn preflight_warnings(context: &RebornCliContext) -> Result<Vec<String>> {
     let marker = crate::commands::onboard::onboarding_marker_path(home);
     if !marker.exists() {
         warnings.push(format!(
-            "onboarding marker not found at {} — run `ironclaw-reborn onboard` first so \
+            "onboarding marker not found at {} — run `ironclaw onboard` first so \
              `serve` has config, providers, and the WebUI token available",
             marker.display()
         ));
@@ -283,7 +345,7 @@ fn preflight_warnings(context: &RebornCliContext) -> Result<Vec<String>> {
 
     if !crate::webui_token::webui_token_file_is_valid(home.path())? {
         warnings.push(format!(
-            "WebUI token not found or too short at {} — run `ironclaw-reborn onboard` first so \
+            "WebUI token not found or too short at {} — run `ironclaw onboard` first so \
              `serve` has a valid WebUI bearer token",
             crate::webui_token::webui_token_file_path(home.path()).display()
         ));
@@ -313,7 +375,7 @@ fn restart_generic(
     start: fn(&mut dyn ServiceCommandRunner) -> Result<()>,
 ) -> Result<()> {
     if !installed {
-        bail!("Service not installed. Run `ironclaw-reborn service install` first.");
+        bail!("Service not installed. Run `ironclaw service install` first.");
     }
     if was_running {
         stop(runner)?;
@@ -340,15 +402,37 @@ fn restart_generic(
 
 // ── Status vocabulary ───────────────────────────────────────────
 
+/// Normalized service lifecycle state, shared by both platforms and by
+/// `commands::status` (see [`ServicePlatform::current_state`]) so the
+/// running/stopped/not-installed vocabulary can't drift between the
+/// `service status` text output and the `status` command's `service`
+/// field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ServiceState {
+    NotInstalled,
+    Stopped,
+    Running,
+}
+
+impl ServiceState {
+    fn from_installed_running(installed: bool, running: bool) -> Self {
+        if !installed {
+            Self::NotInstalled
+        } else if running {
+            Self::Running
+        } else {
+            Self::Stopped
+        }
+    }
+}
+
 /// Normalized `service status` line, shared by both platforms so the
 /// running/stopped/not-installed vocabulary can't drift between them.
 fn status_label(installed: bool, running: bool) -> &'static str {
-    if !installed {
-        "not installed"
-    } else if running {
-        "running"
-    } else {
-        "stopped"
+    match ServiceState::from_installed_running(installed, running) {
+        ServiceState::NotInstalled => "not installed",
+        ServiceState::Stopped => "stopped",
+        ServiceState::Running => "running",
     }
 }
 
@@ -377,7 +461,7 @@ fn status_label(installed: bool, running: bool) -> &'static str {
 fn replaced_existing_service_file_note(replaced_existing: bool) -> Option<&'static str> {
     replaced_existing.then_some(
         "  Replaced an existing service definition at this path; if the service is currently \
-         running, it keeps the OLD definition until `ironclaw-reborn service restart`.",
+         running, it keeps the OLD definition until `ironclaw service restart`.",
     )
 }
 
@@ -463,7 +547,11 @@ fn run_capture_checked(label: &str, command: &mut Command) -> Result<String> {
 /// Production uses [`OsServiceCommandRunner`]. Tests provide a recorder so
 /// failure propagation and command ordering are verified without reaching the
 /// host's real launchd/systemd instance.
-trait ServiceCommandRunner {
+///
+/// `pub(super)`: `commands::status`'s tests implement this trait with their
+/// own mock runner to drive [`ServicePlatform::current_state_with_runner`]
+/// hermetically for all three [`ServiceState`] outcomes.
+pub(super) trait ServiceCommandRunner {
     fn run_checked(&mut self, label: &str, command: &mut Command) -> Result<()>;
     fn run_capture_checked(&mut self, label: &str, command: &mut Command) -> Result<String>;
 }
@@ -651,11 +739,11 @@ mod tests {
         }
 
         for (args, verb_name) in [
-            (["ironclaw-reborn", "start"], "start"),
-            (["ironclaw-reborn", "stop"], "stop"),
-            (["ironclaw-reborn", "restart"], "restart"),
-            (["ironclaw-reborn", "status"], "status"),
-            (["ironclaw-reborn", "uninstall"], "uninstall"),
+            (["ironclaw", "start"], "start"),
+            (["ironclaw", "stop"], "stop"),
+            (["ironclaw", "restart"], "restart"),
+            (["ironclaw", "status"], "status"),
+            (["ironclaw", "uninstall"], "uninstall"),
         ] {
             let parsed = VerbParser::try_parse_from(args)
                 .unwrap_or_else(|e| panic!("{verb_name} must parse via clap: {e}"));
@@ -785,10 +873,14 @@ mod tests {
         let _lock = crate::runtime::test_env::lock_runtime_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let _home = TempHomeGuard::set(tmp.path());
+        let context = RebornCliContext::from_boot_config(
+            ironclaw_reborn_config::RebornBootConfig::resolve_from_env()
+                .expect("boot config must resolve under temp HOME"),
+        );
         let invocation = serve_invocation().expect("serve invocation");
         let mut runner = SuccessfulServiceCommandRunner::default();
-        let fresh_replaced =
-            systemd::install_with_runner(&invocation, &mut runner).expect("install must succeed");
+        let fresh_replaced = systemd::install_with_runner(&context, &invocation, &mut runner)
+            .expect("install must succeed");
         let unit_path = tmp
             .path()
             .join(".config/systemd/user/ironclaw-reborn.service");
@@ -796,6 +888,31 @@ mod tests {
         let contents = std::fs::read_to_string(&unit_path).expect("read unit file");
         assert!(contents.contains("ExecStart="));
         assert!(contents.contains("IRONCLAW_REBORN_HOME="));
+        let reborn_home = context.boot_config().home().path().to_path_buf();
+        let expected_working_directory = reborn_home.join("workspace");
+        assert!(
+            contents.contains(&format!(
+                "WorkingDirectory=\"{}\"",
+                expected_working_directory.display()
+            )),
+            "unit file must anchor cwd at <reborn_home>/workspace, not the Reborn home itself \
+             (the Reborn home is an ancestor of every default skill root, so cwd=reborn_home \
+             still trips composition's overlap check — the crash-loop persisted after the first \
+             attempt at this fix): {contents}"
+        );
+        assert!(
+            expected_working_directory.is_dir(),
+            "install must create <reborn_home>/workspace so `serve` has somewhere to cd into"
+        );
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&expected_working_directory)
+                .expect("stat working directory")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700, "working directory must be 0700, got {mode:o}");
+        }
         assert!(
             !fresh_replaced,
             "a fresh install must not report a replaced unit"
@@ -807,8 +924,8 @@ mod tests {
         // facade (`RebornLocalServiceLifecycle`), must now report that it
         // replaced an existing unit (this reinstall stands in for the
         // facade's unit being atomically replaced by the CLI's).
-        let reinstall_replaced =
-            systemd::install_with_runner(&invocation, &mut runner).expect("reinstall must succeed");
+        let reinstall_replaced = systemd::install_with_runner(&context, &invocation, &mut runner)
+            .expect("reinstall must succeed");
         assert!(unit_path.exists());
         assert!(
             reinstall_replaced,
@@ -832,9 +949,10 @@ mod tests {
             ironclaw_reborn_config::RebornBootConfig::resolve_from_env()
                 .expect("boot config must resolve under temp HOME"),
         );
+        let invocation = serve_invocation().expect("serve invocation");
+        let mut runner = SuccessfulServiceCommandRunner::default();
 
-        ServicePlatform::MacOs
-            .install(&context)
+        launchd::install_with_runner(&context, &invocation, &mut runner)
             .expect("install must succeed");
         let plist_path = tmp
             .path()
@@ -843,14 +961,37 @@ mod tests {
         let contents = std::fs::read_to_string(&plist_path).expect("read plist file");
         assert!(contents.contains(SERVICE_LABEL));
         assert!(contents.contains("<key>IRONCLAW_REBORN_HOME</key>"));
+        let reborn_home = context.boot_config().home().path().to_path_buf();
+        let expected_working_directory = reborn_home.join("workspace");
+        assert!(
+            contents.contains(&format!(
+                "<string>{}</string>",
+                expected_working_directory.display()
+            )) && contents.contains("<key>WorkingDirectory</key>"),
+            "plist must anchor cwd at <reborn_home>/workspace, not the Reborn home itself \
+             (the Reborn home is an ancestor of every default skill root, so cwd=reborn_home \
+             still trips composition's overlap check — the crash-loop persisted after the first \
+             attempt at this fix): {contents}"
+        );
+        assert!(
+            expected_working_directory.is_dir(),
+            "install must create <reborn_home>/workspace so `serve` has somewhere to cd into"
+        );
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&expected_working_directory)
+                .expect("stat working directory")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700, "working directory must be 0700, got {mode:o}");
+        }
 
         // Idempotent reinstall.
-        ServicePlatform::MacOs
-            .install(&context)
+        launchd::install_with_runner(&context, &invocation, &mut runner)
             .expect("reinstall must succeed");
         assert!(plist_path.exists());
 
-        let mut runner = SuccessfulServiceCommandRunner::default();
         launchd::uninstall_with_runner(&mut runner).expect("uninstall must succeed");
         assert!(!plist_path.exists(), "plist file must be removed");
     }

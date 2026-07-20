@@ -1,29 +1,24 @@
+// arch-exempt: large_file, Google OAuth resolution hardening remains at the existing runtime config seam, plan #4088
 use std::io::{IsTerminal, Write};
-#[cfg(feature = "webui-v2-beta")]
 use std::path::Path;
 use std::path::PathBuf;
-#[cfg(feature = "webui-v2-beta")]
 use std::sync::Arc;
 use std::time::Duration;
 use std::{future::Future, thread};
 
 use anyhow::Context;
-#[cfg(any(feature = "slack-v2-host-beta", test))]
 use ironclaw_reborn_composition::OAuthRedirectUri;
-#[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_reborn_composition::SlackPersonalSetupServiceSlot;
-#[cfg(feature = "webui-v2-beta")]
 use ironclaw_reborn_composition::host_api::UserId;
 use ironclaw_reborn_composition::host_api::{AgentId, TenantId};
 #[cfg(feature = "postgres")]
 use ironclaw_reborn_composition::hosted_single_tenant_runtime_policy;
 use ironclaw_reborn_composition::{
     CredentialRefreshSettings, OAuthClientConfig, OperatorLogLayer, PollSettings, RebornBuildInput,
-    RebornCompositionProfile, RebornLocalRuntimeProfileOptions, RebornRuntimeIdentity,
-    RebornRuntimeInput, TurnRunnerSettings, build_reborn_runtime,
+    RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornRuntimeProfileOptions, TurnRunnerSettings, build_reborn_runtime,
     local_runtime_build_input_with_options, nearai_mcp_bootstrap_config_from_env,
 };
-#[cfg(feature = "webui-v2-beta")]
 use ironclaw_reborn_composition::{
     LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSource,
     LocalTriggerAccessStore, local_trigger_access_fire_checker, open_local_trigger_access_store,
@@ -51,20 +46,16 @@ pub(crate) fn init_tracing() {
     use tracing_subscriber::Layer;
     use tracing_subscriber::fmt;
     use tracing_subscriber::prelude::*;
-    // stderr/fmt layer: operator-facing console output. Stays at `info` by
+    // stderr/fmt layer: operator-facing console output, stays at `info` by
     // default so `debug!` diagnostics never reach (and corrupt) a REPL/TUI
-    // terminal — the repo's logging invariant. Broad env overrides are still
-    // guarded from third-party debug floods unless those targets are explicit.
+    // terminal — the repo's logging invariant.
     let stderr_filter = reborn_env_filter(
         "IRONCLAW_REBORN_LOG",
         "info,ironclaw_runner=info,ironclaw_reborn_composition=info",
     );
-    // Operator Logs buffer: captures run diagnostics at `debug` for the
-    // ironclaw run-path crates so the scoped (thread/run) Logs panel is
-    // populated, while those `debug!` events are NOT written to stderr. This is
-    // a *separate* per-layer filter, so terminal safety and Logs-panel
-    // visibility are decoupled. Broad env overrides are guarded the same way
-    // so the browser log buffer is not filled by low-level protocol crates.
+    // Operator Logs buffer: a *separate* per-layer filter capturing run
+    // diagnostics at `debug` for the Logs panel, without those events also
+    // going to stderr — keeps terminal safety and Logs-panel visibility decoupled.
     let operator_filter = reborn_env_filter(
         "IRONCLAW_REBORN_OPERATOR_LOG",
         "info,ironclaw_runner=debug,ironclaw_host_runtime=debug",
@@ -223,13 +214,6 @@ async fn with_run_local_trigger_fire_access_checker(
     runtime_input: RebornRuntimeInput,
     config: &RebornBootConfig,
 ) -> anyhow::Result<RebornRuntimeInput> {
-    #[cfg(not(feature = "webui-v2-beta"))]
-    {
-        let _ = config;
-        Ok(runtime_input)
-    }
-
-    #[cfg(feature = "webui-v2-beta")]
     {
         if !runtime_input.trigger_poller.enabled {
             return Ok(runtime_input);
@@ -251,8 +235,9 @@ async fn with_run_local_trigger_fire_access_checker(
             )
         })?;
         let profile = effective_profile(config, config_file.as_ref())?;
-        let user_store_path =
-            local_runtime_storage_root(config, profile).join("reborn-local-dev.db");
+        let user_store_path = ironclaw_reborn_composition::local_dev_db_path(
+            &local_runtime_storage_root(config, profile),
+        );
         let access_store =
             open_trigger_access_store_for_profile(&runtime_input, profile, &user_store_path)
                 .await?;
@@ -274,7 +259,6 @@ async fn with_run_local_trigger_fire_access_checker(
     }
 }
 
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) async fn open_trigger_access_store_for_profile(
     runtime_input: &RebornRuntimeInput,
     profile: RebornProfile,
@@ -314,7 +298,7 @@ pub(crate) async fn open_trigger_access_store_for_profile(
 }
 
 fn print_runtime_banner(config: &RebornBootConfig) {
-    eprintln!("ironclaw-reborn: runtime started");
+    eprintln!("ironclaw: runtime started");
     eprintln!("  profile     : {}", config.profile());
     eprintln!("  reborn_home : {}", config.home().path().display());
     eprintln!();
@@ -543,13 +527,96 @@ fn apply_credential_refresh_override(
     Ok(settings)
 }
 
+/// Resolve the Reborn runtime's default LLM selection, tolerating a
+/// required-but-unset API key env var when a key is already durably stored
+/// for that provider in the local secret store.
+///
+/// - Without this, a key provisioned via `onboard` into the encrypted
+///   secret store (never written to config.toml/env) would boot `serve`
+///   into a fail-closed error, since `apply_startup_stored_llm_key` only
+///   runs later once the async runtime is up. Providers with
+///   `api_key_required = false` (e.g. `nearai`) never hit this path.
+/// - Only `ApiKeyEnvUnset` is treated specially; every other resolution
+///   failure surfaces unchanged, as does `ApiKeyEnvUnset` itself when no
+///   key is stored — this can only turn a real fix into a successful boot,
+///   never mask a misconfiguration.
+/// - Scoped to `RuntimeInputCaller::Serve` only: opening the secret store
+///   may fall through to the OS keychain (GUI prompt or indefinite block
+///   with no GUI session). `onboard` already pays that cost interactively;
+///   `serve` is the boot path this fix unblocks. `run` stays fail-fast so
+///   a forgotten env var doesn't hang instead of erroring clearly.
+#[cfg(feature = "libsql")]
+fn resolve_reborn_runtime_llm_with_stored_key_fallback(
+    config: &RebornBootConfig,
+    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+    caller: RuntimeInputCaller,
+) -> anyhow::Result<Option<ironclaw_reborn_composition::ResolvedRebornLlm>> {
+    let error = match ironclaw_reborn_composition::resolve_reborn_runtime_llm(config, config_file) {
+        Ok(resolved) => return Ok(resolved),
+        Err(error) => error,
+    };
+    if caller != RuntimeInputCaller::Serve {
+        return Err(error.into());
+    }
+    let ironclaw_reborn_composition::RebornLlmCatalogError::ApiKeyEnvUnset { ref provider, .. } =
+        error
+    else {
+        return Err(error.into());
+    };
+    // `ApiKeyEnvUnset` only comes from the config-file-selection branch, so
+    // a selection should be present; defensive fallback to original error.
+    let Some(selection) = config_file.and_then(|file| file.default_llm_slot()) else {
+        return Err(error.into());
+    };
+    let provider_id = provider.clone();
+    let runtime_storage_root = local_runtime_storage_root(config, config.profile());
+    // The runtime storage root is only created lazily (onboarding writing a
+    // key, or a prior `serve` boot). If it was never created there is
+    // definitely no stored key — fail through to the original error instead
+    // of letting the secret-store opener fail on a missing directory.
+    if !runtime_storage_root.exists() {
+        return Err(error.into());
+    }
+    let has_stored_key = block_on_cli(async move {
+        let store = ironclaw_reborn_composition::open_local_dev_secret_store(&runtime_storage_root)
+            .await
+            .map_err(anyhow::Error::from)?;
+        ironclaw_reborn_composition::LlmKeyStore::new(store)
+            .exists(&provider_id)
+            .await
+            .map_err(anyhow::Error::from)
+    })?;
+    if !has_stored_key {
+        return Err(error.into());
+    }
+    ironclaw_reborn_composition::resolve_llm_selection_allow_missing_key(
+        selection,
+        Some(config.home().providers_file_path().as_path()),
+    )
+    .map(ironclaw_reborn_composition::ResolvedRebornLlm::from_llm_config)
+    .map(Some)
+    .map_err(Into::into)
+}
+
+/// Feature-off fallback: without `libsql` there is no local-dev secret store
+/// to check, so behavior here is byte-identical to calling
+/// `resolve_reborn_runtime_llm` directly — a required-but-unset API key
+/// still fails closed with `ApiKeyEnvUnset`.
+#[cfg(not(feature = "libsql"))]
+fn resolve_reborn_runtime_llm_with_stored_key_fallback(
+    config: &RebornBootConfig,
+    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+    _caller: RuntimeInputCaller,
+) -> anyhow::Result<Option<ironclaw_reborn_composition::ResolvedRebornLlm>> {
+    ironclaw_reborn_composition::resolve_reborn_runtime_llm(config, config_file).map_err(Into::into)
+}
+
 pub(crate) fn build_runtime_input_with_options(
     config: &RebornBootConfig,
     caller: RuntimeInputCaller,
     options: RuntimeInputOptions,
 ) -> anyhow::Result<BuiltRuntimeInput> {
     let runtime_services = build_services_input_with_options(config, caller, options)?;
-    #[cfg(feature = "slack-v2-host-beta")]
     let slack_personal_lazy_slot = runtime_services.slack_personal_lazy_slot.clone();
 
     #[allow(unused_mut)]
@@ -569,16 +636,22 @@ pub(crate) fn build_runtime_input_with_options(
             runtime_services.config_file.as_ref(),
         ));
 
-    #[cfg(feature = "root-llm-provider")]
     {
-        match ironclaw_reborn_composition::resolve_reborn_runtime_llm(
+        // The composition runtime cold-boots with a placeholder gateway and
+        // needs the boot config to run its initial provider reload. This is
+        // required for both `run` and `serve`; without it `run` resolves the
+        // configured provider here but still dispatches through `unconfigured`.
+        runtime_input = runtime_input.with_boot_config(config.clone());
+        match resolve_reborn_runtime_llm_with_stored_key_fallback(
             config,
             runtime_services.config_file.as_ref(),
+            caller,
         )? {
             Some(llm) => {
                 tracing::debug!(
                     provider_id = %llm.provider_id(),
                     model = %llm.model(),
+                    base_url = %llm.base_url().unwrap_or_default(),
                     "resolved LLM selection for Reborn runtime"
                 );
                 runtime_input = runtime_input.with_resolved_llm(llm);
@@ -596,21 +669,18 @@ pub(crate) fn build_runtime_input_with_options(
 
     Ok(BuiltRuntimeInput {
         inner: runtime_input,
-        #[cfg(feature = "slack-v2-host-beta")]
         slack_personal_lazy_slot,
     })
 }
 
 pub(crate) struct RuntimeServicesInput {
     pub(crate) services_input: RebornBuildInput,
-    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) slack_personal_lazy_slot: Option<SlackPersonalSetupServiceSlot>,
     config_file: Option<ironclaw_reborn_config::RebornConfigFile>,
 }
 
 pub(crate) struct BuiltRuntimeInput {
     pub(crate) inner: RebornRuntimeInput,
-    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) slack_personal_lazy_slot: Option<SlackPersonalSetupServiceSlot>,
 }
 
@@ -626,7 +696,7 @@ pub(crate) fn build_services_input_with_options(
     options: RuntimeInputOptions,
 ) -> anyhow::Result<RuntimeServicesInput> {
     // Read the operator's boot TOML if present. Missing file is OK
-    // (operator may not have run `ironclaw-reborn config init` yet);
+    // (operator may not have run `ironclaw config init` yet);
     // sparse fields are OK (each absent field falls back to the
     // CLI-shaped default baked into composition).
     let config_file = read_config_file(config)?;
@@ -657,11 +727,10 @@ pub(crate) fn build_services_input_with_options(
     if let Some(ResolvedGoogleOAuthConfig {
         client,
         hosted_domain_hint: _hosted_domain_hint,
-    }) = resolve_google_oauth_config_from_env()?
+    }) = resolve_google_oauth_config_from_env(config, config_file.as_ref())?
     {
         services_input = services_input.with_google_oauth_backend(client);
     }
-    #[cfg(feature = "slack-v2-host-beta")]
     let slack_personal_lazy_slot =
         if let Some(redirect_uri) = resolve_slack_personal_oauth_redirect_uri_from_env()? {
             let slot = SlackPersonalSetupServiceSlot::new(redirect_uri);
@@ -677,7 +746,6 @@ pub(crate) fn build_services_input_with_options(
 
     Ok(RuntimeServicesInput {
         services_input,
-        #[cfg(feature = "slack-v2-host-beta")]
         slack_personal_lazy_slot,
         config_file,
     })
@@ -696,7 +764,7 @@ fn build_standalone_local_runtime_services_input(
         composition_profile(profile),
         owner_id,
         local_runtime_root,
-        RebornLocalRuntimeProfileOptions {
+        RebornRuntimeProfileOptions {
             confirm_host_access: options.confirm_host_access,
         },
     )
@@ -778,18 +846,96 @@ fn build_production_services_input(
     )
 }
 
-pub(crate) fn resolve_google_oauth_config_from_env()
--> anyhow::Result<Option<ResolvedGoogleOAuthConfig>> {
-    resolve_google_oauth_config(optional_nonempty_env)
+/// Resolve the Google OAuth backend config for boot, merging env vars with
+/// the operator's `[google]` config.toml section and the encrypted
+/// client-secret store. See [`resolve_google_oauth_config_state_merged`]
+/// for the precedence rule.
+pub(crate) fn resolve_google_oauth_config_from_env(
+    config: &RebornBootConfig,
+    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+) -> anyhow::Result<Option<ResolvedGoogleOAuthConfig>> {
+    let env = GoogleOAuthEnvInputs::read(optional_nonempty_env);
+    let config_google = config_file.and_then(|file| file.google.as_ref());
+    match resolve_google_oauth_config_state_with_store_loader(env, config_google, || {
+        google_oauth_client_secret_from_store(config)
+    })? {
+        GoogleOAuthResolution::Configured(config) => Ok(Some(config)),
+        GoogleOAuthResolution::Disabled(state) => {
+            tracing::debug!(
+                target = "ironclaw::reborn::cli::google_oauth",
+                ?state,
+                "Google OAuth backend disabled"
+            );
+            Ok(None)
+        }
+    }
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
+/// Status-surface variant of [`resolve_google_oauth_config_from_env`].
+///
+/// Status only reports the public-field asymmetry (`client_id` without
+/// `redirect_uri`, or vice versa). A client secret is optional because Google
+/// OAuth supports public-client PKCE, so stored-secret presence cannot change
+/// that classification. Keeping the store loader empty makes this diagnostic
+/// strictly read-only without adding a second secret-store opening API.
+pub(crate) fn resolve_google_oauth_config_state_from_env(
+    config: &RebornBootConfig,
+) -> anyhow::Result<Option<GoogleOAuthConfigState>> {
+    let config_file = read_config_file(config)?;
+    let env = GoogleOAuthEnvInputs::read(optional_nonempty_env);
+    let config_google = config_file.as_ref().and_then(|file| file.google.as_ref());
+    Ok(resolve_google_oauth_public_config_state(
+        &env,
+        config_google,
+    ))
+}
+
+/// Read the Google OAuth client secret from the encrypted local-dev secret
+/// store (the same store `config set google.client_secret` writes to via
+/// `LocalDevSecretStoreOpener` — see `commands::config::set`). Opening the
+/// store is an idempotent, safe-to-repeat operation. Boot invokes this lazily
+/// only after public OAuth configuration is complete and no higher-precedence
+/// env secret exists, avoiding unnecessary keychain or filesystem access on
+/// unconfigured and partial hosts. Status never calls this material-reading
+/// path because secret presence cannot affect its public-field diagnosis.
+///
+/// `libsql`-gated because that is the only Cargo feature under which
+/// `config set google.client_secret` can ever have written anything here —
+/// a binary without it can't have populated the store, so there is nothing
+/// to read.
+#[cfg(feature = "libsql")]
+fn google_oauth_client_secret_from_store(
+    config: &RebornBootConfig,
+) -> anyhow::Result<Option<SecretString>> {
+    let storage_root = local_runtime_storage_root(config, config.profile());
+    // Boot may open/migrate local runtime state, but it can still avoid all
+    // keychain/filesystem writes when no store exists yet.
+    if !ironclaw_reborn_composition::local_dev_db_path(&storage_root).exists() {
+        return Ok(None);
+    }
+    block_on_cli(async move {
+        let store = ironclaw_reborn_composition::open_local_dev_secret_store(&storage_root)
+            .await
+            .map_err(anyhow::Error::from)?;
+        ironclaw_reborn_composition::GoogleOauthSecretStore::new(store)
+            .read()
+            .await
+            .map_err(anyhow::Error::from)
+    })
+}
+
+#[cfg(not(feature = "libsql"))]
+fn google_oauth_client_secret_from_store(
+    _config: &RebornBootConfig,
+) -> anyhow::Result<Option<SecretString>> {
+    Ok(None)
+}
+
 pub(crate) fn resolve_slack_personal_oauth_redirect_uri_from_env()
 -> anyhow::Result<Option<OAuthRedirectUri>> {
     resolve_slack_personal_oauth_redirect_uri(optional_nonempty_env)
 }
 
-#[cfg(any(feature = "slack-v2-host-beta", test))]
 fn resolve_slack_personal_oauth_redirect_uri(
     mut lookup: impl FnMut(&str) -> Option<String>,
 ) -> anyhow::Result<Option<OAuthRedirectUri>> {
@@ -801,52 +947,243 @@ fn resolve_slack_personal_oauth_redirect_uri(
     Ok(Some(uri))
 }
 
-fn resolve_google_oauth_config(
-    mut lookup: impl FnMut(&str) -> Option<String>,
-) -> anyhow::Result<Option<ResolvedGoogleOAuthConfig>> {
-    let reborn_client_id = lookup("IRONCLAW_REBORN_GOOGLE_CLIENT_ID");
-    let reborn_redirect_uri = lookup("IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI");
-    let reborn_client_secret = lookup("IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET");
-    let reborn_hosted_domain_hint = lookup("IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT");
-    let legacy_client_id = lookup("GOOGLE_CLIENT_ID");
-    let legacy_client_secret = lookup("GOOGLE_CLIENT_SECRET");
-    let legacy_redirect_uri = lookup("GOOGLE_OAUTH_REDIRECT_URI");
-    let legacy_hosted_domain_hint = lookup("GOOGLE_ALLOWED_HD");
+/// Outcome of resolving Google OAuth config from env, the `[google]`
+/// config.toml section, and the encrypted client-secret store (merged by
+/// [`resolve_google_oauth_config_state_merged`]). Distinguishes "nothing set
+/// at all" from "asymmetrically partial" (`client_id` present without
+/// `redirect_uri`, or vice versa) so callers can log/report specifically —
+/// both degrade to no active Google OAuth backend rather than a boot
+/// failure. `client_secret` is intentionally NOT part of the asymmetry: a
+/// missing secret alone still yields `Configured` (public-client PKCE).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GoogleOAuthConfigState {
+    /// No Google OAuth vars/config present at all — silent, not a
+    /// misconfiguration.
+    Unconfigured,
+    /// `client_id` is present without `redirect_uri`.
+    MissingRedirectUri,
+    /// `redirect_uri` is present without `client_id`.
+    MissingClientId,
+}
 
-    if reborn_client_id.is_none()
-        && reborn_redirect_uri.is_none()
-        && reborn_client_secret.is_none()
-        && reborn_hosted_domain_hint.is_none()
-        && legacy_client_id.is_none()
-        && legacy_client_secret.is_none()
-        && legacy_redirect_uri.is_none()
-        && legacy_hosted_domain_hint.is_none()
-    {
-        return Ok(None);
+impl GoogleOAuthConfigState {
+    /// Convert the closed missing-field state to an operator-facing config
+    /// key only at the CLI rendering boundary.
+    pub(crate) fn missing_config_key(&self) -> Option<&'static str> {
+        match self {
+            Self::Unconfigured => None,
+            Self::MissingRedirectUri => Some("redirect_uri"),
+            Self::MissingClientId => Some("client_id"),
+        }
+    }
+}
+
+/// Either a fully resolved Google OAuth backend config, or a
+/// [`GoogleOAuthConfigState`] explaining why one wasn't built.
+#[derive(Debug, Clone)]
+pub(crate) enum GoogleOAuthResolution {
+    Configured(ResolvedGoogleOAuthConfig),
+    Disabled(GoogleOAuthConfigState),
+}
+
+/// Env-only resolver — the pure lookup-closure testing seam predating the
+/// `[google]` config.toml / secret-store merge. Delegates to
+/// [`resolve_google_oauth_config_state_merged`] with no config/store input,
+/// which is mathematically identical to the old env-only "nothing set at
+/// all" check (each merged field collapses to exactly the
+/// reborn-prefixed-or-legacy env pair when `config_google` and
+/// `store_client_secret` are both `None`). Kept as a separate, still-pure
+/// entry point so existing env-wins test coverage keeps compiling and
+/// passing unchanged.
+#[cfg(test)]
+fn resolve_google_oauth_config_state(
+    lookup: impl FnMut(&str) -> Option<String>,
+) -> anyhow::Result<GoogleOAuthResolution> {
+    resolve_google_oauth_config_state_merged(lookup, None, None)
+}
+
+/// Resolve Google OAuth backend config state with precedence **env (wins) ->
+/// `[google]` config.toml, field by field**; `client_secret` additionally
+/// falls back to the encrypted secret store when neither env var carries it.
+/// `hosted_domain_hint` follows the same env -> config precedence as
+/// `client_id`/`redirect_uri`.
+///
+/// Pure: `env_lookup` is an injected closure and `store_client_secret` is a
+/// pre-fetched value rather than this function doing its own I/O — the same
+/// PURE lookup-closure testing seam the pre-merge env-only tests already
+/// relied on, now widened to cover the config-file and secret-store inputs
+/// too without giving this function a runtime dependency. The boot caller
+/// reads config plus stored secret material; the status caller reads config
+/// but deliberately supplies no stored secret because an optional PKCE client
+/// secret cannot affect its public-field diagnosis.
+#[cfg(test)]
+fn resolve_google_oauth_config_state_merged(
+    env_lookup: impl FnMut(&str) -> Option<String>,
+    config_google: Option<&ironclaw_reborn_config::GoogleSection>,
+    store_client_secret: Option<SecretString>,
+) -> anyhow::Result<GoogleOAuthResolution> {
+    resolve_google_oauth_config_state_from_inputs(
+        GoogleOAuthEnvInputs::read(env_lookup),
+        config_google,
+        store_client_secret,
+    )
+}
+
+#[derive(Default)]
+struct GoogleOAuthEnvInputs {
+    reborn_client_id: Option<String>,
+    reborn_redirect_uri: Option<String>,
+    reborn_client_secret: Option<String>,
+    reborn_hosted_domain_hint: Option<String>,
+    legacy_client_id: Option<String>,
+    legacy_client_secret: Option<String>,
+    legacy_redirect_uri: Option<String>,
+    legacy_hosted_domain_hint: Option<String>,
+}
+
+impl GoogleOAuthEnvInputs {
+    fn read(mut lookup: impl FnMut(&str) -> Option<String>) -> Self {
+        Self {
+            reborn_client_id: lookup("IRONCLAW_REBORN_GOOGLE_CLIENT_ID"),
+            reborn_redirect_uri: lookup("IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI"),
+            reborn_client_secret: lookup("IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET"),
+            reborn_hosted_domain_hint: lookup("IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT"),
+            legacy_client_id: lookup("GOOGLE_CLIENT_ID"),
+            legacy_client_secret: lookup("GOOGLE_CLIENT_SECRET"),
+            legacy_redirect_uri: lookup("GOOGLE_OAUTH_REDIRECT_URI"),
+            legacy_hosted_domain_hint: lookup("GOOGLE_ALLOWED_HD"),
+        }
     }
 
-    let client_id = reborn_client_id
-        .or(legacy_client_id)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "IRONCLAW_REBORN_GOOGLE_CLIENT_ID or GOOGLE_CLIENT_ID is required for Google OAuth setup"
-            )
-        })?;
-    let redirect_uri = reborn_redirect_uri.or(legacy_redirect_uri).ok_or_else(|| {
-        anyhow::anyhow!(
-            "IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI or GOOGLE_OAUTH_REDIRECT_URI is required for Google OAuth setup"
-        )
-    })?;
-    let client_secret = reborn_client_secret
-        .or(legacy_client_secret)
-        .map(SecretString::from);
+    fn resolved_public_fields(
+        &self,
+        config_google: Option<&ironclaw_reborn_config::GoogleSection>,
+    ) -> (Option<String>, Option<String>) {
+        let client_id = self
+            .reborn_client_id
+            .clone()
+            .or_else(|| self.legacy_client_id.clone())
+            .or_else(|| config_google.and_then(|section| section.client_id.clone()));
+        let redirect_uri = self
+            .reborn_redirect_uri
+            .clone()
+            .or_else(|| self.legacy_redirect_uri.clone())
+            .or_else(|| config_google.and_then(|section| section.redirect_uri.clone()));
+        (client_id, redirect_uri)
+    }
+
+    fn has_client_secret(&self) -> bool {
+        self.reborn_client_secret.is_some() || self.legacy_client_secret.is_some()
+    }
+}
+
+/// Classify only the two public fields that determine whether Google OAuth is
+/// disabled. `None` means both are present; an optional client secret cannot
+/// change this result because public-client PKCE remains valid without one.
+fn resolve_google_oauth_public_config_state(
+    env: &GoogleOAuthEnvInputs,
+    config_google: Option<&ironclaw_reborn_config::GoogleSection>,
+) -> Option<GoogleOAuthConfigState> {
+    match env.resolved_public_fields(config_google) {
+        (Some(_), Some(_)) => None,
+        (Some(_), None) => Some(GoogleOAuthConfigState::MissingRedirectUri),
+        (None, Some(_)) => Some(GoogleOAuthConfigState::MissingClientId),
+        (None, None) => Some(GoogleOAuthConfigState::Unconfigured),
+    }
+}
+
+fn resolve_google_oauth_config_state_with_store_loader(
+    env: GoogleOAuthEnvInputs,
+    config_google: Option<&ironclaw_reborn_config::GoogleSection>,
+    load_store_client_secret: impl FnOnce() -> anyhow::Result<Option<SecretString>>,
+) -> anyhow::Result<GoogleOAuthResolution> {
+    let should_read_store = resolve_google_oauth_public_config_state(&env, config_google).is_none()
+        && !env.has_client_secret();
+    let store_client_secret = if should_read_store {
+        load_store_client_secret()?
+    } else {
+        None
+    };
+    resolve_google_oauth_config_state_from_inputs(env, config_google, store_client_secret)
+}
+
+fn resolve_google_oauth_config_state_from_inputs(
+    env: GoogleOAuthEnvInputs,
+    config_google: Option<&ironclaw_reborn_config::GoogleSection>,
+    store_client_secret: Option<SecretString>,
+) -> anyhow::Result<GoogleOAuthResolution> {
+    // env (wins) -> [google] config.toml, field by field.
+    let client_id = env
+        .reborn_client_id
+        .or(env.legacy_client_id)
+        .or_else(|| config_google.and_then(|section| section.client_id.clone()));
+    let redirect_uri = env
+        .reborn_redirect_uri
+        .or(env.legacy_redirect_uri)
+        .or_else(|| config_google.and_then(|section| section.redirect_uri.clone()));
+    let env_client_secret = env.reborn_client_secret.or(env.legacy_client_secret);
+    let hosted_domain_hint = env
+        .reborn_hosted_domain_hint
+        .or(env.legacy_hosted_domain_hint)
+        .or_else(|| config_google.and_then(|section| section.hosted_domain_hint.clone()));
+
+    if client_id.is_none()
+        && redirect_uri.is_none()
+        && env_client_secret.is_none()
+        && hosted_domain_hint.is_none()
+        && store_client_secret.is_none()
+    {
+        return Ok(GoogleOAuthResolution::Disabled(
+            GoogleOAuthConfigState::Unconfigured,
+        ));
+    }
+
+    let (client_id, redirect_uri) = match (client_id, redirect_uri) {
+        (Some(client_id), Some(redirect_uri)) => (client_id, redirect_uri),
+        (Some(_), None) => {
+            tracing::debug!(
+                target = "ironclaw::reborn::cli::google_oauth",
+                missing = "redirect_uri",
+                "Google OAuth partially configured (client_id set, redirect_uri missing); \
+                 disabling until IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI or \
+                 `config set google.redirect_uri` is set"
+            );
+            return Ok(GoogleOAuthResolution::Disabled(
+                GoogleOAuthConfigState::MissingRedirectUri,
+            ));
+        }
+        (None, Some(_)) => {
+            tracing::debug!(
+                target = "ironclaw::reborn::cli::google_oauth",
+                missing = "client_id",
+                "Google OAuth partially configured (redirect_uri set, client_id missing); \
+                 disabling until IRONCLAW_REBORN_GOOGLE_CLIENT_ID or \
+                 `config set google.client_id` is set"
+            );
+            return Ok(GoogleOAuthResolution::Disabled(
+                GoogleOAuthConfigState::MissingClientId,
+            ));
+        }
+        (None, None) => {
+            // Neither client_id nor redirect_uri set, but some other
+            // Google var/field (client_secret / hosted_domain_hint) is —
+            // treat as unconfigured rather than partial: those two
+            // fields alone don't signal OAuth setup intent.
+            return Ok(GoogleOAuthResolution::Disabled(
+                GoogleOAuthConfigState::Unconfigured,
+            ));
+        }
+    };
+
+    let client_secret = env_client_secret
+        .map(SecretString::from)
+        .or(store_client_secret);
     if client_secret.is_none() {
-        tracing::warn!(
+        tracing::debug!(
             target = "ironclaw::reborn::cli::google_oauth",
             "Google OAuth setup config has no client secret; token exchange will use public-client PKCE",
         );
     }
-    let hosted_domain_hint = reborn_hosted_domain_hint.or(legacy_hosted_domain_hint);
     let mut client = OAuthClientConfig::new(client_id, redirect_uri, client_secret)
         .context("invalid Google OAuth client configuration")?;
     if let Some(hosted_domain_hint) = hosted_domain_hint.clone() {
@@ -857,13 +1194,27 @@ fn resolve_google_oauth_config(
         target = "ironclaw::reborn::cli::google_oauth",
         has_client_secret = client.client_secret.is_some(),
         has_hosted_domain_hint = hosted_domain_hint.is_some(),
-        "Google OAuth backend config resolved from environment"
+        "Google OAuth backend config resolved (env / config.toml / secret store)"
     );
 
-    Ok(Some(ResolvedGoogleOAuthConfig {
-        client,
-        hosted_domain_hint,
-    }))
+    Ok(GoogleOAuthResolution::Configured(
+        ResolvedGoogleOAuthConfig {
+            client,
+            hosted_domain_hint,
+        },
+    ))
+}
+
+/// Env-only pure wrapper mirroring [`resolve_google_oauth_config_state`] —
+/// kept for the same pre-merge test seam.
+#[cfg(test)]
+fn resolve_google_oauth_config(
+    lookup: impl FnMut(&str) -> Option<String>,
+) -> anyhow::Result<Option<ResolvedGoogleOAuthConfig>> {
+    match resolve_google_oauth_config_state(lookup)? {
+        GoogleOAuthResolution::Configured(config) => Ok(Some(config)),
+        GoogleOAuthResolution::Disabled(_) => Ok(None),
+    }
 }
 
 /// Read an env var with lenient presence semantics: unset OR
@@ -1235,19 +1586,22 @@ mod tests {
         CredentialRefreshSettings, RebornCompositionProfile, TurnStatus,
         test_support::assistant_reply_without_text_for_test,
     };
-    #[cfg(feature = "webui-v2-beta")]
     use ironclaw_reborn_composition::{LocalTriggerAccessRole, LocalTriggerAccessSource};
     use ironclaw_reborn_config::RebornBootConfig;
+    use secrecy::SecretString;
 
     use super::test_env::EnvGuard;
-    #[cfg(feature = "webui-v2-beta")]
     use super::with_run_local_trigger_fire_access_checker;
     use super::{
-        RuntimeInputCaller, RuntimeInputOptions, apply_credential_refresh_override, block_on_cli,
-        build_runtime_input, build_runtime_input_with_options, no_assistant_text_message,
-        protect_reborn_log_filter, resolve_google_oauth_config,
+        GoogleOAuthConfigState, GoogleOAuthEnvInputs, GoogleOAuthResolution, RuntimeInputCaller,
+        RuntimeInputOptions, apply_credential_refresh_override, block_on_cli, build_runtime_input,
+        build_runtime_input_with_options, no_assistant_text_message, protect_reborn_log_filter,
+        resolve_google_oauth_config, resolve_google_oauth_config_state,
+        resolve_google_oauth_config_state_merged,
+        resolve_google_oauth_config_state_with_store_loader,
         resolve_slack_personal_oauth_redirect_uri, runner_settings,
     };
+    use ironclaw_reborn_config::GoogleSection;
     // Only the `#[cfg(feature = "libsql")]` hosted-volume test consumes this.
     #[cfg(feature = "libsql")]
     use super::local_runtime_storage_root;
@@ -1599,6 +1953,32 @@ mod tests {
             build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
 
         assert!(runtime_input.runner.worker_count.is_none());
+    }
+
+    #[test]
+    fn runtime_inputs_carry_boot_config_for_initial_llm_reload() {
+        let _lock = lock_runtime_env();
+        let _guards = clear_runner_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        for caller in [RuntimeInputCaller::Run, RuntimeInputCaller::Serve] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let reborn_home = temp.path().join("reborn-home");
+            std::fs::create_dir_all(&reborn_home).expect("mkdir");
+            let config = RebornBootConfig::resolve_from_env_parts(
+                Some(reborn_home.into_os_string()),
+                None,
+                None,
+                None,
+            )
+            .expect("boot config");
+
+            let runtime_input = build_runtime_input(&config, caller).expect("runtime input");
+
+            let boot = runtime_input.boot.unwrap_or_else(|| {
+                panic!("{caller:?} must carry boot config for the initial LLM reload")
+            });
+            assert_eq!(boot.home().path(), config.home().path());
+        }
     }
 
     #[test]
@@ -2851,7 +3231,6 @@ enabled = true
         );
     }
 
-    #[cfg(feature = "webui-v2-beta")]
     #[allow(clippy::await_holding_lock, reason = "serializes env guards")]
     #[tokio::test]
     async fn run_trigger_poller_bootstrap_seeds_local_access_checker() {
@@ -3272,17 +3651,61 @@ poll_interval_secs = 15
     }
 
     #[test]
-    fn resolve_google_oauth_config_errors_when_client_id_missing() {
+    fn resolve_google_oauth_config_reports_disabled_when_client_id_present_but_redirect_uri_missing()
+     {
+        let vars = HashMap::from([(
+            "IRONCLAW_REBORN_GOOGLE_CLIENT_ID",
+            "reborn-client.apps.googleusercontent.com",
+        )]);
+
+        let config =
+            resolve_google_oauth_config(|name| vars.get(name).map(|value| value.to_string()))
+                .expect("asymmetric partial Google OAuth config must degrade, not fail boot");
+        assert!(
+            config.is_none(),
+            "client_id-without-redirect_uri must not build an active OAuth backend"
+        );
+
+        let state =
+            resolve_google_oauth_config_state(|name| vars.get(name).map(|value| value.to_string()))
+                .expect("asymmetric partial Google OAuth config must degrade, not fail boot");
+        match state {
+            GoogleOAuthResolution::Disabled(disabled) => {
+                assert_eq!(disabled, GoogleOAuthConfigState::MissingRedirectUri)
+            }
+            GoogleOAuthResolution::Configured(_) => {
+                panic!("expected Disabled(PartiallyConfigured), got Configured")
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_google_oauth_config_reports_disabled_when_redirect_uri_present_but_client_id_missing()
+     {
         let vars = HashMap::from([(
             "IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI",
             "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
         )]);
 
-        let error =
+        let config =
             resolve_google_oauth_config(|name| vars.get(name).map(|value| value.to_string()))
-                .expect_err("redirect-only Google OAuth config must fail closed");
+                .expect("asymmetric partial Google OAuth config must degrade, not fail boot");
+        assert!(
+            config.is_none(),
+            "redirect_uri-without-client_id must not build an active OAuth backend"
+        );
 
-        assert!(error.to_string().contains("GOOGLE_CLIENT_ID"));
+        let state =
+            resolve_google_oauth_config_state(|name| vars.get(name).map(|value| value.to_string()))
+                .expect("asymmetric partial Google OAuth config must degrade, not fail boot");
+        match state {
+            GoogleOAuthResolution::Disabled(disabled) => {
+                assert_eq!(disabled, GoogleOAuthConfigState::MissingClientId)
+            }
+            GoogleOAuthResolution::Configured(_) => {
+                panic!("expected Disabled(PartiallyConfigured), got Configured")
+            }
+        }
     }
 
     #[test]
@@ -3337,7 +3760,7 @@ poll_interval_secs = 15
     }
 
     #[test]
-    fn resolve_google_oauth_config_uses_legacy_client_vars_as_configuration_signal() {
+    fn resolve_google_oauth_config_treats_legacy_client_vars_without_redirect_as_partial() {
         let vars = HashMap::from([
             (
                 "GOOGLE_CLIENT_ID",
@@ -3346,10 +3769,423 @@ poll_interval_secs = 15
             ("GOOGLE_CLIENT_SECRET", "legacy-client-secret"),
         ]);
 
-        let error =
+        let config =
             resolve_google_oauth_config(|name| vars.get(name).map(|value| value.to_string()))
-                .expect_err("legacy client vars without redirect URI must not be ignored");
+                .expect("legacy client vars without redirect URI must degrade, not fail boot");
+        assert!(config.is_none());
 
-        assert!(error.to_string().contains("GOOGLE_OAUTH_REDIRECT_URI"));
+        let state =
+            resolve_google_oauth_config_state(|name| vars.get(name).map(|value| value.to_string()))
+                .expect("legacy client vars without redirect URI must degrade, not fail boot");
+        match state {
+            GoogleOAuthResolution::Disabled(disabled) => {
+                assert_eq!(disabled, GoogleOAuthConfigState::MissingRedirectUri)
+            }
+            GoogleOAuthResolution::Configured(_) => {
+                panic!("expected Disabled(PartiallyConfigured), got Configured")
+            }
+        }
+    }
+
+    // ── resolve_google_oauth_config_state_merged (item 1: [google]
+    // config.toml + secret-store wiring) ────────────────────────────
+
+    #[test]
+    fn merged_resolver_config_only_no_env_is_configured() {
+        let google = GoogleSection {
+            client_id: Some("config-client.apps.googleusercontent.com".to_string()),
+            redirect_uri: Some("http://127.0.0.1:3000/oauth/google/callback".to_string()),
+            hosted_domain_hint: Some("config.example.com".to_string()),
+        };
+
+        let resolution = resolve_google_oauth_config_state_merged(|_| None, Some(&google), None)
+            .expect("config-only Google OAuth section must resolve");
+        match resolution {
+            GoogleOAuthResolution::Configured(config) => {
+                assert_eq!(
+                    config.client.client_id.as_str(),
+                    "config-client.apps.googleusercontent.com"
+                );
+                assert_eq!(
+                    config.client.redirect_uri.as_str(),
+                    "http://127.0.0.1:3000/oauth/google/callback"
+                );
+                assert_eq!(
+                    config.hosted_domain_hint.as_deref(),
+                    Some("config.example.com")
+                );
+            }
+            GoogleOAuthResolution::Disabled(_) => {
+                panic!("config-only [google] section must classify as Configured, no env set")
+            }
+        }
+    }
+
+    #[test]
+    fn merged_resolver_env_overrides_config_field_by_field() {
+        let google = GoogleSection {
+            client_id: Some("config-client.apps.googleusercontent.com".to_string()),
+            redirect_uri: Some("http://127.0.0.1:3000/config/callback".to_string()),
+            hosted_domain_hint: Some("config.example.com".to_string()),
+        };
+        let vars = HashMap::from([(
+            "IRONCLAW_REBORN_GOOGLE_CLIENT_ID",
+            "env-client.apps.googleusercontent.com",
+        )]);
+
+        let resolution = resolve_google_oauth_config_state_merged(
+            |name| vars.get(name).map(|value| value.to_string()),
+            Some(&google),
+            None,
+        )
+        .expect("env-overridden client_id, config-sourced redirect_uri must resolve");
+        match resolution {
+            GoogleOAuthResolution::Configured(config) => {
+                assert_eq!(
+                    config.client.client_id.as_str(),
+                    "env-client.apps.googleusercontent.com",
+                    "env must win over config.toml for the field it sets"
+                );
+                assert_eq!(
+                    config.client.redirect_uri.as_str(),
+                    "http://127.0.0.1:3000/config/callback",
+                    "a field env does not set must still fall back to config.toml"
+                );
+                assert_eq!(
+                    config.hosted_domain_hint.as_deref(),
+                    Some("config.example.com"),
+                    "hosted_domain_hint must also still fall back to config.toml when env \
+                     does not set it"
+                );
+            }
+            GoogleOAuthResolution::Disabled(_) => {
+                panic!("expected Configured with per-field env/config merge")
+            }
+        }
+    }
+
+    /// Companion to the test above: env must also win field-by-field for
+    /// `redirect_uri` and `hosted_domain_hint`, not just `client_id` — the
+    /// `.or_else(...)` fallback chain in `resolve_google_oauth_config_state_merged`
+    /// is repeated per field, so a bug in any one field's ordering would not
+    /// be caught by only ever overriding `client_id`.
+    #[test]
+    fn merged_resolver_env_overrides_redirect_uri_and_hosted_domain_hint() {
+        let google = GoogleSection {
+            client_id: Some("config-client.apps.googleusercontent.com".to_string()),
+            redirect_uri: Some("http://127.0.0.1:3000/config/callback".to_string()),
+            hosted_domain_hint: Some("config.example.com".to_string()),
+        };
+        let vars = HashMap::from([
+            (
+                "IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI",
+                "http://127.0.0.1:3000/env/callback",
+            ),
+            (
+                "IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT",
+                "env.example.com",
+            ),
+        ]);
+
+        let resolution = resolve_google_oauth_config_state_merged(
+            |name| vars.get(name).map(|value| value.to_string()),
+            Some(&google),
+            None,
+        )
+        .expect("env-overridden redirect_uri/hosted_domain_hint must resolve");
+        match resolution {
+            GoogleOAuthResolution::Configured(config) => {
+                assert_eq!(
+                    config.client.client_id.as_str(),
+                    "config-client.apps.googleusercontent.com",
+                    "client_id not set by env must still fall back to config.toml"
+                );
+                assert_eq!(
+                    config.client.redirect_uri.as_str(),
+                    "http://127.0.0.1:3000/env/callback",
+                    "env must win over config.toml for redirect_uri"
+                );
+                assert_eq!(
+                    config.hosted_domain_hint.as_deref(),
+                    Some("env.example.com"),
+                    "env must win over config.toml for hosted_domain_hint"
+                );
+            }
+            GoogleOAuthResolution::Disabled(_) => {
+                panic!("expected Configured with per-field env/config merge")
+            }
+        }
+    }
+
+    #[test]
+    fn merged_resolver_secret_from_store_only_resolves_a_client_secret() {
+        let google = GoogleSection {
+            client_id: Some("config-client.apps.googleusercontent.com".to_string()),
+            redirect_uri: Some("http://127.0.0.1:3000/oauth/google/callback".to_string()),
+            hosted_domain_hint: None,
+        };
+        let store_secret = secrecy::SecretString::from("GOCSPX-from-store".to_string());
+
+        let resolution =
+            resolve_google_oauth_config_state_merged(|_| None, Some(&google), Some(store_secret))
+                .expect("store-sourced client_secret must resolve");
+        match resolution {
+            GoogleOAuthResolution::Configured(config) => {
+                let secret = config
+                    .client
+                    .client_secret
+                    .expect("client_secret must come from the store when env has none");
+                assert_eq!(
+                    secrecy::ExposeSecret::expose_secret(&secret),
+                    "GOCSPX-from-store"
+                );
+            }
+            GoogleOAuthResolution::Disabled(_) => {
+                panic!("expected Configured with a store-sourced client_secret")
+            }
+        }
+    }
+
+    #[test]
+    fn merged_resolver_env_client_secret_wins_over_store() {
+        let google = GoogleSection {
+            client_id: Some("config-client.apps.googleusercontent.com".to_string()),
+            redirect_uri: Some("http://127.0.0.1:3000/oauth/google/callback".to_string()),
+            hosted_domain_hint: None,
+        };
+        let vars = HashMap::from([("IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET", "env-secret")]);
+        let store_secret = secrecy::SecretString::from("store-secret".to_string());
+
+        let resolution = resolve_google_oauth_config_state_merged(
+            |name| vars.get(name).map(|value| value.to_string()),
+            Some(&google),
+            Some(store_secret),
+        )
+        .expect("must resolve");
+        match resolution {
+            GoogleOAuthResolution::Configured(config) => {
+                let secret = config.client.client_secret.expect("secret present");
+                assert_eq!(secrecy::ExposeSecret::expose_secret(&secret), "env-secret");
+            }
+            GoogleOAuthResolution::Disabled(_) => panic!("expected Configured"),
+        }
+    }
+
+    #[test]
+    fn merged_resolver_partial_across_sources_env_client_id_config_missing_redirect() {
+        // client_id from env, redirect_uri absent from both env and config:
+        // must classify as partial, naming the config-sourced gap.
+        let google = GoogleSection {
+            client_id: None,
+            redirect_uri: None,
+            hosted_domain_hint: None,
+        };
+        let vars = HashMap::from([(
+            "IRONCLAW_REBORN_GOOGLE_CLIENT_ID",
+            "env-client.apps.googleusercontent.com",
+        )]);
+
+        let resolution = resolve_google_oauth_config_state_merged(
+            |name| vars.get(name).map(|value| value.to_string()),
+            Some(&google),
+            None,
+        )
+        .expect("must resolve");
+        match resolution {
+            GoogleOAuthResolution::Disabled(disabled) => {
+                assert_eq!(disabled, GoogleOAuthConfigState::MissingRedirectUri)
+            }
+            GoogleOAuthResolution::Configured(_) => {
+                panic!("expected Disabled(PartiallyConfigured)")
+            }
+        }
+    }
+
+    #[test]
+    fn merged_resolver_partial_across_sources_config_redirect_only() {
+        // redirect_uri from config.toml only, client_id absent everywhere:
+        // must classify as partial, naming client_id as missing.
+        let google = GoogleSection {
+            client_id: None,
+            redirect_uri: Some("http://127.0.0.1:3000/oauth/google/callback".to_string()),
+            hosted_domain_hint: None,
+        };
+
+        let resolution = resolve_google_oauth_config_state_merged(|_| None, Some(&google), None)
+            .expect("must resolve");
+        match resolution {
+            GoogleOAuthResolution::Disabled(disabled) => {
+                assert_eq!(disabled, GoogleOAuthConfigState::MissingClientId)
+            }
+            GoogleOAuthResolution::Configured(_) => {
+                panic!("expected Disabled(PartiallyConfigured)")
+            }
+        }
+    }
+
+    #[test]
+    fn merged_resolver_no_config_no_env_no_store_is_unconfigured() {
+        let resolution =
+            resolve_google_oauth_config_state_merged(|_| None, None, None).expect("must resolve");
+        assert_eq!(
+            resolution_state(resolution),
+            GoogleOAuthConfigState::Unconfigured
+        );
+    }
+
+    #[test]
+    fn google_oauth_secret_store_loader_is_lazy_for_unconfigured_partial_and_env_secret_states() {
+        let unconfigured = GoogleOAuthEnvInputs::default();
+        resolve_google_oauth_config_state_with_store_loader(unconfigured, None, || {
+            panic!("unconfigured OAuth must not open the secret store")
+        })
+        .expect("unconfigured resolution");
+
+        let partial = GoogleOAuthEnvInputs {
+            reborn_client_id: Some("client.apps.googleusercontent.com".to_string()),
+            ..GoogleOAuthEnvInputs::default()
+        };
+        resolve_google_oauth_config_state_with_store_loader(partial, None, || {
+            panic!("partial OAuth must not open the secret store")
+        })
+        .expect("partial resolution");
+
+        let env_secret = GoogleOAuthEnvInputs {
+            reborn_client_id: Some("client.apps.googleusercontent.com".to_string()),
+            reborn_redirect_uri: Some("http://127.0.0.1:3000/oauth/google/callback".to_string()),
+            reborn_client_secret: Some("GOCSPX-env-secret".to_string()),
+            ..GoogleOAuthEnvInputs::default()
+        };
+        let resolution =
+            resolve_google_oauth_config_state_with_store_loader(env_secret, None, || {
+                panic!("an env secret must take precedence without opening the secret store")
+            })
+            .expect("configured resolution");
+        assert!(matches!(resolution, GoogleOAuthResolution::Configured(_)));
+    }
+
+    #[test]
+    fn google_oauth_secret_store_loader_runs_for_complete_public_config_without_env_secret() {
+        let env = GoogleOAuthEnvInputs {
+            reborn_client_id: Some("client.apps.googleusercontent.com".to_string()),
+            reborn_redirect_uri: Some("http://127.0.0.1:3000/oauth/google/callback".to_string()),
+            ..GoogleOAuthEnvInputs::default()
+        };
+        let loaded = std::cell::Cell::new(false);
+        let resolution = resolve_google_oauth_config_state_with_store_loader(env, None, || {
+            loaded.set(true);
+            Ok(Some(SecretString::from("GOCSPX-store-secret".to_string())))
+        })
+        .expect("configured resolution");
+        assert!(
+            loaded.get(),
+            "complete public config must consult the store"
+        );
+        match resolution {
+            GoogleOAuthResolution::Configured(config) => assert_eq!(
+                config
+                    .client
+                    .client_secret
+                    .as_ref()
+                    .map(secrecy::ExposeSecret::expose_secret),
+                Some("GOCSPX-store-secret")
+            ),
+            GoogleOAuthResolution::Disabled(state) => {
+                panic!("expected configured OAuth, got {state:?}")
+            }
+        }
+    }
+
+    fn resolution_state(resolution: GoogleOAuthResolution) -> GoogleOAuthConfigState {
+        match resolution {
+            GoogleOAuthResolution::Disabled(state) => state,
+            GoogleOAuthResolution::Configured(_) => {
+                panic!("expected Disabled, got Configured")
+            }
+        }
+    }
+
+    /// End-to-end wiring proof (item 1) that
+    /// `google_oauth_client_secret_from_store` actually reads back a secret
+    /// written the same way `config set google.client_secret` writes it
+    /// (`GoogleOauthSecretStore` over `open_local_dev_secret_store`), not
+    /// just that the pure merge function accepts a hand-built
+    /// `SecretString` — the merge-function tests above already cover the
+    /// precedence rules in isolation.
+    #[cfg(feature = "libsql")]
+    #[test]
+    fn google_oauth_client_secret_from_store_reads_back_a_stored_secret() {
+        let _guard = lock_runtime_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(temp.path().as_os_str().to_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let storage_root = super::local_runtime_storage_root(&config, config.profile());
+        std::fs::create_dir_all(&storage_root).expect("create profile storage root");
+        // Keep this a hermetic store-wiring test: without a cached key, the
+        // production resolver falls through to the real OS keychain while
+        // this test holds the process-wide env lock, serializing every other
+        // env-mutating test behind an interactive system service.
+        std::fs::write(
+            storage_root.join(ironclaw_reborn_composition::LOCAL_DEV_SECRETS_MASTER_KEY_PATH),
+            "00112233445566778899aabbccddeeff".repeat(2),
+        )
+        .expect("seed cached master key");
+        block_on_cli(async move {
+            let store = ironclaw_reborn_composition::open_local_dev_secret_store(&storage_root)
+                .await
+                .map_err(anyhow::Error::from)?;
+            ironclaw_reborn_composition::GoogleOauthSecretStore::new(store)
+                .put(secrecy::SecretString::from(
+                    "GOCSPX-store-wiring-test".to_string(),
+                ))
+                .await
+                .map_err(anyhow::Error::from)
+        })
+        .expect("seed the secret store");
+
+        let secret = super::google_oauth_client_secret_from_store(&config)
+            .expect("must read back")
+            .expect("a secret was stored");
+        assert_eq!(
+            secrecy::ExposeSecret::expose_secret(&secret),
+            "GOCSPX-store-wiring-test"
+        );
+    }
+
+    /// Boot's stored-secret loader must avoid creating state on a pristine
+    /// home: no directory creation and no master-key/keychain resolution.
+    /// Deliberately does NOT set `IRONCLAW_DISABLE_OS_KEYCHAIN`; with no
+    /// secret-store database, the loader must short-circuit to `None` before
+    /// reaching the keychain and complete quickly without a GUI session.
+    #[cfg(feature = "libsql")]
+    #[test]
+    fn google_oauth_client_secret_from_store_is_read_only_on_a_pristine_home() {
+        let _guard = lock_runtime_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("does-not-exist-yet");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.as_os_str().to_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let secret = super::google_oauth_client_secret_from_store(&config)
+            .expect("must resolve without touching the keychain");
+        assert!(
+            secret.is_none(),
+            "a pristine home has no secret store, so there is no secret to read"
+        );
+        assert!(
+            !reborn_home.exists(),
+            "a read-only diagnostic must not create the reborn home directory"
+        );
     }
 }

@@ -45,8 +45,8 @@ use ironclaw_network::{
 };
 use ironclaw_product_workflow::RebornOutboundDeliveryTargetId;
 use ironclaw_reborn_composition::{
-    AssistantReply, RebornCompositionProfile, RebornLocalRuntimeProfileOptions,
-    RebornProductAuthServices, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
+    AssistantReply, PollSettings, RebornCompositionProfile, RebornProductAuthServices,
+    RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, RebornRuntimeProfileOptions,
     RebornTurnDriveOutcome, TriggerPollerSettings, build_reborn_runtime, build_reborn_services,
     local_runtime_build_input_with_options,
 };
@@ -59,15 +59,19 @@ use secrecy::{ExposeSecret, SecretString};
 
 use crate::support::trace_llm::{LlmTrace, TraceResponse};
 
-pub const QA_RECORD_KEY_ENV: &str = "ANTHROPIC_API_KEY";
+pub const QA_RECORD_ANTHROPIC_KEY_ENV: &str = "ANTHROPIC_API_KEY";
+pub const QA_RECORD_NEARAI_KEY_ENV: &str = "NEARAI_API_KEY";
 pub const QA_RECORD_MODEL_ENV: &str = "IRONCLAW_QA_RECORD_MODEL";
-pub const QA_RECORD_DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+pub const QA_RECORD_ANTHROPIC_DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+pub const QA_RECORD_NEARAI_DEFAULT_MODEL: &str = "deepseek-ai/DeepSeek-V4-Flash";
+pub const NEARAI_CLOUD_BASE_URL: &str = "https://cloud-api.near.ai";
 
 const QA_TENANT: &str = "qa-trace-tenant";
 const QA_USER: &str = "qa-trace-owner";
 const QA_AGENT: &str = "qa-trace-agent";
 const QA_GOOGLE_ACCESS_HANDLE: &str = "reborn_qa_google_access_token";
 const QA_GOOGLE_REFRESH_HANDLE: &str = "reborn_qa_google_refresh_token";
+const QA_GITHUB_ACCESS_HANDLE: &str = "reborn_qa_github_access_token";
 const QA_CREDENTIAL_SOURCE_ROOT_ENV: &str = "IRONCLAW_REBORN_QA_CREDENTIAL_SOURCE_ROOT";
 const QA_CREDENTIAL_SOURCE_TENANT_ENV: &str = "IRONCLAW_REBORN_QA_CREDENTIAL_SOURCE_TENANT";
 const QA_CREDENTIAL_SOURCE_USER_ENV: &str = "IRONCLAW_REBORN_QA_CREDENTIAL_SOURCE_USER";
@@ -96,6 +100,16 @@ const GOOGLE_LIVE_CREDENTIAL: LiveCredentialSeed = LiveCredentialSeed {
     label: "qa google",
     access_handle: QA_GOOGLE_ACCESS_HANDLE,
     refresh_handle: Some(QA_GOOGLE_REFRESH_HANDLE),
+};
+
+// A stored GitHub token is a personal-access / OAuth token with no refresh
+// secret; the runtime injects it as a Bearer header at the HTTP egress
+// boundary (see the `github` first-party extension manifest).
+const GITHUB_LIVE_CREDENTIAL: LiveCredentialSeed = LiveCredentialSeed {
+    provider: "github",
+    label: "qa github",
+    access_handle: QA_GITHUB_ACCESS_HANDLE,
+    refresh_handle: None,
 };
 
 #[derive(Debug)]
@@ -203,10 +217,17 @@ pub fn load_qa_trace(fixture_name: &str) -> LlmTrace {
     serde_json::from_str(&json).expect("QA trace fixture parses as recorded LlmTrace JSON")
 }
 
+/// Normalize a recorded tool-call name to its capability-style spelling
+/// (`prefix.tool`). Reborn advertises capabilities to the model as `prefix__tool`
+/// when the provider's function-name grammar forbids dots (e.g. NEAR AI escapes
+/// `builtin.http` to `builtin__http` and `github.get_job_logs` to
+/// `github__get_job_logs`), while the direct-Anthropic path keeps the dotted
+/// spelling. Folding the first `__` back to `.` lets the QA contracts assert one
+/// stable capability name regardless of which recorder path produced the
+/// fixture. Already-dotted names (`slack.whoami`) and inner underscores
+/// (`builtin__get_file_content` -> `builtin.get_file_content`) are preserved.
 pub fn canonical_recorded_tool_name(name: &str) -> String {
-    name.strip_prefix("builtin__")
-        .map(|suffix| format!("builtin.{suffix}"))
-        .unwrap_or_else(|| name.to_string())
+    name.replacen("__", ".", 1)
 }
 
 /// All tool calls in the fixture as canonicalized (name, serialized arguments)
@@ -335,7 +356,7 @@ async fn build_qa_trace_runtime_with_http_interceptor_and_trigger_poller(
         RebornCompositionProfile::LocalDevYolo,
         QA_USER,
         root.path().join("local-dev"),
-        RebornLocalRuntimeProfileOptions {
+        RebornRuntimeProfileOptions {
             confirm_host_access: true,
         },
     )
@@ -355,6 +376,14 @@ async fn build_qa_trace_runtime_with_http_interceptor_and_trigger_poller(
             reply_target_binding_id: "qa-trace-reply".to_string(),
         })
         .with_tool_disclosure(ToolDisclosureMode::Off)
+        // Recording a multi-step live task (e.g. a GitHub CI fix that installs an
+        // extension and makes several API calls) needs more than the 180s default
+        // completion budget. Replay finishes in milliseconds, so a higher ceiling
+        // is harmless there.
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(100),
+            max_total: Duration::from_secs(1200),
+        })
         .with_model_gateway_override(gateway);
     if trigger_poller_enabled {
         input = input.with_trigger_poller_settings(
@@ -426,6 +455,9 @@ pub async fn send_qa_phrase(runtime: &RebornRuntime, phrase: &str) -> AssistantR
 fn live_credentials_for_fixture(fixture_name: &str) -> &'static [&'static LiveCredentialSeed] {
     match fixture_name {
         "routine_meeting_prep" | "routine_crm_inbox" => &[&GOOGLE_LIVE_CREDENTIAL],
+        "investigate_ci_job" => &[&GITHUB_LIVE_CREDENTIAL],
+        // `github_notifications` deliberately seeds no credential: the scenario
+        // exercises the unauthenticated onboarding / auth-gate path.
         _ => &[],
     }
 }
@@ -791,7 +823,7 @@ impl RebornQaCredentialSource {
             RebornCompositionProfile::LocalDev,
             &self.user,
             self.local_dev_root.clone(),
-            RebornLocalRuntimeProfileOptions::default(),
+            RebornRuntimeProfileOptions::default(),
         )
         .expect("Reborn QA credential source input")
         .with_local_runtime_identity(
@@ -1372,22 +1404,50 @@ fn assert_fixture_does_not_contain_live_secret_values(
 /// the fixture path. Panics with a clear message when the API key is absent —
 /// recorder tests are `#[ignore]`d and only run when explicitly invoked.
 pub async fn record_qa_phrase(fixture_name: &str, phrase: &str) {
-    let api_key = std::env::var(QA_RECORD_KEY_ENV).unwrap_or_else(|_| {
-        panic!("{QA_RECORD_KEY_ENV} must be set to record QA traces against the live API")
-    });
-    let model = std::env::var(QA_RECORD_MODEL_ENV)
+    // Surface runtime diagnostics (e.g. the real cause behind a sanitized
+    // `host_stage_unavailable_capability`) when `RUST_LOG` is set. `try_init`
+    // is a no-op if a subscriber is already installed.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .try_init();
+
+    // Provider selection: prefer Anthropic when `ANTHROPIC_API_KEY` is set (the
+    // historical recorder default the committed fixtures were made with);
+    // otherwise fall back to NEAR AI via `NEARAI_API_KEY`. This lets the
+    // recorder run on a NEAR-AI-only machine without changing prior behavior.
+    // `IRONCLAW_QA_RECORD_MODEL` overrides the per-provider default model.
+    let anthropic_key = std::env::var(QA_RECORD_ANTHROPIC_KEY_ENV)
         .ok()
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| QA_RECORD_DEFAULT_MODEL.to_string());
+        .filter(|value| !value.is_empty());
+    let nearai_key = std::env::var(QA_RECORD_NEARAI_KEY_ENV)
+        .ok()
+        .filter(|value| !value.is_empty());
+    let model_override = std::env::var(QA_RECORD_MODEL_ENV)
+        .ok()
+        .filter(|value| !value.is_empty());
 
     let mut live_secret_values = Vec::new();
-    live_secret_values.push((QA_RECORD_KEY_ENV, api_key.clone()));
-
-    let config = anthropic_llm_config(api_key, &model);
+    let config = if let Some(api_key) = anthropic_key {
+        let model = model_override.unwrap_or_else(|| QA_RECORD_ANTHROPIC_DEFAULT_MODEL.to_string());
+        live_secret_values.push((QA_RECORD_ANTHROPIC_KEY_ENV, api_key.clone()));
+        anthropic_llm_config(api_key, &model)
+    } else if let Some(api_key) = nearai_key {
+        let model = model_override.unwrap_or_else(|| QA_RECORD_NEARAI_DEFAULT_MODEL.to_string());
+        live_secret_values.push((QA_RECORD_NEARAI_KEY_ENV, api_key.clone()));
+        nearai_llm_config(api_key, &model)
+    } else {
+        panic!(
+            "one of {QA_RECORD_ANTHROPIC_KEY_ENV} or {QA_RECORD_NEARAI_KEY_ENV} must be set to \
+             record QA traces against the live API"
+        );
+    };
     let session = create_session_manager(config.session.clone()).await;
     let provider = build_static_provider_chain(&config, session)
         .await
-        .expect("anthropic provider chain builds");
+        .expect("recorder provider chain builds");
 
     let fixture_path = qa_fixture_path(fixture_name);
     if let Some(parent) = fixture_path.parent() {
@@ -1423,10 +1483,29 @@ pub async fn record_qa_phrase(fixture_name: &str, phrase: &str) {
         .new_conversation()
         .await
         .expect("new QA conversation");
-    let outcome = runtime
+    let outcome = match runtime
         .send_user_message_until_gate(&conversation, phrase)
         .await
-        .expect("QA phrase reaches a terminal status or a gate");
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            // Flush whatever the model did before the failure so the partial
+            // trace is inspectable (e.g. a RunTimeout mid-task shows how far the
+            // agent got and which tools it called). This is NOT a valid fixture.
+            let _ = runtime.shutdown().await;
+            match recorder.flush().await {
+                Ok(()) => eprintln!(
+                    "[RebornQaTrace] drive failed ({error}); flushed PARTIAL trace to {} for \
+                     inspection — not a valid fixture, do not commit",
+                    fixture_path.display()
+                ),
+                Err(flush_error) => {
+                    eprintln!("[RebornQaTrace] partial-trace flush also failed: {flush_error}")
+                }
+            }
+            panic!("QA phrase {fixture_name:?} did not reach a terminal status or a gate: {error}");
+        }
+    };
     runtime.shutdown().await.expect("runtime shutdown");
 
     recorder.flush().await.expect("flush recorded QA trace");
@@ -1479,15 +1558,21 @@ fn assert_recorded_fixture_matches_expected_result(
     outcome: &RebornTurnDriveOutcome,
 ) {
     let trace = load_recorded_trace_from_path(fixture_path);
-    let requires_terminal_reply = !matches!(fixture_name, "connect_gmail");
+    // `github_notifications` (like `connect_gmail`) exercises an unauthenticated
+    // onboarding path that legitimately ends at an auth gate rather than a
+    // completed action, so it is not required to finalize a terminal reply.
+    let requires_terminal_reply = !matches!(fixture_name, "connect_gmail" | "github_notifications");
     if requires_terminal_reply {
         match outcome {
             RebornTurnDriveOutcome::Terminal(reply) if reply.is_successful_final_reply() => {}
             RebornTurnDriveOutcome::Terminal(reply) => {
                 panic!(
                     "recorded QA fixture {fixture_name:?} ended with non-success terminal \
-                     status {:?}; trace was flushed to {} for inspection",
+                     status {:?} (failure_category={:?}, text={:?}); trace was flushed to {} \
+                     for inspection",
                     reply.status,
+                    reply.failure_category,
+                    reply.text,
                     fixture_path.display()
                 );
             }
@@ -1507,6 +1592,49 @@ fn assert_recorded_fixture_matches_expected_result(
     }
 
     match fixture_name {
+        "investigate_ci_job" => {
+            // The scenario's contract: the agent investigated one specific,
+            // already-completed GitHub Actions job by reading its logs via the
+            // first-party `github.get_job_logs` capability (the token is injected
+            // as a Bearer header at the api.github.com egress boundary, then
+            // stripped on the cross-host redirect to blob storage), and explained
+            // the root cause in its final reply — without pushing any change.
+            assert_recorded_tool_call(
+                fixture_name,
+                fixture_path,
+                &trace,
+                "github.get_job_logs",
+                &[],
+            );
+            assert!(
+                !recorded_trace_has_tool_call(&trace, "github.create_or_update_file", &[]),
+                "investigation fixture {fixture_name:?} must not commit a fix \
+                 (github.create_or_update_file); the contract is investigate + proposed fix only. \
+                 Recorded calls: {:#?}; trace flushed to {}",
+                recorded_tool_calls(&trace),
+                fixture_path.display()
+            );
+        }
+        "github_notifications" => {
+            // No credential is seeded, so the agent should onboard the github
+            // extension (install + activate) and reach the auth gate rather than
+            // silently give up. The onboarding tool choices are the guardrail;
+            // the outcome may be an auth gate or an onboarding reply.
+            assert_recorded_tool_call(
+                fixture_name,
+                fixture_path,
+                &trace,
+                "builtin.extension_install",
+                &["github"],
+            );
+            assert_recorded_tool_call(
+                fixture_name,
+                fixture_path,
+                &trace,
+                "builtin.extension_activate",
+                &["github"],
+            );
+        }
         "connect_gmail" => {
             assert_blocked_auth_outcome(fixture_name, fixture_path, outcome);
             assert_recorded_tool_call(
@@ -1739,6 +1867,47 @@ fn anthropic_llm_config(api_key: String, model: &str) -> LlmConfig {
         cheap_model: None,
         smart_routing_cascade: false,
         max_retries: 1,
+        circuit_breaker_threshold: None,
+        circuit_breaker_recovery_secs: 30,
+        response_cache_enabled: false,
+        response_cache_ttl_secs: 3600,
+        response_cache_max_entries: 1000,
+    }
+}
+
+/// Build the recorder `LlmConfig` for the NEAR AI Cloud backend (API-key auth).
+/// NEAR AI is backend-string dispatched in `ironclaw_llm` (reads `config.nearai`),
+/// unlike Anthropic which routes through `config.provider`.
+fn nearai_llm_config(api_key: String, model: &str) -> LlmConfig {
+    LlmConfig {
+        backend: "nearai".to_string(),
+        session: SessionConfig::default(),
+        nearai: NearAiConfig {
+            model: model.to_string(),
+            cheap_model: None,
+            base_url: NEARAI_CLOUD_BASE_URL.to_string(),
+            api_key: Some(SecretString::from(api_key)),
+            fallback_model: None,
+            // A live fix-CI recording makes dozens of sequential model calls;
+            // a single transient provider blip must not abort the whole run.
+            max_retries: 3,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+            failover_cooldown_secs: 300,
+            failover_cooldown_threshold: 3,
+            smart_routing_cascade: false,
+        },
+        provider: None,
+        bedrock: None,
+        gemini_oauth: None,
+        openai_codex: None,
+        request_timeout_secs: 120,
+        cheap_model: None,
+        smart_routing_cascade: false,
+        max_retries: 3,
         circuit_breaker_threshold: None,
         circuit_breaker_recovery_secs: 30,
         response_cache_enabled: false,

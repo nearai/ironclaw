@@ -51,15 +51,9 @@ mod runtime_setup;
 use crate::RebornRuntime;
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
 use crate::product_auth::serve::SlackPersonalOAuthBindingConfig;
-use crate::slack::slack_actor_identity::{
-    RebornUserIdentityLookup, SlackUserIdentityActorResolver,
-};
+use crate::slack::slack_actor_identity::SlackUserIdentityActorResolver;
 use crate::slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
-};
-use crate::slack::slack_delivery::{
-    SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
-    SlackFinalReplyDeliverySettings, TriggeredRunDeliveryDriver,
 };
 use crate::slack::slack_egress::{SlackProtocolHttpEgress, StaticSlackEgressCredentialProvider};
 use crate::slack::slack_host_state::FilesystemSlackHostState;
@@ -81,6 +75,11 @@ use crate::slack::slack_serve::{
     slack_events_route_mount,
 };
 use crate::webui::route_mounts::PublicRouteMount;
+use ironclaw_channel_delivery::{
+    FinalReplyDeliveryObserver, FinalReplyDeliveryServices, FinalReplyDeliverySettings,
+    TriggeredRunDeliveryDriver,
+};
+use ironclaw_channel_host::identity::RebornUserIdentityLookup;
 
 const SLACK_BOT_TOKEN_HANDLE: &str = "slack_bot_token";
 const SLACK_SIGNATURE_HEADER: &str = "X-Slack-Signature";
@@ -641,7 +640,7 @@ impl SlackPersonalUserBinder for ProvisioningSlackPersonalUserBinder {
 
 #[derive(Clone)]
 struct SlackHostBetaRuntimeParts {
-    local_runtime: Arc<crate::factory::RebornLocalRuntimeServices>,
+    local_runtime: Arc<crate::factory::RebornRuntimeSubstrate>,
     thread_service: Arc<dyn SessionThreadService>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     approval_interaction_service: Arc<dyn ApprovalInteractionService>,
@@ -729,7 +728,8 @@ fn build_triggered_run_delivery_hook_from_parts(
     let delivery_sink: Arc<dyn OutboundDeliverySink> = Arc::new(NoopSlackDeliverySink);
     let binding_service: Arc<dyn ConversationBindingService> =
         Arc::new(NoopConversationBindingService);
-    let services = SlackFinalReplyDeliveryServices {
+    let services = FinalReplyDeliveryServices {
+        channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
         binding_service,
         thread_service: Arc::clone(&parts.thread_service),
         turn_coordinator: Arc::clone(&parts.turn_coordinator),
@@ -1188,8 +1188,9 @@ fn build_slack_installation_record_with_resolvers(
     let preferences: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository> =
         Arc::clone(&parts.local_runtime.outbound_preferences);
     let delivery_sink: Arc<dyn OutboundDeliverySink> = Arc::new(NoopSlackDeliverySink);
-    let observer = Arc::new(SlackFinalReplyDeliveryObserver::with_settings(
-        SlackFinalReplyDeliveryServices {
+    let observer = Arc::new(FinalReplyDeliveryObserver::with_settings(
+        FinalReplyDeliveryServices {
+            channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
             binding_service: Arc::new(binding),
             thread_service: Arc::clone(&parts.thread_service),
             turn_coordinator: Arc::clone(&parts.turn_coordinator),
@@ -1204,7 +1205,7 @@ fn build_slack_installation_record_with_resolvers(
             approval_requests: Some(Arc::clone(&parts.local_runtime.approval_requests)
                 as Arc<dyn ironclaw_run_state::ApprovalRequestStore>),
         },
-        SlackFinalReplyDeliverySettings::default(),
+        FinalReplyDeliverySettings::default(),
     ));
 
     Ok(SlackInstallationRecord::new(
@@ -1339,7 +1340,7 @@ mod tests {
     use http_body_util::BodyExt;
     use ironclaw_authorization::GrantAuthorizer;
     use ironclaw_extensions::ExtensionRegistry;
-    use ironclaw_filesystem::LocalFilesystem;
+    use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
     use ironclaw_host_runtime::{
         CapabilitySurfaceVersion, HostRuntimeHttpEgressPort, HostRuntimeServices,
     };
@@ -1350,7 +1351,7 @@ mod tests {
     use ironclaw_network::{
         NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
     };
-    use ironclaw_processes::{InMemoryProcessResultStore, InMemoryProcessStore, ProcessServices};
+    use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore};
     use ironclaw_product_workflow::{
         LifecyclePackageKind, LifecyclePackageRef, ProductActorUserResolutionRequest,
         ProductWorkflowError, RebornExtensionOnboardingState, RebornOutboundDeliveryTargetId,
@@ -1358,7 +1359,7 @@ mod tests {
         RebornSetOutboundPreferencesRequest, WebUiAuthenticatedCaller,
     };
     use ironclaw_resources::InMemoryResourceGovernor;
-    use ironclaw_secrets::InMemorySecretStore;
+    use ironclaw_secrets::FilesystemSecretStore;
     use ironclaw_slack_v2_adapter::SLACK_USER_ACTOR_KIND;
     use ironclaw_threads::{ListThreadsForScopeRequest, ThreadHistoryRequest, ThreadScope};
     use ironclaw_triggers::TriggerRunHistoryStatus;
@@ -1371,17 +1372,17 @@ mod tests {
 
     use super::*;
     use crate::slack::slack_channel_routes::{
-        InMemorySlackChannelRouteStore, SlackChannelRoute, SlackChannelRouteAdminRouteMount,
-        SlackChannelRouteError, SlackChannelRouteKey, SlackChannelRouteListPage,
-        WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH, slack_channel_route_admin_route_mount,
+        SlackChannelRoute, SlackChannelRouteAdminRouteMount, SlackChannelRouteError,
+        SlackChannelRouteKey, SlackChannelRouteListPage, WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
+        slack_channel_route_admin_route_mount,
     };
     use crate::slack::slack_connectable_channel::{
         SlackOperatorRouteVisibility, build_webui_services_with_slack_host_beta_mounts,
     };
+    use crate::slack::slack_host_state::test_support::in_memory_slack_host_state;
     use crate::slack::slack_outbound_targets::{
-        InMemorySlackPersonalDmTargetStore, SLACK_OUTBOUND_TARGET_LIST_PAGE_SIZE,
-        SlackPersonalDmTarget, SlackPersonalDmTargetError, SlackPersonalDmTargetKey,
-        SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetStore,
+        SLACK_OUTBOUND_TARGET_LIST_PAGE_SIZE, SlackPersonalDmTarget, SlackPersonalDmTargetError,
+        SlackPersonalDmTargetKey, SlackPersonalDmTargetProvisioner, SlackPersonalDmTargetStore,
         slack_reply_target_binding_ref_from_raw, slack_shared_channel_reply_target_binding_ref,
     };
     use crate::slack::slack_serve::{SlackApiAppId, SlackUserId};
@@ -2343,7 +2344,7 @@ mod tests {
 
     #[tokio::test]
     async fn slack_host_beta_targets_page_multiple_route_store_pages() {
-        let store = Arc::new(InMemorySlackChannelRouteStore::new());
+        let store = Arc::new(in_memory_slack_host_state(TENANT));
         let tenant_id = TenantId::new(TENANT).expect("tenant");
         let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation");
         let subject_user_id = UserId::new(SHARED_SUBJECT).expect("shared subject");
@@ -2385,7 +2386,7 @@ mod tests {
     async fn slack_shared_channel_targets_survive_personal_dm_store_failure() {
         let provider = SlackHostBetaOutboundTargetProvider::new(
             outbound_target_provider_config(config()),
-            Arc::new(InMemorySlackChannelRouteStore::new()),
+            Arc::new(in_memory_slack_host_state(TENANT)),
             Arc::new(FailingSlackPersonalDmTargetStore),
         );
 
@@ -2541,7 +2542,7 @@ mod tests {
 
     #[tokio::test]
     async fn slack_personal_dm_reply_target_binding_ref_round_trips_authorized_dm() {
-        let store = Arc::new(InMemorySlackPersonalDmTargetStore::new());
+        let store = Arc::new(in_memory_slack_host_state(TENANT));
         let key = SlackPersonalDmTargetKey::new(
             TenantId::new(TENANT).expect("tenant"),
             AdapterInstallationId::new(INSTALLATION).expect("installation"),
@@ -2558,7 +2559,7 @@ mod tests {
             .expect("personal DM target stores");
         let provider = SlackHostBetaOutboundTargetProvider::new(
             outbound_target_provider_config(config_without_channel_routes()),
-            Arc::new(InMemorySlackChannelRouteStore::new()),
+            Arc::new(in_memory_slack_host_state(TENANT)),
             store,
         );
         let listed = provider
@@ -2582,7 +2583,7 @@ mod tests {
 
     #[tokio::test]
     async fn slack_personal_dm_resolve_binding_rejects_mismatched_dm_channel_id() {
-        let store = Arc::new(InMemorySlackPersonalDmTargetStore::new());
+        let store = Arc::new(in_memory_slack_host_state(TENANT));
         let key = SlackPersonalDmTargetKey::new(
             TenantId::new(TENANT).expect("tenant"),
             AdapterInstallationId::new(INSTALLATION).expect("installation"),
@@ -2599,7 +2600,7 @@ mod tests {
             .expect("personal DM target stores");
         let provider = SlackHostBetaOutboundTargetProvider::new(
             outbound_target_provider_config(config_without_channel_routes()),
-            Arc::new(InMemorySlackChannelRouteStore::new()),
+            Arc::new(in_memory_slack_host_state(TENANT)),
             store,
         );
         let listed = provider
@@ -3021,7 +3022,7 @@ mod tests {
     #[test]
     fn slack_shared_channel_reply_target_binding_ref_round_trips_channel_id() {
         let provider =
-            outbound_target_provider(config(), Arc::new(InMemorySlackChannelRouteStore::new()));
+            outbound_target_provider(config(), Arc::new(in_memory_slack_host_state(TENANT)));
         let binding_ref = slack_shared_channel_reply_target_binding_ref(
             &AdapterInstallationId::new(INSTALLATION).expect("installation"),
             &AgentId::new(AGENT).expect("agent"),
@@ -3040,7 +3041,7 @@ mod tests {
     #[test]
     fn slack_host_beta_target_id_parser_rejects_empty_channel_suffix() {
         let provider =
-            outbound_target_provider(config(), Arc::new(InMemorySlackChannelRouteStore::new()));
+            outbound_target_provider(config(), Arc::new(in_memory_slack_host_state(TENANT)));
         let target_id =
             RebornOutboundDeliveryTargetId::new("slack:shared-channel:T0HOST:").expect("target id");
 
@@ -3431,7 +3432,7 @@ mod tests {
         SlackHostBetaOutboundTargetProvider::new(
             outbound_target_provider_config(config),
             channel_route_store,
-            Arc::new(InMemorySlackPersonalDmTargetStore::new()),
+            Arc::new(in_memory_slack_host_state(TENANT)),
         )
     }
 
@@ -4015,7 +4016,7 @@ mod tests {
         network: Arc<RecordingRuntimeHttpEgress>,
     ) -> HostRuntimeHttpEgressPort {
         test_host_runtime_services()
-            .with_secret_store(Arc::new(InMemorySecretStore::new()))
+            .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
             .try_with_host_http_egress(RecordingNetworkHttpEgress(network))
             .expect("host HTTP egress should wire")
             .host_runtime_http_egress_port()
@@ -4023,17 +4024,17 @@ mod tests {
     }
 
     fn test_host_runtime_services() -> HostRuntimeServices<
-        LocalFilesystem,
+        DiskFilesystem,
         InMemoryResourceGovernor,
-        InMemoryProcessStore,
-        InMemoryProcessResultStore,
+        FilesystemProcessStore<InMemoryBackend>,
+        FilesystemProcessResultStore<InMemoryBackend>,
     > {
         HostRuntimeServices::new(
             Arc::new(ExtensionRegistry::new()),
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(DiskFilesystem::new()),
             Arc::new(InMemoryResourceGovernor::new()),
             Arc::new(GrantAuthorizer::new()),
-            ProcessServices::in_memory(),
+            ironclaw_processes::in_memory_backed_process_services(),
             CapabilitySurfaceVersion::new("surface-v1").expect("surface version"),
         )
     }
@@ -4358,7 +4359,7 @@ mod tests {
     /// `CommunicationPreferenceRepository` Arc that the WebUI
     /// `RebornOutboundPreferencesFacade` writes through
     /// (`local_runtime.outbound_preferences`) into
-    /// `SlackFinalReplyDeliveryServices.communication_preferences`.
+    /// `FinalReplyDeliveryServices.communication_preferences`.
     ///
     /// Pre-fix bug: `build_triggered_run_delivery_hook` constructed a fresh
     /// `FilesystemOutboundStateStore::new(Arc::clone(&local_runtime.host_state_filesystem))`
