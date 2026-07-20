@@ -33,13 +33,53 @@ jobs:
       - name: Extract version from Cargo.toml
         id: version
         run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          # The root package rename is the explicit v1/Reborn cutover marker.
+          # Historical v1 tags keep `ironclaw`; current sources use the root only
+          # as an integration harness. Remove this branch when #3483 transfers
+          # the canonical package identity to ironclaw_reborn_cli.
+          ROOT_PACKAGE="$(python3 - Cargo.toml <<'PY'
+          import pathlib
+          import sys
+          import tomllib
+
+          manifest = pathlib.Path(sys.argv[1])
+          with manifest.open("rb") as handle:
+              print(tomllib.load(handle)["package"]["name"])
+          PY
+          )"
+          case "$ROOT_PACKAGE" in
+            ironclaw)
+              MANIFEST=Cargo.toml
+              ;;
+            ironclaw_reborn_integration_tests)
+              MANIFEST=crates/ironclaw_reborn_cli/Cargo.toml
+              ;;
+            *)
+              echo "::error::Unsupported root package identity '$ROOT_PACKAGE'"
+              exit 1
+              ;;
+          esac
+
+          if [[ ! -f "${MANIFEST}" ]]; then
+            echo "::error::Expected version manifest '${MANIFEST}' does not exist"
+            exit 1
+          fi
+          VERSION="$(python3 - "$MANIFEST" <<'PY'
+          import pathlib
+          import sys
+          import tomllib
+
+          manifest = pathlib.Path(sys.argv[1])
+          with manifest.open("rb") as handle:
+              print(tomllib.load(handle)["package"]["version"])
+          PY
+          )"
           if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::Extracted version '${VERSION}' must match MAJOR.MINOR.PATCH[-prerelease] (Docker tags forbid '+')"
             exit 1
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Detected version: ${VERSION}"
+          echo "Detected version from ${MANIFEST}: ${VERSION}"
 
       - name: Verify requested tag matches source version
         env:

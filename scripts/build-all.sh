@@ -1,21 +1,23 @@
 #!/usr/bin/env bash
-# Build IronClaw and all bundled channels.
+# Build IronClaw Reborn and bundled first-party extensions.
 #
-# Run this before release or when channel sources have changed.
-# The main binary bundles telegram.wasm via include_bytes!; it must exist.
+# Run this before release or when bundled extension sources have changed.
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-echo "Building bundled channels..."
-if [ -d "channels-src/telegram" ]; then
-    ./channels-src/telegram/build.sh
-fi
+shipping_features="$(tr -d '\r\n' < scripts/ci/reborn-shipping-features.txt)"
+
+echo "Building bundled first-party extensions..."
+./scripts/build-wasm-extensions.sh --first-party
 
 echo ""
-echo "Building IronClaw..."
-cargo build --release -p ironclaw --bin ironclaw-legacy
+echo "Building canonical IronClaw (Reborn)..."
+cargo build --release \
+    -p ironclaw_reborn_cli \
+    --features "$shipping_features" \
+    --bin ironclaw
 
 echo ""
-echo "Done. Binary: target/release/ironclaw-legacy"
+echo "Done. Binary: target/release/ironclaw"

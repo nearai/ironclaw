@@ -117,12 +117,12 @@ fn runtime_image_declares_and_prepares_ironclaw_home() {
         "runtime image must set HOME to /home/ironclaw for ~/.ironclaw state",
     );
     assert!(
-        dockerfile.contains("WORKDIR /home/ironclaw"),
-        "runtime image must start in the ironclaw home directory",
+        dockerfile.contains("mkdir -p /data/ironclaw-reborn /workspace"),
+        "runtime image must prepare the Reborn data directory and default workspace",
     );
     assert!(
-        dockerfile.contains("mkdir -p /home/ironclaw/.ironclaw"),
-        "runtime image must pre-create ~/.ironclaw before dropping privileges",
+        dockerfile.contains("WORKDIR /workspace"),
+        "runtime image must preserve the Reborn default workspace as the process directory",
     );
 }
 
@@ -146,18 +146,26 @@ fn reborn_dockerfile_keeps_bundled_skills_in_build_context() {
 }
 
 #[test]
-fn reborn_dockerfile_uses_feature_matched_cache_and_loopback_default() {
+fn reborn_dockerfile_uses_feature_matched_cache_and_published_port_default() {
     let dockerfile = read_repo_file("Dockerfile.reborn");
 
     assert!(
         dockerfile.contains(
-            "cargo chef cook \\\n    --profile dist \\\n    --package ironclaw_reborn_cli \\\n    --features libsql,postgres,inmemory-turn-state"
-        ),
+            "COPY scripts/ci/reborn-shipping-features.txt scripts/ci/reborn-shipping-features.txt"
+        ) && dockerfile.contains("--features \"$shipping_features\""),
         "cargo chef cook must target the Reborn CLI package with the same features as the final build"
     );
     assert!(
-        dockerfile.contains("IRONCLAW_REBORN_SERVE_HOST=127.0.0.1"),
-        "image default serve host must stay loopback; Railway should override to 0.0.0.0"
+        dockerfile.contains("IRONCLAW_REBORN_SERVE_HOST=0.0.0.0"),
+        "container service must bind all interfaces so published Docker ports are reachable"
+    );
+    assert!(
+        dockerfile.contains("port=\"${PORT:-3000}\"")
+            && dockerfile.contains("case \"$port\" in ''|*[!0-9]*) exit 1")
+            && dockerfile.contains("--max-time 5")
+            && dockerfile.contains("--timeout=10s")
+            && dockerfile.contains("http://127.0.0.1:${port}/api/health"),
+        "container healthcheck must validate and quote PORT while probing loopback"
     );
     assert!(
         dockerfile.contains("config.hosted-single-tenant.toml"),

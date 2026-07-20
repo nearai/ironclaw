@@ -360,9 +360,11 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
-      - name: Build Docker image
-        run: docker build --target runtime -t ironclaw-test:ci .
-      - name: Build Reborn Docker image
+      - name: Build canonical Reborn Docker image
+        run: docker build --target runtime -t ironclaw-reborn-default-test:ci .
+      # Keep the pre-cutover explicit path buildable until the v1-deletion
+      # follow-up retires Dockerfile.reborn.
+      - name: Build Dockerfile.reborn compatibility image
         run: docker build -f Dockerfile.reborn -t ironclaw-reborn-test:ci .
 
   version-check:

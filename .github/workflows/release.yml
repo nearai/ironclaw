@@ -45,14 +45,29 @@ permissions:
 on:
   push:
     tags:
-      - 'ironclaw-v[0-9]+.[0-9]+.[0-9]+*'
+      - 'ironclaw-v[0-9]*.[0-9]*.[0-9]*'
 
 jobs:
+  validate-release-tag:
+    name: Validate release tag
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require the canonical SemVer tag format
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^ironclaw-v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Release tag '$RELEASE_TAG' must match ironclaw-vMAJOR.MINOR.PATCH[-prerelease]"
+            exit 1
+          fi
+
   # Compile the shipping Reborn binary on every supported release target.
   # This is intentionally separate from cargo-dist until #3483 resolves the
   # Reborn package/tag/installer contract.
   reborn-binary-compile:
     name: Reborn binary compile
+    needs: validate-release-tag
     uses: ./.github/workflows/reborn-release-compile.yml
     with:
       ref: ${{ github.sha }}
