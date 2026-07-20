@@ -21,8 +21,10 @@ use ironclaw_auth::{
     OAuthProviderRefresh, OAuthProviderRefreshRequest, ProviderScope, SecretCleanupService,
     SecretSubmitRequest, SecretSubmitResult,
 };
+use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{
-    AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
+    AgentId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId,
+    ResourceScope, SecretHandle, TenantId, UserId, VirtualPath,
 };
 use ironclaw_product_workflow::{
     LifecyclePackageKind, LifecyclePackageRef, RebornCancelRunResponse, RebornCreateThreadResponse,
@@ -44,6 +46,7 @@ use ironclaw_reborn_composition::{
     GoogleOAuthRouteConfig, RebornAuthContinuationDispatcher, RebornProductAuthServices,
     RebornReadiness, RebornWebuiBundle,
 };
+use ironclaw_secrets::{FilesystemSecretStore, SecretStore, SecretsCrypto};
 use ironclaw_webui::{WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app};
 use serde_json::json;
 use tower::ServiceExt;
@@ -579,27 +582,47 @@ fn build_app_with_shared_google_oauth(
 
 fn live_flows_for_provider(
     shared: &InMemoryAuthProductServices,
-    provider: &str,
+    provider: &AuthProviderId,
 ) -> Vec<ironclaw_auth::AuthFlowRecord> {
     shared
         .flow_records_snapshot()
         .into_iter()
         .filter(|flow| {
-            flow.provider.as_str() == provider && !ironclaw_auth::is_terminal_status(flow.status)
+            &flow.provider == provider && !ironclaw_auth::is_terminal_status(flow.status)
         })
         .collect()
 }
 
 fn flow_status_by_id(
     shared: &InMemoryAuthProductServices,
-    flow_id: &str,
+    flow_id: &AuthFlowId,
 ) -> ironclaw_auth::AuthFlowStatus {
     shared
         .flow_records_snapshot()
         .into_iter()
-        .find(|flow| flow.id.to_string() == flow_id)
+        .find(|flow| &flow.id == flow_id)
         .expect("flow record")
         .status
+}
+
+fn auth_flow_id_from_wire(value: &str) -> AuthFlowId {
+    AuthFlowId::from_uuid(Uuid::parse_str(value).expect("route returned a valid auth flow id"))
+}
+
+fn restartable_oauth_secret_store(
+    backend: Arc<InMemoryBackend>,
+    crypto: Arc<SecretsCrypto>,
+) -> Arc<dyn SecretStore> {
+    let view = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/secrets").expect("secret alias"),
+        VirtualPath::new("/tenants/tenant-alpha/users/user-alpha/secrets").expect("secret target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("secret mount view");
+    Arc::new(FilesystemSecretStore::new(
+        Arc::new(ScopedFilesystem::with_fixed_view(backend, view)),
+        crypto,
+    ))
 }
 
 fn build_app_with_google_oauth() -> (axum::Router, Arc<RecordingAuthDispatcher>) {
@@ -2384,6 +2407,8 @@ mod slack_personal_oauth_serve {
 #[tokio::test]
 async fn open_close_reopen_supersedes_prior_setup_flow_across_both_start_routes() {
     let (app, shared) = build_app_with_shared_google_oauth(&["google-calendar"]);
+    let github = AuthProviderId::new("github").expect("github provider");
+    let google = AuthProviderId::new("google").expect("google provider");
 
     // --- Plain connect route: three opens for the same owner+provider. ---
     let mut github_flow_ids = Vec::new();
@@ -2395,18 +2420,17 @@ async fn open_close_reopen_supersedes_prior_setup_flow_across_both_start_routes(
             json!({ "session_id": "web-session-reopen", "thread_id": "thread-reopen" }),
         )
         .await;
-        github_flow_ids.push(started.flow_id);
+        github_flow_ids.push(auth_flow_id_from_wire(&started.flow_id));
     }
 
-    let live_github = live_flows_for_provider(&shared, "github");
+    let live_github = live_flows_for_provider(&shared, &github);
     assert_eq!(
         live_github.len(),
         1,
         "each re-opened connect popup must supersede the prior setup flow, leaving one live flow"
     );
     assert_eq!(
-        live_github[0].id.to_string(),
-        github_flow_ids[2],
+        live_github[0].id, github_flow_ids[2],
         "the surviving live flow must be the most recent start"
     );
     for superseded in &github_flow_ids[..2] {
@@ -2435,16 +2459,18 @@ async fn open_close_reopen_supersedes_prior_setup_flow_across_both_start_routes(
         assert_eq!(response.status(), StatusCode::OK);
         let body = read_body_string(response).await;
         let json: serde_json::Value = serde_json::from_str(&body).expect("start json");
-        google_flow_ids.push(json["flow_id"].as_str().expect("flow id").to_string());
+        google_flow_ids.push(auth_flow_id_from_wire(
+            json["flow_id"].as_str().expect("flow id"),
+        ));
     }
 
-    let live_google = live_flows_for_provider(&shared, "google");
+    let live_google = live_flows_for_provider(&shared, &google);
     assert_eq!(
         live_google.len(),
         1,
         "the extension-card connect route mints LifecycleActivation and must supersede too"
     );
-    assert_eq!(live_google[0].id.to_string(), google_flow_ids[2]);
+    assert_eq!(live_google[0].id, google_flow_ids[2]);
     for superseded in &google_flow_ids[..2] {
         assert_eq!(
             flow_status_by_id(&shared, superseded),
@@ -2454,7 +2480,7 @@ async fn open_close_reopen_supersedes_prior_setup_flow_across_both_start_routes(
 
     // Supersede is provider-scoped: the github flow survived the google starts.
     assert_eq!(
-        live_flows_for_provider(&shared, "github").len(),
+        live_flows_for_provider(&shared, &github).len(),
         1,
         "a start for one provider must not cancel another provider's live flow"
     );
@@ -2467,28 +2493,42 @@ async fn open_close_reopen_supersedes_prior_setup_flow_across_both_start_routes(
 /// LIVE flow's verifier, so the user's callback failed with
 /// `unknown_or_expired_flow` on a perfectly good flow.
 ///
-/// Rebuilding the router over the SAME backing services is exactly that
-/// restart: durable auth records and the secret store persist, route-local
-/// state does not. The blocked-turn gate path already stores its verifiers
-/// through the injected `SecretStore` and survives this; the setup path must
-/// too.
+/// Rebuilding the auth bundle and filesystem secret-store handle over the same
+/// backing stores is exactly that restart: durable records persist, while any
+/// service-local field is dropped. The blocked-turn gate path already stores
+/// its verifiers through the injected `SecretStore` and survives this; the
+/// setup path must too.
 #[tokio::test]
 async fn google_oauth_callback_completes_after_restart_rebuilds_route_state() {
     let dispatcher = Arc::new(RecordingAuthDispatcher::default());
-    let product_auth = Arc::new(RebornProductAuthServices::from_shared(
-        Arc::new(InMemoryAuthProductServices::new()),
-        dispatcher.clone(),
-    ));
+    let shared = Arc::new(InMemoryAuthProductServices::new());
+    let secret_backend = Arc::new(InMemoryBackend::new());
+    let secret_crypto = Arc::new(SecretsCrypto::ephemeral());
+    let product_auth = Arc::new(
+        RebornProductAuthServices::from_shared(shared.clone(), dispatcher.clone())
+            .with_secret_store(restartable_oauth_secret_store(
+                Arc::clone(&secret_backend),
+                Arc::clone(&secret_crypto),
+            )),
+    );
     let app = build_app_with_product_auth_service_and_config(
         product_auth.clone(),
         Some(google_oauth_route_config()),
     );
     let (start_json, state) = start_google_oauth_flow(&app).await;
 
-    // The restart: a brand-new router and route state over the same durable
-    // services. Anything the setup path kept only in route-local memory is gone.
+    // The restart: drop the original router and auth bundle, then construct a
+    // new secret-store handle over the same backend. Anything kept only on the
+    // original service object is gone.
+    drop(app);
+    drop(product_auth);
+    let restarted_product_auth = Arc::new(
+        RebornProductAuthServices::from_shared(shared, dispatcher.clone()).with_secret_store(
+            restartable_oauth_secret_store(secret_backend, secret_crypto),
+        ),
+    );
     let restarted = build_app_with_product_auth_service_and_config(
-        product_auth.clone(),
+        restarted_product_auth,
         Some(google_oauth_route_config()),
     );
 

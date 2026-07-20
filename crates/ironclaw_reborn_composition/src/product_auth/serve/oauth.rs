@@ -4276,19 +4276,6 @@ mod tests {
             self.inner.create_flow(request).await
         }
 
-        // Forward instead of inheriting the trait's no-op default: a
-        // decorator that silently skips supersede-on-start would diverge
-        // from the store it wraps.
-        async fn cancel_superseded_setup_flows(
-            &self,
-            scope: &AuthProductScope,
-            provider: &ironclaw_auth::AuthProviderId,
-        ) -> Result<Vec<ironclaw_auth::AuthFlowId>, AuthProductError> {
-            self.inner
-                .cancel_superseded_setup_flows(scope, provider)
-                .await
-        }
-
         async fn get_flow(
             &self,
             scope: &AuthProductScope,
@@ -4388,19 +4375,6 @@ mod tests {
             request: ironclaw_auth::NewAuthFlow,
         ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
             self.inner.create_flow(request).await
-        }
-
-        // Forward instead of inheriting the trait's no-op default: a
-        // decorator that silently skips supersede-on-start would diverge
-        // from the store it wraps.
-        async fn cancel_superseded_setup_flows(
-            &self,
-            scope: &AuthProductScope,
-            provider: &ironclaw_auth::AuthProviderId,
-        ) -> Result<Vec<ironclaw_auth::AuthFlowId>, AuthProductError> {
-            self.inner
-                .cancel_superseded_setup_flows(scope, provider)
-                .await
         }
 
         async fn get_flow(

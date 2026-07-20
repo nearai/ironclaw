@@ -370,34 +370,6 @@ pub trait AuthFlowManager: Send + Sync {
         scope: &AuthProductScope,
         flow_id: AuthFlowId,
     ) -> Result<AuthFlowRecord, AuthProductError>;
-
-    /// Internal building block of [`Self::create_flow`]'s supersede-on-start
-    /// contract: cancel any prior non-terminal setup-class flow for the same
-    /// owner+provider. Production code must not need to
-    /// call this directly — creating the successor flow already runs it.
-    ///
-    /// Setup-class means [`is_setup_class_continuation`]: the web connect
-    /// button's `SetupOnly` and the extension card's `LifecycleActivation`.
-    /// A `TurnGateResume` or `ProductActionResume` flow belongs to a parked
-    /// turn/action, not to the setup surface, and is never superseded here.
-    ///
-    /// Owner granularity is tenant/user/agent/project + surface + session
-    /// (setup flows are thread-less), matching the durable flow-root layout.
-    /// Idempotent and race-tolerant: an already-terminal or concurrently
-    /// canceled prior flow is skipped, never an error. Returns the ids that
-    /// were superseded.
-    ///
-    /// The default is a no-op for narrow flow stores and test doubles that
-    /// never hold more than one concurrent setup flow; the durable store and
-    /// the in-memory fake override it (and route their `create_flow` through
-    /// it).
-    async fn cancel_superseded_setup_flows(
-        &self,
-        _scope: &AuthProductScope,
-        _provider: &AuthProviderId,
-    ) -> Result<Vec<AuthFlowId>, AuthProductError> {
-        Ok(Vec::new())
-    }
 }
 
 /// Whether a continuation belongs to the setup surface — the class a new setup

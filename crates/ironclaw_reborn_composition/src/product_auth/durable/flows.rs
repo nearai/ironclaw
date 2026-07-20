@@ -1,14 +1,19 @@
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use ironclaw_filesystem::{CasExpectation, RecordVersion, RootFilesystem};
-use ironclaw_host_api::ResourceScope;
+use ironclaw_filesystem::{
+    CasApply, CasExpectation, CasUpdateError, ContentType, Entry, RecordVersion, RootFilesystem,
+    cas_update,
+};
+use ironclaw_host_api::{ResourceScope, ScopedPath};
+use serde::{Deserialize, Serialize};
+use std::time::Duration as StdDuration;
 
 use super::domain::{
     PreparedCallbackFlow, prepare_callback_flow, update_account_from_exchange,
     update_account_from_request, validate_bound_update_authority, validate_callback_claim,
     validate_flow_update_binding, validate_manual_token_flow, validate_selection_flow,
 };
-use super::paths::flow_root;
+use super::paths::setup_creation_coordination_path;
 use super::{
     FilesystemAuthProductServices, credential_status_for_completed_flow, is_terminal_status,
     scope_matches,
@@ -24,6 +29,30 @@ use ironclaw_auth::{
     TurnGateAuthFlowQuery, binding_scope_owns_account, flow_matches_durable_owner,
     flow_matches_turn_gate_query, is_setup_class_continuation,
 };
+
+const SETUP_CREATION_LEASE_SECONDS: i64 = 30;
+const SETUP_CREATION_ACQUIRE_TIMEOUT: StdDuration = StdDuration::from_secs(15);
+const SETUP_CREATION_OPERATION_TIMEOUT: StdDuration = StdDuration::from_secs(20);
+const SETUP_CREATION_POLL_INTERVAL: StdDuration = StdDuration::from_millis(5);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SetupCreationCoordination {
+    holder: AuthFlowId,
+    expires_at: ironclaw_auth::Timestamp,
+}
+
+fn map_setup_creation_cas_error(error: CasUpdateError<AuthProductError>) -> AuthProductError {
+    match error {
+        CasUpdateError::Apply(error) => error,
+        error => {
+            tracing::debug!(
+                error = %error,
+                "durable setup-flow creation coordination failed"
+            );
+            AuthProductError::BackendUnavailable
+        }
+    }
+}
 
 struct CallbackAccountWrite {
     account: CredentialAccount,
@@ -41,33 +70,111 @@ enum CallbackAccountRollback {
     },
 }
 
-#[async_trait]
-impl<F> AuthFlowManager for FilesystemAuthProductServices<F>
+impl<F> FilesystemAuthProductServices<F>
 where
     F: RootFilesystem + 'static,
 {
-    async fn create_flow(&self, request: NewAuthFlow) -> Result<AuthFlowRecord, AuthProductError> {
-        // Supersede-on-start happens at the creation seam itself (see the
-        // `AuthFlowManager::create_flow` contract): cancel the prior live
-        // setup-class flows before this one becomes visible, so the walk can
-        // never observe — and cancel — the flow it is clearing the way for.
-        //
-        // The walk and the insert below must form one critical section per
-        // owner root: two racing setup creates could otherwise each list the
-        // root before either insert lands, both find no live predecessor, and
-        // both survive. Lock ordering is root → per-flow (`cancel_flow` takes
-        // "flow:{id}" inside); no path takes them in the other order.
-        let root_lock = if is_setup_class_continuation(&request.continuation) {
-            Some(self.lock_for(format!("flow-root:{}", flow_root(&request.scope)?)))
-        } else {
-            None
+    async fn acquire_setup_creation(
+        &self,
+        scope: &ResourceScope,
+        path: &ScopedPath,
+        holder: AuthFlowId,
+    ) -> Result<(), AuthProductError> {
+        let acquire = async {
+            loop {
+                let acquired = cas_update(
+                    self.filesystem.as_ref(),
+                    scope,
+                    path,
+                    |body| {
+                        serde_json::from_slice(body)
+                            .map_err(|_| AuthProductError::BackendUnavailable)
+                    },
+                    |coordination| {
+                        serde_json::to_vec(coordination)
+                            .map(Entry::bytes)
+                            .map(|entry| entry.with_content_type(ContentType::json()))
+                            .map_err(|_| AuthProductError::BackendUnavailable)
+                    },
+                    |current: Option<SetupCreationCoordination>| async move {
+                        let now = Utc::now();
+                        if let Some(current) = current
+                            && current.holder != holder
+                            && current.expires_at > now
+                        {
+                            return Ok::<_, AuthProductError>(CasApply::no_op(current, false));
+                        }
+                        Ok(CasApply::new(
+                            SetupCreationCoordination {
+                                holder,
+                                expires_at: now + Duration::seconds(SETUP_CREATION_LEASE_SECONDS),
+                            },
+                            true,
+                        ))
+                    },
+                )
+                .await
+                .map_err(map_setup_creation_cas_error)?;
+                if acquired {
+                    return Ok(());
+                }
+                tokio::time::sleep(SETUP_CREATION_POLL_INTERVAL).await;
+            }
         };
-        let _root_guard = match &root_lock {
-            Some(lock) => Some(lock.lock().await),
-            None => None,
-        };
+        tokio::time::timeout(SETUP_CREATION_ACQUIRE_TIMEOUT, acquire)
+            .await
+            .map_err(|_| AuthProductError::BackendUnavailable)?
+    }
+
+    async fn release_setup_creation(
+        &self,
+        scope: &ResourceScope,
+        path: &ScopedPath,
+        holder: AuthFlowId,
+    ) {
+        let result = cas_update(
+            self.filesystem.as_ref(),
+            scope,
+            path,
+            |body| serde_json::from_slice(body).map_err(|_| AuthProductError::BackendUnavailable),
+            |coordination| {
+                serde_json::to_vec(coordination)
+                    .map(Entry::bytes)
+                    .map(|entry| entry.with_content_type(ContentType::json()))
+                    .map_err(|_| AuthProductError::BackendUnavailable)
+            },
+            |current: Option<SetupCreationCoordination>| async move {
+                let Some(mut current) = current else {
+                    return Ok::<_, AuthProductError>(CasApply::no_op(
+                        SetupCreationCoordination {
+                            holder,
+                            expires_at: Utc::now(),
+                        },
+                        (),
+                    ));
+                };
+                if current.holder != holder {
+                    return Ok(CasApply::no_op(current, ()));
+                }
+                current.expires_at = Utc::now();
+                Ok(CasApply::new(current, ()))
+            },
+        )
+        .await;
+        if let Err(error) = result {
+            tracing::debug!(
+                error = %error,
+                "failed to release durable setup-flow creation coordination"
+            );
+        }
+    }
+
+    async fn create_flow_after_coordination(
+        &self,
+        request: NewAuthFlow,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
         if is_setup_class_continuation(&request.continuation) {
-            self.cancel_superseded_setup_flows(&request.scope, &request.provider)
+            self.supersede_setup_flows(&request.scope, &request.provider)
                 .await?;
         }
         if let Some(binding) = &request.update_binding {
@@ -102,6 +209,69 @@ where
         self.write_flow(&record.scope, &record, CasExpectation::Absent)
             .await?;
         Ok(record)
+    }
+
+    async fn supersede_setup_flows(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+        provider: &ironclaw_auth::AuthProviderId,
+    ) -> Result<(), AuthProductError> {
+        // Setup flows live under the owner+surface+session flow root, keyed by
+        // flow id only — thread/mission/invocation are not part of the durable
+        // path. Filter to non-terminal setup-class flows so a parked turn-gate
+        // flow is never disturbed.
+        for (flow, _version) in self.flow_records_under_scope_root(scope).await? {
+            if is_terminal_status(flow.status)
+                || flow.provider != *provider
+                || !is_setup_class_continuation(&flow.continuation)
+            {
+                continue;
+            }
+            // Cancel through the flow's own scope: `cancel_flow` re-reads
+            // under full-scope equality, while a new setup start has a fresh
+            // invocation id.
+            match self.cancel_flow(&flow.scope, flow.id).await {
+                Ok(_) => {}
+                Err(
+                    AuthProductError::Canceled
+                    | AuthProductError::FlowAlreadyTerminal
+                    | AuthProductError::UnknownOrExpiredFlow,
+                ) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl<F> AuthFlowManager for FilesystemAuthProductServices<F>
+where
+    F: RootFilesystem + 'static,
+{
+    async fn create_flow(&self, request: NewAuthFlow) -> Result<AuthFlowRecord, AuthProductError> {
+        if !is_setup_class_continuation(&request.continuation) {
+            return self.create_flow_after_coordination(request).await;
+        }
+
+        let coordination_path =
+            setup_creation_coordination_path(&request.scope, &request.provider)?;
+        let coordination_scope = request.scope.resource.clone();
+        let holder = AuthFlowId::new();
+        self.acquire_setup_creation(&coordination_scope, &coordination_path, holder)
+            .await?;
+        let result = match tokio::time::timeout(
+            SETUP_CREATION_OPERATION_TIMEOUT,
+            self.create_flow_after_coordination(request),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(AuthProductError::BackendUnavailable),
+        };
+        self.release_setup_creation(&coordination_scope, &coordination_path, holder)
+            .await;
+        result
     }
 
     async fn get_flow(
@@ -443,44 +613,6 @@ where
         self.write_flow(scope, &record, CasExpectation::Version(version))
             .await?;
         Ok(record)
-    }
-
-    async fn cancel_superseded_setup_flows(
-        &self,
-        scope: &ironclaw_auth::AuthProductScope,
-        provider: &ironclaw_auth::AuthProviderId,
-    ) -> Result<Vec<AuthFlowId>, AuthProductError> {
-        // Setup flows live under the owner+surface+session flow root, keyed by
-        // flow id only — thread/mission/invocation are not part of the durable
-        // path (see `product_auth::durable::paths`). Listing that root therefore
-        // yields every prior setup flow for this owner+provider regardless of
-        // the per-request invocation that started it. Filter to non-terminal
-        // setup-class flows so a parked turn-gate flow is never disturbed.
-        // Records arrive sorted by flow id from the listing.
-        let mut superseded = Vec::new();
-        for (flow, _version) in self.flow_records_under_scope_root(scope).await? {
-            if is_terminal_status(flow.status)
-                || flow.provider != *provider
-                || !is_setup_class_continuation(&flow.continuation)
-            {
-                continue;
-            }
-            // Cancel through the flow's OWN scope: `cancel_flow` re-reads under
-            // full-scope equality, which the superseding start's scope (fresh
-            // invocation) would not satisfy.
-            match self.cancel_flow(&flow.scope, flow.id).await {
-                Ok(_) => superseded.push(flow.id),
-                // A concurrent claim/cancel/expiry that already moved the flow
-                // terminal is the desired end state, not a fault.
-                Err(
-                    AuthProductError::Canceled
-                    | AuthProductError::FlowAlreadyTerminal
-                    | AuthProductError::UnknownOrExpiredFlow,
-                ) => {}
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(superseded)
     }
 
     async fn mark_continuation_dispatched(

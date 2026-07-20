@@ -1,6 +1,6 @@
 // arch-exempt: large_file, durable auth lifecycle failure-injection coverage, plan #5905
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use chrono::{Duration, Utc};
 use ironclaw_filesystem::{
@@ -65,6 +65,78 @@ fn test_service(
     secret_store: Arc<dyn SecretStore>,
 ) -> FilesystemAuthProductServices<InMemoryBackend> {
     FilesystemAuthProductServices::new(filesystem, secret_store)
+}
+
+/// Returns the same first two flow-root listings before either caller may
+/// continue. Two independently constructed auth services therefore both
+/// observe an empty setup root, deterministically exercising cross-instance
+/// coordination rather than a shared process-local lock.
+struct BarrierFlowListBackend {
+    inner: InMemoryBackend,
+    flow_lists: AtomicUsize,
+    first_two_flow_lists: tokio::sync::Barrier,
+}
+
+impl BarrierFlowListBackend {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryBackend::new(),
+            flow_lists: AtomicUsize::new(0),
+            first_two_flow_lists: tokio::sync::Barrier::new(2),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl RootFilesystem for BarrierFlowListBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        let entries = self.inner.list_dir(path).await?;
+        if path.as_str().contains("/flows") && self.flow_lists.fetch_add(1, Ordering::SeqCst) < 2 {
+            // Before durable coordination both services reach this barrier
+            // and deterministically receive the same empty listing. After the
+            // fix the first lease holder must be allowed to finish before the
+            // second service may enter the flow root.
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                self.first_two_flow_lists.wait(),
+            )
+            .await;
+        }
+        Ok(entries)
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        self.inner.delete_if_version(path, expected_version).await
+    }
 }
 
 struct PausedAccountPutBackend {
@@ -1453,6 +1525,81 @@ async fn concurrent_setup_creates_leave_exactly_one_live_flow_in_the_durable_sto
             "round {round}: concurrent durable setup creates must leave exactly one live flow"
         );
     }
+}
+
+/// A process-local mutex cannot uphold the create-flow invariant across
+/// replicas. Both services below share only the durable backend; the backend
+/// forces their first flow-root reads to observe the same empty snapshot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn independent_services_share_durable_setup_creation_coordination() {
+    let backend = Arc::new(BarrierFlowListBackend::new());
+    let mounts = ironclaw_host_api::MountView::new(vec![MountGrant::new(
+        MountAlias::new("/secrets").unwrap(),
+        VirtualPath::new("/tenants/test/users/alice/secrets").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    let filesystem_a = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&backend),
+        mounts.clone(),
+    ));
+    let filesystem_b = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&backend),
+        mounts,
+    ));
+    let service_a = Arc::new(FilesystemAuthProductServices::new(
+        filesystem_a,
+        Arc::new(FilesystemSecretStore::ephemeral()),
+    ));
+    let service_b = Arc::new(FilesystemAuthProductServices::new(
+        filesystem_b,
+        Arc::new(FilesystemSecretStore::ephemeral()),
+    ));
+    let provider = AuthProviderId::new("github").unwrap();
+
+    let create = |service: Arc<FilesystemAuthProductServices<BarrierFlowListBackend>>,
+                  state: &'static str,
+                  provider: AuthProviderId| async move {
+        service
+            .create_flow(NewAuthFlow {
+                id: None,
+                scope: test_scope(),
+                kind: AuthFlowKind::IntegrationCredential,
+                provider,
+                challenge: AuthChallenge::OAuthUrl {
+                    authorization_url: OAuthAuthorizationUrl::new(
+                        "https://example.com/oauth/authorize?cross-instance=1",
+                    )
+                    .unwrap(),
+                    expires_at: Utc::now() + Duration::minutes(10),
+                },
+                continuation: AuthContinuationRef::SetupOnly,
+                update_binding: None,
+                opaque_state_hash: Some(state_hash(state)),
+                pkce_verifier_hash: Some(pkce_hash(state)),
+                expires_at: Utc::now() + Duration::minutes(10),
+            })
+            .await
+    };
+
+    let (left, right) = tokio::join!(
+        create(Arc::clone(&service_a), "cross-instance-a", provider.clone()),
+        create(Arc::clone(&service_b), "cross-instance-b", provider),
+    );
+    left.expect("first setup create succeeds");
+    right.expect("second setup create succeeds");
+
+    let live = service_a
+        .flow_records_under_scope_root(&test_scope())
+        .await
+        .expect("list flows under the shared root")
+        .into_iter()
+        .filter(|(flow, _)| flow.status == AuthFlowStatus::AwaitingUser)
+        .count();
+    assert_eq!(
+        live, 1,
+        "independent services sharing one backend must leave one live setup flow"
+    );
 }
 
 /// #4a lifecycle lock — the removal entrypoints cancel a pending flow through

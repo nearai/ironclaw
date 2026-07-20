@@ -134,11 +134,10 @@ impl InMemoryAuthProductServices {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// The supersede walk over already-locked state, shared by `create_flow`
-    /// (which must run walk + insert inside one lock acquisition — two racing
+    /// The supersede walk over already-locked state used by `create_flow`,
+    /// which must run walk + insert inside one lock acquisition — two racing
     /// setup creates could otherwise both observe "no live predecessor" and
-    /// both survive) and the standalone `cancel_superseded_setup_flows`
-    /// building block.
+    /// both survive.
     ///
     /// Owner granularity (tenant/user/agent/project + surface + session):
     /// setup flows are thread-less and each re-opened connect popup mints a
@@ -560,17 +559,6 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         record.error = Some(crate::AuthErrorCode::Canceled);
         record.updated_at = now;
         Ok(record.clone())
-    }
-
-    async fn cancel_superseded_setup_flows(
-        &self,
-        scope: &crate::AuthProductScope,
-        provider: &crate::AuthProviderId,
-    ) -> Result<Vec<AuthFlowId>, AuthProductError> {
-        let mut state = self.lock_state();
-        let mut superseded = Self::supersede_setup_flows_locked(&mut state, scope, provider);
-        superseded.sort();
-        Ok(superseded)
     }
 
     async fn mark_continuation_dispatched(
