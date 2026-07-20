@@ -11,7 +11,6 @@ use ironclaw_host_api::{
 use ironclaw_reborn_event_store::{
     RebornEventStoreConfig, RebornProfile, build_reborn_event_stores,
 };
-#[cfg(feature = "postgres")]
 use secrecy::SecretString;
 
 fn capability_id() -> CapabilityId {
@@ -67,8 +66,6 @@ fn audit_record(scope: &ResourceScope, status: &str) -> AuditEnvelope {
         }),
     }
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_replay_advances_next_cursor_past_trailing_filtered_records() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -119,8 +116,6 @@ async fn libsql_replay_advances_next_cursor_past_trailing_filtered_records() {
         "filtered trailing records must advance SQL replay cursor"
     );
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_append_batch_groups_by_stream_and_preserves_order() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -402,8 +397,6 @@ async fn jsonl_audit_log_survives_rebuild_and_filters_scope() {
         Some("project-a".to_string())
     );
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_semantics() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -506,8 +499,6 @@ async fn libsql_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_sema
         Some("project-a".to_string())
     );
 }
-
-#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_replay_advances_next_cursor_past_trailing_filtered_records() {
     let Ok(url) = std::env::var("IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL") else {
@@ -567,8 +558,6 @@ async fn postgres_replay_advances_next_cursor_past_trailing_filtered_records() {
         "filtered trailing records must advance Postgres replay cursor"
     );
 }
-
-#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_semantics() {
     let Ok(url) = std::env::var("IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL") else {

@@ -57,8 +57,8 @@ RUN pnpm install --frozen-lockfile
 WORKDIR /app
 RUN cargo chef cook \
     --profile dist \
-    --package ironclaw_reborn_cli \
-    --features webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta,libsql,postgres,inmemory-turn-state \
+    --package ironclaw \
+    --features libsql,postgres,inmemory-turn-state \
     --recipe-path recipe.json
 RUN cargo chef cook \
     --profile dist \
@@ -87,8 +87,8 @@ WORKDIR /app
 
 RUN cargo build \
     --profile dist \
-    --package ironclaw_reborn_cli \
-    --features webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta,libsql,postgres,inmemory-turn-state \
+    --package ironclaw \
+    --features libsql,postgres,inmemory-turn-state \
     --bin ironclaw
 
 RUN cargo build \

@@ -174,18 +174,12 @@ fn print_remaining_setup_guidance(key: &ConfigKey) {
     }
 }
 
-#[cfg(feature = "webui-v2-beta")]
 fn default_webui_base_url() -> String {
     format!(
         "http://{}:{}",
         crate::commands::serve::DEFAULT_SERVE_HOST,
         crate::commands::serve::DEFAULT_SERVE_PORT
     )
-}
-
-#[cfg(not(feature = "webui-v2-beta"))]
-fn default_webui_base_url() -> String {
-    "http://127.0.0.1:3000".to_string()
 }
 
 fn write_google_field(
@@ -208,7 +202,7 @@ fn write_slack_enabled(home: &RebornHome, value: &str) -> anyhow::Result<()> {
         .map_err(anyhow::Error::from)
 }
 
-#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+#[cfg(feature = "libsql")]
 fn write_llm_api_key(
     context: &RebornCliContext,
     provider_id: &str,
@@ -234,7 +228,7 @@ fn write_llm_api_key(
     })
 }
 
-#[cfg(not(all(feature = "libsql", feature = "root-llm-provider")))]
+#[cfg(not(feature = "libsql"))]
 fn write_llm_api_key(
     _context: &RebornCliContext,
     _provider_id: &str,
@@ -242,8 +236,8 @@ fn write_llm_api_key(
     _store_opener: &dyn SecretStoreOpener,
 ) -> anyhow::Result<()> {
     anyhow::bail!(
-        "`config set <provider>.api_key` requires the binary to be built with the `libsql` and \
-         `root-llm-provider` Cargo features"
+        "`config set <provider>.api_key` requires the binary to be built with the `libsql` Cargo \
+         feature"
     )
 }
 
@@ -339,7 +333,6 @@ fn execute_webui_token(
     // process keeps the old token in memory until it restarts — so the
     // login link below (already built from the new token) only becomes
     // valid once `ironclaw service restart` (printed above) runs.
-    #[cfg(feature = "webui-v2-beta")]
     if let Some(link) = crate::webui_token::login_link(home)? {
         println!("login_link: {link} (valid after restart)");
     }
@@ -404,7 +397,7 @@ impl SecretValueSource for StdinSecretValueSource {
 /// code in this crate must not depend on `ironclaw_secrets` (enforced by
 /// `reborn_dependency_boundaries.rs::reborn_cli_binary_crate_stays_separate_from_v1_root`).
 trait SecretStoreOpener {
-    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+    #[cfg(feature = "libsql")]
     fn open_llm_key_store(
         &self,
         home_path: &Path,
@@ -420,7 +413,7 @@ trait SecretStoreOpener {
 struct LocalDevSecretStoreOpener;
 
 impl SecretStoreOpener for LocalDevSecretStoreOpener {
-    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+    #[cfg(feature = "libsql")]
     fn open_llm_key_store(
         &self,
         home_path: &Path,
@@ -516,7 +509,6 @@ mod tests {
 
     #[cfg(feature = "libsql")]
     impl SecretStoreOpener for FakeSecretStoreOpener {
-        #[cfg(feature = "root-llm-provider")]
         fn open_llm_key_store(
             &self,
             home_path: &Path,
@@ -558,7 +550,7 @@ mod tests {
 
     struct FailingStoreOpener;
     impl SecretStoreOpener for FailingStoreOpener {
-        #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+        #[cfg(feature = "libsql")]
         fn open_llm_key_store(
             &self,
             _home_path: &Path,
@@ -876,7 +868,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+    #[cfg(feature = "libsql")]
     #[test]
     fn llm_api_key_writes_to_secret_store_and_not_config_toml() {
         let (_tmp, context) = RebornCliContext::test_context();

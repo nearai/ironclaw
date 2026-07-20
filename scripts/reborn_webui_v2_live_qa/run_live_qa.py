@@ -382,27 +382,15 @@ def _reborn_binary() -> Path:
 
 
 def build_reborn_binary() -> Path:
-    features = os.environ.get(
-        "REBORN_WEBUI_V2_LIVE_QA_FEATURES",
-        "webui-v2-beta,slack-v2-host-beta",
-    )
+    features = os.environ.get("REBORN_WEBUI_V2_LIVE_QA_FEATURES", "")
     build_env = os.environ.copy()
     build_env.setdefault("CARGO_PROFILE_DEV_DEBUG", "0")
     build_env.setdefault("CARGO_INCREMENTAL", "0")
-    run(
-        [
-            "cargo",
-            "build",
-            "-p",
-            "ironclaw_reborn_cli",
-            "--features",
-            features,
-            "--bin",
-            "ironclaw",
-        ],
-        cwd=ROOT,
-        env=build_env,
-    )
+    command = ["cargo", "build", "-p", "ironclaw"]
+    if features:
+        command += ["--features", features]
+    command += ["--bin", "ironclaw"]
+    run(command, cwd=ROOT, env=build_env)
     binary = _reborn_binary()
     if not binary.exists():
         message = f"ironclaw binary was not produced at {binary}"

@@ -1,5 +1,4 @@
 use std::{collections::BTreeMap, error::Error, time::Duration};
-#[cfg(feature = "postgres")]
 use std::{collections::HashSet, sync::OnceLock};
 
 use async_trait::async_trait;
@@ -19,29 +18,18 @@ use crate::{
     IndexValue, Page, RecordKind, RecordVersion, RootFilesystem, SeqNo, TxnCapability,
     VersionedEntry,
 };
-
-#[cfg(feature = "postgres")]
 /// PostgreSQL-backed [`RootFilesystem`] storing file contents by virtual path.
 pub struct PostgresRootFilesystem {
     pool: deadpool_postgres::Pool,
 }
-
-#[cfg(feature = "postgres")]
 const POSTGRES_MIGRATION_CONNECT_MAX_WAIT_ENV: &str =
     "IRONCLAW_FILESYSTEM_POSTGRES_MIGRATION_CONNECT_MAX_WAIT_SECS";
-#[cfg(feature = "postgres")]
 const POSTGRES_MIGRATION_CONNECT_DEFAULT_MAX_WAIT: Duration = Duration::from_secs(300);
-#[cfg(feature = "postgres")]
 const POSTGRES_MIGRATION_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
-#[cfg(feature = "postgres")]
 const POSTGRES_MIGRATION_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(10);
-#[cfg(feature = "postgres")]
 const POSTGRES_ROOT_FILESYSTEM_MIGRATION_ADVISORY_LOCK: i64 = 824_917_203;
-#[cfg(feature = "postgres")]
 static POSTGRES_ROOT_FILESYSTEM_MIGRATED_SCHEMAS: OnceLock<tokio::sync::Mutex<HashSet<String>>> =
     OnceLock::new();
-
-#[cfg(feature = "postgres")]
 impl PostgresRootFilesystem {
     pub fn new(pool: deadpool_postgres::Pool) -> Self {
         Self { pool }
@@ -127,8 +115,6 @@ impl PostgresRootFilesystem {
         })
     }
 }
-
-#[cfg(feature = "postgres")]
 async fn drop_legacy_projection_indexes(
     transaction: &tokio_postgres::Transaction<'_>,
 ) -> Result<(), FilesystemError> {
@@ -155,13 +141,9 @@ async fn drop_legacy_projection_indexes(
     }
     Ok(())
 }
-
-#[cfg(feature = "postgres")]
 fn quote_postgres_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
-
-#[cfg(feature = "postgres")]
 async fn postgres_root_filesystem_migration_key(
     client: &deadpool_postgres::Object,
 ) -> Result<String, FilesystemError> {
@@ -190,15 +172,11 @@ async fn postgres_root_filesystem_migration_key(
         "{host}:{port}/{database}/{schema}@{postmaster_started_at}"
     ))
 }
-
-#[cfg(feature = "postgres")]
 fn postgres_migration_connect_backoff(attempt: u32) -> Duration {
     POSTGRES_MIGRATION_CONNECT_INITIAL_BACKOFF
         .saturating_mul(2u32.saturating_pow(attempt.min(16)))
         .min(POSTGRES_MIGRATION_CONNECT_MAX_BACKOFF)
 }
-
-#[cfg(feature = "postgres")]
 fn postgres_migration_connect_max_wait() -> Result<Duration, FilesystemError> {
     match std::env::var(POSTGRES_MIGRATION_CONNECT_MAX_WAIT_ENV) {
         Ok(raw) => {
@@ -228,8 +206,6 @@ fn postgres_migration_connect_max_wait() -> Result<Duration, FilesystemError> {
         }),
     }
 }
-
-#[cfg(feature = "postgres")]
 fn format_error_chain(error: &(dyn Error + 'static)) -> String {
     let mut reason = error.to_string();
     let mut source = error.source();
@@ -240,8 +216,6 @@ fn format_error_chain(error: &(dyn Error + 'static)) -> String {
     }
     reason
 }
-
-#[cfg(feature = "postgres")]
 #[async_trait]
 impl RootFilesystem for PostgresRootFilesystem {
     fn capabilities(&self) -> BackendCapabilities {
@@ -909,8 +883,6 @@ impl RootFilesystem for PostgresRootFilesystem {
         Ok(())
     }
 }
-
-#[cfg(feature = "postgres")]
 impl PostgresRootFilesystem {
     async fn exact_entry_with_client(
         &self,
@@ -1082,15 +1054,11 @@ impl PostgresRootFilesystem {
         Ok(out)
     }
 }
-
-#[cfg(feature = "postgres")]
 struct PostgresStorageTxn {
     client: Option<deadpool_postgres::Object>,
     prefix: VirtualPath,
     active: bool,
 }
-
-#[cfg(feature = "postgres")]
 impl PostgresStorageTxn {
     fn client(&self) -> Result<&deadpool_postgres::Object, FilesystemError> {
         self.client
@@ -1110,8 +1078,6 @@ impl PostgresStorageTxn {
         }
     }
 }
-
-#[cfg(feature = "postgres")]
 #[async_trait]
 impl StorageTxn for PostgresStorageTxn {
     async fn put(
@@ -1168,8 +1134,6 @@ impl StorageTxn for PostgresStorageTxn {
         }
     }
 }
-
-#[cfg(feature = "postgres")]
 async fn postgres_reserve_sequence_with_client(
     client: &deadpool_postgres::Object,
     path: &VirtualPath,
@@ -1191,8 +1155,6 @@ async fn postgres_reserve_sequence_with_client(
     let reserved: i64 = row.get("reserved");
     seq_no_from_i64(path, reserved, FilesystemOperation::ReserveSeq)
 }
-
-#[cfg(feature = "postgres")]
 impl Drop for PostgresStorageTxn {
     fn drop(&mut self) {
         if !self.active {
@@ -1221,7 +1183,6 @@ impl Drop for PostgresStorageTxn {
 /// at the call site. Index DDL remains uncached. The error type stays
 /// `tokio_postgres::Error` so existing `db_error` mapping at call sites is
 /// unchanged.
-#[cfg(feature = "postgres")]
 async fn cached_query_opt(
     client: &deadpool_postgres::Object,
     sql: &str,
@@ -1230,8 +1191,6 @@ async fn cached_query_opt(
     let statement = client.prepare_cached(sql).await?;
     client.query_opt(&statement, params).await
 }
-
-#[cfg(feature = "postgres")]
 async fn cached_query(
     client: &deadpool_postgres::Object,
     sql: &str,
@@ -1240,8 +1199,6 @@ async fn cached_query(
     let statement = client.prepare_cached(sql).await?;
     client.query(&statement, params).await
 }
-
-#[cfg(feature = "postgres")]
 async fn cached_query_one(
     client: &deadpool_postgres::Object,
     sql: &str,
@@ -1250,8 +1207,6 @@ async fn cached_query_one(
     let statement = client.prepare_cached(sql).await?;
     client.query_one(&statement, params).await
 }
-
-#[cfg(feature = "postgres")]
 async fn cached_execute(
     client: &deadpool_postgres::Object,
     sql: &str,
@@ -1264,7 +1219,6 @@ async fn cached_execute(
 /// `CasExpectation::Absent` put: insert iff `path` is not an implicit directory
 /// (no descendant in the half-open `[prefix/, prefix0)` range); the `ON CONFLICT
 /// DO NOTHING` also blocks an explicit directory or existing file at `path`.
-#[cfg(feature = "postgres")]
 const PUT_ABSENT_SQL: &str = r#"
     INSERT INTO root_filesystem_entries
         (path, contents, is_dir, content_type, kind, indexed, version)
@@ -1280,7 +1234,6 @@ const PUT_ABSENT_SQL: &str = r#"
 /// `CasExpectation::Version` put: update the file row at the expected version,
 /// rejecting an explicit directory (`is_dir = FALSE`) and — for parity with the
 /// insert arms — any implicit-directory descendant.
-#[cfg(feature = "postgres")]
 const PUT_VERSION_SQL: &str = r#"
     UPDATE root_filesystem_entries
     SET contents = $1,
@@ -1300,7 +1253,6 @@ const PUT_VERSION_SQL: &str = r#"
 /// `CasExpectation::Any` put: upsert unless a descendant makes `path` an
 /// implicit directory; the `ON CONFLICT` guard rejects an explicit directory.
 /// `RETURNING version` removes the separate version read-back.
-#[cfg(feature = "postgres")]
 const PUT_ANY_SQL: &str = r#"
     INSERT INTO root_filesystem_entries
         (path, contents, is_dir, content_type, kind, indexed, version)
@@ -1339,7 +1291,6 @@ const PUT_ANY_SQL: &str = r#"
 /// version) to reproduce the exact error the old pre-check and version read
 /// would have produced: `directory_write_error` for a directory conflict,
 /// `VersionMismatch` otherwise. The happy path never pays for it.
-#[cfg(feature = "postgres")]
 async fn postgres_put_with_client(
     client: &deadpool_postgres::Object,
     path: &VirtualPath,
@@ -1471,7 +1422,6 @@ async fn postgres_put_with_client(
 /// pre-existing (the old 3-read pre-check had a wider window) and tracked
 /// separately — see `put_statements_are_single_round_trip` for the boundary of
 /// what the single-statement guard does and does not guarantee.
-#[cfg(feature = "postgres")]
 async fn diagnose_put_failure(
     client: &deadpool_postgres::Object,
     path: &VirtualPath,
@@ -1489,8 +1439,6 @@ async fn diagnose_put_failure(
         found,
     })
 }
-
-#[cfg(feature = "postgres")]
 async fn postgres_get_with_client(
     client: &deadpool_postgres::Object,
     path: &VirtualPath,
@@ -1525,8 +1473,6 @@ async fn postgres_get_with_client(
         version: record_version_from_i64(path, version_raw)?,
     }))
 }
-
-#[cfg(feature = "postgres")]
 async fn postgres_stat_with_client(
     client: &deadpool_postgres::Object,
     path: &VirtualPath,
@@ -1593,8 +1539,6 @@ async fn postgres_stat_with_client(
         sensitive: false,
     })
 }
-
-#[cfg(feature = "postgres")]
 async fn postgres_delete_with_client(
     client: &deadpool_postgres::Object,
     path: &VirtualPath,
@@ -1658,7 +1602,6 @@ async fn postgres_delete_with_client(
 /// relies on `created_at` being immutable after row creation; if a future
 /// writer mutates it on update, replacement detection would classify that
 /// update as a new incarnation.
-#[cfg(feature = "postgres")]
 const DELETE_IF_VERSION_ATOMIC_SQL: &str = r#"
     WITH candidate AS MATERIALIZED (
         SELECT version, created_at
@@ -1728,7 +1671,6 @@ const DELETE_IF_VERSION_ATOMIC_SQL: &str = r#"
 /// `diagnose_put_failure` / `postgres_current_version_with_client` are
 /// deliberately not reused here: reusing them would require a second
 /// statement, reopening the race this fix closes.
-#[cfg(feature = "postgres")]
 async fn postgres_delete_if_version_with_client(
     client: &deadpool_postgres::Object,
     path: &VirtualPath,
@@ -1760,8 +1702,6 @@ async fn postgres_delete_if_version_with_client(
     }
     Err(not_found(path.clone(), FilesystemOperation::Delete))
 }
-
-#[cfg(feature = "postgres")]
 async fn postgres_current_version_with_client(
     client: &deadpool_postgres::Object,
     path: &VirtualPath,
@@ -1785,7 +1725,6 @@ async fn postgres_current_version_with_client(
 /// Used only on the rare CAS-put failure path. Selects the `is_dir` flag alone
 /// and never reads `OCTET_LENGTH(contents)`, so it does not touch the
 /// (potentially TOAST'd) body to answer a question that only needs one boolean.
-#[cfg(feature = "postgres")]
 async fn postgres_is_dir_with_client(
     client: &deadpool_postgres::Object,
     path: &VirtualPath,
@@ -1799,8 +1738,6 @@ async fn postgres_is_dir_with_client(
     .map_err(|error| db_error(path.clone(), FilesystemOperation::Stat, error))?;
     Ok(row.is_some_and(|row| row.get::<_, bool>("is_dir")))
 }
-
-#[cfg(feature = "postgres")]
 async fn postgres_has_child_entry_with_client(
     client: &deadpool_postgres::Object,
     parent: &VirtualPath,
@@ -1815,8 +1752,6 @@ async fn postgres_has_child_entry_with_client(
     .map_err(|error| db_error(parent.clone(), FilesystemOperation::Stat, error))?;
     Ok(row.is_some())
 }
-
-#[cfg(feature = "postgres")]
 fn descendant_path_range(path: &VirtualPath) -> (String, String) {
     let prefix = path.as_str().trim_end_matches('/');
     // Descendants share the literal "{prefix}/" component boundary. The
@@ -1824,8 +1759,6 @@ fn descendant_path_range(path: &VirtualPath) -> (String, String) {
     // in the normalized virtual path alphabet used by these storage paths.
     (format!("{prefix}/"), format!("{prefix}0"))
 }
-
-#[cfg(feature = "postgres")]
 fn postgres_shared_projection_index_name(spec: &IndexSpec) -> String {
     let kind = match &spec.kind {
         IndexKind::Exact => "exact",
@@ -1839,8 +1772,6 @@ fn postgres_shared_projection_index_name(spec: &IndexSpec) -> String {
     }
     sql_index_name(&format!("/shared/{kind}/{keys}"), spec.name.as_str())
 }
-
-#[cfg(feature = "postgres")]
 fn postgres_projection_index_component(value: &str) -> String {
     format!("{}:{value}", value.len())
 }
@@ -1853,7 +1784,6 @@ fn postgres_projection_index_component(value: &str) -> String {
 ///   `FALSE` (matching in-memory `all`/`any` semantics).
 /// - `Filter::Range` on `IndexValue::I64` bounds casts both sides to
 ///   `BIGINT` so the comparison is numeric, not lexicographic on text.
-#[cfg(feature = "postgres")]
 fn translate_filter(
     path: &VirtualPath,
     filter: &Filter,
@@ -1958,8 +1888,6 @@ fn translate_filter(
         Filter::Or(children) => translate_compound(path, children, " OR ", "FALSE", out, params),
     }
 }
-
-#[cfg(feature = "postgres")]
 fn translate_compound(
     path: &VirtualPath,
     children: &[Filter],
@@ -1987,7 +1915,6 @@ fn translate_compound(
 /// Used to guard `Filter::Range` so cross-variant stored values are filtered
 /// out before any cast/comparison (PR #3659 review fix). Postgres returns:
 /// `"string"` / `"number"` / `"boolean"` / `"null"` / `"object"` / `"array"`.
-#[cfg(feature = "postgres")]
 fn index_value_jsonb_typeof(value: &IndexValue) -> &'static str {
     match value {
         IndexValue::Text(_) | IndexValue::Bytes(_) => "string",
@@ -1995,8 +1922,6 @@ fn index_value_jsonb_typeof(value: &IndexValue) -> &'static str {
         IndexValue::Bool(_) => "boolean",
     }
 }
-
-#[cfg(feature = "postgres")]
 fn bind_index_value(
     path: &VirtualPath,
     value: &IndexValue,
@@ -2024,8 +1949,6 @@ fn bind_index_value(
     params.push(bound);
     Ok(params.len())
 }
-
-#[cfg(feature = "postgres")]
 fn build_entry(
     path: &VirtualPath,
     body: Vec<u8>,
@@ -2053,8 +1976,6 @@ fn build_entry(
         indexed,
     })
 }
-
-#[cfg(feature = "postgres")]
 fn seq_no_from_i64(
     path: &VirtualPath,
     raw: i64,
@@ -2068,8 +1989,6 @@ fn seq_no_from_i64(
             reason: format!("event seq {raw} is not representable"),
         })
 }
-
-#[cfg(feature = "postgres")]
 fn backend_error(
     path: VirtualPath,
     operation: FilesystemOperation,
@@ -2081,8 +2000,6 @@ fn backend_error(
         reason: reason.into(),
     }
 }
-
-#[cfg(feature = "postgres")]
 const POSTGRES_ROOT_FILESYSTEM_SCHEMA: &str = concat!(
     include_str!("../../../migrations/V26__root_filesystem_entries.sql"),
     "\n",
@@ -2099,7 +2016,7 @@ const POSTGRES_ROOT_FILESYSTEM_SCHEMA: &str = concat!(
     include_str!("../../../migrations/V32__root_filesystem_sequences.sql"),
 );
 
-#[cfg(all(test, feature = "postgres"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

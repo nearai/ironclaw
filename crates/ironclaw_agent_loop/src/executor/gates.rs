@@ -69,7 +69,6 @@ impl ExecutorStage<GateInput> for GateStage {
                 state.last_gate = Some(gate_ref.clone());
                 let auth_resume = input.auth_resume.as_ref();
                 let auth_resume_token = auth_resume.map(|r| r.resume_token.clone());
-                let auth_replay = auth_resume.and_then(|r| r.replay.clone());
                 let auth_prior_approval = auth_resume.and_then(|r| r.prior_approval.clone());
                 if matches!(kind, GateKind::Approval) {
                     let approval_resume = input.approval_resume;
@@ -85,8 +84,6 @@ impl ExecutorStage<GateInput> for GateStage {
                             input_ref: resume.input_ref,
                             effective_capability_ids: call.effective_capability_ids.clone(),
                             provider_replay: call.provider_replay.clone(),
-                            input: resume.input,
-                            estimate: resume.estimate,
                             // Disposition is stamped by PlannedDriver at resume time;
                             // GateStage writes the initial (blocking) checkpoint where
                             // no denial has occurred yet.
@@ -114,7 +111,6 @@ impl ExecutorStage<GateInput> for GateStage {
                         resume_token: auth_resume_token,
                         activity_id: call.activity_id,
                         prior_approval: auth_prior_approval,
-                        replay: auth_replay,
                         disposition: None,
                     });
                 }

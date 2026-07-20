@@ -65,7 +65,11 @@ const FROZEN_COLLAPSE_DTOS: &[&str] = &[
     // dispatcher (`Authorized` + resolved handles replace it, §3.1)
     "RuntimeAdapterRequest",
     // ── result side: the overloaded ten-variant enum (§1.2 → `Resolution`) ──
-    "CapabilityOutcome",
+    // `CapabilityOutcome` (and its `CapabilityBatchOutcome`/`CapabilityResultMessage`/
+    // `CapabilityFailure`/`CapabilityDenied`/`ProcessHandleSummary` payloads) are
+    // DELETED (§5.3 Stage 2b): producers emit `host_api::Resolution` directly via
+    // the `ironclaw_turns::run_profile::resolution::*` constructors. The result-lane
+    // collapse is complete; only the request-side shapes above remain to retire.
 ];
 
 /// Matches exactly the frozen collapse-target names (exact identifier, not a
@@ -128,7 +132,7 @@ fn reborn_capability_dto_allowlist_is_frozen_and_only_shrinks() {
 fn collapse_dto_predicate_is_exact_name() {
     let sample = r#"
         pub struct RuntimeCapabilityRequest { a: u8 }     // frozen -> flagged
-        pub enum CapabilityOutcome { A, B }               // frozen -> flagged
+        pub struct CapabilityDispatchRequest { a: u8 }    // frozen -> flagged
         pub struct RuntimeAdapterRequestBuilder;          // suffix -> NOT flagged
         pub struct Invocation;                            // the target -> NOT flagged
         pub struct CapabilityDispatchResult;              // sibling result -> NOT flagged
@@ -137,5 +141,8 @@ fn collapse_dto_predicate_is_exact_name() {
         .into_iter()
         .map(|(ident, _)| ident)
         .collect();
-    assert_eq!(got, vec!["RuntimeCapabilityRequest", "CapabilityOutcome"]);
+    assert_eq!(
+        got,
+        vec!["RuntimeCapabilityRequest", "CapabilityDispatchRequest"]
+    );
 }

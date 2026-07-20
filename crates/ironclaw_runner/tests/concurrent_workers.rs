@@ -642,6 +642,7 @@ async fn scheduler_executor_two_runs_concurrently() {
         Arc::clone(&loop_exit_applier),
         Arc::clone(&registry),
         host_factory as Arc<dyn HostFactory>,
+        None,
     ));
 
     let scheduler_config = TurnRunSchedulerConfig::default()
@@ -921,6 +922,7 @@ async fn scheduler_executor_applies_loop_exit_end_to_end() {
         Arc::clone(&loop_exit_applier),
         Arc::clone(&registry),
         host_factory as Arc<dyn HostFactory>,
+        None,
     ));
 
     let scheduler_config = TurnRunSchedulerConfig::default()

@@ -65,7 +65,7 @@ dead_code = "warn"
 unused_must_use = "deny"
 
 [package]
-name = "ironclaw"
+name = "ironclaw_legacy"
 autobins = false
 version = "0.29.1"
 edition = "2024"
@@ -79,15 +79,16 @@ repository = "https://github.com/nearai/ironclaw"
 [package.metadata.ironclaw]
 layer = "legacy"
 
+[package.metadata.dist]
+dist = false
+
+[lib]
+name = "ironclaw"
+path = "src/lib.rs"
+
 [[bin]]
 name = "ironclaw-legacy"
 path = "src/main.rs"
-
-[package.metadata.wix]
-upgrade-guid = "D0156E61-BA37-451E-8AB9-1A2ECCCFA48F"
-path-guid = "F90B6EA6-87F7-499B-BB19-CF55DE1EB339"
-license = false
-eula = false
 
 [dependencies]
 # Async runtime
@@ -293,7 +294,7 @@ tempfile = "3"
 insta = { version = "1.46.3", features = ["yaml"] }
 # Pull the LLM crate's `testing` feature in only for tests so `StubLlm` and
 # fault-injection helpers don't ship in release binaries.
-ironclaw_llm = { path = "crates/ironclaw_llm", version = "0.1.0", features = ["testing"] }
+ironclaw_llm = { path = "crates/ironclaw_llm", version = "0.1.0", features = ["test-support"] }
 ironclaw_agent_loop = { path = "crates/ironclaw_agent_loop", version = "0.1.0", features = ["test-support"] }
 ironclaw_approvals = { path = "crates/ironclaw_approvals", version = "0.1.0", features = ["test-support"] }
 # Pull the auth crate's `test-support` feature in only for tests so the
@@ -305,6 +306,9 @@ ironclaw_attachments = { path = "crates/ironclaw_attachments", version = "0.1.0"
 # `test-support` enables the in-memory-backed capability-lease store constructor
 # for the integration-test harness (cfg(test) does not propagate into deps).
 ironclaw_authorization = { path = "crates/ironclaw_authorization", version = "0.1.0", features = ["test-support"] }
+# Integration harness builds a fresh in-memory `FilesystemReplayPayloadStore`
+# fallback for harnesses without shared approval parts (§5.3 Stage 2a-i).
+ironclaw_capabilities = { path = "crates/ironclaw_capabilities", version = "0.1.0" }
 ironclaw_extensions = { path = "crates/ironclaw_extensions", version = "0.1.0" }
 ironclaw_filesystem = { path = "crates/ironclaw_filesystem", version = "0.1.0" }
 ironclaw_mcp = { path = "crates/ironclaw_mcp", version = "0.1.0" }
@@ -322,18 +326,16 @@ ironclaw_resources = { path = "crates/ironclaw_resources", version = "0.1.0", fe
 ironclaw_secrets = { path = "crates/ironclaw_secrets", version = "0.1.0" }
 ironclaw_product_adapters = { path = "crates/ironclaw_product_adapters", version = "0.1.0", features = ["test-support"] }
 ironclaw_product_workflow = { path = "crates/ironclaw_product_workflow", version = "0.1.0", features = ["test-support"] }
-ironclaw_runner = { path = "crates/ironclaw_runner", version = "0.1.0", features = ["root-llm-provider"] }
-# `webui-v2-beta` puts `ironclaw_webui` + `ironclaw_reborn_identity` on the
-# int-tier coverage lane (identity_resolution_smoke / webui_v2_router_smoke);
-# feature unification compiles them into every int-tier build, behaviorally
-# inert for suites that never call them.
-# W5-SLACK-PAIR: `slack-v2-host-beta` grows the lcov denominator by ~42k lines
-# of feature-gated slack_*.rs modules (previously invisible, not 0%) and
-# unlocks composing them in int-tier tests. Feature unification recompiles
-# all 17 gated modules into every int-tier test binary — real, one-time
-# build-time cost for the lane, behaviorally inert for suites that never
-# reference Slack types.
-ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support", "libsql", "webui-v2-beta", "slack-v2-host-beta", "telegram-v2-host-beta"] }
+ironclaw_runner = { path = "crates/ironclaw_runner", version = "0.1.0" }
+# `ironclaw_webui` + `ironclaw_reborn_identity` sit on the int-tier coverage
+# lane (identity_resolution_smoke / webui_v2_router_smoke); they compile into
+# every int-tier build, behaviorally inert for suites that never call them.
+# W5-SLACK-PAIR: the Slack host surface grows the lcov denominator by ~42k
+# lines of slack_*.rs modules (previously invisible, not 0%) and unlocks
+# composing them in int-tier tests. All 17 of those modules are recompiled
+# into every int-tier test binary — a real, one-time build-time cost for the
+# lane, behaviorally inert for suites that never reference Slack types.
+ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support"] }
 # Direct dev-dep: composition deliberately does NOT re-export the bare
 # `webui_v2_router`/`WebUiV2State` (facade-only rule), and the router smoke
 # drives the bare router, not the `webui_v2_app` wrapper. The v2 route surface
@@ -344,7 +346,7 @@ ironclaw_webui = { path = "crates/ironclaw_webui", version = "0.1.0" }
 # constants; Slack pairing/actor-resolution int-tier tests need them directly.
 ironclaw_slack_v2_adapter = { path = "crates/ironclaw_slack_v2_adapter", version = "0.1.0" }
 ironclaw_reborn_config = { path = "crates/ironclaw_reborn_config", version = "0.1.0" }
-ironclaw_reborn_openai_compat = { path = "crates/ironclaw_reborn_openai_compat", version = "0.1.0", features = ["openai-compat-beta"] }
+ironclaw_reborn_openai_compat = { path = "crates/ironclaw_reborn_openai_compat", version = "0.1.0"}
 ironclaw_run_state = { path = "crates/ironclaw_run_state", version = "0.1.0", features = ["test-support"] }
 ironclaw_threads = { path = "crates/ironclaw_threads", version = "0.1.0" }
 # `InMemoryDurableEventLog` for the W5-WEBUI-API-1 SSE scenario's test-local
@@ -364,7 +366,7 @@ ironclaw_wasm = { path = "crates/ironclaw_wasm", version = "0.1.0" }
 # proof injects (asserting a real `TriggeredRunDeliveryDriver`'s recorded
 # outcome via the same public store trait the composition factory accepts).
 # Same idea for embeddings: `MockEmbeddings` is only reachable in dev builds.
-ironclaw_embeddings = { path = "crates/ironclaw_embeddings", version = "0.1.0", features = ["testing"] }
+ironclaw_embeddings = { path = "crates/ironclaw_embeddings", version = "0.1.0", features = ["test-support"] }
 # Named `#[case]` parametrization for the storage-backend matrix tests (slice 3).
 rstest = "0.23"
 
@@ -394,29 +396,6 @@ html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
 bedrock = ["ironclaw_llm/bedrock", "ironclaw_embeddings/bedrock"]
 tui = ["dep:ironclaw_tui"]
 import = ["dep:json5", "libsql"]
-# Conditional gate for memory-substrate regression tests that anticipate
-# specific guards: `ensure_path_matches_context`/`ensure_scope_matches_context`
-# fail-closed checks, deterministic tie-breaking by path ascending,
-# `.system/engine/orchestrator/*` protected-path registration, and
-# min_score-after-normalization. #3180 as merged delivers the substrate
-# skeleton but NOT these specific behaviors — the followup PR(s) that
-# implement them must enable this feature in their merge commit so the
-# gated tests fire in CI. Mirrors the same-named feature on
-# `ironclaw_memory`.
-#
-# Empirical note (2026-05-12): enabling `pr3180-ready` on the current
-# `reborn-integration` HEAD surfaces 7 gated tests as failing, because
-# the anticipated APIs do not exist in the merged substrate yet. Do not
-# enable in CI until the followup landings.
-pr3180-ready = []
-# Conditional gate for caller-tier (tool-dispatcher → substrate) tests.
-# Distinct from `pr3180-ready` because the substrate-level guards and
-# the tool-routing migration are separate landings: PR 7 routes
-# `memory_write` through `ironclaw_memory`'s `PromptWriteSafetyPolicy`,
-# so until PR 7 lands, tool-layer rejection tests run against the
-# legacy host-workspace path which doesn't consult the substrate.
-# PR 7 must enable this feature in its merge commit.
-pr7-ready = []
 
 [[test]]
 name = "reborn_group_approvals"
@@ -643,12 +622,19 @@ lto = "thin"
 [workspace.metadata.dist]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax)
 cargo-dist-version = "0.31.0"
-# Ignore out-of-date generated CI so custom release.yml jobs are allowed
+# cargo-dist 0.31 grants `contents: write` to every generated job. Keep the
+# checked-in CI customized so only the host job can publish a GitHub Release.
 allow-dirty = ["ci"]
+# Release only the canonical Reborn CLI.
+packages = ["ironclaw"]
 # CI backends to support
 ci = "github"
+# Match the canonical `ironclaw-v*` release tags.
+tag-namespace = "ironclaw"
+# Install build-only prerequisites before cargo-dist compiles each target.
+github-build-setup = "../dist-build-setup.yml"
 # The installers to generate for each app
-installers = ["shell", "powershell", "npm", "msi"]
+installers = ["shell", "powershell", "msi"]
 # Publish jobs to run in CI
 publish-jobs = []
 # Target platforms to build apps for (Rust target-triple syntax)
@@ -682,3 +668,9 @@ x86_64-unknown-linux-musl = "ubuntu-22.04"
 x86_64-pc-windows-msvc = "windows-2022"
 x86_64-apple-darwin = "macos-15-intel"
 aarch64-apple-darwin = "macos-14"
+
+[workspace.metadata.dist.github-action-commits]
+"actions/checkout" = "df4cb1c069e1874edd31b4311f1884172cec0e10"
+"actions/download-artifact" = "37930b1c2abaa49bbe596cd826c3c89aef350131"
+"actions/upload-artifact" = "b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+"swatinem/rust-cache" = "e18b497796c12c097a38f9edb9d0641fb99eee32"

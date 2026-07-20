@@ -75,7 +75,6 @@ impl NearAiLoginStateStore {
         state
     }
 
-    #[cfg(any(test, feature = "webui-v2-beta"))]
     #[allow(dead_code)]
     pub(crate) async fn consume(&self, state: &str) -> bool {
         let mut states = self.states.lock().await;
@@ -980,7 +979,6 @@ pub(crate) const NEARAI_LOGIN_PREFIX: &str = "/api/webchat/v2/llm/nearai";
 /// The public callback path NEAR AI redirects to (token in the query). The
 /// `{state}` segment must match an authenticated start request before the
 /// callback can write the operator-wide session.
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) const NEARAI_LOGIN_CALLBACK_PATH: &str =
     "/api/webchat/v2/llm/nearai/{state}/auth/callback";
 
@@ -1016,7 +1014,6 @@ fn sanitize_origin(raw: &str) -> Option<String> {
 /// Apply a completed NEAR AI login: store the session token on the live
 /// session, make NEAR AI the active provider, and hot-swap the running
 /// provider. Shared by the public callback route. Errors are log-only strings.
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) async fn apply_nearai_login(
     session: &ironclaw_llm::SessionManager,
     boot: &RebornBootConfig,
@@ -1628,14 +1625,26 @@ mod tests {
             .expect("nearai provider in snapshot")
     }
 
+    /// Clear the runtime-overlay NEARAI_* entries so overlay state from other
+    /// tests cannot leak into snapshot assertions. A real `NEARAI_API_KEY`
+    /// exported by the developer shell is deliberately tolerated: the
+    /// snapshot assertions below only depend on the base URL, and this
+    /// `#![forbid(unsafe_code)]` crate cannot remove real process env vars.
+    /// `NEARAI_BASE_URL` would change the asserted base URL, so its absence
+    /// from the real env is still checked loudly.
     fn clear_nearai_snapshot_env() {
         for key in ["NEARAI_API_KEY", "NEARAI_BASE_URL"] {
             ironclaw_common::env_helpers::remove_runtime_env(key);
-            assert!(
-                ironclaw_common::env_helpers::env_or_override(key).is_none(),
-                "{key} must be unset for this branch-specific snapshot test"
-            );
         }
+        // An EMPTY value is semantically unset to `env_or_override`, so only a
+        // non-empty real value can change the asserted base URL — treat empty
+        // as absent to keep the precondition environment-independent.
+        assert!(
+            std::env::var_os("NEARAI_BASE_URL")
+                .map(|value| value.is_empty())
+                .unwrap_or(true),
+            "NEARAI_BASE_URL must be unset (or empty) in the real environment for this snapshot test"
+        );
     }
 
     /// nearai has exactly one default now — cloud — regardless of whether an
@@ -1721,7 +1730,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "webui-v2-beta")]
     #[tokio::test]
     async fn nearai_login_state_is_single_use() {
         let store = NearAiLoginStateStore::new();
@@ -1898,7 +1906,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "webui-v2-beta")]
     #[tokio::test]
     async fn nearai_login_state_store_evicts_oldest_at_capacity() {
         // Unexpired states within the 15-min TTL must still be bounded, or a

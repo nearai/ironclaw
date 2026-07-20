@@ -1,9 +1,9 @@
 //! Caller-level test for the Telegram v1↔v2 exclusivity guard.
 //!
 //! `REBORN_TELEGRAM_V2_ENABLED=true` now means the **Reborn Telegram channel
-//! host** (`crates/ironclaw_reborn_composition/src/telegram/`, cargo feature
-//! `telegram-v2-host-beta`) owns the deployment bot; the legacy v1 Telegram
-//! WASM channel (`channels-src/telegram`) must not activate for the same
+//! host** (`crates/ironclaw_reborn_composition/src/telegram/`) owns the
+//! deployment bot; the legacy v1 Telegram WASM channel
+//! (`channels-src/telegram`) must not activate for the same
 //! installation while it does. The env name is retained unchanged for config
 //! compatibility with the original issue #3285 tracer gate — only its
 //! referent moved (see `docs/reborn/contracts/telegram-v2.md`).
@@ -14,10 +14,9 @@
 //! A unit test inside `channels.rs` covers the resolve path end-to-end; this
 //! caller-level test exercises every observable (v1-enabled,
 //! v1-telegram-listed, v2-enabled, persisted-active) tuple to pin the
-//! arbitration contract. It deliberately builds WITHOUT the
-//! `telegram-v2-host-beta` feature: the guard is the root binary's startup
-//! arbiter, not part of the Reborn host module (whose behavior is pinned by
-//! `cargo test -p ironclaw_reborn_composition --features telegram-v2-host-beta telegram`).
+//! arbitration contract. The guard is the root binary's startup arbiter, not
+//! part of the Reborn host module (whose behavior is pinned by
+//! `cargo test -p ironclaw_reborn_composition telegram`).
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;

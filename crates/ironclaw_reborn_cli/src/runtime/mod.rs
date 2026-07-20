@@ -1,19 +1,14 @@
 // arch-exempt: large_file, Google OAuth resolution hardening remains at the existing runtime config seam, plan #4088
 use std::io::{IsTerminal, Write};
-#[cfg(feature = "webui-v2-beta")]
 use std::path::Path;
 use std::path::PathBuf;
-#[cfg(feature = "webui-v2-beta")]
 use std::sync::Arc;
 use std::time::Duration;
 use std::{future::Future, thread};
 
 use anyhow::Context;
-#[cfg(any(feature = "slack-v2-host-beta", test))]
 use ironclaw_reborn_composition::OAuthRedirectUri;
-#[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_reborn_composition::SlackPersonalSetupServiceSlot;
-#[cfg(feature = "webui-v2-beta")]
 use ironclaw_reborn_composition::host_api::UserId;
 use ironclaw_reborn_composition::host_api::{AgentId, TenantId};
 #[cfg(feature = "postgres")]
@@ -24,7 +19,6 @@ use ironclaw_reborn_composition::{
     RebornRuntimeProfileOptions, TurnRunnerSettings, build_reborn_runtime,
     local_runtime_build_input_with_options, nearai_mcp_bootstrap_config_from_env,
 };
-#[cfg(feature = "webui-v2-beta")]
 use ironclaw_reborn_composition::{
     LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSource,
     LocalTriggerAccessStore, local_trigger_access_fire_checker, open_local_trigger_access_store,
@@ -220,13 +214,6 @@ async fn with_run_local_trigger_fire_access_checker(
     runtime_input: RebornRuntimeInput,
     config: &RebornBootConfig,
 ) -> anyhow::Result<RebornRuntimeInput> {
-    #[cfg(not(feature = "webui-v2-beta"))]
-    {
-        let _ = config;
-        Ok(runtime_input)
-    }
-
-    #[cfg(feature = "webui-v2-beta")]
     {
         if !runtime_input.trigger_poller.enabled {
             return Ok(runtime_input);
@@ -272,7 +259,6 @@ async fn with_run_local_trigger_fire_access_checker(
     }
 }
 
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) async fn open_trigger_access_store_for_profile(
     runtime_input: &RebornRuntimeInput,
     profile: RebornProfile,
@@ -559,7 +545,7 @@ fn apply_credential_refresh_override(
 ///   with no GUI session). `onboard` already pays that cost interactively;
 ///   `serve` is the boot path this fix unblocks. `run` stays fail-fast so
 ///   a forgotten env var doesn't hang instead of erroring clearly.
-#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+#[cfg(feature = "libsql")]
 fn resolve_reborn_runtime_llm_with_stored_key_fallback(
     config: &RebornBootConfig,
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
@@ -616,7 +602,7 @@ fn resolve_reborn_runtime_llm_with_stored_key_fallback(
 /// to check, so behavior here is byte-identical to calling
 /// `resolve_reborn_runtime_llm` directly — a required-but-unset API key
 /// still fails closed with `ApiKeyEnvUnset`.
-#[cfg(all(feature = "root-llm-provider", not(feature = "libsql")))]
+#[cfg(not(feature = "libsql"))]
 fn resolve_reborn_runtime_llm_with_stored_key_fallback(
     config: &RebornBootConfig,
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
@@ -631,7 +617,6 @@ pub(crate) fn build_runtime_input_with_options(
     options: RuntimeInputOptions,
 ) -> anyhow::Result<BuiltRuntimeInput> {
     let runtime_services = build_services_input_with_options(config, caller, options)?;
-    #[cfg(feature = "slack-v2-host-beta")]
     let slack_personal_lazy_slot = runtime_services.slack_personal_lazy_slot.clone();
 
     #[allow(unused_mut)]
@@ -651,7 +636,6 @@ pub(crate) fn build_runtime_input_with_options(
             runtime_services.config_file.as_ref(),
         ));
 
-    #[cfg(feature = "root-llm-provider")]
     {
         // The composition runtime cold-boots with a placeholder gateway and
         // needs the boot config to run its initial provider reload. This is
@@ -685,21 +669,18 @@ pub(crate) fn build_runtime_input_with_options(
 
     Ok(BuiltRuntimeInput {
         inner: runtime_input,
-        #[cfg(feature = "slack-v2-host-beta")]
         slack_personal_lazy_slot,
     })
 }
 
 pub(crate) struct RuntimeServicesInput {
     pub(crate) services_input: RebornBuildInput,
-    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) slack_personal_lazy_slot: Option<SlackPersonalSetupServiceSlot>,
     config_file: Option<ironclaw_reborn_config::RebornConfigFile>,
 }
 
 pub(crate) struct BuiltRuntimeInput {
     pub(crate) inner: RebornRuntimeInput,
-    #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) slack_personal_lazy_slot: Option<SlackPersonalSetupServiceSlot>,
 }
 
@@ -750,7 +731,6 @@ pub(crate) fn build_services_input_with_options(
     {
         services_input = services_input.with_google_oauth_backend(client);
     }
-    #[cfg(feature = "slack-v2-host-beta")]
     let slack_personal_lazy_slot =
         if let Some(redirect_uri) = resolve_slack_personal_oauth_redirect_uri_from_env()? {
             let slot = SlackPersonalSetupServiceSlot::new(redirect_uri);
@@ -766,7 +746,6 @@ pub(crate) fn build_services_input_with_options(
 
     Ok(RuntimeServicesInput {
         services_input,
-        #[cfg(feature = "slack-v2-host-beta")]
         slack_personal_lazy_slot,
         config_file,
     })
@@ -952,13 +931,11 @@ fn google_oauth_client_secret_from_store(
     Ok(None)
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn resolve_slack_personal_oauth_redirect_uri_from_env()
 -> anyhow::Result<Option<OAuthRedirectUri>> {
     resolve_slack_personal_oauth_redirect_uri(optional_nonempty_env)
 }
 
-#[cfg(any(feature = "slack-v2-host-beta", test))]
 fn resolve_slack_personal_oauth_redirect_uri(
     mut lookup: impl FnMut(&str) -> Option<String>,
 ) -> anyhow::Result<Option<OAuthRedirectUri>> {
@@ -1609,13 +1586,11 @@ mod tests {
         CredentialRefreshSettings, RebornCompositionProfile, TurnStatus,
         test_support::assistant_reply_without_text_for_test,
     };
-    #[cfg(feature = "webui-v2-beta")]
     use ironclaw_reborn_composition::{LocalTriggerAccessRole, LocalTriggerAccessSource};
     use ironclaw_reborn_config::RebornBootConfig;
     use secrecy::SecretString;
 
     use super::test_env::EnvGuard;
-    #[cfg(feature = "webui-v2-beta")]
     use super::with_run_local_trigger_fire_access_checker;
     use super::{
         GoogleOAuthConfigState, GoogleOAuthEnvInputs, GoogleOAuthResolution, RuntimeInputCaller,
@@ -1980,7 +1955,6 @@ mod tests {
         assert!(runtime_input.runner.worker_count.is_none());
     }
 
-    #[cfg(feature = "root-llm-provider")]
     #[test]
     fn runtime_inputs_carry_boot_config_for_initial_llm_reload() {
         let _lock = lock_runtime_env();
@@ -3257,7 +3231,6 @@ enabled = true
         );
     }
 
-    #[cfg(feature = "webui-v2-beta")]
     #[allow(clippy::await_holding_lock, reason = "serializes env guards")]
     #[tokio::test]
     async fn run_trigger_poller_bootstrap_seeds_local_access_checker() {

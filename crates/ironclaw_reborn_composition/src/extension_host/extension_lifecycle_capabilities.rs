@@ -76,7 +76,7 @@ fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         )?,
         lifecycle_manifest(
             EXTENSION_ACTIVATE_CAPABILITY_ID,
-            "Activate an installed Reborn extension for the local-dev capability surface. Use after install succeeds or when install reports the extension is already installed. This is the step that opens the credential/auth gate when required; do not ask the user for credentials before calling it. If activation returns activated=true with visible_capability_ids, those model-visible tools are ready unless a later tool call raises auth_required. If activation says the extension is an external channel or publishes no model-visible tools, follow the returned channel-specific setup/pairing/connect instructions first. For proof-code flows, tell the user to message the extension app/bot and paste the code into the WebChat connection panel, not into normal chat; after the connection panel succeeds, continue the original request.",
+            "Activate an installed Reborn extension for the local-dev capability surface. Use after install succeeds or when install reports the extension is already installed. This is the step that opens the credential/auth gate when required; do not ask the user for credentials before calling it. If activation returns activated=true with visible_capability_ids, those model-visible tools are ready unless a later tool call raises auth_required. If activation says the extension is an external channel or publishes no model-visible tools, follow the returned channel-specific setup/pairing/connect instructions first. For proof-code flows, tell the user to message the extension app/bot and paste the code into the WebChat connection panel, not into normal chat; after the connection panel succeeds, continue the original request. If activation fails with instance-configuration remediation (naming ironclaw config set commands), relay those exact commands verbatim to the user instead of the credential/OAuth guidance above.",
             vec![
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
@@ -339,29 +339,76 @@ fn extension_package_ref(
         .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode))
 }
 
+/// Fixed, host-authored, validator-safe headline for the
+/// `dispatch_with_host_remediation` call below — the strict `safe_summary`
+/// validator rejects `{}[]<>/` and secret-like vocabulary
+/// (`agent-loop-capabilities` invariant 2), so the full `config set`
+/// remediation text rides the trusted host-remediation channel instead;
+/// `safe_summary` stays this short fixed literal.
+const PROVIDER_INSTANCE_NOT_CONFIGURED_SAFE_SUMMARY: &str =
+    "extension activation requires host instance configuration";
+
 fn lifecycle_error(error: ProductWorkflowError) -> FirstPartyCapabilityError {
-    let kind = match error {
-        ProductWorkflowError::InvalidBindingRequest { .. }
-        | ProductWorkflowError::UnsupportedActionKind { .. } => {
-            RuntimeDispatchErrorKind::InputEncode
+    match error {
+        // UNTRUSTED on purpose. `InvalidBindingRequest` has ~40 construction
+        // sites and several interpolate externally-influenced text: a hosted
+        // MCP server's live `tools/list` tool names
+        // (`hosted_mcp_discovery.rs` -> `hosted_mcp_discovery_error`), the
+        // MODEL-chosen `extension_id` (charset-validated only, e.g. "extension
+        // {} is not installed"), and uploaded-zip entry names
+        // (`extension_bundle.rs`). `HostRemediation::new` is a VALUE guard, not
+        // a provenance guard — it rejects credential-SHAPED tokens but allows
+        // adversarial prose — so routing this whole class onto the trusted
+        // channel would stamp `ObservationTrust::HostAuthored` on attacker
+        // -influenced text and skip the credential-vocabulary scan
+        // `ironclaw_threads` applies to untrusted output. The trusted channel
+        // is reserved for reasons built entirely from host-authored constants
+        // (the `ProviderInstanceNotConfigured` arm below).
+        ProductWorkflowError::InvalidBindingRequest { reason } => {
+            FirstPartyCapabilityError::dispatch_with_diagnostic(
+                RuntimeDispatchErrorKind::InputEncode,
+                None,
+                reason,
+            )
         }
-        ProductWorkflowError::Transient { .. } => RuntimeDispatchErrorKind::OperationFailed,
-        _ => RuntimeDispatchErrorKind::OperationFailed,
-    };
-    FirstPartyCapabilityError::new(kind)
+        // The third readiness axis: a provider-instance readiness failure is
+        // a build-time configuration fault, not a malformed-input fault, so it
+        // maps to `OperationFailed` rather than `InvalidBindingRequest`'s
+        // `InputEncode` (PR #6095 misclassification precedent). Both arms are
+        // non-terminal, but they deliberately ride DIFFERENT trust channels:
+        // `InvalidBindingRequest` above stays UNTRUSTED
+        // (`dispatch_with_diagnostic`) because its ~40 construction sites
+        // interpolate externally-influenced text — MCP tool names off the
+        // wire, model-supplied `extension_id`, uploaded-zip entry names. This
+        // arm is the one exception routed onto the TRUSTED channel
+        // (`dispatch_with_host_remediation`), because its `reason` is built
+        // entirely from host-authored constants.
+        ProductWorkflowError::ProviderInstanceNotConfigured { reason } => {
+            FirstPartyCapabilityError::dispatch_with_host_remediation(
+                RuntimeDispatchErrorKind::OperationFailed,
+                Some(PROVIDER_INSTANCE_NOT_CONFIGURED_SAFE_SUMMARY.to_string()),
+                reason,
+            )
+        }
+        ProductWorkflowError::UnsupportedActionKind { .. } => {
+            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
+        }
+        ProductWorkflowError::Transient { .. } => {
+            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+        }
+        _ => FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
-    #[cfg(feature = "slack-v2-host-beta")]
     use std::{collections::HashMap, path::PathBuf, sync::Mutex};
 
     use ironclaw_auth::{
         AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
         CredentialAccountStatus, CredentialOwnership, NewCredentialAccount, ProviderScope,
     };
-    #[cfg(feature = "slack-v2-host-beta")]
     use ironclaw_extensions::ExtensionInstallationId;
     use ironclaw_host_api::{
         CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilitySet, ExecutionContext,
@@ -375,14 +422,30 @@ mod tests {
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
     use super::*;
-    use crate::{RebornBuildInput, RebornServices, build_reborn_services};
-    #[cfg(feature = "slack-v2-host-beta")]
+    use crate::{OAuthClientConfig, RebornBuildInput, RebornServices, build_reborn_services};
     use ironclaw_product_workflow::{
         ChannelConnectionFacade, RebornServicesError, WebUiAuthenticatedCaller,
     };
     use ironclaw_product_workflow::{
         ChannelConnectionRequirement, LifecyclePhase, RebornChannelConnectStrategy,
     };
+
+    /// Dummy but well-formed Google OAuth backend config for tests below that
+    /// exercise PER-ACCOUNT credential gating (scope coalescing, shared
+    /// credential reuse) rather than the provider-instance readiness map —
+    /// without this, every google-family activation on a plain
+    /// `RebornBuildInput::local_dev(..)` fixture now fails closed
+    /// with `ProviderInstanceNotConfigured` before it ever reaches the
+    /// per-account gate these tests target. Mirrors
+    /// `factory/auth_tests.rs::local_dev_google_oauth_backend_builds_with_host_provider_config`.
+    fn test_google_oauth_client_config() -> OAuthClientConfig {
+        OAuthClientConfig::new(
+            "itest-google-client-id.apps.googleusercontent.com",
+            "http://127.0.0.1/oauth/callback/google",
+            None,
+        )
+        .expect("valid test google oauth client config")
+    }
 
     fn slack_activation_response() -> LifecycleProductResponse {
         let requirement = ChannelConnectionRequirement {
@@ -663,7 +726,6 @@ mod tests {
         assert!(!storage_root.join("system/extensions/web-access").exists());
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[derive(Debug, Default)]
     struct RecordingChannelConnectionFacade {
         connections: Mutex<HashMap<String, bool>>,
@@ -673,7 +735,6 @@ mod tests {
         package_present_during_disconnect: Mutex<Vec<bool>>,
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     impl RecordingChannelConnectionFacade {
         fn with_connection(channel: &str, connected: bool) -> Self {
             Self {
@@ -709,7 +770,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[async_trait]
     impl ChannelConnectionFacade for RecordingChannelConnectionFacade {
         async fn caller_channel_connections(
@@ -744,7 +804,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn webui_and_tool_extension_remove_share_ordered_actor_scoped_cleanup() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -872,7 +931,6 @@ mod tests {
         runtime.shutdown().await.expect("runtime shutdown");
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn webui_and_tool_extension_remove_generic_filesystem_channel_without_slack_cleanup() {
         const GENERIC_CHANNEL_MANIFEST: &str = r#"
@@ -1055,7 +1113,6 @@ credential_handle = "channel_ext_token"
         runtime.shutdown().await.expect("runtime shutdown");
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn extension_remove_fails_closed_without_authenticated_actor_for_personal_cleanup() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1182,10 +1239,13 @@ credential_handle = "channel_ext_token"
         // share the `google` provider; removing Gmail must leave the Google
         // credential intact so Calendar keeps working.
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
-            "extension-tools-remove-shared-owner",
-            dir.path().join("local-dev"),
-        ))
+        let services = build_reborn_services(
+            RebornBuildInput::local_dev(
+                "extension-tools-remove-shared-owner",
+                dir.path().join("local-dev"),
+            )
+            .with_google_oauth_backend(test_google_oauth_client_config()),
+        )
         .await
         .expect("local-dev services build");
 
@@ -1474,10 +1534,13 @@ credential_handle = "channel_ext_token"
     #[tokio::test]
     async fn local_dev_extension_activate_returns_auth_gate_when_account_lacks_required_scope() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
-            "extension-tools-scope-gate-owner",
-            dir.path().join("local-dev"),
-        ))
+        let services = build_reborn_services(
+            RebornBuildInput::local_dev(
+                "extension-tools-scope-gate-owner",
+                dir.path().join("local-dev"),
+            )
+            .with_google_oauth_backend(test_google_oauth_client_config()),
+        )
         .await
         .expect("local-dev services build");
         let extension_management = services
@@ -1538,10 +1601,13 @@ credential_handle = "channel_ext_token"
     #[tokio::test]
     async fn local_dev_extension_activate_coalesces_gmail_oauth_scopes_into_one_auth_gate() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
-            "extension-tools-gmail-scope-union-owner",
-            dir.path().join("local-dev"),
-        ))
+        let services = build_reborn_services(
+            RebornBuildInput::local_dev(
+                "extension-tools-gmail-scope-union-owner",
+                dir.path().join("local-dev"),
+            )
+            .with_google_oauth_backend(test_google_oauth_client_config()),
+        )
         .await
         .expect("local-dev services build");
         let extension_management = services
@@ -1938,5 +2004,99 @@ credential_handle = "channel_ext_token"
             provenance: TrustProvenance::Default,
             evaluated_at: chrono::Utc::now(),
         }
+    }
+
+    /// The fixed `safe_summary` headline used
+    /// for `ProviderInstanceNotConfigured` must itself pass the strict
+    /// `LoopSafeSummary` validator (agent-loop-capabilities invariant 2) —
+    /// proves the summary never trips the `{}[]<>/` / secret-vocabulary
+    /// rejection that would otherwise kill the whole run — and the full
+    /// remediation must ride the diagnostic-detail channel, naming the exact
+    /// `config set` command verbatim.
+    #[test]
+    fn provider_instance_not_configured_safe_summary_validates_and_diagnostic_names_config_set() {
+        ironclaw_turns::run_profile::LoopSafeSummary::new(
+            PROVIDER_INSTANCE_NOT_CONFIGURED_SAFE_SUMMARY,
+        )
+        .expect("fixed safe_summary must pass the strict LoopSafeSummary validator");
+
+        let reason = format!(
+            "{}\n\n{}",
+            ironclaw_reborn_config::google_remediation_text(),
+            ironclaw_reborn_config::apply_step_text()
+        );
+        let mapped = lifecycle_error(ProductWorkflowError::ProviderInstanceNotConfigured {
+            reason: reason.clone(),
+        });
+
+        let FirstPartyCapabilityError::Dispatch {
+            kind,
+            safe_summary,
+            detail,
+            ..
+        } = mapped
+        else {
+            panic!("expected a Dispatch failure, got {mapped:?}");
+        };
+        assert_eq!(kind, RuntimeDispatchErrorKind::OperationFailed);
+        assert_eq!(
+            safe_summary,
+            Some(PROVIDER_INSTANCE_NOT_CONFIGURED_SAFE_SUMMARY.to_string())
+        );
+        let detail = detail.expect("remediation detail must be present");
+        // The TRUSTED channel, not the untrusted diagnostic one: this reason is
+        // host-authored, and the untrusted channel collapses it to the
+        // safe-summary placeholder at the host_api boundary (#6299).
+        let ironclaw_host_api::DispatchFailureDetail::HostRemediation { text } = *detail else {
+            panic!("expected a HostRemediation detail, got {detail:?}");
+        };
+        assert!(text.as_str().contains("config set google.client_id"));
+        assert_eq!(text.as_str(), reason);
+    }
+
+    /// `InvalidBindingRequest` keeps its existing `InputEncode` kind and
+    /// carries its reason on the UNTRUSTED diagnostic channel. Several of its
+    /// ~40 construction sites interpolate externally-influenced text (hosted
+    /// MCP tool names, the model-chosen `extension_id`, uploaded-zip entry
+    /// names), so the whole class must stay scanned; only reasons built
+    /// entirely from host-authored constants may ride the trusted channel.
+    #[test]
+    fn invalid_binding_request_carries_reason_on_the_untrusted_diagnostic_channel() {
+        let mapped = lifecycle_error(ProductWorkflowError::InvalidBindingRequest {
+            reason: "telegram account setup was declared without a mounted host".to_string(),
+        });
+
+        let FirstPartyCapabilityError::Dispatch { kind, detail, .. } = mapped else {
+            panic!("expected a Dispatch failure, got {mapped:?}");
+        };
+        assert_eq!(kind, RuntimeDispatchErrorKind::InputEncode);
+        let detail = detail.expect("diagnostic detail must be present");
+        let ironclaw_host_api::DispatchFailureDetail::Diagnostic { text } = *detail else {
+            panic!("expected a Diagnostic detail, got {detail:?}");
+        };
+        assert!(text.contains("mounted host"));
+    }
+
+    /// The provenance regression itself, at the unit seam: a reason carrying
+    /// credential vocabulary (the shape a model-chosen `extension_id` can
+    /// produce) must NOT land on the trusted host-remediation channel, where
+    /// `ObservationTrust::HostAuthored` would exempt it from the downstream
+    /// credential-vocabulary scan.
+    #[test]
+    fn model_influenced_invalid_binding_reason_never_reaches_the_trusted_channel() {
+        let mapped = lifecycle_error(ProductWorkflowError::InvalidBindingRequest {
+            reason: "extension api_key is not installed".to_string(),
+        });
+
+        let FirstPartyCapabilityError::Dispatch { detail, .. } = mapped else {
+            panic!("expected a Dispatch failure, got {mapped:?}");
+        };
+        assert!(
+            matches!(
+                detail.as_deref(),
+                Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic { .. })
+            ),
+            "externally-influenced text must stay on the scanned channel, got {detail:?}"
+        );
     }
 }

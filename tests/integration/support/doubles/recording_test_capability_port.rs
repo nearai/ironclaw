@@ -10,6 +10,7 @@ use std::sync::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::{CapabilityId, ExtensionId, ProviderToolName, RuntimeKind};
+use ironclaw_host_api::{Resolution, ResolutionBatch};
 use ironclaw_host_runtime::READ_FILE_CAPABILITY_ID;
 use ironclaw_loop_host::{
     DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, build_spawn_subagent_parameters_schema,
@@ -18,10 +19,10 @@ use ironclaw_turns::{
     LoopGateRef,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-        CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDescriptorView,
-        CapabilityInputRef, CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage,
-        CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, ProviderToolCallReplay,
-        ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
+        CapabilityInvocation, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort,
+        ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
+        VisibleCapabilitySurface, resolution,
     },
 };
 use serde_json::json;
@@ -156,18 +157,18 @@ impl RecordingTestCapabilityPort {
         allowlist
     }
 
-    fn completed_result(&self) -> CapabilityOutcome {
+    fn completed_result(&self) -> Resolution {
         let ordinal = self.next_result.fetch_add(1, Ordering::SeqCst);
-        CapabilityOutcome::Completed(CapabilityResultMessage {
-            result_ref: ironclaw_turns::LoopResultRef::new(format!("result:test-echo-{ordinal}"))
+        resolution::completed(
+            ironclaw_turns::LoopResultRef::new(format!("result:test-echo-{ordinal}"))
                 .expect("valid result ref"),
-            safe_summary: "echo: hi".to_string(),
-            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-            terminate_hint: false,
-            byte_len: 0,
-            output_digest: None,
-            model_observation: None,
-        })
+            "echo: hi".to_string(),
+            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            false,
+            0,
+            None,
+            None,
+        )
     }
 }
 
@@ -260,7 +261,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         self.invocations.lock().unwrap().push(request);
         if matches!(self.mode, CapabilityMode::InvocationError) {
             return Err(AgentLoopHostError::new(
@@ -271,21 +272,25 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
         if matches!(self.mode, CapabilityMode::ApprovalThenEcho)
             && self.approval_calls.fetch_add(1, Ordering::SeqCst) == 0
         {
-            return Ok(CapabilityOutcome::ApprovalRequired {
-                gate_ref: LoopGateRef::new("gate:test-approval").expect("valid gate ref"),
-                safe_summary: "test approval required".to_string(),
-                approval_resume: None,
-            });
+            return Ok(resolution::approval_required(
+                LoopGateRef::new("gate:test-approval").expect("valid gate ref"),
+                "test approval required".to_string(),
+                None,
+            )
+            .resolution);
         }
         if matches!(self.mode, CapabilityMode::SpawnAuthThenApprovalThenEcho) {
             match self.approval_calls.fetch_add(1, Ordering::SeqCst) {
-                0 => return Ok(self.completed_result()),
+                0 => {
+                    return Ok(self.completed_result());
+                }
                 1 => {
-                    return Ok(CapabilityOutcome::ApprovalRequired {
-                        gate_ref: LoopGateRef::new("gate:test-approval").expect("valid gate ref"),
-                        safe_summary: "test approval required".to_string(),
-                        approval_resume: None,
-                    });
+                    return Ok(resolution::approval_required(
+                        LoopGateRef::new("gate:test-approval").expect("valid gate ref"),
+                        "test approval required".to_string(),
+                        None,
+                    )
+                    .resolution);
                 }
                 _ => {}
             }
@@ -296,21 +301,22 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
         let stop_on_first_suspension = request.stop_on_first_suspension;
-        let mut outcomes = Vec::new();
+        let mut resolutions = Vec::new();
         let mut stopped_on_suspension = false;
         for invocation in request.invocations {
-            let outcome = self.invoke_capability(invocation).await?;
-            let is_suspension = outcome.is_suspension();
-            outcomes.push(outcome);
-            if is_suspension && stop_on_first_suspension {
+            let resolution = self.invoke_capability(invocation).await?;
+            // `parks()`, not `is_suspension()` (H1): a re-entrant gate stops the batch too.
+            let parks = resolution.parks();
+            resolutions.push(resolution);
+            if parks && stop_on_first_suspension {
                 stopped_on_suspension = true;
                 break;
             }
         }
-        Ok(CapabilityBatchOutcome {
-            outcomes,
+        Ok(ResolutionBatch {
+            resolutions,
             stopped_on_suspension,
         })
     }

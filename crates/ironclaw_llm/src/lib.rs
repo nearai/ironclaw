@@ -49,7 +49,7 @@ pub mod tool_schema;
 pub mod transcription;
 mod url_check;
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 
 #[cfg(test)]

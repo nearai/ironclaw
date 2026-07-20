@@ -7,8 +7,6 @@
 //! `RebornProductAuthServices`) is exercised, not just the facade helpers.
 // arch-exempt: large_file, preserves caller-level issue 4201 auth route coverage, plan #5905
 
-#![cfg(feature = "webui-v2-beta")]
-
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;

@@ -8,7 +8,6 @@ publish = false
 layer = "runtimes"
 
 [features]
-default = []
 # In-memory-backed process store constructors for this crate's own tests and
 # downstream tiers. The stores are the production `FilesystemProcess*Store<InMemoryBackend>`;
 # the helpers just wire the in-memory backend seam (arch-simplification §4.3).

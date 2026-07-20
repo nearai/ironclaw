@@ -14,7 +14,7 @@
 //! authenticator that validates the bearer). Nothing above the token crypto is
 //! stubbed.
 
-#![cfg(all(feature = "webui-v2-beta", feature = "test-support"))]
+#![cfg(feature = "test-support")]
 
 use std::path::PathBuf;
 use std::sync::Arc;

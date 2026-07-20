@@ -12,9 +12,9 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
-    CapabilityId, ExtensionId, MountView, ResourceEstimate, ResourceReceipt, ResourceReservation,
-    ResourceScope, ResourceUsage, RunId, RuntimeCredentialAuthRequirement, RuntimeKind,
-    SecretHandle, UserId,
+    CapabilityId, ExtensionId, HostRemediation, MountView, ResourceEstimate, ResourceReceipt,
+    ResourceReservation, ResourceScope, ResourceUsage, RunId, RuntimeCredentialAuthRequirement,
+    RuntimeKind, SecretHandle, UserId,
 };
 
 /// Request for one already-authorized declared capability dispatch.
@@ -152,6 +152,17 @@ pub enum DispatchFailureDetail {
     /// boundary before the model observes it.
     Diagnostic {
         text: String,
+    },
+    /// Host-authored operator remediation — the TRUSTED text channel.
+    ///
+    /// Distinct from [`Self::Diagnostic`] by PROVENANCE, not content shape:
+    /// `Diagnostic` carries an untrusted raw cause (capability output, a
+    /// backend error string) that is redacted hard downstream and collapses to
+    /// the safe-summary placeholder when it names a path or a URL;
+    /// this variant carries a host-authored instruction that must survive
+    /// intact. See [`HostRemediation`] for the invariant and the value guard.
+    HostRemediation {
+        text: HostRemediation,
     },
 }
 

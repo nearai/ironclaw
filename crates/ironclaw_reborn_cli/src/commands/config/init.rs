@@ -260,7 +260,6 @@ regex_activation_enabled = true
 
 # [slack]
 # # Host-beta Slack Events API route for `ironclaw serve`.
-# # Requires a binary built with `--features slack-v2-host-beta`.
 # # Can also be overridden by IRONCLAW_REBORN_SLACK_ENABLED.
 # enabled = false
 # # Configure Slack app ids, bot token, signing secret, and channel mappings
@@ -300,7 +299,7 @@ const PROVIDERS_STUB: &str = r#"[
 ]
 "#;
 
-#[cfg(all(test, feature = "root-llm-provider"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::context::RebornCliContext;

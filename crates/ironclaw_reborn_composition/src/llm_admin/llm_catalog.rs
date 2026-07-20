@@ -14,9 +14,7 @@
 //!    that `build_reborn_runtime` wires through the shared LLM provider
 //!    chain.
 //!
-//! This module is the home of step 3. Lives behind the
-//! `root-llm-provider` feature so the substrate-only composition stays
-//! free of `ironclaw_llm`.
+//! This module is the home of step 3.
 //!
 //! When epic
 //! [#3036](https://github.com/nearai/ironclaw/issues/3036)'s blueprint

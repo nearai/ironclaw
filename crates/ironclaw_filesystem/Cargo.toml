@@ -13,25 +13,20 @@ publish = false
 [package.metadata.ironclaw]
 layer = "substrates"
 
-[features]
-default = []
-postgres = ["dep:deadpool-postgres", "dep:tokio-postgres"]
-libsql = ["dep:libsql", "dep:deadpool"]
-
 [dependencies]
 async-trait = "0.1"
 blake3 = "1"
-deadpool = { version = "0.12", optional = true, default-features = false, features = ["managed", "rt_tokio_1"] }
-deadpool-postgres = { version = "0.14", optional = true }
+deadpool = { version = "0.12", default-features = false, features = ["managed", "rt_tokio_1"] }
+deadpool-postgres = "0.14"
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_observability = { path = "../ironclaw_observability" }
 ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
-libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
+libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "sync", "time"] }
-tokio-postgres = { version = "0.7", optional = true, features = ["with-serde_json-1"] }
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
 tracing = "0.1"
 
 [dev-dependencies]

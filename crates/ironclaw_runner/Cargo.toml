@@ -14,20 +14,11 @@ publish = false
 layer = "kernel"
 
 [features]
-default = []
-root-llm-provider = ["dep:ironclaw_llm", "dep:base64"]
-# Bare libSQL dependency toggle, mirroring the root `ironclaw` crate's `libsql`
-# feature. CI lints/builds the whole workspace with `--all --features libsql`
-# (e.g. code_style's `libsql-only` leg and platform-and-compat); without this,
-# feature resolution fails because `ironclaw_runner` is the lone workspace
-# member that enables libSQL only through the more specific features below.
-libsql = ["dep:libsql"]
 libsql-secrets = [
     "dep:ironclaw_secrets",
     "dep:libsql",
     "dep:secrecy",
     "dep:ironclaw_filesystem",
-    "ironclaw_filesystem/libsql",
     "filesystem-goal-store",
 ]
 filesystem-goal-store = ["dep:ironclaw_filesystem"]
@@ -43,13 +34,12 @@ filesystem-local-trigger-access = ["dep:ironclaw_filesystem"]
 libsql-restart-tests = [
     "dep:libsql",
     "dep:ironclaw_filesystem",
-    "ironclaw_filesystem/libsql",
     "filesystem-goal-store",
 ]
 
 [dependencies]
 async-trait = "0.1"
-base64 = { version = "0.22", optional = true }
+base64 = "0.22"
 # Scope-roster shard-prefix hashing only (§4.5) — same version already used
 # by `ironclaw_filesystem` for the identical stable-hex-from-key pattern
 # (`db.rs`'s index-name collision suffixing); not a `[workspace.dependencies]`
@@ -63,9 +53,10 @@ ironclaw_events = { path = "../ironclaw_events", version = "0.1.0" }
 ironclaw_hooks = { path = "../ironclaw_hooks", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime", version = "0.1.0" }
-ironclaw_llm = { path = "../ironclaw_llm", version = "0.1.0", optional = true, default-features = false }
+ironclaw_llm = { path = "../ironclaw_llm", version = "0.1.0", default-features = false }
 ironclaw_loop_host = { path = "../ironclaw_loop_host", version = "0.1.0" }
 ironclaw_observability = { path = "../ironclaw_observability" }
+ironclaw_run_state = { path = "../ironclaw_run_state", version = "0.1.0" }
 ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
 ironclaw_secrets = { path = "../ironclaw_secrets", version = "0.1.0", optional = true }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0", optional = true }
@@ -105,9 +96,6 @@ wat = "1.245.1"
 tracing-test = { version = "0.2", features = ["no-env-filter"] }
 tracing-subscriber = "0.3"
 
-[[test]]
-name = "llm_gateway"
-required-features = ["root-llm-provider"]
 
 [lints]
 workspace = true

@@ -58,7 +58,7 @@ pub use external_tool_catalog::{
 };
 pub use filesystem_store::{
     FilesystemTurnStateBlockPersistence, FilesystemTurnStateRowStore, FilesystemTurnStateStore,
-    FilesystemTurnStateStoreKind,
+    FilesystemTurnStateStoreKind, TurnStateDurabilityPolicy,
 };
 pub use ids::{
     AcceptedMessageRef, CapabilityActivityId, GateRef, IdempotencyKey, LoopDiagnosticRef,
@@ -108,6 +108,7 @@ pub use status::{
     AdmissionRejection, AdmissionRejectionReason, BlockedReason, ModelInvalidOutputDetailReason,
     SanitizedCancelReason, SanitizedFailure, TurnActiveRunRefState, TurnCapacityResource,
     TurnError, TurnErrorCategory, TurnRunProfile, TurnRunState, TurnStatus,
+    is_recoverability_critical,
 };
 pub use store::{
     SpawnTreeReservation, SpawnTreeReservationKey, TurnActiveLockKey, TurnActiveLockRecord,

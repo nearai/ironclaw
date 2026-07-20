@@ -5,10 +5,10 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_loop_host::EventPublishingTurnRunTransitionPort;
 use ironclaw_turns::{
     AcceptedMessageRef, BlockedReason, DefaultTurnCoordinator, GateRef, IdempotencyKey,
-    InMemoryTurnEventSink, InMemoryTurnStateStore, LoopCheckpointStateRef, ReplyTargetBindingRef,
-    RunProfileRequest, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCheckpointId, TurnCoordinator, TurnEventKind, TurnEventSink, TurnLeaseToken, TurnRunId,
-    TurnRunnerId, TurnScope, TurnStatus,
+    InMemoryTurnEventSink, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits,
+    LoopCheckpointStateRef, ReplyTargetBindingRef, RunProfileRequest, SourceBindingRef,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnCoordinator,
+    TurnEventKind, TurnEventSink, TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope, TurnStatus,
     runner::{
         BlockRunRequest, ClaimRunRequest, CompleteRunRequest, RecoverExpiredLeasesRequest,
         TurnRunTransitionPort,
@@ -141,7 +141,12 @@ async fn event_publishing_transition_port_publishes_blocked_and_terminal_events(
 
 #[tokio::test]
 async fn event_publishing_transition_port_publishes_expired_lease_terminal_events() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    // Crash-retry bound 0: a checkpoint-less abandoned lease terminal-fails
+    // (crash_retry_exhausted) instead of re-queuing (#6284) — the terminal
+    // recovery event this test asserts the publisher emits.
+    let store = Arc::new(InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits::default().set_max_crash_recovery_reclaims(0),
+    ));
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let sink = Arc::new(InMemoryTurnEventSink::default());
     let transition_port = EventPublishingTurnRunTransitionPort::new(
@@ -205,7 +210,7 @@ async fn event_publishing_transition_port_publishes_expired_lease_terminal_event
         .iter()
         .filter(|event| {
             event.kind == TurnEventKind::Failed
-                && event.sanitized_reason.as_deref() == Some("lease_expired")
+                && event.sanitized_reason.as_deref() == Some("crash_retry_exhausted")
         })
         .collect::<Vec<_>>();
     assert_eq!(recovered_events.len(), 2);
