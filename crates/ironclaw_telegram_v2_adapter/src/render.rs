@@ -29,7 +29,7 @@ pub fn render_document(
     attachment: &ProductOutboundAttachment,
     credential_handle: EgressCredentialHandle,
 ) -> Result<EgressRequest, TelegramRenderError> {
-    let boundary = multipart_boundary(attachment.bytes());
+    let boundary = multipart_boundary(attachment.bytes())?;
     let mut body = Vec::new();
     push_text_part(&mut body, &boundary, "chat_id", &reply.chat_id.to_string());
     if let Some(topic_id) = reply.topic_id {
@@ -82,17 +82,30 @@ pub fn render_document(
         .with_credential_handle(Some(credential_handle)))
 }
 
-fn multipart_boundary(bytes: &[u8]) -> String {
-    for nonce in 0u32.. {
-        let candidate = format!("ironclaw-attachment-{}-{nonce}", bytes.len());
+fn multipart_boundary(bytes: &[u8]) -> Result<String, TelegramRenderError> {
+    for _ in 0..10 {
+        let candidate = format!("ironclaw-attachment-{}", uuid::Uuid::new_v4());
         if !bytes
             .windows(candidate.len())
             .any(|window| window == candidate.as_bytes())
         {
-            return candidate;
+            return Ok(candidate);
         }
     }
-    unreachable!("u32 nonce space cannot be exhausted by one attachment")
+    Err(TelegramRenderError::Attachment {
+        reason: "could not generate a collision-free multipart boundary".to_string(),
+    })
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::*;
+
+    #[test]
+    fn multipart_boundaries_are_unpredictable_for_identical_bytes() {
+        let bytes = b"same attachment bytes";
+        assert_ne!(multipart_boundary(bytes), multipart_boundary(bytes)); // safety: test-only assertion proves repeated renders cannot reuse a predictable boundary.
+    }
 }
 
 fn push_text_part(body: &mut Vec<u8>, boundary: &str, name: &str, value: &str) {

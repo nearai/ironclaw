@@ -59,6 +59,7 @@ pub struct FinalReplyDeliveryObserver {
     /// posted N times. The original loop detects the unblock and posts the next gate
     /// exactly once, so resolution-ack loops are always redundant duplicates.
     pub(crate) active_delivery_run_ids: Mutex<HashSet<TurnRunId>>,
+    // arch-exempt: optional_arc, reduced test observers omit workspace reads while production channel wiring supplies them and referenced files fail closed without them, plan #6159
     project_filesystem: Option<Arc<dyn ProjectFilesystemReader>>,
 }
 

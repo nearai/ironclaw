@@ -17,9 +17,7 @@ layer = "products"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 # Production deps only. `tracing` was previously listed here with no call
-# sites in `src/` and has been dropped (Copilot #4). `uuid` moved to
-# dev-deps because its only `src/` references live inside
-# `#[cfg(test)] mod tests {}` blocks. `ironclaw_wasm_product_adapters`
+# sites in `src/` and has been dropped (Copilot #4). `ironclaw_wasm_product_adapters`
 # moved to dev-deps because it is only referenced from the integration
 # contract test crate, not from the adapter library itself.
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0" }
@@ -27,6 +25,7 @@ ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 # `test-support` exposes `FakeProtocolHttpEgress` / `FakeOutboundDeliverySink`

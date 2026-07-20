@@ -13,7 +13,7 @@ use ironclaw_product_adapters::{
 use ironclaw_turns::TurnRunId;
 
 use crate::delivery::send_slack_post_message;
-use crate::files::upload_workspace_file;
+use crate::files::upload_workspace_files;
 use crate::payload::{SLACK_API_HOST, SLACK_FILES_HOST, SlackPayloadParseError, parse_slack_event};
 use crate::render::{
     SlackRenderError, render_auth_prompt, render_final_reply_messages, render_gate_prompt,
@@ -282,32 +282,29 @@ impl ProductAdapter for SlackV2Adapter {
             delivered_any_part = true;
         }
 
-        if let Some(file_target) = file_target.as_ref() {
-            for attachment in &attachments {
-                if upload_workspace_file(
-                    egress,
-                    self.config.egress_credential_handle.clone(),
-                    file_target,
-                    attachment,
-                )
-                .await
-                .is_err()
-                {
-                    let reason =
-                        RedactedString::new("partial Slack delivery: workspace file upload failed");
-                    record_status(
-                        delivery_sink,
-                        DeliveryStatus::FailedPermanent {
-                            attempt_id,
-                            target: target_binding.clone(),
-                            run_id,
-                            reason: reason.clone(),
-                        },
-                    )
-                    .await;
-                    return Err(ProductAdapterError::EgressDenied { reason });
-                }
-            }
+        if let Some(file_target) = file_target.as_ref()
+            && let Err(error) = upload_workspace_files(
+                egress,
+                self.config.egress_credential_handle.clone(),
+                file_target,
+                &attachments,
+            )
+            .await
+        {
+            tracing::debug!(%error, "Slack workspace file upload failed");
+            let reason =
+                RedactedString::new("partial Slack delivery: workspace file upload failed");
+            record_status(
+                delivery_sink,
+                DeliveryStatus::FailedPermanent {
+                    attempt_id,
+                    target: target_binding.clone(),
+                    run_id,
+                    reason: reason.clone(),
+                },
+            )
+            .await;
+            return Err(ProductAdapterError::EgressDenied { reason });
         }
 
         record_status(
@@ -441,7 +438,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn final_reply_workspace_file_uses_external_upload_sequence() {
+    async fn final_reply_workspace_files_use_one_external_upload_completion() {
         let adapter = SlackV2Adapter::new(config());
         let egress =
             FakeProtocolHttpEgress::new([SLACK_API_HOST.to_string(), SLACK_FILES_HOST.to_string()]);
@@ -460,25 +457,46 @@ mod tests {
         );
         egress.program_response(
             SLACK_API_HOST,
+            Ok(EgressResponse::new(
+                200,
+                br#"{"ok":true,"upload_url":"https://files.slack.com/upload/v1/def","file_id":"F456"}"#
+                    .to_vec(),
+            )),
+        );
+        egress.program_response(
+            SLACK_API_HOST,
             Ok(EgressResponse::new(200, br#"{"ok":true}"#.to_vec())),
         );
         egress.program_response(
             SLACK_FILES_HOST,
             Ok(EgressResponse::new(200, b"OK".to_vec())),
         );
+        egress.program_response(
+            SLACK_FILES_HOST,
+            Ok(EgressResponse::new(200, b"OK".to_vec())),
+        );
         let sink = FakeOutboundDeliverySink::new();
-        let attachment = ProductOutboundAttachment::new(
-            "/workspace/report.pdf",
-            "report.pdf",
-            "application/pdf",
-            b"pdf bytes".to_vec(),
-        )
-        .expect("attachment");
+        let attachments = vec![
+            ProductOutboundAttachment::new(
+                "/workspace/report.pdf",
+                "report.pdf",
+                "application/pdf",
+                b"pdf bytes".to_vec(),
+            )
+            .expect("attachment"),
+            ProductOutboundAttachment::new(
+                "/workspace/chart.csv",
+                "chart.csv",
+                "text/csv",
+                b"csv bytes".to_vec(),
+            )
+            .expect("attachment"),
+        ];
 
         adapter
             .render_outbound_with_attachments(
                 envelope(final_reply_payload("Created the report")),
-                vec![attachment],
+                attachments,
                 &egress,
                 &sink,
             )
@@ -486,19 +504,101 @@ mod tests {
             .expect("message and file deliver");
 
         let calls = egress.calls();
-        assert_eq!(calls.len(), 4);
+        assert_eq!(calls.len(), 6);
         assert_eq!(calls[0].path, "/api/chat.postMessage");
-        assert!(
-            calls[1]
-                .path
-                .starts_with("/api/files.getUploadURLExternal?")
-        );
+        for ticket in [&calls[1], &calls[3]] {
+            assert_eq!(ticket.method, "POST");
+            assert_eq!(ticket.path, "/api/files.getUploadURLExternal");
+            assert!(ticket.headers.iter().any(|header| {
+                header.name() == "content-type"
+                    && header.value() == "application/x-www-form-urlencoded"
+            }));
+        }
+        assert_eq!(calls[1].body, b"filename=report.pdf&length=9");
+        assert_eq!(calls[3].body, b"filename=chart.csv&length=9");
         assert_eq!(calls[2].host, SLACK_FILES_HOST);
         assert_eq!(calls[2].body, b"pdf bytes");
-        assert_eq!(calls[3].path, "/api/files.completeUploadExternal");
+        assert_eq!(calls[4].host, SLACK_FILES_HOST);
+        assert_eq!(calls[4].body, b"csv bytes");
+        assert_eq!(calls[5].path, "/api/files.completeUploadExternal");
+        let completion: serde_json::Value =
+            serde_json::from_slice(&calls[5].body).expect("completion JSON");
+        assert_eq!(
+            completion["files"],
+            serde_json::json!([
+                {"id": "F123", "title": "report.pdf"},
+                {"id": "F456", "title": "chart.csv"}
+            ])
+        );
         assert!(matches!(
             sink.statuses().as_slice(),
             [DeliveryStatus::Delivered { .. }]
+        ));
+    }
+
+    #[tokio::test]
+    async fn partial_workspace_file_upload_fails_permanently_without_completion() {
+        let adapter = SlackV2Adapter::new(config());
+        let egress =
+            FakeProtocolHttpEgress::new([SLACK_API_HOST.to_string(), SLACK_FILES_HOST.to_string()]);
+        egress.allow_credential_handle("slack_bot_token");
+        egress.program_response(
+            SLACK_API_HOST,
+            Ok(EgressResponse::new(200, br#"{"ok":true}"#.to_vec())),
+        );
+        for (suffix, file_id) in [("abc", "F123"), ("def", "F456")] {
+            egress.program_response(
+                SLACK_API_HOST,
+                Ok(EgressResponse::new(
+                    200,
+                    format!(
+                        r#"{{"ok":true,"upload_url":"https://files.slack.com/upload/v1/{suffix}","file_id":"{file_id}"}}"#
+                    )
+                    .into_bytes(),
+                )),
+            );
+        }
+        egress.program_response(
+            SLACK_FILES_HOST,
+            Ok(EgressResponse::new(200, b"OK".to_vec())),
+        );
+        egress.program_response(
+            SLACK_FILES_HOST,
+            Ok(EgressResponse::new(500, b"failed".to_vec())),
+        );
+        let sink = FakeOutboundDeliverySink::new();
+        let attachments = ["one.pdf", "two.pdf"]
+            .into_iter()
+            .map(|filename| {
+                ProductOutboundAttachment::new(
+                    format!("/workspace/{filename}"),
+                    filename,
+                    "application/pdf",
+                    b"pdf bytes".to_vec(),
+                )
+                .expect("attachment")
+            })
+            .collect();
+
+        let result = adapter
+            .render_outbound_with_attachments(
+                envelope(final_reply_payload("Created both reports")),
+                attachments,
+                &egress,
+                &sink,
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(
+            egress
+                .calls()
+                .iter()
+                .all(|call| call.path != "/api/files.completeUploadExternal")
+        );
+        assert!(matches!(
+            sink.statuses().as_slice(),
+            [DeliveryStatus::FailedPermanent { .. }]
         ));
     }
 

@@ -11,63 +11,74 @@ use url::Url;
 use crate::payload::{SLACK_API_HOST, SLACK_FILES_HOST};
 use crate::render::SlackReplyTarget;
 
-pub(crate) async fn upload_workspace_file(
+pub(crate) async fn upload_workspace_files(
     egress: &dyn ProtocolHttpEgress,
     credential_handle: EgressCredentialHandle,
     target: &SlackReplyTarget,
-    attachment: &ProductOutboundAttachment,
+    attachments: &[ProductOutboundAttachment],
 ) -> Result<(), ProductAdapterError> {
-    let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("filename", attachment.filename())
-        .append_pair("length", &attachment.bytes().len().to_string())
-        .finish();
-    let response = egress
-        .send(slack_request(
-            SLACK_API_HOST,
-            "GET",
-            format!("/api/files.getUploadURLExternal?{query}"),
-            None,
-            Some(credential_handle.clone()),
-            Some(64 * 1024),
-        )?)
-        .await?;
-    let upload: UploadUrlResponse = parse_slack_json(response.status(), response.body())?;
-    if !upload.ok {
-        return Err(permanent("Slack rejected the file upload URL request"));
+    let mut completed_files = Vec::with_capacity(attachments.len());
+    for attachment in attachments {
+        let body = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("filename", attachment.filename())
+            .append_pair("length", &attachment.bytes().len().to_string())
+            .finish()
+            .into_bytes();
+        let response = egress
+            .send(slack_request(
+                SLACK_API_HOST,
+                "POST",
+                "/api/files.getUploadURLExternal".to_string(),
+                Some(("application/x-www-form-urlencoded", body)),
+                Some(credential_handle.clone()),
+                Some(64 * 1024),
+            )?)
+            .await?;
+        let upload: UploadUrlResponse = parse_slack_json(response.status(), response.body())?;
+        if !upload.ok {
+            return Err(permanent("Slack rejected the file upload URL request"));
+        }
+        let upload_url = upload
+            .upload_url
+            .ok_or_else(|| permanent("Slack omitted the file upload URL"))?;
+        let file_id = upload
+            .file_id
+            .ok_or_else(|| permanent("Slack omitted the uploaded file id"))?;
+        let (host, path) = confined_upload_url(&upload_url)?;
+        let response = egress
+            .send(slack_request(
+                &host,
+                "POST",
+                path,
+                Some(("application/octet-stream", attachment.bytes().to_vec())),
+                None,
+                Some(64 * 1024),
+            )?)
+            .await?;
+        if !(200..300).contains(&response.status()) {
+            return Err(http_failure(
+                response.status(),
+                "Slack file-byte upload failed",
+            ));
+        }
+        completed_files.push(CompletedFile {
+            id: file_id,
+            title: attachment.filename().to_string(),
+        });
     }
-    let upload_url = upload
-        .upload_url
-        .ok_or_else(|| permanent("Slack omitted the file upload URL"))?;
-    let file_id = upload
-        .file_id
-        .ok_or_else(|| permanent("Slack omitted the uploaded file id"))?;
-    let (host, path) = confined_upload_url(&upload_url)?;
-    let response = egress
-        .send(slack_request(
-            &host,
-            "POST",
-            path,
-            Some(("application/octet-stream", attachment.bytes().to_vec())),
-            None,
-            Some(64 * 1024),
-        )?)
-        .await?;
-    if !(200..300).contains(&response.status()) {
-        return Err(http_failure(
-            response.status(),
-            "Slack file-byte upload failed",
-        ));
+    if completed_files.is_empty() {
+        return Ok(());
     }
 
     let body = serde_json::to_vec(&CompleteUploadRequest {
-        files: vec![CompletedFile {
-            id: file_id,
-            title: attachment.filename().to_string(),
-        }],
+        files: completed_files,
         channel_id: target.channel.clone(),
         thread_ts: target.thread_ts.clone(),
     })
-    .map_err(|_| permanent("Slack file completion request could not be encoded"))?;
+    .map_err(|error| {
+        tracing::debug!(%error, "Slack file completion request could not be encoded");
+        permanent("Slack file completion request could not be encoded")
+    })?;
     let response = egress
         .send(slack_request(
             SLACK_API_HOST,
@@ -111,7 +122,10 @@ fn slack_request(
 }
 
 fn confined_upload_url(raw: &str) -> Result<(String, String), ProductAdapterError> {
-    let parsed = Url::parse(raw).map_err(|_| permanent("Slack returned an invalid upload URL"))?;
+    let parsed = Url::parse(raw).map_err(|error| {
+        tracing::debug!(%error, "Slack returned an invalid upload URL");
+        permanent("Slack returned an invalid upload URL")
+    })?;
     if parsed.scheme() != "https"
         || parsed.host_str() != Some(SLACK_FILES_HOST)
         || parsed.username() != ""
@@ -139,8 +153,10 @@ fn parse_slack_json<T: for<'de> Deserialize<'de>>(
     if body.len() > 64 * 1024 {
         return Err(permanent("Slack file API response exceeded its size limit"));
     }
-    serde_json::from_slice(body)
-        .map_err(|_| permanent("Slack file API returned an invalid response"))
+    serde_json::from_slice(body).map_err(|error| {
+        tracing::debug!(%error, "Slack file API returned an invalid JSON response");
+        permanent("Slack file API returned an invalid response")
+    })
 }
 
 fn http_failure(status: u16, reason: &'static str) -> ProductAdapterError {
@@ -183,4 +199,21 @@ struct CompleteUploadRequest {
 struct CompletedFile {
     id: String,
     title: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn confined_upload_url_is_exact_host_confined() {
+        assert!(confined_upload_url("https://files.slack.com/upload/v1/abc").is_ok());
+        for url in [
+            "http://files.slack.com/upload/v1/abc",
+            "https://files.slack.com.evil.example/upload/v1/abc",
+            "https://user@files.slack.com/upload/v1/abc",
+        ] {
+            assert!(confined_upload_url(url).is_err(), "{url} must be rejected");
+        }
+    }
 }

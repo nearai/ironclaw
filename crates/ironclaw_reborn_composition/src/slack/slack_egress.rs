@@ -29,7 +29,8 @@ use thiserror::Error;
 
 const SLACK_EGRESS_TIMEOUT_MS: u32 = 10_000;
 const SLACK_EGRESS_RESPONSE_BODY_LIMIT_BYTES: u64 = 64 * 1024;
-const SLACK_EGRESS_MAX_RESPONSE_BODY_LIMIT_BYTES: u64 = 5 * 1024 * 1024;
+const SLACK_EGRESS_MAX_RESPONSE_BODY_LIMIT_BYTES: u64 =
+    ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64;
 const SLACK_EGRESS_CAPABILITY_ID: &str = "slack.egress";
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

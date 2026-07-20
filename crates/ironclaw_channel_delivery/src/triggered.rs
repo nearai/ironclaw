@@ -67,6 +67,7 @@ pub struct TriggeredRunDeliveryDriver {
     /// `driver_fire_with_unresolvable_delivery_target_records_target_unavailable`.
     // arch-exempt: optional_arc, reduced test drivers omit the cross-owner target strategy while production wiring supplies it and targeted fires fail closed without it, plan #6159
     outbound_target_provider: Option<Arc<dyn OutboundDeliveryTargetProvider>>,
+    // arch-exempt: optional_arc, reduced test drivers omit workspace reads while production channel wiring supplies them and referenced files fail closed without them, plan #6159
     project_filesystem: Option<Arc<dyn ProjectFilesystemReader>>,
 }
 
@@ -1030,7 +1031,10 @@ async fn deliver_triggered_notification(
     );
     let attachments = resolve_workspace_attachments(&payload, thread_scope, project_filesystem)
         .await
-        .map_err(|error| TriggeredNotificationFailure::Other(error.to_string()))?;
+        .map_err(|error| {
+            tracing::warn!(%error, "workspace attachment resolution failed");
+            TriggeredNotificationFailure::Other(error.to_string())
+        })?;
     let render_result = prepare_and_render_product_outbound_with_attachments(
         &outbound_policy,
         services.communication_preferences.as_ref(),

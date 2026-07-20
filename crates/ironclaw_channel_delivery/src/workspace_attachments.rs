@@ -31,7 +31,14 @@ pub(crate) async fn resolve_workspace_attachments(
         let file = reader
             .read_file(thread_scope, &path)
             .await
-            .map_err(|_| permanent("assistant workspace file could not be read"))?;
+            .map_err(|error| {
+                tracing::warn!(
+                    target = "ironclaw::reborn::channel_delivery",
+                    %error,
+                    "failed to read assistant-referenced workspace file"
+                );
+                permanent("assistant workspace file could not be read")
+            })?;
         if file.bytes.len() > DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes {
             return Err(permanent(
                 "assistant workspace file exceeds the channel size limit",
@@ -162,5 +169,66 @@ mod tests {
         };
 
         assert!(matches!(error, ProductAdapterError::Internal { .. }));
+    }
+
+    #[tokio::test]
+    async fn workspace_attachment_count_budget_is_enforced() {
+        let text = (0..=DEFAULT_ATTACHMENT_BUDGETS.max_count)
+            .map(|index| format!("/workspace/file-{index}.txt"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let result = resolve_workspace_attachments(
+            &final_reply(&text),
+            &thread_scope(),
+            Some(&FileReader { bytes: vec![] }),
+        )
+        .await;
+
+        assert!(matches!(result, Err(ProductAdapterError::Internal { .. })));
+    }
+
+    #[tokio::test]
+    async fn workspace_attachment_file_budget_accepts_equal_and_rejects_over() {
+        let equal = resolve_workspace_attachments(
+            &final_reply("/workspace/equal.bin"),
+            &thread_scope(),
+            Some(&FileReader {
+                bytes: vec![0; DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes],
+            }),
+        )
+        .await;
+        assert!(equal.is_ok());
+
+        let over = resolve_workspace_attachments(
+            &final_reply("/workspace/over.bin"),
+            &thread_scope(),
+            Some(&FileReader {
+                bytes: vec![0; DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes + 1],
+            }),
+        )
+        .await;
+        assert!(matches!(over, Err(ProductAdapterError::Internal { .. })));
+    }
+
+    #[tokio::test]
+    async fn workspace_attachment_total_budget_accepts_equal_and_rejects_over() {
+        let reader = FileReader {
+            bytes: vec![0; DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes],
+        };
+        let equal = resolve_workspace_attachments(
+            &final_reply("/workspace/one.bin /workspace/two.bin"),
+            &thread_scope(),
+            Some(&reader),
+        )
+        .await;
+        assert!(equal.is_ok());
+
+        let over = resolve_workspace_attachments(
+            &final_reply("/workspace/one.bin /workspace/two.bin /workspace/three.bin"),
+            &thread_scope(),
+            Some(&reader),
+        )
+        .await;
+        assert!(matches!(over, Err(ProductAdapterError::Internal { .. })));
     }
 }

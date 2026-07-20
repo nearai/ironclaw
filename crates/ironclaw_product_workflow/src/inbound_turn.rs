@@ -125,9 +125,12 @@ pub(crate) async fn check_before_inbound_policy(
         before_inbound_policy.check_user_message(request),
     )
     .await
-    .map_err(|_| ProductWorkflowError::BeforeInboundPolicyFailed {
-        reason: "before-inbound policy timed out".into(),
-        permanent: false,
+    .map_err(|error| {
+        tracing::debug!(%error, "before-inbound policy timed out");
+        ProductWorkflowError::BeforeInboundPolicyFailed {
+            reason: "before-inbound policy timed out".into(),
+            permanent: false,
+        }
     })?
 }
 
@@ -387,8 +390,10 @@ where
             BeforeInboundPolicyOutcome::Allow => (prepared, envelope),
             BeforeInboundPolicyOutcome::RewriteUserMessage(payload) => {
                 let rewritten_trigger = payload.trigger;
-                dispatch_envelope =
-                    envelope.with_rewritten_user_message(payload).map_err(|_| {
+                dispatch_envelope = envelope
+                    .with_rewritten_user_message(payload)
+                    .map_err(|error| {
+                        tracing::debug!(%error, "before-inbound policy produced an invalid rewrite");
                         ProductWorkflowError::TurnSubmissionRejected {
                             reason: "invalid policy-rewritten user message".into(),
                         }

@@ -66,7 +66,8 @@ impl InboundAttachmentMaterializer for SlackAttachmentMaterializer {
                 return Err(http_error(response.status()));
             }
             let file_info: SlackFileInfoResponse = serde_json::from_slice(response.body())
-                .map_err(|_| {
+                .map_err(|error| {
+                    tracing::debug!(%error, "Slack returned an invalid files.info response");
                     AttachmentMaterializationError::permanent(
                         "Slack returned an invalid file response",
                     )
@@ -123,20 +124,24 @@ fn request(
     path: String,
     credential_handle: EgressCredentialHandle,
 ) -> Result<EgressRequest, AttachmentMaterializationError> {
-    let host = DeclaredEgressHost::new(host).map_err(|_| {
+    let host = DeclaredEgressHost::new(host).map_err(|error| {
+        tracing::debug!(%error, "Slack attachment host failed validation");
         AttachmentMaterializationError::permanent("Slack attachment host is invalid")
     })?;
-    let method = EgressMethod::new("GET").map_err(|_| {
+    let method = EgressMethod::new("GET").map_err(|error| {
+        tracing::debug!(%error, "Slack attachment method failed validation");
         AttachmentMaterializationError::permanent("Slack attachment method is invalid")
     })?;
-    let path = EgressPath::new(path).map_err(|_| {
+    let path = EgressPath::new(path).map_err(|error| {
+        tracing::debug!(%error, "Slack attachment path failed validation");
         AttachmentMaterializationError::permanent("Slack attachment path is invalid")
     })?;
     Ok(EgressRequest::new(host, method, path).with_credential_handle(Some(credential_handle)))
 }
 
 fn confined_download_path(raw: &str) -> Result<String, AttachmentMaterializationError> {
-    let parsed = Url::parse(raw).map_err(|_| {
+    let parsed = Url::parse(raw).map_err(|error| {
+        tracing::debug!(%error, "Slack returned an invalid attachment URL");
         AttachmentMaterializationError::permanent("Slack returned an invalid attachment URL")
     })?;
     if parsed.scheme() != "https"

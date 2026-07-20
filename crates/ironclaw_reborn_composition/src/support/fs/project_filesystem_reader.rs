@@ -63,7 +63,10 @@ impl<F: RootFilesystem> ProjectScopedFilesystemReader<F> {
     /// normalized path to stay under the `/workspace` alias so the read-only
     /// workspace mount is the only reachable surface.
     fn confine(&self, path: &str) -> Result<ScopedPath, ProjectFsError> {
-        let scoped = ScopedPath::new(path).map_err(|_| ProjectFsError::InvalidPath)?;
+        let scoped = ScopedPath::new(path).map_err(|error| {
+            tracing::debug!(%error, "project filesystem path failed scoped validation");
+            ProjectFsError::InvalidPath
+        })?;
         // Component-wise containment via `Path::strip_prefix` so a sibling like
         // `/workspaceother` cannot pass a naive string-prefix check. `Ok` covers
         // both the alias root itself and any descendant under it.

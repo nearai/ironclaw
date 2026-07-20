@@ -15,15 +15,23 @@ pub fn extract_workspace_attachment_paths(content: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut search_from = 0;
 
-    while let Some(relative_start) = visible[search_from..].find(WORKSPACE_PREFIX) {
+    while let Some(relative_start) = visible
+        .get(search_from..)
+        .and_then(|remaining| remaining.find(WORKSPACE_PREFIX))
+    {
         let start = search_from + relative_start;
-        let token_end = visible[start..]
+        let Some(remaining) = visible.get(start..) else {
+            break;
+        };
+        let token_end = remaining
             .char_indices()
             .take_while(|(_, character)| is_workspace_token_character(*character))
             .map(|(offset, character)| offset + character.len_utf8())
             .last()
             .map_or(start, |length| start + length);
-        let token = &visible[start..token_end];
+        let Some(token) = visible.get(start..token_end) else {
+            break;
+        };
         if let Some(path) = longest_file_prefix(token)
             && seen.insert(path.to_string())
         {
