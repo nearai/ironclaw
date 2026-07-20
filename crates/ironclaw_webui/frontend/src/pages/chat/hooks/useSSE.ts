@@ -61,24 +61,18 @@ export function useSSE({ threadId, onEvent, enabled }) {
   );
   const onEventRef = React.useRef(onEvent);
   onEventRef.current = onEvent;
-  // Last cursor we successfully received. EventSource sends
-  // `Last-Event-ID` automatically while a single instance reconnects
-  // internally, but a *fresh* EventSource (tab resume from hidden,
-  // explicit reconnect after threadId change) loses that memory. We
-  // pipe it through the v2 backend's `?after_cursor=` query fallback
-  // so resumption survives those cases too.
-  const lastEventIdRef = React.useRef(null);
+  // Last cursor received for each thread visited while this chat view is
+  // mounted. EventSource remembers Last-Event-ID only for one instance, so a
+  // thread switch must retain the old thread's cursor explicitly; otherwise
+  // returning to it starts from projection origin and visually replays every
+  // buffered cumulative assistant-text update.
+  const lastEventIdByThreadRef = React.useRef(new Map());
 
   React.useEffect(() => {
     if (!enabled || !threadId) {
       setStatus(CONNECTION_STATUS.IDLE);
       return;
     }
-    // New thread → drop the prior thread's cursor before the first
-    // connect so we don't try to resume one thread's projection from
-    // another thread's id.
-    lastEventIdRef.current = null;
-
     let es = null;
     let reconnectTimer = null;
     let reconnectWatchdog = null;
@@ -136,7 +130,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
 
       es = openEventStream({
         threadId,
-        afterCursor: lastEventIdRef.current || undefined,
+        afterCursor: lastEventIdByThreadRef.current.get(threadId) || undefined,
       });
       const source = es;
 
@@ -165,7 +159,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
         }
         if (!frame || typeof frame !== "object") return;
         if (event.lastEventId) {
-          lastEventIdRef.current = event.lastEventId;
+          lastEventIdByThreadRef.current.set(threadId, event.lastEventId);
         }
         const type = frame.type || fallbackType;
         onEventRef.current?.({
@@ -187,7 +181,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
           frame.retryable === true &&
           es === source
         ) {
-          lastEventIdRef.current = null;
+          lastEventIdByThreadRef.current.delete(threadId);
           reconnectWithTimer(CONNECTION_STATUS.RECONNECTING);
         }
       };

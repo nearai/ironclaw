@@ -35,6 +35,8 @@ function createHarness({
   const documentListeners = new Map();
   const windowListeners = new Map();
   let cleanup = null;
+  let refIndex = 0;
+  const refs = [];
 
   function EventSource() {}
   EventSource.CONNECTING = 0;
@@ -72,7 +74,11 @@ function createHarness({
       useEffect: (effect) => {
         cleanup = effect();
       },
-      useRef: (initial) => ({ current: initial }),
+      useRef: (initial) => {
+        const index = refIndex++;
+        refs[index] ||= { current: initial };
+        return refs[index];
+      },
       useState: (initial) => [initial, (value) => statuses.push(value)],
     },
     document: {
@@ -96,17 +102,28 @@ function createHarness({
   };
 
   vm.runInNewContext(useSSESourceForTest(), context);
-  const result = context.globalThis.__testExports.useSSE({
-    threadId: "thread-1",
-    enabled: true,
-    onEvent,
-  });
+  let result = null;
+  function render(threadId = "thread-1") {
+    cleanup?.();
+    cleanup = null;
+    refIndex = 0;
+    result = context.globalThis.__testExports.useSSE({
+      threadId,
+      enabled: true,
+      onEvent,
+    });
+    return result;
+  }
+  render();
 
   return {
-    cleanup,
+    cleanup: () => cleanup?.(),
     context,
     documentListeners,
-    result,
+    get result() {
+      return result;
+    },
+    render,
     statuses,
     streams,
     timers,
@@ -257,6 +274,40 @@ test("useSSE falls back to app reconnect timer for closed streams", () => {
 
   assert.equal(streams.length, 2);
   assert.deepEqual(statuses, ["connecting", "disconnected", "reconnecting"]);
+});
+
+test("useSSE resumes each thread from its own cursor after switching", () => {
+  const { cleanup, render, streams } = createHarness();
+
+  streams[0].listener("projection_update")({
+    data: JSON.stringify({
+      type: "projection_update",
+      state: { items: [] },
+    }),
+    lastEventId: "thread-1-cursor",
+  });
+
+  render("thread-2");
+  assert.equal(streams[1].args.threadId, "thread-2");
+  assert.equal(streams[1].args.afterCursor, undefined);
+
+  streams[1].listener("projection_update")({
+    data: JSON.stringify({
+      type: "projection_update",
+      state: { items: [] },
+    }),
+    lastEventId: "thread-2-cursor",
+  });
+
+  render("thread-1");
+  assert.equal(streams[2].args.threadId, "thread-1");
+  assert.equal(streams[2].args.afterCursor, "thread-1-cursor");
+
+  render("thread-2");
+  assert.equal(streams[3].args.threadId, "thread-2");
+  assert.equal(streams[3].args.afterCursor, "thread-2-cursor");
+
+  cleanup();
 });
 
 test("useSSE rebases from origin when the server rejects its replay cursor", () => {
