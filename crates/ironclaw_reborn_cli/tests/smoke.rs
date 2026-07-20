@@ -356,6 +356,8 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         workspace_manifest.contains("name = \"ironclaw\"\nautobins = false\nversion = \"")
             && workspace_manifest.contains("allow-dirty = [\"ci\", \"msi\"]")
             && workspace_manifest.contains("packages = [\"ironclaw_reborn_cli\"]")
+            && workspace_manifest.contains("installers = [\"shell\", \"powershell\", \"msi\"]")
+            && !workspace_manifest.contains("\"npm\"")
             && !workspace_manifest.contains("tag-namespace"),
         "the public ironclaw-v* tag must be version-coherent with the root package while cargo-dist artifacts remain scoped to the Reborn CLI package"
     );
