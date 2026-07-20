@@ -355,10 +355,10 @@ async def test_reborn_legacy_tool_permission_retains_selection_while_saving(
         await _choose_permission(page, "echo", "Ask each time")
         await asyncio.wait_for(harness["permission_save_started"].wait(), timeout=5)
 
-        # Allow React Query's pending mutation render to settle while the
-        # intercepted response remains blocked. The selected value must not
-        # flicker back to the previous server value during this interval.
-        await page.wait_for_timeout(250)
+        select = _tool_row(page, "echo").locator(
+            "[data-testid='settings-tool-permission-select']"
+        )
+        await expect(select).to_have_attribute("aria-busy", "true")
         await expect(button).to_contain_text("Ask each time")
         assert harness["permission_requests"][-1] == {
             "name": "echo",

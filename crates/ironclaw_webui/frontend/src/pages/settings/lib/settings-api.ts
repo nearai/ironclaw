@@ -4,6 +4,7 @@ const OPERATOR_CONFIG_BASE = "/api/webchat/v2/operator/config";
 const SETTINGS_TOOLS_BASE = "/api/webchat/v2/settings/tools";
 const AUTO_APPROVE_KEY = "agent.auto_approve_tools";
 const TOOL_PREFIX = "tool.";
+const TOOL_PERMISSION_UPDATE_TIMEOUT_MS = 30_000;
 const TOOL_PERMISSION_STATES = new Set(["always_allow", "ask_each_time", "disabled"]);
 const TOOL_PERMISSION_UPDATE_STATES = new Set([
   "default",
@@ -161,11 +162,18 @@ export async function fetchTools() {
 }
 export async function updateToolPermission(name, state) {
   const normalized = normalizeToolUpdateState(state);
-  const data = await apiFetch(`${SETTINGS_TOOLS_BASE}/${encodeURIComponent(name)}`, {
-    method: "POST",
-    body: JSON.stringify({ state: normalized }),
-  });
-  return { success: true, tool: toolFromConfigEntry(data.entry), entry: data.entry };
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), TOOL_PERMISSION_UPDATE_TIMEOUT_MS);
+  try {
+    const data = await apiFetch(`${SETTINGS_TOOLS_BASE}/${encodeURIComponent(name)}`, {
+      method: "POST",
+      body: JSON.stringify({ state: normalized }),
+      signal: controller.signal,
+    });
+    return { success: true, tool: toolFromConfigEntry(data.entry), entry: data.entry };
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 export function fetchExtensions() {
   return apiFetch("/api/webchat/v2/extensions");

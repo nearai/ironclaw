@@ -68,6 +68,7 @@ export function useTools() {
     },
     onError: (_error, { name, requestId }) => {
       clearPendingPermission(name, requestId);
+      queryClient.invalidateQueries({ queryKey: ["settings-tools"] });
     },
   });
 

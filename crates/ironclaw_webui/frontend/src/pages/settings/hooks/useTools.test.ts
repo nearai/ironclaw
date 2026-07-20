@@ -43,6 +43,7 @@ function loadUseTools({ mutationError = null } = {}) {
     },
     useQuery: () => ({ data: { tools: [] }, isLoading: false, error: null }),
     useQueryClient: () => ({
+      invalidateQueries: (...args) => calls.push({ type: "invalidateQueries", args }),
       setQueryData: (...args) => calls.push({ type: "setQueryData", args }),
     }),
     clearTimeout: (timeoutId) => {
@@ -109,6 +110,10 @@ test("failed permission saves clear the pending selection so the server value is
 
   const rollbackUpdate = calls.filter((call) => call.type === "setState").at(-1);
   assert.deepEqual(JSON.parse(JSON.stringify(rollbackUpdate.updater(pendingPermission))), {});
+  const invalidation = calls.find((call) => call.type === "invalidateQueries");
+  assert.deepEqual(JSON.parse(JSON.stringify(invalidation.args[0])), {
+    queryKey: ["settings-tools"],
+  });
 });
 
 test("stale successful saves update the cache before a newer save fails", () => {

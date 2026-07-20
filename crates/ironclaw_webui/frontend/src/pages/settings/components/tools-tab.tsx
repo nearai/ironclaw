@@ -157,6 +157,7 @@ function ToolRow({ tool, pendingPermission, onPermissionChange, isSaved }) {
                 options={permissionStates}
                 onChange={(value) => onPermissionChange(tool.name, value)}
                 ariaLabel={t("tools.permissionFor", { name: tool.name })}
+                aria-busy={pendingPermission != null}
                 className="w-36 sm:w-44"
                 data-testid="settings-tool-permission-select"
               />

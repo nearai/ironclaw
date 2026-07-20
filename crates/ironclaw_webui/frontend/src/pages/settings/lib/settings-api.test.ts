@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
+import { test, vi } from "vitest";
 
-import { settingsFromOperatorConfig, toolFromConfigEntry } from "./settings-api";
+import {
+  settingsFromOperatorConfig,
+  toolFromConfigEntry,
+  updateToolPermission,
+} from "./settings-api";
 
 test("settingsFromOperatorConfig maps the global auto-approve key", () => {
   const settings = settingsFromOperatorConfig({
@@ -60,4 +64,40 @@ test("toolFromConfigEntry normalizes legacy and malformed permission values", ()
       effective_source: "default",
     }
   );
+});
+
+test("updateToolPermission aborts a lost request after the bounded save timeout", async () => {
+  vi.useFakeTimers();
+  let requestOptions;
+  vi.stubGlobal("sessionStorage", {
+    getItem: () => "",
+    removeItem: () => {},
+    setItem: () => {},
+  });
+  vi.stubGlobal(
+    "fetch",
+    (_path, options) =>
+      new Promise((_resolve, reject) => {
+        requestOptions = options;
+        options.signal.addEventListener(
+          "abort",
+          () => reject(new Error("permission save aborted")),
+          { once: true }
+        );
+      })
+  );
+
+  try {
+    const update = updateToolPermission("builtin.echo", "disabled");
+    const rejected = assert.rejects(update, /permission save aborted/);
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    await rejected;
+
+    assert.equal(requestOptions.signal.aborted, true);
+    assert.equal(JSON.parse(requestOptions.body).state, "disabled");
+  } finally {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  }
 });
