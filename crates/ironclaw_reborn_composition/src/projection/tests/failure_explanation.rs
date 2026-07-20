@@ -633,6 +633,30 @@ async fn webui_event_stream_pins_model_credentials_summary_before_explainer() {
 }
 
 #[tokio::test]
+async fn webui_event_stream_pins_checkpoint_failure_summaries_before_explainer() {
+    let sentinel = || {
+        Arc::new(FakeFailureExplainer {
+            explanation: "SENTINEL explainer output should not be used".to_string(),
+        }) as Arc<dyn FailureExplanationProvider>
+    };
+
+    assert_failed_run_status_summary_with_explainer(
+        "webui-events-pinned-checkpoint-unavailable-thread",
+        "checkpoint_unavailable",
+        "The run failed because the checkpoint could not be loaded. Retry the run, and contact support if the checkpoint remains unavailable.",
+        Some(sentinel()),
+    )
+    .await;
+    assert_failed_run_status_summary_with_explainer(
+        "webui-events-pinned-host-checkpoint-thread",
+        HOST_STAGE_UNAVAILABLE_CHECKPOINT_CATEGORY,
+        "The run failed because the host checkpoint stage was unavailable. Retry the run, and contact support if checkpoints remain unavailable.",
+        Some(sentinel()),
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn webui_event_stream_uses_model_failure_explanation_when_available() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();

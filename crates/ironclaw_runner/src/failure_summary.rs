@@ -1,6 +1,6 @@
 use crate::failure_categories::{
-    BUDGET_ACCOUNTING_FAILED_CATEGORY, MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
-    MODEL_CREDITS_EXHAUSTED_CATEGORY,
+    BUDGET_ACCOUNTING_FAILED_CATEGORY, HOST_STAGE_UNAVAILABLE_CHECKPOINT_CATEGORY,
+    MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
 };
 use ironclaw_turns::ModelInvalidOutputDetailReason;
 
@@ -89,9 +89,6 @@ pub fn reborn_failure_summary_for_category(category: Option<&str>) -> &'static s
         "checkpoint_rejected" => {
             "The run failed because its checkpoint was rejected. Retry from the last available checkpoint or start a new run."
         }
-        "checkpoint_unavailable" => {
-            "The run failed because the checkpoint could not be loaded. Retry the run, and contact support if the checkpoint remains unavailable."
-        }
         "transcript_write_failed" => {
             "The run failed while saving transcript output. Retry the run, and contact support if saving still fails."
         }
@@ -145,9 +142,6 @@ pub fn reborn_failure_summary_for_category(category: Option<&str>) -> &'static s
         }
         "host_stage_unavailable_transcript" => {
             "The run failed because the host transcript stage was unavailable. Retry the run, and contact support if saving still fails."
-        }
-        "host_stage_unavailable_checkpoint" => {
-            "The run failed because the host checkpoint stage was unavailable. Retry the run, and contact support if checkpoints remain unavailable."
         }
         "host_stage_unavailable_input" => {
             "The run failed because the host input stage was unavailable. Check the submitted message and try again."
@@ -218,6 +212,15 @@ impl ModelInvalidOutputFailureSummary for ModelInvalidOutputDetailReason {
 
 pub fn pinned_failure_summary_for_category(category: &str) -> Option<&'static str> {
     match category {
+        // These failures must retain their checkpoint-specific recovery guidance.
+        // A generated paraphrase can collapse either into a vague host outage,
+        // leaving users without a clear retry path.
+        "checkpoint_unavailable" => Some(
+            "The run failed because the checkpoint could not be loaded. Retry the run, and contact support if the checkpoint remains unavailable.",
+        ),
+        HOST_STAGE_UNAVAILABLE_CHECKPOINT_CATEGORY => Some(
+            "The run failed because the host checkpoint stage was unavailable. Retry the run, and contact support if checkpoints remain unavailable.",
+        ),
         MODEL_CREDITS_EXHAUSTED_CATEGORY => Some(
             "The AI provider account is out of credits. Add credits or switch providers and try again.",
         ),
@@ -238,8 +241,10 @@ fn unknown_failure_summary() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        reborn_failure_summary_for_category, reborn_failure_summary_for_category_and_detail,
+        pinned_failure_summary_for_category, reborn_failure_summary_for_category,
+        reborn_failure_summary_for_category_and_detail,
     };
+    use crate::failure_categories::HOST_STAGE_UNAVAILABLE_CHECKPOINT_CATEGORY;
     use ironclaw_turns::ModelInvalidOutputDetailReason;
 
     #[test]
@@ -264,6 +269,26 @@ mod tests {
             reborn_failure_summary_for_category(Some("unexpected_category")),
             "The run failed before producing a reply. Retry the run, and contact support if it keeps happening."
         );
+    }
+
+    #[test]
+    fn checkpoint_failure_summaries_are_pinned() {
+        for (category, expected_summary) in [
+            (
+                "checkpoint_unavailable",
+                "The run failed because the checkpoint could not be loaded. Retry the run, and contact support if the checkpoint remains unavailable.",
+            ),
+            (
+                HOST_STAGE_UNAVAILABLE_CHECKPOINT_CATEGORY,
+                "The run failed because the host checkpoint stage was unavailable. Retry the run, and contact support if checkpoints remain unavailable.",
+            ),
+        ] {
+            assert_eq!(
+                pinned_failure_summary_for_category(category),
+                Some(expected_summary),
+                "{category} must bypass generated failure explanations"
+            );
+        }
     }
 
     #[test]
