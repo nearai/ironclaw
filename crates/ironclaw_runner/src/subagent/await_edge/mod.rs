@@ -204,14 +204,9 @@ pub(crate) fn map_await_edge_error(
 }
 
 /// `{some/<v>|none}` optional-axis path encoding (§4.2), matching the
-/// existing precedent at
-/// `local_trigger_access::filesystem::optional_axis_path`. Duplicated here
-/// (4 lines) rather than reused — that helper lives behind
-/// `local_trigger_access`'s own `mod filesystem;`, which is both private and
-/// feature-gated behind `filesystem-local-trigger-access`, a feature
-/// unrelated to await-edge's own filesystem gate (`filesystem-goal-store`);
-/// threading a cross-feature dependency for a 4-line pure function is worse
-/// than the duplication.
+/// `agents/<id>/projects/<id>` scope-path convention `goal_store.rs` uses.
+/// A local 4-line pure helper rather than a shared dependency — the encoding
+/// is trivial and each store owns its own path layout.
 fn optional_axis_path(value: Option<&str>) -> String {
     match value {
         Some(value) => format!("some/{value}"),
