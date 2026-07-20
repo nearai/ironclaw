@@ -37,7 +37,7 @@ pub fn package_with_discovered_hosted_mcp_tools(
 ) -> Result<ExtensionPackage, ExtensionError> {
     if hosted_http_mcp_url(package).is_none() {
         return Err(invalid_hosted_mcp_manifest(format!(
-            "extension {} is not a host-bundled hosted MCP provider",
+            "extension {} is not a hosted MCP provider eligible for discovery",
             package.id
         )));
     }
@@ -68,7 +68,7 @@ pub fn package_with_discovered_hosted_mcp_tools(
         })
         .collect();
 
-    ExtensionPackage::from_host_bundled_manifest_with_inline_dynamic_schemas(
+    ExtensionPackage::from_hosted_mcp_manifest_with_inline_dynamic_schemas(
         manifest,
         package.root.clone(),
         package.manifest_digest(),
@@ -77,7 +77,17 @@ pub fn package_with_discovered_hosted_mcp_tools(
 }
 
 fn hosted_http_mcp_url(package: &ExtensionPackage) -> Option<&str> {
-    if package.manifest.source != ManifestSource::HostBundled {
+    // InstalledLocal (operator-installed volume packages) participate in
+    // hosted-MCP discovery on the same terms as compiled-in first-party
+    // manifests — mirroring the egress planner's source gate. Discovery still
+    // runs under the activating caller's scope and leases that caller's
+    // credential, so a caller without the extension's secret falls back to
+    // the static manifest exactly as before, and the discovered package keeps
+    // its original (non-escalated) manifest source.
+    if !matches!(
+        package.manifest.source,
+        ManifestSource::HostBundled | ManifestSource::InstalledLocal
+    ) {
         return None;
     }
     let ExtensionRuntime::Mcp {
@@ -321,6 +331,103 @@ runtime_credentials = [
             .expect("discovered create-pages capability");
         assert!(create_pages.effects.contains(&EffectKind::ExternalWrite));
         assert_eq!(discovered.manifest.capabilities.len(), 2);
+    }
+
+    const AGENT_MARKET_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "agent-market"
+name = "Agent Market"
+version = "0.1.0"
+description = "Marketplace concierge tools"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "https://market.example.com/mcp"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "agent-market.search_agents"
+description = "Search the agent marketplace"
+effects = ["dispatch_capability", "network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/search_agents.input.v1.json"
+output_schema_ref = "schemas/tool.output.v1.json"
+runtime_credentials = [
+  { handle = "agent-market-token", audience = { scheme = "https", host_pattern = "market.example.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " }, required = true }
+]
+"#;
+
+    #[test]
+    fn discovery_accepts_installed_local_hosted_mcp_package_and_keeps_source() {
+        // Regression: volume-installed (InstalledLocal) hosted-MCP packages
+        // must be discovery-eligible — before the fix hosted_http_mcp_url
+        // returned None for any non-HostBundled source, so per-user tools/list
+        // discovery (e.g. a worker agent's per-hire connector tools) could
+        // never replace the static manifest. The discovered package must keep
+        // its InstalledLocal source (no trust relabeling).
+        let package = agent_market_installed_local_package();
+        assert!(is_hosted_http_mcp_package(&package));
+
+        let tools = vec![HostedMcpDiscoveredTool {
+            name: "timeless__list_meetings".to_string(),
+            description: "List the hirer's meetings".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+            annotations: HostedMcpDiscoveredToolAnnotations {
+                read_only_hint: true,
+                ..Default::default()
+            },
+        }];
+
+        let discovered = package_with_discovered_hosted_mcp_tools(&package, &tools)
+            .expect("InstalledLocal hosted MCP package must be discoverable");
+
+        assert_eq!(discovered.manifest.source, ManifestSource::InstalledLocal);
+        let tool = discovered
+            .capabilities
+            .iter()
+            .find(|capability| {
+                capability.id.as_str() == "agent-market.timeless__list_meetings"
+            })
+            .expect("discovered worker tool capability");
+        assert_eq!(tool.runtime, RuntimeKind::Mcp);
+        assert_eq!(tool.runtime_credentials.len(), 1);
+        assert!(
+            discovered
+                .capabilities
+                .iter()
+                .all(|capability| capability.id.as_str() != "agent-market.search_agents"),
+            "static template capability must be replaced by discovery"
+        );
+    }
+
+    fn agent_market_installed_local_package() -> ExtensionPackage {
+        let mut contracts = crate::HostApiContractRegistry::new();
+        contracts
+            .register(std::sync::Arc::new(
+                crate::host_api::capability_provider::CapabilityProviderHostApiContract::new()
+                    .expect("capability provider contract"),
+            ))
+            .expect("register capability provider contract");
+        let manifest = ExtensionManifest::parse_with_host_api_contracts(
+            AGENT_MARKET_MANIFEST,
+            ManifestSource::InstalledLocal,
+            &HostPortCatalog::default(),
+            &contracts,
+        )
+        .expect("valid agent-market manifest");
+        ExtensionPackage::from_manifest(
+            manifest,
+            VirtualPath::new("/system/extensions/agent-market").expect("valid root"),
+        )
+        .expect("valid agent-market package")
     }
 
     #[test]

@@ -289,17 +289,24 @@ impl ExtensionPackage {
         })
     }
 
-    pub fn from_host_bundled_manifest_with_inline_dynamic_schemas(
+    pub fn from_hosted_mcp_manifest_with_inline_dynamic_schemas(
         manifest: ExtensionManifest,
         root: VirtualPath,
         manifest_digest: Option<String>,
         capabilities: Vec<CapabilityDescriptor>,
     ) -> Result<Self, ExtensionError> {
-        if manifest.source != ManifestSource::HostBundled {
+        // The manifest's source is preserved as-is (no trust relabeling): a
+        // discovered InstalledLocal package stays InstalledLocal and keeps its
+        // third-party trust ceiling. Only sources eligible for hosted-MCP
+        // discovery may carry inline dynamic schemas.
+        if !matches!(
+            manifest.source,
+            ManifestSource::HostBundled | ManifestSource::InstalledLocal
+        ) {
             return Err(ExtensionError::InvalidManifest {
-                reason:
-                    "inline dynamic descriptor schemas are only supported for host-bundled packages"
-                        .to_string(),
+                reason: "inline dynamic descriptor schemas are only supported for host-bundled \
+                         or locally-installed hosted MCP packages"
+                    .to_string(),
             });
         }
         ensure_extension_root_matches(&manifest.id, &root)?;
