@@ -2612,6 +2612,48 @@ test("useChatEvents: terminal run failure replaces its provisional stream error"
   });
 });
 
+test("useChatEvents: metadata-free terminal failure replaces its stream error", () => {
+  const harness = createUseChatEventsHarness({ failureMessageForRunStatus });
+  harness.setCurrentActiveRun({
+    runId: "run-terminal-fallback",
+    threadId: "thread-1",
+    status: "running",
+  });
+
+  harness.handleEvent({
+    type: "error",
+    frame: {
+      error: "unavailable",
+      kind: "service_unavailable",
+      retryable: true,
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: "run-terminal-fallback",
+              status: "failed",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.deepEqual(plain(harness.messages[0]), {
+    id: "err-run-terminal-fallback",
+    role: "error",
+    content: "The run failed before producing a reply.",
+    timestamp: harness.messages[0].timestamp,
+    failureStatus: "failed",
+  });
+});
+
 test("useChatEvents: stale terminal failure promotes its own stream error after retry", () => {
   const harness = createUseChatEventsHarness({
     failureMessageForRunStatus: ({ failureSummary }) =>

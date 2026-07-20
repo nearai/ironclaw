@@ -826,7 +826,11 @@ function appendRunFailureMessage(
       ...connectionContext,
     });
     if (existing >= 0) {
-      const hasUsefulUpdate = Boolean(failureSummary || failureCategory);
+      const hasUsefulUpdate = Boolean(
+        failureSummary ||
+          failureCategory ||
+          prev[existing].failureStatus === "stream_error",
+      );
       if (!hasUsefulUpdate || prev[existing].content === content) return prev;
       const next = [...prev];
       next[existing] = {
