@@ -66,6 +66,19 @@ pub(crate) fn extension_lifecycle_tools_profile_for_user(
     })
 }
 
+/// [`extension_lifecycle_tools_profile`], plus a composition-time Google
+/// OAuth backend (the "config set" + restart arm of the provider-instance
+/// readiness map) — the no-false-positive counterpart proving the
+/// readiness-map check clears
+/// once an operator configures the instance, and the run falls through to
+/// the ordinary per-account credential gate instead.
+pub(crate) fn extension_lifecycle_tools_profile_google_oauth_configured()
+-> HarnessResult<ToolsProfile> {
+    let mut profile = extension_lifecycle_tools_profile()?;
+    profile.options = profile.options.with_google_oauth_backend_for_test();
+    Ok(profile)
+}
+
 pub(crate) async fn extension_lifecycle_tools() -> HarnessResult<HostRuntimeCapabilityHarness> {
     extension_lifecycle_tools_profile()?.build().await
 }

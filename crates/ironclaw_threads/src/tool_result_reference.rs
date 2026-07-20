@@ -1,3 +1,4 @@
+// arch-exempt: large_file, validator+markers+schema checks pending split, plan #6310
 use ironclaw_host_api::{CapabilityId, INPUT_ENCODE_HUMAN_SUMMARY, ProviderToolName};
 use ironclaw_safety::{
     validate_optional_provider_metadata_text, validate_provider_arguments,
@@ -587,6 +588,18 @@ fn validate_model_observation_text(value: &str) -> Result<(), String> {
 /// re-fetch it every turn. Markers that begin/end with a non-alphanumeric
 /// delimiter (e.g. `bearer `, `authorization:`) already carry their own
 /// boundary and keep matching exactly as before.
+///
+/// Also exempts a marker occurrence that is the exact host-authored `config
+/// set <namespace>.<key>` remediation shape (e.g. `ironclaw config set
+/// google.client_secret`) — see `is_config_set_key_reference` for the narrow
+/// four-part test. That shape names a config KEY inside a fixed diagnostic
+/// instruction, never a leaked secret VALUE. Assignment-shaped text
+/// (`key=value`, `key: value`) and domain/path-shaped text (`a.b.example.com`)
+/// stay banned even when they reuse the same dotted marker word, and this is
+/// a pure vocabulary scan — it cannot catch a leaked value that never spells
+/// a banned word — so the exemption does not change the threat model for
+/// deliberate exfiltration; it only narrows the same false-positive class the
+/// `secretary` case above already carves out.
 fn contains_marker_at_word_boundary(haystack: &str, marker: &str) -> bool {
     if marker.is_empty() {
         return false;
@@ -601,11 +614,69 @@ fn contains_marker_at_word_boundary(haystack: &str, marker: &str) -> bool {
         let after_ok = !ends_alnum
             || end >= haystack.len()
             || !haystack[end..].starts_with(|c: char| c.is_ascii_alphanumeric());
-        if before_ok && after_ok {
+        if before_ok && after_ok && !is_config_set_key_reference(haystack, start, end) {
             return true;
         }
     }
     false
+}
+
+/// Byte offset of the start of the dotted `namespace.key` identifier token
+/// that ends at byte offset `pos` in `haystack`, walking back through ASCII
+/// alphanumeric/`_`/`.` characters. `char_indices().rev()` + `len_utf8()`
+/// (not `rfind` + `+1`) so a multi-byte character immediately before the
+/// token lands the boundary on a valid UTF-8 char boundary rather than
+/// panicking on a mid-character byte index (`.claude/rules/types.md` UTF-8
+/// slicing rule).
+fn dotted_token_start(haystack: &str, pos: usize) -> usize {
+    let prefix = &haystack[..pos]; // safety: `pos` is always 0 or a byte offset derived from `haystack.match_indices` in the sole caller chain, both always valid UTF-8 char boundaries.
+    prefix
+        .char_indices()
+        .rev()
+        .find(|&(_, character)| {
+            !(character.is_ascii_alphanumeric() || character == '_' || character == '.')
+        })
+        .map(|(index, character)| index + character.len_utf8())
+        .unwrap_or(0)
+}
+
+/// Narrow exemption for the host-authored `ironclaw config set
+/// <namespace>.<key>` remediation shape (see `contains_marker_at_word_boundary`'s
+/// doc for the threat-model rationale). A marker occurrence spanning byte
+/// range `[start, end)` in `haystack` (already lowercased) is exempt only
+/// when ALL of the following hold:
+///
+/// 1. it sits inside a dotted `namespace.key` identifier token (backward walk
+///    via [`dotted_token_start`]);
+/// 2. the marker ends exactly at that token's end — the char right after
+///    `end` is not ASCII alphanumeric, `_`, or `.` — which rejects both a
+///    longer identifier tail and a following path/domain segment
+///    (`a.b.example.com`);
+/// 3. the token itself is immediately preceded, modulo ASCII whitespace, by
+///    the literal command context `config set` — a bare dotted key with no
+///    command context is not a remediation instruction;
+/// 4. the first non-whitespace character right after the token is not `=` or
+///    `:` — which rejects `key=value` / `key: value` assignment dumps even
+///    when wrapped in a spoofed `config set` prefix.
+fn is_config_set_key_reference(haystack: &str, start: usize, end: usize) -> bool {
+    let token_start = dotted_token_start(haystack, start);
+    // (1) inside a dotted namespace.key token.
+    if !haystack[token_start..start].contains('.') {
+        return false;
+    }
+    // (2) marker ends exactly at the token's end.
+    let after_marker = haystack[end..].chars().next();
+    if after_marker.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.') {
+        return false;
+    }
+    // (3) token is immediately preceded (modulo ASCII whitespace) by "config set".
+    let before_token = haystack[..token_start].trim_end_matches(|c: char| c.is_ascii_whitespace()); // safety: `token_start` comes from `dotted_token_start`, which returns 0 or `char_indices`-derived `index + len_utf8` — always a valid UTF-8 char boundary.
+    if !before_token.ends_with("config set") {
+        return false;
+    }
+    // (4) first non-whitespace char after the token must not be `=` or `:`.
+    let after_token = haystack[end..].trim_start_matches(|c: char| c.is_ascii_whitespace());
+    !matches!(after_token.chars().next(), Some('=') | Some(':'))
 }
 
 fn validate_model_visible_tool_observation_schema(value: &serde_json::Value) -> Result<(), String> {
@@ -1083,6 +1154,86 @@ mod tests {
         assert!(contains_marker_at_word_boundary(
             "authorization: bearer abc",
             "bearer "
+        ));
+    }
+
+    /// Discovered while wiring a host-authored remediation ("run `ironclaw
+    /// config set google.client_secret`") through this exact diagnostic
+    /// channel — the dedicated `client_secret` marker (and independently the
+    /// bare `secret` marker, since `_` already counts as a word boundary)
+    /// dropped the WHOLE model observation, taking the unrelated
+    /// `config set google.client_id` line down with it. The original fix
+    /// exempted any dotted `namespace.key` reference regardless of context,
+    /// which was too broad: `internal.password=Tr0ub4dor&3`,
+    /// `google.client_secret: <value>`, and `api.secret.example.com` all
+    /// slipped through it. `is_config_set_key_reference` narrows the
+    /// exemption to the literal `config set <namespace>.<key>` remediation
+    /// shape only (see its doc for the four-part test).
+    #[test]
+    fn config_set_key_reference_is_exempt_from_sensitive_markers() {
+        use super::{contains_marker_at_word_boundary, validate_model_observation_text};
+
+        assert!(!contains_marker_at_word_boundary(
+            "run ironclaw config set google.client_secret to fix this",
+            "client_secret"
+        ));
+        assert!(!contains_marker_at_word_boundary(
+            "run ironclaw config set google.client_secret to fix this",
+            "secret"
+        ));
+        assert!(
+            validate_model_observation_text(
+                "1. ironclaw config set google.client_id <id>.apps.googleusercontent.com\n\
+             2. ironclaw config set google.client_secret   (prompts, hidden input)"
+            )
+            .is_ok()
+        );
+
+        // A bare (non-dotted) mention right next to the value-shaped context
+        // must still be rejected — the exemption is narrowly the `config set`
+        // dotted-key shape, not the word `secret` in general.
+        assert!(contains_marker_at_word_boundary(
+            "here is the client secret value",
+            "secret"
+        ));
+        // A marker at the START of a dotted token (no leading namespace) is
+        // NOT a config-key reference and must still be rejected.
+        assert!(contains_marker_at_word_boundary(
+            "the secret.txt file leaked",
+            "secret"
+        ));
+
+        // Adversarial negatives: dotted-key shaped, but not the exempt
+        // `config set` remediation instruction — every one of these must
+        // still be REJECTED (banned).
+        for (rejected, marker) in [
+            // No `config set` context at all: an assignment dump using the
+            // same dotted-key vocabulary as the remediation text.
+            ("internal.password=tr0ub4dor&3", "password"),
+            // No `config set` context; assignment/annotation-shaped tail.
+            ("google.client_secret: aqicahi", "client_secret"),
+            ("google.client_secret=gocspx-x", "client_secret"),
+            // Domain/path-shaped: the marker is not the token's tail (a `.`
+            // immediately follows), regardless of context.
+            ("api.secret.example.com", "secret"),
+            // Spoofed `config set` prefix wrapping an assignment: condition
+            // (4) must still reject the trailing `=`.
+            ("config set google.client_secret=gocspx-x", "client_secret"),
+        ] {
+            assert!(
+                contains_marker_at_word_boundary(rejected, marker),
+                "`{rejected}` (marker `{marker}`) must NOT be exempt"
+            );
+        }
+
+        // Multi-byte case proving the UTF-8-safe backward walk: a non-ASCII
+        // character sits immediately before the `config set` command context,
+        // and the dotted key is followed by an assignment tail, so this must
+        // still be REJECTED (condition 4) without panicking on a char
+        // boundary while walking back past `é`.
+        assert!(contains_marker_at_word_boundary(
+            "é config set google.client_secret=hunter2",
+            "client_secret"
         ));
     }
 

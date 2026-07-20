@@ -172,12 +172,14 @@ pub(super) fn google_remediation_text() -> String {
 /// is the WebUI extension setup flow. Describes WHAT to configure only;
 /// the restart apply-step sentence is appended once by the caller (see
 /// `set.rs::print_apply_step`), not embedded here — see the module doc.
+///
+/// Delegates to `ironclaw_reborn_config::slack_remediation_text_with_base_url`
+/// — the single shared source of this wording — so this crate's re-export
+/// point stays a stable call site for `set.rs` even though the wording itself
+/// lives lower in the dependency graph, mirroring `google_remediation_text`
+/// above.
 pub(super) fn slack_remediation_text(base_url: &str) -> String {
-    format!(
-        "Slack setup is WebUI-only: finish connecting Slack at {base_url}/extensions \
-         (config set slack.enabled true|false only toggles whether the route mounts; it does \
-         not configure Slack app identity or credentials)."
-    )
+    ironclaw_reborn_config::slack_remediation_text_with_base_url(base_url)
 }
 
 #[cfg(test)]

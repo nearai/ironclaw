@@ -46,8 +46,8 @@ use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
 use ironclaw_product_workflow::{ProjectService, ResolvedBinding};
 use ironclaw_reborn_composition::test_support::SkillActivationTestSource;
 use ironclaw_reborn_composition::{
-    ProductLiveCapabilityIo, RebornApprovalTestParts, RebornBuildInput, RebornProductAuthServices,
-    build_reborn_services,
+    OAuthClientConfig, ProductLiveCapabilityIo, RebornApprovalTestParts, RebornBuildInput,
+    RebornProductAuthServices, build_reborn_services,
 };
 use ironclaw_trust::EffectiveTrustClass;
 use ironclaw_turns::{
@@ -590,6 +590,7 @@ impl HostRuntimeCapabilityHarness {
             project_service_fault_injection,
             durable_capability_io,
             trigger_active_run_lookup_requested,
+            google_oauth_backend_for_test,
         } = options;
         let root = Arc::new(tempfile::tempdir()?);
         let storage_root = root.path().join("local-dev");
@@ -617,6 +618,32 @@ impl HostRuntimeCapabilityHarness {
         }
         if let Some(egress) = network_http_egress_for_test {
             input = input.with_network_http_egress_for_test(egress);
+        }
+        // `ironclaw_reborn_composition` is ALWAYS built with
+        // `slack-v2-host-beta` in this workspace (root `Cargo.toml`'s
+        // dependency declaration), and every extension-lifecycle group wires
+        // a real Slack channel-connection bundle post-build
+        // (`group_constructors.rs::extension_lifecycle_with_profile`)
+        // unconditionally — this test tier never represents a genuinely
+        // Slack-unconfigured instance the way the default (no
+        // `with_google_oauth_backend_for_test`) build represents an
+        // unconfigured Google instance. Default `true` here so the
+        // provider-instance readiness map never gates `slack_personal`
+        // activation for the ~100 pre-existing harnesses that predate the
+        // readiness-map chokepoint; the map's own unit coverage
+        // (`provider_instance_readiness.rs`) pins the `false` arm directly.
+        input = input.with_slack_host_beta_enabled(true);
+        if google_oauth_backend_for_test {
+            // Dummy but well-formed: only presence on `oauth_provider_configs`
+            // feeds `google_oauth_configured` (factory.rs) — the readiness-map
+            // check has no reason to touch the real client id/secret values.
+            let google_client = OAuthClientConfig::new(
+                "itest-google-client-id.apps.googleusercontent.com",
+                "http://127.0.0.1/oauth/callback/google",
+                None,
+            )
+            .map_err(|error| format!("test google oauth client config: {error}"))?;
+            input = input.with_google_oauth_backend(google_client);
         }
         let services = build_reborn_services(input).await?;
         if seed_extension_credentials {

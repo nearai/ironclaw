@@ -720,7 +720,14 @@ async fn slack_oauth_callback_activates_and_publishes_all_personal_tools() {
             "local-dev-slack-auth-lifecycle-owner",
             dir.path().join("local-dev"),
         )
-        .with_product_auth_ports(in_memory_product_auth_ports()),
+        .with_product_auth_ports(in_memory_product_auth_ports())
+        // This test exercises the Slack personal OAuth callback's activation
+        // path (per-account credential completion), not the provider-instance
+        // readiness map — without this, the callback's internal
+        // `extension_activate` now fails closed with
+        // `ProviderInstanceNotConfigured` before it ever reaches OAuth
+        // completion.
+        .with_slack_host_beta_enabled(true),
     )
     .await
     .expect("local-dev services build");

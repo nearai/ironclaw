@@ -29,6 +29,7 @@ pub(crate) mod host_api_contracts;
 pub(crate) mod lifecycle;
 pub(crate) mod mcp;
 pub(crate) mod mcp_discovery;
+pub(crate) mod provider_instance_readiness;
 pub(crate) mod skill_learning;
 pub(crate) mod skill_listing;
 pub(crate) mod webui_extension_credentials;

@@ -9,6 +9,14 @@
 //!   Gmail/Google Workspace "not configured" tool-result error a capability
 //!   dispatch returns before it ever reaches credential resolution.
 //!
+//! `slack_remediation_text` mirrors the same split: `ironclaw_reborn_composition`'s
+//! `extension_host::provider_instance_readiness` module consumes the
+//! base-url-free variant below to build the `slack_personal`
+//! readiness-map entry; `ironclaw_reborn_cli`'s `capability_config` module
+//! wraps `slack_remediation_text_with_base_url` to keep printing a concrete
+//! serve base URL. `slack_setup_sentence` is the single source of truth both
+//! call through, so the wording cannot drift between the two surfaces.
+//!
 //! `ironclaw_reborn_cli` depends on `ironclaw_reborn_composition`, never the
 //! reverse, so this text cannot live in the CLI crate (composition could not
 //! import it). It lives here instead, since both crates already depend on
@@ -26,6 +34,37 @@ pub fn google_remediation_text() -> String {
      4. ironclaw config set google.client_secret   (prompts, hidden input)\n  \
      5. ironclaw config set google.redirect_uri <redirect-uri-from-the-oauth-client>"
         .to_string()
+}
+
+/// Single source of truth for the Slack BYO setup sentence, parameterized on
+/// WHERE the WebUI extensions page is described (a relative route for the
+/// composition-consumed variant, a concrete base URL for the CLI-consumed
+/// variant) — see the module doc for why two public wrappers exist. Describes
+/// WHAT to configure only; the restart apply-step sentence is appended once
+/// by each caller (`apply_step_text()` / `set.rs::print_apply_step`), never
+/// embedded here.
+fn slack_setup_sentence(webui_extensions_location: &str) -> String {
+    format!(
+        "Slack setup is WebUI-only: finish connecting Slack at {webui_extensions_location} \
+         (config set slack.enabled true|false only toggles whether the route mounts; it does \
+         not configure Slack app identity or credentials)."
+    )
+}
+
+/// BYO console-steps remediation text for Slack, base-url-free: the
+/// composition-time build cannot know the serve base URL (it is a
+/// per-invocation `serve` flag, resolved later), so this variant names the
+/// route relatively. Consumed by
+/// `ironclaw_reborn_composition::extension_host::provider_instance_readiness`.
+pub fn slack_remediation_text() -> String {
+    slack_setup_sentence("/extensions in the WebUI")
+}
+
+/// Same sentence, with the concrete serve base URL the CLI resolves at
+/// `config set` time. Consumed by
+/// `ironclaw_reborn_cli::commands::config::capability_config::slack_remediation_text`.
+pub fn slack_remediation_text_with_base_url(base_url: &str) -> String {
+    slack_setup_sentence(&format!("{base_url}/extensions"))
 }
 
 /// Canonical "apply the change" follow-up sentence: `config set` never
@@ -55,5 +94,31 @@ mod tests {
         assert!(google.contains("config set google.client_id"));
         assert!(google.contains("config set google.client_secret"));
         assert!(google.contains("config set google.redirect_uri"));
+    }
+
+    #[test]
+    fn slack_remediation_text_names_the_relative_extensions_route() {
+        let slack = slack_remediation_text();
+        assert!(slack.contains("/extensions"));
+        assert!(slack.contains("config set slack.enabled"));
+        assert!(!slack.contains("config set slack.bot_token"));
+        assert_eq!(
+            slack.matches("service restart").count(),
+            0,
+            "slack_remediation_text must not embed the restart step itself \
+             (callers append it exactly once): {slack}"
+        );
+    }
+
+    #[test]
+    fn slack_remediation_text_with_base_url_embeds_the_concrete_url() {
+        let slack = slack_remediation_text_with_base_url("http://127.0.0.1:3000");
+        assert!(slack.contains("http://127.0.0.1:3000/extensions"));
+        assert!(slack.contains("config set slack.enabled"));
+        assert_eq!(
+            slack.matches("service restart").count(),
+            0,
+            "slack_remediation_text_with_base_url must not embed the restart step itself: {slack}"
+        );
     }
 }

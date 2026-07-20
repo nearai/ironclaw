@@ -207,6 +207,17 @@ pub struct RebornBuildInput {
     pub(crate) oauth_dcr_provider_configs: Vec<OAuthDcrProviderBackendConfig>,
     #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) slack_personal_oauth_lazy_slot: Option<SlackPersonalSetupServiceSlot>,
+    /// Build-time Slack host-beta wiring signal: whether the CLI `serve`
+    /// path resolved a Slack
+    /// host-beta config for this instance BEFORE the composition build ran.
+    /// Mirrors how `google_oauth_configured` arrives via
+    /// `oauth_provider_configs` — one signal, read by
+    /// `provider_instance_readiness_map` to decide whether the
+    /// `slack_personal` provider needs a readiness-map entry. Defaults
+    /// `false`; unrelated to whether `slack-v2-host-beta` mounts are composed
+    /// post-build (a separate, later step — see `serve.rs`).
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) slack_host_beta_enabled: bool,
     pub(crate) nearai_mcp_bootstrap_config:
         Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
     /// Concurrency limits applied to the in-memory turn-state store.
@@ -768,6 +779,17 @@ impl RebornBuildInput {
         self
     }
 
+    /// Record the build-time Slack host-beta wiring signal. The CLI `serve`
+    /// path calls this before the composition build with whether it
+    /// resolved a Slack host-beta
+    /// config for this instance, so `provider_instance_readiness_map` can
+    /// decide whether `slack_personal` needs a readiness-map entry.
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub fn with_slack_host_beta_enabled(mut self, enabled: bool) -> Self {
+        self.slack_host_beta_enabled = enabled;
+        self
+    }
+
     /// Enable Dynamic Client Registration for the bundled Notion MCP OAuth provider.
     ///
     /// Callers provide the public origin that serves the Reborn product-auth
@@ -858,6 +880,8 @@ impl RebornBuildInput {
             oauth_dcr_provider_configs: Vec::new(),
             #[cfg(feature = "slack-v2-host-beta")]
             slack_personal_oauth_lazy_slot: None,
+            #[cfg(feature = "slack-v2-host-beta")]
+            slack_host_beta_enabled: false,
             nearai_mcp_bootstrap_config: None,
             turn_state_store_limits: InMemoryTurnStateStoreLimits::default(),
         }

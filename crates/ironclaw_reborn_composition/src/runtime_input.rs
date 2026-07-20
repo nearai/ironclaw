@@ -673,6 +673,17 @@ impl RebornRuntimeInput {
         self
     }
 
+    /// Forward the build-time Slack host-beta wiring signal onto the
+    /// substrate build input. No-op when the services input is absent,
+    /// mirroring `with_owner_id` above.
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub fn with_slack_host_beta_enabled(mut self, enabled: bool) -> Self {
+        self.services = self
+            .services
+            .map(|services| services.with_slack_host_beta_enabled(enabled));
+        self
+    }
+
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
         self.skill_context_source = Some(source);
         self
