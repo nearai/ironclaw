@@ -6838,6 +6838,11 @@ fn release_ci_publishes_reborn_binaries_without_legacy_or_docker_publish() {
             && publish_job.contains("ironclaw-${target}.tar.gz")
             && publish_job.contains("$asset_name.sha256")
             && publish_job.contains("sha256.sum")
+            && publish_job.contains("release_version=\"${RELEASE_TAG#ironclaw-v}\"")
+            && publish_job.contains(
+                "if [[ \"$release_version\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+- ]]; then"
+            )
+            && !publish_job.contains("if [[ \"$RELEASE_TAG\" == *-* ]]; then")
             && publish_job.contains("gh release create")
             && publish_job.contains("gh release upload")
             && !publish_job.contains("uses: ./.github/workflows/docker.yml"),

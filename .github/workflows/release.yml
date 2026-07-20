@@ -128,7 +128,8 @@ jobs:
           set -euo pipefail
 
           prerelease_flag=()
-          if [[ "$RELEASE_TAG" == *-* ]]; then
+          release_version="${RELEASE_TAG#ironclaw-v}"
+          if [[ "$release_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+- ]]; then
             prerelease_flag=(--prerelease)
           fi
 
