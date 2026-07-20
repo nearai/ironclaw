@@ -16,10 +16,9 @@
 use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
-use futures_util::future::join_all;
 use ironclaw_approvals::{
     PersistentApprovalAction, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
-    PersistentApprovalScope, permission_mode_allows_persistent_approval,
+    PersistentApprovalScope,
 };
 use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_capabilities::{
@@ -30,10 +29,10 @@ use ironclaw_capabilities::{
 use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityDispatcher, CapabilityId, Decision, DenyReason,
-    DispatchFailureKind, InvocationId, PackageSource, Principal, ResourceEstimate, ResourceScope,
-    RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
-    runtime_policy::EffectiveRuntimePolicy, sha256_digest_token,
+    ApprovalRequestId, CapabilityDispatcher, CapabilityId, DenyReason, DispatchFailureKind,
+    InvocationId, PackageSource, Principal, ResourceScope, RuntimeCredentialAuthRequirement,
+    RuntimeDispatchErrorKind, RuntimeKind, SecretHandle, runtime_policy::EffectiveRuntimePolicy,
+    sha256_digest_token,
 };
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_process_sandbox::{
@@ -501,8 +500,14 @@ impl HostRuntime for DefaultHostRuntime {
             );
         }
 
-        let trust_decision = match self.open_pre_authorization(&mut context, &capability_id) {
-            Ok(trust_decision) => trust_decision,
+        // Still runs `open_pre_authorization` for its context.trust stamp and
+        // fail-closed planning gate (redundant with the kernel's in-fold trust +
+        // planning now; cleaned up in a later slice). The returned
+        // `TrustDecision` is no longer consumed here — persistent-approval moved
+        // into the kernel's `authorize()` fold, which recomputes trust — so only
+        // the rejection is handled.
+        match self.open_pre_authorization(&mut context, &capability_id) {
+            Ok(_trust_decision) => {}
             Err(PreAuthorizationRejected::RuntimePolicy { outcome, .. }) => {
                 trace_capability_latency_ok(
                     "invoke_capability_policy_rejected",
@@ -521,7 +526,7 @@ impl HostRuntime for DefaultHostRuntime {
                 );
                 return Ok(*outcome);
             }
-        };
+        }
 
         let registry = self.registry.snapshot();
 
@@ -533,30 +538,14 @@ impl HostRuntime for DefaultHostRuntime {
             return Err(HostRuntimeError::invalid_request(error.to_string()));
         }
 
-        // Credential pre-flight now runs inside the capability kernel's
-        // `authorize()` fold (§5.3.2/§9), reading `HostPolicyFacts` (impl'd by
-        // this runtime). A missing credential surfaces as
-        // `CapabilityInvocationError::AuthorizationRequiresAuth`, which
-        // `translate_invocation_error` maps back to `auth_required_outcome`
-        // (same gate id, same fields). The kernel orders it before the approval
-        // decision, preserving the credential-before-approval invariant.
+        // Credential pre-flight and the persistent-approval re-authorize fold now
+        // run inside the capability kernel's `authorize()` fold (§5.2.7/§5.3.2),
+        // reading `HostPolicyFacts` (impl'd by this runtime). A missing credential
+        // surfaces as `CapabilityInvocationError::AuthorizationRequiresAuth`, which
+        // `translate_invocation_error` maps back to `auth_required_outcome` (same
+        // gate id, same fields). The kernel orders credential-before-approval and
+        // adopts the first persistent grant that flips the decision to Allow.
 
-        let approval_started_at = live_latency_started_at();
-        self.apply_persistent_approval_policy(
-            &mut context,
-            &registry,
-            PersistentApprovalAction::Dispatch,
-            &capability_id,
-            &estimate,
-            &trust_decision,
-        )
-        .await;
-        trace_capability_latency_ok(
-            "persistent_approval_policy",
-            &capability_id,
-            &scope,
-            approval_started_at,
-        );
         let host = self.capability_host(&registry);
 
         let invocation = CapabilityInvocationRequest {
@@ -659,13 +648,17 @@ impl HostRuntime for DefaultHostRuntime {
             );
         }
 
-        let trust_decision = match self.open_pre_authorization(&mut context, &capability_id) {
-            Ok(trust_decision) => trust_decision,
-            Err(
-                PreAuthorizationRejected::RuntimePolicy { outcome, .. }
-                | PreAuthorizationRejected::Trust { outcome, .. },
-            ) => return Ok(*outcome),
-        };
+        // Still runs `open_pre_authorization` for its context.trust stamp and
+        // fail-closed planning gate; the returned `TrustDecision` is no longer
+        // consumed here (persistent-approval moved into the kernel's spawn
+        // authorize fold, which recomputes trust).
+        if let Err(
+            PreAuthorizationRejected::RuntimePolicy { outcome, .. }
+            | PreAuthorizationRejected::Trust { outcome, .. },
+        ) = self.open_pre_authorization(&mut context, &capability_id)
+        {
+            return Ok(*outcome);
+        }
 
         let registry = self.registry.snapshot();
 
@@ -677,19 +670,12 @@ impl HostRuntime for DefaultHostRuntime {
             return Err(HostRuntimeError::invalid_request(error.to_string()));
         }
 
-        // Credential pre-flight now runs inside the kernel's spawn authorize fold
-        // (§5.3.2/§9) via `HostPolicyFacts`, surfacing a missing credential as
-        // `AuthorizationRequiresAuth` before the spawn-approval decision.
+        // Credential pre-flight and the persistent-approval re-authorize fold now
+        // run inside the kernel's spawn authorize fold (§5.2.7/§5.3.2) via
+        // `HostPolicyFacts`: a missing credential surfaces as
+        // `AuthorizationRequiresAuth` before the spawn-approval decision, and the
+        // first persistent grant that flips the decision to Allow is adopted.
 
-        self.apply_persistent_approval_policy(
-            &mut context,
-            &registry,
-            PersistentApprovalAction::SpawnCapability,
-            &capability_id,
-            &estimate,
-            &trust_decision,
-        )
-        .await;
         let host = self.capability_host(&registry);
         let spawn = CapabilitySpawnRequest {
             context,
@@ -840,49 +826,35 @@ impl HostRuntime for DefaultHostRuntime {
             );
         }
 
-        let trust_decision = match self.open_pre_authorization(&mut context, &capability_id) {
-            Ok(trust_decision) => trust_decision,
-            Err(
-                PreAuthorizationRejected::RuntimePolicy {
-                    outcome,
-                    error_kind,
-                }
-                | PreAuthorizationRejected::Trust {
-                    outcome,
-                    error_kind,
-                },
-            ) => {
-                self.fail_matching_blocked_auth_resume_on_preflight_error(
-                    &context,
-                    &capability_id,
-                    error_kind,
-                )
-                .await;
-                return Ok(*outcome);
+        // Still runs `open_pre_authorization` for its context.trust stamp and
+        // fail-closed planning gate; the returned `TrustDecision` is no longer
+        // consumed here. The persistent-approval re-application on auth-resume now
+        // lives in the kernel's `authorize_resumed` fold (§5.2.7/§5.3.2): a
+        // capability authorized only by a persistent grant (e.g.
+        // `extension_activate` under admin-config FirstParty trust) is re-authorized
+        // by the kernel injecting the candidate grant after the credential gate,
+        // instead of host_runtime mutating the context before re-dispatch.
+        if let Err(
+            PreAuthorizationRejected::RuntimePolicy {
+                outcome,
+                error_kind,
             }
-        };
+            | PreAuthorizationRejected::Trust {
+                outcome,
+                error_kind,
+            },
+        ) = self.open_pre_authorization(&mut context, &capability_id)
+        {
+            self.fail_matching_blocked_auth_resume_on_preflight_error(
+                &context,
+                &capability_id,
+                error_kind,
+            )
+            .await;
+            return Ok(*outcome);
+        }
 
         let registry = self.registry.snapshot();
-        // Re-apply the persistent-approval grant on the auth-resume preflight,
-        // mirroring `dispatch_capability`. The original dispatch injected this
-        // grant so the authorizer returned `Allow`; the loop re-dispatches the
-        // resume with a freshly built context that does not carry it. Without
-        // this, a capability authorized only by a persistent-approval grant
-        // (e.g. `extension_activate` under admin-config FirstParty trust) is
-        // re-authorized grant-less after the user supplies the missing
-        // credential and is denied — so the credential gate resumes only to
-        // fail authorization, even though a subsequent fresh dispatch succeeds.
-        // The helper is a no-op when no matching policy/grant exists, so
-        // capabilities that genuinely require fresh approval are unaffected.
-        self.apply_persistent_approval_policy(
-            &mut context,
-            &registry,
-            PersistentApprovalAction::Dispatch,
-            &capability_id,
-            &estimate,
-            &trust_decision,
-        )
-        .await;
         let host = self.capability_host(&registry);
         let auth_resume = CapabilityAuthResumeRequest {
             context,
@@ -1314,122 +1286,6 @@ impl DefaultHostRuntime {
         Ok(())
     }
 
-    async fn apply_persistent_approval_policy(
-        &self,
-        context: &mut ironclaw_host_api::ExecutionContext,
-        registry: &ExtensionRegistry,
-        action: PersistentApprovalAction,
-        capability_id: &CapabilityId,
-        estimate: &ResourceEstimate,
-        trust_decision: &TrustDecision,
-    ) {
-        let Some(policies) = self.persistent_approval_policies.as_ref() else {
-            return;
-        };
-        let Some(descriptor) = registry.get_capability(capability_id) else {
-            return;
-        };
-        if !permission_mode_allows_persistent_approval(descriptor.default_permission) {
-            tracing::debug!(
-                capability_id = %capability_id,
-                permission = ?descriptor.default_permission,
-                "persistent approval skipped for manifest policy"
-            );
-            return;
-        }
-        let scopes = persistent_approval_lookup_scopes(&context.resource_scope);
-        let grantees = persistent_approval_grantees(context);
-        let lookup_results = join_all(
-            scopes
-                .into_iter()
-                .flat_map(|scope| {
-                    grantees
-                        .iter()
-                        .cloned()
-                        .map(move |grantee| (scope.clone(), grantee))
-                })
-                .map(|(scope, grantee)| {
-                    let policies = Arc::clone(policies);
-                    let key = PersistentApprovalPolicyKey {
-                        scope,
-                        action,
-                        capability_id: capability_id.clone(),
-                        grantee,
-                    };
-                    async move { policies.lookup(&key).await }
-                }),
-        )
-        .await;
-        for policy in lookup_results {
-            let policy = match policy {
-                Ok(policy) => policy,
-                Err(error) => {
-                    tracing::warn!(
-                        capability_id = %capability_id,
-                        error = %error,
-                        "persistent approval policy lookup failed; falling back to normal authorization"
-                    );
-                    continue;
-                }
-            };
-            let Some(policy) = policy else {
-                continue;
-            };
-            let Some(grant) = policy.active_grant() else {
-                continue;
-            };
-            let mut candidate_context = context.clone();
-            candidate_context.grants.grants.clear();
-            candidate_context.grants.grants.push(grant.clone());
-            let decision = match action {
-                PersistentApprovalAction::Dispatch => {
-                    self.authorizer
-                        .authorize_dispatch_with_trust(
-                            &candidate_context,
-                            descriptor,
-                            estimate,
-                            trust_decision,
-                        )
-                        .await
-                }
-                PersistentApprovalAction::SpawnCapability => {
-                    self.authorizer
-                        .authorize_spawn_with_trust(
-                            &candidate_context,
-                            descriptor,
-                            estimate,
-                            trust_decision,
-                        )
-                        .await
-                }
-            };
-            match decision {
-                Decision::Allow { .. } => {}
-                Decision::Deny { reason } => {
-                    tracing::debug!(
-                        capability_id = %capability_id,
-                        deny_reason = ?reason,
-                        "persistent approval policy matched but cannot authorize invocation"
-                    );
-                    continue;
-                }
-                Decision::RequireApproval { .. } => {
-                    tracing::debug!(
-                        capability_id = %capability_id,
-                        "persistent approval policy matched but still requires approval"
-                    );
-                    continue;
-                }
-            }
-            tracing::debug!(
-                capability_id = %capability_id,
-                "persistent approval policy matched; injecting scoped grant"
-            );
-            context.grants.grants.push(grant);
-            break;
-        }
-    }
-
     /// Rejects a resume whose sealed ingress actor differs from the actor that
     /// started the run. Callers invoke this before any preflight that can fail
     /// or mutate the blocked run; `CapabilityHost` repeats the check before
@@ -1686,11 +1542,11 @@ impl DefaultHostRuntime {
 ///
 /// - [`credential_presence`](DefaultHostRuntime::credential_presence) is the
 ///   relocation of the former `credential_preflight_check`; and
-/// - [`persistent_grants`](DefaultHostRuntime::persistent_grants) mirrors the
-///   persistent-approval lookup in
-///   [`apply_persistent_approval_policy`](DefaultHostRuntime::apply_persistent_approval_policy).
-///   It is implemented now but not yet consumed by the kernel — the approval
-///   relocation slice wires the re-authorize loop that reads it.
+/// - [`persistent_grants`](DefaultHostRuntime::persistent_grants) surfaces the
+///   active persistent-approval grants (via the same scope × grantee fan-out the
+///   former `apply_persistent_approval_policy` used). The kernel's `authorize()`
+///   fold owns the re-authorize loop that reads it and adopts the first grant
+///   that flips the decision to `Allow`.
 #[async_trait]
 impl ironclaw_capabilities::HostPolicyFacts for DefaultHostRuntime {
     async fn credential_presence(
@@ -1758,7 +1614,7 @@ impl ironclaw_capabilities::HostPolicyFacts for DefaultHostRuntime {
     async fn persistent_grants(
         &self,
         capability_id: &CapabilityId,
-        scope: &ResourceScope,
+        context: &ironclaw_host_api::ExecutionContext,
         action: ironclaw_capabilities::PolicyAction,
     ) -> Vec<ironclaw_host_api::CapabilityGrant> {
         let Some(policies) = self.persistent_approval_policies.as_ref() else {
@@ -1770,18 +1626,14 @@ impl ironclaw_capabilities::HostPolicyFacts for DefaultHostRuntime {
                 PersistentApprovalAction::SpawnCapability
             }
         };
-        // Mirror `apply_persistent_approval_policy`'s scope × grantee fan-out.
-        //
-        // Grantees are derived from the `ResourceScope` alone, which carries no
-        // `extension_id` — so the `Principal::Extension` grantee that
-        // `apply_persistent_approval_policy` also probes cannot be reproduced
-        // here. This method is not yet consumed by the kernel; the approval
-        // relocation slice that wires the re-authorize loop must thread the
-        // extension identity (or evolve this port) to recover extension-grantee
-        // policies. Scope-derived grantees (user/agent/project/mission) match the
-        // settings-page policies that dominate lookup order today.
-        let scopes = persistent_approval_lookup_scopes(scope);
-        let grantees = persistent_approval_grantees_from_scope(scope);
+        // The kernel passes the full `ExecutionContext`, so the grantee fan-out is
+        // derived through the SAME helpers the former
+        // `apply_persistent_approval_policy` used — including the
+        // `Principal::Extension` grantee read from `context.extension_id`, which a
+        // bare `ResourceScope` cannot carry. This recovers extension-grantee
+        // persistent approvals that a scope-only lookup would silently drop.
+        let scopes = persistent_approval_lookup_scopes(&context.resource_scope);
+        let grantees = persistent_approval_grantees(context);
         let mut grants = Vec::new();
         for policy_scope in &scopes {
             for grantee in &grantees {
@@ -2243,27 +2095,6 @@ fn persistent_approval_grantees(context: &ironclaw_host_api::ExecutionContext) -
     // `ApprovalRequest.requested_by`, which is `Principal::User` or
     // `Principal::Extension`), so looking one up could never match. Persistent
     // approvals are deliberately thread-agnostic (see #4825).
-    grantees
-}
-
-/// Scope-derived grantees for the `HostPolicyFacts::persistent_grants` lookup.
-///
-/// A [`ResourceScope`] carries no `extension_id`, so — unlike
-/// [`persistent_approval_grantees`], which derives from a full
-/// `ExecutionContext` — this cannot include the `Principal::Extension` grantee.
-/// See the note on `DefaultHostRuntime::persistent_grants`; the method is not
-/// yet consumed, and the wiring slice must recover the extension grantee.
-fn persistent_approval_grantees_from_scope(scope: &ResourceScope) -> Vec<Principal> {
-    let mut grantees = vec![Principal::User(scope.user_id.clone())];
-    if let Some(agent_id) = &scope.agent_id {
-        grantees.push(Principal::Agent(agent_id.clone()));
-    }
-    if let Some(project_id) = &scope.project_id {
-        grantees.push(Principal::Project(project_id.clone()));
-    }
-    if let Some(mission_id) = &scope.mission_id {
-        grantees.push(Principal::Mission(mission_id.clone()));
-    }
     grantees
 }
 

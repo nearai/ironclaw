@@ -105,7 +105,7 @@ impl HostPolicyFacts for PermissiveHostPolicyFacts {
     async fn persistent_grants(
         &self,
         _capability_id: &CapabilityId,
-        _scope: &ResourceScope,
+        _context: &ExecutionContext,
         _action: PolicyAction,
     ) -> Vec<CapabilityGrant> {
         Vec::new()

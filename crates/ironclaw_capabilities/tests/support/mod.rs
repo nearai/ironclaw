@@ -71,7 +71,7 @@ impl HostPolicyFacts for PermissiveHostPolicyFacts {
     async fn persistent_grants(
         &self,
         _capability_id: &CapabilityId,
-        _scope: &ResourceScope,
+        _context: &ExecutionContext,
         _action: PolicyAction,
     ) -> Vec<CapabilityGrant> {
         Vec::new()
@@ -108,10 +108,45 @@ impl HostPolicyFacts for MissingCredentialPolicyFacts {
     async fn persistent_grants(
         &self,
         _capability_id: &CapabilityId,
-        _scope: &ResourceScope,
+        _context: &ExecutionContext,
         _action: PolicyAction,
     ) -> Vec<CapabilityGrant> {
         Vec::new()
+    }
+}
+
+/// `HostPolicyFacts` double whose `persistent_grants` returns exactly one
+/// caller-supplied candidate grant (credential pre-flight satisfied). Drives the
+/// persistent-approval regression: the kernel's `authorize()` fold must adopt the
+/// grant that flips the authorizer to `Allow`, dispatching without an approval
+/// gate.
+pub struct PersistentGrantPolicyFacts {
+    grant: CapabilityGrant,
+}
+
+impl PersistentGrantPolicyFacts {
+    pub fn new(grant: CapabilityGrant) -> Self {
+        Self { grant }
+    }
+}
+
+#[async_trait]
+impl HostPolicyFacts for PersistentGrantPolicyFacts {
+    async fn credential_presence(
+        &self,
+        _capability_id: &CapabilityId,
+        _scope: &ResourceScope,
+    ) -> CredentialPresence {
+        CredentialPresence::Satisfied
+    }
+
+    async fn persistent_grants(
+        &self,
+        _capability_id: &CapabilityId,
+        _context: &ExecutionContext,
+        _action: PolicyAction,
+    ) -> Vec<CapabilityGrant> {
+        vec![self.grant.clone()]
     }
 }
 

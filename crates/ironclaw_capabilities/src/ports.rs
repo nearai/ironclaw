@@ -25,7 +25,8 @@
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityGrant, CapabilityId, ResourceScope, RuntimeCredentialAuthRequirement, SecretHandle,
+    CapabilityGrant, CapabilityId, ExecutionContext, ResourceScope,
+    RuntimeCredentialAuthRequirement, SecretHandle,
 };
 
 /// Presence of a capability's required credentials, read from the host secret
@@ -77,8 +78,14 @@ pub trait HostPolicyFacts: Send + Sync {
         scope: &ResourceScope,
     ) -> CredentialPresence;
 
-    /// The active persistent-approval grants matching `scope`/`capability`/
-    /// `action`.
+    /// The active persistent-approval grants matching this invocation's identity
+    /// (`capability`/`action`, and every grantee/scope derived from `context`).
+    ///
+    /// `context` is passed whole — not just its `ResourceScope` — because the
+    /// grantee fan-out includes the `Principal::Extension` grantee read from
+    /// `context.extension_id`, which the scope alone does not carry. Surfacing
+    /// only scope-derived grantees would silently drop extension-grantee
+    /// persistent approvals.
     ///
     /// `authorize()` owns the re-authorize loop — it re-runs the trust-aware
     /// authorizer with each grant injected into a candidate context, because it
@@ -88,7 +95,7 @@ pub trait HostPolicyFacts: Send + Sync {
     async fn persistent_grants(
         &self,
         capability_id: &CapabilityId,
-        scope: &ResourceScope,
+        context: &ExecutionContext,
         action: PolicyAction,
     ) -> Vec<CapabilityGrant>;
 }

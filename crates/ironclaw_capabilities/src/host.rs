@@ -8,8 +8,9 @@ use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityDispatchRequest, CapabilityDispatchResult,
     CapabilityDispatcher, CapabilityGrantId, CapabilityId, Decision, DenyReason, DenyRef,
     DispatchError, EffectiveRuntimePolicy, ExecutionContext, GateRef, GateWaypoint, Invocation,
-    InvocationFingerprint, InvocationId, InvocationOrigin, Obligation, ProcessId, ProductKind,
-    ResourceEstimate, ResourceReservation, ResourceReservationId, ResourceScope, RuntimeLane,
+    InvocationFingerprint, InvocationId, InvocationOrigin, Obligation, PermissionMode, ProcessId,
+    ProductKind, ResourceEstimate, ResourceReservation, ResourceReservationId, ResourceScope,
+    RuntimeLane,
 };
 use ironclaw_processes::{ProcessManager, ProcessStart};
 use ironclaw_run_state::{
@@ -32,7 +33,7 @@ use crate::helpers::{
     run_state_error_kind, validate_approval_request_matches_invocation,
 };
 use crate::obligations::post_dispatch_obligations;
-use crate::ports::{CredentialPresence, HostPolicyFacts};
+use crate::ports::{CredentialPresence, HostPolicyFacts, PolicyAction};
 use crate::{
     CapabilityAuthResumeRequest, CapabilityInvocationError, CapabilityInvocationRequest,
     CapabilityInvocationResult, CapabilityObligationAbortRequest,
@@ -471,6 +472,83 @@ where
         }
     }
 
+    /// Persistent-approval fold (§5.2.7/§5.3.2): a prior scoped approval may
+    /// already authorize this invocation. Relocated from host_runtime's former
+    /// `apply_persistent_approval_policy`: only for permission modes that allow
+    /// it, re-authorize with each candidate grant injected; adopt the first grant
+    /// that flips the decision to `Allow`, so no fresh approval gate is raised.
+    ///
+    /// The kernel owns the re-authorize decision because it holds the authorizer;
+    /// [`HostPolicyFacts::persistent_grants`] only surfaces the candidate grants.
+    /// Mutates `authorize_context` in place — pushing the adopted grant so the
+    /// subsequent main authorization allows without approval. A no-op when the
+    /// permission mode forbids persistent approval or no candidate grant flips the
+    /// decision, leaving `authorize_context` untouched.
+    ///
+    /// This adds a second authorizer invocation per candidate grant (the re-auth
+    /// probe), exactly as the host_runtime implementation did; the loop is bounded
+    /// to the grants the port returns.
+    async fn apply_persistent_approval(
+        &self,
+        authorize_context: &mut ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        capability_id: &CapabilityId,
+        estimate: &ResourceEstimate,
+        trust_decision: &TrustDecision,
+        action: PolicyAction,
+    ) {
+        if !permission_mode_allows_persistent_approval(descriptor.default_permission) {
+            debug!(
+                capability_id = %capability_id,
+                permission = ?descriptor.default_permission,
+                "persistent approval skipped for manifest policy"
+            );
+            return;
+        }
+        let grants = self
+            .policy_facts
+            .persistent_grants(capability_id, authorize_context, action)
+            .await;
+        for grant in grants {
+            // Mirror host_runtime's `apply_persistent_approval_policy`: clear the
+            // candidate's grants and inject exactly this single grant, then
+            // re-authorize with the SAME authorizer method the action uses.
+            let mut candidate = authorize_context.clone();
+            candidate.grants.grants.clear();
+            candidate.grants.grants.push(grant.clone());
+            let decision = match action {
+                PolicyAction::Dispatch => {
+                    self.authorizer
+                        .authorize_dispatch_with_trust(
+                            &candidate,
+                            descriptor,
+                            estimate,
+                            trust_decision,
+                        )
+                        .await
+                }
+                PolicyAction::SpawnCapability => {
+                    self.authorizer
+                        .authorize_spawn_with_trust(
+                            &candidate,
+                            descriptor,
+                            estimate,
+                            trust_decision,
+                        )
+                        .await
+                }
+            };
+            if let Decision::Allow { .. } = decision {
+                debug!(
+                    capability_id = %capability_id,
+                    "persistent approval policy matched; injecting scoped grant"
+                );
+                authorize_context.grants.grants.push(grant);
+                break;
+            }
+        }
+    }
+
     async fn authorize(
         &self,
         request: &CapabilityInvocationRequest,
@@ -581,6 +659,16 @@ where
 
         let mut authorize_context = request.context.clone();
         authorize_context.trust = trust_decision.effective_trust.class();
+
+        self.apply_persistent_approval(
+            &mut authorize_context,
+            descriptor,
+            &request.capability_id,
+            &request.estimate,
+            &trust_decision,
+            PolicyAction::Dispatch,
+        )
+        .await;
 
         match self
             .authorizer
@@ -2035,6 +2123,16 @@ where
         let mut authorize_context = request.context.clone();
         authorize_context.trust = trust_decision.effective_trust.class();
 
+        self.apply_persistent_approval(
+            &mut authorize_context,
+            descriptor,
+            &request.capability_id,
+            &request.estimate,
+            &trust_decision,
+            PolicyAction::SpawnCapability,
+        )
+        .await;
+
         match self
             .authorizer
             .authorize_spawn_with_trust(
@@ -2278,6 +2376,26 @@ where
         };
         let mut authorize_context = params.authorized_context.clone();
         authorize_context.trust = trust_decision.effective_trust.class();
+
+        // Persistent-approval fold on the auth-resume re-dispatch (§5.2.7/§5.3.2),
+        // relocated from host_runtime's former `auth_resume_capability` call to
+        // `apply_persistent_approval_policy`. The loop rebuilds a grant-less
+        // context after the credential gate; a capability authorized only by a
+        // persistent grant (e.g. `extension_activate` under admin-config trust)
+        // would otherwise be re-authorized grant-less and denied. Excluded for
+        // `resume_json` (`PendingClaim`), which always carries a fresh approval
+        // lease and never had persistent-approval applied — preserving behavior.
+        if !matches!(params.lease_state, ResumedLeaseState::PendingClaim(_)) {
+            self.apply_persistent_approval(
+                &mut authorize_context,
+                params.descriptor,
+                &params.capability_id,
+                &params.estimate,
+                &trust_decision,
+                PolicyAction::Dispatch,
+            )
+            .await;
+        }
 
         match self
             .authorizer
@@ -2739,6 +2857,20 @@ where
     }
 }
 
+/// Whether a capability's manifest permission mode may be upgraded by an
+/// explicit persistent ("always allow") user decision — the gate on the kernel's
+/// persistent-approval fold.
+///
+/// Pure over [`PermissionMode`] (a `host_api` type), relocated into the kernel
+/// from host_runtime so the fold does not depend on host_runtime or
+/// `ironclaw_approvals`. Semantics match `ironclaw_approvals`'
+/// `permission_mode_allows_persistent_approval`: `Allow` and `Ask` are eligible;
+/// `Deny` is not. Modes requiring mandatory per-invocation consent must use a
+/// gate that does not offer persistent approval.
+fn permission_mode_allows_persistent_approval(permission: PermissionMode) -> bool {
+    matches!(permission, PermissionMode::Allow | PermissionMode::Ask)
+}
+
 /// Map a kernel trust-classification failure to the model-visible invocation
 /// error, preserving today's outcome kinds: the "unknown capability" case →
 /// `UnknownCapability` (host `MissingRuntime`); every other variant →
@@ -3191,7 +3323,7 @@ mod tests {
         async fn persistent_grants(
             &self,
             _capability_id: &CapabilityId,
-            _scope: &ResourceScope,
+            _context: &ExecutionContext,
             _action: crate::ports::PolicyAction,
         ) -> Vec<ironclaw_host_api::CapabilityGrant> {
             Vec::new()
