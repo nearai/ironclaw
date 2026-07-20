@@ -30,11 +30,17 @@ use parking_lot::RwLock;
 
 use crate::{CapabilityVisibility, ExtensionPackage, ExtensionRegistry};
 
-/// Default lifetime of a discovered per-user surface before the next turn
-/// re-runs discovery. Short enough that a fresh hire's newly granted tools
-/// appear within a couple of minutes; long enough to keep discovery off the
-/// per-turn hot path.
-pub const DEFAULT_SCOPED_OVERLAY_TTL: Duration = Duration::from_secs(180);
+/// Default lifetime of a discovered per-user surface. It MUST comfortably
+/// exceed the longest single run: discovery runs at turn start and the
+/// discovered tools are then read live on every capability dispatch, so a TTL
+/// shorter than the run makes late tool calls (e.g. a worker agent's final
+/// `marketplace__submit_deliverable` after minutes of work — worse under an
+/// LLM-provider 5xx storm that stretches the run) vanish from the surface
+/// mid-run with `unknown_capability`. 30 min covers any realistic bounded run;
+/// a stable per-agent tool set (all of the agent's active connector grants)
+/// means the long window does not stale a worker's surface across dispatches,
+/// and the turn-start refresher still re-discovers once an idle entry expires.
+pub const DEFAULT_SCOPED_OVERLAY_TTL: Duration = Duration::from_secs(1800);
 
 #[derive(Debug, Clone)]
 struct OverlayEntry {
