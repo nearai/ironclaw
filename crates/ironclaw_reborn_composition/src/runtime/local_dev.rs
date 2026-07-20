@@ -53,6 +53,7 @@ use crate::{
 };
 
 pub(super) mod extension_surface;
+mod hosted_mcp_overlay;
 mod external_tool_capability;
 mod outbound_delivery;
 mod project_create;
@@ -69,6 +70,7 @@ pub(crate) use crate::outbound::{
     OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
 };
 use extension_surface::{LocalDevExtensionSurface, LocalDevExtensionSurfaceSource};
+use hosted_mcp_overlay::HostedMcpOverlayRefresher;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use project_create::PROJECT_CREATE_CAPABILITY_ID;
 use refreshing_capability_port::{
@@ -129,8 +131,24 @@ pub(super) fn capability_wiring(
         policy.as_ref(),
         &[EffectKind::ExternalWrite],
     );
-    let extension_surface_source =
+    let mut extension_surface_source =
         LocalDevExtensionSurfaceSource::new(local_runtime.extension_management.clone());
+    if let Some(scoped_overlay) = local_runtime.scoped_overlay.clone() {
+        extension_surface_source = extension_surface_source.with_scoped_overlay(scoped_overlay);
+    }
+    // Turn-start per-user hosted-MCP discovery (P2b): only when the composed
+    // runtime has the overlay, the shared registry, and the product-auth
+    // runtime ports (egress + one-shot secret staging).
+    let hosted_mcp_overlay_refresher = match (
+        local_runtime.scoped_overlay.clone(),
+        local_runtime.shared_extension_registry.clone(),
+        local_runtime.product_auth_runtime_ports.clone(),
+    ) {
+        (Some(overlay), Some(shared_registry), Some(runtime_ports)) => Some(Arc::new(
+            HostedMcpOverlayRefresher::new(overlay, shared_registry, runtime_ports),
+        )),
+        _ => None,
+    };
     // First-class project creation reuses the same access-controlled
     // `ProjectService` facade the WebUI v2 surface wires (composition owns the
     // service, never the raw repository), so an agent-created project is a real
@@ -161,6 +179,7 @@ pub(super) fn capability_wiring(
             memory_mounts,
             system_extensions_lifecycle_mounts,
             extension_surface_source,
+            hosted_mcp_overlay_refresher,
             input_resolver: Arc::clone(&capability_input_resolver),
             result_writer: Arc::clone(&capability_result_writer),
             milestone_sink,
@@ -193,6 +212,7 @@ struct LocalDevLoopCapabilityPortFactory {
     memory_mounts: MountView,
     system_extensions_lifecycle_mounts: MountView,
     extension_surface_source: LocalDevExtensionSurfaceSource,
+    hosted_mcp_overlay_refresher: Option<Arc<HostedMcpOverlayRefresher>>,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
@@ -217,11 +237,16 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
         &self,
         run_context: &LoopRunContext,
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
-        let skill_mounts = scoped_skill_management_mount_view(&local_dev_resource_scope_for_run(
-            run_context,
-            &self.fallback_user_id,
-        ))
-        .map_err(host_api_agent_loop_error)?;
+        let run_scope = local_dev_resource_scope_for_run(run_context, &self.fallback_user_id);
+        // Per-user hosted-MCP discovery BEFORE the surface snapshot: the
+        // port's visible capabilities, grants, and egress plans all read the
+        // overlay this refresh populates. Failures degrade to the last-good or
+        // static surface and never fail the turn.
+        if let Some(refresher) = &self.hosted_mcp_overlay_refresher {
+            refresher.refresh_for_scope(&run_scope).await;
+        }
+        let skill_mounts = scoped_skill_management_mount_view(&run_scope)
+            .map_err(host_api_agent_loop_error)?;
         create_refreshing_local_dev_capability_port(RefreshingLocalDevCapabilityPortConfig {
             runtime: Arc::clone(&self.runtime),
             run_context: run_context.clone(),

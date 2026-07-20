@@ -2254,9 +2254,10 @@ fn prepare_obligation_error_to_invocation(
         }
         CapabilityObligationError::AuthRequired {
             credential_requirements,
+            required_secrets,
         } => CapabilityInvocationError::AuthorizationRequiresAuth {
             capability: capability_id.clone(),
-            required_secrets: Vec::new(),
+            required_secrets,
             credential_requirements,
         },
         CapabilityObligationError::Failed { kind } => CapabilityInvocationError::ObligationFailed {

@@ -10,6 +10,7 @@ use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, Trust
 use crate::extension_host::extension_lifecycle::{
     ActiveExtensionCapability, RebornLocalExtensionManagementPort,
 };
+use ironclaw_extensions::{InstallationOwner, ScopedPackageOverlay};
 use ironclaw_first_party_extensions::{
     EXA_MCP_HOST, NETWORK_EGRESS_LIMIT, WEB_ACCESS_EXTENSION_ID, WEB_GET_CONTENT_CAPABILITY_ID,
     WEB_SEARCH_CAPABILITY_ID, gsuite_network_policy_for,
@@ -19,6 +20,7 @@ use ironclaw_product_workflow::ProductWorkflowError;
 #[derive(Clone, Default)]
 pub(in crate::runtime) struct LocalDevExtensionSurfaceSource {
     extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
+    scoped_overlay: Option<Arc<ScopedPackageOverlay>>,
     #[cfg(test)]
     static_surface: Option<LocalDevExtensionSurface>,
 }
@@ -29,15 +31,27 @@ impl LocalDevExtensionSurfaceSource {
     ) -> Self {
         Self {
             extension_management,
+            scoped_overlay: None,
             #[cfg(test)]
             static_surface: None,
         }
+    }
+
+    /// Attach the per-user discovered-package overlay so grants and provider
+    /// trust cover the caller's discovered hosted-MCP surface.
+    pub(in crate::runtime) fn with_scoped_overlay(
+        mut self,
+        overlay: Arc<ScopedPackageOverlay>,
+    ) -> Self {
+        self.scoped_overlay = Some(overlay);
+        self
     }
 
     #[cfg(test)]
     pub(in crate::runtime) fn from_surface(surface: LocalDevExtensionSurface) -> Self {
         Self {
             extension_management: None,
+            scoped_overlay: None,
             static_surface: Some(surface),
         }
     }
@@ -52,13 +66,17 @@ impl LocalDevExtensionSurfaceSource {
         let Some(extension_management) = self.extension_management.as_deref() else {
             return Ok(LocalDevExtensionSurface::default());
         };
-        LocalDevExtensionSurface::from_extension_management(extension_management).await
+        let mut surface =
+            LocalDevExtensionSurface::from_extension_management(extension_management).await?;
+        surface.scoped_overlay = self.scoped_overlay.clone();
+        Ok(surface)
     }
 }
 
 #[derive(Debug, Clone, Default)]
 pub(in crate::runtime) struct LocalDevExtensionSurface {
     active_capabilities: Vec<ActiveExtensionCapability>,
+    scoped_overlay: Option<Arc<ScopedPackageOverlay>>,
 }
 
 impl LocalDevExtensionSurface {
@@ -68,6 +86,7 @@ impl LocalDevExtensionSurface {
     ) -> Self {
         Self {
             active_capabilities,
+            scoped_overlay: None,
         }
     }
 
@@ -78,7 +97,68 @@ impl LocalDevExtensionSurface {
             active_capabilities: extension_management
                 .active_model_visible_capabilities()
                 .await?,
+            scoped_overlay: None,
         })
+    }
+
+    /// The caller's effective capability set: active capabilities visible to
+    /// the caller, with any extension the caller holds a fresh discovered
+    /// overlay for replaced by its discovered (per-principal) capability set.
+    ///
+    /// Overlay entries only apply to extensions that already have a
+    /// caller-visible active installation — a stale overlay for a
+    /// deactivated/evicted extension grants nothing (fail closed).
+    fn caller_capabilities(
+        &self,
+        caller: &ironclaw_host_api::UserId,
+    ) -> Vec<ActiveExtensionCapability> {
+        let overlay_capabilities = self.overlay_capabilities(caller);
+        let overlaid_providers: Vec<&ExtensionId> = overlay_capabilities
+            .iter()
+            .map(|capability| &capability.provider)
+            .collect();
+        let mut merged: Vec<ActiveExtensionCapability> = self
+            .active_capabilities
+            .iter()
+            .filter(|capability| capability.owner.visible_to(caller))
+            .filter(|capability| !overlaid_providers.contains(&&capability.provider))
+            .cloned()
+            .collect();
+        merged.extend(overlay_capabilities);
+        merged
+    }
+
+    fn overlay_capabilities(
+        &self,
+        caller: &ironclaw_host_api::UserId,
+    ) -> Vec<ActiveExtensionCapability> {
+        let Some(overlay) = &self.scoped_overlay else {
+            return Vec::new();
+        };
+        let mut capabilities = Vec::new();
+        for package in overlay.fresh_packages_for(caller) {
+            let caller_sees_provider = self
+                .active_capabilities
+                .iter()
+                .any(|capability| {
+                    capability.provider == package.id && capability.owner.visible_to(caller)
+                });
+            if !caller_sees_provider {
+                continue;
+            }
+            for descriptor in &package.capabilities {
+                capabilities.push(ActiveExtensionCapability {
+                    id: descriptor.id.clone(),
+                    provider: descriptor.provider.clone(),
+                    effects: descriptor.effects.clone(),
+                    default_permission: descriptor.default_permission,
+                    runtime_credentials: descriptor.runtime_credentials.clone(),
+                    network_targets: descriptor.network_targets.clone(),
+                    owner: InstallationOwner::user(caller.clone()),
+                });
+            }
+        }
+        capabilities
     }
 
     /// Mint capability grants for one request (#5459 P1: filtered to the
@@ -92,9 +172,8 @@ impl LocalDevExtensionSurface {
         grantee: &ExtensionId,
         caller: &ironclaw_host_api::UserId,
     ) -> Vec<CapabilityGrant> {
-        self.active_capabilities
+        self.caller_capabilities(caller)
             .iter()
-            .filter(|capability| capability.owner.visible_to(caller))
             .map(|capability| CapabilityGrant {
                 id: CapabilityGrantId::new(),
                 capability: capability.id.clone(),
@@ -122,10 +201,7 @@ impl LocalDevExtensionSurface {
         caller: &ironclaw_host_api::UserId,
     ) -> BTreeMap<ExtensionId, TrustDecision> {
         let mut effects_by_provider: BTreeMap<ExtensionId, Vec<EffectKind>> = BTreeMap::new();
-        for capability in &self.active_capabilities {
-            if !capability.owner.visible_to(caller) {
-                continue;
-            }
+        for capability in &self.caller_capabilities(caller) {
             let effects = effects_by_provider
                 .entry(capability.provider.clone())
                 .or_default();
@@ -308,6 +384,122 @@ mod tests {
             "a member-held provider must not be advertised to a non-member"
         );
         assert!(carol_trust.contains_key(&ExtensionId::new("hacker-news").unwrap()));
+    }
+
+    /// P2b: a caller with a fresh discovered (per-principal) overlay for an
+    /// extension gets grants for exactly the discovered capability set — the
+    /// static capabilities are replaced for that caller and untouched for
+    /// every other user (cross-user isolation of discovered surfaces).
+    #[test]
+    fn grants_use_the_callers_discovered_overlay_and_never_leak_across_users() {
+        let worker = UserId::new("worker-user").unwrap();
+        let concierge = UserId::new("concierge-user").unwrap();
+        let grantee = ExtensionId::new("caller").unwrap();
+
+        const MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "agent-market"
+name = "Agent Market"
+version = "0.1.0"
+description = "Marketplace tools"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "https://market.example.com/mcp"
+
+[[capabilities]]
+id = "agent-market.search_agents"
+description = "Search the marketplace"
+effects = ["dispatch_capability", "network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/search.input.json"
+output_schema_ref = "schemas/search.output.json"
+runtime_credentials = [
+  { handle = "agent-market-token", audience = { scheme = "https", host_pattern = "market.example.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " }, required = true }
+]
+"#;
+        let manifest = ironclaw_extensions::ExtensionManifest::parse(
+            MANIFEST,
+            ironclaw_extensions::ManifestSource::HostBundled,
+            &ironclaw_host_api::HostPortCatalog::default(),
+        )
+        .expect("valid manifest");
+        let package = ironclaw_extensions::ExtensionPackage::from_manifest(
+            manifest,
+            ironclaw_host_api::VirtualPath::new("/system/extensions/agent-market").unwrap(),
+        )
+        .expect("valid package");
+        let static_capability = ActiveExtensionCapability {
+            id: CapabilityId::new("agent-market.search_agents").unwrap(),
+            provider: ExtensionId::new("agent-market").unwrap(),
+            effects: vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
+            default_permission: PermissionMode::Allow,
+            runtime_credentials: package.manifest.capabilities[0].runtime_credentials.clone(),
+            network_targets: Vec::new(),
+            owner: ironclaw_extensions::InstallationOwner::Tenant,
+        };
+
+        let discovered = ironclaw_extensions::package_with_discovered_hosted_mcp_tools(
+            &package,
+            &[ironclaw_extensions::HostedMcpDiscoveredTool {
+                name: "timeless__list_meetings".to_string(),
+                description: "List the hirer's meetings".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+                annotations: Default::default(),
+            }],
+        )
+        .expect("discoverable package");
+        let overlay = Arc::new(ironclaw_extensions::ScopedPackageOverlay::new());
+        overlay.insert(
+            worker.clone(),
+            discovered,
+            std::time::Duration::from_secs(60),
+        );
+
+        let mut surface =
+            LocalDevExtensionSurface::from_active_capabilities(vec![static_capability]);
+        surface.scoped_overlay = Some(overlay);
+
+        let worker_grants: Vec<_> = surface
+            .grants(&grantee, &worker)
+            .into_iter()
+            .collect();
+        let worker_ids: Vec<&str> = worker_grants
+            .iter()
+            .map(|grant| grant.capability.as_str())
+            .collect();
+        assert_eq!(
+            worker_ids,
+            vec!["agent-market.timeless__list_meetings"],
+            "the overlay replaces the static surface for its owner"
+        );
+        assert!(
+            worker_grants[0]
+                .constraints
+                .secrets
+                .iter()
+                .any(|handle| handle.as_str() == "agent-market-token"),
+            "discovered capabilities keep the template credential constraint"
+        );
+        assert!(
+            surface
+                .provider_trust(&worker)
+                .contains_key(&ExtensionId::new("agent-market").unwrap())
+        );
+
+        let concierge_ids: Vec<String> = surface
+            .grants(&grantee, &concierge)
+            .into_iter()
+            .map(|grant| grant.capability.as_str().to_string())
+            .collect();
+        assert_eq!(
+            concierge_ids,
+            vec!["agent-market.search_agents".to_string()],
+            "another user keeps the static surface untouched"
+        );
     }
 
     #[test]

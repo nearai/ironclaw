@@ -1,6 +1,6 @@
 use futures_util::{StreamExt, stream};
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
-use ironclaw_extensions::{CapabilityVisibility, ExtensionPackage, ExtensionRegistry};
+use ironclaw_extensions::{CapabilityVisibility, ExtensionPackage, OverlaidRegistryView};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityGrant, Decision, EffectKind, ResourceEstimate, RuntimeKind,
@@ -118,7 +118,7 @@ pub struct VisibleCapability {
 }
 
 pub(crate) struct CapabilityCatalog<'a> {
-    registry: &'a ExtensionRegistry,
+    registry: &'a OverlaidRegistryView,
     authorizer: &'a dyn TrustAwareCapabilityDispatchAuthorizer,
     base_version: &'a CapabilitySurfaceVersion,
     runtime_policy: &'a EffectiveRuntimePolicy,
@@ -127,7 +127,7 @@ pub(crate) struct CapabilityCatalog<'a> {
 
 impl<'a> CapabilityCatalog<'a> {
     pub(crate) fn new(
-        registry: &'a ExtensionRegistry,
+        registry: &'a OverlaidRegistryView,
         authorizer: &'a dyn TrustAwareCapabilityDispatchAuthorizer,
         base_version: &'a CapabilitySurfaceVersion,
         runtime_policy: &'a EffectiveRuntimePolicy,
@@ -582,7 +582,9 @@ mod tests {
             network_targets: Vec::new(),
             resource_profile: None,
         };
-        let registry = ExtensionRegistry::new();
+        let registry = OverlaidRegistryView::global_only(std::sync::Arc::new(
+            ironclaw_extensions::ExtensionRegistry::new(),
+        ));
         let runtime_policy = test_runtime_policy();
         let surface_version = CapabilitySurfaceVersion::new("surface-v1").unwrap();
         let authorizer = GrantAuthorizer;

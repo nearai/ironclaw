@@ -420,6 +420,7 @@ mod hosted_mcp_discovery;
 mod installations;
 mod lifecycle;
 mod registry;
+mod scoped_overlay;
 pub mod v2;
 
 pub use host_api::capability_provider::{
@@ -453,6 +454,9 @@ pub use lifecycle::{
     ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,
 };
 pub use registry::{ExtensionRegistry, SharedExtensionRegistry};
+pub use scoped_overlay::{
+    DEFAULT_SCOPED_OVERLAY_TTL, OverlaidRegistryView, OverlayFreshness, ScopedPackageOverlay,
+};
 
 /// Filesystem-backed extension discovery.
 pub struct ExtensionDiscovery;

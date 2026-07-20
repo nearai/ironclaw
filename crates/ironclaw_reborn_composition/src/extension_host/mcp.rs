@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use ironclaw_extensions::{
-    ExtensionPackage, ExtensionRuntime, ManifestSource, SharedExtensionRegistry,
+    ExtensionPackage, ExtensionRuntime, ManifestSource, OverlaidRegistryView,
+    ScopedPackageOverlay, SharedExtensionRegistry,
 };
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
@@ -19,35 +20,55 @@ const MCP_TIMEOUT_MS: u32 = 60_000;
 pub(crate) fn hosted_http_mcp_runtime(
     registry: Arc<SharedExtensionRegistry>,
     runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
+    scoped_overlay: Option<Arc<ScopedPackageOverlay>>,
 ) -> McpRuntime<
     McpHostHttpClient<McpRuntimeHttpAdapter<Arc<dyn RuntimeHttpEgress>>, RegistryMcpEgressPlanner>,
 > {
-    let client = McpHostHttpClient::new(
-        McpRuntimeHttpAdapter::new(runtime_http_egress),
-        RegistryMcpEgressPlanner::new(registry),
-    );
+    let mut planner = RegistryMcpEgressPlanner::new(registry);
+    if let Some(overlay) = scoped_overlay {
+        planner = planner.with_scoped_overlay(overlay);
+    }
+    let client = McpHostHttpClient::new(McpRuntimeHttpAdapter::new(runtime_http_egress), planner);
     McpRuntime::new(McpRuntimeConfig::default(), client)
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct RegistryMcpEgressPlanner {
     registry: Arc<SharedExtensionRegistry>,
+    scoped_overlay: Option<Arc<ScopedPackageOverlay>>,
 }
 
 impl RegistryMcpEgressPlanner {
     pub(crate) fn new(registry: Arc<SharedExtensionRegistry>) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            scoped_overlay: None,
+        }
+    }
+
+    /// Prefer the request user's discovered (per-principal) surface when
+    /// resolving credentials/endpoints; absent entries fall through to the
+    /// global registry unchanged.
+    pub(crate) fn with_scoped_overlay(mut self, overlay: Arc<ScopedPackageOverlay>) -> Self {
+        self.scoped_overlay = Some(overlay);
+        self
+    }
+
+    fn view_for(&self, user: &ironclaw_host_api::UserId) -> OverlaidRegistryView {
+        match &self.scoped_overlay {
+            Some(overlay) => overlay.view_for(user, self.registry.snapshot()),
+            None => OverlaidRegistryView::global_only(self.registry.snapshot()),
+        }
     }
 
     fn credential_injections(
         &self,
+        view: &OverlaidRegistryView,
         provider: &ExtensionId,
         capability_id: &CapabilityId,
         endpoint: &HostedMcpEndpoint,
     ) -> Vec<RuntimeCredentialInjection> {
-        self.registry
-            .snapshot()
-            .get_capability(capability_id)
+        view.get_capability(capability_id)
             .filter(|descriptor| &descriptor.provider == provider)
             .map(|descriptor| {
                 descriptor
@@ -67,24 +88,26 @@ impl RegistryMcpEgressPlanner {
             .unwrap_or_default()
     }
 
-    fn provider_endpoint(&self, provider: &ExtensionId) -> Option<HostedMcpEndpoint> {
-        let registry = self.registry.snapshot();
-        registry
-            .get_extension(provider)
-            .and_then(hosted_http_mcp_endpoint)
+    fn provider_endpoint(
+        &self,
+        view: &OverlaidRegistryView,
+        provider: &ExtensionId,
+    ) -> Option<HostedMcpEndpoint> {
+        view.get_extension(provider).and_then(hosted_http_mcp_endpoint)
     }
 }
 
 impl McpHostHttpEgressPlanner for RegistryMcpEgressPlanner {
     fn plan(&self, request: McpHostHttpEgressPlanRequest<'_>) -> McpHostHttpEgressPlan {
-        let Some(endpoint) = self.provider_endpoint(request.provider) else {
+        let view = self.view_for(&request.scope.user_id);
+        let Some(endpoint) = self.provider_endpoint(&view, request.provider) else {
             return McpHostHttpEgressPlan::default();
         };
         if !hosted_mcp_url_allowed(request.url, &endpoint) {
             return McpHostHttpEgressPlan::default();
         }
         let credential_injections =
-            self.credential_injections(request.provider, request.capability_id, &endpoint);
+            self.credential_injections(&view, request.provider, request.capability_id, &endpoint);
         McpHostHttpEgressPlan {
             // Credential-free hosted MCP providers are valid: the manifest may
             // expose a public/unauthenticated server, and host network policy
@@ -222,7 +245,11 @@ mod tests {
         let capability_id = CapabilityId::new("notion.notion-search").unwrap();
         let endpoint = HostedMcpEndpoint::parse(NOTION_MCP_URL).unwrap();
 
-        let injections = planner.credential_injections(&provider, &capability_id, &endpoint);
+        let view = OverlaidRegistryView::global_only(
+            SharedExtensionRegistry::new(registry_with_notion()).snapshot(),
+        );
+        let injections =
+            planner.credential_injections(&view, &provider, &capability_id, &endpoint);
 
         assert_eq!(injections.len(), 1);
         assert_eq!(
@@ -320,6 +347,71 @@ mod tests {
         assert_eq!(
             plan.network_policy.allowed_targets[0].host_pattern,
             "market.example.com"
+        );
+    }
+
+    /// P2b: with a scoped overlay attached, the planner resolves a caller's
+    /// DISCOVERED capability (absent from the global registry) and plans its
+    /// credential injection — and never does so for another user.
+    #[test]
+    fn planner_resolves_discovered_overlay_capability_for_its_owner_only() {
+        let shared = Arc::new(SharedExtensionRegistry::new(registry_with_provider_source(
+            "agent-market",
+            "https://market.example.com/mcp",
+            "agent-market.search_agents",
+            "agent-market-token",
+            ManifestSource::InstalledLocal,
+        )));
+        let base_package = shared
+            .snapshot()
+            .get_extension(&ExtensionId::new("agent-market").unwrap())
+            .cloned()
+            .expect("registered package");
+        let discovered = ironclaw_extensions::package_with_discovered_hosted_mcp_tools(
+            &base_package,
+            &[ironclaw_extensions::HostedMcpDiscoveredTool {
+                name: "timeless__list_meetings".to_string(),
+                description: "List the hirer's meetings".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+                annotations: Default::default(),
+            }],
+        )
+        .expect("discoverable package");
+        let overlay = Arc::new(ironclaw_extensions::ScopedPackageOverlay::new());
+        let worker = UserId::new("worker-user").unwrap();
+        overlay.insert(
+            worker.clone(),
+            discovered,
+            std::time::Duration::from_secs(60),
+        );
+        let planner =
+            RegistryMcpEgressPlanner::new(shared).with_scoped_overlay(Arc::clone(&overlay));
+        let provider = ExtensionId::new("agent-market").unwrap();
+        let cap = CapabilityId::new("agent-market.timeless__list_meetings").unwrap();
+
+        let worker_scope = scope_for_user(&worker);
+        let plan = planner.plan(sample_plan_request(
+            &provider,
+            &cap,
+            "https://market.example.com/mcp",
+            &worker_scope,
+        ));
+        assert_eq!(plan.credential_injections.len(), 1);
+        assert_eq!(
+            plan.credential_injections[0].handle,
+            SecretHandle::new("agent-market-token").unwrap()
+        );
+
+        let other_scope = scope_for_user(&UserId::new("concierge-user").unwrap());
+        let other_plan = planner.plan(sample_plan_request(
+            &provider,
+            &cap,
+            "https://market.example.com/mcp",
+            &other_scope,
+        ));
+        assert!(
+            other_plan.credential_injections.is_empty(),
+            "another user's plan must not resolve the worker's discovered capability"
         );
     }
 
@@ -473,6 +565,13 @@ mod tests {
     }
 
     // ── helpers ───────────────────────────────────────────────────────────
+
+    fn scope_for_user(user: &UserId) -> ResourceScope {
+        ResourceScope {
+            user_id: user.clone(),
+            ..sample_scope()
+        }
+    }
 
     fn sample_scope() -> ResourceScope {
         ResourceScope {

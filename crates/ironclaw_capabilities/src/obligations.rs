@@ -81,6 +81,10 @@ pub enum CapabilityObligationError {
     #[error("authorization requires authentication")]
     AuthRequired {
         credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+        /// Secret handles whose absence caused the failure. Named so the
+        /// model-visible error can tell the user which credential is not
+        /// provisioned instead of a bare "requires authentication".
+        required_secrets: Vec<ironclaw_host_api::SecretHandle>,
     },
     #[error("authorization obligation failed: {kind}")]
     Failed {

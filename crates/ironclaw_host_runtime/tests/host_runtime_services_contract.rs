@@ -2676,9 +2676,12 @@ async fn host_runtime_services_resume_missing_runtime_secret_returns_auth_gate()
     match resumed {
         RuntimeCapabilityOutcome::AuthRequired(auth_gate) => {
             assert_eq!(auth_gate.capability_id, script_capability_id());
-            assert!(
-                auth_gate.required_secrets.is_empty(),
-                "secret handles are not product-visible until auth recovery projections carry them"
+            assert_eq!(
+                auth_gate.required_secrets,
+                vec![SecretHandle::new("approval_resume_token").unwrap()],
+                "the auth gate names the missing secret handle so the user \
+                 knows which credential is not provisioned (matches the \
+                 gsuite first-party auth_required_with_context contract)"
             );
         }
         other => panic!("expected auth-required resume outcome, got {other:?}"),

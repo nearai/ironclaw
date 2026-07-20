@@ -470,10 +470,12 @@ where
     };
     let runtime_http_egress = runtime_ports.runtime_http_egress();
     let registry = services.shared_extension_registry();
+    let scoped_overlay = services.scoped_package_overlay();
 
     Ok(services.with_mcp_runtime(Arc::new(hosted_http_mcp_runtime(
         registry,
         runtime_http_egress,
+        Some(scoped_overlay),
     ))))
 }
 
@@ -1132,6 +1134,13 @@ pub(crate) struct RebornLocalRuntimeServices {
         Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionFacade>>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub(crate) host_runtime_http_egress: Option<HostRuntimeHttpEgressPort>,
+    /// Per-user discovered hosted-MCP surfaces (turn-time discovery cache),
+    /// shared with the host-runtime registry consumers.
+    pub(crate) scoped_overlay: Option<Arc<ironclaw_extensions::ScopedPackageOverlay>>,
+    /// Product-auth runtime ports (egress + one-shot secret staging) for
+    /// turn-time hosted-MCP discovery.
+    pub(crate) product_auth_runtime_ports:
+        Option<ironclaw_host_runtime::ProductAuthProviderRuntimePorts>,
     pub(crate) skill_mounts: MountView,
     pub(crate) memory_mounts: MountView,
     pub(crate) system_extensions_lifecycle_mounts: MountView,
@@ -2039,6 +2048,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     if let Some(local_runtime) = Arc::get_mut(&mut store_graph.local_runtime) {
         local_runtime.extension_management = Some(Arc::clone(&extension_management));
         local_runtime.runtime_http_egress = Some(product_auth_runtime_ports.runtime_http_egress());
+        local_runtime.scoped_overlay = Some(services.scoped_package_overlay());
+        local_runtime.product_auth_runtime_ports = Some(product_auth_runtime_ports.clone());
         local_runtime.extension_registry = Arc::clone(&extension_registry);
         local_runtime.shared_extension_registry = Some(services.shared_extension_registry());
         let host_runtime_http_egress = services.host_runtime_http_egress_port();
@@ -2615,6 +2626,8 @@ async fn build_local_dev_store_graph(
         channel_connection_facade_slot: Arc::new(std::sync::OnceLock::new()),
         runtime_http_egress: None,
         host_runtime_http_egress: None,
+        scoped_overlay: None,
+        product_auth_runtime_ports: None,
         skill_mounts,
         memory_mounts,
         system_extensions_lifecycle_mounts,
@@ -2810,6 +2823,8 @@ async fn build_local_dev_store_graph(
         channel_connection_facade_slot: Arc::new(std::sync::OnceLock::new()),
         runtime_http_egress: None,
         host_runtime_http_egress: None,
+        scoped_overlay: None,
+        product_auth_runtime_ports: None,
         skill_mounts,
         memory_mounts,
         system_extensions_lifecycle_mounts,
@@ -6077,6 +6092,8 @@ mod tests {
                 &base_runtime.channel_connection_facade_slot,
             ),
             runtime_http_egress: base_runtime.runtime_http_egress.clone(),
+            scoped_overlay: base_runtime.scoped_overlay.clone(),
+            product_auth_runtime_ports: base_runtime.product_auth_runtime_ports.clone(),
             host_runtime_http_egress: base_runtime.host_runtime_http_egress.clone(),
             skill_mounts: base_runtime.skill_mounts.clone(),
             memory_mounts: base_runtime.memory_mounts.clone(),

@@ -27,7 +27,10 @@ use ironclaw_capabilities::{
     CapabilityInvocationRequest, CapabilityInvocationResult, CapabilityObligationHandler,
     CapabilityResumeRequest, CapabilitySpawnRequest, CapabilitySpawnResult,
 };
-use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
+use ironclaw_extensions::{
+    ExtensionPackage, ExtensionRegistry, OverlaidRegistryView, ScopedPackageOverlay,
+    SharedExtensionRegistry,
+};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDispatcher, CapabilityId, Decision, DenyReason,
@@ -111,6 +114,7 @@ use crate::{
 /// Default production wiring for [`HostRuntime`].
 pub struct DefaultHostRuntime {
     registry: Arc<SharedExtensionRegistry>,
+    scoped_overlay: Option<Arc<ScopedPackageOverlay>>,
     dispatcher: Arc<dyn CapabilityDispatcher>,
     authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
     trust_policy: Arc<dyn TrustPolicy>,
@@ -183,6 +187,14 @@ impl DefaultHostRuntime {
         )
     }
 
+    /// The per-user discovered-package overlay: when set, the visible
+    /// capability surface for a scoped request prefers the request user's
+    /// discovered hosted-MCP surface over the global registry entries.
+    pub fn with_scoped_overlay(mut self, overlay: Arc<ScopedPackageOverlay>) -> Self {
+        self.scoped_overlay = Some(overlay);
+        self
+    }
+
     pub fn from_shared_registry(
         registry: Arc<SharedExtensionRegistry>,
         dispatcher: Arc<dyn CapabilityDispatcher>,
@@ -192,6 +204,7 @@ impl DefaultHostRuntime {
     ) -> Self {
         Self {
             registry,
+            scoped_overlay: None,
             dispatcher,
             authorizer,
             trust_policy: Arc::new(HostTrustPolicy::fail_closed()),
@@ -1069,9 +1082,14 @@ impl HostRuntime for DefaultHostRuntime {
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, HostRuntimeError> {
-        let registry = self.registry.snapshot();
+        let view = match &self.scoped_overlay {
+            Some(overlay) => {
+                overlay.view_for(&request.context.user_id, self.registry.snapshot())
+            }
+            None => OverlaidRegistryView::global_only(self.registry.snapshot()),
+        };
         let catalog = CapabilityCatalog::new(
-            &registry,
+            &view,
             self.authorizer.as_ref(),
             &self.surface_version,
             &self.runtime_policy,

@@ -130,6 +130,7 @@ impl CapabilityObligationHandler for AuthRequiredObligationHandler {
     ) -> Result<(), CapabilityObligationError> {
         Err(CapabilityObligationError::AuthRequired {
             credential_requirements: Vec::new(),
+            required_secrets: Vec::new(),
         })
     }
 
@@ -139,6 +140,7 @@ impl CapabilityObligationHandler for AuthRequiredObligationHandler {
     ) -> Result<CapabilityObligationOutcome, CapabilityObligationError> {
         Err(CapabilityObligationError::AuthRequired {
             credential_requirements: Vec::new(),
+            required_secrets: Vec::new(),
         })
     }
 }
@@ -167,6 +169,7 @@ impl CapabilityObligationHandler for PostDispatchAuthRequiredObligationHandler {
     ) -> Result<CapabilityDispatchResult, CapabilityObligationError> {
         Err(CapabilityObligationError::AuthRequired {
             credential_requirements: Vec::new(),
+            required_secrets: Vec::new(),
         })
     }
 }

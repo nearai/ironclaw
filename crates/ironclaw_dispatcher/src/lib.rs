@@ -9,7 +9,10 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_events::{EventSink, RuntimeEvent};
-use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
+use ironclaw_extensions::{
+    ExtensionPackage, ExtensionRegistry, OverlaidRegistryView, ScopedPackageOverlay,
+    SharedExtensionRegistry,
+};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, ExtensionId, MountView, ResourceEstimate, ResourceReceipt,
@@ -114,6 +117,7 @@ where
     runtime_policy: EffectiveRuntimePolicy,
     runtime_adapters: HashMap<RuntimeKind, ServiceHandle<'a, dyn RuntimeAdapter<F, G> + 'a>>,
     event_sink: Option<ServiceHandle<'a, dyn EventSink + 'a>>,
+    scoped_overlay: Option<Arc<ScopedPackageOverlay>>,
 }
 
 impl<'a, F, G> RuntimeDispatcher<'a, F, G>
@@ -129,6 +133,7 @@ where
             runtime_policy: default_runtime_policy(),
             runtime_adapters: HashMap::new(),
             event_sink: None,
+            scoped_overlay: None,
         }
     }
 
@@ -164,7 +169,18 @@ where
             runtime_policy: default_runtime_policy(),
             runtime_adapters: HashMap::new(),
             event_sink: None,
+            scoped_overlay: None,
         }
+    }
+
+    /// The per-user discovered-package overlay: when set, capability and
+    /// provider resolution for a dispatch prefers the request scope's
+    /// user-specific discovered surface over the global registry (hosted-MCP
+    /// per-principal tools/list). Absent overlay entries fall through to the
+    /// global registry unchanged.
+    pub fn with_scoped_overlay(mut self, overlay: Arc<ScopedPackageOverlay>) -> Self {
+        self.scoped_overlay = Some(overlay);
+        self
     }
 
     /// Replaces the effective runtime policy passed to runtime adapters.
@@ -233,7 +249,10 @@ where
         ))
         .await?;
 
-        let registry = self.registry.snapshot();
+        let registry = match &self.scoped_overlay {
+            Some(overlay) => overlay.view_for(&scope.user_id, self.registry.snapshot()),
+            None => OverlaidRegistryView::global_only(self.registry.snapshot()),
+        };
         let descriptor = match registry.get_capability(&request.capability_id).cloned() {
             Some(descriptor) => descriptor,
             None => {

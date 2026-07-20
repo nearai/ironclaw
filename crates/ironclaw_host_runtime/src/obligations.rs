@@ -1251,8 +1251,11 @@ impl BuiltinObligationHandler {
                 }
             };
             let Some(source_scope) = owner else {
+                // Name the missing handle so the model-visible failure can say
+                // which credential is not provisioned for this account.
                 return Err(CapabilityObligationError::AuthRequired {
                     credential_requirements: Vec::new(),
+                    required_secrets: vec![handle.clone()],
                 });
             };
             resolved.push(ResolvedSecretInjection {
@@ -1855,6 +1858,7 @@ fn credential_stage_error_to_obligation_error(
 ) -> CapabilityObligationError {
     match error {
         CredentialStageError::AuthRequired => CapabilityObligationError::AuthRequired {
+            required_secrets: Vec::new(),
             credential_requirements: credential_obligation
                 .map(|obligation| {
                     vec![RuntimeCredentialAuthRequirement {

@@ -22,7 +22,9 @@ use ironclaw_events::{
     InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
     SecurityAuditSink,
 };
-use ironclaw_extensions::{ExtensionRegistry, ExtensionRuntime, SharedExtensionRegistry};
+use ironclaw_extensions::{
+    ExtensionRegistry, ExtensionRuntime, ScopedPackageOverlay, SharedExtensionRegistry,
+};
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
 #[cfg(feature = "postgres")]
@@ -122,6 +124,7 @@ where
     R: ProcessResultStore + 'static,
 {
     registry: Arc<SharedExtensionRegistry>,
+    scoped_overlay: Arc<ScopedPackageOverlay>,
     trust_policy: Arc<dyn TrustPolicy>,
     trust_policy_configured: bool,
     filesystem: Arc<F>,
@@ -296,6 +299,7 @@ where
         let credential_session_store: Arc<dyn CredentialSessionStore> = credential_broker;
         Self {
             registry: Arc::new(SharedExtensionRegistry::new((*registry).clone())),
+            scoped_overlay: Arc::new(ScopedPackageOverlay::new()),
             trust_policy: Arc::new(HostTrustPolicy::fail_closed()),
             trust_policy_configured: false,
             filesystem,
@@ -388,6 +392,7 @@ where
             Arc::clone(&self.filesystem),
             Arc::clone(&self.governor),
         )
+        .with_scoped_overlay(Arc::clone(&self.scoped_overlay))
         .with_runtime_policy(
             self.runtime_policy
                 .clone()
@@ -462,6 +467,12 @@ where
     /// Builds the upper facade without production validation.
     pub fn shared_extension_registry(&self) -> Arc<SharedExtensionRegistry> {
         Arc::clone(&self.registry)
+    }
+
+    /// The per-user discovered-package overlay shared by every scoped
+    /// capability-resolution path (surface, dispatch, MCP egress planning).
+    pub fn scoped_package_overlay(&self) -> Arc<ScopedPackageOverlay> {
+        Arc::clone(&self.scoped_overlay)
     }
 
     /// Returns the canonical host-runtime HTTP egress port when configured.
