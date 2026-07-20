@@ -40,12 +40,10 @@ migration-support = []
 libsql = [
     "dep:libsql",
     "ironclaw_host_runtime/libsql",
-    "ironclaw_runner/filesystem-goal-store",
 ]
 postgres = [
     "dep:deadpool-postgres",
     "ironclaw_host_runtime/postgres",
-    "ironclaw_runner/filesystem-goal-store",
 ]
 [dependencies]
 async-trait = "0.1"
