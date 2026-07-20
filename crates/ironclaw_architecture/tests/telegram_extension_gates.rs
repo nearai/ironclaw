@@ -79,7 +79,7 @@ fn generic_channel_delivery_is_not_owned_by_composition() {
         .join("crates/ironclaw_reborn_composition/src/outbound/channel_delivery.rs");
     assert!(
         !old_owner.exists(),
-        "generic channel-delivery behavior must be owned by ironclaw_channel_delivery, not {}",
+        "generic channel-delivery behavior must be owned by ironclaw_extension_host, not {}",
         old_owner.display()
     );
 }

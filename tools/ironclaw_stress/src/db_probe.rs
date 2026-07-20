@@ -2,7 +2,6 @@ use std::{io::ErrorKind, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "postgres")]
 use crate::redaction::redact_postgres_url;
 use crate::{Args, Backend};
 
@@ -109,7 +108,6 @@ async fn file_size(path: &std::path::Path) -> Result<u64, std::io::Error> {
     }
 }
 
-#[cfg(feature = "postgres")]
 async fn capture_postgres(args: &Args) -> DbProbeSnapshot {
     let url = match crate::resolve_postgres_url(args) {
         Ok(url) => url,
@@ -130,7 +128,6 @@ async fn capture_postgres(args: &Args) -> DbProbeSnapshot {
     }
 }
 
-#[cfg(feature = "postgres")]
 async fn try_capture_postgres(
     url: &str,
 ) -> Result<DbProbeSnapshot, Box<dyn std::error::Error + Send + Sync>> {
@@ -164,22 +161,12 @@ async fn try_capture_postgres(
     })
 }
 
-#[cfg(not(feature = "postgres"))]
-async fn capture_postgres(_args: &Args) -> DbProbeSnapshot {
-    DbProbeSnapshot {
-        error: Some("binary was built without the postgres feature".to_string()),
-        ..DbProbeSnapshot::default()
-    }
-}
-
-#[cfg(feature = "postgres")]
 pub(crate) fn sanitize_postgres_error(resolved_url: &str, error: impl std::fmt::Display) -> String {
     let mut message = format!("postgres probe failed: {error}");
     message = message.replace(resolved_url, &redact_postgres_url(resolved_url));
     message
 }
 
-#[cfg(feature = "postgres")]
 fn i64_to_u64(value: i64) -> Option<u64> {
     u64::try_from(value).ok()
 }

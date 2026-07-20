@@ -42,7 +42,6 @@ pub(crate) async fn build_secret_consume_workload(
     }
 }
 
-#[cfg(feature = "libsql")]
 async fn build_libsql_secret_consume_workload(
     args: &Args,
     run_id: &str,
@@ -51,29 +50,12 @@ async fn build_libsql_secret_consume_workload(
     secret_consume_workload_from_root(filesystem, run_id, target)
 }
 
-#[cfg(not(feature = "libsql"))]
-async fn build_libsql_secret_consume_workload(
-    _args: &Args,
-    _run_id: &str,
-) -> Result<SecretConsumeWorkload, String> {
-    Err("binary was built without the libsql feature".to_string())
-}
-
-#[cfg(feature = "postgres")]
 async fn build_postgres_secret_consume_workload(
     args: &Args,
     run_id: &str,
 ) -> Result<SecretConsumeWorkload, String> {
     let (filesystem, _pool, target) = crate::build_postgres_root_and_pool(args).await?;
     secret_consume_workload_from_root(filesystem, run_id, target)
-}
-
-#[cfg(not(feature = "postgres"))]
-async fn build_postgres_secret_consume_workload(
-    _args: &Args,
-    _run_id: &str,
-) -> Result<SecretConsumeWorkload, String> {
-    Err("binary was built without the postgres feature".to_string())
 }
 
 fn secret_consume_workload_from_root<F>(

@@ -318,7 +318,7 @@ ironclaw_extensions = { path = "crates/ironclaw_extensions", version = "0.1.0" }
 # Extension-runtime P2: the invented-vendor fixture factory the integration
 # harness registers (`NativeExtensionFactory`), plus scripted channel fakes.
 ironclaw_extension_host = { path = "crates/ironclaw_extension_host", version = "0.1.0", features = ["test-support"] }
-ironclaw_filesystem = { path = "crates/ironclaw_filesystem", version = "0.1.0", features = ["postgres"] }
+ironclaw_filesystem = { path = "crates/ironclaw_filesystem", version = "0.1.0" }
 ironclaw_mcp = { path = "crates/ironclaw_mcp", version = "0.1.0" }
 ironclaw_first_party_extensions = { path = "crates/ironclaw_first_party_extensions", version = "0.1.0" }
 # W6-COLD-SPOTS: `CommunicationPreferenceRecord`/`CommunicationPreferenceKey`
@@ -335,7 +335,7 @@ ironclaw_secrets = { path = "crates/ironclaw_secrets", version = "0.1.0" }
 ironclaw_product_adapters = { path = "crates/ironclaw_product_adapters", version = "0.1.0", features = ["test-support"] }
 ironclaw_product_workflow = { path = "crates/ironclaw_product_workflow", version = "0.1.0", features = ["test-support"] }
 ironclaw_runner = { path = "crates/ironclaw_runner", version = "0.1.0" }
-ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support", "libsql"] }
+ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support"] }
 ironclaw_loop_host = { path = "crates/ironclaw_loop_host", features = ["test-support"] }
 # Direct dev-dep: composition deliberately does NOT re-export the bare
 # `webui_v2_router`/`WebUiV2State` (facade-only rule), and the router smoke

@@ -14,7 +14,6 @@ publish = false
 layer = "products"
 
 [features]
-default = []
 # Compile in `InMemorySessionStore` + `EmailUserDirectory` as public crate
 # items. Off by default so production cannot accidentally wire process-local
 # identity/session stores whose contents vanish on restart.
@@ -84,7 +83,7 @@ ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
 # `tests/session_round_trip.rs`, …) build a local-dev runtime through composition's
 # public builders, so they need composition's `test-support` + `libsql` seams plus
 # the model-gateway / capability-port traits.
-ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", features = ["test-support", "libsql"] }
+ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", features = ["test-support"] }
 ironclaw_loop_host = { path = "../ironclaw_loop_host" }
 tempfile = "3"
 ironclaw_threads = { path = "../ironclaw_threads" }

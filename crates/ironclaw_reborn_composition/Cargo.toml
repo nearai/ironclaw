@@ -47,22 +47,14 @@ test-support = [
 ]
 libsql = [
     "dep:libsql",
-    "ironclaw_filesystem/libsql",
-    "ironclaw_reborn_openai_compat/libsql",
-    "ironclaw_product_workflow/libsql",
     "ironclaw_host_runtime/libsql",
     "ironclaw_runner/filesystem-goal-store",
-    "ironclaw_reborn_event_store/libsql",
-    "ironclaw_triggers/libsql",
 ]
 postgres = [
     "dep:deadpool-postgres",
-    "ironclaw_filesystem/postgres",
     "ironclaw_host_runtime/postgres",
     "ironclaw_runner/filesystem-goal-store",
     "ironclaw_runner/filesystem-local-trigger-access",
-    "ironclaw_reborn_event_store/postgres",
-    "ironclaw_triggers/postgres",
 ]
 [dependencies]
 async-trait = "0.1"
