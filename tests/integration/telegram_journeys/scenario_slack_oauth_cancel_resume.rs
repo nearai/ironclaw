@@ -1,7 +1,7 @@
 use super::harness::*;
 use super::reborn_support::reply::RebornScriptedReply;
 use axum::http::{Method, StatusCode};
-use ironclaw_auth::{AuthErrorCode, AuthFlowStatus, OAuthCallbackState, OAuthCallbackStateKind};
+use ironclaw_auth::{AuthFlowOutcome, AuthFlowState, OAuthCallbackState, OAuthCallbackStateKind};
 use ironclaw_turns::TurnStatus;
 use serde_json::json;
 use std::time::Duration;
@@ -25,7 +25,7 @@ const SLACK_CALLBACK_PATH: &str = "/api/reborn/product-auth/oauth/slack_personal
 ///    `team` (plus the expected client and callback, never the client secret);
 /// 3. the user denies authorization through the real public OAuth callback
 ///    route, which renders the sanitized popup failure page and durably records
-///    `Failed(ProviderDenied)` with its continuation marker;
+///    `Resolved(ProviderDenied)` with its resolution-delivery marker;
 /// 4. the exact `BlockedAuth` run resumes with a denied gate outcome, completes,
 ///    and delivers the model's recovery response back to Telegram;
 /// 5. a new DM on the same paired conversation receives a normal reply, proving
@@ -46,6 +46,10 @@ async fn telegram_dm_slack_oauth_targets_workspace_and_popup_cancel_resumes_thre
                 "Slack authorization was canceled, so I continued without it.",
             ),
             RebornScriptedReply::text("Yes — this Telegram thread is still active."),
+            RebornScriptedReply::tool_call(
+                "builtin.extension_activate",
+                json!({"extension_id": "slack"}),
+            ),
         ],
         QA_SLACK_TEAM,
     )
@@ -163,7 +167,9 @@ async fn telegram_dm_slack_oauth_targets_workspace_and_popup_cancel_resumes_thre
             .await
             .expect("read denied Slack flow")
             .expect("denied Slack flow remains durable");
-        if flow.status == AuthFlowStatus::Failed && flow.continuation_emitted_at.is_some() {
+        if flow.state == AuthFlowState::Resolved(AuthFlowOutcome::ProviderDenied)
+            && flow.resolution_delivered_at.is_some()
+        {
             failed_flow = Some(flow);
             break;
         }
@@ -172,7 +178,10 @@ async fn telegram_dm_slack_oauth_targets_workspace_and_popup_cancel_resumes_thre
     let failed_flow = failed_flow.expect(
         "provider denial durably fails the flow and acknowledges its continuation within 10s",
     );
-    assert_eq!(failed_flow.error, Some(AuthErrorCode::ProviderDenied));
+    assert_eq!(
+        failed_flow.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::ProviderDenied)
+    );
 
     wait_for_run_status(
         &stack.runtime.webui_turn_coordinator_for_test(),
@@ -201,6 +210,67 @@ async fn telegram_dm_slack_oauth_targets_workspace_and_popup_cancel_resumes_thre
         "the normal reply is attributable to the post-cancel follow-up"
     );
     assert_eq!(stack.model_trace.calls(), 4);
+
+    // A later user request creates a distinct, newer Slack auth gate. Replaying
+    // the old provider-denial callback must be an idempotent no-op against the
+    // old exact references and cannot release or cancel this newer gate.
+    let retry_text = "please try connecting Slack again";
+    let retry_baseline = stack.network.request_bodies_for("/sendMessage").len();
+    let status = stack.webhook_dm_without_drain(&secret, 4, retry_text).await;
+    assert_eq!(status, StatusCode::OK, "retry DM webhook acks 200");
+    let retry_prompt = stack
+        .wait_for_dm_send_after(retry_baseline, |text| {
+            text.contains("slack.com/oauth/v2/authorize")
+        })
+        .await
+        .expect("the retry creates a newer Slack authorization gate");
+    let retry_url = retry_prompt["text"]
+        .as_str()
+        .and_then(|text| {
+            text.split_whitespace()
+                .find(|part| part.starts_with("https://slack.com/oauth/v2/authorize?"))
+        })
+        .and_then(|part| Url::parse(part).ok())
+        .expect("retry Slack authorization URL parses");
+    let retry_state = retry_url
+        .query_pairs()
+        .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+        .expect("retry Slack authorization URL carries opaque state");
+    let retry_callback_state =
+        OAuthCallbackState::decode(OAuthCallbackStateKind::SLACK_PERSONAL, &retry_state)
+            .expect("retry Slack callback state decodes");
+    assert_ne!(
+        retry_callback_state.flow_id(),
+        flow_id,
+        "the later request owns a distinct auth flow"
+    );
+    let (retry_turn_scope, retry_run_id) = stack.run_for_dm_message(retry_text).await;
+    wait_for_run_status(
+        &stack.runtime.webui_turn_coordinator_for_test(),
+        &retry_turn_scope,
+        retry_run_id,
+        TurnStatus::BlockedAuth,
+    )
+    .await
+    .expect("the newer Telegram run is parked on its own Slack auth gate");
+
+    let _ = call_route(
+        stack
+            .oauth_callback_public
+            .clone()
+            .expect("Slack journey exposes the public OAuth callback"),
+        Method::GET,
+        &callback_path,
+        None,
+        &[("accept", "text/html,application/xhtml+xml")],
+        None,
+    )
+    .await;
+    stack
+        .assert_run_stays_status(&retry_turn_scope, retry_run_id, TurnStatus::BlockedAuth)
+        .await
+        .expect("redelivering the old terminal result cannot affect the newer exact gate");
+    assert_eq!(stack.model_trace.calls(), 5);
 
     stack.runtime.shutdown().await.expect("runtime shuts down");
 }

@@ -47,29 +47,6 @@ async fn oauth_completion_compensation_preserves_a_newer_account_generation() {
         .credential_secret_fingerprint
         .clone()
         .expect("first secret fingerprint");
-    let claimed = services
-        .claim_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchClaimInput {
-                flow_id: first.id,
-                claimed_at: Utc::now(),
-            },
-        )
-        .await
-        .expect("first continuation claim");
-    services
-        .settle_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchSettlementInput {
-                flow_id: first.id,
-                expected_claimed_at: claimed.updated_at,
-                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
-                    error: AuthErrorCode::BackendUnavailable,
-                },
-            },
-        )
-        .await
-        .expect("first continuation failure");
     let first_account = services
         .get_account(CredentialAccountLookupRequest::new(
             owner.clone(),
@@ -177,29 +154,6 @@ async fn oauth_completion_compensation_ignores_metadata_only_account_updates() {
         .credential_secret_fingerprint
         .clone()
         .expect("OAuth fingerprint");
-    let claim = services
-        .claim_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchClaimInput {
-                flow_id: completed.id,
-                claimed_at: Utc::now(),
-            },
-        )
-        .await
-        .unwrap();
-    services
-        .settle_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchSettlementInput {
-                flow_id: completed.id,
-                expected_claimed_at: claim.updated_at,
-                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
-                    error: AuthErrorCode::BackendUnavailable,
-                },
-            },
-        )
-        .await
-        .unwrap();
     let current = services
         .get_account(CredentialAccountLookupRequest::new(
             owner.clone(),
@@ -749,7 +703,7 @@ async fn cleanup_matches_owner_granularity_and_provider_selected_oauth_accounts(
 }
 
 #[tokio::test]
-async fn completed_unacknowledged_turn_gate_cleanup_emits_once_then_converges() {
+async fn resolved_undelivered_turn_gate_cleanup_redelivers_exact_outcome_then_converges() {
     let services = InMemoryAuthProductServices::new();
     let owner = scope("alice");
     let account = services
@@ -793,12 +747,17 @@ async fn completed_unacknowledged_turn_gate_cleanup_emits_once_then_converges() 
         )
         .await
         .expect("selection completes");
-    assert_eq!(completed.status, AuthFlowStatus::Completed);
-    assert!(completed.continuation_emitted_at.is_none());
+    assert_eq!(
+        completed.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized {
+            account_id: account.id,
+        })
+    );
+    assert!(completed.resolution_delivered_at.is_none());
 
     // Completion is durable but dispatch is not acknowledged yet. Lifecycle
-    // cleanup must still synthesize a denial so a gate cannot remain parked
-    // after its credential is removed.
+    // cleanup must redeliver the persisted winning resolution so a gate cannot
+    // remain parked after its credential is removed.
     let request = SecretCleanupRequest {
         scope: owner.clone(),
         extension_id: ExtensionId::new("github").expect("extension"),
@@ -809,17 +768,23 @@ async fn completed_unacknowledged_turn_gate_cleanup_emits_once_then_converges() 
         .cleanup_for_lifecycle(request.clone())
         .await
         .expect("cleanup");
-    assert_eq!(report.canceled_turn_gate_continuations.len(), 1);
-    let event = &report.canceled_turn_gate_continuations[0];
+    assert_eq!(report.auth_resolutions.len(), 1);
+    let event = &report.auth_resolutions[0];
     assert_eq!(event.flow_id, flow.id);
+    assert_eq!(
+        event.outcome,
+        AuthFlowOutcome::Authorized {
+            account_id: account.id,
+        }
+    );
 
     services
-        .mark_continuation_dispatched(&owner, flow.id, event.emitted_at)
+        .mark_resolution_delivered(&owner, flow.id, event.resolved_at)
         .await
-        .expect("acknowledge cleanup continuation");
+        .expect("acknowledge cleanup resolution");
     let retry = services
         .cleanup_for_lifecycle(request)
         .await
         .expect("cleanup retry");
-    assert!(retry.canceled_turn_gate_continuations.is_empty());
+    assert!(retry.auth_resolutions.is_empty());
 }

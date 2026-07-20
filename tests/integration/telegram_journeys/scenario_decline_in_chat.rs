@@ -1,9 +1,11 @@
 use super::harness::*;
 use super::reborn_support::reply::RebornScriptedReply;
 use axum::http::StatusCode;
+use ironclaw_auth::{AuthFlowOutcome, AuthFlowState, OAuthCallbackState, OAuthCallbackStateKind};
 use ironclaw_turns::TurnStatus;
 use serde_json::json;
 use std::time::Duration;
+use url::Url;
 
 /// Ben's third regression (2026-07-17): the busy-on-auth hint tells the user
 /// to reply `auth deny gate:<ref>` in this chat, but that reply used to parse
@@ -38,10 +40,26 @@ async fn telegram_dm_auth_deny_command_cancels_gate_and_frees_the_thread() {
 
     let status = stack.webhook_dm(&secret, 2, "can you set up gmail?").await;
     assert_eq!(status, StatusCode::OK);
-    stack
+    let auth_prompt = stack
         .wait_for_dm_send(|text| text.contains("accounts.google.com"))
         .await
         .expect("the gated install DMs the authorization link first");
+    let authorization_url = auth_prompt["text"]
+        .as_str()
+        .and_then(|text| {
+            text.split_whitespace()
+                .find(|part| part.starts_with("https://accounts.google.com/"))
+        })
+        .and_then(|part| Url::parse(part).ok())
+        .expect("Google authorization URL parses");
+    let state = authorization_url
+        .query_pairs()
+        .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+        .expect("Google authorization URL carries opaque state");
+    let callback_state = OAuthCallbackState::decode(OAuthCallbackStateKind::GOOGLE, &state)
+        .expect("Google callback state decodes");
+    let auth_flow_id = callback_state.flow_id();
+    let auth_flow_scope = callback_state.scope().clone();
 
     // Resolve the exact run from the durable thread transcript before acting
     // on the gate. This lets the denial assertion wait for an authoritative
@@ -89,6 +107,31 @@ async fn telegram_dm_auth_deny_command_cancels_gate_and_frees_the_thread() {
     )
     .await
     .expect("explicit denial terminally cancels the exact gated run");
+    let product_auth = stack
+        .webui
+        .product_auth
+        .as_ref()
+        .expect("journey runtime exposes product auth");
+    let mut aborted_flow = None;
+    for _ in 0..400 {
+        let flow = product_auth
+            .flow_manager()
+            .get_flow(&auth_flow_scope, auth_flow_id)
+            .await
+            .expect("read explicitly denied flow")
+            .expect("explicitly denied flow remains durable");
+        if flow.state == AuthFlowState::Resolved(AuthFlowOutcome::UserAborted)
+            && flow.resolution_delivered_at.is_some()
+        {
+            aborted_flow = Some(flow);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        aborted_flow.is_some(),
+        "in-chat auth deny durably resolves as UserAborted and delivers the exact resolution"
+    );
     // Once the run is terminally cancelled, no late continuation can consume
     // another model step. The install and activate calls are the only calls
     // before the next user turn.

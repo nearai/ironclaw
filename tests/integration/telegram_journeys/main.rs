@@ -42,9 +42,12 @@
 //! (see `telegram_dm_slack_install_gates_with_action_needed_notice_not_silence`).
 //! It also covers the cross-extension Slack OAuth recovery journeys: an
 //! explicit in-chat denial terminally cancels the exact run, while a
-//! provider-popup denial resumes the exact gate as denied; the Slack link is
-//! pinned to the configured workspace and both paths prove the same Telegram
-//! thread accepts a later message.
+//! provider-popup denial resolves as `ProviderDenied` and resumes the exact
+//! gate as denied; the Slack link is pinned to the configured workspace. The
+//! explicit in-chat denial resolves as `UserAborted`, cancels only the exact
+//! blocked run, and both paths prove the same Telegram thread accepts a later
+//! message. Re-delivery after an exact gate has been left is pinned as a no-op
+//! that cannot affect a newer gate.
 //!
 //! One scenario file per user journey (catalog row ids in each
 //! scenario's doc-comment); the shared stack lives in `harness.rs`.

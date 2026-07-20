@@ -426,7 +426,19 @@ impl JourneyStack {
         &self,
         predicate: impl Fn(&str) -> bool,
     ) -> Result<Value, String> {
-        self.wait_for_send_in(TG_CHAT_ID, predicate).await
+        self.wait_for_send_in_after(TG_CHAT_ID, 0, predicate).await
+    }
+
+    /// Poll only Telegram sends captured after `baseline`. Multi-turn auth
+    /// journeys use this to prove a newer gate emitted its own authorization
+    /// prompt instead of accidentally matching the older gate's URL.
+    pub(crate) async fn wait_for_dm_send_after(
+        &self,
+        baseline: usize,
+        predicate: impl Fn(&str) -> bool,
+    ) -> Result<Value, String> {
+        self.wait_for_send_in_after(TG_CHAT_ID, baseline, predicate)
+            .await
     }
 
     pub(crate) async fn wait_for_send_in(
@@ -434,19 +446,62 @@ impl JourneyStack {
         chat_id: i64,
         predicate: impl Fn(&str) -> bool,
     ) -> Result<Value, String> {
+        self.wait_for_send_in_after(chat_id, 0, predicate).await
+    }
+
+    async fn wait_for_send_in_after(
+        &self,
+        chat_id: i64,
+        baseline: usize,
+        predicate: impl Fn(&str) -> bool,
+    ) -> Result<Value, String> {
         for _ in 0..200 {
             let sends = self.network.request_bodies_for("/sendMessage");
-            if let Some(body) = sends.iter().find(|body| {
-                body["chat_id"] == chat_id && body["text"].as_str().is_some_and(&predicate)
-            }) {
+            if let Some(body) = sends
+                .get(baseline..)
+                .unwrap_or_default()
+                .iter()
+                .find(|body| {
+                    body["chat_id"] == chat_id && body["text"].as_str().is_some_and(&predicate)
+                })
+            {
                 return Ok(body.clone());
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         Err(format!(
-            "no matching sendMessage for chat {chat_id}; captured: {:?}",
+            "no matching sendMessage for chat {chat_id} after {baseline}; captured: {:?}",
             self.network.request_bodies_for("/sendMessage")
         ))
+    }
+
+    /// Prove a run remains on the same exact status for a bounded observation
+    /// window. This catches stale auth resolution delivery that races after a
+    /// newer gate has already parked the conversation.
+    pub(crate) async fn assert_run_stays_status(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        expected: TurnStatus,
+    ) -> Result<(), String> {
+        let coordinator = self.runtime.webui_turn_coordinator_for_test();
+        for _ in 0..40 {
+            let state = coordinator
+                .get_run_state(GetRunStateRequest {
+                    scope: scope.clone(),
+                    run_id,
+                })
+                .await
+                .map_err(|error| format!("run state read failed: {error}"))?;
+            if state.status != expected {
+                return Err(format!(
+                    "run left {expected:?} during stale-resolution observation: {:?}",
+                    state.status
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        Ok(())
     }
 
     /// Resolve the exact durable run created for a paired Telegram DM by its

@@ -3,7 +3,7 @@ use ironclaw_host_api::ExtensionId;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AuthContinuationEvent, AuthFlowId, AuthProductError, AuthProviderId, CredentialAccountId,
+    AuthFlowId, AuthProductError, AuthProviderId, AuthResolved, CredentialAccountId,
     CredentialSecretFingerprint, OAuthProviderExchange, scope::AuthProductScope,
 };
 
@@ -80,7 +80,7 @@ pub struct SecretCleanupReport {
     /// complete. This internal handoff is deliberately omitted from product
     /// responses; it carries no secret material.
     #[serde(skip)]
-    pub canceled_turn_gate_continuations: Vec<AuthContinuationEvent>,
+    pub auth_resolutions: Vec<AuthResolved>,
 }
 
 /// Stable redacted cleanup quarantine category.

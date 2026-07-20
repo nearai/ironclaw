@@ -27,11 +27,11 @@
 use chrono::{Duration, Utc};
 
 use crate::{
-    AUTH_FLOW_CANCELLATION_LEASE_SECONDS, AuthChallenge, AuthContinuationRef, AuthFlowId,
-    AuthFlowKind, AuthFlowManager, AuthFlowRecord, AuthFlowStatus, AuthProductError,
-    AuthProductScope, AuthProviderId, AuthorizationCodeHash, CredentialAccountLabel, NewAuthFlow,
-    OAuthAuthorizationUrl, OAuthCallbackInput, OAuthProviderExchange, OpaqueStateHash,
-    PkceVerifierHash, ProviderCallbackOutcome,
+    AuthChallenge, AuthContinuationRef, AuthFlowId, AuthFlowKind, AuthFlowManager, AuthFlowOutcome,
+    AuthFlowRecord, AuthFlowState, AuthProductError, AuthProductScope, AuthProviderId,
+    AuthorizationCodeHash, CredentialAccountLabel, NewAuthFlow, OAuthAuthorizationUrl,
+    OAuthCallbackInput, OAuthProviderExchange, OpaqueStateHash, PkceVerifierHash,
+    ProviderCallbackOutcome,
 };
 use ironclaw_host_api::SecretHandle;
 
@@ -131,7 +131,6 @@ pub async fn assert_auth_flow_callback_conformance(
     provider: &AuthProviderId,
 ) {
     completed_flow_claim_idempotent_and_complete_rejects_replay(flows, scope, provider).await;
-    cancellation_reservation_is_fenced_and_reversible(flows, scope, provider).await;
     expired_flow_rejects_and_marks_expired(flows, scope, provider).await;
     canceled_flow_rejects_completion_as_canceled(flows, scope, provider).await;
     unknown_flow_rejects_completion(flows, scope, provider).await;
@@ -173,9 +172,9 @@ async fn completed_flow_claim_idempotent_and_complete_rejects_replay(
         .await
         .unwrap_or_else(|error| panic!("[{CASE}] first claim: {error:?}"));
     assert_eq!(
-        claimed.status,
-        AuthFlowStatus::CallbackReceived,
-        "[{CASE}] first claim moves the flow to CallbackReceived"
+        claimed.state,
+        AuthFlowState::Processing,
+        "[{CASE}] first claim moves the flow to Processing"
     );
 
     let completed = flows
@@ -186,13 +185,19 @@ async fn completed_flow_claim_idempotent_and_complete_rejects_replay(
         .await
         .unwrap_or_else(|error| panic!("[{CASE}] complete: {error:?}"));
     assert_eq!(
-        completed.status,
-        AuthFlowStatus::Completed,
-        "[{CASE}] authorized completion lands on Completed"
+        completed.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized {
+            account_id: match completed.state {
+                AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id }) => account_id,
+                _ => panic!("[{CASE}] completion must mint a credential account"),
+            },
+        }),
+        "[{CASE}] authorized completion lands on Resolved(Authorized)"
     );
-    let account_id = completed
-        .credential_account_id
-        .unwrap_or_else(|| panic!("[{CASE}] completion must mint a credential account"));
+    let AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id }) = completed.state
+    else {
+        panic!("[{CASE}] completion must mint a credential account");
+    };
 
     // Replayed CLAIM (duplicated redirect): idempotent, same terminal record.
     let reclaimed = flows
@@ -210,13 +215,8 @@ async fn completed_flow_claim_idempotent_and_complete_rejects_replay(
             panic!("[{CASE}] a replayed claim on a completed flow must be idempotent: {error:?}")
         });
     assert_eq!(
-        reclaimed.status,
-        AuthFlowStatus::Completed,
-        "[{CASE}] replayed claim returns the completed record"
-    );
-    assert_eq!(
-        reclaimed.credential_account_id,
-        Some(account_id),
+        reclaimed.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id }),
         "[{CASE}] replayed claim returns the ORIGINAL grant's account"
     );
 
@@ -235,98 +235,10 @@ async fn completed_flow_claim_idempotent_and_complete_rejects_replay(
     );
     let record = read_flow(flows, scope, flow.id, CASE).await;
     assert_eq!(
-        record.status,
-        AuthFlowStatus::Completed,
-        "[{CASE}] record stays Completed"
-    );
-    assert_eq!(
-        record.credential_account_id,
-        Some(account_id),
+        record.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id }),
         "[{CASE}] the original grant survives the rejected replay"
     );
-    let cancellation = flows
-        .reserve_cancellation(scope, flow.id, Utc::now())
-        .await
-        .unwrap_or_else(|error| {
-            panic!("[{CASE}] completed flow must win a cancellation race: {error:?}")
-        });
-    assert_eq!(cancellation.status, AuthFlowStatus::Completed); // safety: test-support conformance assertion intentionally panics on mismatch.
-}
-
-async fn cancellation_reservation_is_fenced_and_reversible(
-    flows: &dyn AuthFlowManager,
-    scope: &AuthProductScope,
-    provider: &AuthProviderId,
-) {
-    const CASE: &str = "cancellation reservation";
-    let tag = "conformance-cancellation-reservation";
-    let flow = flows
-        .create_flow(new_flow(
-            scope,
-            provider,
-            tag,
-            Utc::now() + Duration::minutes(5),
-        ))
-        .await
-        .unwrap_or_else(|error| panic!("[{CASE}] create_flow: {error:?}"));
-
-    let initial_claimed_at =
-        Utc::now() - Duration::seconds(AUTH_FLOW_CANCELLATION_LEASE_SECONDS + 1);
-    let reserved = flows
-        .reserve_cancellation(scope, flow.id, initial_claimed_at)
-        .await
-        .unwrap_or_else(|error| panic!("[{CASE}] reserve: {error:?}"));
-    assert_eq!(reserved.status, AuthFlowStatus::Canceling); // safety: test-support conformance assertion intentionally panics on mismatch.
-
-    let completion = flows
-        .complete_oauth_callback(
-            scope,
-            callback_input(flow.id, tag, authorized_outcome(provider, tag)),
-        )
-        .await
-        .expect_err("callback completion must not cross a denial reservation");
-    assert_eq!(completion, AuthProductError::FlowAlreadyTerminal); // safety: test-support conformance assertion intentionally panics on mismatch.
-
-    let stale = flows
-        .finalize_cancellation(scope, flow.id, reserved.updated_at - Duration::seconds(1))
-        .await
-        .expect_err("a stale worker must not settle the reservation");
-    assert_eq!(stale, AuthProductError::BackendConflict); // safety: test-support conformance assertion intentionally panics on mismatch.
-
-    let replacement_at = Utc::now();
-    let replacement = flows
-        .reserve_cancellation(scope, flow.id, replacement_at)
-        .await
-        .unwrap_or_else(|error| panic!("[{CASE}] reclaim expired reservation: {error:?}"));
-    assert_eq!(replacement.status, AuthFlowStatus::Canceling); // safety: test-support conformance assertion intentionally panics on mismatch.
-    assert_eq!(replacement.updated_at, replacement_at); // safety: test-support conformance assertion intentionally panics on mismatch.
-
-    let stale_finalize = flows
-        .finalize_cancellation(scope, flow.id, reserved.updated_at)
-        .await
-        .expect_err("the old lease owner must not finalize its replacement");
-    assert_eq!(stale_finalize, AuthProductError::BackendConflict); // safety: test-support conformance assertion intentionally panics on mismatch.
-    let stale_rollback = flows
-        .rollback_cancellation(scope, flow.id, reserved.updated_at)
-        .await
-        .expect_err("the old lease owner must not roll back its replacement");
-    assert_eq!(stale_rollback, AuthProductError::BackendConflict); // safety: test-support conformance assertion intentionally panics on mismatch.
-
-    let rolled_back = flows
-        .rollback_cancellation(scope, flow.id, replacement.updated_at)
-        .await
-        .unwrap_or_else(|error| panic!("[{CASE}] rollback: {error:?}"));
-    assert_eq!(rolled_back.status, AuthFlowStatus::AwaitingUser); // safety: test-support conformance assertion intentionally panics on mismatch.
-
-    let reserved = flows
-        .reserve_cancellation(scope, flow.id, Utc::now())
-        .await
-        .unwrap_or_else(|error| panic!("[{CASE}] re-reserve: {error:?}"));
-    let canceled = flows
-        .finalize_cancellation(scope, flow.id, reserved.updated_at)
-        .await
-        .unwrap_or_else(|error| panic!("[{CASE}] finalize: {error:?}"));
-    assert_eq!(canceled.status, AuthFlowStatus::Canceled); // safety: test-support conformance assertion intentionally panics on mismatch.
 }
 
 /// A callback for a lapsed flow is rejected `UnknownOrExpiredFlow` and the
@@ -364,9 +276,9 @@ async fn expired_flow_rejects_and_marks_expired(
     );
     let record = read_flow(flows, scope, flow.id, CASE).await;
     assert_eq!(
-        record.status,
-        AuthFlowStatus::Expired,
-        "[{CASE}] the record is marked terminal Expired (write-back), not left pending"
+        record.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Expired),
+        "[{CASE}] the record is marked Resolved(Expired), not left open"
     );
 }
 
@@ -392,6 +304,12 @@ async fn canceled_flow_rejects_completion_as_canceled(
         .cancel_flow(scope, flow.id)
         .await
         .unwrap_or_else(|error| panic!("[{CASE}] cancel_flow: {error:?}"));
+    let canceled = read_flow(flows, scope, flow.id, CASE).await;
+    assert_eq!(
+        canceled.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::UserAborted),
+        "[{CASE}] explicit cancel resolves as UserAborted"
+    );
 
     let error = flows
         .complete_oauth_callback(
@@ -485,8 +403,11 @@ async fn state_hash_mismatch_denies_without_burning_the_flow(
             panic!("[{CASE}] the genuine callback must still complete after a mismatch: {error:?}")
         });
     assert_eq!(
-        completed.status,
-        AuthFlowStatus::Completed,
+        completed.state,
+        AuthFlowState::Resolved(match completed.state {
+            AuthFlowState::Resolved(outcome @ AuthFlowOutcome::Authorized { .. }) => outcome,
+            _ => panic!("[{CASE}] genuine callback must authorize"),
+        }),
         "[{CASE}] a rejected mismatch must not consume the flow"
     );
 }

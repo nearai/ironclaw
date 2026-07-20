@@ -1,12 +1,12 @@
 use ironclaw_host_api::ExtensionId;
 
 use crate::{
-    AuthChallenge, AuthErrorCode, AuthFlowRecord, AuthFlowStatus, AuthProductError,
-    CredentialAccount, CredentialAccountUpdateBinding, CredentialOwnership, CredentialRecoveryKind,
-    CredentialRecoveryProjection, CredentialRecoveryReason, CredentialRefreshRequest,
-    CredentialSelectionInput, ManualTokenCompletionInput, ManualTokenSetupRequest, NewAuthFlow,
-    NewCredentialAccount, OAuthCallbackClaimRequest, OAuthProviderExchange, Timestamp,
-    flow::credential_status_for_completed_flow, scope_matches,
+    AuthChallenge, AuthFlowOutcome, AuthFlowRecord, AuthFlowState, AuthProductError,
+    CredentialAccount, CredentialAccountId, CredentialAccountUpdateBinding, CredentialOwnership,
+    CredentialRecoveryKind, CredentialRecoveryProjection, CredentialRecoveryReason,
+    CredentialRefreshRequest, CredentialSelectionInput, ManualTokenCompletionInput,
+    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest,
+    OAuthProviderExchange, Timestamp, flow::credential_status_for_completed_flow, scope_matches,
 };
 
 pub struct PreparedCallbackFlow {
@@ -24,14 +24,8 @@ pub fn prepare_callback_flow(
     if !scope_matches(scope, &record.scope) {
         return Err(AuthProductError::CrossScopeDenied);
     }
-    if crate::is_terminal_status(record.status) {
-        return Err(match record.status {
-            AuthFlowStatus::Canceled => AuthProductError::Canceled,
-            _ => AuthProductError::FlowAlreadyTerminal,
-        });
-    }
-    if record.status == AuthFlowStatus::Canceling {
-        return Err(AuthProductError::FlowAlreadyTerminal);
+    if let AuthFlowState::Resolved(outcome) = record.state {
+        return Err(error_for_terminal_outcome(outcome));
     }
     expire_if_needed(record, now)?;
     if !record
@@ -74,10 +68,10 @@ pub fn validate_callback_claim(
     {
         return Err(AuthProductError::CrossScopeDenied);
     }
-    if crate::is_terminal_status(record.status) {
-        return match record.status {
-            AuthFlowStatus::Completed => Ok(()),
-            AuthFlowStatus::Failed
+    if let AuthFlowState::Resolved(outcome) = record.state {
+        return match outcome {
+            AuthFlowOutcome::Authorized { .. } => Ok(()),
+            AuthFlowOutcome::Failed { .. }
                 if record.credential_secret_fingerprint.is_some()
                     && matches!(
                         record.continuation,
@@ -86,11 +80,10 @@ pub fn validate_callback_claim(
             {
                 Ok(())
             }
-            AuthFlowStatus::Canceled => Err(AuthProductError::Canceled),
-            _ => Err(AuthProductError::FlowAlreadyTerminal),
+            _ => Err(error_for_terminal_outcome(outcome)),
         };
     }
-    if record.status == AuthFlowStatus::Completing
+    if record.state == AuthFlowState::Processing
         && matches!(
             record.continuation,
             crate::AuthContinuationRef::LifecycleActivation { .. }
@@ -99,7 +92,7 @@ pub fn validate_callback_claim(
         return Ok(());
     }
     expire_if_needed(record, now)?;
-    if record.status != AuthFlowStatus::AwaitingUser {
+    if record.state != AuthFlowState::Open {
         return Err(AuthProductError::FlowAlreadyTerminal);
     }
     Ok(())
@@ -114,19 +107,18 @@ pub fn validate_selection_flow(
     if !scope_matches(scope, &record.scope) {
         return Err(AuthProductError::CrossScopeDenied);
     }
-    if crate::is_terminal_status(record.status) {
-        return match (record.status, record.credential_account_id) {
-            (AuthFlowStatus::Completed, Some(completed))
-                if completed == input.credential_account_id =>
+    if let AuthFlowState::Resolved(outcome) = record.state {
+        return match outcome {
+            AuthFlowOutcome::Authorized { account_id }
+                if account_id == input.credential_account_id =>
             {
                 Ok(())
             }
-            (AuthFlowStatus::Canceled, _) => Err(AuthProductError::Canceled),
-            _ => Err(AuthProductError::FlowAlreadyTerminal),
+            _ => Err(error_for_terminal_outcome(outcome)),
         };
     }
     expire_if_needed(record, now)?;
-    if record.status != AuthFlowStatus::AwaitingUser {
+    if record.state != AuthFlowState::Open {
         return Err(AuthProductError::FlowAlreadyTerminal);
     }
     let Some(AuthChallenge::AccountSelectionRequired { provider, accounts }) = &record.challenge
@@ -177,19 +169,18 @@ pub fn validate_manual_token_flow(
             "auth flow manual-token provider mismatch",
         ));
     }
-    if crate::is_terminal_status(record.status) {
-        return match (record.status, record.credential_account_id) {
-            (AuthFlowStatus::Completed, Some(completed))
-                if completed == input.credential_account_id =>
+    if let AuthFlowState::Resolved(outcome) = record.state {
+        return match outcome {
+            AuthFlowOutcome::Authorized { account_id }
+                if account_id == input.credential_account_id =>
             {
                 Ok(())
             }
-            (AuthFlowStatus::Canceled, _) => Err(AuthProductError::Canceled),
-            _ => Err(AuthProductError::FlowAlreadyTerminal),
+            _ => Err(error_for_terminal_outcome(outcome)),
         };
     }
     expire_if_needed(record, now)?;
-    if record.status != AuthFlowStatus::AwaitingUser {
+    if record.state != AuthFlowState::Open {
         return Err(AuthProductError::FlowAlreadyTerminal);
     }
     Ok(())
@@ -199,10 +190,23 @@ fn expire_if_needed(record: &mut AuthFlowRecord, now: Timestamp) -> Result<(), A
     if now <= record.expires_at {
         return Ok(());
     }
-    record.status = AuthFlowStatus::Expired;
-    record.error = Some(AuthErrorCode::UnknownOrExpiredFlow);
+    record.state = AuthFlowState::Resolved(AuthFlowOutcome::Expired);
     record.updated_at = now;
     Err(AuthProductError::UnknownOrExpiredFlow)
+}
+
+fn error_for_terminal_outcome(outcome: AuthFlowOutcome) -> AuthProductError {
+    match outcome {
+        AuthFlowOutcome::UserAborted => AuthProductError::Canceled,
+        _ => AuthProductError::FlowAlreadyTerminal,
+    }
+}
+
+pub(crate) fn resolved_account_id(record: &AuthFlowRecord) -> Option<CredentialAccountId> {
+    match record.state {
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id }) => Some(account_id),
+        _ => None,
+    }
 }
 
 pub fn update_account_from_exchange(

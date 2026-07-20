@@ -44,14 +44,12 @@ pub use domain::select_latest_duplicate_user_reusable_account;
 pub use error::{AuthErrorCode, AuthProductError};
 pub use fakes::InMemoryAuthProductServices;
 pub use flow::{
-    AUTH_CONTINUATION_DISPATCH_LEASE_SECONDS, AUTH_FLOW_CANCELLATION_LEASE_SECONDS, AuthChallenge,
-    AuthContinuationDispatchClaimInput, AuthContinuationDispatchOutcome,
-    AuthContinuationDispatchSettlementInput, AuthContinuationEvent, AuthContinuationRef,
-    AuthFlowKind, AuthFlowManager, AuthFlowOwnerScope, AuthFlowRecord, AuthFlowRecordSource,
-    AuthFlowStatus, CredentialAccountUpdateBinding, CredentialSelectionInput,
-    ManualTokenCompletionInput, NewAuthFlow, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
-    OAuthCallbackInput, ProviderCallbackOutcome, TurnGateAuthFlowQuery,
-    credential_status_for_completed_flow, flow_matches_durable_owner, flow_matches_turn_gate_query,
+    AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthFlowOutcome,
+    AuthFlowOwnerScope, AuthFlowRecord, AuthFlowRecordSource, AuthFlowState, AuthResolved,
+    CredentialAccountUpdateBinding, CredentialSelectionInput, ManualTokenCompletionInput,
+    NewAuthFlow, OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
+    ProviderCallbackOutcome, TurnGateAuthFlowQuery, credential_status_for_completed_flow,
+    flow_matches_durable_owner, flow_matches_turn_gate_query,
 };
 pub use ids::{
     AuthFlowId, AuthGateRef, AuthInteractionId, AuthProviderId, AuthSessionId,
@@ -119,12 +117,6 @@ pub fn scope_matches(left: &AuthProductScope, right: &AuthProductScope) -> bool 
     left == right
 }
 
-pub fn is_terminal_status(status: AuthFlowStatus) -> bool {
-    matches!(
-        status,
-        AuthFlowStatus::Completed
-            | AuthFlowStatus::Failed
-            | AuthFlowStatus::Expired
-            | AuthFlowStatus::Canceled
-    )
+pub fn is_terminal_state(state: AuthFlowState) -> bool {
+    matches!(state, AuthFlowState::Resolved(_))
 }

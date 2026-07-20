@@ -21,23 +21,24 @@ pub enum AuthFlowKind {
     IdentityLogin,
 }
 
+/// Terminal result of an auth flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AuthFlowOutcome {
+    Authorized { account_id: CredentialAccountId },
+    ProviderDenied,
+    UserAborted,
+    Expired,
+    Failed { error: AuthErrorCode },
+}
+
 /// Durable auth-flow lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthFlowStatus {
-    Pending,
-    AwaitingUser,
-    CallbackReceived,
-    /// Reserved for production stores that split durable claim, provider
-    /// exchange, and account mutation across asynchronous workers.
-    Completing,
-    /// Exclusive denial reservation held while the owning blocked run is
-    /// canceled. Completion paths must not mutate a flow in this state.
-    Canceling,
-    Completed,
-    Failed,
-    Expired,
-    Canceled,
+#[serde(tag = "state", content = "outcome", rename_all = "snake_case")]
+pub enum AuthFlowState {
+    Open,
+    Processing,
+    Resolved(AuthFlowOutcome),
 }
 
 /// Stable recoverable auth challenge rendered by product adapters.
@@ -86,19 +87,17 @@ pub enum AuthContinuationRef {
     },
 }
 
-/// Emitted after an auth flow either completes with credentials or terminates
-/// in a way that must release its typed continuation, such as provider denial.
+/// Durable terminal auth result delivered to the exact typed continuation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuthContinuationEvent {
+pub struct AuthResolved {
     pub flow_id: AuthFlowId,
     pub scope: AuthProductScope,
     pub continuation: AuthContinuationRef,
-    /// Provider of the terminal flow, so completion dispatchers can fan a
-    /// granted credential out without re-reading the record and denial
-    /// dispatchers can release the exact originating continuation.
+    /// Provider of the resolved flow, so authorized outcomes can fan out
+    /// without re-reading the record.
     pub provider: AuthProviderId,
-    pub credential_account_id: Option<CredentialAccountId>,
-    pub emitted_at: Timestamp,
+    pub outcome: AuthFlowOutcome,
+    pub resolved_at: Timestamp,
 }
 
 /// Pre-authorized credential update target captured before OAuth completion.
@@ -126,17 +125,16 @@ impl CredentialAccountUpdateBinding {
 /// Durable scoped auth flow record. OAuth state/verifier/code values are
 /// represented by hashes only; raw callback material must stay in one-shot
 /// provider-client inputs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AuthFlowRecord {
     pub id: AuthFlowId,
     pub scope: AuthProductScope,
     pub kind: AuthFlowKind,
-    pub status: AuthFlowStatus,
+    #[serde(flatten)]
+    pub state: AuthFlowState,
     pub provider: AuthProviderId,
     pub challenge: Option<AuthChallenge>,
     pub continuation: AuthContinuationRef,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credential_account_id: Option<CredentialAccountId>,
     /// Redacted fingerprint of the secret handles committed by this OAuth
     /// flow. It fences exact compensation without storing credential material.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -149,13 +147,132 @@ pub struct AuthFlowRecord {
     pub pkce_verifier_hash: Option<crate::PkceVerifierHash>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization_code_hash: Option<AuthorizationCodeHash>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<AuthErrorCode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub continuation_emitted_at: Option<Timestamp>,
+    pub resolution_delivered_at: Option<Timestamp>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
     pub expires_at: Timestamp,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthFlowRecordWire {
+    id: AuthFlowId,
+    scope: AuthProductScope,
+    kind: AuthFlowKind,
+    #[serde(flatten)]
+    lifecycle: AuthFlowLifecycleWire,
+    provider: AuthProviderId,
+    challenge: Option<AuthChallenge>,
+    continuation: AuthContinuationRef,
+    #[serde(default)]
+    credential_secret_fingerprint: Option<crate::CredentialSecretFingerprint>,
+    #[serde(default)]
+    update_binding: Option<CredentialAccountUpdateBinding>,
+    #[serde(default)]
+    opaque_state_hash: Option<OpaqueStateHash>,
+    #[serde(default)]
+    pkce_verifier_hash: Option<crate::PkceVerifierHash>,
+    #[serde(default)]
+    authorization_code_hash: Option<AuthorizationCodeHash>,
+    #[serde(default, alias = "continuation_emitted_at")]
+    resolution_delivered_at: Option<Timestamp>,
+    created_at: Timestamp,
+    updated_at: Timestamp,
+    expires_at: Timestamp,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum AuthFlowLifecycleWire {
+    Canonical(AuthFlowState),
+    Legacy(LegacyAuthFlowLifecycle),
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyAuthFlowLifecycle {
+    status: LegacyAuthFlowStatus,
+    #[serde(default)]
+    credential_account_id: Option<CredentialAccountId>,
+    #[serde(default)]
+    error: Option<AuthErrorCode>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum LegacyAuthFlowStatus {
+    Pending,
+    AwaitingUser,
+    CallbackReceived,
+    Completing,
+    Completed,
+    Failed,
+    Expired,
+    Canceling,
+    Canceled,
+}
+
+impl LegacyAuthFlowLifecycle {
+    fn into_state<E: serde::de::Error>(self) -> Result<AuthFlowState, E> {
+        let state = match self.status {
+            LegacyAuthFlowStatus::Pending | LegacyAuthFlowStatus::AwaitingUser => {
+                AuthFlowState::Open
+            }
+            LegacyAuthFlowStatus::CallbackReceived => AuthFlowState::Processing,
+            LegacyAuthFlowStatus::Completing => match self.credential_account_id {
+                Some(account_id) => {
+                    AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id })
+                }
+                None => AuthFlowState::Processing,
+            },
+            LegacyAuthFlowStatus::Completed => {
+                let account_id = self.credential_account_id.ok_or_else(|| {
+                    E::custom("legacy completed auth flow is missing its credential account")
+                })?;
+                AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id })
+            }
+            LegacyAuthFlowStatus::Failed => match self.error {
+                Some(AuthErrorCode::ProviderDenied) => {
+                    AuthFlowState::Resolved(AuthFlowOutcome::ProviderDenied)
+                }
+                Some(error) => AuthFlowState::Resolved(AuthFlowOutcome::Failed { error }),
+                None => {
+                    return Err(E::custom("legacy failed auth flow is missing its error"));
+                }
+            },
+            LegacyAuthFlowStatus::Expired => AuthFlowState::Resolved(AuthFlowOutcome::Expired),
+            LegacyAuthFlowStatus::Canceling | LegacyAuthFlowStatus::Canceled => {
+                AuthFlowState::Resolved(AuthFlowOutcome::UserAborted)
+            }
+        };
+        Ok(state)
+    }
+}
+
+impl<'de> Deserialize<'de> for AuthFlowRecord {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = AuthFlowRecordWire::deserialize(deserializer)?;
+        let state = match wire.lifecycle {
+            AuthFlowLifecycleWire::Canonical(state) => state,
+            AuthFlowLifecycleWire::Legacy(legacy) => legacy.into_state::<D::Error>()?,
+        };
+        Ok(Self {
+            id: wire.id,
+            scope: wire.scope,
+            kind: wire.kind,
+            state,
+            provider: wire.provider,
+            challenge: wire.challenge,
+            continuation: wire.continuation,
+            credential_secret_fingerprint: wire.credential_secret_fingerprint,
+            update_binding: wire.update_binding,
+            opaque_state_hash: wire.opaque_state_hash,
+            pkce_verifier_hash: wire.pkce_verifier_hash,
+            authorization_code_hash: wire.authorization_code_hash,
+            resolution_delivered_at: wire.resolution_delivered_at,
+            created_at: wire.created_at,
+            updated_at: wire.updated_at,
+            expires_at: wire.expires_at,
+        })
+    }
 }
 
 /// Stable owner fields used by read models that project auth flows.
@@ -234,46 +351,6 @@ pub struct OAuthCallbackFailureInput {
     pub error: AuthErrorCode,
 }
 
-/// Exclusive, restart-recoverable claim taken before a continuation side
-/// effect. `claimed_at` doubles as the CAS fence returned to settlement.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthContinuationDispatchClaimInput {
-    pub flow_id: AuthFlowId,
-    pub claimed_at: Timestamp,
-}
-
-/// Authoritative result of a claimed continuation side effect.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthContinuationDispatchOutcome {
-    Dispatched {
-        emitted_at: Timestamp,
-    },
-    /// Release a claim after its durable settlement could not be persisted.
-    /// The side effect may be retried; lifecycle activation is idempotent.
-    RetryableFailure,
-    TerminalFailure {
-        error: AuthErrorCode,
-    },
-}
-
-/// Fenced settlement for one continuation dispatch claim.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthContinuationDispatchSettlementInput {
-    pub flow_id: AuthFlowId,
-    pub expected_claimed_at: Timestamp,
-    pub outcome: AuthContinuationDispatchOutcome,
-}
-
-/// A callback may reclaim a continuation left in `Completing` after this
-/// interval. Settlement is fenced by the claim timestamp, so the stale worker
-/// cannot overwrite the new owner's result.
-pub const AUTH_CONTINUATION_DISPATCH_LEASE_SECONDS: i64 = 60;
-
-/// A crashed denial worker may be replaced after this interval. Settlement is
-/// fenced by the reservation timestamp, so the stale worker cannot finalize or
-/// roll back the replacement's reservation.
-pub const AUTH_FLOW_CANCELLATION_LEASE_SECONDS: i64 = 60;
-
 /// User-selected configured credential that completes an account-selection
 /// auth flow without exposing credential internals to product surfaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -345,55 +422,17 @@ pub trait AuthFlowManager: Send + Sync {
         input: OAuthCallbackFailureInput,
     ) -> Result<AuthFlowRecord, AuthProductError>;
 
-    async fn claim_continuation_dispatch(
-        &self,
-        scope: &AuthProductScope,
-        input: AuthContinuationDispatchClaimInput,
-    ) -> Result<AuthFlowRecord, AuthProductError>;
-
-    async fn settle_continuation_dispatch(
-        &self,
-        scope: &AuthProductScope,
-        input: AuthContinuationDispatchSettlementInput,
-    ) -> Result<AuthFlowRecord, AuthProductError>;
-
-    async fn mark_continuation_dispatched(
+    async fn mark_resolution_delivered(
         &self,
         scope: &AuthProductScope,
         flow_id: AuthFlowId,
-        emitted_at: Timestamp,
+        delivered_at: Timestamp,
     ) -> Result<AuthFlowRecord, AuthProductError>;
 
     async fn cancel_flow(
         &self,
         scope: &AuthProductScope,
         flow_id: AuthFlowId,
-    ) -> Result<AuthFlowRecord, AuthProductError>;
-
-    /// Reserve an awaiting flow for denial before canceling its blocked run.
-    /// A completed flow is returned unchanged so completion wins the race.
-    /// `observed_at` is host-derived and makes lease recovery deterministic.
-    async fn reserve_cancellation(
-        &self,
-        scope: &AuthProductScope,
-        flow_id: AuthFlowId,
-        observed_at: Timestamp,
-    ) -> Result<AuthFlowRecord, AuthProductError>;
-
-    /// Finalize an exact cancellation reservation after run cancellation.
-    async fn finalize_cancellation(
-        &self,
-        scope: &AuthProductScope,
-        flow_id: AuthFlowId,
-        expected_claimed_at: Timestamp,
-    ) -> Result<AuthFlowRecord, AuthProductError>;
-
-    /// Release an exact cancellation reservation when run cancellation fails.
-    async fn rollback_cancellation(
-        &self,
-        scope: &AuthProductScope,
-        flow_id: AuthFlowId,
-        expected_claimed_at: Timestamp,
     ) -> Result<AuthFlowRecord, AuthProductError>;
 }
 
@@ -425,7 +464,7 @@ pub trait AuthFlowRecordSource: Send + Sync {
 }
 
 pub fn flow_matches_turn_gate_query(flow: &AuthFlowRecord, query: &TurnGateAuthFlowQuery) -> bool {
-    if !query.include_terminal && crate::is_terminal_status(flow.status) {
+    if !query.include_terminal && crate::is_terminal_state(flow.state) {
         return false;
     }
     if !query.owner.matches(flow) {
