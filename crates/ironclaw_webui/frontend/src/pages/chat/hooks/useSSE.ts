@@ -93,13 +93,15 @@ export function useSSE({ threadId, onEvent, enabled }) {
       }
     }
 
-    function reconnectWithTimer() {
+    function reconnectWithTimer(
+      status: ConnectionStatus = CONNECTION_STATUS.DISCONNECTED,
+    ) {
       if (es) {
         es.close();
         es = null;
       }
       clearReconnectWatchdog();
-      setStatus(CONNECTION_STATUS.DISCONNECTED);
+      setStatus(status);
       reconnectAttempts++;
       const delay = Math.min(1000 * 2 ** reconnectAttempts, maxReconnectDelay);
       reconnectTimer = setTimeout(connect, delay);
@@ -136,6 +138,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
         threadId,
         afterCursor: lastEventIdRef.current || undefined,
       });
+      const source = es;
 
       es.onopen = () => {
         clearReconnectWatchdog();
@@ -164,15 +167,29 @@ export function useSSE({ threadId, onEvent, enabled }) {
         if (event.lastEventId) {
           lastEventIdRef.current = event.lastEventId;
         }
+        const type = frame.type || fallbackType;
         onEventRef.current?.({
           // The frame's own `type` field is the canonical source;
           // `event.type` (from the SSE `event:` line) is the
           // fallback for forwards-compatibility if Rust adds an
           // event without setting `type` in the body.
-          type: frame.type || fallbackType,
+          type,
           frame,
           lastEventId: event.lastEventId || null,
         });
+        // A replay-unavailable response means retrying the same cursor can
+        // never make progress. Replace this EventSource so the browser drops
+        // its internal Last-Event-ID, and reconnect from the projection origin
+        // where durable run/final-reply state can be rebuilt.
+        if (
+          type === "error" &&
+          frame.kind === "replay_unavailable" &&
+          frame.retryable === true &&
+          es === source
+        ) {
+          lastEventIdRef.current = null;
+          reconnectWithTimer(CONNECTION_STATUS.RECONNECTING);
+        }
       };
 
       // Cover anything emitted without an `event:` field — defensive

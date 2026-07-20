@@ -24,7 +24,11 @@ function useSSESourceForTest() {
   return `${lines.join("\n")}\nglobalThis.__testExports = { useSSE };`;
 }
 
-function createHarness({ online = true, visibilityState = "visible" } = {}) {
+function createHarness({
+  online = true,
+  visibilityState = "visible",
+  onEvent = () => {},
+} = {}) {
   const statuses = [];
   const streams = [];
   const timers = [];
@@ -95,7 +99,7 @@ function createHarness({ online = true, visibilityState = "visible" } = {}) {
   const result = context.globalThis.__testExports.useSSE({
     threadId: "thread-1",
     enabled: true,
-    onEvent: () => {},
+    onEvent,
   });
 
   return {
@@ -253,4 +257,45 @@ test("useSSE falls back to app reconnect timer for closed streams", () => {
 
   assert.equal(streams.length, 2);
   assert.deepEqual(statuses, ["connecting", "disconnected", "reconnecting"]);
+});
+
+test("useSSE rebases from origin when the server rejects its replay cursor", () => {
+  const events = [];
+  const { statuses, streams, timers } = createHarness({
+    onEvent: (event) => events.push(event),
+  });
+
+  const stream = streams[0];
+  stream.listener("projection_update")({
+    data: JSON.stringify({
+      type: "projection_update",
+      state: { items: [] },
+    }),
+    lastEventId: "stale-cursor",
+  });
+  stream.listener("error")({
+    data: JSON.stringify({
+      error: "unavailable",
+      kind: "replay_unavailable",
+      retryable: true,
+    }),
+    lastEventId: "",
+  });
+
+  assert.equal(stream.closeCalls, 1);
+  assert.deepEqual(statuses, ["connecting", "reconnecting"]);
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0].delay, 2000);
+  assert.equal(events.length, 2);
+  assert.equal(events[1].type, "error");
+
+  timers[0].handler();
+
+  assert.equal(streams.length, 2);
+  assert.equal(streams[1].args.afterCursor, undefined);
+  assert.deepEqual(statuses, [
+    "connecting",
+    "reconnecting",
+    "reconnecting",
+  ]);
 });
