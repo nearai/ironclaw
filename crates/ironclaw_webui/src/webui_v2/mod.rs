@@ -1,8 +1,8 @@
 //! Reborn WebChat v2 HTTP route surface.
 //!
 //! This crate ships the minimal native WebUI v2 route set on top of the
-//! [`ironclaw_product_workflow::RebornServicesApi`] facade. It is off by
-//! default — enable the `webui-v2-beta` Cargo feature to compile it in.
+//! [`ironclaw_product_workflow::RebornServicesApi`] facade. It is compiled into
+//! every build.
 //!
 //! ## Boundaries
 //!
@@ -46,7 +46,7 @@ mod router;
 mod schema;
 mod sse_capacity;
 // Browser SPA asset bundle: the JSON route surface and the static bytes it
-// drives now ship from one crate behind the single `webui-v2-beta` feature.
+// drives now ship from one crate.
 pub mod static_assets;
 
 #[allow(deprecated)]
@@ -122,8 +122,7 @@ pub use schema::{WebChatV2Event, WebChatV2EventFrame};
 // Re-export the static-bundle router factory at the crate root so host
 // composition can mount the canonical root surface as one owned unit. This
 // crate folds the former `ironclaw_webui_v2` module in unconditionally, so the
-// re-exports are not gated on the `webui-v2-beta` feature (which lived on the
-// standalone crate).
+// re-exports are always available.
 pub use sse_capacity::DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER;
 pub use static_assets::{
     StaticRouterConfig, StaticRouterConfigError, serve_root, serve_wildcard, static_router,

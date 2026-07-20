@@ -25,7 +25,7 @@
 //! #3615 WebUI security parity audit, plus the connection-limit backfill
 //! for `02-network-limits.md`.
 
-#![cfg(feature = "dev-in-memory-session")]
+#![cfg(feature = "test-support")]
 
 use std::sync::Arc;
 

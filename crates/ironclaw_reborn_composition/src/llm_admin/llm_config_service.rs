@@ -75,7 +75,6 @@ impl NearAiLoginStateStore {
         state
     }
 
-    #[cfg(any(test, feature = "webui-v2-beta"))]
     #[allow(dead_code)]
     pub(crate) async fn consume(&self, state: &str) -> bool {
         let mut states = self.states.lock().await;
@@ -980,7 +979,6 @@ pub(crate) const NEARAI_LOGIN_PREFIX: &str = "/api/webchat/v2/llm/nearai";
 /// The public callback path NEAR AI redirects to (token in the query). The
 /// `{state}` segment must match an authenticated start request before the
 /// callback can write the operator-wide session.
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) const NEARAI_LOGIN_CALLBACK_PATH: &str =
     "/api/webchat/v2/llm/nearai/{state}/auth/callback";
 
@@ -1016,7 +1014,6 @@ fn sanitize_origin(raw: &str) -> Option<String> {
 /// Apply a completed NEAR AI login: store the session token on the live
 /// session, make NEAR AI the active provider, and hot-swap the running
 /// provider. Shared by the public callback route. Errors are log-only strings.
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) async fn apply_nearai_login(
     session: &ironclaw_llm::SessionManager,
     boot: &RebornBootConfig,
@@ -1733,7 +1730,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "webui-v2-beta")]
     #[tokio::test]
     async fn nearai_login_state_is_single_use() {
         let store = NearAiLoginStateStore::new();
@@ -1910,7 +1906,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "webui-v2-beta")]
     #[tokio::test]
     async fn nearai_login_state_store_evicts_oldest_at_capacity() {
         // Unexpired states within the 15-min TTL must still be bounded, or a

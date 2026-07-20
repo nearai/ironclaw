@@ -13,7 +13,7 @@ deadpool-postgres = "0.14"
 ironclaw_filesystem = { path = "../../../crates/ironclaw_filesystem", features = ["libsql", "postgres"] }
 ironclaw_host_runtime = { path = "../../../crates/ironclaw_host_runtime", features = ["libsql", "postgres"] }
 ironclaw_host_api = { path = "../../../crates/ironclaw_host_api" }
-ironclaw_reborn_composition = { path = "../../../crates/ironclaw_reborn_composition", features = ["libsql", "postgres", "webui-v2-beta"] }
+ironclaw_reborn_composition = { path = "../../../crates/ironclaw_reborn_composition", features = ["libsql", "postgres"] }
 ironclaw_reborn_event_store = { path = "../../../crates/ironclaw_reborn_event_store", features = ["libsql", "postgres"] }
 ironclaw_resources = { path = "../../../crates/ironclaw_resources" }
 ironclaw_run_state = { path = "../../../crates/ironclaw_run_state" }

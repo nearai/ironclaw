@@ -11,11 +11,10 @@ mod llm_credentials;
 mod master_key;
 pub(crate) mod prompts;
 
-#[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+#[cfg(feature = "libsql")]
 use llm_credentials::LlmCredentialProvisionOutcome;
 use llm_credentials::{EncryptedLlmKeyStoreOpener, LiveLlmProbe, provision_llm_credentials};
 use master_key::{MasterKeyProvisionOutcome, provision_master_key};
-#[cfg(feature = "webui-v2-beta")]
 use prompts::PromptSource;
 use prompts::{LlmCredentialPromptError, StdinPromptSource};
 
@@ -43,7 +42,6 @@ pub(crate) struct OnboardCommand {
     /// of onboarding. Always effectively on in a non-interactive session
     /// (headless CI, a piped/scripted invocation) regardless of this flag —
     /// see `execute()`'s service step.
-    #[cfg(feature = "webui-v2-beta")]
     #[arg(long = "no-service")]
     no_service: bool,
 }
@@ -77,7 +75,7 @@ impl OnboardCommand {
             // Non-interactive session (headless CI, piped/scripted) is expected —
             // mirrors `MasterKeyProvisionOutcome::Suppressed`; `models set-provider`
             // remains the non-interactive path to configure a provider.
-            #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+            #[cfg(feature = "libsql")]
             Err(LlmCredentialPromptError::NonInteractive) => {
                 LlmCredentialProvisionOutcome::SkippedNonInteractive
             }
@@ -85,14 +83,14 @@ impl OnboardCommand {
         };
         // Computed after `llm_outcome` so `steps_pending` reflects what actually
         // happened this run, not an unconditional `llm_credentials` pending.
-        #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+        #[cfg(feature = "libsql")]
         let llm_configured = matches!(
             llm_outcome,
             LlmCredentialProvisionOutcome::Configured { .. }
                 | LlmCredentialProvisionOutcome::AlreadyConfigured { .. }
                 | LlmCredentialProvisionOutcome::ConfiguredFromEnv { .. }
         );
-        #[cfg(not(all(feature = "libsql", feature = "root-llm-provider")))]
+        #[cfg(not(feature = "libsql"))]
         let llm_configured = false;
         let marker_action = write_onboarding_marker(
             home,
@@ -133,13 +131,13 @@ impl OnboardCommand {
         println!("- config.toml and providers.json available");
         println!("- webui bearer token provisioned (used by `serve` when the env var is unset)");
         println!("- onboarding completion marker available");
-        #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+        #[cfg(feature = "libsql")]
         if let LlmCredentialProvisionOutcome::Configured { provider_id, .. }
         | LlmCredentialProvisionOutcome::AlreadyConfigured { provider_id, .. } = &llm_outcome
         {
             println!("- LLM provider `{provider_id}` credentials stored");
         }
-        #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+        #[cfg(feature = "libsql")]
         if let LlmCredentialProvisionOutcome::ConfiguredFromEnv { provider_id, .. } = &llm_outcome {
             println!(
                 "- LLM provider `{provider_id}` configured from environment (key also saved to \
@@ -151,12 +149,12 @@ impl OnboardCommand {
         if llm_configured {
             println!("- none for LLM credentials (configured above)");
         } else {
-            #[cfg(not(all(feature = "libsql", feature = "root-llm-provider")))]
+            #[cfg(not(feature = "libsql"))]
             println!(
                 "- LLM credential provisioning is unavailable in this build: rebuild or \
                  install `ironclaw` with `--features full`, then rerun `ironclaw onboard`"
             );
-            #[cfg(all(feature = "libsql", feature = "root-llm-provider"))]
+            #[cfg(feature = "libsql")]
             println!(
                 "- configure LLM credentials: rerun `ironclaw onboard` from an \
                  interactive terminal, run \
@@ -171,14 +169,12 @@ impl OnboardCommand {
             println!("- history import not requested");
         }
 
-        #[cfg(feature = "webui-v2-beta")]
         self.finish_with_service_and_login_link(&context, home, prompts.is_interactive())?;
 
         Ok(())
     }
 
-    /// Onboarding's last two steps, gated behind `webui-v2-beta` (both depend
-    /// on `serve`/`service`):
+    /// Onboarding's last two steps (both depend on `serve`/`service`):
     /// - install-and-start the OS service (skippable, see [`Self::should_install_service`])
     /// - print the CLI-token login link, reusing the `webui-token` value
     ///   `ensure_webui_token_file` already provisioned above
@@ -186,7 +182,6 @@ impl OnboardCommand {
     /// `interactive` is passed down from the same [`PromptSource::is_interactive`]
     /// reading the LLM-credential prompt step made, so `should_install_service`
     /// doesn't need its own `IsTerminal` check.
-    #[cfg(feature = "webui-v2-beta")]
     fn finish_with_service_and_login_link(
         &self,
         context: &RebornCliContext,
@@ -248,7 +243,6 @@ impl OnboardCommand {
     /// `interactive` comes from the same [`PromptSource::is_interactive`]
     /// reading used to gate the LLM-credential prompts (`prompts::StdinPromptSource`
     /// is the sole `IsTerminal` check in this command) rather than re-deriving it here.
-    #[cfg(feature = "webui-v2-beta")]
     fn should_install_service(&self, interactive: bool) -> bool {
         !self.no_service && interactive
     }
@@ -257,7 +251,6 @@ impl OnboardCommand {
 /// Outcome of onboard's OS-service install/start finale. Even `Failed` is a
 /// successful `execute()` (exit 0) — reported via `service_note`, but a
 /// service-manager hiccup must not fail an otherwise-successful onboarding run.
-#[cfg(feature = "webui-v2-beta")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ServiceStartOutcome {
     InstalledAndStarted,
@@ -266,7 +259,6 @@ enum ServiceStartOutcome {
     Failed(String),
 }
 
-#[cfg(feature = "webui-v2-beta")]
 impl ServiceStartOutcome {
     fn display_line(&self) -> String {
         match self {
@@ -375,7 +367,7 @@ fn pending_steps(import_history: bool, llm_configured: bool) -> Vec<&'static str
     steps
 }
 
-#[cfg(all(test, feature = "libsql", feature = "root-llm-provider"))]
+#[cfg(all(test, feature = "libsql"))]
 mod tests {
     use super::*;
 

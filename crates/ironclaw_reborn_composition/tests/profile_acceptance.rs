@@ -1,5 +1,5 @@
 // Only the `#[cfg(not(feature = "libsql"))]` no-libsql regression test below
-// consumes this error type; `webui-v2-beta` (hence CI) pulls in `libsql`.
+// consumes this error type; CI builds enable `libsql`.
 #[cfg(not(feature = "libsql"))]
 use ironclaw_reborn_composition::RebornRuntimeProfileError;
 use ironclaw_reborn_composition::{

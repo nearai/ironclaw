@@ -769,7 +769,7 @@ jobs:
               python3 scripts/live-canary/validate_reborn_binary_artifact.py \
                 artifacts/prepared-reborn-webui-v2-binary \
                 "${TARGET_REF}" \
-                "webui-v2-beta,slack-v2-host-beta"
+                "libsql"
             ); then
               echo "::warning::The Reborn E2E artifact could not be downloaded or validated; using the canary fallback build."
               rm -rf artifacts/prepared-reborn-webui-v2-binary
@@ -813,7 +813,6 @@ jobs:
         run: >-
           cargo build
           -p ironclaw_reborn_cli
-          --features webui-v2-beta,slack-v2-host-beta
           --bin ironclaw
 
       - name: Package fallback Reborn WebUI v2 binary
@@ -835,7 +834,7 @@ jobs:
           )
           jq -n \
             --arg product_ref "${TARGET_REF}" \
-            --argjson features '["slack-v2-host-beta","webui-v2-beta"]' \
+            --argjson features '["libsql"]' \
             '{format_version: 1, product_ref: $product_ref, features: $features}' \
             > artifacts/prepared-reborn-webui-v2-binary/manifest.json
           echo "source=canary-fallback" >> "${GITHUB_OUTPUT}"
@@ -1111,7 +1110,7 @@ jobs:
           python3 scripts/live-canary/validate_reborn_binary_artifact.py \
             .live-qa-binary \
             "${TARGET_REF}" \
-            "webui-v2-beta,slack-v2-host-beta"
+            "libsql"
           mkdir -p target/debug
           tar -C target/debug -xzf .live-qa-binary/ironclaw-reborn.tar.gz
           chmod 755 target/debug/ironclaw target/debug/ironclaw-reborn

@@ -30,32 +30,25 @@ This crate owns the standalone `ironclaw` command surface. Keep it small, explic
    - `cargo test -p ironclaw_architecture reborn`
    - `cargo clippy -p ironclaw_reborn_cli --all-targets -- -D warnings`
 
-## Beta features
+## The `serve` subcommand
 
-The `webui-v2-beta` Cargo feature compiles in the WebChat v2 HTTP gateway
-subcommand (`ironclaw serve`). It is **off by default** so a
-default `cargo install` / release build does not link the axum router,
-auth middleware, or HTTP/SSE/WS stack at all. Producing a binary that
-exposes the v2 surface is an explicit opt-in:
+The WebChat v2 HTTP gateway subcommand (`ironclaw serve`) is compiled into
+every build:
 
 ```bash
-cargo install --path crates/ironclaw_reborn_cli --features webui-v2-beta
+cargo install --path crates/ironclaw_reborn_cli
 # or, from a workspace checkout
-cargo build -p ironclaw_reborn_cli --features webui-v2-beta --release
+cargo build -p ironclaw_reborn_cli --release
 ```
 
-The beta WebUI static crate runs the frontend bundler from Cargo build scripts,
-so any `webui-v2-beta` or `--all-features` build needs Node.js/npm available
-even though the generated `static/dist/` bundle is not committed.
+The WebUI static crate runs the frontend bundler from Cargo build scripts,
+so any build needs Node.js/npm available even though the generated
+`static/dist/` bundle is not committed.
 
-When the feature is off, `ironclaw --help` does not list `serve`
-and `ironclaw serve …` returns `error: unrecognized subcommand`.
-This is verified by `help_mentions_reborn_commands` in `tests/smoke.rs`,
-which only asserts on the `serve` line under `#[cfg(feature =
-"webui-v2-beta")]`. Beta-only smoke tests (`serve_help_mentions_host_and_port`,
-`serve_fails_closed_when_env_bearer_token_var_is_unset`, etc.) are
-themselves feature-gated so default `cargo test -p ironclaw_reborn_cli`
-runs do not regress on a missing feature flag.
+`ironclaw --help` lists `serve`, verified by `help_mentions_reborn_commands`
+in `tests/smoke.rs`, alongside the serve smoke tests
+(`serve_help_mentions_host_and_port`,
+`serve_fails_closed_when_env_bearer_token_var_is_unset`, etc.).
 
 The descriptor-level "all v2 routes are actually mounted" regression
 lives at the composition layer in

@@ -1,4 +1,3 @@
-#![cfg(feature = "slack-v2-host-beta")]
 //! Slack host-beta routes composed into the (host-owned) `webui_v2_app`.
 //!
 //! `webui_v2_app` was hoisted out of `ironclaw_reborn_composition` into this

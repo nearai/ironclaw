@@ -73,7 +73,6 @@ mod projection;
 mod refreshing_capability_port;
 mod result_read;
 mod skill_activation;
-#[cfg(feature = "slack-v2-host-beta")]
 mod slack_channel_connection;
 mod trace_capture;
 mod trigger_materializer;
@@ -128,7 +127,7 @@ pub use result_read::{RESULT_READ_CAPABILITY_ID, wrap_result_read_capability_for
 pub use skill_activation::{
     SKILL_ACTIVATE_CAPABILITY_ID, SkillActivationTestSource, build_skill_context_source_for_test,
 };
-#[cfg(all(feature = "test-support", feature = "slack-v2-host-beta"))]
+#[cfg(feature = "test-support")]
 pub use slack_channel_connection::{
     SlackChannelConnectionTestBundle, SlackChannelConnectionTestConfig,
     build_slack_channel_connection_for_test,

@@ -44,7 +44,7 @@ ironclaw-reborn profile list --json
 ironclaw-reborn repl
 ironclaw-reborn run
 ironclaw-reborn run --confirm-host-access
-ironclaw-reborn serve                      # only compiled in with --features webui-v2-beta
+ironclaw-reborn serve
 ironclaw-reborn serve --confirm-host-access
 ironclaw-reborn skills list
 ironclaw-reborn skills list --json
@@ -74,12 +74,8 @@ It intentionally does not yet support:
 - production extension/tool execution;
 - long-lived Reborn runtime services.
 
-The WebChat v2 web UI **is** supported through `serve`, but only when the
-binary is built with `--features webui-v2-beta`. The `serve` subcommand is
-compiled behind that feature, so without it `serve` does not exist in the binary
-at all — it will not appear in `--help` and `ironclaw-reborn serve` errors as an
-unknown subcommand. It is an early beta operator surface, not a production
-gateway. See [Running with the WebUI (`serve`)](#running-with-the-webui-serve).
+The WebChat v2 web UI **is** supported through `serve`. It is an early beta
+operator surface, not a production gateway. See [Running with the WebUI (`serve`)](#running-with-the-webui-serve).
 
 ## Running with the WebUI (`serve`)
 
@@ -112,7 +108,7 @@ export IRONCLAW_REBORN_HOME="$HOME/.ironclaw-reborn-demo"
 # 2. Configure a model route. NEAR AI shown here; swap the provider id and key
 #    env var for any row in the table below. set-provider records the credential
 #    env-var NAME in config.toml; the secret VALUE stays in the environment.
-cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- \
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- \
   models set-provider nearai
 export NEARAI_API_KEY="your-key-here"
 
@@ -122,8 +118,8 @@ export NEARAI_API_KEY="your-key-here"
 export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"   # bearer token you log in with
 export IRONCLAW_REBORN_WEBUI_USER_ID="reborn-cli"             # must match [identity].default_owner
 
-# 4. Launch (feature flag is mandatory — the UI is not compiled in without it).
-cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- serve
+# 4. Launch.
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- serve
 ```
 
 Then open **`http://127.0.0.1:3000/`** and log in with the
@@ -134,8 +130,7 @@ Then open **`http://127.0.0.1:3000/`** and log in with the
 (the **CLI flag only**) tells the OS to pick a free ephemeral port — useful for
 test harnesses, though the banner still prints `:0`. `[webui].listen_port = 0`
 in `config.toml` is **rejected**, since a config-driven ephemeral port is almost
-always a mistake. For the Slack host-beta ingress, build with
-`--features slack-v2-host-beta` (it includes `webui-v2-beta`).
+always a mistake. The Slack host ingress is compiled into the same binary.
 
 ### Choose your model provider
 
@@ -154,7 +149,7 @@ API-key providers it records that provider's credential env-var name in
 So to use Anthropic instead of the quick-start example, swap step 2 for:
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- \
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- \
   models set-provider anthropic
 export ANTHROPIC_API_KEY="your-key-here"
 ```
@@ -429,26 +424,9 @@ records the variable *name*, never the value. Once `[llm.default]` exists it
 selects the provider; `LLM_BACKEND` is only an env fallback when no default slot
 is configured.
 
-All of the above requires the `root-llm-provider` Cargo feature, which is
-**on by default** (`default = ["root-llm-provider", "libsql"]` in
-`crates/ironclaw_reborn_cli/Cargo.toml`). A binary built with
-`--no-default-features` (or any feature set that drops `root-llm-provider`)
-does not have `RebornProviderAdmin` linked in, so all four `models`
-subcommands error instead:
-
-```bash
-cargo run -q -p ironclaw_reborn_cli --no-default-features --features libsql --bin ironclaw-reborn -- models list
-```
-
-```
-Error: `models list` requires the root-llm-provider feature; v1_state: not-used
-```
-
-`set`/`set-provider` report the same `requires the root-llm-provider feature`
-error in that build; `list`/`status` used to instead print placeholder text
-(`routes: not-configured`, `v1_state: not-used`) as if the command had
-succeeded — that placeholder path was removed so all four subcommands fail
-the same way when the feature is off.
+The `models` subcommands are always available: the LLM provider
+(`ironclaw_llm`) is a mandatory dependency of the Reborn CLI, so there is no
+build of the binary without `RebornProviderAdmin` linked in.
 
 ### `profile list`
 
@@ -484,7 +462,7 @@ cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- run --dry-run
 ```
 
 When `$IRONCLAW_REBORN_HOME/config.toml` is missing, the first stateful
-runtime start through `run`, `repl`, or feature-gated `serve` seeds a sparse
+runtime start through `run`, `repl`, or `serve` seeds a sparse
 `config.toml` containing `api_version` and the safe `local-dev` boot profile.
 It intentionally does not seed `[llm.default]`, so env-only model selection
 continues to work. `run --dry-run`, diagnostics, and read-only commands remain
@@ -546,14 +524,14 @@ cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- repl
 
 ### `serve`
 
-Starts the WebChat v2 HTTP listener (browser UI). Requires a binary built with
-`--features webui-v2-beta` and the two `IRONCLAW_REBORN_WEBUI_*` auth env vars.
+Starts the WebChat v2 HTTP listener (browser UI). Requires the two
+`IRONCLAW_REBORN_WEBUI_*` auth env vars.
 See [Running with the WebUI (`serve`)](#running-with-the-webui-serve) for the
 full walkthrough, auth setup, common startup errors, and an API smoke test.
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- serve
-cargo run -q -p ironclaw_reborn_cli --features webui-v2-beta --bin ironclaw-reborn -- serve --host 127.0.0.1 --port 3000
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- serve
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- serve --host 127.0.0.1 --port 3000
 ```
 
 ### `skills list`

@@ -15,7 +15,7 @@ use chrono::Utc;
 use deadpool_postgres::tokio_postgres;
 #[cfg(feature = "libsql")]
 use ironclaw_auth::{OAuthClientId, OAuthRedirectUri};
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+#[cfg(feature = "postgres")]
 use ironclaw_host_api::{AgentId, ProjectId, TenantId};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{
@@ -36,7 +36,7 @@ use ironclaw_host_runtime::{
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn_composition::RebornRuntimeProcessBinding;
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+#[cfg(feature = "postgres")]
 use ironclaw_reborn_composition::{
     LocalTriggerAccessRole, LocalTriggerAccessSeed, LocalTriggerAccessSource,
 };
@@ -51,7 +51,7 @@ use ironclaw_reborn_composition::{
     RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
     RebornReadinessDiagnosticStatus,
 };
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+#[cfg(feature = "postgres")]
 use ironclaw_reborn_config::{RebornConfigFile, StorageBackend, StorageSection};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_runner::turn_scheduler::{
@@ -82,7 +82,7 @@ use tokio::sync::Mutex;
 #[cfg(feature = "libsql")]
 static SECRETS_MASTER_KEY_ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+#[cfg(feature = "postgres")]
 static HOSTED_TRIGGER_ACCESS_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(feature = "libsql")]
@@ -118,13 +118,13 @@ impl Drop for EnvVarGuard {
     }
 }
 
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+#[cfg(feature = "postgres")]
 struct PostgresEnvVarGuard {
     key: &'static str,
     previous: Option<std::ffi::OsString>,
 }
 
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+#[cfg(feature = "postgres")]
 impl PostgresEnvVarGuard {
     fn set(key: &'static str, value: &str) -> Self {
         let previous = std::env::var_os(key);
@@ -147,7 +147,7 @@ impl PostgresEnvVarGuard {
     }
 }
 
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+#[cfg(feature = "postgres")]
 impl Drop for PostgresEnvVarGuard {
     fn drop(&mut self) {
         // SAFETY: PostgresEnvVarGuard is only constructed while
@@ -1532,7 +1532,7 @@ async fn production_postgres_services_migrate_trigger_repository_before_runtime_
     assert_eq!(count, 0);
 }
 
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
+#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn hosted_single_tenant_trigger_access_store_persists_across_reopen() {
     let Some((_container, _pool, database_url)) = postgres_pool_or_skip().await else {
