@@ -148,7 +148,8 @@ use crate::runtime_input::{
     TriggerFireAccessGrant, TriggerPollerAuthorizerConfig, TriggerPollerSettings,
 };
 use crate::trigger_fire_access::{
-    CompositeTriggerFireChecker, IdentityMembershipTriggerFireChecker, StaticOwnerTriggerFireChecker,
+    CompositeTriggerFireChecker, IdentityMembershipTriggerFireChecker,
+    StaticOwnerTriggerFireChecker,
 };
 use crate::{
     RebornBuildError, RebornProductAuthServices, RebornReadiness, RebornServices,
