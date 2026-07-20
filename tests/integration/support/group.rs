@@ -334,8 +334,9 @@ impl GroupCapability {
 
     /// The durable gate-record store this backend's capability port persists
     /// `GateRecord::Auth` into (§5.2.9) — the SAME `Arc` the turn executor must
-    /// re-read an auth block's `credential_requirements` from. `None` for the
-    /// echo backend and for host-runtime backends without approval parts.
+    /// re-read an auth block's `credential_requirements` from. `None` only for
+    /// the `Recording` (echo) backend; the host-runtime backend always resolves
+    /// a store (`HostRuntimeCapabilityHarness::gate_record_store` returns `Some`).
     pub(crate) fn gate_record_store(&self) -> Option<Arc<dyn ironclaw_run_state::GateRecordStore>> {
         match self {
             Self::HostRuntime(harness) => harness.gate_record_store(),

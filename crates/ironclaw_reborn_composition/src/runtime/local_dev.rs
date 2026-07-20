@@ -1205,5 +1205,25 @@ fn host_api_agent_loop_error(
     )
 }
 
+/// Shared test assertion for the `local_dev` per-capability submodules: the
+/// §5.3 collapse maps a recoverable service failure onto `Resolution::Done`
+/// carrying a `RecoverableFailure` verdict (the collapse of the old
+/// `CapabilityOutcome::Failed`). Consumed by `outbound_delivery`,
+/// `project_create`, and further submodules as they migrate to the `Resolution`
+/// shape — replacing the byte-identical per-file copies (CodeRabbit #6299).
+#[cfg(test)]
+pub(crate) fn assert_recoverable_failure(
+    resolution: &ironclaw_host_api::Resolution,
+    expected: ironclaw_host_api::FailureKind,
+) {
+    match resolution {
+        ironclaw_host_api::Resolution::Done(outcome) => assert_eq!(
+            outcome.verdict,
+            ironclaw_host_api::ToolVerdict::recoverable_failure(expected)
+        ),
+        other => panic!("expected Resolution::Done recoverable failure, got {other:?}"),
+    }
+}
+
 #[cfg(test)]
 mod tests;
