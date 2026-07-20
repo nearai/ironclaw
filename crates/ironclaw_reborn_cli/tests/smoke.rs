@@ -6833,6 +6833,7 @@ fn release_ci_publishes_reborn_binaries_without_legacy_or_docker_publish() {
     assert!(
         publish_job.contains("\n      - reborn-binary-compile\n")
             && publish_job.contains("contents: write")
+            && publish_job.contains("GH_REPO: ${{ github.repository }}")
             && publish_job.contains("pattern: reborn-compile-*")
             && publish_job.contains("ironclaw-${target}.tar.gz")
             && publish_job.contains("$asset_name.sha256")
