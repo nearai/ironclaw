@@ -6855,6 +6855,8 @@ fn release_ci_publishes_reborn_without_enabling_legacy_or_docker() {
             && !reborn_publish_job.contains("\n      - plan\n")
             && reborn_publish_job.contains("gh release create")
             && reborn_publish_job.contains("release-assets/*")
+            && reborn_publish_job.contains("--title \"Version $RELEASE_VERSION\"")
+            && !reborn_publish_job.contains("--title \"IronClaw ")
             && reborn_publish_job.contains("--verify-tag")
             && reborn_publish_job.contains("--draft")
             && reborn_publish_job.contains("-F draft=false")
@@ -6885,6 +6887,8 @@ fn release_ci_publishes_reborn_without_enabling_legacy_or_docker() {
             && reborn_publish_job.contains(".digest // \"\"")
             && reborn_publish_job.contains(".target_commitish // \"\"")
             && reborn_publish_job.contains(".name // \"\"")
+            && reborn_publish_job
+                .contains("[[ \"$actual_name\" != \"Version $RELEASE_VERSION\" ]]")
             && reborn_publish_job.contains("verify_release \"$draft_release\" true")
             && reborn_publish_job.contains("verify_release \"$published_release\" false")
             && reborn_publish_job.contains("publish_verified_draft \"${draft_ids[0]}\"")

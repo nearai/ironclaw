@@ -231,8 +231,8 @@ jobs:
               echo "::error::Release draft state is $actual_draft, expected $expected_draft"
               return 1
             fi
-            if [[ "$actual_name" != "IronClaw $RELEASE_VERSION (Reborn)" ]]; then
-              echo "::error::Release title is $actual_name, expected IronClaw $RELEASE_VERSION (Reborn)"
+            if [[ "$actual_name" != "Version $RELEASE_VERSION" ]]; then
+              echo "::error::Release title is $actual_name, expected Version $RELEASE_VERSION"
               return 1
             fi
             if [[ "$actual_prerelease" != "$RELEASE_IS_PRERELEASE" ]]; then
@@ -313,7 +313,7 @@ jobs:
             "$RELEASE_TAG"
             --verify-tag
             --target "$RELEASE_COMMIT"
-            --title "IronClaw $RELEASE_VERSION (Reborn)"
+            --title "Version $RELEASE_VERSION"
             --notes-file "$notes_file"
             --draft
           )
