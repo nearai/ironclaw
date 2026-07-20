@@ -70,7 +70,8 @@ use ironclaw_turns::{
     SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnError, TurnLeaseToken,
     TurnPersistenceSnapshot, TurnRunId, TurnRunnerId, TurnScope, TurnStateDurabilityPolicy,
     TurnStateStore, TurnStatus, is_recoverability_critical,
-    run_profile::LoopCheckpointStateRef,
+    CheckpointSchemaId, LoopCheckpointStore, PutLoopCheckpointRequest, RunProfileVersion,
+    run_profile::{LoopCheckpointKind, LoopCheckpointStateRef},
     runner::{
         BlockRunRequest, ClaimRunRequest, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
         RecoverExpiredLeasesRequest, TurnRunTransitionPort,
@@ -2997,6 +2998,50 @@ async fn write_behind_cancel_of_running_run_survives_crash() {
         "a write-behind crash must not drop an acked cancel back to Running",
     );
     check_internal_invariants(&recovered.persistence_snapshot().await.unwrap()).unwrap();
+}
+
+/// #6263 Step 3 (IronLoop) — `put_loop_checkpoint` is a non-critical write, so
+/// under WriteBehind it must take the async reserve→enqueue→track path like
+/// every other non-critical commit. Before the fix it enqueued and handed a live
+/// ack straight to `commit_pending` with `critical: false`, tripping the
+/// write-behind debug assertion (and, in release, waiting synchronously — the
+/// opposite of the intended lazy flush). Drives the real store method.
+#[tokio::test]
+async fn write_behind_put_loop_checkpoint_takes_async_path() {
+    let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
+    let scoped = fault_scoped(Arc::clone(&backend));
+    let scope = only_scope();
+    let store =
+        open_row_store_with_policy(Arc::clone(&scoped), TurnStateDurabilityPolicy::WriteBehind);
+
+    let run_id = submit_one(&store, &scope, "idem-wb-checkpoint").await;
+    let turn_id = store
+        .persistence_snapshot()
+        .await
+        .unwrap()
+        .runs
+        .iter()
+        .find(|run| run.run_id == run_id)
+        .expect("submitted run present")
+        .turn_id;
+
+    // Must not panic (the write-behind assertion) and must return Ok on the
+    // async lazy-flush path.
+    let record = store
+        .put_loop_checkpoint(PutLoopCheckpointRequest {
+            scope: scope.clone(),
+            turn_id,
+            run_id,
+            state_ref: LoopCheckpointStateRef::new("checkpoint:wb-async").unwrap(),
+            schema_id: CheckpointSchemaId::new("interactive_checkpoint_v1").unwrap(),
+            schema_version: RunProfileVersion::new(1),
+            kind: LoopCheckpointKind::BeforeModel,
+            gate_ref: None,
+        })
+        .await
+        .expect("write-behind loop checkpoint returns Ok on the async path");
+    assert_eq!(record.run_id, run_id);
+    check_internal_invariants(&store.persistence_snapshot().await.unwrap()).unwrap();
 }
 
 /// #6263 Step 3 (IronLoop f2) — read-your-writes under write-behind. A

@@ -374,12 +374,28 @@ where
             self.ensure_not_degraded().await?;
             let record = loop_checkpoint_record_from_request(request);
             let delta = SnapshotDelta::default().set_loop_checkpoints_upsert(vec![record.clone()]);
+            // A loop checkpoint carries no run status transition, so it is never
+            // recoverability-critical: under write-behind it takes the async
+            // (lazy-flush) path. Any checkpoint a gate-park needs is flushed by
+            // the block transition's synchronous barrier.
+            const CHECKPOINT_CRITICAL: bool = false;
             let ack = {
                 // Serialize the durable enqueue on the shared snapshot-state lock
                 // — the same lock every apply path holds across its
                 // read-seq -> enqueue window — so the delta journal observes a
                 // consistent append order without a separate commit gate.
                 let mut guard = self.snapshot_state.lock().await;
+                // Bound the pending window BEFORE enqueue on the async path
+                // (#6263 Step 3): reserve a slot here, under snapshot_state, so
+                // concurrent checkpoints can't grow the journal channel past the
+                // cap while a flush is in flight — the same reserve→enqueue→track
+                // flow every other async commit uses.
+                if self.write_behind_async(CHECKPOINT_CRITICAL)
+                    && let Err(error) = self.reserve_write_behind_slot().await
+                {
+                    *guard = None;
+                    return Err(error);
+                }
                 let ack = self
                     .enqueue_delta(row_store_durable_delta(delta.clone()))
                     .map_err(|error| match error {
@@ -396,7 +412,11 @@ where
                     *guard = None;
                     return Err(error);
                 }
-                ack
+                // Track the ack in the bounded window and return `None` on the
+                // async path so `commit_pending` lazy-flushes (no await); on
+                // write-through it returns the ack unchanged to be awaited.
+                self.track_write_behind_ack_if_async(CHECKPOINT_CRITICAL, ack)
+                    .await
             };
             self.commit_pending(
                 PendingRowCommit {
@@ -404,11 +424,7 @@ where
                     ack,
                     active_lock_reservations: Vec::new(),
                     run_row_reservations: Vec::new(),
-                    // A loop checkpoint carries no run status transition, so it is
-                    // never recoverability-critical: under write-behind it lazy-
-                    // flushes. Any checkpoint a gate-park needs is flushed by the
-                    // block transition's synchronous barrier.
-                    critical: false,
+                    critical: CHECKPOINT_CRITICAL,
                 },
                 "timed out waiting for loop checkpoint row-store append",
             )
