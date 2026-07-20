@@ -55,7 +55,7 @@ case "${package}" in
     printf '%s\n' "--features test-support,webui-v2-beta,slack-v2-host-beta,telegram-v2-host-beta,libsql"
     ;;
   ironclaw_runner)
-    printf '%s\n' "--features root-llm-provider,libsql-secrets,libsql-restart-tests,webui-user-store"
+    printf '%s\n' "--features root-llm-provider,libsql-secrets,libsql-restart-tests"
     ;;
   ironclaw_reborn_event_store)
     printf '%s\n' "--features libsql"
