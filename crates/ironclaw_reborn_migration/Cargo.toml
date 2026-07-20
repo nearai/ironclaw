@@ -28,7 +28,10 @@ name = "ironclaw-reborn-extension-ownership-migration"
 path = "src/extension_ownership_main.rs"
 
 [features]
-default = ["full-migration", "libsql", "postgres"]
+# The default operator build must remain Reborn-only. Full v1 state import is
+# still available, but it intentionally requires an explicit feature so normal
+# Reborn builds and Docker images do not pull the legacy root crate back in.
+default = ["libsql", "postgres"]
 full-migration = ["dep:ironclaw"]
 # Backend features wire every Reborn write stack that dispatches on that
 # backend. When `full-migration` is also enabled, `ironclaw?/libsql` forwards
