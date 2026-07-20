@@ -1647,6 +1647,17 @@ impl RebornRuntime {
         Arc::clone(&self.thread_service)
     }
 
+    /// Test-only accessor for the runtime's fixed `ThreadScope` (tenant/agent/
+    /// project/owner), shared by every conversation this runtime opens. Needed
+    /// alongside `session_thread_service()` to construct valid
+    /// `AcceptInboundMessageRequest`/`AppendToolResultReferenceRequest` etc. --
+    /// those require a `scope` matching the one the runtime itself uses, which
+    /// otherwise has no way to be reconstructed by a caller.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn thread_scope(&self) -> ThreadScope {
+        self.thread_scope.clone()
+    }
+
     pub(crate) fn webui_turn_coordinator(&self) -> Arc<dyn TurnCoordinator> {
         self.turn_coordinator.clone()
     }
