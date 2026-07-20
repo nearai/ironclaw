@@ -1,4 +1,5 @@
 //! Concrete-name specificity gate for the unified extension runtime.
+// arch-exempt: large_file, unified extension specificity ratchet stays centralized, plan #6175
 //!
 //! Goal (docs/reborn/extension-runtime/overview.md §1): no generic crate
 //! contains a concrete product name, vendor id, or vendor API host. The
@@ -111,10 +112,10 @@ const TERM_COLLISIONS: &[(&str, &str)] = &[
 /// pinned by a self-test; broadening it is a gate regression, not a fix.
 const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
     (
-        "crates/ironclaw_host_api/src/safe_summary.rs",
+        "crates/ironclaw_host_api/src/credential_redaction.rs",
         "github",
-        "GitHub token prefixes (ghp_/github_pat_/gho_/ghu_) in the safe-summary \
-         secret-marker scan — vendor-specific safety detection, the documented \
+        "GitHub token prefixes (ghp_/github_pat_/gho_/ghu_) in credential \
+         redaction — vendor-specific safety detection, the documented \
          leak-scanner carve-out domain (sourcing from the inventory would weaken \
          the scan)",
     ),
@@ -517,9 +518,19 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "WebUI browser-login SSO provider button/route, not the extensions vendor",
     ),
     (
-        "crates/ironclaw_webui/frontend/src/pages/settings/hooks/useProviderLogin.ts",
+        "crates/ironclaw_webui/frontend/src/lib/browser-origin.ts",
+        "github",
+        "WebUI browser-login SSO provider origin validation, not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_webui/frontend/src/lib/browser-origin.ts",
+        "google",
+        "WebUI browser-login SSO provider origin validation, not the extensions vendor",
+    ),
+    (
+        "crates/ironclaw_webui/frontend/src/lib/browser-origin.ts",
         "private.near.ai",
-        "WebUI browser-login SSO provider button/route, not the extensions vendor",
+        "WebUI browser-login SSO provider origin validation, not the extensions vendor",
     ),
 ];
 
@@ -1212,6 +1223,14 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_reborn_composition/src/factory.rs",
         "notion",
     ),
+    (
+        "crates/ironclaw_reborn_composition/src/factory.rs",
+        "telegram",
+    ),
+    (
+        "crates/ironclaw_reborn_composition/src/google_oauth_secret_store.rs",
+        "google",
+    ),
     ("crates/ironclaw_reborn_composition/src/lib.rs", "google"),
     ("crates/ironclaw_reborn_composition/src/lib.rs", "slack"),
     (
@@ -1258,6 +1277,24 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/ironclaw_skills/src/types.rs", "github"),
     ("crates/ironclaw_skills/src/types.rs", "google"),
     ("crates/ironclaw_skills/src/types.rs", "slack"),
+    (
+        "crates/ironclaw_reborn_config/src/capability_remediation.rs",
+        "gmail",
+    ),
+    (
+        "crates/ironclaw_reborn_config/src/capability_remediation.rs",
+        "google",
+    ),
+    ("crates/ironclaw_reborn_config/src/config_file.rs", "gmail"),
+    ("crates/ironclaw_reborn_config/src/config_file.rs", "google"),
+    ("crates/ironclaw_reborn_config/src/config_file.rs", "slack"),
+    (
+        "crates/ironclaw_reborn_config/src/config_file.rs",
+        "telegram",
+    ),
+    ("crates/ironclaw_reborn_config/src/lib.rs", "google"),
+    ("crates/ironclaw_reborn_config/src/lib.rs", "slack"),
+    ("crates/ironclaw_reborn_config/src/lib.rs", "telegram"),
     // lane-4: dev-dep — the sanctioned DEL-7 dev-dependency on the concrete slack crate (test linkage only); the scanner sees the crate name in Cargo.toml
     ("crates/ironclaw_reborn_composition/Cargo.toml", "slack"),
     // lane-4: branch — the provider catalog names github_copilot (an LLM

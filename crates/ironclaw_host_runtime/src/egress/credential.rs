@@ -510,12 +510,13 @@ const _: fn(&CredentialCacheEntry) = |entry| {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{
         InvocationId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeKind, TenantId,
         Timestamp, UserId,
     };
     use ironclaw_secrets::{
-        InMemorySecretStore, SecretLease, SecretLeaseId, SecretMetadata, SecretStoreError,
+        FilesystemSecretStore, SecretLease, SecretLeaseId, SecretMetadata, SecretStoreError,
     };
 
     fn sample_scope() -> ResourceScope {
@@ -738,13 +739,13 @@ mod tests {
     }
 
     struct TokioBackedSecretStore {
-        inner: InMemorySecretStore,
+        inner: FilesystemSecretStore<InMemoryBackend>,
     }
 
     impl TokioBackedSecretStore {
         fn new() -> Self {
             Self {
-                inner: InMemorySecretStore::new(),
+                inner: FilesystemSecretStore::ephemeral(),
             }
         }
 
@@ -861,7 +862,7 @@ mod path_placeholder_tests {
         RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeHttpEgressRequest, RuntimeKind,
         TenantId, UserId,
     };
-    use ironclaw_secrets::InMemorySecretStore;
+    use ironclaw_secrets::FilesystemSecretStore;
 
     fn request_with_url(url: &str) -> RuntimeHttpEgressRequest {
         RuntimeHttpEgressRequest {
@@ -900,7 +901,7 @@ mod path_placeholder_tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
-        let store = InMemorySecretStore::new();
+        let store = FilesystemSecretStore::ephemeral();
         let mut request = request_with_url(url);
         let handle = SecretHandle::new("path-credential").unwrap();
         runtime

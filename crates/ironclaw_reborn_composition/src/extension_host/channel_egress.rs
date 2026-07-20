@@ -320,7 +320,7 @@ mod tests {
     };
     use ironclaw_processes::in_memory_backed_process_services;
     use ironclaw_resources::InMemoryResourceGovernor;
-    use ironclaw_secrets::InMemorySecretStore;
+    use ironclaw_secrets::FilesystemSecretStore;
     use secrecy::SecretString;
 
     use super::*;
@@ -390,7 +390,7 @@ mod tests {
     ) {
         let requests = network.requests();
         let services = test_host_runtime_services()
-            .with_secret_store(Arc::new(InMemorySecretStore::new()))
+            .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
             .try_with_host_http_egress(network)
             .expect("host HTTP egress should wire");
         let port = services
@@ -412,7 +412,7 @@ mod tests {
         handle: &SecretHandle,
         value: &str,
     ) -> Arc<dyn ChannelEgressCredentialsPort> {
-        let store = Arc::new(InMemorySecretStore::new());
+        let store = Arc::new(FilesystemSecretStore::ephemeral());
         store
             .put(
                 scope.clone(),
@@ -531,7 +531,7 @@ mod tests {
         // Credentials port over an EMPTY store: no material seeded.
         let credentials: Arc<dyn ChannelEgressCredentialsPort> =
             Arc::new(SecretStoreChannelEgressCredentials::new(
-                Arc::new(InMemorySecretStore::new()) as Arc<dyn SecretStore>,
+                Arc::new(FilesystemSecretStore::ephemeral()) as Arc<dyn SecretStore>,
                 scope.clone(),
             ));
         let (port, requests) = host_egress_port(RecordingNetworkHttpEgress::ok());

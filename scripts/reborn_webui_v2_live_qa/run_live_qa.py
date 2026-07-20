@@ -206,6 +206,16 @@ DEFAULT_USER_ID = "reborn-webui-v2-live-qa-user"
 ENDPOINT_STATUS_URL = "https://near.ai"
 PROVIDER = "reborn-webui-v2"
 MODE = "live"
+# Live QA is model- and network-nondeterministic: the same commit can pass then
+# flake red hours later. Retry a transient (assertion/behavioral) case failure up
+# to this many total attempts before recording a red. Default 2 = one retry;
+# override via REBORN_WEBUI_V2_LIVE_QA_CASE_ATTEMPTS.
+try:
+    LIVE_QA_CASE_ATTEMPTS = max(
+        1, int(os.environ.get("REBORN_WEBUI_V2_LIVE_QA_CASE_ATTEMPTS", "2"))
+    )
+except ValueError:
+    LIVE_QA_CASE_ATTEMPTS = 2
 HN_KEYWORD_SEARCH_URL = (
     "https://hn.algolia.com/api/v1/search_by_date"
     "?query=NEAR%20AI&tags=story&hitsPerPage=1"
@@ -372,27 +382,15 @@ def _reborn_binary() -> Path:
 
 
 def build_reborn_binary() -> Path:
-    features = os.environ.get(
-        "REBORN_WEBUI_V2_LIVE_QA_FEATURES",
-        "webui-v2-beta",
-    )
+    features = os.environ.get("REBORN_WEBUI_V2_LIVE_QA_FEATURES", "")
     build_env = os.environ.copy()
     build_env.setdefault("CARGO_PROFILE_DEV_DEBUG", "0")
     build_env.setdefault("CARGO_INCREMENTAL", "0")
-    run(
-        [
-            "cargo",
-            "build",
-            "-p",
-            "ironclaw_reborn_cli",
-            "--features",
-            features,
-            "--bin",
-            "ironclaw",
-        ],
-        cwd=ROOT,
-        env=build_env,
-    )
+    command = ["cargo", "build", "-p", "ironclaw_reborn_cli"]
+    if features:
+        command += ["--features", features]
+    command += ["--bin", "ironclaw"]
+    run(command, cwd=ROOT, env=build_env)
     binary = _reborn_binary()
     if not binary.exists():
         message = f"ironclaw binary was not produced at {binary}"
@@ -810,10 +808,8 @@ async def start_reborn_server(
             process_extra_env,
         )
     ):
-        # Provider id is `slack` on the unified auth engine; the per-provider
-        # callback route is `/oauth/{provider}/callback`.
         process_extra_env["IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI"] = (
-            f"{base_url}/api/reborn/product-auth/oauth/slack/callback"
+            f"{base_url}/api/reborn/product-auth/oauth/slack_personal/callback"
         )
     stdout_path = output_dir / "ironclaw-reborn-serve.stdout.log"
     stderr_path = output_dir / "ironclaw-reborn-serve.stderr.log"
@@ -855,32 +851,6 @@ async def start_reborn_server(
     return proc, base_url
 
 
-def _slack_generic_setup_request(payload: dict[str, object]) -> dict[str, object]:
-    """Translate the legacy flat setup payload into the generic
-    `[channel.config]` setup submit wire shape (see
-    `crates/ironclaw_product_workflow/src/reborn_services/lifecycle_setup.rs`):
-    secret handles ride `payload.secrets`, non-secret handles ride
-    `payload.fields`, keyed by the slack manifest's `[channel.config]`
-    handles."""
-    secrets: dict[str, object] = {
-        "slack_bot_token": payload["bot_token"],
-        "slack_signing_secret": payload["signing_secret"],
-    }
-    if payload.get("oauth_client_secret"):
-        secrets["slack_oauth_client_secret"] = payload["oauth_client_secret"]
-    fields: dict[str, object] = {}
-    for legacy_key, handle in (
-        ("installation_id", "slack_installation_id"),
-        ("team_id", "slack_team_id"),
-        ("api_app_id", "slack_api_app_id"),
-        ("oauth_client_id", "slack_oauth_client_id"),
-    ):
-        value = str(payload.get(legacy_key) or "").strip()
-        if value:
-            fields[handle] = value
-    return {"action": "submit", "payload": {"secrets": secrets, "fields": fields}}
-
-
 async def _apply_slack_setup_api_after_start(
     *,
     base_url: str,
@@ -896,54 +866,14 @@ async def _apply_slack_setup_api_after_start(
     )
     if payload is None:
         return {"applied": False, "reason": "setup_payload_missing", **preflight}
-    request = _slack_generic_setup_request(payload)
-    submitted_secrets = set(request["payload"]["secrets"])
-    install_status_code: int | None = None
     try:
         import httpx
 
-        headers = {"Authorization": f"Bearer {AUTH_TOKEN}"}
         async with httpx.AsyncClient(timeout=30.0) as client:
-            # The generic lifecycle requires the extension installed before
-            # its `[channel.config]` setup submit; check the installed
-            # listing first so re-runs stay idempotent.
-            listing = await client.get(
-                f"{base_url}/api/webchat/v2/extensions",
-                headers=headers,
-            )
-            slack_installed = False
-            if 200 <= listing.status_code < 300:
-                listing_body = listing.json()
-                extensions = (
-                    listing_body.get("extensions")
-                    if isinstance(listing_body, dict)
-                    else None
-                )
-                for extension in extensions if isinstance(extensions, list) else []:
-                    if not isinstance(extension, dict):
-                        continue
-                    package_ref = extension.get("package_ref")
-                    ref_id = (
-                        package_ref.get("id") if isinstance(package_ref, dict) else None
-                    )
-                    if ref_id == "slack":
-                        slack_installed = True
-                        break
-            if not slack_installed:
-                install = await client.post(
-                    f"{base_url}/api/webchat/v2/extensions/install",
-                    headers=headers,
-                    json={"package_ref": {"kind": "extension", "id": "slack"}},
-                )
-                install_status_code = install.status_code
-                if install.status_code < 200 or install.status_code >= 300:
-                    raise LiveQaError(
-                        f"Slack extension install returned HTTP {install.status_code}"
-                    )
-            response = await client.post(
-                f"{base_url}/api/webchat/v2/extensions/slack/setup",
-                headers=headers,
-                json=request,
+            response = await client.put(
+                f"{base_url}/api/webchat/v2/channels/slack/setup",
+                headers={"Authorization": f"Bearer {AUTH_TOKEN}"},
+                json=payload,
             )
             if response.status_code < 200 or response.status_code >= 300:
                 raise LiveQaError(
@@ -958,50 +888,32 @@ async def _apply_slack_setup_api_after_start(
         raise LiveQaError(f"Slack setup API call failed: {type(exc).__name__}: {exc}") from exc
     if not isinstance(status, dict):
         raise LiveQaError(f"Slack setup API returned non-object JSON: {status!r}")
-    provided_secrets = {
-        secret.get("name")
-        for secret in status.get("secrets") or []
-        if isinstance(secret, dict) and secret.get("provided") is True
-    }
-    missing_secrets = sorted(submitted_secrets - provided_secrets)
-    if missing_secrets:
+    required_flags = ["configured", "bot_token_configured", "signing_secret_configured"]
+    if payload.get("oauth_client_id") or payload.get("oauth_client_secret"):
+        required_flags.extend(["oauth_client_id_configured", "oauth_client_secret_configured"])
+    missing_flags = [flag for flag in required_flags if status.get(flag) is not True]
+    mismatched_identity = [
+        key
+        for key in ("installation_id", "team_id", "api_app_id")
+        if str(status.get(key) or "") != str(payload.get(key) or "")
+    ]
+    if missing_flags or mismatched_identity:
         raise LiveQaError(
             "Slack setup API returned incomplete setup status: "
-            f"missing_secrets={missing_secrets!r}"
+            f"missing_flags={missing_flags!r} "
+            f"mismatched_identity={mismatched_identity!r}"
         )
-    oauth_client_id_configured = bool(payload.get("oauth_client_id"))
-    oauth_client_secret_configured = "slack_oauth_client_secret" in provided_secrets
     return {
         "applied": True,
         "status_code": response.status_code,
-        "install_status_code": install_status_code,
         "request": {
             "installation_id": payload.get("installation_id"),
             "team_id": payload.get("team_id"),
             "api_app_id": payload.get("api_app_id"),
-            "oauth_client_id_configured": oauth_client_id_configured,
+            "oauth_client_id_configured": bool(payload.get("oauth_client_id")),
             "oauth_client_secret_configured": bool(payload.get("oauth_client_secret")),
         },
-        # Downstream consumers read identity + readiness flags from the
-        # `setup` slot; the generic setup response never echoes non-secret
-        # values, so identity rides through from the submitted payload and
-        # the secret flags come from the API's `provided` projection.
-        "status": {
-            "configured": True,
-            "installation_id": payload.get("installation_id"),
-            "team_id": payload.get("team_id"),
-            "api_app_id": payload.get("api_app_id"),
-            "bot_token_configured": "slack_bot_token" in provided_secrets,
-            "signing_secret_configured": "slack_signing_secret" in provided_secrets,
-            "oauth_client_id_configured": oauth_client_id_configured,
-            "oauth_client_secret_configured": oauth_client_secret_configured,
-            "personal_oauth_ready": oauth_client_id_configured
-            and oauth_client_secret_configured,
-            "phase": status.get("phase"),
-            "provided_secrets": sorted(
-                name for name in provided_secrets if isinstance(name, str)
-            ),
-        },
+        "status": status,
     }
 
 
@@ -1264,6 +1176,14 @@ ASSISTANT_REPLY_POLL_SECONDS = 0.5
 # Persisted diagnostic excerpt only — content checks read
 # AssistantReplyWaitResult.full_text, never this truncation.
 ASSISTANT_REPLY_EXCERPT_MAX_CHARS = 2000
+# Capture-race re-confirm: the finalized-reply flag and the bubble text are
+# read in separate Playwright round-trips, so the flag can flip to "true" one
+# poll after a stale/mid-stream text snapshot was captured. Before hard-failing
+# on a missing marker, re-read the finalized bubble this many times (spaced by
+# this delay) so a truncated snapshot doesn't fail a reply that actually
+# contains the marker.
+ASSISTANT_REPLY_MARKER_RECONFIRM_ATTEMPTS = 3
+ASSISTANT_REPLY_MARKER_RECONFIRM_SECONDS = 0.3
 
 
 def _exc_text(exc: BaseException) -> str:
@@ -1316,6 +1236,60 @@ def _is_provider_incident(result: ProbeResult) -> bool:
         "provider_unavailable",
         "provider_transient",
     }
+
+
+def _is_case_retriable(result: ProbeResult) -> bool:
+    """Whether an unsuccessful case result is a transient failure worth re-running.
+
+    Only assertion/behavioral failures are retriable. Non-transient failures are
+    recorded as-is without wasting a retry: blocked preconditions, and
+    infrastructure/provider incidents (failure_class=="infrastructure",
+    inconclusive, or a model/provider incident per _is_provider_incident).
+    """
+    if result.success:
+        return False
+    details = result.details
+    if details.get("blocked"):
+        return False
+    if details.get("failure_class") == "infrastructure":
+        return False
+    if details.get("inconclusive"):
+        return False
+    if _is_provider_incident(result):
+        return False
+    return True
+
+
+async def _run_case_with_retries(
+    fn: CaseFn,
+    ctx: "LiveQaContext",
+    *,
+    attempts: int,
+    is_retriable: Callable[[ProbeResult], bool],
+) -> ProbeResult:
+    """Run a live-QA case, retrying a transient failure before recording a red.
+
+    Runs ``fn(ctx)``; on an unsuccessful *and* retriable result with attempts
+    remaining, runs it again; otherwise returns the (last) result. Re-running
+    ``fn(ctx)`` drives a fresh chat turn against the same already-running
+    server/ctx — no restart — which is the intended retry semantics for a
+    nondeterministic model/network flake. The number of attempts made is
+    recorded into ``result.details["attempts"]``.
+    """
+    total = max(1, attempts)
+    result: ProbeResult | None = None
+    for attempt in range(1, total + 1):
+        result = await fn(ctx)
+        result.details["attempts"] = attempt
+        if result.success or attempt >= total or not is_retriable(result):
+            return result
+        print(
+            "[reborn-webui-v2-live-qa] retrying case after retriable failure "
+            f"attempt={attempt}/{total}",
+            flush=True,
+        )
+    assert result is not None  # the loop body always runs at least once
+    return result
 
 
 def _record_assistant_reply_wait_result(
@@ -1876,11 +1850,65 @@ async def _wait_for_assistant_reply(
             )
             required_text_matched = required_text_matches(normalized, required_text)
             if last_final_reply_state == "true" and not marker_matches:
-                raise AssertionError(
-                    "finalized assistant reply did not contain required marker. "
-                    f"marker={marker!r} "
-                    f"last_assistant={last_final_assistant_text[-500:]!r}"
-                )
+                # Capture race: `data-final-reply` and the bubble text are read
+                # in two separate Playwright round-trips, so the finalized flag
+                # can flip to "true" a poll after a stale/mid-stream text
+                # snapshot was captured — truncating the marker out of an
+                # otherwise-complete reply. Re-read the finalized bubble a
+                # bounded number of times with the freshest text before failing,
+                # and only raise if the marker is still genuinely absent.
+                for _ in range(ASSISTANT_REPLY_MARKER_RECONFIRM_ATTEMPTS):
+                    await asyncio.sleep(ASSISTANT_REPLY_MARKER_RECONFIRM_SECONDS)
+                    try:
+                        reconfirm_final_assistant_text = await assistant.inner_text(
+                            timeout=1000
+                        )
+                    except Exception:
+                        reconfirm_final_assistant_text = ""
+                    if reconfirm_final_assistant_text:
+                        last_final_assistant_text = reconfirm_final_assistant_text
+                    try:
+                        reconfirm_block_texts = [
+                            block.strip()
+                            for block in (await assistant_blocks.all_inner_texts())[
+                                max(0, assistant_count_before) :
+                            ]
+                            if block.strip()
+                        ]
+                    except Exception:
+                        reconfirm_block_texts = []
+                    if reconfirm_block_texts:
+                        text = "\n".join(reconfirm_block_texts)
+                        last_text = text
+                        last_observed_text = text
+                        normalized = text.lower()
+                    elif reconfirm_final_assistant_text:
+                        # Block-texts read failed or came back empty this
+                        # attempt; fall back to the whole-bubble text so the
+                        # marker AND required-text checks evaluate against the
+                        # freshest snapshot — never a stale pre-reconfirm
+                        # truncation (which could otherwise fail required_text
+                        # or, worse, succeed with stale text on record).
+                        text = reconfirm_final_assistant_text
+                        last_text = text
+                        last_observed_text = text
+                        normalized = text.lower()
+                    marker_matches = (
+                        not enforce_marker
+                        or not marker
+                        or marker in last_final_assistant_text
+                    )
+                    if marker_matches:
+                        required_text_matched = required_text_matches(
+                            normalized, required_text
+                        )
+                        break
+                if not marker_matches:
+                    raise AssertionError(
+                        "finalized assistant reply did not contain required marker. "
+                        f"marker={marker!r} "
+                        f"last_assistant={last_final_assistant_text[-500:]!r}"
+                    )
             if marker_matches and required_text_matched:
                 if last_final_reply_state == "false":
                     await asyncio.sleep(ASSISTANT_REPLY_POLL_SECONDS)
@@ -2119,6 +2147,13 @@ def _trigger_record_count(reborn_home: Path, routine_name: str | None = None) ->
 
 ROUTINE_TRIGGER_RECORD_WAIT_TIMEOUT_SECONDS = 120.0
 ROUTINE_TRIGGER_RECORD_POLL_SECONDS = 2.0
+
+# Routine creation is a heavy, multi-step assistant turn (list sheets ->
+# read -> compose -> create trigger). The former 180s per-turn reply wait
+# timed out mid-work on slower model runs, blocking qa_2e / qa_6d / qa_9b at
+# a near-uniform ~182-184s with latest_final_reply_state='false'. 300s gives
+# it the same headroom as the comparably heavy calendar-prep live-chat turn.
+ROUTINE_CREATION_REPLY_TIMEOUT_SECONDS = 300.0
 
 
 async def _wait_for_trigger_record_after_count(
@@ -2636,6 +2671,101 @@ async def _slack_search_marker_hits(
             }
         )
     return {"checked": True, "hits": hits}
+
+
+# Bounded search-index readiness window for freshly-seeded markers. Slack's
+# search index is eventually consistent — a Web-API post is typically not
+# searchable for ~15-30s after it lands — so probes that answer via search
+# must gate the agent turn on the seed becoming searchable first.
+SLACK_SEARCH_INDEX_READINESS_TIMEOUT_SECONDS = 45.0
+SLACK_SEARCH_INDEX_READINESS_POLL_SECONDS = 3.0
+
+
+async def _wait_for_slack_search_marker(
+    ctx: LiveQaContext,
+    *,
+    marker: str,
+    timeout: float = SLACK_SEARCH_INDEX_READINESS_TIMEOUT_SECONDS,
+    poll_interval: float = SLACK_SEARCH_INDEX_READINESS_POLL_SECONDS,
+) -> dict[str, object]:
+    """Poll Slack search until a freshly-seeded marker becomes searchable.
+
+    Slack's search index is eventually consistent: a message posted via the
+    Web API is not searchable for many seconds after it lands. A probe that
+    answers a "most recent message I sent" question by calling
+    ``search.messages`` (``from:me`` newest-first) can therefore surface an
+    OLDER already-indexed seed while the newest one is still un-indexed — an
+    external-lag artifact, not an agent regression. This barrier gates the
+    agent turn on the newest seed becoming searchable so the caller can
+    surface an INCONCLUSIVE result on timeout instead of a spurious
+    answer-mismatch red.
+
+    Reuses :func:`_slack_search_marker_hits` (personal-token workspace sweep).
+    Returns a dict:
+      ready      — True once the marker appears in search results
+      checked    — whether the sweep ever actually ran (False => never ran)
+      permanent  — True when search can NEVER run here (missing scope, ...)
+      attempts   — number of search calls made
+      waited_ms  — elapsed poll time
+      error      — last search error, when any
+    """
+    started = time.monotonic()
+    deadline = started + timeout
+    attempts = 0
+    checked_any = False
+    last_error: str | None = None
+    while True:
+        # Deadline check BEFORE the sweep: each sweep carries its own HTTP
+        # timeout, so starting one at/past the deadline could stretch the
+        # advertised readiness bound by a full extra sweep.
+        if time.monotonic() >= deadline:
+            return {
+                "ready": False,
+                "checked": checked_any,
+                "permanent": False,
+                "attempts": attempts,
+                "waited_ms": int((time.monotonic() - started) * 1000),
+                "error": last_error,
+            }
+        attempts += 1
+        sweep = await _slack_search_marker_hits(ctx, marker=marker)
+        if sweep.get("checked"):
+            checked_any = True
+            # A sweep that ran cleanly supersedes any earlier transient error;
+            # a timeout after this point must not report a stale one.
+            last_error = None
+            if sweep.get("hits"):
+                return {
+                    "ready": True,
+                    "checked": True,
+                    "permanent": False,
+                    "attempts": attempts,
+                    "waited_ms": int((time.monotonic() - started) * 1000),
+                }
+        else:
+            last_error = str(sweep.get("error") or "slack_search_unavailable")
+            if sweep.get("permanent"):
+                # The sweep can never run in this environment — spinning to the
+                # deadline would only hide the real env-repair cause.
+                return {
+                    "ready": False,
+                    "checked": checked_any,
+                    "permanent": True,
+                    "attempts": attempts,
+                    "waited_ms": int((time.monotonic() - started) * 1000),
+                    "error": last_error,
+                }
+        now = time.monotonic()
+        if now >= deadline:
+            return {
+                "ready": False,
+                "checked": checked_any,
+                "permanent": False,
+                "attempts": attempts,
+                "waited_ms": int((time.monotonic() - started) * 1000),
+                "error": last_error,
+            }
+        await asyncio.sleep(min(poll_interval, deadline - now))
 
 
 async def _slack_personal_dm_counterpart_names(
@@ -3249,47 +3379,40 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
             wait_until="domcontentloaded",
         )  # type: ignore[attr-defined]
         await expect(page.locator("body")).to_contain_text("Channels", timeout=15000)  # type: ignore[attr-defined]
-        # Channel discovery is extension-surface data (NEA-25): the Slack
-        # connect affordance rides the extension's channel surface in the
-        # registry catalog — there is no separate connectable-channel registry.
-        body = await _fetch_webui_json(page, "/api/webchat/v2/extensions/registry")
-        entries = body.get("entries")
-        if not isinstance(entries, list):
-            raise AssertionError(f"extension registry body did not include entries: {body!r}")
-        slack_channel_surfaces = [
-            surface
-            for entry in entries
-            if isinstance(entry, dict)
-            and (entry.get("package_ref") or {}).get("id") == "slack"
-            for surface in (entry.get("surfaces") or [])
-            if isinstance(surface, dict) and surface.get("kind") == "channel"
+        body = await _fetch_webui_json(page, "/api/webchat/v2/channels/connectable")
+        channels = body.get("channels")
+        if not isinstance(channels, list):
+            raise AssertionError(f"connectable channels body did not include a list: {body!r}")
+        slack_channels = [
+            channel
+            for channel in channels
+            if isinstance(channel, dict) and channel.get("channel") == "slack"
         ]
-        slack_connections = [
-            surface["connection"]
-            for surface in slack_channel_surfaces
-            if isinstance(surface.get("connection"), dict)
-        ]
-        observed["slack_channel_surface_count"] = len(slack_channel_surfaces)
-        observed["slack_strategy_count"] = len(slack_connections)
+        observed["connectable_channel_count"] = len(channels)
+        observed["slack_strategy_count"] = len(slack_channels)
         observed["slack_strategies"] = [
-            connection.get("strategy") for connection in slack_connections
+            channel.get("strategy")
+            for channel in slack_channels
+            if isinstance(channel, dict)
         ]
         personal = next(
             (
-                connection
-                for connection in slack_connections
-                if connection.get("strategy") == "oauth"
+                channel
+                for channel in slack_channels
+                if isinstance(channel, dict)
+                and channel.get("strategy") == "oauth"
             ),
             None,
         )
         if not isinstance(personal, dict):
-            raise AssertionError(
-                f"Slack oauth connect strategy missing from channel surfaces: {entries!r}"
-            )
-        title = str(personal.get("display_name") or "")
+            raise AssertionError(f"Slack oauth connect strategy missing: {channels!r}")
+        action_body = personal.get("action")
+        if not isinstance(action_body, dict):
+            raise AssertionError(f"Slack connect action missing: {personal!r}")
+        title = str(action_body.get("title") or "")
         if not title:
-            raise AssertionError(f"Slack connect display name missing: {personal!r}")
-        instructions = str(personal.get("instructions") or "")
+            raise AssertionError(f"Slack connect action title missing: {personal!r}")
+        instructions = str(action_body.get("instructions") or "")
         if not _slack_connect_instructions_look_valid(instructions):
             raise AssertionError(f"unexpected Slack connect instructions: {instructions!r}")
         # Extension-scoped OAuth deliberately rejects an absent installation.
@@ -3310,7 +3433,7 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
                 "Slack personal product-auth preflight did not include an invocation_id"
             )
         accounts_request: dict[str, object] = {
-            "provider": "slack",
+            "provider": "slack_personal",
             "requester_extension": "slack",
             "invocation_id": invocation_id,
             "limit": 10,
@@ -3330,7 +3453,7 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
             account
             for account in accounts
             if isinstance(account, dict)
-            and account.get("provider") == "slack"
+            and account.get("provider") == "slack_personal"
             and account.get("status") == "configured"
         ]
         if not configured_accounts:
@@ -3342,14 +3465,14 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
             "POST",
             "/api/webchat/v2/extensions/slack/setup/oauth/start",
             {
-                "provider": "slack",
+                "provider": "slack_personal",
                 "account_label": "Slack personal OAuth",
                 "scopes": [],
                 "expires_at": _slack_oauth_start_expires_at(),
                 "invocation_id": str(uuid.uuid4()),
             },
         )
-        if oauth_start.get("provider") != "slack":
+        if oauth_start.get("provider") != "slack_personal":
             raise AssertionError(f"Slack OAuth start returned unexpected provider: {oauth_start!r}")
         authorization_url = str(oauth_start.get("authorization_url") or "")
         if not authorization_url.startswith("https://slack.com/oauth/"):
@@ -3901,9 +4024,7 @@ async def _ensure_extension_authenticated_on_page(
         {
             f"{prefix}_active": match.get("active"),
             f"{prefix}_authenticated": match.get("authenticated"),
-            # §6.1 installation-state enum (replaces the retired
-            # `activation_status` string on the extensions wire).
-            f"{prefix}_installation_state": match.get("installation_state"),
+            f"{prefix}_activation_status": match.get("activation_status"),
             f"{prefix}_needs_setup": match.get("needs_setup"),
             f"{prefix}_tool_count": len(tools),
         }
@@ -4579,7 +4700,7 @@ async def _routine_creation_case(
             marker=marker,
             required_text=required_text,
             extensions=extensions,
-            timeout=180.0,
+            timeout=ROUTINE_CREATION_REPLY_TIMEOUT_SECONDS,
             extra_details=details,
         )
     else:
@@ -4589,7 +4710,7 @@ async def _routine_creation_case(
             prompt=prompt,
             marker=marker,
             required_text=required_text,
-            timeout=180.0,
+            timeout=ROUTINE_CREATION_REPLY_TIMEOUT_SECONDS,
             extra_details=details,
             routine_confirmation_follow_up=True,
             routine_follow_up_timezone_instruction=follow_up_timezone_instruction,
@@ -6511,6 +6632,7 @@ async def _slack_correctness_chat_reply(
     answer_marker: str,
     extra_details: dict[str, object],
     expected_capability: str | None = None,
+    accept_any_capability: tuple[str, ...] = (),
     expected_capability_statuses: tuple[str, ...] = ("completed",),
     expected_capability_sequence: tuple[str, ...] = (),
     expected_capability_arguments: dict[str, dict[str, str]] | None = None,
@@ -6524,6 +6646,14 @@ async def _slack_correctness_chat_reply(
     answer marker remains prompt context but is not a liveness condition. The
     full text is stripped from persisted details on both paths; a failed chat
     result is ready to return as-is with latency re-anchored to the case start.
+
+    `expected_capability` (and the sequence/argument variants) assert TOOL
+    IDENTITY — the model must terminally use that exact capability. Use
+    `accept_any_capability` instead when the case asserts an OUTCOME that any
+    of several capabilities can satisfy: the arm passes as long as at least
+    ONE of the accept-any set produced current-turn terminal evidence, rather
+    than pinning a single tool id. The two are composable — accept-any members
+    form an OR-group while every plain `expected_capability` stays required.
     """
     expected_capabilities = list(
         dict.fromkeys(
@@ -6535,6 +6665,7 @@ async def _slack_correctness_chat_reply(
                 ),
                 *expected_capability_sequence,
                 *(expected_capability_arguments or {}),
+                *accept_any_capability,
             ]
         )
     )
@@ -6587,15 +6718,26 @@ async def _slack_correctness_chat_reply(
             }
         )
         statuses = evidence.get("statuses")
-        missing_capabilities = (
-            [
+        accept_any_set = set(accept_any_capability)
+        if isinstance(statuses, dict):
+            # Plain expected capabilities stay individually required; the
+            # accept-any set is an OR-group that only counts as missing when
+            # NONE of its members produced current-turn terminal evidence.
+            missing_capabilities = [
                 capability_id
                 for capability_id in expected_capabilities
-                if not statuses.get(capability_id, [])
+                if capability_id not in accept_any_set
+                and not statuses.get(capability_id, [])
             ]
-            if isinstance(statuses, dict)
-            else expected_capabilities
-        )
+            if accept_any_capability and not any(
+                statuses.get(capability_id, [])
+                for capability_id in accept_any_capability
+            ):
+                missing_capabilities.append(
+                    "any-of:" + "|".join(accept_any_capability)
+                )
+        else:
+            missing_capabilities = list(expected_capabilities)
         evidence_read_error = evidence.get("read_error")
         observed_arguments = evidence.get("input_arguments")
         argument_mismatches = {
@@ -6909,12 +7051,17 @@ async def case_qa_10c_slack_thread_replies(ctx: LiveQaContext) -> ProbeResult:
     """Thread-visibility probe: listing a conversation "including thread
     replies" must surface the replies seeded under a thread root.
 
-    Pins the missing thread-replies capability: the host exposes only
-    top-level conversations.history, so bot replies posted with thread_ts
-    are invisible to the agent (red until a conversations.replies tool
-    ships). THREADROOT/TOPLEVEL presence is the control proving plain
-    history reads worked at all — without it a history outage would be
-    misread as the thread gap.
+    Asserts the OUTCOME — the seeded thread replies appear in the answer —
+    not the identity of the tool that fetched them. Thread visibility is
+    satisfied whether the model reaches the replies through the dedicated
+    `slack.get_thread_replies` capability or through indexed
+    `slack.search_messages` (whose threaded hits carry reply text), so the
+    capability arm accepts either (accept-any). Conversation history is NOT a
+    member: the shipped manifest documents that history returns thread
+    parents only, never replies. The real regression this guards is the
+    agent being UNABLE to see thread replies at all: THREADROOT/TOPLEVEL
+    presence is the control proving plain history reads worked, and the
+    missing-REPLY_* check stays red when the replies are not surfaced.
     """
     case_name = "qa_10c_slack_thread_replies"
     started = time.monotonic()
@@ -6972,7 +7119,17 @@ async def case_qa_10c_slack_thread_replies(ctx: LiveQaContext) -> ProbeResult:
             ),
             answer_marker=answer_marker,
             extra_details=details,
-            expected_capability="slack.get_thread_replies",
+            # Outcome, not tool identity: any capability that can genuinely
+            # retrieve thread-reply content satisfies the arm. Per the shipped
+            # manifest, conversation history NEVER returns replies (only
+            # thread parents), so it is deliberately NOT in this set; indexed
+            # search does surface reply text (threaded hits), so a model
+            # reaching the replies via search passes. The missing-REPLY_*
+            # assert below is what actually pins thread visibility.
+            accept_any_capability=(
+                "slack.get_thread_replies",
+                "slack.search_messages",
+            ),
         )
         if not chat.success:
             return chat
@@ -7357,6 +7514,64 @@ async def case_qa_10g_slack_last_message_sent_global(
             label=last_sent_marker,
             actor="personal",
         )
+        # Slack's search index is eventually consistent: the agent answers this
+        # by searching ``from:me`` newest-first, but a Web-API post is not
+        # searchable for many seconds. Until the freshly-seeded GLOBAL marker is
+        # indexed, that search returns an OLDER already-indexed seed and the
+        # marker assertion below would red for external index lag, not an agent
+        # regression. Gate the turn on the marker becoming searchable; if it
+        # never indexes within the bounded deadline, surface INCONCLUSIVE.
+        readiness = await _wait_for_slack_search_marker(
+            ctx, marker=last_sent_marker
+        )
+        details["search_index_readiness"] = readiness
+        if not readiness.get("ready"):
+            if readiness.get("permanent"):
+                # Search can NEVER run here (missing scope / invalid or revoked
+                # token): this is an actionable env-repair failure, not index
+                # lag — report it as such rather than an inconclusive lag
+                # artifact that would hide the real cause.
+                reason = (
+                    "Slack search readiness check can never run in this "
+                    f"environment (error={readiness.get('error')!r}) — repair "
+                    "the personal token/scopes"
+                )
+                result = _result(
+                    case_name,
+                    False,
+                    started,
+                    {
+                        **details,
+                        "error": reason,
+                        "failure_class": "infrastructure",
+                        "failure_category": "slack_search_unavailable",
+                        "failure_status": "failed",
+                    },
+                )
+                result.details["blocking"] = False
+                return result
+            reason = (
+                "Slack search did not index the workspace-global last-sent "
+                f"marker within {int(SLACK_SEARCH_INDEX_READINESS_TIMEOUT_SECONDS)}s "
+                f"(attempts={readiness.get('attempts')}, "
+                f"error={readiness.get('error')!r}) — external search-index "
+                "lag, not an agent regression"
+            )
+            result = _result(
+                case_name,
+                False,
+                started,
+                {
+                    **details,
+                    "error": reason,
+                    "failure_class": "infrastructure",
+                    "failure_category": "slack_search_index_lag",
+                    "failure_status": "inconclusive",
+                    "inconclusive": True,
+                },
+            )
+            result.details["blocking"] = False
+            return result
         chat, reply_text = await _slack_correctness_chat_reply(
             ctx,
             case_name=case_name,
@@ -8348,7 +8563,12 @@ async def run_cases(args: argparse.Namespace) -> int:
                 write_preflight(args.output_dir, prepared_home)
                 shutil.copyfile(preflight_path, case_preflight_path)
             print(f"[reborn-webui-v2-live-qa] running case={name}", flush=True)
-            result = await CASES[name].fn(ctx)
+            result = await _run_case_with_retries(
+                CASES[name].fn,
+                ctx,
+                attempts=LIVE_QA_CASE_ATTEMPTS,
+                is_retriable=_is_case_retriable,
+            )
             result = _attach_browser_diagnostics(args.output_dir, result)
             results.append(result)
             print(

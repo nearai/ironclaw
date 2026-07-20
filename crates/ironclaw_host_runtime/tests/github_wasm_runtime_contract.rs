@@ -2,10 +2,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_filesystem::DiskFilesystem;
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
     AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet,
     CorrelationId, CredentialStageError, Decision, EffectKind, ExecutionContext, ExtensionId,
@@ -27,10 +27,9 @@ use ironclaw_processes::ProcessServices;
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceGovernor, ResourceLimits,
 };
-use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
+use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
 use ironclaw_trust::{
-    AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
-    HostTrustPolicy, TrustDecision, TrustProvenance,
+    AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy, TrustDecision,
 };
 use ironclaw_wasm::{
     RecordingWasmHostHttp, WasmHostError, WasmHttpResponse, WitToolExecution, WitToolHost,
@@ -134,7 +133,7 @@ async fn host_runtime_services_routes_structured_github_wasm_search_through_runt
     let network = RecordingNetworkHttpEgress::with_body(
         br#"{"total_count":0,"incomplete_results":false,"items":[]}"#.to_vec(),
     );
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let slot_handle = SecretHandle::new("github_runtime_token").unwrap();
     let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
     let services = HostRuntimeServices::new(
@@ -222,7 +221,7 @@ async fn host_runtime_services_restages_github_product_auth_for_multi_request_wa
     let network = RecordingNetworkHttpEgress::with_body(
         format!(r#"{{"ref":"refs/heads/main","object":{{"sha":"{source_sha}"}}}}"#).into_bytes(),
     );
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let slot_handle = SecretHandle::new("github_runtime_token").unwrap();
     let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
     let services = HostRuntimeServices::new(
@@ -314,7 +313,7 @@ async fn host_runtime_services_routes_google_drive_wasm_list_files_with_scoped_g
     let scope = sample_scope(InvocationId::new());
     let policy = google_drive_policy();
     let network = RecordingNetworkHttpEgress::with_body(br#"{"files":[]}"#.to_vec());
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let slot_handle = SecretHandle::new("google_runtime_token").unwrap();
     let account_access_secret = SecretHandle::new("google_manual_access").unwrap();
     let required_scopes = vec!["https://www.googleapis.com/auth/drive.readonly".to_string()];
@@ -423,7 +422,7 @@ async fn host_runtime_services_extracts_google_drive_download_binary_into_text()
         br#"{"id":"file-1","name":"hello.pdf","mimeType":"application/pdf"}"#.to_vec(),
         pdf,
     );
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let account_access_secret = SecretHandle::new("google_drive_download_access").unwrap();
     let required_scopes = vec!["https://www.googleapis.com/auth/drive.readonly".to_string()];
     let services = google_wasm_services_for_test!(
@@ -485,7 +484,7 @@ async fn host_runtime_services_maps_google_drive_wasm_401_to_auth_required() {
         401,
         br#"{"error":{"status":"UNAUTHENTICATED","message":"Invalid Credentials"}}"#.to_vec(),
     );
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let account_access_secret = SecretHandle::new("google_drive_access").unwrap();
     let required_scopes = vec!["https://www.googleapis.com/auth/drive.readonly".to_string()];
     let services = google_wasm_services_for_test!(
@@ -557,7 +556,7 @@ async fn host_runtime_services_maps_google_drive_upload_wasm_401_to_auth_require
         401,
         br#"{"error":{"status":"UNAUTHENTICATED","message":"Invalid Credentials"}}"#.to_vec(),
     );
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let account_access_secret = SecretHandle::new("google_drive_upload_access").unwrap();
     let required_scopes = vec!["https://www.googleapis.com/auth/drive".to_string()];
     let services = google_wasm_services_for_test!(
@@ -630,7 +629,7 @@ async fn host_runtime_services_routes_google_docs_wasm_get_document_with_scoped_
     let network = RecordingNetworkHttpEgress::with_body(
         br#"{"documentId":"doc-1","title":"Doc","revisionId":"r1","body":{"content":[{"endIndex":5}]}}"#.to_vec(),
     );
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let account_access_secret = SecretHandle::new("google_docs_access").unwrap();
     let required_scopes = vec!["https://www.googleapis.com/auth/documents.readonly".to_string()];
     let services = google_wasm_services_for_test!(
@@ -689,7 +688,7 @@ async fn host_runtime_services_routes_google_sheets_wasm_get_spreadsheet_with_sc
     let network = RecordingNetworkHttpEgress::with_body(
         br#"{"spreadsheetId":"sheet-1","properties":{"title":"Sheet"},"spreadsheetUrl":"https://docs.google.com/spreadsheets/d/sheet-1","sheets":[],"namedRanges":[]}"#.to_vec(),
     );
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let account_access_secret = SecretHandle::new("google_sheets_access").unwrap();
     let required_scopes = vec!["https://www.googleapis.com/auth/spreadsheets.readonly".to_string()];
     let services = google_wasm_services_for_test!(
@@ -748,7 +747,7 @@ async fn host_runtime_services_routes_google_slides_wasm_get_presentation_with_s
     let network = RecordingNetworkHttpEgress::with_body(
         br#"{"presentationId":"slides-1","title":"Slides","revisionId":"r1","slides":[]}"#.to_vec(),
     );
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let account_access_secret = SecretHandle::new("google_slides_access").unwrap();
     let required_scopes =
         vec!["https://www.googleapis.com/auth/presentations.readonly".to_string()];
@@ -806,7 +805,7 @@ async fn host_runtime_services_maps_github_wasm_input_errors_to_invalid_input() 
     let network = RecordingNetworkHttpEgress::with_body(
         br#"{"total_count":0,"incomplete_results":false,"items":[]}"#.to_vec(),
     );
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
     let services = github_wasm_services_for_test!(
         network.clone(),
@@ -848,7 +847,7 @@ async fn host_runtime_services_maps_github_search_validation_status_to_invalid_i
         422,
         br#"{"message":"Validation Failed","errors":[{"message":"\"YYYY-MM-DD\" is not a recognized date/time format.","resource":"Search","field":"q","code":"invalid"}],"status":"422"}"#.to_vec(),
     );
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
     let services = github_wasm_services_for_test!(
         network.clone(),
@@ -888,7 +887,7 @@ async fn host_runtime_services_keeps_github_non_validation_422_as_operation_fail
         br#"{"message":"Validation failed, or the endpoint has been spammed.","status":"422"}"#
             .to_vec(),
     );
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
     let services = github_wasm_services_for_test!(
         network.clone(),
@@ -926,7 +925,7 @@ async fn host_runtime_services_missing_github_runtime_secret_blocks_on_auth() {
     let network = RecordingNetworkHttpEgress::with_body(
         br#"{"total_count":0,"incomplete_results":false,"items":[]}"#.to_vec(),
     );
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let slot_handle = SecretHandle::new("github_runtime_token").unwrap();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_github_package()),
@@ -1003,7 +1002,7 @@ async fn host_runtime_services_injects_personal_xoxp_token_for_slack_user_search
     let network = RecordingNetworkHttpEgress::with_body(
         br#"{"ok":true,"messages":{"total":2,"matches":[]}}"#.to_vec(),
     );
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let slot_handle = SecretHandle::new("slack_user_token").unwrap();
     let account_access_secret = SecretHandle::new("slack_access").unwrap();
     let services = HostRuntimeServices::new(
@@ -1110,7 +1109,7 @@ async fn host_runtime_services_missing_slack_account_blocks_slack_user_on_auth()
     let network = RecordingNetworkHttpEgress::with_body(
         br#"{"ok":true,"messages":{"total":0,"matches":[]}}"#.to_vec(),
     );
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let slot_handle = SecretHandle::new("slack_user_token").unwrap();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_slack_user_package()),
@@ -2305,13 +2304,7 @@ fn wasm_runtime_request_for_scope(
     input: serde_json::Value,
 ) -> RuntimeCapabilityRequest {
     let context = execution_context_with_dispatch_grant_for_scope(capability_id.clone(), scope);
-    RuntimeCapabilityRequest::new(
-        context,
-        capability_id,
-        wasm_http_estimate(),
-        input,
-        trust_decision_with_dispatch_authority(),
-    )
+    RuntimeCapabilityRequest::new(context, capability_id, wasm_http_estimate(), input)
 }
 
 fn execution_context_with_dispatch_grant_for_scope(
@@ -2365,23 +2358,6 @@ fn capability_grants(capability: CapabilityId) -> CapabilitySet {
         },
     });
     grants
-}
-
-fn trust_decision_with_dispatch_authority() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![
-                EffectKind::DispatchCapability,
-                EffectKind::Network,
-                EffectKind::UseSecret,
-                EffectKind::ExternalWrite,
-            ],
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::Default,
-        evaluated_at: Utc::now(),
-    }
 }
 
 fn execute_bundled_github_wasm(
@@ -2675,7 +2651,10 @@ macro_rules! slack_enrichment_services_for_test {
     }};
 }
 
-async fn seed_slack_user_token(secret_store: &InMemorySecretStore, scope: &ResourceScope) {
+async fn seed_slack_user_token(
+    secret_store: &FilesystemSecretStore<InMemoryBackend>,
+    scope: &ResourceScope,
+) {
     secret_store
         .put(
             scope.clone(),
@@ -2711,7 +2690,7 @@ async fn slack_history_output_carries_display_names_alongside_raw_user_ids() {
         ("users.info?user=U0BBB", 200, SLACK_USER_BBB_BODY),
         ("auth.test", 200, SLACK_AUTH_TEST_SELF_AAA_BODY),
     ]);
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
     seed_slack_user_token(&secret_store, &scope).await;
 
@@ -2809,7 +2788,7 @@ async fn slack_thread_replies_resolve_names_and_mark_connected_account() {
         ("users.info?user=U0BBB", 200, SLACK_USER_BBB_BODY),
         ("auth.test", 200, SLACK_AUTH_TEST_SELF_AAA_BODY),
     ]);
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
     seed_slack_user_token(&secret_store, &scope).await;
 
@@ -2879,7 +2858,7 @@ async fn slack_list_conversations_dms_carry_counterpart_display_names() {
         ),
         ("users.info?user=U0AAA", 200, SLACK_USER_AAA_BODY),
     ]);
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
     seed_slack_user_token(&secret_store, &scope).await;
 
@@ -2924,7 +2903,7 @@ async fn slack_list_conversations_surfaces_membership_and_pagination() {
             {"id":"D0FIRAT","is_im":true,"is_channel":false,"is_private":false,"is_mpim":false,"user":"U0AAA"}
         ],"response_metadata":{"next_cursor":"dXNlcjpVMEc5V0ZYTlo="}}"#,
     )]);
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
     seed_slack_user_token(&secret_store, &scope).await;
 
@@ -2989,7 +2968,7 @@ async fn slack_get_conversation_info_resolves_exact_dm_counterpart() {
         ),
         ("users.info?user=U0BBB", 200, SLACK_USER_BBB_BODY),
     ]);
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
     seed_slack_user_token(&secret_store, &scope).await;
 
@@ -3034,7 +3013,7 @@ async fn slack_get_conversation_info_rejects_missing_conversation_identity() {
         200,
         r#"{"ok":true,"channel":{"is_im":true,"user":"U0BBB"}}"#,
     )]);
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let services = slack_enrichment_services_for_test!(network, Arc::clone(&secret_store));
     seed_slack_user_token(&secret_store, &scope).await;
 
@@ -3070,7 +3049,7 @@ async fn slack_get_conversation_info_rejects_dm_without_counterpart() {
         200,
         r#"{"ok":true,"channel":{"id":"D0FIRAT","is_channel":false,"is_private":true,"is_im":true,"is_mpim":false}}"#,
     )]);
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let services = slack_enrichment_services_for_test!(network, Arc::clone(&secret_store));
     seed_slack_user_token(&secret_store, &scope).await;
 
@@ -3107,7 +3086,7 @@ async fn slack_history_limit_is_clamped_to_slack_maximum() {
         ("users.info", 200, SLACK_USER_AAA_BODY),
         ("auth.test", 200, SLACK_AUTH_TEST_SELF_AAA_BODY),
     ]);
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
     seed_slack_user_token(&secret_store, &scope).await;
 
@@ -3151,13 +3130,13 @@ async fn slack_search_matches_carry_display_names_thread_ts_and_page() {
             200,
             r#"{"ok":true,"query":"deploy","messages":{"total":2,"matches":[
                 {"iid":"1","channel":{"id":"C0GENERAL","name":"general"},"type":"message","user":"U0AAA","username":"firat","ts":"1751970001.000100","text":"deploy went fine per <@U0BBB>","permalink":"https://x.slack.com/archives/C0GENERAL/p1751970001000100","thread_ts":"1751960000.000100"},
-                {"iid":"2","channel":{"id":"C0GENERAL","name":"general"},"type":"message","user":"U0BBB","username":"ada","ts":"1751970002.000100","text":"deploying again","permalink":"https://x.slack.com/archives/C0GENERAL/p1751970002000100"}
+                {"iid":"2","channel":{"id":"C0GENERAL","name":"general"},"type":"message","user":"U0BBB","username":"ada","ts":"1751970002.000100","text":"deploying again cc <@U0QQQQQQQ|contractor.jane>","permalink":"https://x.slack.com/archives/C0GENERAL/p1751970002000100"}
             ]}}"#,
         ),
         ("users.info?user=U0AAA", 200, SLACK_USER_AAA_BODY),
         ("users.info?user=U0BBB", 200, SLACK_USER_BBB_BODY),
     ]);
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
     seed_slack_user_token(&secret_store, &scope).await;
 
@@ -3211,15 +3190,24 @@ async fn slack_search_matches_carry_display_names_thread_ts_and_page() {
         first_text.contains("@Ada Lovelace") && !first_text.contains("<@U"),
         "search match text must resolve in-text mentions like history does: {output}"
     );
+    // Digest/names-not-ids (qa_9c) rides the SAME resolver as quoted-message
+    // hygiene (qa_10i): a labeled mention whose id can't be resolved via
+    // users.info must render Slack's inline label rather than leak the raw id.
+    let second_text = matches[1]["text"].as_str().expect("text");
+    assert!(
+        second_text.contains("@contractor.jane") && !second_text.contains("<@U0QQQQQQQ"),
+        "search/digest text must fall back to the inline label for unresolvable mentions: {output}"
+    );
 }
 
 /// Inbound entity hygiene (qa_10i): message text arrives with raw Slack
 /// control tokens — `<@U…>` mentions, `<#C…|name>` channel refs, HTML
 /// entities — and the model leaks the raw ids into user-facing replies.
 /// The tool must resolve in-text mentions to `@Display Name` via the same
-/// users.info cache/budget as author enrichment (unresolved tokens stay
-/// as-is, never fabricated), rewrite channel refs to `#name`, and decode
-/// &amp;/&lt;/&gt;.
+/// users.info cache/budget as author enrichment; a labeled mention whose id
+/// can't be resolved falls back to Slack's own inline `|label` (never leaking
+/// the raw id), while a bare unresolved mention stays as-is (never fabricated).
+/// Channel refs render as `#name`, and &amp;/&lt;/&gt; decode.
 #[tokio::test]
 async fn slack_history_text_resolves_in_text_entities_to_display_names() {
     let capability_id = CapabilityId::new("slack.get_conversation_history").unwrap();
@@ -3230,13 +3218,13 @@ async fn slack_history_text_resolves_in_text_entities_to_display_names() {
             200,
             r#"{"ok":true,"has_more":false,"messages":[
                 {"type":"message","user":"U0AAA","text":"ENTITYMSG please sync with <@U0BBB>","ts":"1751970001.000100"},
-                {"type":"message","user":"U0AAA","text":"see <@U0AAA|firat> &amp; <#C0GENERAL|general> re &lt;q3&gt; <@U0ZZZZZZZ> <https://x.example/a|link>","ts":"1751970002.000100"}
+                {"type":"message","user":"U0AAA","text":"see <@U0AAA|firat> &amp; <#C0GENERAL|general> re &lt;q3&gt; <@U0ZZZZZZZ> cc <@U0ZZZZZZZ|external.person> <https://x.example/a|link>","ts":"1751970002.000100"}
             ]}"#,
         ),
         ("users.info?user=U0AAA", 200, SLACK_USER_AAA_BODY),
         ("users.info?user=U0BBB", 200, SLACK_USER_BBB_BODY),
     ]);
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
     seed_slack_user_token(&secret_store, &scope).await;
 
@@ -3280,7 +3268,20 @@ async fn slack_history_text_resolves_in_text_entities_to_display_names() {
     );
     assert!(
         second_text.contains("<@U0ZZZZZZZ>"),
-        "unresolved mention tokens must stay as-is, never fabricated: {output}"
+        "unresolved BARE mention tokens must stay as-is, never fabricated: {output}"
+    );
+    // A LABELED mention whose id can't be resolved via users.info must fall
+    // back to Slack's own inline label (`@external.person`) instead of leaking
+    // the raw `<@U0ZZZZZZZ|external.person>` token — the same inline-label
+    // fallback the `<#C…|name>` channel-ref arm uses. This is the qa_10i leak
+    // vector: a labeled mention that resolution missed still carries the raw id.
+    assert!(
+        second_text.contains("@external.person"),
+        "labeled mention with an unresolvable id must render Slack's inline label: {output}"
+    );
+    assert!(
+        !second_text.contains("<@U0ZZZZZZZ|"),
+        "labeled unresolvable mention must not leak the raw <@U…|label> token: {output}"
     );
     assert!(
         second_text.contains("<https://x.example/a|link>"),
@@ -3315,7 +3316,7 @@ async fn slack_send_message_posts_as_the_connected_user() {
         200,
         r#"{"ok":true,"channel":"D0FIRAT","ts":"1751970009.000100"}"#,
     )]);
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let services = slack_enrichment_services_for_test!(
         network.clone(),
         Arc::clone(&secret_store),
@@ -3369,7 +3370,7 @@ async fn slack_send_message_retries_without_as_user_for_granular_apps() {
             r#"{"ok":true,"channel":"D0FIRAT","ts":"1751970010.000100"}"#,
         ),
     ]);
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let services = slack_enrichment_services_for_test!(
         network.clone(),
         Arc::clone(&secret_store),
@@ -3420,7 +3421,7 @@ async fn slack_history_read_survives_users_info_failure_without_names() {
         ("conversations.history", 200, SLACK_HISTORY_BODY),
         ("users.info", 200, r#"{"ok":false,"error":"missing_scope"}"#),
     ]);
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
     seed_slack_user_token(&secret_store, &scope).await;
 
@@ -3468,7 +3469,7 @@ async fn slack_whoami_resolves_connected_identity() {
         ("auth.test", 200, SLACK_AUTH_TEST_SELF_AAA_BODY),
         ("users.info?user=U0AAA", 200, SLACK_USER_AAA_BODY),
     ]);
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
     seed_slack_user_token(&secret_store, &scope).await;
 
@@ -3513,7 +3514,7 @@ async fn slack_channel_not_found_surfaces_code_in_model_visible_failure() {
         200,
         r#"{"ok":false,"error":"channel_not_found"}"#,
     )]);
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
     seed_slack_user_token(&secret_store, &scope).await;
 
@@ -3554,7 +3555,7 @@ async fn slack_get_user_info_surfaces_status_and_timezone() {
     let scope = sample_scope(InvocationId::new());
     let network =
         UrlKeyedSlackEgress::new(vec![("users.info?user=U0CCC", 200, SLACK_USER_STATUS_BODY)]);
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
     seed_slack_user_token(&secret_store, &scope).await;
 
@@ -3615,7 +3616,7 @@ async fn slack_history_name_resolution_is_capped_per_call() {
         ("conversations.history", 200, history_body),
         ("users.info", 200, SLACK_USER_AAA_BODY),
     ]);
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let services = slack_enrichment_services_for_test!(network.clone(), Arc::clone(&secret_store));
     seed_slack_user_token(&secret_store, &scope).await;
 

@@ -856,7 +856,6 @@ mod tests {
                 [EXTENSION_ACTIVATE_CAPABILITY_ID],
             ),
             serde_json::json!({"extension_id": "github"}),
-            trust_decision(),
         )
         .await;
         let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
@@ -1353,7 +1352,6 @@ mod tests {
             capability_id,
             execution_context([capability_id]),
             input,
-            trust_decision(),
         )
         .await
     }
@@ -1368,7 +1366,6 @@ mod tests {
             capability_id,
             execution_context([capability_id]),
             input,
-            trust_decision(),
         )
         .await
     }

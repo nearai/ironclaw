@@ -40,11 +40,9 @@ mod error;
 mod extension_account_setup;
 #[cfg(any(test, feature = "test-support"))]
 mod fakes;
-// Durable filesystem-backed idempotency ledger. Gated behind `storage` so the
-// facade surface stays free of the `ironclaw_filesystem` dependency unless a
-// consumer opts into a durable backend.
+// Durable filesystem-backed idempotency ledger. The filesystem contract is a
+// base dependency; concrete libSQL/Postgres implementations remain gated.
 mod delivery_coordinator;
-#[cfg(feature = "storage")]
 mod filesystem_ledger;
 mod gate_state;
 mod in_memory_ledger;
@@ -124,7 +122,6 @@ pub use fakes::{
     FakeBeforeInboundPolicy, FakeConversationBindingService, FakeIdempotencyLedger,
     FakeInboundTurnService, rejecting_reborn_services_error,
 };
-#[cfg(feature = "storage")]
 pub use filesystem_ledger::RebornFilesystemIdempotencyLedger;
 #[cfg(feature = "libsql")]
 pub use filesystem_ledger::RebornLibSqlIdempotencyLedger;

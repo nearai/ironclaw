@@ -978,7 +978,7 @@ impl PostAdmissionObserver for RunDeliveryPostAdmissionObserver {
     }
 }
 
-#[cfg(all(test, feature = "webui-v2-beta"))]
+#[cfg(test)]
 mod e2e_tests;
 
 #[cfg(test)]

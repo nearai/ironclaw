@@ -8,7 +8,6 @@
 
 mod process_executor;
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -29,7 +28,8 @@ use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     CapabilityDispatcher, CapabilityId, DispatchError, ResourceReservationId, ResourceScope,
-    ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeKind, SecretHandle,
+    ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeKind, RuntimeLane,
+    SecretHandle,
     runtime_policy::{
         DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode,
         ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -52,8 +52,8 @@ use ironclaw_run_state::{
 };
 use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
 use ironclaw_secrets::{
-    CredentialAccountStore, CredentialSessionStore, InMemoryCredentialBroker, InMemorySecretStore,
-    SecretStore, SecretStoreError,
+    CredentialAccountStore, CredentialSessionStore, FilesystemSecretStore,
+    InMemoryCredentialBroker, SecretStore, SecretStoreError,
 };
 use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
 use ironclaw_turns::{
@@ -103,8 +103,10 @@ pub use production_wiring::{
     ProductionEventStoreWiringError, ProductionWiringComponent, ProductionWiringConfig,
     ProductionWiringIssue, ProductionWiringIssueKind, ProductionWiringReport,
 };
+#[cfg(test)]
+use runtime_adapters::RuntimeAdapter;
 use runtime_adapters::{
-    FirstPartyRuntimeAdapter, McpRuntimeAdapter, RuntimeAdapter, RuntimeAdapterRequest,
+    FirstPartyRuntimeAdapter, McpRuntimeAdapter, RuntimeAdapterRequest, RuntimeLaneExecutor,
     ScriptRuntimeAdapter, ServiceResolvedRuntimeAdapter, WasmRuntimeAdapter,
 };
 use tool_resolver::RegistryLaneToolResolver;
@@ -508,7 +510,7 @@ where
     /// [`ironclaw_host_api::ToolAdapter`]s. The lanes stay host-private.
     pub fn extension_lane_tool_binder(&self) -> ExtensionLaneToolBinder {
         ExtensionLaneToolBinder::new(Arc::new(ServiceLanePackageBinder {
-            lanes: self.runtime_lanes(),
+            executor: self.runtime_lane_executor(),
             filesystem: Arc::clone(&self.filesystem),
             governor: Arc::clone(&self.governor),
             runtime_policy: self
@@ -528,7 +530,7 @@ where
             .then(crate::first_party_tools::builtin_provider_allowlist);
         Arc::new(RegistryLaneToolResolver::new(
             Arc::clone(&self.registry),
-            self.runtime_lanes(),
+            self.runtime_lane_executor(),
             Arc::clone(&self.filesystem),
             Arc::clone(&self.governor),
             self.runtime_policy
@@ -538,9 +540,9 @@ where
         ))
     }
 
-    /// The configured runtime lanes, keyed by kind (shared by the registry
-    /// resolver and the extension tool binder).
-    fn runtime_lanes(&self) -> HashMap<RuntimeKind, Arc<dyn RuntimeAdapter<F, G>>> {
+    /// The configured closed runtime-lane executor shared by the registry
+    /// resolver and extension tool binder.
+    fn runtime_lane_executor(&self) -> Arc<RuntimeLaneExecutor<F, G>> {
         let mut invocation_services_resolver = LocalInvocationServicesResolver::new(
             Arc::clone(&self.filesystem) as Arc<dyn RootFilesystem>,
             runtime_http_egress(&self.runtime_http_egress),
@@ -564,44 +566,31 @@ where
         let invocation_services: Arc<dyn InvocationServicesResolver> =
             Arc::new(invocation_services_resolver);
 
-        let mut lanes: HashMap<RuntimeKind, Arc<dyn RuntimeAdapter<F, G>>> = HashMap::new();
-        if let Some(runtime) = &self.script_runtime {
-            lanes.insert(
-                RuntimeKind::Script,
-                Arc::new(ServiceResolvedRuntimeAdapter::new(
-                    Arc::new(ScriptRuntimeAdapter::from_executor(Arc::clone(runtime))),
-                    Arc::clone(&invocation_services),
-                )),
-            );
-        }
-        if let Some(runtime) = &self.mcp_runtime {
-            lanes.insert(
-                RuntimeKind::Mcp,
-                Arc::new(ServiceResolvedRuntimeAdapter::new(
-                    Arc::new(McpRuntimeAdapter::from_executor(Arc::clone(runtime))),
-                    Arc::clone(&invocation_services),
-                )),
-            );
-        }
-        if let Some(runtime) = &self.first_party_runtime {
-            lanes.insert(
-                RuntimeKind::FirstParty,
-                Arc::new(FirstPartyRuntimeAdapter::from_registry(
-                    Arc::clone(runtime),
-                    Arc::clone(&invocation_services),
-                )),
-            );
-        }
-        if let Some(runtime) = &self.wasm_runtime {
-            lanes.insert(
-                RuntimeKind::Wasm,
-                Arc::new(ServiceResolvedRuntimeAdapter::new(
-                    Arc::clone(runtime),
-                    Arc::clone(&invocation_services),
-                )),
-            );
-        }
-        lanes
+        let process = self.script_runtime.as_ref().map(|runtime| {
+            ServiceResolvedRuntimeAdapter::new(
+                Arc::new(ScriptRuntimeAdapter::from_executor(Arc::clone(runtime))),
+                Arc::clone(&invocation_services),
+            )
+        });
+        let mcp = self.mcp_runtime.as_ref().map(|runtime| {
+            ServiceResolvedRuntimeAdapter::new(
+                Arc::new(McpRuntimeAdapter::from_executor(Arc::clone(runtime))),
+                Arc::clone(&invocation_services),
+            )
+        });
+        let first_party = self.first_party_runtime.as_ref().map(|runtime| {
+            FirstPartyRuntimeAdapter::from_registry(
+                Arc::clone(runtime),
+                Arc::clone(&invocation_services),
+            )
+        });
+        let wasm = self.wasm_runtime.as_ref().map(|runtime| {
+            ServiceResolvedRuntimeAdapter::new(
+                Arc::clone(runtime),
+                Arc::clone(&invocation_services),
+            )
+        });
+        Arc::new(RuntimeLaneExecutor::new(first_party, wasm, mcp, process))
     }
 
     /// Builds the upper facade without production validation.

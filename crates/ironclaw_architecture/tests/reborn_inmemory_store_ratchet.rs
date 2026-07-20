@@ -11,9 +11,9 @@
 //! - a **second definition** of a frozen name (same file or another
 //!   module/crate) fails — occurrences are preserved and multiplicity is checked
 //!   explicitly, so duplicate-name debt cannot hide behind an existing entry;
-//! - **deleting** a store without removing it from [`FROZEN_INMEMORY_STORES`]
-//!   also fails — so the allowlist is forced to shrink in lock-step as each
-//!   domain lands, and a reviewer sees the list get shorter (§10: "compare set
+//! - **deleting** a store without removing it from its frozen list also
+//!   fails — so the allowlist is forced to shrink in lock-step as each domain
+//!   lands, and a reviewer sees the list get shorter (§10: "compare set
 //!   membership, never an aggregate count").
 //!
 //! Scanner semantics (shared with the other §10 ratchets — see
@@ -23,16 +23,17 @@
 //! so keep test doubles under `tests/` (or justify an allowlist entry in
 //! review).
 //!
-//! Definition of done for this axis (§10): the **debt** shrinks to empty — every
-//! persistence-store duplicate becomes `Filesystem*Store<InMemoryBackend>` in
-//! tests. The mechanical consolidations (A1–A8: approvals, authorization,
-//! processes, run-state, budget-gate, and the whole outbound family) are done;
-//! see the annotated `FROZEN_INMEMORY_STORES` below for the per-entry status of
-//! the remainder. Note two entries (`InMemoryBoundedSubagentGoalStore`,
-//! `InMemoryOpenAiCompatRefStore`) are **justified bounded caches**, not
-//! persistence debt — a future PR may formally split them into a justified-keep
-//! list; for now they stay frozen with a do-not-consolidate note. Until then
-//! this frozen set is the contract.
+//! The frozen inventory is split into two disjoint lists:
+//! [`FROZEN_DEBT_INMEMORY_STORES`] (parallel store implementations §4.3 still
+//! owes a consolidation) and [`JUSTIFIED_KEEP_INMEMORY_STORES`] (audited
+//! keeps — each entry's annotation states why it is NOT a §1.4 lock-step
+//! duplicate and must not be blindly "consolidated"). **Definition of done for
+//! this axis (§10): the DEBT list shrinks to empty.** The mechanical
+//! consolidations (A1–A8: approvals, authorization, processes, run-state,
+//! budget-gate, the outbound family), the checkpoint cluster
+//! (checkpoint-state payloads, loop-checkpoint metadata), the Slack
+//! host-state test doubles, and the secrets cluster
+//! (`FilesystemSecretStore::ephemeral()`) are done.
 
 mod ratchet_support;
 
@@ -49,67 +50,79 @@ fn is_inmemory_store(ident: &str) -> bool {
     ident.starts_with("InMemory") && ident.ends_with("Store")
 }
 
-/// The frozen inventory of pub-visible `struct InMemory*Store` definitions under
-/// `crates/`. Remove an entry in the same PR that deletes its store; never add
-/// one. Comments are stripped by the scanner, so the per-entry status notes
-/// below are documentation only — the enforced contract is the string set.
+/// Remaining §4.3 consolidation DEBT: pub-visible `struct InMemory*Store`
+/// definitions under `crates/` that duplicate (or stand in for) a durable
+/// store implementation and still owe a consolidation. Remove an entry in the
+/// same PR that deletes its store; never add one. Comments are stripped by the
+/// scanner, so the per-entry status notes are documentation only — the
+/// enforced contract is the string set.
 ///
-/// **Status of the remainder (assessed 2026-07-18, after the mechanical §4.3
-/// slices A1–A8 landed the approvals/authorization/processes/run-state/budget-gate
-/// and the whole outbound family).** The clean mechanical consolidations are
-/// DONE; every entry still here is blocked on non-mechanical work OR is a
-/// justified keep — except the trailing pub(crate) trio, which is not yet
-/// individually triaged. Triaged entries are annotated with WHAT they need, so
-/// the next contributor picks up a scoped task instead of re-deriving the
-/// blocker; untriaged entries say so explicitly.
-const FROZEN_INMEMORY_STORES: &[&str] = &[
-    // --- turns cluster: DEFERRED, not mechanical. `InMemoryTurnStateStore` is the
-    //     `inmemory-turn-state` production runtime authority (pessimistic Mutex,
-    //     no-CAS-livelock); a `FilesystemTurnStateStore<InMemoryBackend>` swap needs
-    //     a concurrency stress test PROVING it keeps the no-livelock property first.
-    //     `FilesystemCheckpointStateStore` already EXISTS in `ironclaw_loop_host`
-    //     (contract-tested, composition-wired) — that entry only needs the test-seam
-    //     swap + allowlist trim; LoopCheckpoint/InstructionMaterialization still need
-    //     a filesystem variant BUILT (cross-crate in `ironclaw_loop_host`). ---
+/// **Status (re-assessed 2026-07-19).** Every entry here is blocked on
+/// deliberate, non-mechanical work, annotated with WHAT it needs so the next
+/// contributor picks up a scoped task instead of re-deriving the blocker.
+const FROZEN_DEBT_INMEMORY_STORES: &[&str] = &[
+    // --- turns: DEFERRED, the trickiest store case (§9: "turns last").
+    //     `InMemoryTurnStateStore` is the `inmemory-turn-state` production
+    //     runtime authority (pessimistic Mutex, no-CAS-livelock); a
+    //     `FilesystemTurnStateStore<InMemoryBackend>` swap needs (a) the §11.4
+    //     reference-model property suite (Slice 0 — replacement oracle for the
+    //     lost independent implementation) and (b) a concurrency stress test
+    //     PROVING the swap keeps the no-livelock property (see
+    //     `tools/ironclaw_stress/results/2026-06-30-turn-state-inmemory/` for
+    //     the contention measurements that motivated the in-memory authority).
+    //     (Checkpoint-state payloads + loop-checkpoint metadata are DONE: the
+    //     payload store is `FilesystemCheckpointStateStore` everywhere, and
+    //     checkpoint metadata is served by the turn-state store's own
+    //     `LoopCheckpointStore` impl in both build paths.) ---
     "InMemoryTurnStateStore",
-    "InMemoryCheckpointStateStore",
-    "InMemoryLoopCheckpointStore",
-    "InMemoryInstructionMaterializationStore",
-    // --- JUSTIFIED KEEPS — bounded in-memory caches serving the test/no-durable
-    //     fallback role. Durable production variants ALREADY EXIST and are wired
-    //     (`FilesystemSubagentGoalStore` in the libSQL/Postgres runner adapters;
-    //     `FilesystemOpenAiCompatRefStore` in OpenAI-compatible serving) — these
-    //     in-memory types are not missing consolidations, they are the bounded
-    //     volatile role next to those stores. Do NOT swap them for a durable
-    //     store in tests that specifically exercise the bounded/evicting cache
-    //     semantics. ---
+    // --- secrets cluster: DONE — `InMemorySecretStore` and its crate-private
+    //     `InMemorySecretsStore` engine (legacy_store.rs) are deleted; every
+    //     consumer is consolidated onto `FilesystemSecretStore::ephemeral()`
+    //     (the production encrypted store over `InMemoryBackend` with an
+    //     ephemeral master key and the tenant-rewriting `/secrets` mount
+    //     resolver). ---
+];
+
+/// Audited JUSTIFIED KEEPS: pub-visible `InMemory*Store` types that are NOT
+/// §1.4 lock-step store duplicates. Each annotation states the reason; do not
+/// "consolidate" these without first invalidating that reason in review.
+const JUSTIFIED_KEEP_INMEMORY_STORES: &[&str] = &[
+    // --- Bounded volatile caches next to already-wired durable stores
+    //     (`FilesystemSubagentGoalStore` in the libSQL/Postgres runner
+    //     adapters; `FilesystemOpenAiCompatRefStore` in OpenAI-compatible
+    //     serving). Do NOT swap them for a durable store in tests that
+    //     exercise the bounded/evicting cache semantics. ---
     //   BoundedSubagentGoal: capacity-bounded, evict-oldest (VecDeque insertion
     //     order) cache of in-flight subagent-spawn goals — goal_store.rs.
     "InMemoryBoundedSubagentGoalStore",
-    //   OpenAiCompatRef: capacity-bounded with oldest-created eviction (evicts the
-    //     minimum `created_at`; reads do not refresh recency — NOT an LRU) AND the
-    //     crate's documented filesystem-free default so contract-only consumers pull
-    //     no `ironclaw_filesystem` dep (openai_compat CLAUDE.md).
+    //   OpenAiCompatRef: capacity-bounded with oldest-created eviction (evicts
+    //     the minimum `created_at`; reads do not refresh recency — NOT an LRU)
+    //     AND the crate's documented filesystem-free default so contract-only
+    //     consumers pull no `ironclaw_filesystem` dep (openai_compat CLAUDE.md).
     "InMemoryOpenAiCompatRefStore",
-    // --- BLOCKED — cross-crate placement. `FilesystemExtensionInstallationStore`
-    //     exists but in high `ironclaw_reborn_composition` and depends on a
-    //     composition-internal contract registry, so it can't move DOWN to
-    //     `ironclaw_extensions` (whose own tests need an in-memory store). Needs the
-    //     filesystem store (or its contract dep) relocated first. Prod already wires
-    //     Filesystem. ---
+    // --- Ephemeral per-run staging BY DESIGN. Constructed per claimed run /
+    //     model call (`ironclaw_runner` loop_driver_host + model_gateway) to
+    //     stage raw model-visible prompt content between the prompt and model
+    //     ports; the run_profile contract requires raw prompt text to stay
+    //     behind host implementations, so a durable variant must not exist. ---
+    "InMemoryInstructionMaterializationStore",
+    // --- Embedded ENGINE, not a parallel implementation.
+    //     `FilesystemExtensionInstallationStore` (reborn_composition) wraps
+    //     this store as its in-memory working set and adds snapshot
+    //     persistence — the domain logic exists exactly once, here. Follow-up
+    //     that would let it go crate-private: relocate the filesystem store
+    //     down to `ironclaw_extensions` by inverting its manifest-decoder deps
+    //     (`product_extension_host_api_contract_registry`,
+    //     `default_host_port_catalog`) into a constructor parameter. ---
     "InMemoryExtensionInstallationStore",
-    // --- SECURITY-SENSITIVE — secrets subsystem; deliberate careful work, not a
-    //     mechanical swap. ---
-    "InMemorySecretStore",
-    // --- BUILD-FIRST — no filesystem variant exists. `InMemorySessionStore`
-    //     (webui login sessions, TTL-expiring bearer tokens) would gain restart
-    //     durability from a `FilesystemSessionStore`, but that store must be BUILT
-    //     (auth-adjacent — handle with care). ~63 usages. ---
+    // --- Dev/test-only by explicit feature gate (`test-support`).
+    //     The production counterpart already exists and is restart-safe by
+    //     being STATELESS: `SignedTokenSessionStore` (HMAC-signed bearers,
+    //     signed_session_login.rs); durable revocation is an optional
+    //     DB-backed `SessionStore` a deployment supplies. A
+    //     `FilesystemSessionStore` persisting bearer material would be a
+    //     security regression, not a consolidation. ---
     "InMemorySessionStore",
-    // --- pub(crate) stores the visibility-aware scanner also inventories
-    //     (crate-private; not yet individually triaged — assess build-vs-justified
-    //     when picked up, same as the peripheral set above). ---
-    "InMemorySecretsStore",
 ];
 
 #[test]
@@ -127,7 +140,33 @@ fn reborn_inmemory_store_allowlist_is_frozen_and_only_shrinks() {
         &mut found,
     );
 
-    let frozen: BTreeSet<&str> = FROZEN_INMEMORY_STORES.iter().copied().collect();
+    // Check each list for internal duplicates first, so a combined-length
+    // mismatch below can only mean cross-list overlap (a duplicate inside one
+    // list would otherwise masquerade as a disjointness failure).
+    for (label, list) in [
+        ("FROZEN_DEBT_INMEMORY_STORES", FROZEN_DEBT_INMEMORY_STORES),
+        (
+            "JUSTIFIED_KEEP_INMEMORY_STORES",
+            JUSTIFIED_KEEP_INMEMORY_STORES,
+        ),
+    ] {
+        let unique: BTreeSet<&str> = list.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            list.len(),
+            "{label} contains duplicate entries"
+        );
+    }
+    let frozen: BTreeSet<&str> = FROZEN_DEBT_INMEMORY_STORES
+        .iter()
+        .chain(JUSTIFIED_KEEP_INMEMORY_STORES)
+        .copied()
+        .collect();
+    assert_eq!(
+        frozen.len(),
+        FROZEN_DEBT_INMEMORY_STORES.len() + JUSTIFIED_KEEP_INMEMORY_STORES.len(),
+        "the debt and justified-keep lists must be disjoint"
+    );
     let found_refs: BTreeSet<&str> = found.keys().map(String::as_str).collect();
 
     let added: Vec<(&str, &Vec<TypeDefOccurrence>)> = found
@@ -141,7 +180,8 @@ fn reborn_inmemory_store_allowlist_is_frozen_and_only_shrinks() {
          (arch-simplification §4.3/§10): every domain store must be \
          `Filesystem*Store<InMemoryBackend>`. Offending new stores: {added:?}. If this \
          is a genuine new local store, justify it in review and add it to \
-         FROZEN_INMEMORY_STORES — but the intended direction is to delete these, not \
+         FROZEN_DEBT_INMEMORY_STORES (or, with an audited reason, \
+         JUSTIFIED_KEEP_INMEMORY_STORES) — but the intended direction is to delete these, not \
          add them."
     );
 
@@ -156,7 +196,7 @@ fn reborn_inmemory_store_allowlist_is_frozen_and_only_shrinks() {
     let removed: Vec<&&str> = frozen.difference(&found_refs).collect();
     assert!(
         removed.is_empty(),
-        "FROZEN_INMEMORY_STORES lists stores that no longer exist: {removed:?}. A store \
+        "the frozen lists name stores that no longer exist: {removed:?}. A store \
          was deleted (good!) — trim it from the allowlist in the same PR so the ratchet \
          keeps shrinking toward empty (§10)."
     );

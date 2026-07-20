@@ -8,8 +8,8 @@
 //!   turn coordinator, product auth). Useful when an outer harness wires the loop
 //!   drivers / turn-runner itself (e.g. v1 `AppBuilder`).
 //! - [`build_reborn_runtime`] — full runtime assembly: substrate + loop
-//!   driver registry + LLM model gateway (under `root-llm-provider`) +
-//!   turn-runner worker, spawned as one unit. This is the single entry
+//!   driver registry + LLM model gateway + turn-runner worker, spawned
+//!   as one unit. This is the single entry
 //!   point used by the standalone `ironclaw-reborn` binary and any
 //!   future Reborn ingress.
 //!
@@ -20,22 +20,22 @@
 
 use std::sync::Arc;
 
-#[cfg(feature = "webui-v2-beta")]
 mod admin_secrets;
 mod admin_token;
-#[cfg(feature = "webui-v2-beta")]
 mod admin_user_directory;
 #[cfg(test)]
 mod approval_test_support;
 mod automation;
 mod blocked_auth_resume;
+mod builtin_capability_policy;
+pub mod deployment;
 mod error;
 mod extension_host;
 mod factory;
+mod google_oauth_secret_store;
 mod input;
 mod llm_admin;
 mod local_dev_authorization;
-mod local_dev_capability_policy;
 mod local_dev_mounts;
 mod local_runtime_profile;
 mod observability;
@@ -74,7 +74,6 @@ pub use extension_host::extension_ingress::{
     ExtensionIngressParts, ExtensionIngressRegistry, GenericChannelInboundSink,
     InboundPayloadClassifier, PostAdmissionObserver, StaticIngressSecrets, VerifiedEvidenceMint,
 };
-#[cfg(feature = "webui-v2-beta")]
 pub use extension_host::extension_ingress::{
     EXTENSION_INGRESS_ROUTE_PATTERN, extension_ingress_route_mount, forward_alias_request,
 };
@@ -93,12 +92,15 @@ pub use factory::ChannelHostAssemblyTestWiring;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use factory::LOCAL_DEV_SECRETS_MASTER_KEY_PATH;
 #[cfg(feature = "test-support")]
-pub use factory::RebornLocalDevApprovalTestParts;
+pub use factory::RebornApprovalTestParts;
+#[cfg(any(feature = "libsql", feature = "test-support"))]
+pub use factory::local_dev_db_path;
 #[cfg(feature = "libsql")]
 pub use factory::open_local_dev_secret_store;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use factory::{KeychainMasterKeyOutcome, provision_local_dev_keychain_master_key};
 pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
+pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
 pub use input::{
     ChannelExtensionBinding, OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding,
 };
@@ -144,43 +146,35 @@ pub use ironclaw_skills::{
 };
 pub use ironclaw_triggers::TriggerId;
 pub use ironclaw_turns::TurnStatus;
-#[cfg(feature = "root-llm-provider")]
 pub use llm_admin::llm_catalog::{
     ProviderCatalogValidationError, RebornLlmCatalogError, resolve_against_registry,
     resolve_llm_selection_against_catalog, resolve_llm_selection_allow_missing_key,
     resolve_reborn_runtime_llm, validate_reborn_provider_catalog_contents,
 };
-#[cfg(feature = "root-llm-provider")]
 pub use llm_admin::llm_config_service::{LlmReloadTrigger, RebornLlmConfigService};
-#[cfg(feature = "root-llm-provider")]
 pub use llm_admin::llm_key_store::{LlmKeyStore, LlmKeyStoreError};
 pub use llm_admin::nearai_mcp::{
     NearAiMcpBootstrapConfig, NearAiMcpBootstrapConfigError, nearai_mcp_bootstrap_config_from_env,
 };
-#[cfg(feature = "openai-compat-beta")]
 pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
 // Re-exported for the host-owned `ironclaw_webui::webui_v2_app`
 // (hoisted up from this crate): its bearer-auth middleware mints tenant-scoped
 // verified-bearer evidence for protected OpenAI-compatible mounts. Ingress must
 // not depend on `ironclaw_product_adapters` directly (architecture boundary), so
 // it reaches this helper through composition's facade.
-#[cfg(feature = "openai-compat-beta")]
 pub use ironclaw_product_adapters::mark_bearer_token_verified_for_tenant;
-#[cfg(feature = "root-llm-provider")]
 pub use llm_admin::provider_admin::{
     DetectedEnvLlm, EXAMPLE_OVERLAY_PROVIDER_ID, ProviderMenuEntry, ProviderProbeOutcome,
     RebornModelRoutesState, RebornProviderAdmin, RebornProviderAdminError, RebornProviderInfo,
     RebornProviderList, RebornProviderMetadata, RebornProviderSelection, RebornProviderStatus,
     RebornProviderWriteOutcome, RebornV1State,
 };
-#[cfg(feature = "root-llm-provider")]
 pub use llm_admin::provider_admin_product_command::RebornProviderAdminProductCommandService;
-#[cfg(feature = "root-llm-provider")]
 pub use llm_admin::provider_repo::{ProviderRepo, ProviderRepoError};
 pub use local_runtime_profile::{
-    RebornLocalRuntimeProfileError, RebornLocalRuntimeProfileOptions,
-    hosted_single_tenant_runtime_policy, hosted_single_tenant_volume_runtime_policy,
-    local_dev_runtime_policy, local_dev_yolo_runtime_policy, local_runtime_build_input,
+    RebornRuntimeProfileError, RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
+    hosted_single_tenant_volume_runtime_policy, local_dev_runtime_policy,
+    local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,
 };
 pub use observability::budget::build_default_budget_accountant;
@@ -210,7 +204,6 @@ pub use product_auth::api::auth::{
 // Product-auth WebUI route-mount builders, exposed so the host-owned
 // `ironclaw_webui::webui_v2_app` (moved up from this crate) can
 // compose the Reborn-native product-auth surface into the WebChat v2 router.
-#[cfg(feature = "webui-v2-beta")]
 pub use product_auth::serve::{
     ProductAuthRouteMount, ProductAuthRouteState, product_auth_route_mount,
 };
@@ -247,7 +240,6 @@ pub use runtime_input::{
     TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
     TriggerFireAccessError, TriggerPollerSettings, TurnRunnerSettings,
 };
-#[cfg(feature = "root-llm-provider")]
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
 pub use web_access::register_bundled_web_access_first_party_handlers;
 pub use webui::facade::{RebornWebuiBundle, build_webui_services};
@@ -255,7 +247,6 @@ pub use webui::facade::{RebornWebuiBundle, build_webui_services};
 // builders (nearai login, OpenAI-compat) and the host-owned gateway assembly
 // in `ironclaw_webui`. The `WebuiServeConfig` / `webui_v2_app`
 // / `WebuiAuthenticator` surface moved up into that ingress crate.
-#[cfg(feature = "webui-v2-beta")]
 pub use webui::route_mounts::{
     ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount,
 };
@@ -271,7 +262,7 @@ pub mod host_api {
     };
 }
 
-#[cfg(all(feature = "webui-v2-beta", feature = "postgres"))]
+#[cfg(feature = "postgres")]
 pub use ironclaw_runner::local_trigger_access::RebornFilesystemLocalTriggerAccessStore;
 /// Reborn-owned local trigger-fire access store, re-exported so host
 /// binaries reach it through this composition facade instead of taking a
@@ -281,19 +272,16 @@ pub use ironclaw_runner::local_trigger_access::RebornFilesystemLocalTriggerAcces
 /// callers use [`open_local_trigger_access_store`]; hosted-single-tenant
 /// callers use the filesystem-backed store through the host filesystem
 /// abstraction.
-#[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_runner::local_trigger_access::{
     LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSeed,
     LocalTriggerAccessSource, LocalTriggerAccessStore, RebornLibSqlLocalTriggerAccessStore,
     RebornLocalTriggerAccessStoreError,
 };
 
-#[cfg(feature = "webui-v2-beta")]
 struct LocalTriggerAccessFireChecker {
     store: std::sync::Arc<dyn LocalTriggerAccessStore>,
 }
 
-#[cfg(feature = "webui-v2-beta")]
 impl LocalTriggerAccessFireChecker {
     fn new(store: std::sync::Arc<dyn LocalTriggerAccessStore>) -> Self {
         Self { store }
@@ -302,14 +290,12 @@ impl LocalTriggerAccessFireChecker {
 
 /// Wrap a backend-neutral local trigger access store as the runtime fire-time
 /// authorizer.
-#[cfg(feature = "webui-v2-beta")]
 pub fn local_trigger_access_fire_checker(
     store: std::sync::Arc<dyn LocalTriggerAccessStore>,
 ) -> std::sync::Arc<dyn runtime_input::TriggerFireAccessChecker> {
     std::sync::Arc::new(LocalTriggerAccessFireChecker::new(store))
 }
 
-#[cfg(feature = "webui-v2-beta")]
 #[async_trait::async_trait]
 impl runtime_input::TriggerFireAccessChecker for LocalTriggerAccessFireChecker {
     async fn check_trigger_fire_access(
@@ -350,7 +336,6 @@ impl runtime_input::TriggerFireAccessChecker for LocalTriggerAccessFireChecker {
 /// `ironclaw_reborn_identity` directly. The concrete filesystem-backed store
 /// stays private to this composition layer (composition CLAUDE.md: "keep
 /// lower substrate handles private").
-#[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_reborn_identity::{
     ExternalSubjectId, IdentityKeyError, ProviderInstanceId, ProviderKind, RebornIdentityError,
     RebornIdentityResolver, ResolveExternalIdentity, SurfaceKind,
@@ -366,7 +351,7 @@ pub use ironclaw_reborn_identity::{
 /// function exists only so tests (and downstream integration crates via
 /// `test-support`) can build a resolver without standing up a full runtime.
 /// Gated so it ships zero bytes in production binaries.
-#[cfg(all(feature = "webui-v2-beta", any(test, feature = "test-support")))]
+#[cfg(any(test, feature = "test-support"))]
 pub fn open_reborn_identity_resolver(
     tenant_id: &ironclaw_host_api::TenantId,
 ) -> std::sync::Arc<dyn RebornIdentityResolver> {
@@ -398,7 +383,9 @@ pub fn open_reborn_identity_resolver(
 /// Open the reborn-owned local trigger access store on the substrate DB at
 /// `path`, creating the parent directory and running its idempotent
 /// migrations.
-#[cfg(feature = "webui-v2-beta")]
+///
+/// Opens a libSQL handle directly, so it needs this crate's `libsql` feature.
+#[cfg(feature = "libsql")]
 pub async fn open_local_trigger_access_store(
     path: &std::path::Path,
 ) -> Result<std::sync::Arc<RebornLibSqlLocalTriggerAccessStore>, RebornLocalTriggerAccessStoreError>
@@ -418,7 +405,7 @@ pub async fn open_local_trigger_access_store(
     ))
 }
 
-#[cfg(all(test, feature = "webui-v2-beta"))]
+#[cfg(test)]
 mod webui_user_access_checker_tests {
     use super::*;
     use crate::runtime_input::{TriggerFireAccessCheck, TriggerFireAccessDecision};
@@ -625,6 +612,8 @@ const PER_USER_ALIASES: &[&str] = &[
     "/outbound",
     "/run-state",
     "/approvals",
+    "/gate-records",
+    "/replay-payloads",
     "/threads",
     "/conversations",
     "/turns",
@@ -1069,10 +1058,10 @@ mod two_tenant_isolation_tests {
 
     fn scope(tenant: &str, user: &str) -> ResourceScope {
         ResourceScope {
-            tenant_id: TenantId::new(tenant).unwrap(),
-            user_id: UserId::new(user).unwrap(),
+            tenant_id: TenantId::new(tenant).unwrap(), // safety: fixed-valid test fixture
+            user_id: UserId::new(user).unwrap(),       // safety: fixed-valid test fixture
             agent_id: Some(AgentId::new("github").unwrap()),
-            project_id: Some(ProjectId::new("default").unwrap()),
+            project_id: Some(ProjectId::new("default").unwrap()), // safety: fixed-valid test fixture
             mission_id: None,
             thread_id: None,
             invocation_id: InvocationId::new(),
@@ -1124,5 +1113,57 @@ mod two_tenant_isolation_tests {
         let lease_b = store.lease_once(&scope_b, &handle).await.unwrap();
         let material_b = store.consume(&scope_b, lease_b.id).await.unwrap();
         assert_eq!(material_b.expose_secret(), "bob-secret");
+    }
+}
+
+#[cfg(test)]
+mod gate_record_production_mount_tests {
+    //! Production-shape mount coverage for the `/gate-records` alias: drives the
+    //! `GateRecordStore` seam over the real `wrap_scoped`/`invocation_mount_view`
+    //! wiring. Pins two things: the alias is actually registered in
+    //! [`PER_USER_ALIASES`] (an unregistered alias fails every save with
+    //! `MountNotFound`, making the store unusable in production), and the
+    //! per-tenant path rewriting keeps identically-shaped refs from colliding
+    //! across tenants.
+    use super::*;
+    use ironclaw_filesystem::InMemoryBackend;
+    use ironclaw_host_api::{
+        GateRecord, GateRef, InvocationId, ProjectId, SafeSummary, TenantId, UserId,
+    };
+    use ironclaw_run_state::{FilesystemGateRecordStore, GateRecordStore};
+
+    fn scope(tenant: &str, user: &str) -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new(tenant).unwrap(), // safety: fixed-valid test fixture
+            user_id: UserId::new(user).unwrap(),       // safety: fixed-valid test fixture
+            agent_id: None,
+            project_id: Some(ProjectId::new("default").unwrap()), // safety: fixed-valid test fixture
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn gate_records_save_and_load_through_the_production_mount_view() {
+        let scoped = wrap_scoped(Arc::new(InMemoryBackend::new()));
+        let store = FilesystemGateRecordStore::new(scoped);
+        let record = GateRecord::Approval {
+            summary: SafeSummary::new("awaiting decision").unwrap(), // safety: fixed-valid test fixture
+        };
+        let gate_ref = GateRef::new();
+        let scope_a = scope("tenant_a", "alice");
+
+        // The alias must resolve (a missing PER_USER_ALIASES entry fails here
+        // with MountNotFound), and the owner must read the record back.
+        store
+            .save(scope_a.clone(), gate_ref, record.clone())
+            .await
+            .unwrap(); // safety: test assertion on an in-memory store
+        assert_eq!(store.load(&scope_a, gate_ref).await.unwrap(), Some(record)); // safety: test assertion
+
+        // Structural tenant isolation: same ref, different tenant → unknown.
+        let scope_b = scope("tenant_b", "bob");
+        assert_eq!(store.load(&scope_b, gate_ref).await.unwrap(), None); // safety: test assertion
     }
 }

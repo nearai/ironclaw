@@ -185,8 +185,11 @@ function evalIsLocalDevOrigin({ hostname }) {
   if (hostname !== undefined) {
     context.window = { location: { hostname } };
   }
+  // `isLocalDevOrigin` lives in the app-wide shared lib (not this hook
+  // module) since the login page also consumes it — see
+  // `src/lib/browser-origin.ts`.
   return runVmModuleForTest(
-    "../hooks/useProviderLogin.ts",
+    "../../../lib/browser-origin.ts",
     ["isLocalDevOrigin"],
     context,
     import.meta.url
@@ -635,11 +638,18 @@ function runProviderLogin({ hostname, activeProviderId = null, popupClosed = fal
   const openedUrls = [];
   const popups = [];
   let stateIndex = 0;
+  const { isLocalDevOrigin } = runVmModuleForTest(
+    "../../../lib/browser-origin.ts",
+    ["isLocalDevOrigin"],
+    { window: { location: { hostname } } },
+    import.meta.url,
+  );
   const context = {
     console,
     Date,
     Math,
     Promise,
+    isLocalDevOrigin,
     setTimeout: (cb) => {
       cb();
       return 0;

@@ -13,7 +13,7 @@ use super::*;
 
 impl RebornServices {
     /// Real `DefaultApprovalInteractionService` wired like `build_reborn_runtime`, via the
-    /// shared `build_local_dev_approval_interaction_service` recipe so the two never drift.
+    /// shared `build_approval_interaction_service` recipe so the two never drift.
     /// `Ok(None)` without a local-dev runtime; `Err` surfaces a local-dev capability-policy
     /// or grantee-resolver construction failure instead of collapsing it into `None`. No
     /// audit sink threaded — production wires one for audit-log observability only, not
@@ -28,15 +28,14 @@ impl RebornServices {
         let Some(local_runtime) = self.local_runtime.as_ref() else {
             return Ok(None);
         };
-        let local_dev_capability_policy =
-            Arc::new(local_dev_capability_policy().map_err(|error| {
-                RebornRuntimeError::InvalidArgument {
-                    reason: format!("local-dev capability policy is invalid: {error}"),
-                }
-            })?);
-        Ok(Some(build_local_dev_approval_interaction_service(
+        let builtin_capability_policy = Arc::new(builtin_capability_policy().map_err(|error| {
+            RebornRuntimeError::InvalidArgument {
+                reason: format!("local-dev capability policy is invalid: {error}"),
+            }
+        })?);
+        Ok(Some(build_approval_interaction_service(
             local_runtime,
-            local_dev_capability_policy,
+            builtin_capability_policy,
             turn_coordinator,
             None,
         )?))
@@ -87,16 +86,15 @@ impl RebornServices {
         let Some(local_runtime) = self.local_runtime.as_ref() else {
             return Ok(None);
         };
-        let local_dev_capability_policy =
-            Arc::new(local_dev_capability_policy().map_err(|error| {
-                RebornRuntimeError::InvalidArgument {
-                    reason: format!("local-dev capability policy is invalid: {error}"),
-                }
-            })?);
+        let builtin_capability_policy = Arc::new(builtin_capability_policy().map_err(|error| {
+            RebornRuntimeError::InvalidArgument {
+                reason: format!("local-dev capability policy is invalid: {error}"),
+            }
+        })?);
         Ok(Some(
-            build_local_dev_approval_interaction_service_with_turn_run_source(
+            build_approval_interaction_service_with_turn_run_source(
                 local_runtime,
-                local_dev_capability_policy,
+                builtin_capability_policy,
                 turn_coordinator,
                 None,
                 turn_state as Arc<dyn TurnRunSnapshotSource>,

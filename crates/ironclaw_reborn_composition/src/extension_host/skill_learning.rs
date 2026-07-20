@@ -9,9 +9,8 @@
 //! seam: the eligibility gate, the transcript read, the inference adapter, the
 //! scoped write, and the learned-skill live notification.
 //!
-//! Skill learning requires a learning LLM provider, so the sink and its adapter
-//! are gated on `root-llm-provider` (the feature that wires `ironclaw_llm`).
-//! [`CompositeTurnEventSink`] is always available.
+//! Skill learning requires a learning LLM provider; the sink is only wired when
+//! one is resolved from the runtime's LLM config.
 //!
 //! Invariants (shared with `trace_capture.rs`):
 //! - Never block or fail the turn lifecycle path: the sink is subscribed
@@ -55,14 +54,12 @@ impl TurnEventSink for CompositeTurnEventSink {
     }
 }
 
-#[cfg(feature = "root-llm-provider")]
 pub(crate) use learning::{
     LiveSkillLearnedNotifier, LlmSkillRefiner, PortSkillWriter, SkillLearnedNotifier,
     SkillLearningExtractionTasks, SkillLearningInferenceAdapter, SkillLearningTurnEventSink,
     SkillRefiner, SkillWriter,
 };
 
-#[cfg(feature = "root-llm-provider")]
 mod learning {
     use std::collections::BTreeSet;
     use std::sync::{Arc, LazyLock, Mutex};
@@ -1530,3 +1527,4 @@ mod learning {
         }
     }
 }
+// arch-exempt: large_file, skill learning service remains centralized during composition cleanup, plan #6175

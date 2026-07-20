@@ -23,10 +23,6 @@
 //! host-owned code. So the seam this PR provides is the `Router`; the
 //! consuming host binary writes the listener-binding line itself.
 //!
-//! Everything in this module is gated on the `webui-v2-beta` Cargo
-//! feature. Substrate-only callers (v1 `AppBuilder`, diagnostic
-//! harnesses) stay off the feature and carry no HTTP surface code.
-//!
 //! The composition is intentionally Reborn-owned and does **not** share
 //! middleware with the v1 gateway under `/src/channels/web/`. Path A in
 //! `docs/reborn/how-to-port-channel-to-reborn.md` requires native
@@ -799,7 +795,6 @@ async fn authenticate_request(
     // authenticate users only to reject every v2 mutation/read. The
     // browser body cannot influence either of these identifiers — by
     // contract `WebuiServeConfig` is host-owned.
-    #[cfg(feature = "openai-compat-beta")]
     let openai_user_id = auth.user_id.clone();
     let caller = WebUiAuthenticatedCaller::new(
         state.tenant_id.clone(),
@@ -810,7 +805,6 @@ async fn authenticate_request(
     .with_operator_webui_config(auth.capabilities.operator_webui_config);
     request.extensions_mut().insert(caller);
     request.extensions_mut().insert(auth.capabilities);
-    #[cfg(feature = "openai-compat-beta")]
     {
         let scope = ironclaw_reborn_openai_compat::OpenAiCompatActorScope::new(
             state.tenant_id.clone(),

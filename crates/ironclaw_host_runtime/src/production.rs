@@ -406,6 +406,71 @@ impl DefaultHostRuntime {
             capability_id,
         })
     }
+
+    /// §5.3.2 authority-as-a-fold — the runtime-policy + trust gates that open
+    /// the pre-authorize derivation, shared by all four dispatch entry points
+    /// (`invoke`/`spawn`/`resume`/`auth_resume`). Runs `enforce_runtime_policy`
+    /// then `evaluate_invocation_trust`, setting `context.trust` on success. On
+    /// rejection it logs the gate + error kind and returns the ready-to-surface
+    /// [`RuntimeCapabilityOutcome`] tagged by gate, plus the `error_kind` string:
+    /// the caller emits its own per-entry-point latency trace and, for
+    /// resume/auth-resume, drives its blocked-resume failure side effect
+    /// (`fail_matching_blocked_{,auth_}resume_on_preflight_error`) before
+    /// returning. Behavior-preserving apart from consolidating the paths'
+    /// `debug!` message text; de-dups the four inline copies and names the seam
+    /// a later slice lifts into the kernel `authorize()`.
+    fn open_pre_authorization(
+        &self,
+        context: &mut ironclaw_host_api::ExecutionContext,
+        capability_id: &CapabilityId,
+    ) -> Result<TrustDecision, PreAuthorizationRejected> {
+        if let Err(error) = self.enforce_runtime_policy(capability_id) {
+            let error_kind = error.kind();
+            tracing::debug!(
+                capability_id = %capability_id,
+                runtime_policy_error_kind = error_kind,
+                "capability runtime policy rejected invocation before authorization"
+            );
+            return Err(PreAuthorizationRejected::RuntimePolicy {
+                outcome: Box::new(runtime_policy_failure(capability_id.clone(), error)),
+                error_kind,
+            });
+        }
+        let trust_decision = match self.evaluate_invocation_trust(capability_id) {
+            Ok(host_decision) => host_decision,
+            Err(error) => {
+                let error_kind = error.kind();
+                tracing::debug!(
+                    capability_id = %capability_id,
+                    trust_error_kind = error_kind,
+                    "capability trust evaluation failed before authorization"
+                );
+                return Err(PreAuthorizationRejected::Trust {
+                    outcome: Box::new(trust_evaluation_failure(capability_id.clone(), error)),
+                    error_kind,
+                });
+            }
+        };
+        context.trust = trust_decision.effective_trust.class();
+        Ok(trust_decision)
+    }
+}
+
+/// Which pre-authorize gate rejected in
+/// [`DefaultHostRuntime::open_pre_authorization`], carrying the ready-to-surface
+/// `outcome` (so the caller picks its own per-entry-point latency label before
+/// returning it) and the `error_kind` string (so the resume/auth-resume callers
+/// can drive their blocked-resume failure side effect, which the invoke/spawn
+/// callers ignore).
+enum PreAuthorizationRejected {
+    RuntimePolicy {
+        outcome: Box<RuntimeCapabilityOutcome>,
+        error_kind: &'static str,
+    },
+    Trust {
+        outcome: Box<RuntimeCapabilityOutcome>,
+        error_kind: &'static str,
+    },
 }
 
 #[async_trait]
@@ -420,7 +485,6 @@ impl HostRuntime for DefaultHostRuntime {
             estimate,
             input,
             idempotency_key,
-            trust_decision: _caller_trust_decision,
         } = request;
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
@@ -437,39 +501,27 @@ impl HostRuntime for DefaultHostRuntime {
             );
         }
 
-        if let Err(error) = self.enforce_runtime_policy(&capability_id) {
-            tracing::debug!(
-                capability_id = %capability_id,
-                runtime_policy_error_kind = error.kind(),
-                "capability runtime policy rejected invocation before dispatch"
-            );
-            trace_capability_latency_ok(
-                "invoke_capability_policy_rejected",
-                &capability_id,
-                &scope,
-                total_started_at,
-            );
-            return Ok(runtime_policy_failure(capability_id, error));
-        }
-
-        let trust_decision = match self.evaluate_invocation_trust(&capability_id) {
-            Ok(host_decision) => host_decision,
-            Err(error) => {
-                tracing::debug!(
-                    capability_id = %capability_id,
-                    trust_error_kind = error.kind(),
-                    "capability trust evaluation failed before dispatch"
+        let trust_decision = match self.open_pre_authorization(&mut context, &capability_id) {
+            Ok(trust_decision) => trust_decision,
+            Err(PreAuthorizationRejected::RuntimePolicy { outcome, .. }) => {
+                trace_capability_latency_ok(
+                    "invoke_capability_policy_rejected",
+                    &capability_id,
+                    &scope,
+                    total_started_at,
                 );
+                return Ok(*outcome);
+            }
+            Err(PreAuthorizationRejected::Trust { outcome, .. }) => {
                 trace_capability_latency_ok(
                     "invoke_capability_trust_rejected",
                     &capability_id,
                     &scope,
                     total_started_at,
                 );
-                return Ok(trust_evaluation_failure(capability_id, error));
+                return Ok(*outcome);
             }
         };
-        context.trust = trust_decision.effective_trust.class();
 
         let registry = self.registry.snapshot();
 
@@ -612,7 +664,6 @@ impl HostRuntime for DefaultHostRuntime {
             estimate,
             input,
             idempotency_key,
-            trust_decision: _caller_trust_decision,
         } = request;
         let input = match host_runtime_spawn_input_for_capability(&capability_id, input)? {
             SpawnInputPreparation::Ready(input) => input,
@@ -635,27 +686,13 @@ impl HostRuntime for DefaultHostRuntime {
             );
         }
 
-        if let Err(error) = self.enforce_runtime_policy(&capability_id) {
-            tracing::debug!(
-                capability_id = %capability_id,
-                runtime_policy_error_kind = error.kind(),
-                "capability runtime policy rejected spawn before process start"
-            );
-            return Ok(runtime_policy_failure(capability_id, error));
-        }
-
-        let trust_decision = match self.evaluate_invocation_trust(&capability_id) {
-            Ok(host_decision) => host_decision,
-            Err(error) => {
-                tracing::debug!(
-                    capability_id = %capability_id,
-                    trust_error_kind = error.kind(),
-                    "capability trust evaluation failed before spawn"
-                );
-                return Ok(trust_evaluation_failure(capability_id, error));
-            }
+        let trust_decision = match self.open_pre_authorization(&mut context, &capability_id) {
+            Ok(trust_decision) => trust_decision,
+            Err(
+                PreAuthorizationRejected::RuntimePolicy { outcome, .. }
+                | PreAuthorizationRejected::Trust { outcome, .. },
+            ) => return Ok(*outcome),
         };
-        context.trust = trust_decision.effective_trust.class();
 
         let registry = self.registry.snapshot();
 
@@ -724,7 +761,6 @@ impl HostRuntime for DefaultHostRuntime {
             estimate,
             input,
             idempotency_key,
-            trust_decision: _caller_trust_decision,
         } = request;
         if let Some(outcome) = self
             .resume_actor_preflight_guard(&context, &capability_id)
@@ -742,41 +778,28 @@ impl HostRuntime for DefaultHostRuntime {
             );
         }
 
-        if let Err(error) = self.enforce_runtime_policy(&capability_id) {
-            tracing::debug!(
-                capability_id = %capability_id,
-                runtime_policy_error_kind = error.kind(),
-                "capability runtime policy rejected resume before dispatch"
-            );
-            self.fail_matching_blocked_resume_on_preflight_error(
-                &context,
-                &capability_id,
-                approval_request_id,
-                error.kind(),
-            )
-            .await;
-            return Ok(runtime_policy_failure(capability_id, error));
-        }
-
-        let trust_decision = match self.evaluate_invocation_trust(&capability_id) {
-            Ok(host_decision) => host_decision,
-            Err(error) => {
-                tracing::debug!(
-                    capability_id = %capability_id,
-                    trust_error_kind = error.kind(),
-                    "capability trust evaluation failed before resume"
-                );
+        let trust_decision = match self.open_pre_authorization(&mut context, &capability_id) {
+            Ok(trust_decision) => trust_decision,
+            Err(
+                PreAuthorizationRejected::RuntimePolicy {
+                    outcome,
+                    error_kind,
+                }
+                | PreAuthorizationRejected::Trust {
+                    outcome,
+                    error_kind,
+                },
+            ) => {
                 self.fail_matching_blocked_resume_on_preflight_error(
                     &context,
                     &capability_id,
                     approval_request_id,
-                    error.kind(),
+                    error_kind,
                 )
                 .await;
-                return Ok(trust_evaluation_failure(capability_id, error));
+                return Ok(*outcome);
             }
         };
-        context.trust = trust_decision.effective_trust.class();
 
         let registry = self.registry.snapshot();
         let host = self.capability_host(&registry);
@@ -832,7 +855,6 @@ impl HostRuntime for DefaultHostRuntime {
             estimate,
             input,
             idempotency_key,
-            trust_decision: _caller_trust_decision,
             approval_request_id,
         } = request;
         if let Some(outcome) = self
@@ -851,39 +873,27 @@ impl HostRuntime for DefaultHostRuntime {
             );
         }
 
-        if let Err(error) = self.enforce_runtime_policy(&capability_id) {
-            tracing::debug!(
-                capability_id = %capability_id,
-                runtime_policy_error_kind = error.kind(),
-                "capability runtime policy rejected auth-resume before dispatch"
-            );
-            self.fail_matching_blocked_auth_resume_on_preflight_error(
-                &context,
-                &capability_id,
-                error.kind(),
-            )
-            .await;
-            return Ok(runtime_policy_failure(capability_id, error));
-        }
-
-        let trust_decision = match self.evaluate_invocation_trust(&capability_id) {
-            Ok(host_decision) => host_decision,
-            Err(error) => {
-                tracing::debug!(
-                    capability_id = %capability_id,
-                    trust_error_kind = error.kind(),
-                    "capability trust evaluation failed before auth-resume"
-                );
+        let trust_decision = match self.open_pre_authorization(&mut context, &capability_id) {
+            Ok(trust_decision) => trust_decision,
+            Err(
+                PreAuthorizationRejected::RuntimePolicy {
+                    outcome,
+                    error_kind,
+                }
+                | PreAuthorizationRejected::Trust {
+                    outcome,
+                    error_kind,
+                },
+            ) => {
                 self.fail_matching_blocked_auth_resume_on_preflight_error(
                     &context,
                     &capability_id,
-                    error.kind(),
+                    error_kind,
                 )
                 .await;
-                return Ok(trust_evaluation_failure(capability_id, error));
+                return Ok(*outcome);
             }
         };
-        context.trust = trust_decision.effective_trust.class();
 
         let registry = self.registry.snapshot();
         // Re-apply the persistent-approval grant on the auth-resume preflight,
@@ -957,7 +967,6 @@ impl HostRuntime for DefaultHostRuntime {
             estimate,
             input,
             idempotency_key,
-            trust_decision: _caller_trust_decision,
         } = request;
         if let Some(outcome) = self
             .resume_actor_preflight_guard(&context, &capability_id)
@@ -1941,12 +1950,14 @@ fn trust_evaluation_failure_kind(error: TrustEvaluationError) -> RuntimeFailureK
 /// strings; `Serialization`/`Deserialization` carry serde internals. Forward
 /// the redacted variant discriminator instead of `error.to_string()` so the
 /// boundary stays infrastructure-opaque to upper services.
+// arch-exempt: large_file, host runtime production wiring; +1 arm for RunStateError::GateRecordAlreadyExists (#6243 left this match non-exhaustive), plan #6175
 fn unavailable_from_run_state(error: RunStateError) -> HostRuntimeError {
     let reason = match error {
         RunStateError::UnknownInvocation { .. } => "run-state record not found",
         RunStateError::InvocationAlreadyExists { .. } => "run-state record already exists",
         RunStateError::UnknownApprovalRequest { .. } => "approval request not found",
         RunStateError::ApprovalRequestAlreadyExists { .. } => "approval request already exists",
+        RunStateError::GateRecordAlreadyExists { .. } => "gate record already exists",
         RunStateError::ApprovalNotPending { .. } => "approval request not pending",
         RunStateError::InvalidPath(_) => "run-state storage path invalid",
         RunStateError::Filesystem(_) => "run-state filesystem unavailable",
@@ -2122,13 +2133,20 @@ fn stable_auth_gate_id(
     let mut requirements = credential_requirements
         .iter()
         .map(|requirement| {
-            let mut scopes = requirement.provider_scopes.clone();
-            scopes.sort();
+            // `setup` MUST be part of the fingerprint (#6299 IronLoop): two
+            // requirements that agree on provider/extension/provider_scopes but
+            // differ in `setup` (e.g. a ManualToken record vs a later OAuth or
+            // Pairing record, or differing OAuth setup scopes) are DIFFERENT auth
+            // requirements. Omitting it lets them derive the same deterministic
+            // `for_auth_gate` key; the write-once store then reports
+            // `GateRecordAlreadyExists` and silently keeps the stale record, so
+            // the runner reloads and renders the wrong authentication flow.
             format!(
-                "credential={}:{}:{}",
+                "credential={}:{}:setup={}:{}",
                 requirement.provider.as_str(),
                 requirement.requester_extension.as_str(),
-                scopes.join(",")
+                stable_setup_token(&requirement.setup),
+                canonical_scope_list(&requirement.provider_scopes),
             )
         })
         .collect::<Vec<_>>();
@@ -2139,6 +2157,38 @@ fn stable_auth_gate_id(
     let suffix = digest.strip_prefix("sha256:").unwrap_or(&digest);
     RuntimeGateId::from_stable_suffix(&format!("auth-{suffix}"))
         .unwrap_or_else(|_| RuntimeGateId::new())
+}
+
+/// Canonical, deterministic fingerprint token for a credential-account setup,
+/// so [`stable_auth_gate_id`] distinguishes auth requirements that differ only
+/// in their setup flow (#6299 IronLoop). Exhaustive by design: a new
+/// `RuntimeCredentialAccountSetup` variant fails the build here rather than
+/// silently hashing to an existing token. OAuth setup scopes use the same
+/// injective [`canonical_scope_list`] encoding as `provider_scopes`.
+fn stable_setup_token(setup: &ironclaw_host_api::RuntimeCredentialAccountSetup) -> String {
+    use ironclaw_host_api::RuntimeCredentialAccountSetup as Setup;
+    match setup {
+        Setup::ManualToken => "manual_token".to_string(),
+        Setup::OAuth { scopes } => format!("oauth:{}", canonical_scope_list(scopes)),
+        Setup::Pairing => "pairing".to_string(),
+        Setup::Retired => "retired".to_string(),
+    }
+}
+
+/// Injective canonical encoding of a scope list for the auth-gate fingerprint
+/// (#6299 IronLoop). Scopes are not validated to exclude a join delimiter, so a
+/// plain `join(",")` is ambiguous — `["a,b"]` and `["a", "b"]` would collide and
+/// derive the same write-once gate key. Sort (a scope set is order-independent),
+/// then length-prefix each element (`<byte_len>:<scope>`) so distinct sets can
+/// never share an encoding regardless of which characters the scopes contain.
+fn canonical_scope_list(scopes: &[String]) -> String {
+    let mut sorted = scopes.to_vec();
+    sorted.sort();
+    sorted
+        .iter()
+        .map(|scope| format!("{}:{scope}", scope.len()))
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 fn spawned_process_outcome_from(
@@ -2615,6 +2665,93 @@ output_schema_ref = "schemas/test.output.json"
             panic!("expected auth gate");
         };
         assert_ne!(first_gate.gate_id, second_gate.gate_id);
+    }
+
+    #[test]
+    fn auth_required_outcome_changes_gate_when_only_setup_changes() {
+        // Regression (#6299 IronLoop): two requirements identical in provider,
+        // requester, and `provider_scopes` but differing ONLY in `setup` are
+        // DIFFERENT auth flows and must NOT collide on the deterministic
+        // `for_auth_gate` key. Before the fix `setup` was omitted from the
+        // fingerprint, so e.g. a ManualToken record and a later OAuth/Pairing
+        // record produced the same gate id; the write-once gate-record store
+        // then reported `GateRecordAlreadyExists`, kept the stale record, and
+        // the runner reloaded and rendered the wrong authentication flow.
+        use ironclaw_host_api::RuntimeCredentialAccountSetup as Setup;
+        let requirement_with = |setup: Setup| RuntimeCredentialAuthRequirement {
+            provider: VendorId::new("notion").unwrap(),
+            setup,
+            requester_extension: ExtensionId::new("notion").unwrap(),
+            provider_scopes: vec!["read".to_string()],
+        };
+        let gate_id = |setup: Setup| {
+            let RuntimeCapabilityOutcome::AuthRequired(gate) =
+                auth_required_outcome(cap(), Vec::new(), vec![requirement_with(setup)])
+            else {
+                panic!("expected auth gate");
+            };
+            gate.gate_id
+        };
+
+        let manual = gate_id(Setup::ManualToken);
+        let oauth = gate_id(Setup::OAuth {
+            scopes: vec!["read".to_string()],
+        });
+        let pairing = gate_id(Setup::Pairing);
+        // Distinct setup KINDS never collide (all `provider_scopes` equal).
+        assert_ne!(manual, oauth, "ManualToken vs OAuth must not collide");
+        assert_ne!(manual, pairing, "ManualToken vs Pairing must not collide");
+        assert_ne!(oauth, pairing, "OAuth vs Pairing must not collide");
+
+        // OAuth setups differing ONLY in their setup scopes are distinct flows
+        // too (`provider_scopes` held fixed at ["read"] above and here).
+        let oauth_readwrite = gate_id(Setup::OAuth {
+            scopes: vec!["read".to_string(), "write".to_string()],
+        });
+        assert_ne!(
+            oauth, oauth_readwrite,
+            "OAuth setups with different setup scopes must not collide"
+        );
+
+        // Injective encoding: a single scope containing the old `,` join
+        // delimiter must not collide with two scopes that join to the same
+        // string — `["a,b"]` and `["a", "b"]` are DIFFERENT scope sets. Before
+        // the length-prefixed `canonical_scope_list`, both encoded to "a,b".
+        let one_comma_scope = gate_id(Setup::OAuth {
+            scopes: vec!["a,b".to_string()],
+        });
+        let two_scopes = gate_id(Setup::OAuth {
+            scopes: vec!["a".to_string(), "b".to_string()],
+        });
+        assert_ne!(
+            one_comma_scope, two_scopes,
+            "OAuth setup scopes must encode injectively: [\"a,b\"] != [\"a\", \"b\"]",
+        );
+
+        // The same injective guarantee must hold for the per-requirement
+        // `provider_scopes` list, not only OAuth setup scopes — otherwise a
+        // revert of the `provider_scopes` encoding alone would go uncaught (the
+        // cases above hold `provider_scopes` fixed). Fixed ManualToken setup,
+        // `provider_scopes` `["a,b"]` vs `["a", "b"]`.
+        let provider_scopes_gate = |scopes: Vec<String>| {
+            let requirement = RuntimeCredentialAuthRequirement {
+                provider: VendorId::new("notion").unwrap(),
+                setup: Setup::ManualToken,
+                requester_extension: ExtensionId::new("notion").unwrap(),
+                provider_scopes: scopes,
+            };
+            let RuntimeCapabilityOutcome::AuthRequired(gate) =
+                auth_required_outcome(cap(), Vec::new(), vec![requirement])
+            else {
+                panic!("expected auth gate");
+            };
+            gate.gate_id
+        };
+        assert_ne!(
+            provider_scopes_gate(vec!["a,b".to_string()]),
+            provider_scopes_gate(vec!["a".to_string(), "b".to_string()]),
+            "provider_scopes must encode injectively: [\"a,b\"] != [\"a\", \"b\"]",
+        );
     }
 
     #[test]

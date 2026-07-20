@@ -58,7 +58,7 @@ WORKDIR /app
 RUN cargo chef cook \
     --profile dist \
     --package ironclaw_reborn_cli \
-    --features webui-v2-beta,libsql,postgres,inmemory-turn-state \
+    --features libsql,postgres \
     --recipe-path recipe.json
 
 FROM deps AS builder
@@ -82,7 +82,7 @@ WORKDIR /app
 RUN cargo build \
     --profile dist \
     --package ironclaw_reborn_cli \
-    --features webui-v2-beta,libsql,postgres,inmemory-turn-state \
+    --features libsql,postgres \
     --bin ironclaw
 
 FROM debian:bookworm-slim AS runtime

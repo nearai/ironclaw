@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- *(webui-v2)* report settings imports with no supported entries as failures instead of showing a false success message ([#6179](https://github.com/nearai/ironclaw/issues/6179)).
+- *(filesystem)* make libSQL descendant listings seek through the path index instead of scanning the full root-filesystem table, preventing extension-readiness fan-out from stalling unrelated WebUI requests.
 - *(webui-v2)* expose per-user secret provisioning in Admin user details with write-only values, handle-only listings, and confirmed deletion ([#6118](https://github.com/nearai/ironclaw/issues/6118)).
 - *(webui-v2)* render the Extensions Registry as soon as catalog data arrives instead of holding the skeleton screen for slower installed-extension enrichment ([#6052](https://github.com/nearai/ironclaw/issues/6052)).
 - *(webui-v2)* submit the latest composer value when Enter follows input before React rerenders, avoiding intermittently dropped follow-up messages ([#6044](https://github.com/nearai/ironclaw/issues/6044)).
@@ -37,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(reborn-cli)* **Breaking:** `ironclaw-reborn serve` now rejects the legacy `[slack]` config fields (`installation_id`, `team_id`, `api_app_id`, `slack_user_id`, `user_id`, `shared_subject_user_id`, `signing_secret_env`, `bot_token_env`, `channel_routes`). Slack bot credentials and routing are configured from the WebUI channel setup page; per-user identity comes only from Slack OAuth. `[slack].enabled` / `IRONCLAW_REBORN_SLACK_ENABLED` still gate whether the channel mounts ([#5604](https://github.com/nearai/ironclaw/pull/5604)).
 - *(reborn-extensions)* the credential-authority type is now `VendorId` end-to-end (renamed from `ProviderId` / `RuntimeCredentialAccountProviderId`); stored vendor id strings are unchanged and the persisted wire field stays `provider`. Extension manifests adopt schema `reborn.extension_manifest.v3` (explicit `[channel]` and `[auth.<vendor>]` sections); the v2 reader still parses and normalizes old manifests into the same resolved model (P1, MAN-11/MAN-2).
 - *(reborn)* outbound delivery is unified behind a single host-owned delivery coordinator — the sole delivery-state writer; channel adapters render and send through `ChannelAdapter::deliver` with no store access, and there is no direct product send path (P5, OUT-1/OUT-4).
+
+### CI / Release
+
+- *(release)* compile the canonical Reborn `ironclaw` binary across the seven supported OS/CPU targets as a tag-driven preflight while temporarily skipping the legacy cargo-dist, WASM, GitHub Release, registry-update, announcement, and Docker jobs; manual and hourly Docker workflow entry points remain available ([#6160](https://github.com/nearai/ironclaw/issues/6160)).
 
 ### Removed
 

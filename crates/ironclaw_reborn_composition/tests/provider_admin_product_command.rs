@@ -1,5 +1,3 @@
-#![cfg(feature = "root-llm-provider")]
-
 use std::sync::Arc;
 
 use chrono::Utc;

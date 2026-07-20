@@ -29,16 +29,22 @@ fn parse_cli<const N: usize>(args: [&'static str; N]) -> Cli {
     parse_cli_result(args).expect("CLI args should parse")
 }
 
-/// Tests that touch the shared global `policy_path()` must serialize their
-/// access — without this, concurrent `truncate + write_all` cycles in
-/// `write_policy` interleave and leave the file with mixed-length bytes,
-/// which `read_policy` then refuses to parse.
+/// Tests that touch the shared global `policy_path()` must serialize both
+/// policy access and process-environment reads. `policy_path()` resolves
+/// `HOME` on each call, while service tests temporarily replace `HOME`; without
+/// the canonical env lock a policy write can switch roots mid-operation and
+/// target a temp directory that has already been removed.
 static GLOBAL_POLICY_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn lock_global_policy_for_test() -> std::sync::MutexGuard<'static, ()> {
-    GLOBAL_POLICY_TEST_MUTEX
+fn lock_global_policy_for_test() -> (
+    std::sync::MutexGuard<'static, ()>,
+    std::sync::MutexGuard<'static, ()>,
+) {
+    let env = crate::runtime::test_env::lock_runtime_env();
+    let policy = GLOBAL_POLICY_TEST_MUTEX
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    (env, policy)
 }
 
 struct TracePolicyFileRestore {

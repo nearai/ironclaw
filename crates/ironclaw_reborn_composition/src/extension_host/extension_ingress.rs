@@ -567,12 +567,10 @@ pub(crate) fn build_extension_ingress(
     }
 }
 
-#[cfg(feature = "webui-v2-beta")]
 pub use serve_mount::{
     EXTENSION_INGRESS_ROUTE_PATTERN, extension_ingress_route_mount, forward_alias_request,
 };
 
-#[cfg(feature = "webui-v2-beta")]
 mod serve_mount {
     use std::num::{NonZeroU32, NonZeroU64};
     use std::pin::Pin;

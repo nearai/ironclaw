@@ -247,7 +247,6 @@ pub(crate) fn build_webui_services_with_channel_connection(
     // the admin secret provisioner, and a token minter are all available.
     // Otherwise the fail-closed RejectingAdminUserService default stands and
     // admin routes report the service unavailable.
-    #[cfg(feature = "webui-v2-beta")]
     if let (Some(directory), Some(provisioner), Some(minter)) = (
         runtime.reborn_user_directory(),
         runtime.reborn_admin_secret_provisioner(),
@@ -442,10 +441,7 @@ pub(crate) fn build_webui_services_with_channel_connection(
     )));
     api = api.with_operator_logs_service(crate::operator_log_buffer());
     if let Some(local_runtime) = &services.local_runtime {
-        #[cfg(feature = "root-llm-provider")]
         let webui_boot_config = runtime.webui_boot_config();
-        #[cfg(not(feature = "root-llm-provider"))]
-        let webui_boot_config = None;
         api = api.with_operator_service_lifecycle_service(Arc::new(
             RebornLocalServiceLifecycle::new_for_operator_with_boot_config(
                 runtime.webui_tenant_id().clone(),
@@ -458,7 +454,6 @@ pub(crate) fn build_webui_services_with_channel_connection(
     // Compose the operator LLM-config settings service when the runtime was
     // assembled with a boot config. The secret store stays private to this
     // crate; the service is the only facade-shaped handle that leaves.
-    #[cfg(feature = "root-llm-provider")]
     if let Some(llm_config) = build_llm_config_service(runtime) {
         api = api.with_llm_config_service(llm_config);
     }
@@ -466,7 +461,6 @@ pub(crate) fn build_webui_services_with_channel_connection(
     // Wire the live active-model reader so a default-model run (no explicit
     // `model`, hence no `resolved_model_route`) is still priced — against the
     // model that actually ran, tracking operator model swaps.
-    #[cfg(feature = "root-llm-provider")]
     if let Some(active_model_reader) = runtime.webui_active_model_reader() {
         api = api.with_active_model_reader(active_model_reader);
     }
@@ -484,7 +478,6 @@ pub(crate) fn build_webui_services_with_channel_connection(
 /// Returns `None` when the runtime was assembled without a boot config. Shared
 /// by `build_webui_services` (operator LLM routes) and the OpenAI-compatible
 /// `/v1/models` catalog so both read the same configured-model source.
-#[cfg(feature = "root-llm-provider")]
 pub(crate) fn build_llm_config_service(
     runtime: &RebornRuntime,
 ) -> Option<Arc<dyn ironclaw_product_workflow::LlmConfigService>> {
@@ -526,7 +519,7 @@ impl OperatorStatusService for ReadinessOperatorStatusService {
 struct LocalSkillsProductFacade {
     skill_management: Arc<RebornLocalSkillManagementPort>,
     // The skill activation selector's live master switch (see
-    // `RebornLocalRuntimeServices::skill_auto_activate_learned`); writing it here
+    // `RebornRuntimeSubstrate::skill_auto_activate_learned`); writing it here
     // changes the next turn's selection without a runtime rebuild. `None` when no
     // flag-reading selector is wired (the production assembly) — the toggle then
     // reports unavailable instead of writing to a flag nothing reads.

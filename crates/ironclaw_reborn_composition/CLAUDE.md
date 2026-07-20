@@ -4,7 +4,7 @@
 - Expose facade-shaped handles only: `HostRuntime`, `TurnCoordinator`, product-auth `RebornProductAuthServices`, WebUI `RebornServicesApi`, readiness.
 - Keep lower substrate handles private to factories and owning crates.
 - Substrate handles MAY be exposed via `#[cfg(any(test, feature = "test-support"))]` pub accessors on `RebornRuntime` when downstream integration tests need to drive production-shape state the facade doesn't yet surface (e.g. seeding `TriggerRecord` rows, `pair_external_actor` calls). These seams ship zero bytes in production binaries. New test-support accessors must carry a doc-comment naming the production call site they mirror and an explicit note that the handle is for tests only.
-- Outbound state stores are composition-owned via `RebornLocalRuntimeServices`; do not construct `FilesystemOutboundStateStore` in consumer modules (lint-enforced via `clippy::disallowed-methods`).
+- Outbound state stores are composition-owned via `RebornRuntimeSubstrate`; do not construct `FilesystemOutboundStateStore` in consumer modules (lint-enforced via `clippy::disallowed-methods`).
 - Do not depend on the root `ironclaw` crate or `src/` modules.
 - Do not add legacy bridge modes here until an accepted migration contract exists.
 - Do not route live v1/product traffic here; callers must opt in through explicit Reborn adapters.
@@ -54,7 +54,7 @@
   calling `SessionThreadService`; do not append with the runtime/base
   `ThreadScope` directly in multi-user WebUI paths.
 
-## WebUI v2 native surface (`webui-v2-beta` feature)
+## WebUI v2 native surface
 
 The Reborn-side host composition for the WebChat v2 HTTP gateway lives
 in this crate. Implements Path A of
@@ -120,7 +120,7 @@ Inbound order (outer → inner → handler):
    `config.tenant_id` plus the authentication result's `UserId`, and a
    request-scoped `WebUiV2Capabilities` extension from the same
    authentication result.
-   When `openai-compat-beta` is enabled, the same verified bearer result also
+   The same verified bearer result also
    inserts an `OpenAiCompatAuthenticatedCaller` extension with tenant-scoped
    verified auth evidence for protected OpenAI-compatible route mounts; route
    crates must not mint this evidence.

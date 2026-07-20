@@ -61,8 +61,7 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
 `ironclaw_reborn_composition` (the composed `RebornWebuiBundle` + product-auth
 mount builders + `WebuiAuthenticator` trait + mount vocabulary),
 `ironclaw_product_workflow` (`RebornServicesApi` + wire DTOs), `ironclaw_host_api`
-(identity newtypes), and — under `openai-compat-beta` only —
-`ironclaw_reborn_openai_compat`. Plus infra crates: `axum`, `tokio`, `tower*`,
+(identity newtypes), and `ironclaw_reborn_openai_compat`. Plus infra crates: `axum`, `tokio`, `tower*`,
 `tracing`, `thiserror`, `async-trait`, `secrecy`, `subtle`, `jsonwebtoken`, etc.
 
 Any other workspace-crate edge requires an `ironclaw_architecture` boundary-test

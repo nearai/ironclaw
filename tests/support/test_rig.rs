@@ -466,6 +466,13 @@ impl TestRig {
         self.channel.tool_calls_started()
     }
 
+    /// Return the display form (`name(detail)` when a contextual detail is
+    /// carried, bare `name` otherwise) of all `ToolStarted` events captured so
+    /// far — see `TestChannel::tool_call_display_names`.
+    pub fn tool_call_display_names(&self) -> Vec<String> {
+        self.channel.tool_call_display_names()
+    }
+
     /// Return the filtered list of captured responses so far.
     ///
     /// Mirrors the bootstrap-greeting filtering used by `wait_for_responses`.
@@ -1260,6 +1267,10 @@ impl TestRigBuilder {
         let scheduler_slot: ironclaw::tools::builtin::SchedulerSlot =
             Arc::new(tokio::sync::RwLock::new(None));
 
+        // Receiver for RoutineEngine notifications, wired into the TestChannel
+        // once it exists (see the forwarder spawned after channel creation).
+        let mut routine_notify_rx: Option<tokio::sync::mpsc::Receiver<OutgoingResponse>> = None;
+
         // Build HTTP interceptor once — shared by both AgentDeps and WASM tools.
         // Direct override takes priority (e.g. RecordingHttpInterceptor for live tests).
         let http_interceptor: Option<Arc<dyn HttpInterceptor>> = if let Some(override_interceptor) =
@@ -1305,7 +1316,15 @@ impl TestRigBuilder {
                 use ironclaw::config::RoutineConfig;
 
                 let routine_config = RoutineConfig::default();
-                let (notify_tx, _notify_rx) = tokio::sync::mpsc::channel(16);
+                // Keep the receiver: it is forwarded into the TestChannel once
+                // the channel exists (below), so routine-engine notifications
+                // (`send_notification` → notify_tx) are observable by tests.
+                // Previously the rx was dropped here, so every routine-path
+                // notification failed with "channel closed" — the mission live
+                // canary only passed when the model happened to route via the
+                // mission path instead.
+                let (notify_tx, notify_rx) = tokio::sync::mpsc::channel(16);
+                routine_notify_rx = Some(notify_rx);
                 let engine = Arc::new(RoutineEngine::new(
                     routine_config,
                     ironclaw::tenant::SystemScope::new(Arc::clone(db_arc)),
@@ -1542,6 +1561,16 @@ impl TestRigBuilder {
         channel_manager.add(Box::new(handle)).await;
         let channels = Arc::new(channel_manager);
 
+        // Forward routine-engine notifications into the TestChannel so tests
+        // observe them like any other outbound response. Mirrors production,
+        // where `AgentLoop` spawns a forwarder that routes `notify_rx` through
+        // the channel manager; without this every routine-path notification
+        // dies with "channel closed" (the rx used to be dropped at engine
+        // construction).
+        if let Some(notify_rx) = routine_notify_rx.take() {
+            spawn_routine_notify_forwarder(notify_rx, Arc::clone(&test_channel));
+        }
+
         // 7b. Register message tool so routines can send messages to channels.
         deps.tools
             .register_message_tools(Arc::clone(&channels), deps.extension_manager.clone())
@@ -1682,3 +1711,33 @@ pub async fn run_recorded_trace_v2(filename: &str) {
         .await;
     rig.shutdown();
 }
+
+/// Forward routine-engine notifications into the given [`TestChannel`] so
+/// tests observe them like any other outbound response (production's
+/// `AgentLoop` equivalent routes its `notify_rx` through the channel
+/// manager). Extracted as the deterministic seam pinned by
+/// `support_unit_tests::routine_notify_forwarder_delivers_into_test_channel` —
+/// the regression it guards is the rig dropping the receiver at engine
+/// construction, which killed every routine-path notification with
+/// "channel closed".
+pub fn spawn_routine_notify_forwarder(
+    mut notify_rx: tokio::sync::mpsc::Receiver<OutgoingResponse>,
+    channel: std::sync::Arc<TestChannel>,
+) {
+    tokio::spawn(async move {
+        use ironclaw::channels::Channel as _;
+        while let Some(response) = notify_rx.recv().await {
+            let msg = ironclaw::channels::IncomingMessage::new(
+                channel.channel_name(),
+                channel.user_id(),
+                "",
+            );
+            channel
+                .as_ref()
+                .respond(&msg, response)
+                .await
+                .expect("routine notify forwarder: TestChannel rejected the response");
+        }
+    });
+}
+// arch-exempt: large_file, shared test rig remains centralized during harness migration, plan #6175

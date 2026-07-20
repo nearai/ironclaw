@@ -1,15 +1,17 @@
+// arch-exempt: large_file, mechanical §4.3 secret-store swap only (FilesystemSecretStore -> FilesystemSecretStore::ephemeral), plan #6168
 use chrono::Utc;
 use ironclaw_auth::{
     CredentialAccountLabel, CredentialAccountService, CredentialOwnership,
     InMemoryAuthProductServices, NewCredentialAccount,
 };
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
     AgentId, CredentialStageError, ExtensionId, InvocationId, MissionId, ProjectId, ResourceScope,
     RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, SecretHandle, TenantId,
     ThreadId, UserId, VendorId,
 };
 use ironclaw_secrets::{
-    InMemorySecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
+    FilesystemSecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
     SecretStoreError,
 };
 
@@ -66,7 +68,7 @@ fn resolver_with_refresh(
         ),
         Arc::new(ProductAuthRuntimeCredentialAccountRefresher::new(
             Arc::new(TestRuntimeCredentialRefreshPort(accounts)),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
         )),
     )
 }
@@ -84,7 +86,7 @@ impl RuntimeCredentialAccountRefreshPort for TestRuntimeCredentialRefreshPort {
 }
 
 struct MetadataUnavailableSecretStore {
-    inner: Arc<InMemorySecretStore>,
+    inner: Arc<FilesystemSecretStore<InMemoryBackend>>,
 }
 
 #[async_trait::async_trait]
@@ -975,7 +977,7 @@ async fn resolver_stages_oauth_access_secret_when_proactive_refresh_backend_is_u
         accounts.has_pending_refresh_backend_failure_for_tests(account.id),
         "test must start with a staged backend refresh failure"
     );
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     secret_store
         .put(
             scope.clone(),
@@ -1022,7 +1024,7 @@ async fn resolver_propagates_backend_error_when_stale_access_token_cannot_refres
         .await;
     accounts.fail_next_refresh_backend_for_tests(account.id);
 
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     secret_store
         .put(
             account.scope.resource.clone(),
@@ -1063,7 +1065,8 @@ async fn resolver_propagates_backend_error_when_access_secret_metadata_is_missin
         .create(&accounts)
         .await;
     accounts.fail_next_refresh_backend_for_tests(account.id);
-    let resolver = resolver_with_refresh_and_store(accounts, Arc::new(InMemorySecretStore::new()));
+    let resolver =
+        resolver_with_refresh_and_store(accounts, Arc::new(FilesystemSecretStore::ephemeral()));
 
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
@@ -1094,7 +1097,7 @@ async fn resolver_propagates_backend_error_when_access_secret_metadata_is_unread
         .create(&accounts)
         .await;
     accounts.fail_next_refresh_backend_for_tests(account.id);
-    let inner_store = Arc::new(InMemorySecretStore::new());
+    let inner_store = Arc::new(FilesystemSecretStore::ephemeral());
     inner_store
         .put(
             scope.clone(),
@@ -1693,7 +1696,7 @@ async fn resolver_skips_inline_refresh_when_access_token_is_fresh() {
         .await;
 
     // Pre-populate the secret store with a fresh expiry (1 hour from now).
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     secret_store
         .put(
             scope.clone(),
@@ -1739,7 +1742,7 @@ async fn resolver_refreshes_when_access_token_is_within_margin() {
         .await;
 
     // Pre-populate the secret store with an expiry within the margin (2 minutes from now).
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     secret_store
         .put(
             scope.clone(),

@@ -1,4 +1,5 @@
 //! Pluggable backend for predicate sliding-window state.
+// arch-exempt: large_file, shared backend contract remains colocated pending module split, plan #6175
 //!
 //! The [`PredicateEvaluator`] in [`crate::evaluator`] delegates its
 //! counter / value-sum bookkeeping to a [`PredicateStateBackend`]. The
@@ -949,10 +950,10 @@ fn evict_lru_value(history: &mut HashMap<ValueKey, ValueBucket>, evictions: &Ato
 /// the proof that the harness shape works with one backend before the
 /// durable impls land.
 ///
-/// Gated on `any(test, feature = "contract-tests")` so out-of-crate
+/// Gated on `any(test, feature = "test-support")` so out-of-crate
 /// durable backends can depend on `ironclaw_hooks` with the
-/// `contract-tests` feature and run the same suite against their impl.
-#[cfg(any(test, feature = "contract-tests"))]
+/// `test-support` feature and run the same suite against their impl.
+#[cfg(any(test, feature = "test-support"))]
 pub mod contract {
     use super::*;
 

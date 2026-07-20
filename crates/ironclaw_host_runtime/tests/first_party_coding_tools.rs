@@ -23,10 +23,7 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_triggers::InMemoryTriggerRepository;
-use ironclaw_trust::{
-    AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
-    HostTrustPolicy, TrustDecision, TrustProvenance,
-};
+use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use ironclaw_turns::run_profile::LoopSafeSummary;
 use serde_json::{Value, json};
 
@@ -1518,7 +1515,6 @@ async fn invoke_with_context<R: HostRuntime + ?Sized>(
             CapabilityId::new(capability).unwrap(),
             ResourceEstimate::default(),
             input,
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -1541,7 +1537,6 @@ async fn invoke_completed_with_context<R: HostRuntime + ?Sized>(
             CapabilityId::new(capability).unwrap(),
             ResourceEstimate::default(),
             input,
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -1563,7 +1558,6 @@ async fn invoke_failure_with_context<R: HostRuntime + ?Sized>(
             CapabilityId::new(capability).unwrap(),
             ResourceEstimate::default(),
             input,
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -2113,16 +2107,4 @@ fn trust_policy() -> HostTrustPolicy {
         ),
     ]))])
     .unwrap()
-}
-
-fn trust_decision() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: builtin_effects(),
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::Default,
-        evaluated_at: chrono::Utc::now(),
-    }
 }

@@ -6,8 +6,6 @@
 //! caller path (auth layer + body limit + rate limit + handler +
 //! `RebornProductAuthServices`) is exercised, not just the facade helpers.
 
-#![cfg(feature = "webui-v2-beta")]
-
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;

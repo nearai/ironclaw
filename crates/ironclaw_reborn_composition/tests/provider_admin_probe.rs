@@ -11,8 +11,6 @@
 //! the scanned roots; `webui_v2_serve.rs` in this same crate already binds
 //! a loopback listener here for the same reason.
 
-#![cfg(feature = "root-llm-provider")]
-
 use ironclaw_llm::ProviderProtocol;
 use ironclaw_reborn_composition::{ProviderRepo, RebornProviderAdmin};
 use ironclaw_reborn_config::{RebornBootConfig, RebornHome, RebornProfile};

@@ -334,7 +334,7 @@ impl RebornIntegrationHarnessBuilder {
     }
 
     /// `write_file`/`read_file` tools (same set as `file_tools()`), backed by
-    /// the REAL `LocalDevCapabilityIo` (durable tool-result projection seam,
+    /// the REAL `StagedCapabilityIo` (durable tool-result projection seam,
     /// issue #5838) instead of the ephemeral `ProductLiveCapabilityIo` test
     /// double, so a large `read_file` output is persisted durably and
     /// `result_read` can page through it.
@@ -344,7 +344,7 @@ impl RebornIntegrationHarnessBuilder {
     }
 
     /// Harness-port-seam Change 4: same as `.with_builtin_http_tools()` plus a
-    /// confirmed `/host` mount grant, so `wrap_local_dev_surface_disclosure`'s
+    /// confirmed `/host` mount grant, so `wrap_surface_disclosure`'s
     /// scoped-roots note is observable on `read_file`'s captured tool
     /// definition (the layer is disabled without a confirmed host-home mount).
     pub fn with_confirmed_host_mount(mut self) -> Self {
@@ -2092,3 +2092,4 @@ pub(crate) fn thread_scope_from_binding(binding: &ResolvedBinding) -> HarnessRes
 // and per-thread harness assembly (`RebornThreadBuilder::build`) live in
 // `group.rs` (imported above) — that module owns `GroupSharedStorage` and the
 // capability mode types.
+// arch-exempt: large_file, integration builder remains centralized during fixture migration, plan #6175

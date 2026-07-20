@@ -28,8 +28,8 @@ use ironclaw_loop_host::{
     HostManagedModelResponse,
 };
 use ironclaw_reborn_composition::{
-    RebornCompositionProfile, RebornLocalRuntimeProfileOptions, RebornRuntime,
-    RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerSettings, build_reborn_runtime,
+    RebornCompositionProfile, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornRuntimeProfileOptions, TriggerPollerSettings, build_reborn_runtime,
     local_runtime_build_input_with_options,
 };
 use ironclaw_runner::runtime::ToolDisclosureMode;
@@ -38,7 +38,6 @@ use ironclaw_triggers::{
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerId, TriggerPollerWorkerConfig, TriggerRecord,
     TriggerRepository, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
-use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::run_profile::{
     LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
 };
@@ -154,7 +153,7 @@ impl HostManagedModelGateway for RecordingGateway {
 /// Whichever registrations succeed (capability visible + permitted) are
 /// forwarded together as one `capability_calls` response, which the loop
 /// will actually dispatch — including staging the real JSON input through
-/// the run's real `LocalDevCapabilityIo`, so a genuinely unpatched surface
+/// the run's real `StagedCapabilityIo`, so a genuinely unpatched surface
 /// would really create a second trigger and/or remove/pause/resume the
 /// target trigger. If every registration is denied (the fixed, expected
 /// behavior), there is nothing to dispatch and a plain reply is returned
@@ -397,7 +396,7 @@ async fn build_runtime_with<G: HostManagedModelGateway + 'static>(
         RebornCompositionProfile::LocalDevYolo,
         USER,
         root.path().join("local-dev"),
-        RebornLocalRuntimeProfileOptions {
+        RebornRuntimeProfileOptions {
             confirm_host_access: true,
         },
     )
@@ -435,7 +434,7 @@ async fn build_runtime_with_tool_disclosure<G: HostManagedModelGateway + 'static
         RebornCompositionProfile::LocalDevYolo,
         USER,
         root.path().join("local-dev"),
-        RebornLocalRuntimeProfileOptions {
+        RebornRuntimeProfileOptions {
             confirm_host_access: true,
         },
     )
@@ -487,7 +486,6 @@ async fn invoke_trigger_create(runtime: &RebornRuntime, input: Value) -> Value {
             CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID).expect("capability id"),
             ResourceEstimate::default(),
             input,
-            trigger_management_trust_decision(),
         ))
         .await
         .expect("trigger create invocation completes");
@@ -537,18 +535,6 @@ fn trigger_management_execution_context() -> ExecutionContext {
     context.resource_scope.agent_id = Some(agent_id);
     context.resource_scope.project_id = None;
     context
-}
-
-fn trigger_management_trust_decision() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::AdminConfig,
-        evaluated_at: Utc::now(),
-    }
 }
 
 #[tokio::test]
@@ -1491,7 +1477,7 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
     // would return `Ok(candidate)` for it — with a REAL, run-scoped staged
     // input, because `register_provider_tool_call` is the exact path a
     // native provider tool call uses to stage its arguments through the
-    // run's real `LocalDevCapabilityIo`. The loop would then actually
+    // run's real `StagedCapabilityIo`. The loop would then actually
     // dispatch that mutator against the staged input, and either the marker
     // trigger asserted absent below WOULD exist, or the original trigger's
     // state WOULD have changed. Reverting any one entry of the
@@ -1564,3 +1550,4 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
         all_triggers[0]
     );
 }
+// arch-exempt: large_file, trigger poller end-to-end coverage remains centralized, plan #6175

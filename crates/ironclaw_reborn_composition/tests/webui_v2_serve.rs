@@ -9,8 +9,6 @@
 //! facade is mocked so the regression target stays the gateway-layer
 //! composition.
 
-#![cfg(feature = "webui-v2-beta")]
-
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -214,7 +212,6 @@ async fn health_route_is_public_for_platform_probes() {
     assert_eq!(json["channel"], "reborn");
 }
 
-#[cfg(feature = "openai-compat-beta")]
 mod openai_compat_mount_tests {
     use super::*;
     use ironclaw_product_adapters::{

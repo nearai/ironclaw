@@ -1,4 +1,5 @@
 //! The auth-engine conformance suite (checklist AUTH-1..12): ONE table-driven
+// arch-exempt: large_file, table-driven auth conformance remains one contract suite, plan #6175
 //! contract over recipe data against a scripted vendor HTTP server. Vendors
 //! are rows — the five real vendors' recipes are loaded from their bundled
 //! manifests (`crates/ironclaw_first_party_extensions/assets`), synthetic rows
@@ -27,7 +28,7 @@ use ironclaw_host_api::{
     RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, SecretHandle,
     UserId, VendorAuthRecipe,
 };
-use ironclaw_secrets::{InMemorySecretStore, SecretStore};
+use ironclaw_secrets::{FilesystemSecretStore, SecretStore};
 use secrecy::{ExposeSecret, SecretString};
 
 // ---------------------------------------------------------------------------
@@ -178,7 +179,7 @@ const CALLBACK_BASE: &str = "https://host.example/api/reborn/product-auth/oauth"
 struct Harness {
     engine: AuthEngine,
     server: Arc<ScriptedVendorServer>,
-    secrets: Arc<InMemorySecretStore>,
+    secrets: Arc<dyn SecretStore>,
 }
 
 impl Harness {
@@ -194,12 +195,12 @@ impl Harness {
             );
         }
         let server = Arc::new(ScriptedVendorServer::default());
-        let secrets = Arc::new(InMemorySecretStore::new());
+        let secrets: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
         let engine = AuthEngine::new(AuthEngineDeps {
             recipes: Arc::new(StaticAuthRecipeResolver::new(recipes)),
             client_credentials: Arc::new(StaticClientCredentials { by_vendor }),
             egress: Arc::clone(&server) as Arc<dyn RuntimeHttpEgress>,
-            secret_store: Arc::clone(&secrets) as Arc<dyn SecretStore>,
+            secret_store: Arc::clone(&secrets),
             callback_base: EngineCallbackBase::new(CALLBACK_BASE).expect("callback base"),
             dcr_client_name: "IronClaw test".to_string(),
         });
@@ -1728,12 +1729,12 @@ impl KeepaliveLeaderLock for NeverLeaderLock {
     }
 }
 
-/// Engine + scripted vendor server + in-memory stores wired into sweep deps,
+/// Engine + scripted vendor server + ephemeral stores wired into sweep deps,
 /// with the refresh port going through the REAL engine-owned refresh path
 /// (`ProviderBackedCredentialAccountService` over `AuthEngine`).
 struct SweepFixture {
     server: Arc<ScriptedVendorServer>,
-    secrets: Arc<InMemorySecretStore>,
+    secrets: Arc<dyn SecretStore>,
     services: Arc<InMemoryAuthProductServices>,
     source: Arc<ScriptedCandidateSource>,
     deps: KeepaliveSweepDeps,
@@ -1753,12 +1754,12 @@ impl SweepFixture {
             );
         }
         let server = Arc::new(ScriptedVendorServer::default());
-        let secrets = Arc::new(InMemorySecretStore::new());
+        let secrets: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
         let engine = Arc::new(AuthEngine::new(AuthEngineDeps {
             recipes: Arc::new(StaticAuthRecipeResolver::new(recipes.clone())),
             client_credentials: Arc::new(StaticClientCredentials { by_vendor }),
             egress: Arc::clone(&server) as Arc<dyn RuntimeHttpEgress>,
-            secret_store: Arc::clone(&secrets) as Arc<dyn SecretStore>,
+            secret_store: Arc::clone(&secrets),
             callback_base: EngineCallbackBase::new(CALLBACK_BASE).expect("callback base"),
             dcr_client_name: "IronClaw test".to_string(),
         }));

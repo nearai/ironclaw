@@ -240,7 +240,7 @@ mod tests {
     };
     use ironclaw_host_api::{InvocationId, ResourceScope};
     use ironclaw_product_workflow::ProductConversationRouteKey;
-    use ironclaw_secrets::InMemorySecretStore;
+    use ironclaw_secrets::FilesystemSecretStore;
 
     use super::*;
     use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
@@ -344,7 +344,7 @@ supports_threads = false
         .expect("resource scope");
         let channel_config = Arc::new(ChannelConfigService::new(
             store,
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
             scope,
             Arc::new(NoopReactivation),
         ));

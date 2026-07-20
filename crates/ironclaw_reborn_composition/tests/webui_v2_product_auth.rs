@@ -2,8 +2,6 @@
 
 // arch-exempt: large_file, caller-level product-auth route regression coverage, plan #5905
 
-#![cfg(feature = "webui-v2-beta")]
-
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
@@ -635,7 +633,7 @@ fn vendor_test_engine(
             recipes: Arc::new(ironclaw_auth::StaticAuthRecipeResolver::new(vec![recipe])),
             client_credentials: Arc::new(StaticVendorClientCredentials),
             egress: Arc::new(PanicVendorEgress),
-            secret_store: Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+            secret_store: Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
             callback_base: ironclaw_auth::EngineCallbackBase::new(
                 "http://127.0.0.1:3000/api/reborn/product-auth/oauth",
             )

@@ -14,7 +14,7 @@ use ironclaw_host_api::{
     RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
-use ironclaw_secrets::InMemorySecretStore;
+use ironclaw_secrets::FilesystemSecretStore;
 use ironclaw_turns::{
     AcceptedMessageRef, BlockedReason, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
     GetRunStateRequest, IdempotencyKey, LoopCheckpointStateRef, ReplyTargetBindingRef,
@@ -593,7 +593,7 @@ async fn oauth_callback_exchanges_vendor_recipe_through_reborn_product_auth_boun
             ])),
             client_credentials: Arc::new(StaticTestCredentials),
             egress: egress.clone(),
-            secret_store: Arc::new(InMemorySecretStore::new()),
+            secret_store: Arc::new(FilesystemSecretStore::ephemeral()),
             callback_base: ironclaw_auth::EngineCallbackBase::new(
                 "https://app.example/api/reborn/product-auth/oauth",
             )
@@ -957,7 +957,7 @@ fn provider_scope(value: &str) -> ProviderScope {
 #[cfg(test)]
 async fn submit_and_block_auth_run(
     turn_coordinator: &dyn ironclaw_turns::TurnCoordinator,
-    local_runtime: &RebornLocalRuntimeServices,
+    local_runtime: &RebornRuntimeSubstrate,
     scope: TurnScope,
     actor: TurnActor,
     gate_ref: &str,

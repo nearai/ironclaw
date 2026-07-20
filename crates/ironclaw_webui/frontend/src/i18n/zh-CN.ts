@@ -75,6 +75,7 @@ registerPack("zh-CN", {
   "login.connect": "连接",
   "login.oauthDivider": "或继续使用",
   "login.oauthProvider": "通过 {provider} 继续",
+  "login.localDevHint": "在本地运行 IronClaw？获取你的登录链接：",
 
   // Chat — empty state
   "chat.heroTitle": "你好，需要我帮你做什么？",
@@ -278,6 +279,7 @@ registerPack("zh-CN", {
   "settings.exportSuccess": "设置已导出",
   "settings.importSuccess": "设置已导入",
   "settings.importInvalid": "所选文件必须包含设置对象",
+  "settings.importNoSupported": "所选文件中没有受支持的设置",
   "settings.importFailed": "导入失败：{message}",
 
   // Settings — restart banner
@@ -728,6 +730,7 @@ registerPack("zh-CN", {
   "automations.filter.completed": "已完成",
   "automations.refresh": "更新最新自动化",
   "automations.error.loadFailed": "提取系统自动化计划列表不成功！",
+  "automations.error.actionFailed": "无法更新自动化。请重试。",
   "automations.rename.action": "重命名自动化",
   "automations.rename.nameLabel": "自动化名称",
   "automations.rename.nameRequired": "自动化名称不能为空。",

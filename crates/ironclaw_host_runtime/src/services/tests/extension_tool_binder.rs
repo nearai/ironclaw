@@ -353,10 +353,7 @@ async fn registry_resolver_allowlist_restricts_to_builtin_provider() {
         [ExtensionId::new("builtin").unwrap()].into_iter().collect();
     let resolver = super::super::tool_resolver::RegistryLaneToolResolver::new(
         registry,
-        std::collections::HashMap::<
-            RuntimeKind,
-            Arc<dyn super::super::runtime_adapters::RuntimeAdapter<_, _>>,
-        >::new(),
+        Arc::new(RuntimeLaneExecutor::new(None, None, None, None)),
         Arc::new(DiskFilesystem::new()),
         governor,
         policy_with(

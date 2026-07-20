@@ -75,6 +75,7 @@ registerPack("es", {
   "login.connect": "Conectar",
   "login.oauthDivider": "o continuar con",
   "login.oauthProvider": "Continuar con {provider}",
+  "login.localDevHint": "¿Ejecutas IronClaw en local? Obtén tu enlace de acceso:",
 
   // Chat — empty state
   "chat.heroTitle": "Hola, ¿en que necesitas ayuda?",
@@ -278,6 +279,7 @@ registerPack("es", {
   "settings.exportSuccess": "Configuración exportada",
   "settings.importSuccess": "Configuración importada",
   "settings.importInvalid": "El archivo seleccionado debe contener un objeto de configuración",
+  "settings.importNoSupported": "El archivo seleccionado no contiene ajustes compatibles",
   "settings.importFailed": "Importación fallida: {message}",
 
   // Settings — restart banner
@@ -728,6 +730,7 @@ registerPack("es", {
   "automations.filter.completed": "Completadas",
   "automations.refresh": "Actualizar automatizaciones",
   "automations.error.loadFailed": "No se pueden cargar automatizaciones",
+  "automations.error.actionFailed": "No se pudo actualizar la automatización. Inténtalo de nuevo.",
   "automations.rename.action": "Cambiar nombre de automatización",
   "automations.rename.nameLabel": "Nombre de automatización",
   "automations.rename.nameRequired": "El nombre de la automatización es obligatorio.",

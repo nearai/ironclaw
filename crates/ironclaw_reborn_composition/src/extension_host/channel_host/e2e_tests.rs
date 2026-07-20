@@ -64,7 +64,7 @@ use ironclaw_product_workflow::{
     ResolvedBinding, RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
     TriggeredRunDeliveryRequest,
 };
-use ironclaw_secrets::InMemorySecretStore;
+use ironclaw_secrets::FilesystemSecretStore;
 use ironclaw_slack_extension::{
     SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID, SlackPreferenceTargetCodec,
 };
@@ -522,7 +522,7 @@ async fn configured_channel_config() -> Arc<ChannelConfigService> {
     };
     let channel_config = Arc::new(ChannelConfigService::new(
         installation_store,
-        Arc::new(InMemorySecretStore::default()),
+        Arc::new(FilesystemSecretStore::ephemeral()),
         scope,
         Arc::new(NoopChannelConfigReactivation),
     ));
@@ -4328,3 +4328,4 @@ async fn generic_triggered_hook_routes_fire_to_the_owning_extension_driver() {
         "an undecodable stored target fails closed"
     );
 }
+// arch-exempt: large_file, channel host end-to-end coverage remains centralized, plan #6175

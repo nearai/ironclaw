@@ -101,9 +101,8 @@ use ironclaw_turns::run_profile::{
     ModelProfileId,
 };
 use ironclaw_turns::{
-    FilesystemTurnStateStore, InMemoryCheckpointStateStore, InMemoryTurnEventSink,
-    InMemoryTurnStateStoreLimits, LoopCheckpointStore, TurnCoordinator, TurnEventSink, TurnScope,
-    TurnStateStore,
+    FilesystemTurnStateStore, InMemoryTurnEventSink, InMemoryTurnStateStoreLimits,
+    LoopCheckpointStore, TurnCoordinator, TurnEventSink, TurnScope, TurnStateStore,
 };
 
 use super::builder::{
@@ -151,6 +150,8 @@ mod group_options;
 
 /// Convenience alias matching `builder.rs` and `harness.rs`.
 pub type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
 
 // ---------------------------------------------------------------------------
 // GroupSharedStorage
@@ -328,6 +329,18 @@ impl GroupCapability {
                 HarnessCapabilityMode::Recording(RecordingTestCapabilityPort::echo())
             }
             Self::HostRuntime(arc) => HarnessCapabilityMode::HostRuntime(Arc::clone(arc)),
+        }
+    }
+
+    /// The durable gate-record store this backend's capability port persists
+    /// `GateRecord::Auth` into (§5.2.9) — the SAME `Arc` the turn executor must
+    /// re-read an auth block's `credential_requirements` from. `None` only for
+    /// the `Recording` (echo) backend; the host-runtime backend always resolves
+    /// a store (`HostRuntimeCapabilityHarness::gate_record_store` returns `Some`).
+    pub(crate) fn gate_record_store(&self) -> Option<Arc<dyn ironclaw_run_state::GateRecordStore>> {
+        match self {
+            Self::HostRuntime(harness) => harness.gate_record_store(),
+            Self::Recording => None,
         }
     }
 
@@ -743,7 +756,7 @@ impl RebornIntegrationGroupBuilder {
                 .with_limits(turn_state_limits),
         );
         let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
-        let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
+        let checkpoint_state_store = in_memory_checkpoint_state_store();
 
         let group_thread_scope = thread_scope_from_binding(&base.canonical_binding)?;
         let group_thread_harness = RebornThreadHarness::filesystem_shared_composite(
@@ -818,7 +831,7 @@ impl RebornIntegrationGroupBuilder {
         .with_checkpoint_state_store(checkpoint_state_store.clone());
         if let Some(approval_requests) = capability_recorder.approval_requests_store() {
             evidence = evidence.with_approval_gate_evidence(
-                ironclaw_reborn_composition::test_support::build_local_dev_approval_gate_evidence_for_test(
+                ironclaw_reborn_composition::test_support::build_approval_gate_evidence_for_test(
                     approval_requests,
                 ),
             );
@@ -998,6 +1011,12 @@ impl RebornIntegrationGroupBuilder {
             attachment_read_port: capability_recorder
                 .attachment_test_support()
                 .map(|support| support.read_port),
+            // §5.2.9 render-from-record: the SAME durable gate-record store this
+            // group's capability port persists `GateRecord::Auth` into, so the
+            // turn executor re-reads an auth block's `credential_requirements`
+            // from the exact record the port saved (mirrors production
+            // `runtime.rs`'s `local_runtime.gate_record_store`).
+            gate_record_store: capability.gate_record_store(),
             scheduler_wake_wiring: None,
         };
         let planned_runtime_parts_shape = harness_planned_runtime_parts_shape(&parts);

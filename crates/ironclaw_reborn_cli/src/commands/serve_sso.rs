@@ -1,7 +1,6 @@
 //! WebChat v2 SSO startup config for `ironclaw serve`.
 //!
-//! Compiled under the `webui-v2-beta` feature (the same feature that
-//! compiles the `serve` command). This module owns the host config side
+//! This module owns the host config side
 //! of SSO login startup policy: reading the operator's env vars into a
 //! provider list, resolving the public base URL, refusing cleartext
 //! OAuth on a public interface, and requiring a fail-closed

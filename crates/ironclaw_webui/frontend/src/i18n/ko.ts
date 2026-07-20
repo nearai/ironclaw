@@ -75,6 +75,7 @@ registerPack("ko", {
   "login.connect": "연결",
   "login.oauthDivider": "또는 계속",
   "login.oauthProvider": "{provider} 계속",
+  "login.localDevHint": "IronClaw를 로컬에서 실행 중인가요? 로그인 링크를 받으세요:",
 
   // Chat — empty state
   "chat.heroTitle": "안녕하세요, 무엇을 도와드릴까요?",
@@ -278,6 +279,7 @@ registerPack("ko", {
   "settings.exportSuccess": "내보낸 설정",
   "settings.importSuccess": "가져온 설정",
   "settings.importInvalid": "선택한 파일에 설정 개체가 포함되어야 함",
+  "settings.importNoSupported": "선택한 파일에 지원되는 설정이 없습니다",
   "settings.importFailed": "가져오기 실패: {message}",
 
   // Settings — restart banner
@@ -728,6 +730,7 @@ registerPack("ko", {
   "automations.filter.completed": "완료됨",
   "automations.refresh": "자동화 새로 고침",
   "automations.error.loadFailed": "자동화를 로드할 수 없음",
+  "automations.error.actionFailed": "자동화를 업데이트할 수 없습니다. 다시 시도하세요.",
   "automations.rename.action": "자동화 이름 변경",
   "automations.rename.nameLabel": "자동화 이름",
   "automations.rename.nameRequired": "자동화 이름은 필수입니다.",

@@ -96,7 +96,7 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | `ironclaw_engine` | `ironclaw_engine` | Unified thread-capability-CodeAct execution engine. It is closer to product/agent orchestration than low-level host policy. |
 | `ironclaw_skills` | `ironclaw_skills` | Skill selection, scoring, and management. |
 | `ironclaw_gateway` | `ironclaw_gateway` | Browser gateway frontend assets, layout configuration, and widget extension system. |
-| `ironclaw_webui` | `ironclaw_webui` | Reborn WebChat v2 HTTP route surface and route descriptors. Off by default; enable with `webui-v2-beta`. |
+| `ironclaw_webui` | `ironclaw_webui` | Reborn WebChat v2 HTTP route surface and route descriptors. |
 | `ironclaw_tui` | `ironclaw_tui` | Modular Ratatui-based terminal UI. |
 | `ironclaw_slack_extension` | `ironclaw_slack_extension` | Slack v2 channel extension for the Reborn product surface: protocol parsing and rendering (payloads, mrkdwn, delivery DTOs). |
 | `ironclaw_telegram_extension` | `ironclaw_telegram_extension` | Telegram v2 channel adapter for the Reborn product surface. Maps Telegram traffic into Reborn capability and turn contracts. |

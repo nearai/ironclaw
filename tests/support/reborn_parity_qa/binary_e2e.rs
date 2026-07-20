@@ -61,11 +61,10 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     CancelRunRequest, FilesystemTurnStateStore, GateRef, GetLoopCheckpointRequest,
-    GetRunStateRequest, IdempotencyKey, InMemoryCheckpointStateStore, LoopBlockedKind,
-    LoopCheckpointKind, LoopCheckpointStore, ReplyTargetBindingRef, ResumeTurnRequest,
-    RetryTurnRequest, RetryTurnResponse, SanitizedCancelReason, SourceBindingRef, TurnActor,
-    TurnCoordinator, TurnError, TurnRunId, TurnRunRecord, TurnRunState, TurnScope,
-    TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
+    GetRunStateRequest, IdempotencyKey, LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStore,
+    ReplyTargetBindingRef, ResumeTurnRequest, RetryTurnRequest, RetryTurnResponse,
+    SanitizedCancelReason, SourceBindingRef, TurnActor, TurnCoordinator, TurnError, TurnRunId,
+    TurnRunRecord, TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
     run_profile::{
         CapabilityCallCandidate, CapabilityInputRef, CapabilityInvocation,
         CapabilitySurfaceVersion, LoopHostMilestone, LoopHostMilestoneKind, ParentLoopOutput,
@@ -91,6 +90,8 @@ use crate::reborn_support::session_thread::RebornThreadHarness;
 use crate::reborn_support::test_adapter::RebornTestIngress;
 
 pub type HarnessWaitConfig = WaitConfig;
+
+use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
 
 pub struct RebornBinaryE2EHarness {
     ingress: RebornTestIngress,
@@ -758,7 +759,7 @@ impl RebornBinaryE2EHarness {
         };
         let turns_scoped_fs = scoped_turns_fs(turn_backend, &binding)?;
         let turn_store = Arc::new(FilesystemTurnStateStore::new(Arc::clone(&turns_scoped_fs)));
-        let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
+        let checkpoint_state_store = in_memory_checkpoint_state_store();
         let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
         let milestone_sink =
             Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
@@ -867,6 +868,7 @@ impl RebornBinaryE2EHarness {
             hook_security_audit_sink: None,
             turn_event_sink: None,
             attachment_read_port: None,
+            gate_record_store: None,
             scheduler_wake_wiring: None,
         })?;
         let binding_service: Arc<dyn ConversationBindingService> =
@@ -1574,3 +1576,4 @@ pub fn assert_milestone_order(
             .collect::<Vec<_>>()
     );
 }
+// arch-exempt: large_file, binary parity coverage remains centralized, plan #6175

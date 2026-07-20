@@ -435,7 +435,7 @@ mod tests {
         ManifestSource,
     };
     use ironclaw_host_api::{InvocationId, SecretHandle, UserId};
-    use ironclaw_secrets::InMemorySecretStore;
+    use ironclaw_secrets::FilesystemSecretStore;
 
     use super::*;
     use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
@@ -596,7 +596,7 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
     struct Fixture {
         service: ChannelConfigService,
         installation_store: Arc<InMemoryExtensionInstallationStore>,
-        secrets: Arc<InMemorySecretStore>,
+        secrets: Arc<FilesystemSecretStore<ironclaw_filesystem::InMemoryBackend>>,
         scope: ResourceScope,
         reactivation: Arc<RecordingReactivation>,
         extension_id: ExtensionId,
@@ -604,7 +604,7 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
 
     async fn channel_fixture(reactivation: RecordingReactivation) -> Fixture {
         let installation_store = installed_store(CHANNEL_FIXTURE_MANIFEST, "acmechat").await;
-        let secrets = Arc::new(InMemorySecretStore::new());
+        let secrets = Arc::new(FilesystemSecretStore::ephemeral());
         let scope = test_scope();
         let reactivation = Arc::new(reactivation);
         let service = ChannelConfigService::new(
@@ -897,7 +897,7 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
     #[tokio::test]
     async fn extensions_without_a_channel_surface_have_nothing_to_configure() {
         let installation_store = installed_store(TOOLS_ONLY_FIXTURE_MANIFEST, "zephyrite").await;
-        let secrets = Arc::new(InMemorySecretStore::new());
+        let secrets = Arc::new(FilesystemSecretStore::ephemeral());
         let reactivation = Arc::new(RecordingReactivation::new());
         let service = ChannelConfigService::new(
             installation_store as Arc<dyn ExtensionInstallationStore>,

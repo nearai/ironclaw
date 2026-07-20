@@ -1,4 +1,5 @@
 //! LLM integration for the agent.
+// arch-exempt: large_file, provider facade remains centralized pending crate split, plan #6175
 //!
 //! Supports multiple backends:
 //! - **NEAR AI** (default): Session token or API key auth via Chat Completions API
@@ -49,7 +50,7 @@ pub mod tool_schema;
 pub mod transcription;
 mod url_check;
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 
 #[cfg(test)]

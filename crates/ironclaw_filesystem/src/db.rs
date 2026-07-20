@@ -74,6 +74,15 @@ pub(crate) fn direct_children(
 }
 
 #[cfg(feature = "libsql")]
+pub(crate) fn descendant_path_range(path: &VirtualPath) -> (String, String) {
+    let prefix = path.as_str().trim_end_matches('/');
+    // Descendants share the literal "{prefix}/" component boundary. The
+    // exclusive upper bound "{prefix}0" works because '/' sorts before '0'
+    // in the normalized virtual path alphabet used by these storage paths.
+    (format!("{prefix}/"), format!("{prefix}0"))
+}
+
+#[cfg(feature = "libsql")]
 pub(crate) fn child_path_like_pattern(path: &VirtualPath) -> String {
     let mut pattern = String::new();
     for character in path.as_str().trim_end_matches('/').chars() {

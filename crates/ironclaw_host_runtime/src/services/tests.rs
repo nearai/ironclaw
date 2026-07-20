@@ -21,7 +21,8 @@ use ironclaw_host_api::{
     Obligation, PermissionMode, ProjectId, ReservationStatus, ResourceEstimate, ResourceReceipt,
     ResourceReservationId, ResourceScope, ResourceUsage, RuntimeCredentialInjection,
     RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeDispatchErrorKind, RuntimeHttpEgress,
-    RuntimeHttpEgressRequest, RuntimeKind, SecretHandle, TenantId, TrustClass, UserId, VirtualPath,
+    RuntimeHttpEgressRequest, RuntimeKind, RuntimeLane, SecretHandle, TenantId, TrustClass, UserId,
+    VirtualPath,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -31,7 +32,7 @@ use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceGovernor, ResourceTally,
 };
 use ironclaw_secrets::{
-    InMemorySecretStore, SecretLeaseId, SecretMaterial, SecretStore, SecretStoreError,
+    FilesystemSecretStore, SecretLeaseId, SecretMaterial, SecretStore, SecretStoreError,
 };
 use secrecy::ExposeSecret;
 use serde_json::{Value, json};
@@ -42,8 +43,8 @@ use super::{
     HostRuntimeHttpEgressPort, HostRuntimeServices, LocalInvocationServicesResolver,
     McpRuntimeAdapter, NetworkMode, ProcessBackendKind, ProcessResultStore, ProcessStore,
     ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssueKind, RootFilesystem,
-    RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeProfile, SecretMode,
-    ServiceResolvedRuntimeAdapter,
+    RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeLaneExecutor,
+    RuntimeProfile, SecretMode, ServiceResolvedRuntimeAdapter,
 };
 #[cfg(unix)]
 use crate::CommandExecutionRequest;
@@ -80,7 +81,7 @@ async fn production_wiring_reports_missing_persistent_approval_policies() {
 // production wiring. `in_memory_backed_persistent_approval_policy_store()` returns
 // `FilesystemPersistentApprovalPolicyStore<InMemoryBackend>` — the exact concrete
 // type the no-durable-features composition wires (factory.rs
-// `LocalDevPersistentApprovalPolicyStore`), so this guards the real shape, not a
+// `ComposedPersistentApprovalPolicyStore`), so this guards the real shape, not a
 // synthetic one. The durable libSQL/Postgres monomorphizations are distinct types
 // and fall through to `ProductionCandidate`.
 #[tokio::test]
@@ -108,7 +109,7 @@ async fn product_auth_provider_runtime_ports_returns_none_without_egress() {
 
 #[tokio::test]
 async fn product_auth_provider_runtime_ports_returns_configured_egress_and_obligation_handler() {
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let services = test_services()
         .with_secret_store(Arc::clone(&secret_store))
         .try_with_host_http_egress(RecordingNetwork::ok())
@@ -149,7 +150,7 @@ async fn product_auth_provider_runtime_ports_returns_configured_egress_and_oblig
 
 #[tokio::test]
 async fn product_auth_ports_stage_secret_from_source_scope_into_target_scope() {
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let services = test_services()
         .with_secret_store(Arc::clone(&secret_store))
         .try_with_host_http_egress(RecordingNetwork::ok())
@@ -195,7 +196,7 @@ async fn product_auth_ports_stage_secret_from_source_scope_into_target_scope() {
 #[tokio::test]
 async fn runtime_secret_material_stager_stages_secret_material_into_target_scope() {
     let services = test_services()
-        .with_secret_store(Arc::new(InMemorySecretStore::new()))
+        .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
         .try_with_host_http_egress(RecordingNetwork::ok())
         .expect("host HTTP egress should wire with graph secret store");
     let scope = sample_scope();
@@ -226,7 +227,7 @@ async fn host_runtime_http_egress_port_executes_with_host_staged_credentials() {
     let network = RecordingNetwork::ok();
     let recorded_requests = Arc::clone(&network.requests);
     let services = test_services()
-        .with_secret_store(Arc::new(InMemorySecretStore::new()))
+        .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
         .try_with_host_http_egress(network)
         .expect("host HTTP egress should wire with graph secret store");
     let scope = sample_scope();
@@ -290,7 +291,7 @@ async fn host_runtime_http_egress_port_denies_before_network_when_obligation_fai
     let recorded_requests = Arc::clone(&network.requests);
     let runtime_http_egress = Arc::new(crate::HostHttpEgressService::production(
         network,
-        InMemorySecretStore::new(),
+        FilesystemSecretStore::ephemeral(),
         Arc::new(NetworkObligationPolicyStore::new()),
         Arc::new(RuntimeSecretInjectionStore::new()),
         Arc::new(crate::http_body::UnsupportedRuntimeHttpBodyStore),
@@ -325,7 +326,7 @@ async fn host_http_egress_borrows_staged_policy_for_repeated_invocation_requests
     let network = RecordingNetwork::ok();
     let recorded_requests = Arc::clone(&network.requests);
     let services = test_services()
-        .with_secret_store(Arc::new(InMemorySecretStore::new()))
+        .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
         .try_with_host_http_egress(network)
         .expect("host HTTP egress should wire with graph secret store");
     let scope = sample_scope();
@@ -363,7 +364,7 @@ async fn host_http_egress_helper_injects_staged_credentials_from_handoff_store()
     let network = RecordingNetwork::ok();
     let recorded_requests = Arc::clone(&network.requests);
     let services = test_services()
-        .with_secret_store(Arc::new(InMemorySecretStore::new()))
+        .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
         .try_with_host_http_egress(network)
         .expect("host HTTP egress should wire with graph secret store");
     services
@@ -408,7 +409,7 @@ async fn host_http_egress_helper_consumes_staged_credentials_after_first_egress(
     let network = RecordingNetwork::ok();
     let recorded_requests = Arc::clone(&network.requests);
     let services = test_services()
-        .with_secret_store(Arc::new(InMemorySecretStore::new()))
+        .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
         .try_with_host_http_egress(network)
         .expect("host HTTP egress should wire with graph secret store");
     services
@@ -460,7 +461,8 @@ async fn host_http_egress_treats_expired_staged_secret_as_missing() {
 
     let network = RecordingNetwork::ok();
     let recorded_requests = Arc::clone(&network.requests);
-    let mut services = test_services().with_secret_store(Arc::new(InMemorySecretStore::new()));
+    let mut services =
+        test_services().with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()));
     services.secret_injection_store = Arc::new(RuntimeSecretInjectionStore::with_ttl(
         Duration::from_millis(5),
     ));
@@ -501,13 +503,13 @@ async fn host_http_egress_verification_rejects_mismatched_handoff_stores() {
     let mismatched_secret_injections = Arc::new(RuntimeSecretInjectionStore::new());
     let egress = Arc::new(crate::HostHttpEgressService::production(
         RecordingNetwork::ok(),
-        InMemorySecretStore::new(),
+        FilesystemSecretStore::ephemeral(),
         mismatched_network_policies,
         mismatched_secret_injections,
         Arc::new(crate::http_body::UnsupportedRuntimeHttpBodyStore),
     ));
     let services = test_services()
-        .with_secret_store(Arc::new(InMemorySecretStore::new()))
+        .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
         .with_host_http_egress_service(egress);
 
     let report = services
@@ -1221,7 +1223,7 @@ async fn assert_first_party_denies_before_handler(
             Arc::new(DiskFilesystem::new()),
             None,
             Arc::new(HostProcessPort::new()),
-            Some(Arc::new(InMemorySecretStore::new())),
+            Some(Arc::new(FilesystemSecretStore::ephemeral())),
         )),
     );
     let filesystem = DiskFilesystem::new();

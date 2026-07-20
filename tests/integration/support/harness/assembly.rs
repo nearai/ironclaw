@@ -30,7 +30,7 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_network::{PolicyNetworkHttpEgress, ReqwestNetworkTransport};
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_secrets::{InMemorySecretStore, SecretMaterial};
+use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial};
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use ironclaw_wasm::{WitToolHost, WitToolRuntimeConfig};
 
@@ -46,7 +46,7 @@ use super::HarnessResult;
 /// resolver + result writer). Every `HostRuntimeCapabilityHarness`
 /// constructor that does not opt into `.with_durable_capability_io()`
 /// (issue #5838) uses this so both roles keep sharing one underlying object,
-/// matching production's `LocalDevCapabilityIo` invariant.
+/// matching production's `StagedCapabilityIo` invariant.
 pub(crate) fn default_capability_io_pair() -> (
     Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
     Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
@@ -320,7 +320,7 @@ pub(crate) fn local_dev_host_runtime_with_live_http_egress(
         ironclaw_processes::ProcessServices::in_memory(),
         HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
-    .with_secret_store(Arc::new(InMemorySecretStore::new()))
+    .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers(Arc::new(
         ironclaw_triggers::InMemoryTriggerRepository::default(),
     ))?))
@@ -361,7 +361,7 @@ pub(crate) fn local_dev_host_runtime_with_real_egress_pipeline(
         ironclaw_processes::ProcessServices::in_memory(),
         HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
-    .with_secret_store(Arc::new(InMemorySecretStore::new()))
+    .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers(Arc::new(
         ironclaw_triggers::InMemoryTriggerRepository::default(),
     ))?))

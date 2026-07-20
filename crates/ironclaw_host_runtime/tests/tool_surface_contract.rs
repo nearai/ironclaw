@@ -1034,7 +1034,6 @@ async fn visible_surface_marks_askable_capabilities_without_granting_authority()
             capability_id("echo.say"),
             ResourceEstimate::default(),
             json!({"message": "hello"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -1076,7 +1075,6 @@ async fn hidden_capability_direct_invoke_still_fails_closed_through_authorizatio
             capability_id("echo.say"),
             ResourceEstimate::default(),
             json!({"message": "hello"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -1575,7 +1573,6 @@ async fn runtime_policy_denied_extension_invoke_does_not_dispatch() {
             capability_id("echo.say"),
             ResourceEstimate::default(),
             json!({"message": "blocked before dispatch"}),
-            trust_decision_for(vec![EffectKind::DispatchCapability, EffectKind::Network]),
         ))
         .await
         .unwrap();
@@ -1620,7 +1617,6 @@ async fn runtime_policy_denied_secret_invoke_does_not_dispatch() {
             capability_id("secret-tool.read"),
             ResourceEstimate::default(),
             json!({}),
-            trust_decision_for(vec![EffectKind::UseSecret]),
         ))
         .await
         .unwrap();
@@ -1668,7 +1664,6 @@ async fn runtime_policy_denied_mcp_http_invoke_does_not_dispatch_when_effect_und
             capability_id("mcp.search"),
             ResourceEstimate::default(),
             json!({"query": "blocked before mcp dispatch"}),
-            trust_decision_for(vec![EffectKind::DispatchCapability]),
         ))
         .await
         .unwrap();
@@ -2121,10 +2116,6 @@ fn context_with_secret_grant() -> ExecutionContext {
 
 fn capability_id(value: &str) -> CapabilityId {
     CapabilityId::new(value).unwrap()
-}
-
-fn trust_decision_with_dispatch_authority() -> TrustDecision {
-    trust_decision_for(vec![EffectKind::DispatchCapability])
 }
 
 struct PanicTrustPolicy;

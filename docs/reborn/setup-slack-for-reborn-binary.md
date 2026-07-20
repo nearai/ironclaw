@@ -1,13 +1,11 @@
 # Set Up Slack for the Reborn Binary
 
-This guide is for the standalone `ironclaw-reborn serve` Slack host-beta path,
+This guide is for the standalone `ironclaw-reborn serve` Slack host path,
 not the legacy v1 Slack WASM channel.
 
-Slack support has two gates:
-
-1. The binary must be built with the `webui-v2-beta` Cargo feature (Slack ships as a first-party extension; there is no separate Slack feature).
-2. Runtime config must set `[slack].enabled = true`, or the deployment env
-   must set `IRONCLAW_REBORN_SLACK_ENABLED=true`.
+Slack support ships in the binary. It has one gate: runtime config must set
+`[slack].enabled = true`, or the deployment env must set
+`IRONCLAW_REBORN_SLACK_ENABLED=true`.
 
 Slack bot token and signing secret are configured in WebUI Slack setup and
 stored in the Reborn secret store. Do not put OAuth client secrets or LLM keys
@@ -20,7 +18,6 @@ For local source runs:
 ```bash
 cargo run -q \
   -p ironclaw_reborn_cli \
-  --features webui-v2-beta \
   --bin ironclaw-reborn \
   -- serve
 ```
@@ -30,19 +27,10 @@ For a local source build:
 ```bash
 cargo build \
   -p ironclaw_reborn_cli \
-  --features webui-v2-beta \
   --bin ironclaw-reborn
 ```
 
-Slack is included in every `webui-v2-beta` build, so no extra feature is
-prefer to be explicit:
-
-```bash
---features webui-v2-beta
-```
-
-`Dockerfile.reborn` already builds with `webui-v2-beta`.
-Slack is still disabled unless the mounted or seeded Reborn config enables it.
+Slack is disabled unless the mounted or seeded Reborn config enables it.
 
 ## Public Endpoint
 
@@ -56,7 +44,7 @@ Slack personal OAuth must also redirect back to the Reborn product-auth
 callback:
 
 ```text
-https://<public-host>/api/reborn/product-auth/oauth/slack/callback
+https://<public-host>/api/reborn/product-auth/oauth/slack_personal/callback
 ```
 
 For local development, expose the local listener through a tunnel and use the
@@ -156,7 +144,7 @@ OAuth & Permissions:
 - Add the redirect URL:
 
 ```text
-https://<public-host>/api/reborn/product-auth/oauth/slack/callback
+https://<public-host>/api/reborn/product-auth/oauth/slack_personal/callback
 ```
 
 - Add bot token scopes:
@@ -210,7 +198,7 @@ features:
     always_online: false
 oauth_config:
   redirect_urls:
-    - https://<public-host>/api/reborn/product-auth/oauth/slack/callback
+    - https://<public-host>/api/reborn/product-auth/oauth/slack_personal/callback
   scopes:
     bot:
       - chat:write
@@ -248,7 +236,6 @@ Start the service:
 ```bash
 cargo run -q \
   -p ironclaw_reborn_cli \
-  --features webui-v2-beta \
   --bin ironclaw-reborn \
   -- serve --host 127.0.0.1 --port 3000
 ```
@@ -275,13 +262,13 @@ Verification checklist:
 
 ## Troubleshooting
 
-### Slack enablement
+### Slack routes are not mounted
 
-Rebuild or rerun ironclaw-reborn with --features webui-v2-beta.
+Confirm the Reborn config sets [slack].enabled = true, or that the deployment env sets IRONCLAW_REBORN_SLACK_ENABLED=true, then restart ironclaw-reborn.
 
 ### Slack route never receives events
 
-Confirm the Slack Request URL is exactly https://<public-host>/webhooks/slack/events, the public URL reaches the Reborn listener, and Socket Mode is disabled for this host-beta path.
+Confirm the Slack Request URL is exactly https://<public-host>/webhooks/slack/events, the public URL reaches the Reborn listener, and Socket Mode is disabled for this host path.
 
 ### Slack URL verification fails
 
@@ -293,7 +280,7 @@ Add or confirm chat:write, reinstall the Slack app, and update the bot token in 
 
 ### Slack OAuth callback fails
 
-Confirm the Slack redirect URL is exactly https://<public-host>/api/reborn/product-auth/oauth/slack/callback, the user scope includes users:read, the app was reinstalled after changing OAuth settings, and the WebUI Slack setup client id/client secret match the Slack app.
+Confirm the Slack redirect URL is exactly https://<public-host>/api/reborn/product-auth/oauth/slack_personal/callback, the user scope includes users:read, the app was reinstalled after changing OAuth settings, and the WebUI Slack setup client id/client secret match the Slack app.
 
 ### Channel mention does not reach Reborn
 

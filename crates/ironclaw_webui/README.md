@@ -76,7 +76,7 @@ attach under their feature flag.
   `SessionAuthenticator` (bearer → `SessionStore` lookup, non-operator),
   `OidcAuthenticator` (JWKS + standard-claim verifier, non-operator).
 - **Sessions:** the `SessionStore` trait (durable impl is the host's;
-  `InMemorySessionStore` behind `dev-in-memory-session` for dev/tests) plus the
+  `InMemorySessionStore` behind `test-support` for dev/tests) plus the
   signed-token login surface (`build_signed_session_login`).
 - **OAuth login surface:** `webui_v2_auth_router` mounts `/auth/*` and mints
   sessions from Google / GitHub logins. Providers plug in through the

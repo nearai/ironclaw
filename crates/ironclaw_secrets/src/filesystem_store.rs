@@ -47,10 +47,13 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use ironclaw_filesystem::{
     CasApply, CasExpectation, CasUpdateError, ContentType, Entry, FilesystemError, Filter,
-    IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page, RecordKind, RootFilesystem,
-    ScopedFilesystem, cas_update,
+    InMemoryBackend, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page, RecordKind,
+    RootFilesystem, ScopedFilesystem, cas_update,
 };
-use ironclaw_host_api::{HostApiError, ResourceScope, ScopedPath, SecretHandle, Timestamp};
+use ironclaw_host_api::{
+    HostApiError, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
+    SYSTEM_RESERVED_ID, ScopedPath, SecretHandle, Timestamp, VirtualPath,
+};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -340,6 +343,62 @@ where
             }
             other => other,
         }
+    }
+}
+
+/// Redacted `Debug`: never walks the backend or crypto state, so no secret
+/// material, ciphertext, or lease contents can leak through `{:?}` output
+/// (test wrappers `#[derive(Debug)]` around this store).
+impl<F> std::fmt::Debug for FilesystemSecretStore<F>
+where
+    F: RootFilesystem,
+{
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FilesystemSecretStore")
+            .field("filesystem", &self.filesystem)
+            .field("lease_ttl", &self.lease_ttl)
+            .finish_non_exhaustive()
+    }
+}
+
+impl FilesystemSecretStore<InMemoryBackend> {
+    /// Volatile, encrypted secret store: the production `FilesystemSecretStore`
+    /// over a fresh [`InMemoryBackend`] with an ephemeral master key and a
+    /// tenant-rewriting mount resolver (`/secrets` ->
+    /// `/tenants/<tenant>/users/<user>/secrets`), matching production
+    /// composition's `invocation_mount_view` shape so cross-tenant isolation
+    /// stays structural. Replaces the deleted `InMemorySecretStore` (§4.3 of
+    /// `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`).
+    pub fn ephemeral() -> Self {
+        let scoped = ScopedFilesystem::new(
+            Arc::new(InMemoryBackend::new()),
+            ephemeral_secrets_mount_view,
+        );
+        Self::new(Arc::new(scoped), Arc::new(SecretsCrypto::ephemeral()))
+    }
+}
+
+/// Tenant-rewriting `/secrets` mount resolver used by
+/// [`FilesystemSecretStore::ephemeral`]. Mirrors production composition's
+/// `invocation_mount_view` for the `/secrets` alias, including the
+/// `__system__` path segment for the reserved system sentinel scope (the raw
+/// sentinel contains control bytes and is not path-safe).
+fn ephemeral_secrets_mount_view(scope: &ResourceScope) -> Result<MountView, HostApiError> {
+    let tenant_id = ephemeral_scope_path_segment(scope.tenant_id.as_str());
+    let user_id = ephemeral_scope_path_segment(scope.user_id.as_str());
+    MountView::new(vec![MountGrant::new(
+        MountAlias::new("/secrets")?,
+        VirtualPath::new(format!("/tenants/{tenant_id}/users/{user_id}/secrets"))?,
+        MountPermissions::read_write_list_delete(),
+    )])
+}
+
+fn ephemeral_scope_path_segment(value: &str) -> &str {
+    if value == SYSTEM_RESERVED_ID {
+        "__system__"
+    } else {
+        value
     }
 }
 

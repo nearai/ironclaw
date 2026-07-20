@@ -26,6 +26,7 @@ use ironclaw_reborn_event_store::{PostgresPoolTlsOptions, RebornPostgresSslMode}
 
 #[cfg(feature = "postgres")]
 use crate::RebornBuildError;
+use crate::deployment::DeploymentConfig;
 use crate::{RebornCompositionProfile, RebornProductAuthServicePorts};
 
 #[cfg(feature = "postgres")]
@@ -174,7 +175,17 @@ impl RebornRuntimeProcessBinding {
 }
 
 pub struct RebornBuildInput {
-    pub(crate) profile: RebornCompositionProfile,
+    /// The deployment this build assembles, as data (§4.4/§5.6). Carries the
+    /// substrate, traffic, readiness, and storage-shape axes every consumer
+    /// reads instead of re-deriving them from a profile name.
+    ///
+    /// The **resolved** runtime policy rides `runtime_policy`, not this value:
+    /// `new` builds the config without a yolo host-access disclosure (it is not
+    /// known at construction), so callers that hold the operator's confirmation
+    /// install the accurate config through
+    /// [`RebornBuildInput::with_deployment`] — `local_runtime_build_input_with_options`
+    /// is the one that does.
+    pub(crate) deployment: DeploymentConfig,
     pub(crate) owner_id: String,
     pub(crate) local_runtime_identity: Option<RebornLocalRuntimeIdentity>,
     pub(crate) storage: RebornStorageInput,
@@ -285,9 +296,30 @@ pub(crate) enum RebornStorageInput {
 }
 
 impl RebornBuildInput {
-    /// Selected composition profile.
+    /// Selected composition profile — a display/telemetry label. Behaviour
+    /// comes from [`RebornBuildInput::deployment`].
     pub fn profile(&self) -> RebornCompositionProfile {
-        self.profile
+        self.deployment.profile()
+    }
+
+    /// The deployment axes this build assembles from.
+    pub fn deployment(&self) -> &DeploymentConfig {
+        &self.deployment
+    }
+
+    /// Replace the deployment this input was constructed with.
+    ///
+    /// Test-only: production builds the deployment at construction
+    /// (`RebornBuildInput::new` takes it, and `local_runtime_build_input_with_options`
+    /// supplies one built where the operator's yolo disclosure is known). This
+    /// exists so tests can construct a deliberately mismatched
+    /// deployment/storage pairing and drive the fail-closed guard in
+    /// `build_reborn_services` — production behaviour, reached through a
+    /// pairing production rejects.
+    #[cfg(test)]
+    pub(crate) fn with_deployment(mut self, deployment: DeploymentConfig) -> Self {
+        self.deployment = deployment;
+        self
     }
 
     /// Owner id (string form). Used by the assembled runtime to mint the
@@ -296,7 +328,6 @@ impl RebornBuildInput {
         &self.owner_id
     }
 
-    #[cfg(feature = "root-llm-provider")]
     pub(crate) fn has_nearai_mcp_bootstrap_config(&self) -> bool {
         self.nearai_mcp_bootstrap_config.is_some()
     }
@@ -325,14 +356,14 @@ impl RebornBuildInput {
 
     pub fn disabled(owner_id: impl Into<String>) -> Self {
         Self::new(
-            RebornCompositionProfile::Disabled,
+            DeploymentConfig::disabled(),
             owner_id,
             RebornStorageInput::Disabled,
         )
     }
 
     pub fn local_dev(owner_id: impl Into<String>, root: PathBuf) -> Self {
-        Self::local_dev_with_profile(RebornCompositionProfile::LocalDev, owner_id, root)
+        Self::local_dev_from_deployment(DeploymentConfig::local_dev(), owner_id, root)
     }
 
     pub(crate) fn local_dev_with_profile(
@@ -340,9 +371,24 @@ impl RebornBuildInput {
         owner_id: impl Into<String>,
         root: PathBuf,
     ) -> Self {
-        debug_assert!(profile.uses_local_dev_storage_input());
+        Self::local_dev_from_deployment(
+            DeploymentConfig::for_profile(profile, false),
+            owner_id,
+            root,
+        )
+    }
+
+    /// Build a local-dev-storage-shaped input from an already-resolved
+    /// deployment. The `debug_assert` is on the storage-shape **axis**, not on
+    /// a list of profile names (§4.4).
+    pub(crate) fn local_dev_from_deployment(
+        deployment: DeploymentConfig,
+        owner_id: impl Into<String>,
+        root: PathBuf,
+    ) -> Self {
+        debug_assert!(deployment.uses_local_dev_storage_input());
         Self::new(
-            profile,
+            deployment,
             owner_id,
             RebornStorageInput::LocalDev {
                 root,
@@ -360,7 +406,13 @@ impl RebornBuildInput {
         pool: deadpool_postgres::Pool,
         secret_master_key: ironclaw_secrets::SecretMaterial,
     ) -> Result<Self, RebornBuildError> {
-        if profile != RebornCompositionProfile::HostedSingleTenant {
+        // The storage handle and the deployment must agree. Expressed as the
+        // config's storage-shape axis rather than a profile-name comparison
+        // (§4.4): a deployment that takes a hosted single-tenant pool is a
+        // property of the deployment, not of its name.
+        if DeploymentConfig::for_profile(profile, false).storage_shape()
+            != crate::deployment::StorageShape::HostedSingleTenantPool
+        {
             return Err(RebornBuildError::InvalidConfig {
                 reason: format!(
                     "hosted single-tenant Postgres storage requires profile=hosted-single-tenant; got profile={profile}"
@@ -368,7 +420,7 @@ impl RebornBuildInput {
             });
         }
         Ok(Self::new(
-            profile,
+            DeploymentConfig::for_profile(profile, false),
             owner_id,
             RebornStorageInput::HostedSingleTenantPostgres {
                 root,
@@ -388,7 +440,13 @@ impl RebornBuildInput {
         root: PathBuf,
         config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
     ) -> Result<Self, RebornBuildError> {
-        if profile != RebornCompositionProfile::HostedSingleTenant {
+        // The storage handle and the deployment must agree. Expressed as the
+        // config's storage-shape axis rather than a profile-name comparison
+        // (§4.4): a deployment that takes a hosted single-tenant pool is a
+        // property of the deployment, not of its name.
+        if DeploymentConfig::for_profile(profile, false).storage_shape()
+            != crate::deployment::StorageShape::HostedSingleTenantPool
+        {
             return Err(RebornBuildError::InvalidConfig {
                 reason: format!(
                     "hosted single-tenant Postgres storage requires profile=hosted-single-tenant; got profile={profile}"
@@ -402,7 +460,7 @@ impl RebornBuildInput {
             ..
         } = resolve_postgres_storage_from_config_and_env(profile, config_file)?;
         Ok(Self::new(
-            profile,
+            DeploymentConfig::for_profile(profile, false),
             owner_id,
             RebornStorageInput::HostedSingleTenantPostgres {
                 root,
@@ -417,7 +475,7 @@ impl RebornBuildInput {
 
     /// Open the hosted-single-tenant trigger access store from this build
     /// input's already-resolved PostgreSQL storage.
-    #[cfg(all(feature = "webui-v2-beta", feature = "postgres"))]
+    #[cfg(feature = "postgres")]
     pub async fn open_hosted_single_tenant_trigger_access_store(
         &self,
     ) -> Result<Arc<dyn crate::LocalTriggerAccessStore>, crate::RebornLocalTriggerAccessStoreError>
@@ -516,7 +574,7 @@ impl RebornBuildInput {
         secret_master_key: ironclaw_secrets::SecretMaterial,
     ) -> Self {
         Self::new(
-            profile,
+            DeploymentConfig::for_profile(profile, false),
             owner_id,
             RebornStorageInput::Libsql {
                 db,
@@ -537,7 +595,7 @@ impl RebornBuildInput {
         auth_token: Option<ironclaw_secrets::SecretMaterial>,
     ) -> Self {
         Self::new(
-            profile,
+            DeploymentConfig::for_profile(profile, false),
             owner_id,
             RebornStorageInput::Libsql {
                 db,
@@ -558,7 +616,7 @@ impl RebornBuildInput {
         secret_master_key: ironclaw_secrets::SecretMaterial,
     ) -> Self {
         Self::new(
-            profile,
+            DeploymentConfig::for_profile(profile, false),
             owner_id,
             RebornStorageInput::Postgres {
                 pool,
@@ -578,7 +636,7 @@ impl RebornBuildInput {
         url: ironclaw_secrets::SecretMaterial,
     ) -> Self {
         Self::new(
-            profile,
+            DeploymentConfig::for_profile(profile, false),
             owner_id,
             RebornStorageInput::Postgres {
                 pool,
@@ -607,7 +665,7 @@ impl RebornBuildInput {
         let trust_policy = crate::builtin_first_party_trust_policy()?;
 
         Ok(Self::new(
-            profile,
+            DeploymentConfig::for_profile(profile, false),
             owner_id,
             RebornStorageInput::Postgres {
                 pool,
@@ -807,12 +865,12 @@ impl RebornBuildInput {
     }
 
     fn new(
-        profile: RebornCompositionProfile,
+        deployment: DeploymentConfig,
         owner_id: impl Into<String>,
         storage: RebornStorageInput,
     ) -> Self {
         Self {
-            profile,
+            deployment,
             owner_id: owner_id.into(),
             local_runtime_identity: None,
             storage,

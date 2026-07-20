@@ -28,7 +28,7 @@ use ironclaw_network::{
 };
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_scripts::ScriptRuntimeHttpAdapter;
-use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
+use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
 use ironclaw_wasm::{
     WasmHostHttp, WasmHttpRequest, WasmRuntimeHttpAdapter, WasmStagedRuntimeCredential,
     WasmStagedRuntimeCredentials,
@@ -351,7 +351,7 @@ async fn host_http_egress_consumes_secret_staged_by_builtin_obligation_handler()
         },
     });
     let network_recorder = network.requests.clone();
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
         secret_store.clone(),
@@ -4748,7 +4748,7 @@ fn block_on_test_runtime<T>(future: impl std::future::Future<Output = T>) -> T {
 fn test_obligation_services() -> BuiltinObligationServices {
     BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
-        Arc::new(InMemorySecretStore::new()),
+        Arc::new(FilesystemSecretStore::ephemeral()),
         Arc::new(InMemoryResourceGovernor::new()),
     )
 }

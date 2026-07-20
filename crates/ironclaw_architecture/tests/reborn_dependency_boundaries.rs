@@ -828,31 +828,27 @@ fn reborn_runner_llm_wiring_stays_out_of_root_src() {
         "Reborn LLM gateway wiring should expose LlmProviderModelGateway from crates/ironclaw_runner"
     );
 
-    let reborn_manifest = std::fs::read_to_string(root.join("crates/ironclaw_runner/Cargo.toml"))
-        .expect("Reborn manifest must be readable");
-    assert!(
-        reborn_manifest.contains("optional = true")
-            && reborn_manifest.contains("default-features = false")
-            && reborn_manifest.contains("root-llm-provider"),
-        "ironclaw_runner may reuse root LLM code only behind an explicit feature, without enabling the root app's default postgres/libsql/tui feature set"
-    );
-
-    // The composition root — the only crate that should pull `ironclaw_runner`
-    // (and through it `ironclaw_llm`) for the assembled runtime — must mirror
-    // the same feature-gated discipline. Both `ironclaw_runner` (transitive)
-    // and `ironclaw_llm` (direct) live behind a `root-llm-provider` feature
-    // on the composition crate, so a default build of composition stays
-    // substrate-only.
-    let composition_manifest =
-        std::fs::read_to_string(root.join("crates/ironclaw_reborn_composition/Cargo.toml"))
-            .expect("Reborn composition manifest must be readable");
-    assert!(
-        composition_manifest.contains("root-llm-provider")
-            && composition_manifest.contains("ironclaw_llm")
-            && composition_manifest.contains("optional = true")
-            && composition_manifest.contains("default-features = false"),
-        "ironclaw_reborn_composition must gate `ironclaw_llm` behind the same `root-llm-provider` feature with `optional = true, default-features = false`"
-    );
+    // Reborn crates may reuse the extracted LLM crate, but never on its default
+    // terms: `ironclaw_llm`'s defaults drag in the root app's postgres/libsql/tui
+    // feature set, which would couple the Reborn stack back to the v1 monolith.
+    // `default-features = false` on every edge is the durable invariant.
+    for manifest_path in [
+        "crates/ironclaw_runner/Cargo.toml",
+        "crates/ironclaw_reborn_composition/Cargo.toml",
+    ] {
+        let manifest = std::fs::read_to_string(root.join(manifest_path))
+            .unwrap_or_else(|_| panic!("{manifest_path} must be readable"));
+        let llm_dep = manifest
+            .lines()
+            .find(|line| line.trim_start().starts_with("ironclaw_llm = "))
+            .unwrap_or_else(|| panic!("{manifest_path} must depend on ironclaw_llm"));
+        assert!(
+            llm_dep.contains("default-features = false"),
+            "{manifest_path} must depend on `ironclaw_llm` with `default-features = false`, \
+             so the Reborn stack never enables the root app's default postgres/libsql/tui \
+             feature set: {llm_dep}"
+        );
+    }
 }
 
 #[test]

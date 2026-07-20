@@ -1535,7 +1535,7 @@ mod tests {
         NetworkMethod, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
         RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, SecretHandle, VendorId,
     };
-    use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
+    use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
     use ironclaw_turns::{TurnRunId, TurnScope};
     use tower::ServiceExt;
 
@@ -1784,7 +1784,7 @@ mod tests {
         let engine = test_engine(
             test_vendor_recipe(false, Some("https://mcp.vendorco.example/mcp")),
             Arc::new(RouteDcrSetupEgress),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
         );
         let product_auth = RebornProductAuthServices::local_dev_in_memory(Arc::new(NoopDispatcher))
             .with_auth_engine(engine);
@@ -1861,7 +1861,7 @@ mod tests {
         let engine = test_engine(
             test_vendor_recipe(true, None),
             Arc::new(PanickingDcrEgress),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
         );
         // `RebornProductAuthServices::new` wires no account record source: the
         // update-binding lookup is unavailable and the start must proceed
@@ -2073,7 +2073,7 @@ mod tests {
         let engine = test_engine(
             test_vendor_recipe(true, None),
             Arc::new(PanickingDcrEgress),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
         );
         let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
         let product_auth =
@@ -2123,11 +2123,11 @@ mod tests {
     /// when the route-local cache misses (cross-process callback).
     #[tokio::test]
     async fn oauth_callback_retrieves_pkce_from_gate_store_when_route_cache_misses() {
-        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let engine = test_engine(
             test_vendor_recipe(true, None),
             Arc::new(PanickingDcrEgress),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
         );
         let driver = Arc::new(
             crate::product_auth::oauth::oauth_gate::OAuthGateFlowDriver::new(
@@ -2192,12 +2192,12 @@ mod tests {
     #[tokio::test]
     async fn vendor_oauth_callback_resumes_blocked_turn_gate() {
         let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
-        let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+        let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
         let dispatcher = Arc::new(RecordingDispatcher::default());
         let engine = test_engine(
             test_vendor_recipe(true, None),
             Arc::new(ScriptedTokenExchangeEgress),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
         );
         let driver = Arc::new(
             crate::product_auth::oauth::oauth_gate::OAuthGateFlowDriver::new(

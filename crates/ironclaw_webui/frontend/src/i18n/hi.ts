@@ -75,6 +75,7 @@ registerPack("hi", {
   "login.connect": "कनेक्ट",
   "login.oauthDivider": "या जारी रखें",
   "login.oauthProvider": "{provider} के साथ जारी रखें",
+  "login.localDevHint": "IronClaw को लोकल पर चला रहे हैं? अपना साइन-इन लिंक पाएं:",
 
   // Chat — empty state
   "chat.heroTitle": "नमस्ते, आपको किसमें मदद चाहिए?",
@@ -278,6 +279,7 @@ registerPack("hi", {
   "settings.exportSuccess": "निर्यात की गई सेटिंग्स",
   "settings.importSuccess": "आयातित सेटिंग्स",
   "settings.importInvalid": "चयनित फ़ाइल में एक सेटिंग ऑब्जेक्ट होना चाहिए",
+  "settings.importNoSupported": "चयनित फ़ाइल में कोई समर्थित सेटिंग नहीं मिली",
   "settings.importFailed": "आयात विफल: {message}",
 
   // Settings — restart banner
@@ -728,6 +730,7 @@ registerPack("hi", {
   "automations.filter.completed": "पूर्ण",
   "automations.refresh": "ऑटोमेशन ताज़ा करें",
   "automations.error.loadFailed": "ऑटोमेशन लोड करने में असमर्थ",
+  "automations.error.actionFailed": "ऑटोमेशन अपडेट नहीं किया जा सका। फिर से कोशिश करें।",
   "automations.rename.action": "ऑटोमेशन का नाम बदलें",
   "automations.rename.nameLabel": "ऑटोमेशन नाम",
   "automations.rename.nameRequired": "ऑटोमेशन नाम आवश्यक है.",

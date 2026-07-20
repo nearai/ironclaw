@@ -2051,12 +2051,21 @@ async fn canceled_hanging_executor_lease_expires_to_cancelled() {
     handle.shutdown().await;
 }
 
+/// #6284: a checkpoint-less run whose lease expires is normally re-queued
+/// (re-drivable), NOT stranded terminal — but that re-drive loop is bounded by
+/// `claim_count`. With `max_crash_recovery_reclaims = 1` the manual claim
+/// (claim_count = 1) already reaches the bound, so the scheduler's reconciler
+/// terminal-fails the run with the genuine-invariant reason
+/// `crash_retry_exhausted` (NOT `lease_expired`). This keeps a deterministic
+/// "reconciler terminally resolves an abandoned run" assertion under the new
+/// re-drivable contract.
 #[tokio::test]
 #[tracing_test::traced_test]
-async fn expired_lease_reconciler_fails_running_run() {
+async fn expired_lease_reconciler_fails_running_run_at_crash_retry_bound() {
     let store = Arc::new(InMemoryTurnStateStore::with_limits(
         InMemoryTurnStateStoreLimits {
             runner_lease_ttl: ChronoDuration::milliseconds(-1),
+            max_crash_recovery_reclaims: 1,
             ..InMemoryTurnStateStoreLimits::default()
         },
     ));
@@ -2091,7 +2100,7 @@ async fn expired_lease_reconciler_fails_running_run() {
             .failure
             .as_ref()
             .map(|failure| failure.category()),
-        Some("lease_expired")
+        Some("crash_retry_exhausted")
     );
     handle.shutdown().await;
 
@@ -2101,7 +2110,7 @@ async fn expired_lease_reconciler_fails_running_run() {
             line.contains("turn run scheduler recovered expired lease")
                 && line.contains(&format!("thread_id={thread_id}"))
                 && line.contains(&format!("run_id={run_id_str}"))
-                && line.contains("failure_category=lease_expired")
+                && line.contains("failure_category=crash_retry_exhausted")
         });
         if found {
             Ok(())

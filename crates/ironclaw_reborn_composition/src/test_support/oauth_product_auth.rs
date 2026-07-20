@@ -379,7 +379,7 @@ struct OAuthProductAuthInfra {
 fn build_oauth_product_auth_infra() -> OAuthProductAuthInfra {
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
-    use ironclaw_secrets::InMemorySecretStore;
+    use ironclaw_secrets::FilesystemSecretStore;
 
     // Fixed-view scoped filesystem: the product-auth durable layer writes
     // flow/account JSON under /secrets/agents/…/product-auth/… so we only
@@ -393,7 +393,8 @@ fn build_oauth_product_auth_infra() -> OAuthProductAuthInfra {
     let backend = Arc::new(InMemoryBackend::new());
     let scoped_fs: Arc<ScopedFilesystem<InMemoryBackend>> =
         Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts));
-    let secret_store: Arc<dyn ironclaw_secrets::SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn ironclaw_secrets::SecretStore> =
+        Arc::new(FilesystemSecretStore::ephemeral());
     // Real durable product-auth services over the in-memory scoped filesystem.
     let durable = Arc::new(
         crate::product_auth::durable::FilesystemAuthProductServices::new(
@@ -416,7 +417,7 @@ fn build_oauth_product_auth_infra() -> OAuthProductAuthInfra {
 /// - `InMemoryBackend` with a fixed `MountView` scoped to
 ///   `/tenants/test-tenant/users/test-user/secrets` (no `libsql`/`postgres`
 ///   feature dependency).
-/// - `InMemorySecretStore` for access/refresh token handles.
+/// - `FilesystemSecretStore::ephemeral()` for access/refresh token handles.
 /// - `ScriptedOAuthTokenEgress` intercepting the provider token endpoint.
 /// - Real `FilesystemAuthProductServices<InMemoryBackend>` for flow + account
 ///   persistence — zero mocks on the storage layer.
@@ -473,7 +474,7 @@ pub async fn build_oauth_product_auth_for_test_on_libsql(
 ) -> OAuthProductAuthTestBundle {
     use ironclaw_filesystem::{LibSqlRootFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
-    use ironclaw_secrets::InMemorySecretStore;
+    use ironclaw_secrets::FilesystemSecretStore;
 
     let db = Arc::new(
         libsql::Builder::new_local(db_path.display().to_string())
@@ -493,7 +494,8 @@ pub async fn build_oauth_product_auth_for_test_on_libsql(
     .expect("mount view");
     let scoped_fs: Arc<ScopedFilesystem<LibSqlRootFilesystem>> =
         Arc::new(ScopedFilesystem::with_fixed_view(root, mounts));
-    let secret_store: Arc<dyn ironclaw_secrets::SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn ironclaw_secrets::SecretStore> =
+        Arc::new(FilesystemSecretStore::ephemeral());
     let durable = Arc::new(
         crate::product_auth::durable::FilesystemAuthProductServices::new(
             Arc::clone(&scoped_fs),
@@ -548,7 +550,7 @@ where
 {
     use ironclaw_filesystem::ScopedFilesystem;
     use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
-    use ironclaw_secrets::InMemorySecretStore;
+    use ironclaw_secrets::FilesystemSecretStore;
 
     let mounts = MountView::new(vec![MountGrant::new(
         MountAlias::new("/secrets").expect("mount alias"),
@@ -558,7 +560,8 @@ where
     .expect("mount view");
     let scoped_fs: Arc<ScopedFilesystem<F>> =
         Arc::new(ScopedFilesystem::with_fixed_view(root, mounts));
-    let secret_store: Arc<dyn ironclaw_secrets::SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn ironclaw_secrets::SecretStore> =
+        Arc::new(FilesystemSecretStore::ephemeral());
     let durable = Arc::new(
         crate::product_auth::durable::FilesystemAuthProductServices::new(
             Arc::clone(&scoped_fs),

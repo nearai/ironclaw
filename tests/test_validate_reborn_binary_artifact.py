@@ -27,7 +27,7 @@ class ValidateRebornBinaryArtifactTests(unittest.TestCase):
             f"{digest}  {VALIDATOR.ARCHIVE_NAME}\n",
             encoding="utf-8",
         )
-        self.write_manifest("webui-v2-beta")
+        self.write_manifest("postgres,libsql")
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -50,36 +50,36 @@ class ValidateRebornBinaryArtifactTests(unittest.TestCase):
         VALIDATOR.validate_artifact(
             self.artifact_dir,
             "a" * 40,
-            "webui-v2-beta",
+            "postgres,libsql",
         )
 
     def test_accepts_array_feature_superset(self) -> None:
         self.write_manifest(
             [
-                "openai-compat-beta",
-                "slack-v2-host-beta",
-                "webui-v2-beta",
+                "extra-feature",
+                "libsql",
+                "postgres",
             ]
         )
 
         VALIDATOR.validate_artifact(
             self.artifact_dir,
             "a" * 40,
-            "webui-v2-beta",
+            "postgres,libsql",
         )
 
     def test_rejects_missing_required_feature(self) -> None:
-        self.write_manifest(["webui-v2-beta"])
+        self.write_manifest(["postgres"])
 
-        with self.assertRaisesRegex(ValueError, "slack-v2-host-beta"):
+        with self.assertRaisesRegex(ValueError, "libsql"):
             VALIDATOR.validate_artifact(
                 self.artifact_dir,
                 "a" * 40,
-                "webui-v2-beta",
+                "postgres,libsql",
             )
 
     def test_rejects_invalid_feature_shape(self) -> None:
-        self.write_manifest(["webui-v2-beta", 42])
+        self.write_manifest(["postgres", 42])
 
         with self.assertRaisesRegex(
             ValueError, "comma-separated string or string array"
@@ -87,11 +87,11 @@ class ValidateRebornBinaryArtifactTests(unittest.TestCase):
             VALIDATOR.validate_artifact(
                 self.artifact_dir,
                 "a" * 40,
-                "webui-v2-beta",
+                "postgres,libsql",
             )
 
     def test_rejects_empty_feature_entries(self) -> None:
-        for features in ("webui-v2-beta,", ["webui-v2-beta", ""]):
+        for features in ("postgres,", ["postgres", ""]):
             with self.subTest(features=features):
                 self.write_manifest(features)
 
@@ -99,13 +99,13 @@ class ValidateRebornBinaryArtifactTests(unittest.TestCase):
                     VALIDATOR.validate_artifact(
                         self.artifact_dir,
                         "a" * 40,
-                        "webui-v2-beta",
+                        "postgres,libsql",
                     )
 
     def test_rejects_duplicate_features(self) -> None:
         for features in (
-            "webui-v2-beta,webui-v2-beta",
-            ["webui-v2-beta", "webui-v2-beta"],
+            "postgres,postgres",
+            ["postgres", "postgres"],
         ):
             with self.subTest(features=features):
                 self.write_manifest(features)
@@ -114,7 +114,7 @@ class ValidateRebornBinaryArtifactTests(unittest.TestCase):
                     VALIDATOR.validate_artifact(
                         self.artifact_dir,
                         "a" * 40,
-                        "webui-v2-beta",
+                        "postgres,libsql",
                     )
 
     def test_rejects_corrupt_archive(self) -> None:
@@ -124,12 +124,12 @@ class ValidateRebornBinaryArtifactTests(unittest.TestCase):
             VALIDATOR.validate_artifact(
                 self.artifact_dir,
                 "a" * 40,
-                "webui-v2-beta",
+                "postgres,libsql",
             )
 
     def test_rejects_mismatched_manifest(self) -> None:
         self.write_manifest(
-            "webui-v2-beta",
+            "postgres,libsql",
             product_ref="b" * 40,
         )
 
@@ -137,7 +137,7 @@ class ValidateRebornBinaryArtifactTests(unittest.TestCase):
             VALIDATOR.validate_artifact(
                 self.artifact_dir,
                 "a" * 40,
-                "webui-v2-beta",
+                "postgres,libsql",
             )
 
 

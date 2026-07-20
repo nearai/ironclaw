@@ -221,9 +221,13 @@ jobs:
 
           while IFS= read -r package; do
             feature_flags="$(scripts/ci/package-feature-flags.sh "$package")"
-            if [[ "${feature_flags}" == *"webui-v2-beta"* ]]; then
-              needs_webui_node=true
-            fi
+            # These packages link `ironclaw_webui`, whose build script compiles
+            # the Vite frontend and therefore needs a Node/pnpm toolchain.
+            case "${package}" in
+              ironclaw_reborn_cli|ironclaw_reborn_composition)
+                needs_webui_node=true
+                ;;
+            esac
 
             case "${package}" in
               ironclaw_first_party_extension_ports|ironclaw_host_runtime|ironclaw_loop_host|ironclaw_product_workflow|ironclaw_runner|ironclaw_reborn_cli|ironclaw_reborn_composition|ironclaw_webui|ironclaw_wasm)

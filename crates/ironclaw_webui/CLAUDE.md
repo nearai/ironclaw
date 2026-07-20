@@ -65,7 +65,7 @@ turning the `webui_v2_routes()` descriptors into tower layers.
 | `GitHubProvider` (in `auth/github.rs`) | GitHub OAuth App provider (scopes `read:user user:email`, no PKCE, verified-email preference). Built from `GitHubOAuthConfig`. |
 | `OAuthRouterConfig` | Tenant + `SessionStore` + `UserDirectory` + provider list + base URL |
 | `UserDirectory` trait | Host-supplied mapping from `(provider, OAuthUserProfile)` to `UserId` |
-| `EmailUserDirectory` | Local-dev default impl (verified email → `UserId`); gated on `dev-in-memory-session` |
+| `EmailUserDirectory` | Local-dev default impl (verified email → `UserId`); gated on `test-support` |
 
 ## WebChat v2 route surface (folded from `ironclaw_webui_v2`)
 

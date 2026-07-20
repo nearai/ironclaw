@@ -346,7 +346,7 @@ mod tests {
     use ironclaw_host_api::{
         AgentId, ExtensionId, TenantId, ThreadId, UserId, VendorAuthRecipe, VendorId,
     };
-    use ironclaw_secrets::InMemorySecretStore;
+    use ironclaw_secrets::FilesystemSecretStore;
 
     fn acme_vendor_recipe() -> ResolvedVendorAuthRecipe {
         let recipe: VendorAuthRecipe = serde_json::from_value(serde_json::json!({
@@ -420,7 +420,7 @@ mod tests {
             recipes: Arc::new(StaticAuthRecipeResolver::new(vec![acme_vendor_recipe()])),
             client_credentials: credentials,
             egress: Arc::new(PanicEgress),
-            secret_store: Arc::new(InMemorySecretStore::new()),
+            secret_store: Arc::new(FilesystemSecretStore::ephemeral()),
             callback_base: EngineCallbackBase::new(
                 "https://host.example/api/reborn/product-auth/oauth",
             )
@@ -452,7 +452,7 @@ mod tests {
                 flow_source,
                 driver: OAuthGateFlowDriver::new(
                     engine_with_credentials(Arc::new(StaticCredentials)),
-                    Arc::new(InMemorySecretStore::new()),
+                    Arc::new(FilesystemSecretStore::ephemeral()),
                 ),
                 scope: TurnScope::new(
                     TenantId::new("tenant-alpha").unwrap(),
@@ -626,7 +626,7 @@ mod tests {
         // And an unconfigured (credentials missing) vendor also falls through.
         let unconfigured_driver = OAuthGateFlowDriver::new(
             engine_with_credentials(Arc::new(UnconfiguredCredentials)),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
         );
         let result = unconfigured_driver
             .challenge_for_blocked_gate(OAuthGateChallengeRequest {

@@ -1,11 +1,10 @@
-//! W6-COLD-SPOTS: `FilesystemOutboundStateStore` (`outbound_preferences`,
-//! the one role that was never feature-gated) survives a real
-//! process-level reopen. Mirrors `local_dev_outbound_store` (factory.rs);
+//! W6-COLD-SPOTS: `FilesystemOutboundStateStore` (`outbound_preferences`
+//! role) survives a real process-level reopen. Mirrors `local_dev_outbound_store` (factory.rs);
 //! see docs/plans/2026-07-04-w6-cold-spots-plan.md.
 //!
 //! `ThreadNotificationPolicy`/`DeliveredGateRouteStore`/
-//! `TriggeredRunDeliveryStore` excluded — not in
-//! this binary's dev-dep feature set. Deferred until PR #5656.
+//! `TriggeredRunDeliveryStore` excluded — not covered here. Deferred until
+//! PR #5656.
 
 use ironclaw_outbound::{
     CommunicationModality, CommunicationPreferenceKey, CommunicationPreferenceRecord,

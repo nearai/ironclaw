@@ -14,7 +14,6 @@ pub use extension_host::extension_ingress::{
     ExtensionIngressParts, ExtensionIngressRegistry, GenericChannelInboundSink,
     InboundPayloadClassifier, PostAdmissionObserver, StaticIngressSecrets, VerifiedEvidenceMint,
 };
-#[cfg(feature = "webui-v2-beta")]
 pub use extension_host::extension_ingress::{
     EXTENSION_INGRESS_ROUTE_PATTERN, extension_ingress_route_mount, forward_alias_request,
 };
@@ -33,12 +32,15 @@ pub use factory::ChannelHostAssemblyTestWiring;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use factory::LOCAL_DEV_SECRETS_MASTER_KEY_PATH;
 #[cfg(feature = "test-support")]
-pub use factory::RebornLocalDevApprovalTestParts;
+pub use factory::RebornApprovalTestParts;
+#[cfg(any(feature = "libsql", feature = "test-support"))]
+pub use factory::local_dev_db_path;
 #[cfg(feature = "libsql")]
 pub use factory::open_local_dev_secret_store;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use factory::{KeychainMasterKeyOutcome, provision_local_dev_keychain_master_key};
 pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
+pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
 pub use input::{
     ChannelExtensionBinding, OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding,
 };
@@ -68,38 +70,30 @@ pub use ironclaw_skills::{
 };
 pub use ironclaw_triggers::TriggerId;
 pub use ironclaw_turns::TurnStatus;
-#[cfg(feature = "root-llm-provider")]
 pub use llm_admin::llm_catalog::{
     ProviderCatalogValidationError, RebornLlmCatalogError, resolve_against_registry,
     resolve_llm_selection_against_catalog, resolve_llm_selection_allow_missing_key,
     resolve_reborn_runtime_llm, validate_reborn_provider_catalog_contents,
 };
-#[cfg(feature = "root-llm-provider")]
 pub use llm_admin::llm_config_service::{LlmReloadTrigger, RebornLlmConfigService};
-#[cfg(feature = "root-llm-provider")]
 pub use llm_admin::llm_key_store::{LlmKeyStore, LlmKeyStoreError};
 pub use llm_admin::nearai_mcp::{
     NearAiMcpBootstrapConfig, NearAiMcpBootstrapConfigError, nearai_mcp_bootstrap_config_from_env,
 };
-#[cfg(feature = "openai-compat-beta")]
 pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
-#[cfg(feature = "openai-compat-beta")]
 pub use ironclaw_product_adapters::mark_bearer_token_verified_for_tenant;
-#[cfg(feature = "root-llm-provider")]
 pub use llm_admin::provider_admin::{
     DetectedEnvLlm, EXAMPLE_OVERLAY_PROVIDER_ID, ProviderMenuEntry, ProviderProbeOutcome,
     RebornModelRoutesState, RebornProviderAdmin, RebornProviderAdminError, RebornProviderInfo,
     RebornProviderList, RebornProviderMetadata, RebornProviderSelection, RebornProviderStatus,
     RebornProviderWriteOutcome, RebornV1State,
 };
-#[cfg(feature = "root-llm-provider")]
 pub use llm_admin::provider_admin_product_command::RebornProviderAdminProductCommandService;
-#[cfg(feature = "root-llm-provider")]
 pub use llm_admin::provider_repo::{ProviderRepo, ProviderRepoError};
 pub use local_runtime_profile::{
-    RebornLocalRuntimeProfileError, RebornLocalRuntimeProfileOptions,
-    hosted_single_tenant_runtime_policy, hosted_single_tenant_volume_runtime_policy,
-    local_dev_runtime_policy, local_dev_yolo_runtime_policy, local_runtime_build_input,
+    RebornRuntimeProfileError, RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
+    hosted_single_tenant_volume_runtime_policy, local_dev_runtime_policy,
+    local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,
 };
 pub use observability::budget::build_default_budget_accountant;
@@ -123,7 +117,6 @@ pub use product_auth::api::auth::{
     RebornOAuthCallbackRequest, RebornOAuthCallbackResponse, RebornProductAuthServicePorts,
     RebornProductAuthServices,
 };
-#[cfg(feature = "webui-v2-beta")]
 pub use product_auth::serve::{
     ProductAuthRouteMount, ProductAuthRouteState, product_auth_route_mount,
 };
@@ -160,23 +153,19 @@ pub use runtime_input::{
     TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
     TriggerFireAccessError, TriggerPollerSettings, TurnRunnerSettings,
 };
-#[cfg(feature = "root-llm-provider")]
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
 pub use web_access::register_bundled_web_access_first_party_handlers;
 pub use webui::facade::{RebornWebuiBundle, build_webui_services};
-#[cfg(feature = "webui-v2-beta")]
 pub use webui::route_mounts::{
     ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount,
 };
-#[cfg(all(feature = "webui-v2-beta", feature = "postgres"))]
+#[cfg(feature = "postgres")]
 pub use ironclaw_runner::local_trigger_access::RebornFilesystemLocalTriggerAccessStore;
-#[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_runner::local_trigger_access::{
     LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSeed,
     LocalTriggerAccessSource, LocalTriggerAccessStore, RebornLibSqlLocalTriggerAccessStore,
     RebornLocalTriggerAccessStoreError,
 };
-#[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_reborn_identity::{
     ExternalSubjectId, IdentityKeyError, ProviderInstanceId, ProviderKind, RebornIdentityError,
     RebornIdentityResolver, ResolveExternalIdentity, SurfaceKind,

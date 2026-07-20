@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use clap::Args;
-#[cfg(feature = "openai-compat-beta")]
 use ironclaw_reborn_composition::build_openai_compat_route_mount;
 use ironclaw_reborn_composition::build_webui_services;
 use ironclaw_reborn_composition::host_api::{
@@ -209,7 +208,6 @@ impl ServeCommand {
         let mut runtime_input = runtime_input.with_owner_id(runtime_owner);
         // Carry the boot config so the WebUI facade can compose the operator
         // LLM-config settings service over `providers.json` / `config.toml`.
-        #[cfg(feature = "root-llm-provider")]
         {
             runtime_input = runtime_input.with_boot_config(boot_config.clone());
         }
@@ -346,8 +344,9 @@ impl ServeCommand {
         // canonical identity itself lives on the runtime's scoped filesystem,
         // not in this file.
         let profile = crate::runtime::effective_profile(boot_config, config_file.as_ref())?;
-        let user_store_path = crate::runtime::local_runtime_storage_root(boot_config, profile)
-            .join("reborn-local-dev.db");
+        let user_store_path = ironclaw_reborn_composition::local_dev_db_path(
+            &crate::runtime::local_runtime_storage_root(boot_config, profile),
+        );
         // CORS allow-origin list. Empty = fail-closed on every
         // cross-origin preflight; operators MUST opt in to the
         // specific origins the host installation actually serves.
@@ -477,7 +476,6 @@ impl ServeCommand {
             }
 
             let bundle: RebornWebuiBundle = build_webui_services(&runtime, None)?;
-            #[cfg(feature = "openai-compat-beta")]
             let openai_compat_mount = build_openai_compat_route_mount(
                 &runtime,
                 tenant_id.clone(),
@@ -575,7 +573,6 @@ impl ServeCommand {
             if let Some(project_id) = default_project_id.clone() {
                 serve_config = serve_config.with_default_project_id(project_id);
             }
-            #[cfg(feature = "openai-compat-beta")]
             {
                 serve_config = serve_config.with_protected_route_mount(openai_compat_mount);
             }
@@ -618,7 +615,6 @@ impl ServeCommand {
             }
             // Public NEAR AI login callback route (token redirect target). Built
             // from the runtime's LLM seam; absent when no LLM was wired.
-            #[cfg(feature = "root-llm-provider")]
             if let Some(nearai_mount) = runtime.nearai_login_callback_mount() {
                 serve_config = serve_config.with_public_route_mount(nearai_mount);
             }
@@ -1821,3 +1817,4 @@ mod tests {
         clear_webui_env();
     }
 }
+// arch-exempt: large_file, serve composition remains centralized during assembly cleanup, plan #6175

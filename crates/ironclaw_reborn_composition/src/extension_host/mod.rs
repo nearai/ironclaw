@@ -25,7 +25,6 @@ pub(crate) mod channel_identity;
 pub(crate) mod channel_identity_store;
 pub(crate) mod channel_outbound_targets;
 pub(crate) mod channel_pairing;
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) mod channel_pairing_serve;
 pub(crate) mod channel_subject_routes;
 pub(crate) mod channel_triggered_delivery;

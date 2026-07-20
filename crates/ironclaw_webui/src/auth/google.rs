@@ -79,10 +79,10 @@ impl GoogleProvider {
 
     /// Test-only constructor: lets the caller-level test harness
     /// substitute the auth / token endpoint URLs with a local mock
-    /// server. The `dev-in-memory-session` feature gate keeps the
+    /// server. The `test-support` feature gate keeps the
     /// helper out of production builds for the same reason the
     /// in-memory session store is gated.
-    #[cfg(any(test, feature = "dev-in-memory-session"))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_endpoints(
         config: GoogleOAuthConfig,
         auth_endpoint: impl Into<String>,

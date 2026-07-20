@@ -30,9 +30,17 @@ fn resolver_with_lanes(
         Arc<dyn RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor>>,
     >,
 ) -> RegistryLaneToolResolver<DiskFilesystem, InMemoryResourceGovernor> {
+    let executor = lanes.into_iter().fold(
+        RuntimeLaneExecutor::new(None, None, None, None),
+        |executor, (runtime, adapter)| {
+            let lane = RuntimeLane::from_runtime_kind(runtime)
+                .expect("test runtime must map to an execution lane");
+            executor.with_test_adapter(lane, adapter)
+        },
+    );
     RegistryLaneToolResolver::new(
         registry,
-        lanes,
+        Arc::new(executor),
         Arc::new(DiskFilesystem::new()),
         governor,
         policy_with(

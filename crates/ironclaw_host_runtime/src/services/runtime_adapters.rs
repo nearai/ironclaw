@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    marker::PhantomData,
     panic::AssertUnwindSafe,
     sync::{Arc, Mutex, MutexGuard},
 };
@@ -20,10 +21,10 @@ use super::{
     FirstPartyCapabilityRequest, InvocationServicesResolutionRequest, InvocationServicesResolver,
     McpError, McpExecutionRequest, McpExecutor, McpInvocation, NetworkObligationPolicyStore,
     PlannerError, PreparedWitTool, ResourceGovernor, ResourceReservationId, ResourceScope,
-    RootFilesystem, RuntimeAdapterResult, RuntimeDispatchErrorKind, RuntimeKind, ScriptError,
-    ScriptExecutionRequest, ScriptExecutor, ScriptInvocation, SharedRuntimeHttpEgress, WasmError,
-    WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder, WitToolHost,
-    WitToolRuntime, WitToolRuntimeConfig, plan_capability, runtime_http_egress,
+    RootFilesystem, RuntimeAdapterResult, RuntimeDispatchErrorKind, RuntimeKind, RuntimeLane,
+    ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation, SharedRuntimeHttpEgress,
+    WasmError, WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder,
+    WitToolHost, WitToolRuntime, WitToolRuntimeConfig, plan_capability, runtime_http_egress,
 };
 use crate::{
     FirstPartyCapabilityError,
@@ -227,6 +228,117 @@ where
 
         self.inner.dispatch_json(request).await
     }
+}
+
+/// Closed host-runtime lane set. Capability bindings retain this one concrete
+/// executor and a [`RuntimeLane`] value instead of retaining a trait object
+/// selected from a `HashMap<RuntimeKind, dyn RuntimeAdapter>`.
+pub(super) struct RuntimeLaneExecutor<F, G>
+where
+    F: RootFilesystem,
+    G: ResourceGovernor,
+{
+    first_party: Option<FirstPartyRuntimeAdapter>,
+    wasm: Option<ServiceResolvedRuntimeAdapter<WasmRuntimeAdapter>>,
+    mcp: Option<ServiceResolvedRuntimeAdapter<McpRuntimeAdapter>>,
+    process: Option<ServiceResolvedRuntimeAdapter<ScriptRuntimeAdapter>>,
+    #[cfg(test)]
+    test_adapters: HashMap<RuntimeLane, Arc<dyn RuntimeAdapter<F, G>>>,
+    marker: PhantomData<fn() -> (F, G)>,
+}
+
+impl<F, G> RuntimeLaneExecutor<F, G>
+where
+    F: RootFilesystem,
+    G: ResourceGovernor,
+{
+    pub(super) fn new(
+        first_party: Option<FirstPartyRuntimeAdapter>,
+        wasm: Option<ServiceResolvedRuntimeAdapter<WasmRuntimeAdapter>>,
+        mcp: Option<ServiceResolvedRuntimeAdapter<McpRuntimeAdapter>>,
+        process: Option<ServiceResolvedRuntimeAdapter<ScriptRuntimeAdapter>>,
+    ) -> Self {
+        Self {
+            first_party,
+            wasm,
+            mcp,
+            process,
+            #[cfg(test)]
+            test_adapters: HashMap::new(),
+            marker: PhantomData,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_test_adapter(
+        mut self,
+        lane: RuntimeLane,
+        adapter: Arc<dyn RuntimeAdapter<F, G>>,
+    ) -> Self {
+        self.test_adapters.insert(lane, adapter);
+        self
+    }
+
+    pub(super) fn supports_lane(&self, lane: RuntimeLane) -> bool {
+        #[cfg(test)]
+        if self.test_adapters.contains_key(&lane) {
+            return true;
+        }
+        match lane {
+            RuntimeLane::FirstParty => self.first_party.is_some(),
+            RuntimeLane::Wasm => self.wasm.is_some(),
+            RuntimeLane::Mcp => self.mcp.is_some(),
+            RuntimeLane::Process => self.process.is_some(),
+        }
+    }
+
+    pub(super) async fn dispatch_json(
+        &self,
+        lane: RuntimeLane,
+        request: RuntimeAdapterRequest<'_, F, G>,
+    ) -> Result<RuntimeAdapterResult, DispatchError> {
+        #[cfg(test)]
+        if let Some(adapter) = self.test_adapters.get(&lane) {
+            return adapter.dispatch_json(request).await;
+        }
+        match lane {
+            RuntimeLane::FirstParty => match self.first_party.as_ref() {
+                Some(adapter) => adapter.dispatch_json(request).await,
+                None => fail_unconfigured_lane(request),
+            },
+            RuntimeLane::Wasm => match self.wasm.as_ref() {
+                Some(adapter) => adapter.dispatch_json(request).await,
+                None => fail_unconfigured_lane(request),
+            },
+            RuntimeLane::Mcp => match self.mcp.as_ref() {
+                Some(adapter) => adapter.dispatch_json(request).await,
+                None => fail_unconfigured_lane(request),
+            },
+            RuntimeLane::Process => match self.process.as_ref() {
+                Some(adapter) => adapter.dispatch_json(request).await,
+                None => fail_unconfigured_lane(request),
+            },
+        }
+    }
+}
+
+fn fail_unconfigured_lane<F, G>(
+    request: RuntimeAdapterRequest<'_, F, G>,
+) -> Result<RuntimeAdapterResult, DispatchError>
+where
+    F: RootFilesystem,
+    G: ResourceGovernor,
+{
+    release_adapter_reservation(
+        request.governor,
+        request
+            .resource_reservation
+            .as_ref()
+            .map(|reservation| reservation.id),
+    );
+    Err(DispatchError::MissingRuntimeBackend {
+        runtime: request.descriptor.runtime,
+    })
 }
 
 #[derive(Clone)]

@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical §4.3 secret-store swap only (FilesystemSecretStore -> FilesystemSecretStore::ephemeral), plan #6168
 //! Composition-side implementation of the WebChat v2 LLM-config port.
 //!
 //! Ties together the read/set-active surface ([`RebornProviderAdmin`]), the
@@ -74,7 +75,6 @@ impl NearAiLoginStateStore {
         state
     }
 
-    #[cfg(any(test, feature = "webui-v2-beta"))]
     #[allow(dead_code)]
     pub(crate) async fn consume(&self, state: &str) -> bool {
         let mut states = self.states.lock().await;
@@ -979,7 +979,6 @@ pub(crate) const NEARAI_LOGIN_PREFIX: &str = "/api/webchat/v2/llm/nearai";
 /// The public callback path NEAR AI redirects to (token in the query). The
 /// `{state}` segment must match an authenticated start request before the
 /// callback can write the operator-wide session.
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) const NEARAI_LOGIN_CALLBACK_PATH: &str =
     "/api/webchat/v2/llm/nearai/{state}/auth/callback";
 
@@ -1015,7 +1014,6 @@ fn sanitize_origin(raw: &str) -> Option<String> {
 /// Apply a completed NEAR AI login: store the session token on the live
 /// session, make NEAR AI the active provider, and hot-swap the running
 /// provider. Shared by the public callback route. Errors are log-only strings.
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) async fn apply_nearai_login(
     session: &ironclaw_llm::SessionManager,
     boot: &RebornBootConfig,
@@ -1335,11 +1333,12 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+    use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId};
     use ironclaw_llm::NEARAI_CLOUD_DEFAULT_BASE_URL;
     use ironclaw_reborn_config::{RebornHome, RebornProfile};
     use ironclaw_secrets::{
-        InMemorySecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata,
+        FilesystemSecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata,
         SecretStore, SecretStoreError,
     };
 
@@ -1354,11 +1353,11 @@ mod tests {
     }
 
     fn key_store() -> LlmKeyStore {
-        LlmKeyStore::new(Arc::new(InMemorySecretStore::new()))
+        LlmKeyStore::new(Arc::new(FilesystemSecretStore::ephemeral()))
     }
 
     struct CountingMetadataSecretStore {
-        inner: InMemorySecretStore,
+        inner: FilesystemSecretStore<InMemoryBackend>,
         metadata_calls: Arc<AtomicUsize>,
         metadata_for_scope_calls: Arc<AtomicUsize>,
     }
@@ -1366,7 +1365,7 @@ mod tests {
     impl CountingMetadataSecretStore {
         fn new() -> Self {
             Self {
-                inner: InMemorySecretStore::new(),
+                inner: FilesystemSecretStore::ephemeral(),
                 metadata_calls: Arc::new(AtomicUsize::new(0)),
                 metadata_for_scope_calls: Arc::new(AtomicUsize::new(0)),
             }
@@ -1443,13 +1442,13 @@ mod tests {
     }
 
     struct MetadataUnavailableSecretStore {
-        inner: InMemorySecretStore,
+        inner: FilesystemSecretStore<InMemoryBackend>,
     }
 
     impl MetadataUnavailableSecretStore {
         fn new() -> Self {
             Self {
-                inner: InMemorySecretStore::new(),
+                inner: FilesystemSecretStore::ephemeral(),
             }
         }
     }
@@ -1529,13 +1528,13 @@ mod tests {
     /// to an in-memory store. Used to prove provider deletion fails closed when
     /// the stored key cannot be removed.
     struct DeleteUnavailableSecretStore {
-        inner: InMemorySecretStore,
+        inner: FilesystemSecretStore<InMemoryBackend>,
     }
 
     impl DeleteUnavailableSecretStore {
         fn new() -> Self {
             Self {
-                inner: InMemorySecretStore::new(),
+                inner: FilesystemSecretStore::ephemeral(),
             }
         }
     }
@@ -1626,14 +1625,26 @@ mod tests {
             .expect("nearai provider in snapshot")
     }
 
+    /// Clear the runtime-overlay NEARAI_* entries so overlay state from other
+    /// tests cannot leak into snapshot assertions. A real `NEARAI_API_KEY`
+    /// exported by the developer shell is deliberately tolerated: the
+    /// snapshot assertions below only depend on the base URL, and this
+    /// `#![forbid(unsafe_code)]` crate cannot remove real process env vars.
+    /// `NEARAI_BASE_URL` would change the asserted base URL, so its absence
+    /// from the real env is still checked loudly.
     fn clear_nearai_snapshot_env() {
         for key in ["NEARAI_API_KEY", "NEARAI_BASE_URL"] {
             ironclaw_common::env_helpers::remove_runtime_env(key);
-            assert!(
-                ironclaw_common::env_helpers::env_or_override(key).is_none(),
-                "{key} must be unset for this branch-specific snapshot test"
-            );
         }
+        // An EMPTY value is semantically unset to `env_or_override`, so only a
+        // non-empty real value can change the asserted base URL — treat empty
+        // as absent to keep the precondition environment-independent.
+        assert!(
+            std::env::var_os("NEARAI_BASE_URL")
+                .map(|value| value.is_empty())
+                .unwrap_or(true),
+            "NEARAI_BASE_URL must be unset (or empty) in the real environment for this snapshot test"
+        );
     }
 
     /// nearai has exactly one default now — cloud — regardless of whether an
@@ -1719,7 +1730,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "webui-v2-beta")]
     #[tokio::test]
     async fn nearai_login_state_is_single_use() {
         let store = NearAiLoginStateStore::new();
@@ -1896,7 +1906,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "webui-v2-beta")]
     #[tokio::test]
     async fn nearai_login_state_store_evicts_oldest_at_capacity() {
         // Unexpired states within the 15-min TTL must still be bounded, or a
