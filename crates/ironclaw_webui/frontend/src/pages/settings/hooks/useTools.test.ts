@@ -116,7 +116,7 @@ test("failed permission saves clear the pending selection so the server value is
   });
 });
 
-test("stale successful saves update the cache before a newer save fails", () => {
+test("a newer failed save refetches after an older successful response is ignored", () => {
   const { calls, getMutationOptions, useTools } = loadUseTools();
   const tools = useTools();
 
@@ -133,13 +133,7 @@ test("stale successful saves update the cache before a newer save fails", () => 
     { tool: { name: "builtin.echo", state: "always_allow" } },
     mutations[0].payload
   );
-
-  const cacheUpdate = calls.find((call) => call.type === "setQueryData");
-  assert.ok(cacheUpdate, "expected the stale success to reconcile the query cache");
-  const reconciled = cacheUpdate.args[1]({
-    tools: [{ name: "builtin.echo", state: "ask_each_time" }],
-  });
-  assert.equal(reconciled.tools[0].state, "always_allow");
+  assert.equal(calls.some((call) => call.type === "setQueryData"), false);
 
   getMutationOptions().onError(new Error("permission denied"), mutations[1].payload);
 
@@ -148,6 +142,36 @@ test("stale successful saves update the cache before a newer save fails", () => 
     JSON.parse(JSON.stringify(rollbackUpdate.updater(pendingPermissions))),
     {}
   );
+  assert.equal(calls.filter((call) => call.type === "invalidateQueries").length, 2);
+});
+
+test("an older successful response cannot overwrite a newer successful save", () => {
+  const { calls, getMutationOptions, useTools } = loadUseTools();
+  const tools = useTools();
+
+  tools.setPermission("builtin.echo", "always_allow");
+  tools.setPermission("builtin.echo", "disabled");
+  const mutations = calls.filter((call) => call.type === "mutate");
+
+  getMutationOptions().onSuccess(
+    { tool: { name: "builtin.echo", state: "disabled" } },
+    mutations[1].payload
+  );
+
+  const cacheUpdates = calls.filter((call) => call.type === "setQueryData");
+  assert.equal(cacheUpdates.length, 1);
+  const latest = cacheUpdates[0].args[1]({
+    tools: [{ name: "builtin.echo", state: "ask_each_time" }],
+  });
+  assert.equal(latest.tools[0].state, "disabled");
+
+  getMutationOptions().onSuccess(
+    { tool: { name: "builtin.echo", state: "always_allow" } },
+    mutations[0].payload
+  );
+
+  assert.equal(calls.filter((call) => call.type === "setQueryData").length, 1);
+  assert.equal(calls.filter((call) => call.type === "invalidateQueries").length, 1);
 });
 
 test("saved indicator timeouts restart per tool and are cleared on unmount", () => {

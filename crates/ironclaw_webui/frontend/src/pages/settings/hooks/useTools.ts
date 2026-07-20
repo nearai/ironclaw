@@ -45,6 +45,10 @@ export function useTools() {
     mutationFn: async ({ name, state }) =>
       throwIfApiFailed(await updateToolPermission(name, state), "Save failed"),
     onSuccess: (data, { name, state, requestId }) => {
+      if (pendingRequestIds.current[name] !== requestId) {
+        queryClient.invalidateQueries({ queryKey: ["settings-tools"] });
+        return;
+      }
       queryClient.setQueryData(["settings-tools"], (old) => {
         if (!old) return old;
         const updatedTool = data?.tool;
@@ -55,7 +59,6 @@ export function useTools() {
           ),
         };
       });
-      if (pendingRequestIds.current[name] !== requestId) return;
       clearPendingPermission(name, requestId);
       setSavedTools((prev) => ({ ...prev, [name]: true }));
       if (savedTimeouts.current[name]) {
