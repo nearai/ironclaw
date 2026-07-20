@@ -39,11 +39,14 @@
 
 ## Quick Start
 
-Install the Reborn `1.0.0-rc.1` release on macOS, Linux, or Windows/WSL:
+Choose an `ironclaw-v*` tag from the [Releases page](https://github.com/nearai/ironclaw/releases/),
+then install it on macOS, Linux, or Windows/WSL. Replace `X.Y.Z` with the
+selected version, including any prerelease suffix:
 
 ```bash
+IRONCLAW_RELEASE_TAG=ironclaw-vX.Y.Z
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/nearai/ironclaw/releases/download/ironclaw-v1.0.0-rc.1/ironclaw-installer.sh | sh
+  "https://github.com/nearai/ironclaw/releases/download/${IRONCLAW_RELEASE_TAG}/ironclaw-installer.sh" | sh
 ```
 
 Then run the guided setup:
@@ -114,7 +117,8 @@ pre-built binaries and installers.
 <details>
   <summary>Install via Windows Installer (Windows)</summary>
 
-Download the [Windows Installer](https://github.com/nearai/ironclaw/releases/download/ironclaw-v1.0.0-rc.1/ironclaw-x86_64-pc-windows-msvc.msi) and run it.
+Open the selected `ironclaw-v*` release, download
+`ironclaw-x86_64-pc-windows-msvc.msi`, and run it.
 
 </details>
 
@@ -122,7 +126,8 @@ Download the [Windows Installer](https://github.com/nearai/ironclaw/releases/dow
   <summary>Install via PowerShell script (Windows)</summary>
 
 ```powershell
-irm https://github.com/nearai/ironclaw/releases/download/ironclaw-v1.0.0-rc.1/ironclaw-installer.ps1 | iex
+$IronClawReleaseTag = "ironclaw-vX.Y.Z"
+irm "https://github.com/nearai/ironclaw/releases/download/$IronClawReleaseTag/ironclaw-installer.ps1" | iex
 ```
 
 </details>
@@ -131,8 +136,9 @@ irm https://github.com/nearai/ironclaw/releases/download/ironclaw-v1.0.0-rc.1/ir
   <summary>Install via shell script (macOS, Linux, Windows/WSL)</summary>
 
 ```bash
+IRONCLAW_RELEASE_TAG=ironclaw-vX.Y.Z
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/nearai/ironclaw/releases/download/ironclaw-v1.0.0-rc.1/ironclaw-installer.sh | sh
+  "https://github.com/nearai/ironclaw/releases/download/${IRONCLAW_RELEASE_TAG}/ironclaw-installer.sh" | sh
 ```
 
 </details>

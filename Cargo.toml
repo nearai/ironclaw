@@ -622,6 +622,9 @@ lto = "thin"
 [workspace.metadata.dist]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax)
 cargo-dist-version = "0.31.0"
+# cargo-dist 0.31 grants `contents: write` to every generated job. Keep the
+# checked-in CI customized so only the host job can publish a GitHub Release.
+allow-dirty = ["ci"]
 # Release only the canonical Reborn CLI.
 packages = ["ironclaw"]
 # CI backends to support

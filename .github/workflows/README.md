@@ -67,6 +67,21 @@ release targets, produce archives and checksums plus shell, PowerShell, and MSI
 installers, and create the tag's GitHub Release. cargo-dist derives the
 Release title and body from the release metadata and `CHANGELOG.md`.
 
+cargo-dist 0.31 generates workflow-wide `contents: write` and does not expose a
+setting for built-in job permissions. The checked-in workflow is therefore
+intentionally hardened beyond the generated template: repository access
+defaults to `contents: read`, only `host` receives `contents: write`, and local
+and global build jobs do not receive `GH_TOKEN`. `allow-dirty = ["ci"]` in the
+workspace dist config prevents a later `dist generate` from silently restoring
+the broader permission. When updating cargo-dist or its CI configuration,
+remove that allow-dirty entry temporarily, regenerate the workflow, reapply the
+permission boundary, and verify it with:
+
+```bash
+cargo test -p ironclaw --test smoke release_ci_ -- --nocapture
+rg -n "permissions:|GH_TOKEN" .github/workflows/ironclaw-release.yml
+```
+
 `reborn-release-compile.yml` remains an independent compile-and-smoke preflight
 that runs only through `workflow_dispatch`. It uploads temporary evidence
 artifacts but does not publish a Release, and it is not called by the tag or

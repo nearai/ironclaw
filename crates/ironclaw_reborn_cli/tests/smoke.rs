@@ -371,7 +371,7 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         "cargo-dist must install the WebUI build prerequisites before compiling artifacts"
     );
     assert!(
-        cli_manifest.contains("name = \"ironclaw\"\nversion = \"1.0.0-rc.1\"")
+        cli_manifest.contains("[package]\nname = \"ironclaw\"\nversion = \"")
             && cli_manifest.contains("[package.metadata.dist]\ndist = true")
             && cli_manifest
                 .contains("features = [\"libsql\", \"postgres\", \"inmemory-turn-state\"]")
@@ -6872,6 +6872,12 @@ fn release_ci_publishes_reborn_without_enabling_legacy_or_docker_paths() {
         "cargo-dist plan must create the release and publish its build manifest"
     );
 
+    assert!(
+        release_workflow.contains("name: Release\npermissions:\n  \"contents\": \"read\"\n")
+            && !plan_job.contains("permissions:"),
+        "release CI must default every job to read-only repository permissions"
+    );
+
     let local_build_job = release_job("build-local-artifacts");
     assert!(
         local_build_job.contains("fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix")
@@ -6882,6 +6888,10 @@ fn release_ci_publishes_reborn_without_enabling_legacy_or_docker_paths() {
             && local_build_job.contains("artifacts-build-local-${{ join(matrix.targets, '_') }}"),
         "cargo-dist must build and upload every platform artifact from its generated matrix"
     );
+    assert!(
+        !local_build_job.contains("permissions:") && !local_build_job.contains("GH_TOKEN:"),
+        "untrusted local builds must not receive elevated repository permissions or a GitHub token"
+    );
 
     let global_build_job = release_job("build-global-artifacts");
     assert!(
@@ -6890,10 +6900,16 @@ fn release_ci_publishes_reborn_without_enabling_legacy_or_docker_paths() {
             && global_build_job.contains("artifacts-build-global"),
         "cargo-dist must generate checksums and universal installers after local builds"
     );
+    assert!(
+        !global_build_job.contains("permissions:") && !global_build_job.contains("GH_TOKEN:"),
+        "global packaging must not receive elevated repository permissions or a GitHub token"
+    );
 
     let host_job = release_job("host");
     assert!(
         host_job.contains("needs.plan.outputs.publishing == 'true'")
+            && host_job.contains("permissions:\n      \"contents\": \"write\"")
+            && host_job.contains("GH_TOKEN:")
             && host_job.contains("--steps=upload --steps=release")
             && host_job.contains("ANNOUNCEMENT_TITLE")
             && host_job.contains("ANNOUNCEMENT_BODY")
@@ -6911,7 +6927,9 @@ fn release_ci_publishes_reborn_without_enabling_legacy_or_docker_paths() {
             && announce_job.contains("- host")
             && announce_job.contains("needs.host.result == 'success'")
             && !announce_job.contains("registry")
-            && !announce_job.contains("checksum"),
+            && !announce_job.contains("checksum")
+            && !announce_job.contains("permissions:")
+            && !announce_job.contains("GH_TOKEN:"),
         "cargo-dist announce must only finalize a successful hosted release, not run the legacy registry path"
     );
 
@@ -6942,7 +6960,8 @@ fn release_ci_publishes_reborn_without_enabling_legacy_or_docker_paths() {
         workspace_manifest.contains("name = \"ironclaw_legacy\"")
             && workspace_manifest.contains("[package.metadata.dist]\ndist = false")
             && workspace_manifest.contains("packages = [\"ironclaw\"]")
-            && cli_manifest.contains("name = \"ironclaw\"\nversion = \"1.0.0-rc.1\"")
+            && workspace_manifest.contains("allow-dirty = [\"ci\"]")
+            && cli_manifest.contains("[package]\nname = \"ironclaw\"\nversion = \"")
             && cli_manifest.contains("[package.metadata.dist]\ndist = true"),
         "cargo-dist package selection must exclude legacy and enable only Reborn"
     );
