@@ -67,7 +67,7 @@ unused_must_use = "deny"
 [package]
 name = "ironclaw"
 autobins = false
-version = "0.99.1-rc.8"
+version = "0.99.1-rc.9"
 edition = "2024"
 rust-version.workspace = true
 description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
@@ -622,7 +622,7 @@ lto = "thin"
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax)
 cargo-dist-version = "0.31.0"
 # Ignore out-of-date generated CI so custom release.yml jobs are allowed
-allow-dirty = ["ci"]
+allow-dirty = ["ci", "msi"]
 # Release only the standalone Reborn CLI through cargo-dist. The workspace root
 # still contains the legacy package named `ironclaw`, so keep selection explicit.
 packages = ["ironclaw_reborn_cli"]
