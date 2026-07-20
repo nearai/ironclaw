@@ -707,7 +707,6 @@ mod tests {
             EXTENSION_REMOVE_CAPABILITY_ID,
             execution_context_for_user("extension-tools-owner", [EXTENSION_REMOVE_CAPABILITY_ID]),
             serde_json::json!({"extension_id": "web-access"}),
-            trust_decision(),
         )
         .await
         .expect("remove succeeds");
@@ -726,7 +725,6 @@ mod tests {
             EXTENSION_INSTALL_CAPABILITY_ID,
             execution_context_for_user("extension-tools-owner", [EXTENSION_INSTALL_CAPABILITY_ID]),
             serde_json::json!({"extension_id": "web-access"}),
-            trust_decision(),
         )
         .await
         .expect("reinstall succeeds");
@@ -742,7 +740,6 @@ mod tests {
             EXTENSION_ACTIVATE_CAPABILITY_ID,
             execution_context_for_user("extension-tools-owner", [EXTENSION_ACTIVATE_CAPABILITY_ID]),
             serde_json::json!({"extension_id": "web-access"}),
-            trust_decision(),
         )
         .await
         .expect("reactivate succeeds");

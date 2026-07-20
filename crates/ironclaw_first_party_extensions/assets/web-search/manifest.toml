@@ -1,0 +1,30 @@
+schema_version = "reborn.extension_manifest.v2"
+id = "web_search"
+name = "Web Search"
+version = "0.2.2"
+description = "Search the web using the Brave Search API. Returns titles, URLs, descriptions, and publication dates for matching web pages."
+trust = "first_party_requested"
+
+[runtime]
+kind = "wasm"
+module = "wasm/web_search_tool.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "web_search.search"
+description = "Search the web using Brave Search. Returns titles, URLs, descriptions, and publication dates for matching web pages. Supports filtering by country, language, and freshness."
+effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "brave_api_key", audience = { scheme = "https", host_pattern = "api.search.brave.com" }, target = { type = "header", name = "X-Subscription-Token" }, required = true },
+]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/web_search/search.input.v1.json"
+output_schema_ref = "schemas/web_search/search.output.v1.json"
+prompt_doc_ref = "prompts/web_search/search.md"
+required_host_ports = ["host.runtime.http_egress"]

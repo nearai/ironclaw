@@ -82,6 +82,11 @@ const NOTION_MCP_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/notion-mcp/manifest.toml");
 const WEB_ACCESS_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/web-access/manifest.toml");
+const WEB_SEARCH_MANIFEST: &str =
+    include_str!("../../../ironclaw_first_party_extensions/assets/web-search/manifest.toml");
+const WEB_SEARCH_WASM_MODULE: &[u8] = include_bytes!(
+    "../../../ironclaw_first_party_extensions/assets/web-search/wasm/web_search_tool.wasm"
+);
 const NEARAI_MCP_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/nearai-mcp/manifest.toml");
 const SLACK_BOT_MANIFEST: &str =
@@ -406,6 +411,7 @@ impl AvailableExtensionCatalog {
             github_package()?,
             notion_mcp_package()?,
             web_access_package()?,
+            web_search_package()?,
             nearai_mcp_package(nearai_mcp_config)?,
             google_calendar_package()?,
             google_docs_package()?,
@@ -535,6 +541,15 @@ fn web_access_package() -> Result<AvailableExtensionPackage, ProductWorkflowErro
         "Web Access",
         WEB_ACCESS_MANIFEST,
         web_access_assets(),
+    )
+}
+
+fn web_search_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    bundled_extension_package(
+        "web_search",
+        "Web Search",
+        WEB_SEARCH_MANIFEST,
+        web_search_assets(),
     )
 }
 
@@ -1099,6 +1114,31 @@ fn web_access_assets() -> Vec<AvailableExtensionAsset> {
             "prompts/web-access/get_content.md",
             include_bytes!(
                 "../../../ironclaw_first_party_extensions/assets/web-access/prompts/web-access/get_content.md"
+            ),
+        ),
+    ]
+}
+
+fn web_search_assets() -> Vec<AvailableExtensionAsset> {
+    vec![
+        bytes_asset("manifest.toml", WEB_SEARCH_MANIFEST.as_bytes()),
+        bytes_asset("wasm/web_search_tool.wasm", WEB_SEARCH_WASM_MODULE),
+        bytes_asset(
+            "schemas/web_search/search.input.v1.json",
+            include_bytes!(
+                "../../../ironclaw_first_party_extensions/assets/web-search/schemas/web_search/search.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/web_search/search.output.v1.json",
+            include_bytes!(
+                "../../../ironclaw_first_party_extensions/assets/web-search/schemas/web_search/search.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "prompts/web_search/search.md",
+            include_bytes!(
+                "../../../ironclaw_first_party_extensions/assets/web-search/prompts/web_search/search.md"
             ),
         ),
     ]

@@ -1673,6 +1673,10 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         owner_user_id.clone(),
         local_runtime_identity_for_nearai_mcp.as_ref(),
     )?;
+    // `bootstrap_nearai_mcp` below consumes `nearai_mcp_owner_scope` by value;
+    // `bootstrap_web_search_brave` needs the same (tenant, user) scope for its
+    // secret-store provisioning, so keep a copy.
+    let web_search_owner_scope = nearai_mcp_owner_scope.clone();
     let mut store_graph = build_local_runtime_store_graph(RebornStoreGraphInput {
         filesystem: Arc::clone(&filesystem),
         owner_user_id,
@@ -2047,15 +2051,30 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     )
     .await?;
     nearai_mcp_bootstrap_outcome.log_completion();
-    // `web-access` is zero-config (no credentials, no durable-storage gate
-    // needed) — unlike NEAR AI MCP above, it can always be auto-activated
-    // rather than only when a config/credential is present. See
-    // `web_access_bootstrap`'s module doc for why this needs to exist at all:
-    // nothing in the base toolset otherwise points a session's model at the
-    // extension catalog, so it never discovers real web search on its own.
-    crate::extension_host::web_access_bootstrap::bootstrap_web_access(&extension_management)
-        .await?
-        .log_completion();
+    // `web_search` (real, credentialed Brave Search API) and `web-access`
+    // (zero-config Exa MCP) share the same model-facing `web_search` display
+    // name (see `ironclaw_runner::tool_disclosure`), so only one may be
+    // active at a time. Prefer Brave whenever an operator has actually
+    // configured `BRAVE_API_KEY` — a real, quota'd backend beats Exa's
+    // rate-shared free tier — and fall back to Exa's always-available
+    // zero-config path otherwise. See `web_search_bootstrap`'s and
+    // `web_access_bootstrap`'s module docs for why either needs to exist at
+    // all: nothing in the base toolset otherwise points a session's model at
+    // the extension catalog, so it never discovers real web search on its own.
+    let web_search_bootstrap_outcome =
+        crate::extension_host::web_search_bootstrap::bootstrap_web_search_brave(
+            crate::extension_host::web_search_bootstrap::web_search_bootstrap_api_key_from_env(),
+            &extension_management,
+            admin_secret_provisioner.as_ref(),
+            &web_search_owner_scope,
+        )
+        .await?;
+    web_search_bootstrap_outcome.log_completion();
+    if web_search_bootstrap_outcome.leaves_web_access_available() {
+        crate::extension_host::web_access_bootstrap::bootstrap_web_access(&extension_management)
+            .await?
+            .log_completion();
+    }
     if let Some(local_runtime) = Arc::get_mut(&mut store_graph.local_runtime) {
         local_runtime.extension_management = Some(Arc::clone(&extension_management));
         local_runtime.runtime_http_egress = Some(product_auth_runtime_ports.runtime_http_egress());
@@ -7041,6 +7060,83 @@ mod tests {
         // does not burn the retry budget on a call that can never resolve). The
         // capability still fails closed — only the disposition changed.
         assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn local_dev_web_search_brave_is_auto_installed_and_activated_when_configured() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let owner = "local-dev-web-search-owner";
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            owner,
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let local_runtime = services.local_runtime.as_ref().expect("local runtime");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management");
+        let admin_secret_provisioner = local_runtime
+            .admin_secret_provisioner
+            .as_ref()
+            .expect("admin secret provisioner");
+        let owner_scope =
+            local_dev_nearai_mcp_owner_scope(UserId::new(owner).expect("valid owner"), None)
+                .expect("owner scope");
+
+        // Without a configured key, `build_reborn_services` above already ran
+        // `bootstrap_web_search_brave(None, ...)` — assert it left `web_search`
+        // untouched (still just `Discovered`, matching the fallback-to-Exa
+        // behavior the mutual-exclusion logic in `build_local_runtime` relies
+        // on) before exercising the configured path directly.
+        let web_search_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "web_search")
+                .expect("valid ref");
+        let phase_before = extension_management
+            .project(
+                web_search_ref.clone(),
+                extension_management.tenant_operator_user_id_for_test(),
+            )
+            .await
+            .expect("project web_search before bootstrap")
+            .phase;
+        assert_eq!(phase_before, LifecyclePhase::Discovered);
+
+        let outcome = crate::extension_host::web_search_bootstrap::bootstrap_web_search_brave(
+            Some(secrecy::SecretString::from("test-brave-key".to_string())),
+            extension_management,
+            Some(admin_secret_provisioner),
+            &owner_scope,
+        )
+        .await
+        .expect("brave bootstrap succeeds");
+        assert_eq!(
+            outcome,
+            crate::extension_host::web_search_bootstrap::WebSearchBootstrapOutcome::Activated
+        );
+        assert!(!outcome.leaves_web_access_available());
+
+        let phase_after = extension_management
+            .project(
+                web_search_ref,
+                extension_management.tenant_operator_user_id_for_test(),
+            )
+            .await
+            .expect("project web_search after bootstrap")
+            .phase;
+        assert_eq!(phase_after, LifecyclePhase::Active);
+
+        let secrets = admin_secret_provisioner
+            .list(&owner_scope.tenant_id, &owner_scope.user_id)
+            .await
+            .expect("list secrets");
+        assert!(
+            secrets
+                .iter()
+                .any(|meta| meta.handle.as_str() == "brave_api_key"),
+            "expected brave_api_key to be seeded, got: {secrets:?}"
+        );
     }
 
     fn nearai_bootstrap_input_with_base(
