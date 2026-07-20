@@ -167,6 +167,22 @@ fn migrate_known_prior_default_system_prompt(
         return Ok(());
     }
 
+    let staged = stage_default_system_prompt_replacement(path)?;
+
+    // Staging can take long enough for a user to save an edit. Re-check the
+    // editable file immediately before replacement, so migration never
+    // overwrites an edit that appeared while the replacement was being staged.
+    replace_staged_default_system_prompt_if_known_prior(
+        storage_root,
+        path,
+        &known_prior_default,
+        staged,
+    )
+}
+
+fn stage_default_system_prompt_replacement(
+    path: &Path,
+) -> Result<tempfile::NamedTempFile, DefaultSystemPromptError> {
     // Write the replacement beside the existing prompt, then rename it only
     // after a complete, durable write. This keeps the prior trusted prompt
     // intact if staging fails or the process is interrupted before replacement.
@@ -206,6 +222,19 @@ fn migrate_known_prior_default_system_prompt(
             path: path.to_path_buf(),
             source,
         })?;
+    Ok(staged)
+}
+
+fn replace_staged_default_system_prompt_if_known_prior(
+    storage_root: &Path,
+    path: &Path,
+    known_prior_default: &str,
+    staged: tempfile::NamedTempFile,
+) -> Result<(), DefaultSystemPromptError> {
+    if read_default_system_prompt(storage_root, path)? != known_prior_default {
+        return Ok(());
+    }
+
     staged
         .persist(path)
         .map_err(|error| DefaultSystemPromptError::Io {
@@ -577,6 +606,41 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&prompt_path).expect("custom prompt reads"),
             "custom edited runtime prompt"
+        );
+    }
+
+    #[test]
+    fn default_system_prompt_migration_preserves_an_edit_made_while_staging() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let storage_root = root.path().canonicalize().expect("canonical root");
+        let prompt_path = storage_root.join("system/prompts/default-system.md");
+        std::fs::create_dir_all(prompt_path.parent().expect("prompt parent"))
+            .expect("prompt parent");
+        let (before_policy, after_policy) = DEFAULT_SYSTEM_PROMPT_EMBEDDED
+            .split_once(DEFAULT_SYSTEM_PROMPT_LANGUAGE_POLICY)
+            .expect("embedded prompt contains language policy");
+        let known_prior_default = format!("{before_policy}{after_policy}");
+
+        std::fs::write(&prompt_path, &known_prior_default).expect("prior prompt writes");
+        assert_eq!(
+            read_default_system_prompt(&storage_root, &prompt_path).expect("prior prompt reads"),
+            known_prior_default
+        );
+        let staged = stage_default_system_prompt_replacement(&prompt_path)
+            .expect("replacement prompt stages");
+
+        std::fs::write(&prompt_path, "user edit made during migration").expect("user edit writes");
+        replace_staged_default_system_prompt_if_known_prior(
+            &storage_root,
+            &prompt_path,
+            &known_prior_default,
+            staged,
+        )
+        .expect("migration revalidation succeeds");
+
+        assert_eq!(
+            std::fs::read_to_string(&prompt_path).expect("prompt reads"),
+            "user edit made during migration"
         );
     }
 
