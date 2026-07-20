@@ -4,19 +4,13 @@
 //!
 //! ## Why this file exists (issue #6263, Step 3 prerequisite)
 //!
-//! The row store is a write-ahead-log durable store: every mutation delegates
-//! to the embedded `InMemoryTurnStateStore` engine, diffs the resulting
-//! snapshot into a typed delta, appends that delta to a single-writer journal,
-//! and (today) awaits the durable ack before returning `Ok` — i.e. it is
-//! **write-through**. A background task materializes the journal tail into
-//! per-record rows; on restart, `load_snapshot_from_rows` replays the
-//! un-materialized tail.
-//!
-//! Issue #6263 Step 3 will make non-critical transitions **async write-behind**
-//! (ack before durable), keeping only gate-park + terminal transitions
-//! synchronously durable. That change is only safe with a crash-consistency
-//! oracle in place *first*. This suite is that oracle. It MUST be green on the
-//! current write-through store and becomes the acceptance gate for Step 3.
+//! The row store delegates mutations to an embedded `InMemoryTurnStateStore`
+//! and persists typed deltas through a single-writer journal. Write-through
+//! appends every mutation. Recovery-boundary cadence keeps non-critical state
+//! in the live snapshot and appends one coalesced delta at gate/terminal
+//! transitions, the pending cap, or drain. A background task materializes the
+//! journal into per-record rows; restart replays any unmaterialized tail. This
+//! suite is the acceptance oracle for both durability policies.
 //!
 //! ## Architecture
 //!
@@ -69,9 +63,9 @@ use ironclaw_turns::{
     ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest, RunProfileRequest,
     RunProfileVersion, SanitizedCancelReason, SanitizedFailure, SourceBindingRef,
     SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnError,
-    TurnEventProjectionSource, TurnId, TurnLeaseToken, TurnPersistenceSnapshot, TurnRunId,
-    TurnRunnerId, TurnScope, TurnSpawnTreeStateStore, TurnStateDurabilityPolicy, TurnStateStore,
-    TurnStatus, is_recoverability_critical,
+    TurnEventProjectionSource, TurnLeaseToken, TurnPersistenceSnapshot, TurnRunId, TurnRunnerId,
+    TurnScope, TurnSpawnTreeStateStore, TurnStateDurabilityPolicy, TurnStateStore, TurnStatus,
+    is_recoverability_critical,
     run_profile::{LoopCheckpointKind, LoopCheckpointStateRef},
     runner::{
         BlockRunRequest, ClaimRunRequest, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
@@ -134,7 +128,7 @@ struct FaultBackend {
     config: StdMutex<FaultConfig>,
     recorded: StdMutex<Vec<RecordedOp>>,
     /// Append stall gate: every journal append acquires it. A test holding this
-    /// lock freezes the flusher so pending write-behind acks never resolve.
+    /// lock serializes append fault injection and durable mutation recording.
     append_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -147,13 +141,6 @@ impl FaultBackend {
             recorded: StdMutex::new(Vec::new()),
             append_gate: Arc::new(tokio::sync::Mutex::new(())),
         }
-    }
-
-    /// Handle to the append stall gate. A test holding this lock (via
-    /// `lock_owned()`) stalls every journal append, freezing the flusher so
-    /// pending write-behind acks never resolve.
-    fn append_gate(&self) -> Arc<tokio::sync::Mutex<()>> {
-        Arc::clone(&self.append_gate)
     }
 
     fn cfg(&self) -> std::sync::MutexGuard<'_, FaultConfig> {
@@ -209,6 +196,18 @@ impl FaultBackend {
 
     fn recorded_ops(&self) -> Vec<RecordedOp> {
         self.recorded.lock().expect("recorded mutex").clone()
+    }
+
+    fn journal_append_count(&self) -> usize {
+        self.recorded_ops()
+            .iter()
+            .filter(|op| match op {
+                RecordedOp::Append { path, .. } | RecordedOp::AppendBatch { path, .. } => {
+                    path.as_str().contains("/turns/rows/v1/deltas")
+                }
+                _ => false,
+            })
+            .count()
     }
 
     /// Reconstruct an independent, byte-identical copy of the durable state as
@@ -410,7 +409,7 @@ fn open_row_store(
 }
 
 /// Open a fresh strict-mode row store under an explicit durability policy. Both
-/// policies are exercised by the property + targeted suites so the write-behind
+/// policies are exercised by the property + targeted suites so the recovery-boundary
 /// path proves it never loses a recoverability-critical transition and only ever
 /// drops a redoable, prefix-consistent non-critical tail.
 fn open_row_store_with_policy(
@@ -434,10 +433,10 @@ fn open_row_store_lenient(
 }
 
 /// Lenient opener under an explicit durability policy. The hosted single-tenant
-/// write-behind shape (single-writer, no cross-store CAS) is lenient: no
-/// pre-append reservations, so a critical barrier is a plain enqueue+await and
-/// an injected append fault exercises the halt path directly, without the strict
-/// mode's pre-append reservation writes/rollbacks.
+/// recovery-boundary shape (single-writer, no cross-store CAS) is lenient: no
+/// pre-append reservations, so a critical boundary directly flushes the
+/// aggregate and an injected append fault exercises the halt path without the
+/// strict mode's reservation writes/rollbacks.
 fn open_row_store_lenient_with_policy(
     scoped: Arc<ScopedFilesystem<FaultBackend>>,
     policy: TurnStateDurabilityPolicy,
@@ -1096,12 +1095,12 @@ impl Harness {
 ///
 /// * `WriteThrough` — the strict "acked ⇒ durable" projection diff: the
 ///   recovered store must equal the acked reference model exactly.
-/// * `WriteBehind` — the diff is replaced by a legal-PREFIX check (recovered is
+/// * `RecoveryBoundary` — the diff is replaced by a legal-PREFIX check (recovered is
 ///   a consistent, re-drivable prefix of the model — no invented state), while
 ///   the recoverability-critical set stays STRICT (gate-park + terminal never
 ///   lost, exact match, cause preserved). The anti-cheat that a lost prefix is
 ///   *redoable* (re-applying the lost ops converges to the model) is proven
-///   separately in [`write_behind_lost_noncritical_tail_reapplies_to_model`].
+///   separately in [`recovery_boundary_lost_noncritical_tail_reapplies_to_model`].
 ///
 /// In BOTH modes: internal invariants + `assert_recoverability_critical_survives`.
 async fn assert_recovered_matches_model(
@@ -1114,7 +1113,12 @@ async fn assert_recovered_matches_model(
     let recovered_snapshot = recovered
         .persistence_snapshot()
         .await
-        .expect("recovered snapshot");
+        .unwrap_or_else(|error| {
+            panic!(
+                "recovered snapshot failed: {error:?}\npolicy={policy:?}\nseed={seed}\nops:\n  {}",
+                log.join("\n  ")
+            )
+        });
     let model_snapshot = model.persistence_snapshot();
 
     if let Err(violation) = check_internal_invariants(&recovered_snapshot) {
@@ -1141,13 +1145,13 @@ async fn assert_recovered_matches_model(
                 log.join("\n  ")
             );
         }
-        TurnStateDurabilityPolicy::WriteBehind => {
+        TurnStateDurabilityPolicy::RecoveryBoundary => {
             assert_recovered_is_legal_prefix(&recovered_snapshot, &model_snapshot, seed, log);
         }
     }
 }
 
-/// The `WriteBehind` oracle (replaces the strict projection diff): the recovered
+/// The `RecoveryBoundary` oracle (replaces the strict projection diff): the recovered
 /// snapshot must be a consistent, re-drivable **prefix** of the acked model —
 /// every recovered run/lock/idempotency-record/event/checkpoint is one the model
 /// also has (no invented / phantom state), and no non-critical transition ran
@@ -1238,7 +1242,7 @@ fn assert_recovered_is_legal_prefix(
         assert!(
             model_series.starts_with(recovered_series),
             "recovered event stream for scope {scope} is NOT a prefix of the model's \
-             (write-behind may only drop a trailing non-critical tail)\n\
+             (recovery-boundary may only drop a trailing non-critical tail)\n\
              RECOVERED: {recovered_series:?}\nMODEL: {model_series:?}\n{}",
             ctx()
         );
@@ -1350,7 +1354,7 @@ fn assert_recoverability_critical_survives(
 /// `crash_every` ops, optionally arming a write fault before some ops.
 ///
 /// Under `WriteThrough` the store never loses an acked op (strict diff). Under
-/// `WriteBehind` a crash may drop a trailing non-critical tail, so the oracle is
+/// `RecoveryBoundary` a crash may drop a trailing non-critical tail, so the oracle is
 /// the legal-prefix check — but the store still never loses a recoverability-
 /// critical transition and never violates an invariant across crashes.
 async fn run_chaos(
@@ -1416,13 +1420,13 @@ async fn run_chaos(
 
         if (op_index + 1) % crash_every == 0 {
             // Crash: drop the store (aborting the detached flusher so a
-            // write-behind tail cannot flush post-crash and race the reopen),
+            // recovery-boundary tail cannot flush post-crash and race the reopen),
             // reopen over the same durable bytes.
             drop(store);
             store = open_row_store_with_policy(Arc::clone(&scoped), policy);
             assert_recovered_matches_model(&store, &model, seed, &h.log, policy).await;
 
-            if matches!(policy, TurnStateDurabilityPolicy::WriteBehind) {
+            if matches!(policy, TurnStateDurabilityPolicy::RecoveryBoundary) {
                 // The prefix oracle just verified the recovered state is a legal,
                 // re-drivable prefix of the acked model (and lost no critical
                 // transition). Now ACCEPT that verified crash-loss: resync the
@@ -1431,7 +1435,7 @@ async fn run_chaos(
                 // stay ahead of the rewound store and later ops would diverge on
                 // a difference the crash legitimately introduced. The loss being
                 // *redoable* (not corruption) is proven separately by
-                // `write_behind_lost_noncritical_tail_reapplies_to_model`.
+                // `recovery_boundary_lost_noncritical_tail_reapplies_to_model`.
                 let recovered_snapshot = store
                     .persistence_snapshot()
                     .await
@@ -1536,11 +1540,11 @@ async fn row_store_crash_consistency_property_no_faults() {
     // 10 seeds × 64 ops, crashing every 6 ops — pure crash/recovery consistency
     // against the acked reference model, no injected write faults. Run under
     // BOTH durability policies (#6263 Step 3): WriteThrough must match the model
-    // exactly; WriteBehind must recover to a consistent, re-drivable prefix that
+    // exactly; RecoveryBoundary must recover to a consistent, re-drivable prefix that
     // never loses a recoverability-critical transition.
     for policy in [
         TurnStateDurabilityPolicy::WriteThrough,
-        TurnStateDurabilityPolicy::WriteBehind,
+        TurnStateDurabilityPolicy::RecoveryBoundary,
     ] {
         for seed in [1, 7, 42, 101, 777, 2718, 8191, 31337, 65521, 999983] {
             run_chaos(seed, 64, 6, false, policy).await;
@@ -1554,13 +1558,12 @@ async fn row_store_crash_consistency_property_with_faults() {
     // faulted journal append / faulted Nth write), exercising
     // crash-immediately-after-a-rolled-back-write. Run under BOTH policies:
     // WriteThrough recovers exactly to the model (the faulted op left no durable
-    // trace); WriteBehind recovers to a consistent prefix (a faulted async append
-    // degrades the store, but a critical op's preappend+await still rolls back
-    // atomically, exactly as write-through) — always invariant-clean and never
-    // losing a critical transition.
+    // trace); RecoveryBoundary recovers to a consistent prefix (a faulted
+    // boundary append degrades the store) — always invariant-clean and never
+    // losing a successfully persisted critical transition.
     for policy in [
         TurnStateDurabilityPolicy::WriteThrough,
-        TurnStateDurabilityPolicy::WriteBehind,
+        TurnStateDurabilityPolicy::RecoveryBoundary,
     ] {
         for seed in [3, 13, 99, 500, 4093, 50021, 1234567, 88888] {
             run_chaos(seed, 56, 5, true, policy).await;
@@ -2531,7 +2534,7 @@ async fn noop_claim_does_not_leak_active_lock_across_crash() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// #6263 Step 3 — WriteBehind-specific targeted tests
+// #6263 Step 3 — RecoveryBoundary-specific targeted tests
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn scope_b_regression() -> TurnScope {
@@ -2543,19 +2546,17 @@ fn scope_b_regression() -> TurnScope {
     )
 }
 
-/// #6263 Step 3 — critical ops are durability BARRIERS. Under `WriteBehind` a
+/// #6263 Step 3 — critical ops are durability BARRIERS. Under `RecoveryBoundary` a
 /// batch of non-critical transitions (submit/claim = Queued/Running) returns
 /// `Ok` before flushing; a following critical transition (terminal complete)
-/// awaits its ack, and because the journal is a strictly sequential
-/// single-writer, awaiting the critical op's ack implies EVERY prior enqueued
-/// delta is already durable. A crash immediately after the critical op's `Ok`
-/// must therefore recover the whole preceding async tail — with no explicit
-/// barrier mechanism.
+/// computes one delta from the last journaled snapshot through the terminal
+/// state and awaits its ack. A crash immediately after the critical op's `Ok`
+/// must therefore recover the whole preceding in-memory tail.
 #[tokio::test]
-async fn write_behind_critical_op_is_a_barrier_flushing_the_async_tail() {
+async fn recovery_boundary_critical_op_flushes_the_in_memory_tail() {
     let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
     let scoped = fault_scoped(Arc::clone(&backend));
-    let policy = TurnStateDurabilityPolicy::WriteBehind;
+    let policy = TurnStateDurabilityPolicy::RecoveryBoundary;
     let scope_list = scopes();
 
     // N non-critical submits (one per scope), then claim+complete run 0. The
@@ -2578,6 +2579,11 @@ async fn write_behind_critical_op_is_a_barrier_flushing_the_async_tail() {
             .await
             .unwrap()
             .expect("claim run 0 (non-critical)");
+        assert_eq!(
+            backend.journal_append_count(),
+            0,
+            "submits and claim must remain in memory before a recovery boundary",
+        );
         store
             .complete_run(CompleteRunRequest {
                 run_id: run_ids[0],
@@ -2586,13 +2592,18 @@ async fn write_behind_critical_op_is_a_barrier_flushing_the_async_tail() {
             })
             .await
             .expect("complete run 0 (critical barrier)");
+        assert_eq!(
+            backend.journal_append_count(),
+            1,
+            "the terminal boundary must persist the coalesced tail in one journal append",
+        );
         // Crash synchronously — no await between the critical Ok and the drop.
         drop(store);
         run_ids
     };
 
     let recovered = open_row_store_with_policy(Arc::clone(&scoped), policy);
-    // Run 0 completed (critical) AND every prior async submit is durable: the
+    // Run 0 completed (critical) AND every prior deferred submit is durable: the
     // barrier flushed the whole tail.
     for (i, run_id) in run_ids.iter().enumerate() {
         let state = recovered
@@ -2603,7 +2614,7 @@ async fn write_behind_critical_op_is_a_barrier_flushing_the_async_tail() {
             .await
             .unwrap_or_else(|error| {
                 panic!(
-                    "the critical barrier must have flushed async submit #{i} ({run_id}) durably, \
+                    "the critical barrier must have flushed deferred submit #{i} ({run_id}) durably, \
                      got {error:?}"
                 )
             });
@@ -2618,29 +2629,32 @@ async fn write_behind_critical_op_is_a_barrier_flushing_the_async_tail() {
 }
 
 /// #6263 Step 4 — `drain()` is the graceful-shutdown analog of the critical
-/// barrier. Under `WriteBehind` a batch of non-critical transitions returns `Ok`
-/// before flushing; calling [`FilesystemTurnStateRowStore::drain`] awaits the
-/// whole enqueued-but-un-acked async tail, so a crash (drop + reopen)
+/// barrier. Under `RecoveryBoundary` a batch of non-critical transitions returns `Ok`
+/// before flushing; calling [`FilesystemTurnStateRowStore::drain`] writes the
+/// whole coalesced in-memory tail, so a crash (drop + reopen)
 /// immediately after the drain recovers every non-critical submit — with NO
 /// terminal op forcing a barrier. This is exactly what the runtime's graceful
 /// `shutdown()` relies on to recover in-flight (non-critical) runs across a
 /// planned restart under the flipped `inmemory-turn-state` profile.
 #[tokio::test]
-async fn write_behind_drain_flushes_the_async_tail_for_graceful_restart() {
+async fn recovery_boundary_drain_flushes_the_in_memory_tail_for_graceful_restart() {
     let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
     let scoped = fault_scoped(Arc::clone(&backend));
-    let policy = TurnStateDurabilityPolicy::WriteBehind;
+    let policy = TurnStateDurabilityPolicy::RecoveryBoundary;
     let scope_list = scopes();
 
     let run_ids: Vec<TurnRunId> = {
         let store = open_row_store_with_policy(Arc::clone(&scoped), policy);
         let mut run_ids = Vec::new();
         for (i, scope) in scope_list.iter().enumerate() {
-            // Non-critical (Queued): returns Ok before its durable ack.
+            // Non-critical (Queued): returns Ok without a durable append.
             run_ids.push(submit_one(&store, scope, &format!("idem-drain-{i}")).await);
         }
-        // Graceful shutdown drains the WriteBehind tail; NO terminal op forces it.
-        store.drain().await.expect("drain flushes the async tail");
+        // Graceful shutdown drains the RecoveryBoundary tail; NO terminal op forces it.
+        store
+            .drain()
+            .await
+            .expect("drain flushes the in-memory tail");
         // Crash synchronously — no await between drain's Ok and the drop.
         drop(store);
         run_ids
@@ -2656,7 +2670,7 @@ async fn write_behind_drain_flushes_the_async_tail_for_graceful_restart() {
             .await
             .unwrap_or_else(|error| {
                 panic!(
-                    "drain must have flushed async submit #{i} ({run_id}) durably, got {error:?}"
+                    "drain must have flushed deferred submit #{i} ({run_id}) durably, got {error:?}"
                 )
             });
         assert_eq!(state.status, TurnStatus::Queued, "drain-flushed run #{i}");
@@ -2664,26 +2678,26 @@ async fn write_behind_drain_flushes_the_async_tail_for_graceful_restart() {
     check_internal_invariants(&recovered.persistence_snapshot().await.unwrap()).unwrap();
 }
 
-/// #6263 Step 3 — append-failure HALT (`WriteBehind`, constraint 4). A
-/// non-critical op returns `Ok` before its durable append; if that append later
+/// #6263 Step 3 — append-failure HALT (`RecoveryBoundary`, constraint 4). A
+/// non-critical op returns `Ok` while still volatile; if its boundary append later
 /// fails, CONTINUING would leave later deltas building on a durable GAP =
 /// corruption. Instead the store HALTS: it latches degraded so subsequent
 /// mutations fail fast, and on reopen recovers to the last consistent durable
 /// point — the faulted op's run is atomically absent, the pre-fault durable base
 /// survives, and the recovered state is invariant-clean and re-drivable.
 #[tokio::test]
-async fn write_behind_append_failure_halts_degrades_and_recovers_consistently() {
+async fn recovery_boundary_append_failure_halts_degrades_and_recovers_consistently() {
     let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
     let scoped = fault_scoped(Arc::clone(&backend));
-    let policy = TurnStateDurabilityPolicy::WriteBehind;
+    let policy = TurnStateDurabilityPolicy::RecoveryBoundary;
     let scope_a = only_scope();
     let scope_b = scope_b_regression();
     let run_a;
 
     {
         // Lenient (no pre-append reservations) isolates the append-halt path: a
-        // critical barrier is a plain enqueue+await, so the faulted async append
-        // surfaces as the barrier's ack error, not a pre-append CAS conflict.
+        // critical boundary directly flushes the aggregate, so the faulted
+        // append surfaces as the boundary error, not a reservation conflict.
         let store = open_row_store_lenient_with_policy(Arc::clone(&scoped), policy);
 
         // Durable base: run A gate-parked (block = critical → barrier → durable).
@@ -2714,7 +2728,7 @@ async fn write_behind_append_failure_halts_degrades_and_recovers_consistently() 
             .expect("gate-park A (critical barrier → durable)");
 
         // Arm a fault on the next append, then submit B (non-critical). Under
-        // write-behind the submit returns Ok WITHOUT awaiting — its flush is the
+        // recovery-boundary the submit returns Ok WITHOUT awaiting — its flush is the
         // append that will fault.
         backend.fail_next_appends(1);
         let run_b = TurnRunId::new();
@@ -2725,7 +2739,7 @@ async fn write_behind_append_failure_halts_degrades_and_recovers_consistently() 
                 &InMemoryRunProfileResolver::default(),
             )
             .await
-            .expect("write-behind non-critical submit returns Ok before its durable append");
+            .expect("recovery-boundary non-critical submit returns Ok while volatile");
 
         // Deterministically observe the halt: claim B then block B (critical).
         // The block awaits its ack; the flusher hits B-submit's faulted append,
@@ -2770,7 +2784,7 @@ async fn write_behind_append_failure_halts_degrades_and_recovers_consistently() 
             .await;
         assert!(
             matches!(fast_fail, Err(TurnError::Unavailable { .. })),
-            "a degraded write-behind store must fail subsequent mutations fast, got {fast_fail:?}"
+            "a degraded recovery-boundary store must fail subsequent mutations fast, got {fast_fail:?}"
         );
 
         backend.disarm();
@@ -2818,13 +2832,13 @@ async fn write_behind_append_failure_halts_degrades_and_recovers_consistently() 
 /// deterministic crash that lost exactly those K), recover, assert it is a
 /// consistent legal prefix missing them, then RE-APPLY the K lost acked ops to
 /// the recovered store and assert it CONVERGES to the model exactly. This is
-/// what stops the write-behind prefix oracle from being silently weakened to
+/// what stops the recovery-boundary prefix oracle from being silently weakened to
 /// pass a buggy implementation.
 #[tokio::test]
-async fn write_behind_lost_noncritical_tail_reapplies_to_model() {
+async fn recovery_boundary_lost_noncritical_tail_reapplies_to_model() {
     let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
     let scoped = fault_scoped(Arc::clone(&backend));
-    let policy = TurnStateDurabilityPolicy::WriteBehind;
+    let policy = TurnStateDurabilityPolicy::RecoveryBoundary;
     let model = model_store();
     let scope_list = scopes();
     let log = ["anti-cheat convergence".to_string()];
@@ -2873,7 +2887,7 @@ async fn write_behind_lost_noncritical_tail_reapplies_to_model() {
     let fork_before = backend.fork_durable_bytes().await;
 
     // K acked non-critical submits (distinct scopes) on both stores. Under
-    // write-behind these return Ok before flushing; the fork already excludes
+    // recovery-boundary these return Ok before flushing; the fork already excludes
     // them, so they are the deterministically-lost tail.
     const K: usize = 3;
     let mut lost = Vec::new();
@@ -2889,7 +2903,7 @@ async fn write_behind_lost_noncritical_tail_reapplies_to_model() {
             &InMemoryRunProfileResolver::default(),
         )
         .await
-        .expect("write-behind non-critical submit acked");
+        .expect("recovery-boundary non-critical submit acked");
         model
             .submit_turn(
                 req.clone(),
@@ -2947,25 +2961,21 @@ fn scope_bp(i: usize) -> TurnScope {
     )
 }
 
-/// #6263 Step 3 — WriteBehind BACKPRESSURE bounds the enqueued-but-un-acked
-/// window (and thus the crash-loss window). With the cap set to 1, every
-/// non-critical op after the first must await the OLDEST pending ack before
-/// returning — so op N returning implies op N-1 is already durable. A burst of K
-/// non-critical submits followed by a crash with NO barrier must therefore leave
-/// at least K-1 durable (only the very last, un-awaited op may be lost), proving
-/// backpressure — not an unbounded queue — governs the loss window.
+/// RecoveryBoundary bounds the in-memory mutation window. With the cap set to
+/// one, every mutation reaches the cap and flushes before returning. A burst of
+/// K non-critical submits followed by a crash with no explicit boundary must
+/// therefore recover all K.
 #[tokio::test]
-async fn write_behind_backpressure_bounds_the_unacked_window() {
+async fn recovery_boundary_cap_bounds_the_pending_mutation_window() {
     let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
     let scoped = fault_scoped(Arc::clone(&backend));
-    let policy = TurnStateDurabilityPolicy::WriteBehind;
+    let policy = TurnStateDurabilityPolicy::RecoveryBoundary;
     const K: usize = 6;
 
     let run_ids: Vec<TurnRunId> = {
-        // Cap the write-behind window at 1: each submit awaits the prior submit's
-        // ack before returning, so backpressure flushes the tail as it goes.
+        // Cap at one: every submit flushes its aggregate before returning.
         let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped))
-            .with_limits(limits().set_max_pending_write_behind_deltas(1))
+            .with_limits(limits().set_max_pending_recovery_boundary_deltas(1))
             .with_durability_policy(policy);
         let mut run_ids = Vec::new();
         for i in 0..K {
@@ -2977,43 +2987,44 @@ async fn write_behind_backpressure_bounds_the_unacked_window() {
                     &InMemoryRunProfileResolver::default(),
                 )
                 .await
-                .expect("write-behind submit under backpressure returns Ok");
+                .expect("recovery-boundary submit under backpressure returns Ok");
             run_ids.push(run_id);
         }
-        // Crash with NO barrier: only the last (un-awaited) op may be lost.
+        // Crash with no explicit boundary: the cap already flushed every op.
         drop(store);
         run_ids
     };
 
     let recovered = FilesystemTurnStateRowStore::new(Arc::clone(&scoped))
-        .with_limits(limits().set_max_pending_write_behind_deltas(1))
+        .with_limits(limits().set_max_pending_recovery_boundary_deltas(1))
         .with_durability_policy(policy);
     let snapshot = recovered.persistence_snapshot().await.unwrap();
     let durable: BTreeSet<TurnRunId> = snapshot.runs.iter().map(|run| run.run_id).collect();
     let surviving = run_ids.iter().filter(|id| durable.contains(id)).count();
-    assert!(
-        surviving >= K - 1,
-        "backpressure (cap=1) must flush all but the last op before a barrier-less crash: \
-         {surviving}/{K} durable"
+    assert_eq!(
+        surviving, K,
+        "cap=1 must flush every op before a boundary-less crash: {surviving}/{K} durable"
     );
     check_internal_invariants(&snapshot).unwrap();
 }
 
 /// #6263 Step 3 (IronLoop f1) — `CancelRequested` is recoverability-critical.
-/// Under write-behind, `request_cancel` on a Running run is a durability
+/// Under recovery-boundary, `request_cancel` on a Running run is a durability
 /// barrier: a crash immediately after the (acked) cancel must recover the run
 /// still cancelled, never revert it to Running and re-execute work the caller
 /// was told was cancelled. Before the fix `CancelRequested` was non-critical, so
-/// the acked cancel rode the async tail and a crash lost it.
+/// the accepted cancel could remain only in the volatile tail and be lost.
 #[tokio::test]
-async fn write_behind_cancel_of_running_run_survives_crash() {
+async fn recovery_boundary_cancel_of_running_run_survives_crash() {
     let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
     let scoped = fault_scoped(Arc::clone(&backend));
     let scope = only_scope();
 
     let run_id = {
-        let store =
-            open_row_store_with_policy(Arc::clone(&scoped), TurnStateDurabilityPolicy::WriteBehind);
+        let store = open_row_store_with_policy(
+            Arc::clone(&scoped),
+            TurnStateDurabilityPolicy::RecoveryBoundary,
+        );
         let run_id = submit_one(&store, &scope, "idem-wb-cancel").await;
         store
             .claim_next_run(ClaimRunRequest {
@@ -3025,7 +3036,7 @@ async fn write_behind_cancel_of_running_run_survives_crash() {
             .unwrap()
             .expect("claim the queued run to Running");
         // Submit (Queued) and claim (Running) are non-critical → async under
-        // write-behind. `request_cancel` → CancelRequested is now critical: it
+        // recovery-boundary. `request_cancel` → CancelRequested is now critical: it
         // awaits its durable ack, a barrier that flushes the whole prior tail.
         // Drop the store synchronously right after it returns (a crash) with no
         // intervening await, so only the cancel barrier's own synchronous
@@ -3044,8 +3055,10 @@ async fn write_behind_cancel_of_running_run_survives_crash() {
         run_id
     };
 
-    let recovered =
-        open_row_store_with_policy(Arc::clone(&scoped), TurnStateDurabilityPolicy::WriteBehind);
+    let recovered = open_row_store_with_policy(
+        Arc::clone(&scoped),
+        TurnStateDurabilityPolicy::RecoveryBoundary,
+    );
     let state = recovered
         .get_run_state(GetRunStateRequest {
             scope: scope.clone(),
@@ -3056,24 +3069,22 @@ async fn write_behind_cancel_of_running_run_survives_crash() {
     assert_eq!(
         state.status,
         TurnStatus::CancelRequested,
-        "a write-behind crash must not drop an acked cancel back to Running",
+        "a recovery-boundary crash must not drop an acked cancel back to Running",
     );
     check_internal_invariants(&recovered.persistence_snapshot().await.unwrap()).unwrap();
 }
 
-/// #6263 Step 3 (IronLoop) — `put_loop_checkpoint` is a non-critical write, so
-/// under WriteBehind it must take the async reserve→enqueue→track path like
-/// every other non-critical commit. Before the fix it enqueued and handed a live
-/// ack straight to `commit_pending` with `critical: false`, tripping the
-/// write-behind debug assertion (and, in release, waiting synchronously — the
-/// opposite of the intended lazy flush). Drives the real store method.
+/// A `BeforeModel` loop checkpoint is non-critical, so it remains in the live
+/// authority without forcing a journal append.
 #[tokio::test]
-async fn write_behind_put_loop_checkpoint_takes_async_path() {
+async fn recovery_boundary_put_loop_checkpoint_remains_in_memory() {
     let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
     let scoped = fault_scoped(Arc::clone(&backend));
     let scope = only_scope();
-    let store =
-        open_row_store_with_policy(Arc::clone(&scoped), TurnStateDurabilityPolicy::WriteBehind);
+    let store = open_row_store_with_policy(
+        Arc::clone(&scoped),
+        TurnStateDurabilityPolicy::RecoveryBoundary,
+    );
 
     let run_id = submit_one(&store, &scope, "idem-wb-checkpoint").await;
     let turn_id = store
@@ -3086,8 +3097,7 @@ async fn write_behind_put_loop_checkpoint_takes_async_path() {
         .expect("submitted run present")
         .turn_id;
 
-    // Must not panic (the write-behind assertion) and must return Ok on the
-    // async lazy-flush path.
+    let appends_before = backend.journal_append_count();
     let record = store
         .put_loop_checkpoint(PutLoopCheckpointRequest {
             scope: scope.clone(),
@@ -3100,26 +3110,33 @@ async fn write_behind_put_loop_checkpoint_takes_async_path() {
             gate_ref: None,
         })
         .await
-        .expect("write-behind loop checkpoint returns Ok on the async path");
+        .expect("recovery-boundary loop checkpoint returns Ok");
     assert_eq!(record.run_id, run_id);
+    assert_eq!(
+        backend.journal_append_count(),
+        appends_before,
+        "a BeforeModel checkpoint must not force a recovery-boundary append",
+    );
     check_internal_invariants(&store.persistence_snapshot().await.unwrap()).unwrap();
 }
 
 /// #6298 IronLoop f5 — `BeforeSideEffect` loop checkpoints are recoverability-
 /// critical: they gate side-effect replay (expired-lease recovery treats the
 /// absence of a durable checkpoint as "no side effect ran" and requeues). Under
-/// WriteBehind they must be SYNCHRONOUS, so a crash immediately after the
+/// RecoveryBoundary they must be SYNCHRONOUS, so a crash immediately after the
 /// checkpoint returns `Ok` still finds it durable — recovery does not replay the
 /// capability. (`BeforeModel` stays async — losing one is redoable work.)
 #[tokio::test]
-async fn write_behind_before_side_effect_checkpoint_survives_crash() {
+async fn recovery_boundary_before_side_effect_checkpoint_survives_crash() {
     let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
     let scoped = fault_scoped(Arc::clone(&backend));
     let scope = only_scope();
 
     let (run_id, turn_id, checkpoint_id) = {
-        let store =
-            open_row_store_with_policy(Arc::clone(&scoped), TurnStateDurabilityPolicy::WriteBehind);
+        let store = open_row_store_with_policy(
+            Arc::clone(&scoped),
+            TurnStateDurabilityPolicy::RecoveryBoundary,
+        );
         let run_id = submit_one(&store, &scope, "idem-wb-sidefx").await;
         let turn_id = store
             .persistence_snapshot()
@@ -3150,8 +3167,10 @@ async fn write_behind_before_side_effect_checkpoint_survives_crash() {
         (run_id, turn_id, checkpoint_id)
     };
 
-    let recovered =
-        open_row_store_with_policy(Arc::clone(&scoped), TurnStateDurabilityPolicy::WriteBehind);
+    let recovered = open_row_store_with_policy(
+        Arc::clone(&scoped),
+        TurnStateDurabilityPolicy::RecoveryBoundary,
+    );
     let checkpoint = recovered
         .get_loop_checkpoint(GetLoopCheckpointRequest {
             scope,
@@ -3163,24 +3182,24 @@ async fn write_behind_before_side_effect_checkpoint_survives_crash() {
         .expect("get_loop_checkpoint");
     assert!(
         checkpoint.is_some(),
-        "a BeforeSideEffect checkpoint must survive a write-behind crash so recovery does not \
+        "a BeforeSideEffect checkpoint must survive a recovery-boundary crash so recovery does not \
          replay the side effect",
     );
 }
 
 /// #6298 IronLoop f6 — the hot cache is bounded and evicts OLD TERMINAL runs,
-/// but their durable rows persist. Under healthy WriteBehind, `get_run_state`
+/// but their durable rows persist. Under healthy RecoveryBoundary, `get_run_state`
 /// must fall back to the durable rows on a hot-cache miss so an evicted terminal
 /// stays queryable (the eviction contract), not `ScopeNotFound`.
 #[tokio::test]
-async fn write_behind_get_run_state_finds_evicted_terminal_via_durable_fallback() {
+async fn recovery_boundary_get_run_state_finds_evicted_terminal_via_durable_fallback() {
     let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
     let scoped = fault_scoped(Arc::clone(&backend));
     // Cap terminals at 1: completing a SECOND run evicts the first from the hot
     // cache while its durable row remains.
     let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped))
         .with_limits(limits().set_max_terminal_records(1))
-        .with_durability_policy(TurnStateDurabilityPolicy::WriteBehind);
+        .with_durability_policy(TurnStateDurabilityPolicy::RecoveryBoundary);
 
     // Drive a run to a terminal (Completed) — a critical transition, so durable.
     async fn complete_a_run(
@@ -3230,78 +3249,55 @@ async fn write_behind_get_run_state_finds_evicted_terminal_via_durable_fallback(
     );
 }
 
-/// #6298 IronLoop f7 — a cancelled write-behind flush/reserve must NOT drop the
-/// pending ack. Under a stalled flusher, a read whose flush awaits an un-acked
-/// write and is cancelled by a timeout must leave the ack tracked — so a SECOND
-/// read still blocks on it rather than falsely succeeding (which would lose the
-/// acknowledged-but-unflushed write on a later store drop, and re-open the
-/// unbounded-channel window). Before the fix the flush drained the ack into a
-/// `Vec` (and reserve popped it) before awaiting, so a cancellation dropped it.
+/// Recovery-boundary reads are served from the live domain authority and must
+/// not turn into accidental durability barriers. Otherwise the runtime's normal
+/// read-after-submit flow would restore the write amplification this policy is
+/// intended to remove.
 #[tokio::test]
-async fn write_behind_cancelled_flush_preserves_pending_ack() {
+async fn recovery_boundary_reads_do_not_force_a_flush() {
     let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
     let scoped = fault_scoped(Arc::clone(&backend));
     let scope = only_scope();
-    let store =
-        open_row_store_with_policy(Arc::clone(&scoped), TurnStateDurabilityPolicy::WriteBehind);
+    let store = open_row_store_with_policy(
+        Arc::clone(&scoped),
+        TurnStateDurabilityPolicy::RecoveryBoundary,
+    );
 
-    // Freeze every journal append: pending write-behind acks never resolve.
-    let stall = backend.append_gate().lock_owned().await;
-
-    // A non-critical submit returns Ok (async) with its ack tracked in the window
-    // but its durable append stalled.
+    let writes_before = backend.write_count.load(Ordering::SeqCst);
     let run_id = submit_one(&store, &scope, "idem-f7").await;
-    let request = || GetLoopCheckpointRequest {
-        scope: scope.clone(),
-        // The checkpoint need not exist — `get_loop_checkpoint` flushes the
-        // pending write-behind tail BEFORE the durable lookup, and that flush is
-        // what blocks on the stalled ack.
-        turn_id: TurnId::new(),
-        run_id,
-        checkpoint_id: TurnCheckpointId::new(),
-    };
-
-    // First durable read: its flush blocks on the stalled pending ack; the short
-    // timeout CANCELS it mid-await.
-    let first = tokio::time::timeout(
-        std::time::Duration::from_millis(200),
-        store.get_loop_checkpoint(request()),
-    )
-    .await;
-    assert!(
-        first.is_err(),
-        "the flush must block on the stalled pending ack (first read)",
+    let state = store
+        .get_run_state(GetRunStateRequest {
+            scope: scope.clone(),
+            run_id,
+        })
+        .await
+        .expect("live read sees the deferred submit");
+    assert_eq!(state.status, TurnStatus::Queued);
+    let _events = store
+        .read_turn_events_after(&scope, scope.explicit_owner_user_id(), None, 100)
+        .await
+        .expect("live event read succeeds without a durable flush");
+    assert_eq!(
+        backend.write_count.load(Ordering::SeqCst),
+        writes_before,
+        "submit plus live reads must not touch the filesystem before a recovery boundary",
     );
-
-    // Second durable read: it must ALSO block. The cancelled flush must have left
-    // the ack tracked; if it had dropped it (the bug), the window would be empty
-    // and this read would return quickly — a drain that falsely succeeded.
-    let second = tokio::time::timeout(
-        std::time::Duration::from_millis(200),
-        store.get_loop_checkpoint(request()),
-    )
-    .await;
-    assert!(
-        second.is_err(),
-        "a cancelled flush must NOT drop the pending ack — the second read must still block on \
-         it, not falsely succeed while the acknowledged write is unflushed",
-    );
-
-    drop(stall);
 }
 
-/// #6263 Step 3 (IronLoop f2) — read-your-writes under write-behind. A
+/// #6263 Step 3 (IronLoop f2) — read-your-writes under recovery-boundary. A
 /// non-critical submit returns `Ok` after updating the hot snapshot but before
 /// its durable append; an immediate same-store `get_run_state` must still see it
 /// (served from the hot snapshot), not miss it as `ScopeNotFound` while the
 /// flusher lags. Before the fix `get_run_state` read only durable rows.
 #[tokio::test]
-async fn write_behind_get_run_state_reflects_unflushed_submit() {
+async fn recovery_boundary_get_run_state_reflects_unflushed_submit() {
     let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
     let scoped = fault_scoped(Arc::clone(&backend));
     let scope = only_scope();
-    let store =
-        open_row_store_with_policy(Arc::clone(&scoped), TurnStateDurabilityPolicy::WriteBehind);
+    let store = open_row_store_with_policy(
+        Arc::clone(&scoped),
+        TurnStateDurabilityPolicy::RecoveryBoundary,
+    );
 
     let run_id = submit_one(&store, &scope, "idem-wb-ryw").await;
     // No await for a flush between the submit's Ok and this read.
@@ -3311,7 +3307,7 @@ async fn write_behind_get_run_state_reflects_unflushed_submit() {
             run_id,
         })
         .await
-        .expect("read-your-writes: an unflushed write-behind submit must be visible");
+        .expect("read-your-writes: an unflushed recovery-boundary submit must be visible");
     assert_eq!(state.run_id, run_id);
     assert_eq!(state.status, TurnStatus::Queued);
 }
@@ -3324,15 +3320,15 @@ async fn write_behind_get_run_state_reflects_unflushed_submit() {
 /// visible via read-your-writes (the strict peak-depth bound is structural — the
 /// journal channel length is not externally observable).
 #[tokio::test]
-async fn write_behind_concurrent_writers_under_cap_stay_consistent() {
+async fn recovery_boundary_concurrent_writers_under_cap_stay_consistent() {
     let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
     let scoped = fault_scoped(Arc::clone(&backend));
     const K: usize = 12;
 
     let store = Arc::new(
         FilesystemTurnStateRowStore::new(Arc::clone(&scoped))
-            .with_limits(limits().set_max_pending_write_behind_deltas(2))
-            .with_durability_policy(TurnStateDurabilityPolicy::WriteBehind),
+            .with_limits(limits().set_max_pending_recovery_boundary_deltas(2))
+            .with_durability_policy(TurnStateDurabilityPolicy::RecoveryBoundary),
     );
 
     let mut tasks = Vec::new();
@@ -3353,8 +3349,8 @@ async fn write_behind_concurrent_writers_under_cap_stay_consistent() {
     }
     for task in tasks {
         task.await
-            .expect("no panic/deadlock in a concurrent write-behind writer")
-            .expect("concurrent write-behind submit returns Ok");
+            .expect("no panic/deadlock in a concurrent recovery-boundary writer")
+            .expect("concurrent recovery-boundary submit returns Ok");
     }
 
     for (i, run_id) in run_ids.iter().enumerate() {
@@ -3370,7 +3366,7 @@ async fn write_behind_concurrent_writers_under_cap_stay_consistent() {
     check_internal_invariants(&store.persistence_snapshot().await.unwrap()).unwrap();
 }
 
-/// #6298 — LIVE read-your-writes PROPERTY: drive a `WriteBehind` store and the
+/// #6298 — LIVE read-your-writes PROPERTY: drive a `RecoveryBoundary` store and the
 /// acked reference model through the same seeded op stream and, after EVERY acked
 /// op (no crash), assert the caller-facing `get_run_state` query on every live run
 /// matches the model. This is the property-scale complement to
@@ -3380,7 +3376,7 @@ async fn write_behind_concurrent_writers_under_cap_stay_consistent() {
 /// many seeds.
 ///
 /// It is deliberately a SEPARATE, crash-free run rather than folded into
-/// `run_chaos`: `get_run_state` drains the pending write-behind tail to durability
+/// `run_chaos`: `get_run_state` drains the pending recovery-boundary tail to durability
 /// before reading (the #6298 read barrier), which would empty the crash-loss
 /// window `run_chaos` exists to exercise. With no crash, that drain is harmless and
 /// exactly what we want — it forces the durable read to observe every acked
@@ -3388,8 +3384,8 @@ async fn write_behind_concurrent_writers_under_cap_stay_consistent() {
 /// just-acked, not-yet-materialized run is queried: `Ok(model)` vs
 /// `Err(ScopeNotFound)` (store).
 #[tokio::test]
-async fn write_behind_live_get_run_state_tracks_model_across_ops() {
-    let policy = TurnStateDurabilityPolicy::WriteBehind;
+async fn recovery_boundary_live_get_run_state_tracks_model_across_ops() {
+    let policy = TurnStateDurabilityPolicy::RecoveryBoundary;
     for seed in [2, 11, 53, 211, 1009, 40009] {
         let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
         let scoped = fault_scoped(Arc::clone(&backend));
@@ -3450,7 +3446,7 @@ async fn write_behind_live_get_run_state_tracks_model_across_ops() {
 ///
 /// ## The defect this pins
 ///
-/// Under `WriteBehind`, a non-critical mutation (`submit_turn` → `Queued`)
+/// Under `RecoveryBoundary`, a non-critical mutation (`submit_turn` → `Queued`)
 /// returns `Ok` after the delta is ENQUEUED but before the flusher appends it
 /// and the materializer writes durable rows (the flusher even coalesces for
 /// [`DELTA_JOURNAL_FLUSH_COALESCE_DELAY`] before appending). The pre-#6298 query
@@ -3467,13 +3463,13 @@ async fn write_behind_live_get_run_state_tracks_model_across_ops() {
 ///
 /// Post-#6298 every query serves from the cached snapshot, so the reads are
 /// read-your-writes-consistent under BOTH policies. Asserting both proves the
-/// `WriteThrough` behavior is observably unchanged and the `WriteBehind` symptom
+/// `WriteThrough` behavior is observably unchanged and the `RecoveryBoundary` symptom
 /// is gone at the store tier.
 #[tokio::test]
 async fn live_reads_are_read_your_writes_consistent_in_both_durability_modes() {
     for policy in [
         TurnStateDurabilityPolicy::WriteThrough,
-        TurnStateDurabilityPolicy::WriteBehind,
+        TurnStateDurabilityPolicy::RecoveryBoundary,
     ] {
         let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
         let scoped = fault_scoped(Arc::clone(&backend));
@@ -3497,7 +3493,7 @@ async fn live_reads_are_read_your_writes_consistent_in_both_durability_modes() {
             .expect("submit returns Ok after enqueue");
 
         // get_run_state: the run is found and Queued — NOT ScopeNotFound. This is
-        // the exact runtime-breaking symptom under WriteBehind pre-#6298.
+        // the exact runtime-breaking symptom under RecoveryBoundary pre-#6298.
         let state = store
             .get_run_state(GetRunStateRequest {
                 scope: scope.clone(),
@@ -3533,8 +3529,8 @@ async fn live_reads_are_read_your_writes_consistent_in_both_durability_modes() {
             page.entries.len(),
         );
 
-        // get_loop_checkpoint: put a checkpoint (non-critical, lazy-flushed under
-        // WriteBehind), then read it back live.
+        // get_loop_checkpoint: put a checkpoint (non-critical, kept in memory under
+        // RecoveryBoundary), then read it back live.
         let put = PutLoopCheckpointRequest {
             scope: scope.clone(),
             turn_id,

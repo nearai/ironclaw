@@ -158,10 +158,9 @@ pub(crate) struct Args {
 
     /// Durable-commit policy for the row-store backends (`filesystem-row`,
     /// `row-memory`). `write-through` (default) awaits every delta's durable ack;
-    /// `write-behind` returns non-critical transitions (Queued/Running) before
-    /// their ack while keeping gate-park + terminal transitions synchronously
-    /// durable — the `inmemory-turn-state` production profile's policy. No effect
-    /// on the `filesystem`/`memory` backends.
+    /// `recovery-boundary` keeps non-critical transitions (Queued/Running) in the
+    /// live authority and flushes a coalesced delta at recovery boundaries. No
+    /// effect on the `filesystem`/`memory` backends.
     #[arg(long, value_enum, default_value_t = TurnStateDurability::WriteThrough)]
     pub(crate) turn_state_durability: TurnStateDurability,
 
@@ -666,24 +665,23 @@ pub(crate) enum TurnStateDurability {
     /// Await every delta's durable ack (current default; byte-for-byte the
     /// pre-#6263-Step-3 behavior).
     WriteThrough,
-    /// Non-critical transitions return before their durable ack; gate-park and
-    /// terminal transitions stay synchronously durable. The `inmemory-turn-state`
-    /// production profile's policy.
-    WriteBehind,
+    /// Keep non-critical transitions in the live in-process authority; flush one
+    /// coalesced delta at gate/terminal boundaries, the pending cap, or drain.
+    RecoveryBoundary,
 }
 
 impl TurnStateDurability {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::WriteThrough => "write-through",
-            Self::WriteBehind => "write-behind",
+            Self::RecoveryBoundary => "recovery-boundary",
         }
     }
 
     pub(crate) fn to_policy(self) -> ironclaw_turns::TurnStateDurabilityPolicy {
         match self {
             Self::WriteThrough => ironclaw_turns::TurnStateDurabilityPolicy::WriteThrough,
-            Self::WriteBehind => ironclaw_turns::TurnStateDurabilityPolicy::WriteBehind,
+            Self::RecoveryBoundary => ironclaw_turns::TurnStateDurabilityPolicy::RecoveryBoundary,
         }
     }
 }

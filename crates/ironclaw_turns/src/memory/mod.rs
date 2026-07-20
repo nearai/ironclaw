@@ -114,11 +114,11 @@ pub(crate) const DEFAULT_RUNNER_LEASE_TTL_SECONDS: i64 = 90;
 /// it is terminal-failed with `crash_retry_exhausted`.
 const DEFAULT_MAX_CRASH_RECOVERY_RECLAIMS: u32 = 5;
 
-/// Default backpressure bound for the row store's async write-behind window.
+/// Default backpressure bound for the row store's async recovery-boundary window.
 /// Sized so a burst of non-critical churn (queued/running/cancel-requested
 /// transitions) can coalesce into batched journal appends without an unbounded
 /// backlog, while keeping the worst-case crash-loss window small.
-const DEFAULT_MAX_PENDING_WRITE_BEHIND_DELTAS: usize = 128;
+const DEFAULT_MAX_PENDING_RECOVERY_BOUNDARY_DELTAS: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InMemoryTurnStateStoreLimits {
@@ -152,14 +152,13 @@ pub struct InMemoryTurnStateStoreLimits {
     /// genuine-invariant reason `crash_retry_exhausted` (never `lease_expired`),
     /// so a run that keeps crashing pre-checkpoint cannot re-drive forever.
     pub max_crash_recovery_reclaims: u32,
-    /// Backpressure bound for the row store's async write-behind mode
-    /// ([`crate::TurnStateDurabilityPolicy::WriteBehind`]). Non-critical
-    /// transitions return `Ok` immediately after enqueue without awaiting the
-    /// durable ack, so the enqueued-but-un-acked delta window is otherwise
-    /// unbounded. When the window reaches this cap, the next non-critical op
-    /// awaits the OLDEST pending ack before returning — bounding both memory and
-    /// the crash-loss window. Unused under `WriteThrough` (every op awaits).
-    pub max_pending_write_behind_deltas: usize,
+    /// Backpressure bound for the row store's async recovery-boundary mode
+    /// ([`crate::TurnStateDurabilityPolicy::RecoveryBoundary`]). Non-critical
+    /// transitions update the live snapshot without appending. When the number
+    /// of pending mutations reaches this cap, that mutation flushes one
+    /// coalesced delta before returning, bounding memory and the crash-loss
+    /// window. Unused under `WriteThrough` (every op awaits its own append).
+    pub max_pending_recovery_boundary_deltas: usize,
 }
 
 impl Default for InMemoryTurnStateStoreLimits {
@@ -173,7 +172,7 @@ impl Default for InMemoryTurnStateStoreLimits {
             max_concurrent_trigger_runs: None,
             max_concurrent_conversation_runs: None,
             max_crash_recovery_reclaims: DEFAULT_MAX_CRASH_RECOVERY_RECLAIMS,
-            max_pending_write_behind_deltas: DEFAULT_MAX_PENDING_WRITE_BEHIND_DELTAS,
+            max_pending_recovery_boundary_deltas: DEFAULT_MAX_PENDING_RECOVERY_BOUNDARY_DELTAS,
         }
     }
 }
@@ -243,11 +242,11 @@ impl InMemoryTurnStateStoreLimits {
         self
     }
 
-    pub fn set_max_pending_write_behind_deltas(
+    pub fn set_max_pending_recovery_boundary_deltas(
         mut self,
-        max_pending_write_behind_deltas: usize,
+        max_pending_recovery_boundary_deltas: usize,
     ) -> Self {
-        self.max_pending_write_behind_deltas = max_pending_write_behind_deltas;
+        self.max_pending_recovery_boundary_deltas = max_pending_recovery_boundary_deltas;
         self
     }
 }

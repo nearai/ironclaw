@@ -43,8 +43,9 @@ The RootFilesystem-backed row store uses `/turns/rows/v1` as its durable shape.
 Each logical family has its own keyed row collection under that root, with
 `/turns/rows/v1/meta/state.json` carrying the last fully materialized
 delta-journal sequence (`journal_seq`) and the event retention floor. Writers
-update the hot in-process row cache, enqueue a `SnapshotDelta`, and return only
-after the delta is durably appended. Row materialization is allowed to lag
+Under the default write-through policy, writers update the hot in-process row
+cache, enqueue a `SnapshotDelta`, and return only after the delta is durably
+appended. Row materialization is allowed to lag
 behind the foreground ack: the background materializer coalesces journal tails
 into row updates and advances `journal_seq`, while restart and durable read
 paths replay any journal tail newer than `journal_seq` before trusting row
@@ -55,6 +56,17 @@ avoiding full-snapshot rewrites on hot writes. Tier-2 run-record rows (`turns`,
 `turn_runs`, and lifecycle events) remain durable even when terminal runs are
 evicted from hot in-memory indexes; cache limits are eviction thresholds, not
 deletion thresholds for the durable run record.
+
+The explicitly selected single-owner `inmemory-turn-state` profile uses the
+same row store and RootFilesystem shape with recovery-boundary cadence. Its
+process-local domain snapshot is authoritative between boundaries, so reads do
+not force a flush. A gate/terminal transition, pending-mutation cap, or graceful
+drain appends one canonical delta from the last journaled snapshot to the live
+snapshot and waits for durability. An unexpected process loss may discard only
+the trailing non-critical prefix after the last boundary; callers selecting this
+profile must make that work re-drivable and must not run multiple unfenced
+writers for the same owner scope. Write-through remains the default for profiles
+that require every successful mutation to survive process loss.
 
 Legacy `/turns/state.json` blobs migrate into `/turns/rows/v1` through the same
 delta journal. On first row-store load, if materialized rows and replayed

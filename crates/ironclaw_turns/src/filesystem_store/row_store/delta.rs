@@ -38,8 +38,15 @@ fn zero_seq_no() -> SeqNo {
 
 pub(super) struct RowSnapshotState {
     pub(super) snapshot: TurnPersistenceSnapshot,
+    /// Last live snapshot whose delta prefix was durably appended.
+    ///
+    /// Under recovery-boundary cadence `snapshot` may advance ahead of this
+    /// value. A boundary computes one canonical delta from this snapshot to the
+    /// live snapshot, collapsing all intermediate mutations into one append.
+    pub(super) journaled_snapshot: TurnPersistenceSnapshot,
     pub(super) store: Arc<InMemoryTurnStateStore>,
     pub(super) journal_seq: SeqNo,
+    pub(super) pending_mutations: usize,
     latest_event_cursor: EventCursor,
     indexes: RowSnapshotIndexes,
 }
@@ -53,12 +60,33 @@ impl RowSnapshotState {
         let latest_event_cursor = latest_event_cursor(&snapshot);
         let indexes = RowSnapshotIndexes::from_snapshot(&snapshot)?;
         Ok(Self {
+            journaled_snapshot: snapshot.clone(),
             snapshot,
             store,
             journal_seq,
+            pending_mutations: 0,
             latest_event_cursor,
             indexes,
         })
+    }
+
+    pub(super) fn replace_live_snapshot(
+        &mut self,
+        snapshot: TurnPersistenceSnapshot,
+        store: Arc<InMemoryTurnStateStore>,
+    ) -> Result<(), TurnError> {
+        self.latest_event_cursor = latest_event_cursor(&snapshot);
+        self.indexes = RowSnapshotIndexes::from_snapshot(&snapshot)?;
+        self.snapshot = snapshot;
+        self.store = store;
+        self.pending_mutations = self.pending_mutations.saturating_add(1);
+        Ok(())
+    }
+
+    pub(super) fn mark_journaled(&mut self, journal_seq: SeqNo) {
+        self.journaled_snapshot = self.snapshot.clone();
+        self.journal_seq = self.journal_seq.max(journal_seq);
+        self.pending_mutations = 0;
     }
 
     pub(super) fn latest_event_cursor(&self) -> EventCursor {

@@ -200,25 +200,20 @@ where
     }
 
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        // Read-your-writes (#6263 Step 3): under healthy write-behind a
+        // Read-your-writes: under a healthy recovery-boundary policy a
         // non-critical mutation returns `Ok` after updating the hot snapshot but
-        // before its durable append, so a durable-row read here could miss it
+        // before a recovery-boundary append, so a durable-row read here could miss it
         // (`ScopeNotFound` or a stale status). Serve from the hot snapshot — the
-        // single-writer authority under write-behind. Write-through (durable ==
+        // single-writer authority. Write-through (durable ==
         // cache) and the degraded path (cache cleared) read the durable rows.
-        let state = if self.is_write_behind_healthy() {
+        let state = if self.is_recovery_boundary_healthy() {
             match self.read_run_state_from_hot_cache(&request).await? {
                 Some(state) => Some(state),
-                // Hot-cache miss under healthy write-behind: the hot snapshot is
+                // Hot-cache miss: the hot snapshot is
                 // bounded and evicts OLD TERMINAL runs, whose durable rows still
-                // persist and must stay queryable (the eviction contract). Flush
-                // our pending write-behind tail (so a not-yet-durable own write
-                // can't be a false miss) then read the durable rows (#6298
-                // IronLoop f6).
-                None => {
-                    self.flush_pending_write_behind_for_read().await?;
-                    self.read_run_state_from_durable_rows(&request).await?
-                }
+                // persist and must stay queryable (the eviction contract). An
+                // own live write cannot be a false miss, so fall back directly.
+                None => self.read_run_state_from_durable_rows(&request).await?,
             }
         } else {
             self.read_run_state_from_durable_rows(&request).await?
@@ -363,6 +358,17 @@ where
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<TurnEventPage, TurnError> {
+        if self.is_recovery_boundary_healthy() {
+            let (snapshot, _) = self.read_snapshot().await?;
+            return Ok(crate::events::project_turn_events(
+                &snapshot.events,
+                scope,
+                owner_user_id,
+                after,
+                limit,
+                snapshot.event_retention_floor,
+            ));
+        }
         self.read_turn_events_from_durable_rows(scope, owner_user_id, after, limit)
             .await
     }
@@ -386,14 +392,14 @@ where
             self.ensure_not_degraded().await?;
             let record = loop_checkpoint_record_from_request(request);
             let delta = SnapshotDelta::default().set_loop_checkpoints_upsert(vec![record.clone()]);
-            // A loop checkpoint is normally non-critical — under write-behind it
-            // lazy-flushes, and a gate-park's checkpoint is flushed by the block
+            // A loop checkpoint is normally non-critical — under recovery-boundary it
+            // remains in memory, and a gate-park's checkpoint is flushed by the block
             // transition's synchronous barrier. The EXCEPTION is
             // `BeforeSideEffect`: it is written immediately before a capability's
             // external side effect, and expired-lease recovery treats the ABSENCE
             // of a durable checkpoint as proof no side effect occurred (and
-            // requeues the run). If it lazy-flushed, a crash after the capability
-            // ran but before the flush would replay a non-idempotent side effect
+            // requeues the run). If it remained volatile, a crash after the
+            // capability ran would replay a non-idempotent side effect
             // (#6298 IronLoop f5). Keep it synchronous (critical) so it is durable
             // BEFORE the capability executes.
             let checkpoint_critical = matches!(
@@ -401,43 +407,49 @@ where
                 crate::run_profile::LoopCheckpointKind::BeforeSideEffect
             );
             let ack = {
-                // Serialize the durable enqueue on the shared snapshot-state lock
-                // — the same lock every apply path holds across its
-                // read-seq -> enqueue window — so the delta journal observes a
-                // consistent append order without a separate commit gate.
+                // Serialize live mutation and any boundary append on the shared
+                // snapshot-state lock, matching every other apply path.
                 let mut guard = self.snapshot_state.lock().await;
-                // Bound the pending window BEFORE enqueue on the async path
-                // (#6263 Step 3): reserve a slot here, under snapshot_state, so
-                // concurrent checkpoints can't grow the journal channel past the
-                // cap while a flush is in flight — the same reserve→enqueue→track
-                // flow every other async commit uses.
-                if self.write_behind_async(checkpoint_critical)
-                    && let Err(error) = self.reserve_write_behind_slot().await
-                {
-                    *guard = None;
-                    return Err(error);
-                }
-                let ack = self
-                    .enqueue_delta(row_store_durable_delta(delta.clone()))
-                    .map_err(|error| match error {
-                        RowPersistError::Turn(error) => error,
+                self.ensure_snapshot_cache_for_mutation(&mut guard).await?;
+                if self.is_recovery_boundary() {
+                    let state = guard.as_mut().ok_or_else(|| TurnError::Unavailable {
+                        reason: "row snapshot cache was not initialized".to_string(),
                     })?;
-                if let Some(state) = guard.as_mut()
-                    && let Err(error) = state.apply_delta(delta, state.journal_seq)
-                {
-                    // A failed in-memory apply may leave the cached snapshot
-                    // partially mutated; drop it so the next read rebuilds from
-                    // durable state, matching `apply` / `apply_with_targeted_delta`.
-                    // (The durable enqueue already succeeded, so recovery replays
-                    // it — the cache is the only thing to invalidate.)
-                    *guard = None;
-                    return Err(error);
+                    let current_seq = state.journal_seq;
+                    if let Err(error) = state.apply_delta(delta, current_seq) {
+                        *guard = None;
+                        return Err(error);
+                    }
+                    state.pending_mutations = state.pending_mutations.saturating_add(1);
+                    let at_capacity = state.pending_mutations
+                        >= self.limits.max_pending_recovery_boundary_deltas.max(1);
+                    if checkpoint_critical || at_capacity {
+                        self.flush_recovery_boundary_locked(
+                            &mut guard,
+                            "timed out waiting for loop checkpoint recovery boundary",
+                        )
+                        .await?;
+                    }
+                    None
+                } else {
+                    let ack = self
+                        .enqueue_delta(row_store_durable_delta(delta.clone()))
+                        .map_err(|error| match error {
+                            RowPersistError::Turn(error) => error,
+                        })?;
+                    if let Some(state) = guard.as_mut()
+                        && let Err(error) = state.apply_delta(delta, state.journal_seq)
+                    {
+                        // A failed in-memory apply may leave the cached snapshot
+                        // partially mutated; drop it so the next read rebuilds from
+                        // durable state, matching `apply` / `apply_with_targeted_delta`.
+                        // (The durable enqueue already succeeded, so recovery replays
+                        // it — the cache is the only thing to invalidate.)
+                        *guard = None;
+                        return Err(error);
+                    }
+                    ack
                 }
-                // Track the ack in the bounded window and return `None` on the
-                // async path so `commit_pending` lazy-flushes (no await); on
-                // write-through it returns the ack unchanged to be awaited.
-                self.track_write_behind_ack_if_async(checkpoint_critical, ack)
-                    .await
             };
             self.commit_pending(
                 PendingRowCommit {
@@ -459,6 +471,25 @@ where
         &self,
         request: GetLoopCheckpointRequest,
     ) -> Result<Option<LoopCheckpointRecord>, TurnError> {
+        if self.is_recovery_boundary_healthy() {
+            let checkpoint = self
+                .with_cached_snapshot(|snapshot| {
+                    snapshot
+                        .loop_checkpoints
+                        .iter()
+                        .find(|record| {
+                            record.scope == request.scope
+                                && record.turn_id == request.turn_id
+                                && record.run_id == request.run_id
+                                && record.checkpoint_id == request.checkpoint_id
+                        })
+                        .cloned()
+                })
+                .await?;
+            if checkpoint.is_some() {
+                return Ok(checkpoint);
+            }
+        }
         self.read_loop_checkpoint_from_durable_rows(&request).await
     }
 }

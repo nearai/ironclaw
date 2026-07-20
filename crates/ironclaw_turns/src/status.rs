@@ -68,16 +68,15 @@ impl TurnStatus {
 ///   sanitized, model-visible failure cause the model must see;
 /// * losing a `CancelRequested` re-runs work the caller was told was cancelled:
 ///   `request_cancel` reports success once the transition is committed, so a
-///   write-behind crash that reverts it to `Running`/`Queued` would execute a
+///   recovery-boundary crash that reverts it to `Running`/`Queued` would execute a
 ///   run the caller successfully cancelled (and drop its idempotency record).
 ///   The caller is waiting on this transition exactly as on a gate-park.
 ///
-/// These transitions MUST stay synchronously durable even under async
-/// write-behind ([`crate::TurnStateDurabilityPolicy::WriteBehind`]): the async
-/// path may move only NON-critical transitions off the synchronous ack. The
-/// row store keys its write-through-vs-write-behind decision on this predicate,
-/// and the crash-consistency suite references THIS function (not a copy) as the
-/// single boundary write-behind flips.
+/// These transitions MUST be recovery boundaries under
+/// [`crate::TurnStateDurabilityPolicy::RecoveryBoundary`]: the store persists
+/// the full coalesced tail before returning. Only NON-critical transitions may
+/// remain process-local. The crash-consistency suite references THIS function
+/// (not a copy) as the single durability boundary.
 pub fn is_recoverability_critical(status: TurnStatus) -> bool {
     status.is_blocked() || status.is_terminal() || matches!(status, TurnStatus::CancelRequested)
 }

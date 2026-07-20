@@ -43,14 +43,14 @@ pub(super) struct DeltaJournal {
     sender: mpsc::UnboundedSender<DeltaJournalRequest>,
     /// When set, the flusher HALTS (rather than continues) on an append failure
     /// — see [`run_delta_journal_flusher`]. Set by the row store when it runs in
-    /// [`crate::TurnStateDurabilityPolicy::WriteBehind`].
-    write_behind: Arc<AtomicBool>,
-    /// Latched `true` by the flusher when a write-behind append fails. The row
+    /// [`crate::TurnStateDurabilityPolicy::RecoveryBoundary`].
+    recovery_boundary: Arc<AtomicBool>,
+    /// Latched `true` by the flusher when a recovery-boundary append fails. The row
     /// store checks this at mutation entry to fail fast and to reload its hot
     /// cache from the last consistent durable point.
     degraded: Arc<AtomicBool>,
     /// Background task handles, aborted on drop so a "crashed" (dropped) store
-    /// cannot keep appending queued write-behind deltas to a shared backend
+    /// cannot keep appending queued recovery-boundary deltas to a shared backend
     /// after the crash point.
     flusher: JoinHandle<()>,
     materializer: JoinHandle<()>,
@@ -61,7 +61,7 @@ impl Drop for DeltaJournal {
         // Deterministic crash: stop the detached durable pipeline at the drop
         // point. Acked write-through data is already durable (the caller awaited
         // its ack before dropping the store); only queued-but-un-appended
-        // write-behind deltas are lost — exactly the bounded crash-loss window.
+        // recovery-boundary deltas are lost — exactly the bounded crash-loss window.
         self.flusher.abort();
         self.materializer.abort();
     }
@@ -82,7 +82,7 @@ impl DeltaJournal {
     {
         let (sender, receiver) = mpsc::unbounded_channel();
         let (materialize_sender, materialize_receiver) = mpsc::unbounded_channel();
-        let write_behind = Arc::new(AtomicBool::new(false));
+        let recovery_boundary = Arc::new(AtomicBool::new(false));
         let degraded = Arc::new(AtomicBool::new(false));
         let materializer = tokio::spawn(run_delta_journal_materializer(
             Arc::clone(&filesystem),
@@ -93,12 +93,12 @@ impl DeltaJournal {
             filesystem,
             receiver,
             materialize_sender,
-            Arc::clone(&write_behind),
+            Arc::clone(&recovery_boundary),
             Arc::clone(&degraded),
         ));
         Self {
             sender,
-            write_behind,
+            recovery_boundary,
             degraded,
             flusher,
             materializer,
@@ -107,13 +107,13 @@ impl DeltaJournal {
 
     /// Select the flusher's append-failure behavior: `false` (default) =
     /// write-through (continue past a failed append; each caller awaited and
-    /// handles its own error); `true` = write-behind (halt the durable sequence
+    /// handles its own error); `true` = recovery-boundary (halt the durable sequence
     /// on the first append failure).
-    pub(super) fn set_write_behind(&self, on: bool) {
-        self.write_behind.store(on, Ordering::SeqCst);
+    pub(super) fn set_recovery_boundary(&self, on: bool) {
+        self.recovery_boundary.store(on, Ordering::SeqCst);
     }
 
-    /// Whether the flusher has halted the durable sequence after a write-behind
+    /// Whether the flusher has halted the durable sequence after a recovery-boundary
     /// append failure. Once `true`, the store is degraded until reopened.
     pub(super) fn is_degraded(&self) -> bool {
         self.degraded.load(Ordering::SeqCst)
@@ -136,24 +136,13 @@ impl DeltaJournal {
         };
         ack.await.map_err(|_| delta_journal_stopped())?
     }
-
-    /// Await an ack IN PLACE, by mutable reference, so a cancelled await leaves
-    /// the ack owned by the caller (e.g. still tracked in the pending window)
-    /// rather than consuming and dropping it. `DeltaAck` is a `oneshot::Receiver`
-    /// — `Future + Unpin` — so `(&mut *ack).await` polls it without taking
-    /// ownership; the caller removes it only after this resolves. Used by the
-    /// write-behind backpressure reserve, which runs under an outer timeout that
-    /// can cancel it (#6298 IronLoop f7).
-    pub(super) async fn await_ack_ref(ack: &mut DeltaAck) -> Result<(), TurnError> {
-        (&mut *ack).await.map_err(|_| delta_journal_stopped())?
-    }
 }
 
 async fn run_delta_journal_flusher<F>(
     filesystem: Arc<ScopedFilesystem<F>>,
     mut receiver: mpsc::UnboundedReceiver<DeltaJournalRequest>,
     materialize_sender: mpsc::UnboundedSender<SeqNo>,
-    write_behind: Arc<AtomicBool>,
+    recovery_boundary: Arc<AtomicBool>,
     degraded: Arc<AtomicBool>,
 ) where
     F: RootFilesystem,
@@ -185,8 +174,8 @@ async fn run_delta_journal_flusher<F>(
                 for request in requests {
                     let _ = request.ack.send(Err(error.clone()));
                 }
-                if write_behind.load(Ordering::SeqCst) {
-                    // Append-failure HALT (write-behind only). Under write-behind
+                if recovery_boundary.load(Ordering::SeqCst) {
+                    // Append-failure HALT (recovery-boundary only). Under recovery-boundary
                     // a non-critical op already returned `Ok` to its caller when
                     // it enqueued, so CONTINUING to the next batch (the safe
                     // write-through behavior, where every caller awaited its own
@@ -628,7 +617,8 @@ fn delta_journal_stopped() -> TurnError {
 
 fn delta_journal_halted() -> TurnError {
     TurnError::Unavailable {
-        reason: "turn-state delta journal halted after a write-behind append failure".to_string(),
+        reason: "turn-state delta journal halted after a recovery-boundary append failure"
+            .to_string(),
     }
 }
 

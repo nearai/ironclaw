@@ -639,17 +639,13 @@ pub struct RebornRuntime {
     services: RebornServices,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     /// Turn-state row store, kept so graceful `shutdown` can drain the
-    /// `WriteBehind` durable tail (awaiting the acks of non-critical transitions
-    /// that committed at memory speed) so a planned restart recovers in-flight
-    /// turns, not just the synchronously-durable gate-park/terminal ones. `None`
+    /// `RecoveryBoundary` tail (writing one coalesced delta) so a planned restart
+    /// recovers in-flight turns, not just gate-park/terminal ones. `None`
     /// when no local runtime is wired (e.g. production-parts launches).
     ///
-    /// This is the graceful-restart seam for `WriteBehind`. The `inmemory-turn-state`
-    /// profile currently ships the row store at the `WriteThrough` default (see the
-    /// factory build arm — `WriteBehind` is blocked on the row store's
-    /// non-cache-aware query paths), so `drain()` is a no-op today: `WriteThrough`
-    /// persists every transition synchronously and buffers nothing. The wiring stays
-    /// so the seam is live the moment the arm selects `WriteBehind`.
+    /// This is the graceful-restart seam for `RecoveryBoundary`. The `inmemory-turn-state`
+    /// profile selects this policy in the factory build arm; other profiles keep
+    /// the `WriteThrough` default.
     #[cfg(feature = "inmemory-turn-state")]
     turn_state_flush: Option<Arc<ComposedTurnStateStore>>,
     turn_tree_store: Arc<dyn TurnSpawnTreeStateStore>,
@@ -2554,22 +2550,16 @@ impl RebornRuntime {
         }
         // Everything that mutates turn state (trigger poller, credential-refresh
         // worker, scheduler/runner) is now stopped, so the row store is quiescent.
-        // Drain the `WriteBehind` durable tail — awaiting the acks of non-critical
-        // transitions that committed at memory speed — so a planned restart
-        // recovers in-flight turns, not just the synchronously-durable
-        // gate-park/terminal ones. The `inmemory-turn-state` profile currently ships
-        // the row store at the `WriteThrough` default (its tail is always empty), so
-        // this drain is a no-op today; it is the live seam for when the build arm
-        // selects `WriteBehind`. Best-effort: a drain failure means the flusher
-        // latched degraded mid-shutdown; log it so the operator sees the un-drained
-        // tail rather than failing the clean exit path.
+        // Drain the `RecoveryBoundary` tail as one coalesced delta so a planned
+        // restart recovers in-flight turns. Best-effort: a drain failure means
+        // the store degraded mid-shutdown; log it without failing clean exit.
         #[cfg(feature = "inmemory-turn-state")]
         if let Some(turn_state) = &self.turn_state_flush
             && let Err(error) = turn_state.drain().await
         {
             tracing::warn!(
                 %error,
-                "turn-state WriteBehind drain failed during graceful shutdown; the un-acked \
+                "turn-state RecoveryBoundary drain failed during graceful shutdown; the \
                  non-critical tail may not be durable on restart"
             );
         }
@@ -4085,7 +4075,7 @@ pub async fn build_reborn_runtime(
         )
     });
 
-    // Row-store handle for the graceful-shutdown `WriteBehind` drain (see the
+    // Row-store handle for the graceful-shutdown `RecoveryBoundary` drain (see the
     // field doc). `local_runtime` is `Option<&…>` (`Copy`), so mapping it here
     // doesn't disturb its later use.
     #[cfg(feature = "inmemory-turn-state")]
