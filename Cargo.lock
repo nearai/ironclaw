@@ -5067,11 +5067,14 @@ dependencies = [
 name = "ironclaw_reborn_migration"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "async-trait",
  "chrono",
+ "chrono-tz",
  "clap",
  "deadpool-postgres",
+ "hkdf 0.13.0",
  "ironclaw_common",
  "ironclaw_extensions",
  "ironclaw_filesystem",
@@ -5086,16 +5089,22 @@ dependencies = [
  "ironclaw_threads",
  "ironclaw_triggers",
  "libsql",
+ "rustls 0.23.41",
+ "rustls-native-certs 0.8.4",
  "secrecy",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-postgres",
+ "tokio-postgres-rustls",
  "tracing",
  "tracing-subscriber",
  "ulid",
  "uuid",
+ "webpki-roots 1.0.7",
 ]
 
 [[package]]
