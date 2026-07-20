@@ -165,13 +165,12 @@ pub struct TurnStateStoreLimits {
     /// genuine-invariant reason `crash_retry_exhausted` (never `lease_expired`),
     /// so a run that keeps crashing pre-checkpoint cannot re-drive forever.
     pub max_crash_recovery_reclaims: u32,
-    /// Backpressure bound for the row store's async write-behind mode
-    /// ([`crate::TurnStateDurabilityPolicy::WriteBehind`]). Non-critical
-    /// transitions return `Ok` immediately after enqueue without awaiting the
-    /// durable ack, so the enqueued-but-un-acked delta window is otherwise
-    /// unbounded. When the window reaches this cap, the next non-critical op
-    /// awaits the OLDEST pending ack before returning — bounding both memory and
-    /// the crash-loss window. Unused under `WriteThrough` (every op awaits).
+    /// Backpressure bound for the row store's async write-behind mode.
+    /// Non-critical transitions return `Ok` immediately after enqueue without
+    /// awaiting the durable ack, so the enqueued-but-un-acked delta window is
+    /// otherwise unbounded. When the window reaches this cap, the next
+    /// non-critical op awaits the OLDEST pending ack before returning —
+    /// bounding both memory and the crash-loss window.
     pub max_pending_write_behind_deltas: usize,
 }
 

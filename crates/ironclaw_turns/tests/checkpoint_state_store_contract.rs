@@ -144,6 +144,11 @@ async fn turn_state_loop_checkpoint_store_survives_persistence_snapshot() {
     let snapshot = checkpoint_store.persistence_snapshot().await.unwrap();
     assert_eq!(snapshot.loop_checkpoints.len(), 1);
 
+    // `BeforeBlock` is a non-critical checkpoint kind (only `BeforeSideEffect`
+    // is a durability barrier) — drain before reopening so its journal append
+    // has landed.
+    checkpoint_store.drain().await.expect("drain checkpoint");
+
     let reopened = FilesystemTurnStateRowStore::new(scoped.clone());
     let loaded = reopened
         .get_loop_checkpoint(GetLoopCheckpointRequest {

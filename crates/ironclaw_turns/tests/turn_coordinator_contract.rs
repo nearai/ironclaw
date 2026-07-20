@@ -1402,6 +1402,10 @@ async fn rehydrated_resumed_run_persists_terminal_state() {
             .status,
         TurnStatus::Queued,
     );
+    // The resume's Blocked -> Queued transition on the SAME run is non-critical
+    // (it's neither a new run nor a gate-park/terminal/cancel status) — drain
+    // before reopening so its journal append has landed.
+    origin.drain().await.expect("drain resume");
 
     // Restart: reopen over the same durable filesystem. The resumed gate-touched
     // run must be re-tracked from its retained checkpoint marker.
@@ -3869,6 +3873,9 @@ async fn model_route_snapshot_persists_across_snapshot_restore_and_recovery() {
         })
         .await
         .unwrap();
+    // The claim and the model-route snapshot write are both non-critical — drain
+    // before reopening so their journal appends have landed.
+    source_store.drain().await.expect("drain before reopen");
 
     let restored = Arc::new(FilesystemTurnStateRowStore::new(fs.clone()));
     assert_eq!(

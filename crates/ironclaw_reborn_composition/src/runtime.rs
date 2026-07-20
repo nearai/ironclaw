@@ -647,12 +647,11 @@ pub struct RebornRuntime {
     )]
     channel_host_assembly:
         Option<Arc<crate::extension_host::channel_host::GenericChannelHostAssembly>>,
-    /// Concrete in-memory turn-state authority, kept so graceful `shutdown` can
-    /// flush the full snapshot durably (recovering in-flight turns on the next
-    /// restart, not just gate-blocked ones). `None` when no local runtime is
-    /// wired (e.g. production-parts launches); the durable filesystem store
-    /// already persists every transition, so it needs no shutdown flush.
-    #[cfg(feature = "inmemory-turn-state")]
+    /// Turn-state row store, kept so graceful `shutdown` can drain the
+    /// write-behind durable tail (awaiting the acks of non-critical transitions
+    /// that committed at memory speed) so a planned restart recovers in-flight
+    /// turns, not just the synchronously-durable gate-park/terminal/new-run ones.
+    /// `None` when no local runtime is wired (e.g. production-parts launches).
     turn_state_flush: Option<Arc<ComposedTurnStateStore>>,
     turn_tree_store: Arc<dyn TurnSpawnTreeStateStore>,
     thread_service: Arc<dyn SessionThreadService>,
@@ -2393,16 +2392,12 @@ impl RebornRuntime {
         }
         // Everything that mutates turn state (trigger poller, credential-refresh
         // worker, scheduler/runner) is now stopped, so the row store is quiescent.
-        // Drain the `WriteBehind` durable tail — awaiting the acks of non-critical
+        // Drain the write-behind durable tail — awaiting the acks of non-critical
         // transitions that committed at memory speed — so a planned restart
         // recovers in-flight turns, not just the synchronously-durable
-        // gate-park/terminal ones. The `inmemory-turn-state` profile currently ships
-        // the row store at the `WriteThrough` default (its tail is always empty), so
-        // this drain is a no-op today; it is the live seam for when the build arm
-        // selects `WriteBehind`. Best-effort: a drain failure means the flusher
-        // latched degraded mid-shutdown; log it so the operator sees the un-drained
-        // tail rather than failing the clean exit path.
-        #[cfg(feature = "inmemory-turn-state")]
+        // gate-park/terminal/new-run ones. Best-effort: a drain failure means the
+        // flusher latched degraded mid-shutdown; log it so the operator sees the
+        // un-drained tail rather than failing the clean exit path.
         if let Some(turn_state) = &self.turn_state_flush
             && let Err(error) = turn_state.drain().await
         {
@@ -4043,10 +4038,9 @@ pub async fn build_reborn_runtime(
         )
     });
 
-    // Row-store handle for the graceful-shutdown `WriteBehind` drain (see the
+    // Row-store handle for the graceful-shutdown write-behind drain (see the
     // field doc). `local_runtime` is `Option<&…>` (`Copy`), so mapping it here
     // doesn't disturb its later use.
-    #[cfg(feature = "inmemory-turn-state")]
     let turn_state_flush = local_runtime.map(|lr| Arc::clone(&lr.turn_state));
 
     // Apply the effective LLM config (config.toml/env selection + any stored
@@ -4074,7 +4068,6 @@ pub async fn build_reborn_runtime(
         services,
         turn_coordinator,
         channel_host_assembly,
-        #[cfg(feature = "inmemory-turn-state")]
         turn_state_flush,
         turn_tree_store: turn_state_store,
         thread_service,

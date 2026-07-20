@@ -2,14 +2,16 @@
 //!
 //! [`in_memory_turn_state_store`] is the single, workspace-wide replacement for
 //! the former public in-memory turn-state store: a [`FilesystemTurnStateRowStore`]
-//! over a volatile [`InMemoryBackend`] at the default
-//! [`WriteThrough`](crate::TurnStateDurabilityPolicy::WriteThrough) durability.
-//! Because every transition commits synchronously under `WriteThrough`, its
-//! read-after-write and reopen-durability semantics are identical to the old
-//! in-memory authority — the same engine (`TurnStateEngine`) runs inside it.
-//!
-//! Keeping every test on this one constructor means a later step can flip the
-//! whole fleet's durability policy in exactly one place.
+//! over a volatile [`InMemoryBackend`], at the store's single write-behind
+//! durability mode (#6263 Step 5b — there is no longer a durability-mode
+//! choice). Gate-park, terminal, and new-run transitions are still
+//! synchronously durable (they are recoverability-critical, see
+//! [`crate::is_recoverability_critical`]); other transitions commit at memory
+//! speed and flush asynchronously. A test that reopens a fresh store instance
+//! over the same backend (to exercise restart/rehydration) must drain the
+//! prior instance first — drop it after its last critical op, or call its
+//! `drain()` — so a pending non-critical async tail is not silently lost
+//! before the reopen reads.
 
 use std::sync::Arc;
 

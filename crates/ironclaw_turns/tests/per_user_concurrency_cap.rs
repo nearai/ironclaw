@@ -1077,6 +1077,9 @@ async fn snapshot_rebuild_restores_nonzero_running_counter() {
             .unwrap(),
         1
     );
+    // The claim (Queued -> Running) is non-critical claim churn — drain it so
+    // its journal append has landed before the reopen below.
+    store.drain().await.expect("drain claim");
 
     // Reopen WHILE the run is Running, with a cap enabled so the rebuild loop
     // executes — counter must already be 1 without claiming again.

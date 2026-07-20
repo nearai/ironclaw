@@ -503,8 +503,6 @@ where
                 PendingRowCommit {
                     value: record,
                     ack,
-                    active_lock_reservations: Vec::new(),
-                    run_row_reservations: Vec::new(),
                     critical: checkpoint_critical,
                 },
                 "timed out waiting for loop checkpoint row-store append",

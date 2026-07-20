@@ -7,9 +7,10 @@
 //! ratchet, so this is where the seal's own test authorizer belongs.
 
 use ironclaw_host_api::{
-    ActivityId, AuthorizeResult, Authorized, Blocked, CapabilityAuthorizer, CapabilityId, DenyRef,
-    GateRef, GateWaypoint, Invocation, InvocationOrigin, MountView, ProductKind, ResourceEstimate,
-    ResourceReservation, ResourceReservationId, ResourceScope, RuntimeLane, Timestamp, UserId,
+    ActivityId, Actor, AuthorizeResult, Authorized, Blocked, CapabilityAuthorizer, CapabilityId,
+    CorrelationId, DenyRef, GateRef, GateWaypoint, Invocation, InvocationOrigin, MountView,
+    ProductKind, ResourceEstimate, ResourceReservation, ResourceReservationId, ResourceScope,
+    RuntimeLane, Timestamp, UserId,
 };
 
 /// A stand-in kernel authorizer. In production the sole impl lives in
@@ -23,9 +24,12 @@ fn invocation() -> Invocation {
         capability: CapabilityId::new("shell.exec").unwrap(),
         input: serde_json::json!({}),
         scope: ResourceScope::system(),
-        actor: UserId::new("user1").unwrap(),
+        actor: Actor::Sealed(UserId::new("user1").unwrap()),
         origin: InvocationOrigin::Product(ProductKind::new("settings").unwrap()),
         estimate: ResourceEstimate::default(),
+        correlation_id: CorrelationId::new(),
+        process_id: None,
+        parent_process_id: None,
     }
 }
 
