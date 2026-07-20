@@ -53,13 +53,27 @@ bootstrap and startup will not re-enable it.
 Legacy IronClaw startup also uses the same env pair to bootstrap the persisted
 `nearai` MCP server config described in `.env.example`.
 
+## Interactive LLM Credential Prompts
+
+On an interactive terminal, `onboard` prompts for the LLM provider (arrow-key
+menu, falling back to a numbered list), then that provider's API key (input
+masked), then an optional model override, and probes the key before storing it.
+Writes go to the encrypted secret store first and `[llm.default]` in
+`config.toml` second, so the config can never name a provider whose key failed
+to persist.
+
+**Esc at the API-key prompt returns to the provider menu** rather than
+cancelling onboarding — including at the reprompt that follows a failed probe.
+Nothing entered on the abandoned pass is stored: every prompt is a pure read
+and both durable writes happen only after a provider is finally settled on.
+
+A rerun where `[llm.default]` already names a provider *and* the secret store
+already holds its key skips these prompts entirely (`--force` re-runs them).
+
 ## Non-Goals In This Slice
 
 - No v1 `src/setup/wizard.rs` reuse.
 - No automatic first-run invocation before `ironclaw run`.
-- No interactive provider credential prompts.
-- No keychain or encrypted secret setup for LLM keys.
-- No model picker.
 - No channel, extension, or WebUI setup flow.
 - No conversation-history import.
 

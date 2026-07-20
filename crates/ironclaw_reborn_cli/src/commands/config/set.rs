@@ -381,13 +381,20 @@ impl SecretValueSource for StdinSecretValueSource {
                  entered with input hidden"
             );
         }
-        print!("{label} (input hidden): ");
+        print!("{label} (input hidden, Esc to cancel): ");
         std::io::stdout()
             .flush()
             .context("flush stdout before secret prompt")?;
-        let value = crate::commands::onboard::prompts::read_masked_line()?;
+        let read = crate::commands::onboard::prompts::read_masked_line()?;
         println!();
-        Ok(value)
+        match read {
+            crate::commands::onboard::prompts::MaskedLine::Entered(value) => Ok(value),
+            // Esc used to be ignored here (the read loop kept waiting); it now
+            // backs out of the prompt without writing anything.
+            crate::commands::onboard::prompts::MaskedLine::Cancelled => {
+                anyhow::bail!("`config set {label}` cancelled at the value prompt; nothing written")
+            }
+        }
     }
 }
 
