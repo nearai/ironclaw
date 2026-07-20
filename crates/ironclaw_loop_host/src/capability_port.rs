@@ -1947,6 +1947,13 @@ impl HostRuntimeLoopCapabilityPort {
             .load(&scope, invocation_id)
             .await
             .map_err(replay_payload_store_error)?;
+        // A miss here is fail-closed. Two causes: (a) a genuine store fault, or
+        // (b) a gate raised before this host-side `ReplayPayloadStore` existed
+        // (pre-#6271), whose `{input, estimate}` rode the loop checkpoint rather
+        // than the store. #6271 ships no backward-compat bridge for (b) by
+        // decision: the rollout is drain-then-deploy — in-flight gates from
+        // before the cutover are drained first (and none exist pre-release), so
+        // in production a miss is a real fault, never a migration gap.
         payload.ok_or_else(|| {
             tracing::warn!(
                 invocation_id = %invocation_id,
