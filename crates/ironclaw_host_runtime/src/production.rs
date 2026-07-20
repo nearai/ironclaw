@@ -104,9 +104,9 @@ use crate::{
     RuntimeCapabilityCompleted, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
     RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeGateId,
     RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest,
-    VisibleCapabilitySurface, obligations::secret_owner_scope, plan_capability,
-    surface::CapabilityCatalog,
+    VisibleCapabilitySurface, obligations::secret_owner_scope, surface::CapabilityCatalog,
 };
+use ironclaw_runtime_policy::{PlannerError, plan_capability};
 
 /// Default production wiring for [`HostRuntime`].
 pub struct DefaultHostRuntime {
@@ -1804,20 +1804,20 @@ enum TrustEvaluationError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RuntimePolicyEvaluationError {
     UnknownCapability,
-    Denied(crate::PlannerError),
+    Denied(PlannerError),
 }
 
 impl RuntimePolicyEvaluationError {
     fn kind(&self) -> &'static str {
         match self {
             Self::UnknownCapability => "unknown_capability",
-            Self::Denied(crate::PlannerError::ProcessEffectsRequiredButProcessBackendIsNone {
+            Self::Denied(PlannerError::ProcessEffectsRequiredButProcessBackendIsNone {
                 ..
             }) => "process_backend_none",
-            Self::Denied(crate::PlannerError::NetworkRequiredButNetworkModeIsDeny { .. }) => {
+            Self::Denied(PlannerError::NetworkRequiredButNetworkModeIsDeny { .. }) => {
                 "network_denied"
             }
-            Self::Denied(crate::PlannerError::SecretAccessRequiredButSecretModeIsDeny {
+            Self::Denied(PlannerError::SecretAccessRequiredButSecretModeIsDeny {
                 ..
             }) => "secret_denied",
         }

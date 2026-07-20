@@ -10,6 +10,7 @@ mod error;
 mod helpers;
 mod host;
 mod obligations;
+mod ports;
 mod replay_payload;
 mod requests;
 
@@ -25,6 +26,7 @@ pub use obligations::{
     CapabilityObligationError, CapabilityObligationFailureKind, CapabilityObligationHandler,
     CapabilityObligationOutcome, CapabilityObligationPhase, CapabilityObligationRequest,
 };
+pub use ports::{CredentialPresence, HostPolicyFacts, PolicyAction};
 pub use replay_payload::{
     FilesystemReplayPayloadStore, ReplayPayload, ReplayPayloadStore, ReplayPayloadStoreError,
 };
