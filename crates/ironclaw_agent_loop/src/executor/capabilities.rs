@@ -1491,6 +1491,9 @@ fn capability_failure_detail_from(diagnostic: &ModelFailureDiagnostic) -> Capabi
         ModelFailureDiagnostic::Diagnostic { text } => CapabilityFailureDetail::Diagnostic {
             text: text.as_str().to_string(),
         },
+        ModelFailureDiagnostic::HostRemediation { text } => {
+            CapabilityFailureDetail::HostRemediation { text: text.clone() }
+        }
     }
 }
 

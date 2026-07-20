@@ -386,6 +386,17 @@ fn model_failure_diagnostic(
             // path-shaped diagnostic redacts to the placeholder (never raw).
             text: SafeSummary::new(text).unwrap_or_else(|_| SafeSummary::placeholder()),
         }),
+        // The TRUSTED channel: the payload is already a validated
+        // `HostRemediation`, so it crosses the charter as-is. Deliberately NOT
+        // squeezed through `SafeSummary` — doing so is the #6299 regression
+        // this arm exists to prevent, because every host-authored remediation
+        // names a `config set` key or a console URL and would collapse to the
+        // placeholder. The guard that makes this safe is upstream (only host
+        // code constructs `HostRemediation`, and its value guard rejects
+        // credential shapes), not a second redaction pass here.
+        CapabilityFailureDetail::HostRemediation { text } => {
+            Some(ModelFailureDiagnostic::HostRemediation { text })
+        }
     }
 }
 

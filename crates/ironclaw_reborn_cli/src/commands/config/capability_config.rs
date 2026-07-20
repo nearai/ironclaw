@@ -172,11 +172,13 @@ pub(super) fn google_remediation_text() -> String {
 /// is the WebUI extension setup flow. Describes WHAT to configure only;
 /// the restart apply-step sentence is appended once by the caller (see
 /// `set.rs::print_apply_step`), not embedded here — see the module doc.
+///
 pub(super) fn slack_remediation_text(base_url: &str) -> String {
     format!(
-        "Slack setup is WebUI-only: finish connecting Slack at {base_url}/extensions \
-         (config set slack.enabled true|false only toggles whether the route mounts; it does \
-         not configure Slack app identity or credentials)."
+        "Also set IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI=<your Slack app's redirect \
+         URL> in the service environment. After restarting, connect your Slack workspace at \
+         {base_url}/extensions (workspace OAuth happens there; config set cannot supply Slack \
+         app identity or credentials)"
     )
 }
 
@@ -408,6 +410,13 @@ mod tests {
         let slack = slack_remediation_text("http://127.0.0.1:3000");
         assert!(slack.contains("http://127.0.0.1:3000/extensions"));
         assert!(!slack.contains("config set slack.bot_token"));
+        // `config set slack.enabled` alone leaves the personal-OAuth slot
+        // empty, so the CLI must also name the redirect URI or the user walks
+        // straight into the 503 this remediation exists to prevent.
+        assert!(
+            slack.contains("IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI"),
+            "the CLI variant must name the remaining redirect-URI step: {slack}"
+        );
         assert_eq!(
             slack.matches("service restart").count(),
             0,

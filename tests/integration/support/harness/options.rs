@@ -100,6 +100,16 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// `HostRuntimeCapabilityHarness::install_trigger_active_run_lookup_for_test`.
     /// Opt-in; every other harness stays byte-identical.
     pub(crate) trigger_active_run_lookup_requested: bool,
+    /// Provider-instance readiness map, "config set" + restart arm: when
+    /// `true`, registers a dummy Google OAuth backend on the `RebornBuildInput`
+    /// via the SAME generic production builder
+    /// (`RebornBuildInput::with_vendor_oauth_client`)
+    /// that `ironclaw config set google.client_id`/`client_secret` feeds in
+    /// production — proving the readiness-map check clears once an operator
+    /// configures the instance, with no test-only bypass. `false` (the
+    /// default) matches every pre-existing harness: no Google OAuth backend,
+    /// i.e. this instance is "unconfigured".
+    pub(crate) google_oauth_backend_for_test: bool,
 }
 
 impl HostRuntimeHarnessOptions {
@@ -122,6 +132,7 @@ impl HostRuntimeHarnessOptions {
             project_service_fault_injection: false,
             durable_capability_io: false,
             trigger_active_run_lookup_requested: false,
+            google_oauth_backend_for_test: false,
         }
     }
 
@@ -229,6 +240,12 @@ impl HostRuntimeHarnessOptions {
     /// `ProductLiveCapabilityIo` test double.
     pub(crate) fn with_durable_capability_io(mut self) -> Self {
         self.durable_capability_io = true;
+        self
+    }
+    /// Opt into a composition-time Google OAuth backend. See
+    /// `google_oauth_backend_for_test`'s doc.
+    pub(crate) fn with_google_oauth_backend_for_test(mut self) -> Self {
+        self.google_oauth_backend_for_test = true;
         self
     }
 }

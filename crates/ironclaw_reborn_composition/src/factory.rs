@@ -62,7 +62,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_api::{
     ExtensionId, HostPath, InvocationId, MountPermissions, MountView, PackageId, ResourceScope,
-    RuntimeHttpEgress, UserId, VirtualPath, sha256_digest_token,
+    RuntimeHttpEgress, UserId, VendorId, VirtualPath, sha256_digest_token,
 };
 // `EffectKind` is referenced only by the test / test-support trust-decision
 // helpers now that every production `*_allowed_effects` fn moved to the package
@@ -132,6 +132,9 @@ use crate::extension_host::{
     extension_removal_cleanup::{ExtensionRemovalCleanupAdapter, ExtensionRemovalCleanupRegistry},
     gsuite::{
         ProductAuthRuntimeGsuiteCredentialStager, register_bundled_gsuite_first_party_handlers,
+    },
+    provider_instance_readiness::{
+        ProviderInstanceReadinessInput, provider_instance_readiness_map,
     },
 };
 use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
@@ -1755,6 +1758,17 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     // Computed before `oauth_provider_configs` is consumed by
     // `compose_provider_client` below — see `google_oauth_configured`.
     let google_oauth_configured = google_oauth_configured(&oauth_provider_configs);
+    let google_provider = VendorId::new(ironclaw_auth::GOOGLE_PROVIDER_ID).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("provider instance readiness map could not be built: {error}"),
+        }
+    })?;
+    let provider_instance_readiness =
+        provider_instance_readiness_map([ProviderInstanceReadinessInput {
+            provider: google_provider,
+            configured: google_oauth_configured,
+            remediation: ironclaw_reborn_config::google_setup_steps_text(),
+        }]);
     let local_runtime_identity_for_nearai_mcp = local_runtime_identity.clone();
     let (
         root,
@@ -2297,6 +2311,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         )
         .with_account_setup_registry(account_setups.clone())
         .with_removal_cleanup_registry(removal_cleanup)
+        .with_provider_instance_readiness(provider_instance_readiness)
         // Removal of a channel+auth extension disconnects the caller through
         // the facade this late-bound slot carries once composition (runtime
         // build or the channel-connection test bundle) fills it.

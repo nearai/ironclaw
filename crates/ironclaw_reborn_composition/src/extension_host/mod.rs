@@ -42,9 +42,12 @@ pub(crate) mod extension_removal_cleanup;
 pub(crate) mod generic_host;
 pub(crate) mod gsuite;
 pub(crate) mod host_api_contracts;
+#[cfg(test)]
+mod host_remediation_contract_tests;
 pub(crate) mod lifecycle;
 pub(crate) mod mcp;
 pub(crate) mod mcp_discovery;
+pub(crate) mod provider_instance_readiness;
 pub(crate) mod reply_contexts;
 pub(crate) mod run_delivery_ports;
 pub(crate) mod skill_learning;
