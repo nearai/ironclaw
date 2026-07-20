@@ -1,3 +1,4 @@
+// arch-exempt: large_file, serve command aggregates config+wiring+mounts, plan #6310
 use std::env;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
@@ -258,6 +259,19 @@ impl ServeCommand {
             &user_id,
             &boot_config.home().config_file_path(),
         )?;
+        // Resolved BEFORE the composition build (`build_reborn_runtime` below)
+        // so `provider_instance_readiness_map` sees the same build-time
+        // signal the post-build Slack mount step below consumes (mirrors how
+        // `google_oauth_configured` arrives via `with_google_oauth_backend`).
+        runtime_input =
+            runtime_input.with_slack_host_beta_enabled(slack_host_beta_config.is_some());
+        // Second Slack readiness axis, from the redirect URI already resolved
+        // by `build_runtime_input_with_options` above (line ~144) — not a
+        // second read of the environment. Without it the extension route
+        // mounts but the WebUI Connect button 503s, which is the dead end the
+        // readiness map exists to replace with actionable text.
+        runtime_input = runtime_input
+            .with_slack_personal_oauth_redirect_uri_configured(slack_personal_lazy_slot.is_some());
         let telegram_host_config = resolve_telegram_host_config_for_serve_command(
             config_file.as_ref(),
             &tenant_id,

@@ -1,4 +1,17 @@
-// arch-exempt: large_file, in-memory turn state decomposition, plan #5662
+// arch-exempt: large_file, turn-state semantics engine decomposition, plan #6263
+//! The turn-state semantics engine (`TurnStateEngine`).
+//!
+//! This is the single, private execution core of turn-state semantics —
+//! admission, lifecycle, spawn-tree, run-transition, checkpoint and event
+//! projection logic — materialized transiently inside every
+//! [`FilesystemTurnStateRowStore`](super::row_store::FilesystemTurnStateRowStore)
+//! and [`FilesystemTurnStateStore`](super::FilesystemTurnStateStore) `apply`
+//! closure from the durable snapshot/rows. It is NOT a store: it has no
+//! durability, no persistence backend, and is not exported from the crate.
+//! The one public turn-state store is `FilesystemTurnStateRowStore`.
+//!
+//! Only [`TurnStateStoreLimits`] (the row store's config) is re-exported
+//! publicly from the crate root; the engine type stays `pub(crate)`.
 use async_trait::async_trait;
 use std::{
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
@@ -16,7 +29,7 @@ use ironclaw_host_api::{TenantId, UserId};
 use crate::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason,
     AllowAllTurnAdmissionLimitProvider, BlockedReason, CancelRunRequest, CancelRunResponse,
-    GateRef, GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, LoopCheckpointRecord,
+    GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, LoopCheckpointRecord,
     LoopCheckpointStore, LoopExitMapping, PutLoopCheckpointRequest, ReplyTargetBindingRef,
     ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse,
     RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver, SanitizedFailure,
@@ -121,7 +134,7 @@ const DEFAULT_MAX_CRASH_RECOVERY_RECLAIMS: u32 = 5;
 const DEFAULT_MAX_PENDING_WRITE_BEHIND_DELTAS: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InMemoryTurnStateStoreLimits {
+pub struct TurnStateStoreLimits {
     pub max_events: usize,
     pub max_terminal_records: usize,
     pub max_idempotency_records: usize,
@@ -162,7 +175,7 @@ pub struct InMemoryTurnStateStoreLimits {
     pub max_pending_write_behind_deltas: usize,
 }
 
-impl Default for InMemoryTurnStateStoreLimits {
+impl Default for TurnStateStoreLimits {
     fn default() -> Self {
         Self {
             max_events: MAX_EVENTS,
@@ -178,7 +191,7 @@ impl Default for InMemoryTurnStateStoreLimits {
     }
 }
 
-impl InMemoryTurnStateStoreLimits {
+impl TurnStateStoreLimits {
     pub fn set_max_events(mut self, max_events: usize) -> Self {
         self.max_events = max_events;
         self
@@ -252,7 +265,7 @@ impl InMemoryTurnStateStoreLimits {
     }
 }
 
-pub struct InMemoryTurnStateStore {
+pub(crate) struct TurnStateEngine {
     inner: Mutex<Inner>,
     submit_idempotency_ready: Notify,
     admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
@@ -287,9 +300,9 @@ pub struct InMemoryTurnStateStore {
     gate_persisted_runs: Mutex<HashSet<TurnRunId>>,
 }
 
-impl Default for InMemoryTurnStateStore {
+impl Default for TurnStateEngine {
     fn default() -> Self {
-        Self::with_limits(InMemoryTurnStateStoreLimits::default())
+        Self::with_limits(TurnStateStoreLimits::default())
     }
 }
 
@@ -328,7 +341,7 @@ struct Inner {
     event_retention_floor: EventCursor,
     admission_reservations: HashMap<TurnRunId, TurnAdmissionReservationRecord>,
     tree_reservations: HashMap<SpawnTreeReservationKey, TreeReservationState>,
-    limits: InMemoryTurnStateStoreLimits,
+    limits: TurnStateStoreLimits,
     concurrency: ConcurrencyLimiter,
 }
 
@@ -451,8 +464,8 @@ impl Drop for SubmitInFlightGuard<'_> {
     }
 }
 
-impl InMemoryTurnStateStore {
-    pub fn with_limits(limits: InMemoryTurnStateStoreLimits) -> Self {
+impl TurnStateEngine {
+    pub(crate) fn with_limits(limits: TurnStateStoreLimits) -> Self {
         Self {
             inner: Mutex::new(Inner {
                 concurrency: ConcurrencyLimiter::with_limits(ConcurrencyLimits {
@@ -475,7 +488,10 @@ impl InMemoryTurnStateStore {
 
     /// Attach a durable sink for gate-blocked turns (persist-on-block). Off the
     /// hot path — the sink is called only when the blocked-run set changes.
-    pub fn with_block_persistence(
+    // Preserved engine API now reachable only in-crate after the public store
+    // was eliminated (#6263); no behavior change.
+    #[allow(dead_code)]
+    pub(crate) fn with_block_persistence(
         mut self,
         block_persistence: Arc<dyn crate::TurnStateBlockPersistence>,
     ) -> Self {
@@ -517,17 +533,18 @@ impl InMemoryTurnStateStore {
         self
     }
 
-    pub fn with_admission_limit_provider(
+    #[allow(dead_code)] // preserved engine API, in-crate-only post-#6263
+    pub(crate) fn with_admission_limit_provider(
         admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
     ) -> Self {
         Self::with_limits_and_admission_limit_provider(
-            InMemoryTurnStateStoreLimits::default(),
+            TurnStateStoreLimits::default(),
             admission_limit_provider,
         )
     }
 
-    pub fn with_limits_and_admission_limit_provider(
-        limits: InMemoryTurnStateStoreLimits,
+    pub(crate) fn with_limits_and_admission_limit_provider(
+        limits: TurnStateStoreLimits,
         admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
     ) -> Self {
         Self {
@@ -550,14 +567,14 @@ impl InMemoryTurnStateStore {
         }
     }
 
-    pub fn active_admission_reservations(&self) -> Vec<TurnAdmissionReservationRecord> {
+    pub(crate) fn active_admission_reservations(&self) -> Vec<TurnAdmissionReservationRecord> {
         match self.inner.lock() {
             Ok(inner) => inner.active_admission_reservations(),
             Err(poisoned) => poisoned.into_inner().active_admission_reservations(),
         }
     }
 
-    pub fn events(&self) -> Vec<TurnLifecycleEvent> {
+    pub(crate) fn events(&self) -> Vec<TurnLifecycleEvent> {
         match self.inner.lock() {
             Ok(inner) => inner.events.clone(),
             Err(poisoned) => poisoned.into_inner().events.clone(),
@@ -702,9 +719,10 @@ impl InMemoryTurnStateStore {
         }
     }
 
-    pub fn from_persistence_snapshot(
+    #[allow(dead_code)] // preserved engine API, in-crate-only post-#6263
+    pub(crate) fn from_persistence_snapshot(
         snapshot: TurnPersistenceSnapshot,
-        limits: InMemoryTurnStateStoreLimits,
+        limits: TurnStateStoreLimits,
     ) -> Result<Self, TurnError> {
         Self::from_persistence_snapshot_with_admission_limit_provider(
             snapshot,
@@ -713,9 +731,9 @@ impl InMemoryTurnStateStore {
         )
     }
 
-    pub fn from_persistence_snapshot_with_admission_limit_provider(
+    pub(crate) fn from_persistence_snapshot_with_admission_limit_provider(
         snapshot: TurnPersistenceSnapshot,
-        limits: InMemoryTurnStateStoreLimits,
+        limits: TurnStateStoreLimits,
         admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
     ) -> Result<Self, TurnError> {
         Ok(Self {
@@ -730,7 +748,7 @@ impl InMemoryTurnStateStore {
         })
     }
 
-    pub fn persistence_snapshot(&self) -> TurnPersistenceSnapshot {
+    pub(crate) fn persistence_snapshot(&self) -> TurnPersistenceSnapshot {
         match self.inner.lock() {
             Ok(inner) => inner.persistence_snapshot(),
             Err(poisoned) => poisoned.into_inner().persistence_snapshot(),
@@ -841,7 +859,8 @@ impl InMemoryTurnStateStore {
     /// used by tests, no-DB builds, and the stress tool). A hard crash (SIGKILL /
     /// OOM) still loses in-flight state — bounding that needs a periodic flush,
     /// which is a separate follow-up.
-    pub async fn flush(&self) {
+    #[allow(dead_code)] // preserved engine API, in-crate-only post-#6263
+    pub(crate) async fn flush(&self) {
         self.persist_blocked_state().await;
     }
 
@@ -874,7 +893,7 @@ impl InMemoryTurnStateStore {
 
     /// Returns the number of runs currently in `TurnStatus::Running` or `TurnStatus::CancelRequested` for the given
     /// (tenant, user) pair. Intended for testing and observability.
-    pub fn running_count_for_user(
+    pub(crate) fn running_count_for_user(
         &self,
         tenant: &ironclaw_host_api::TenantId,
         user: &ironclaw_host_api::UserId,
@@ -890,7 +909,7 @@ impl InMemoryTurnStateStore {
 
     /// Returns the number of runs currently in `TurnStatus::Running` or `TurnStatus::CancelRequested` with `ScheduledTrigger` origin
     /// for the given tenant. Intended for testing and observability.
-    pub fn running_trigger_count(&self, tenant: &TenantId) -> u32 {
+    pub(crate) fn running_trigger_count(&self, tenant: &TenantId) -> u32 {
         match self.inner.lock() {
             Ok(inner) => inner.concurrency.count_for_trigger(tenant),
             Err(poisoned) => poisoned.into_inner().concurrency.count_for_trigger(tenant),
@@ -899,7 +918,7 @@ impl InMemoryTurnStateStore {
 
     /// Returns the number of runs currently in `TurnStatus::Running` or `TurnStatus::CancelRequested` with `Inbound` or `WebUi` origin
     /// for the given tenant. Intended for testing and observability.
-    pub fn running_conversation_count(&self, tenant: &TenantId) -> u32 {
+    pub(crate) fn running_conversation_count(&self, tenant: &TenantId) -> u32 {
         match self.inner.lock() {
             Ok(inner) => inner.concurrency.count_for_conversation(tenant),
             Err(poisoned) => poisoned
@@ -907,72 +926,6 @@ impl InMemoryTurnStateStore {
                 .concurrency
                 .count_for_conversation(tenant),
         }
-    }
-
-    pub fn blocked_approval_runs_for_actor(
-        &self,
-        scope: &TurnScope,
-        actor: &TurnActor,
-    ) -> Result<Vec<TurnRunState>, TurnError> {
-        let inner = self.lock_inner()?;
-        let mut runs = inner
-            .records
-            .values()
-            .filter(|record| {
-                record.scope.same_thread(scope)
-                    && record.actor == *actor
-                    && record.status.get() == TurnStatus::BlockedApproval
-                    && record.gate_ref.is_some()
-            })
-            .map(RunRecord::state)
-            .collect::<Vec<_>>();
-        runs.sort_by_key(|run| run.run_id.as_uuid());
-        Ok(runs)
-    }
-
-    pub fn approval_run_for_actor_and_gate(
-        &self,
-        scope: &TurnScope,
-        actor: &TurnActor,
-        gate_ref: &GateRef,
-    ) -> Result<Option<TurnRunId>, TurnError> {
-        let inner = self.lock_inner()?;
-        let active = inner
-            .records
-            .values()
-            .find(|record| {
-                record.scope.same_thread(scope)
-                    && record.actor == *actor
-                    && record.status.get() == TurnStatus::BlockedApproval
-                    && record.gate_ref.as_ref() == Some(gate_ref)
-            })
-            .map(|record| record.run_id);
-        if active.is_some() {
-            return Ok(active);
-        }
-
-        let mut historical = inner
-            .checkpoints
-            .iter()
-            .filter(|checkpoint| {
-                checkpoint.status == TurnStatus::BlockedApproval
-                    && &checkpoint.gate_ref == gate_ref
-                    && checkpoint
-                        .scope
-                        .as_ref()
-                        .is_none_or(|stored| stored.same_thread(scope))
-            })
-            .filter_map(|checkpoint| {
-                inner
-                    .records
-                    .get(&checkpoint.run_id)
-                    .filter(|record| record.scope.same_thread(scope) && record.actor == *actor)
-                    .map(|record| record.run_id)
-            })
-            .collect::<Vec<_>>();
-        historical.sort_by_key(|run_id| run_id.as_uuid());
-        historical.dedup();
-        Ok(historical.into_iter().next())
     }
 
     fn lock_inner(&self) -> Result<MutexGuard<'_, Inner>, TurnError> {
@@ -1011,7 +964,7 @@ impl InMemoryTurnStateStore {
 }
 
 #[async_trait]
-impl TurnEventProjectionSource for InMemoryTurnStateStore {
+impl TurnEventProjectionSource for TurnStateEngine {
     async fn read_turn_events_after(
         &self,
         scope: &TurnScope,
@@ -1032,7 +985,7 @@ impl TurnEventProjectionSource for InMemoryTurnStateStore {
 }
 
 #[async_trait]
-impl LoopCheckpointStore for InMemoryTurnStateStore {
+impl LoopCheckpointStore for TurnStateEngine {
     async fn put_loop_checkpoint(
         &self,
         request: PutLoopCheckpointRequest,
@@ -1076,7 +1029,7 @@ impl LoopCheckpointStore for InMemoryTurnStateStore {
 }
 
 #[async_trait]
-impl TurnStateStore for InMemoryTurnStateStore {
+impl TurnStateStore for TurnStateEngine {
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,
@@ -1367,7 +1320,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
 }
 
 #[async_trait]
-impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
+impl TurnSpawnTreeStateStore for TurnStateEngine {
     async fn submit_child_turn(
         &self,
         request: SubmitChildRunRequest,
@@ -1931,7 +1884,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
 }
 
 #[async_trait]
-impl TurnRunTransitionPort for InMemoryTurnStateStore {
+impl TurnRunTransitionPort for TurnStateEngine {
     async fn claim_next_run(
         &self,
         request: ClaimRunRequest,
@@ -2209,7 +2162,7 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
 impl Inner {
     fn from_persistence_snapshot(
         snapshot: TurnPersistenceSnapshot,
-        limits: InMemoryTurnStateStoreLimits,
+        limits: TurnStateStoreLimits,
     ) -> Result<Self, TurnError> {
         let mut cursor = 0;
         let turns = snapshot
@@ -4266,8 +4219,8 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_pruning_removes_orphaned_turn_records() {
-        let limits = InMemoryTurnStateStoreLimits::default().set_max_terminal_records(1);
-        let store = InMemoryTurnStateStore::with_limits(limits);
+        let limits = TurnStateStoreLimits::default().set_max_terminal_records(1);
+        let store = TurnStateEngine::with_limits(limits);
         let policy = AllowAllTurnAdmissionPolicy;
         let resolver = TestRunProfileResolver;
         let scope = TurnScope::new(
@@ -4348,7 +4301,7 @@ mod tests {
 
     #[tokio::test]
     async fn overlay_runner_lease_record_ignores_stale_heartbeat() {
-        let store = InMemoryTurnStateStore::default();
+        let store = TurnStateEngine::default();
         let policy = AllowAllTurnAdmissionPolicy;
         let resolver = TestRunProfileResolver;
         let scope = TurnScope::new(

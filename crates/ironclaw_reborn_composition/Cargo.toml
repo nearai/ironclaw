@@ -53,22 +53,14 @@ test-support = [
 migration-support = []
 libsql = [
     "dep:libsql",
-    "ironclaw_filesystem/libsql",
-    "ironclaw_reborn_openai_compat/libsql",
-    "ironclaw_product_workflow/libsql",
     "ironclaw_host_runtime/libsql",
     "ironclaw_runner/filesystem-goal-store",
-    "ironclaw_reborn_event_store/libsql",
-    "ironclaw_triggers/libsql",
 ]
 postgres = [
     "dep:deadpool-postgres",
-    "ironclaw_filesystem/postgres",
     "ironclaw_host_runtime/postgres",
     "ironclaw_runner/filesystem-goal-store",
     "ironclaw_runner/filesystem-local-trigger-access",
-    "ironclaw_reborn_event_store/postgres",
-    "ironclaw_triggers/postgres",
 ]
 [dependencies]
 async-trait = "0.1"
@@ -190,7 +182,7 @@ ironclaw_host_runtime = { path = "../ironclaw_host_runtime", features = ["test-s
 ironclaw_conversations = { path = "../ironclaw_conversations" }
 ironclaw_reborn_composition = { path = ".", features = ["test-support"] }
 ironclaw_threads = { path = "../ironclaw_threads" }
-ironclaw_turns = { path = "../ironclaw_turns" }
+ironclaw_turns = { path = "../ironclaw_turns", features = ["test-support"] }
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = ["test-support"] }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }

@@ -3,7 +3,7 @@
 Standalone tool + library that converts **IronClaw v1 / engine-v2 persisted
 state** into the **Reborn** state substrate. Ships as its own binary
 (`ironclaw-reborn-migration`); the conversion engine is a library
-(`run_migration`) so it can later be wired into `ironclaw-reborn` startup.
+(`run_migration`) so it can later be wired into `ironclaw` startup.
 
 - **Read side** = the root `ironclaw` crate (`ironclaw::db::connect_with_handles`)
   — one v1 database (PostgreSQL **or** libSQL). Engine-v2 state is **not** a
@@ -75,7 +75,7 @@ a domain fails the build.
   `extension_installation_store_for_migration` (mirrors composition's
   `*_for_test` accessors; ships zero bytes without the feature).
 
-## Remaining follow-up — wire into `ironclaw-reborn` startup
+## Remaining follow-up — wire into `ironclaw` startup
 
 Call `run_migration` in `crates/ironclaw_reborn_cli/src/runtime/mod.rs` after the
 storage root is resolved and before `build_reborn_runtime`, mirroring

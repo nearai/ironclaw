@@ -23,7 +23,7 @@ use super::{
     FilesystemTurnStateRowStore, PendingRowCommit, RunStateTransitionTarget,
     delta::{
         RowPersistError, SnapshotDelta, blocked_run_targeted_delta, claimed_run_targeted_delta,
-        full_snapshot_delta, loop_checkpoint_record_from_request, row_store_durable_delta,
+        full_snapshot_delta, retry_turn_full_delta, row_store_durable_delta,
         run_state_targeted_delta, run_state_with_idempotency_targeted_delta,
         submit_turn_targeted_delta,
     },
@@ -53,36 +53,60 @@ where
         let pre_resolved = PreResolvedRunProfileResolver::new(profile_resolution);
         let max_idempotency_records = self.limits.max_idempotency_records;
         let idempotency_key = request.idempotency_key.clone();
-        self.apply_with_targeted_delta(
-            RunnerLeaseOverlay::None,
-            |store| {
-                let request = request.clone();
-                let pre_resolved = pre_resolved.clone();
-                async move {
-                    store
-                        .submit_turn(request, admission_policy, &pre_resolved)
-                        .await
-                }
-            },
-            move |snapshot, latest_event_cursor, store, response| {
-                if snapshot.idempotency_records.len() >= max_idempotency_records {
-                    return full_snapshot_delta(snapshot, store);
-                }
-                submit_turn_targeted_delta(
-                    snapshot,
-                    latest_event_cursor,
-                    store,
-                    response,
-                    &idempotency_key,
-                )
-            },
-        )
-        .instrument(turn_state_write_span(
-            "submit_turn",
-            Some(&request.scope),
-            request.requested_run_id.as_ref(),
-        ))
-        .await
+        let outcome = self
+            .apply_with_targeted_delta(
+                RunnerLeaseOverlay::None,
+                |store| {
+                    let request = request.clone();
+                    let pre_resolved = pre_resolved.clone();
+                    async move {
+                        // `ThreadBusy` is transient — the engine persists nothing
+                        // for it — so surface it as the OUTER error to keep the
+                        // stale-cache refresh/retry firing. Every other outcome is
+                        // wrapped in `Ok` so its durable state is ALWAYS committed:
+                        // `Accepted` (turn/run/lock/idempotency/events) and the
+                        // rejections the engine records an idempotency record for
+                        // (`AdmissionRejected`, invalid request, requested_run_id
+                        // conflict, profile-resolution error). The plain `Err` path
+                        // discarded that record, so a duplicate submit re-evaluated
+                        // instead of replaying the same rejection (#6263).
+                        match store
+                            .submit_turn(request, admission_policy, &pre_resolved)
+                            .await
+                        {
+                            Err(TurnError::ThreadBusy(busy)) => Err(TurnError::ThreadBusy(busy)),
+                            other => Ok(other),
+                        }
+                    }
+                },
+                move |snapshot, latest_event_cursor, store, result| match result {
+                    Ok(response) => {
+                        if snapshot.idempotency_records.len() >= max_idempotency_records {
+                            return full_snapshot_delta(snapshot, store);
+                        }
+                        submit_turn_targeted_delta(
+                            snapshot,
+                            latest_event_cursor,
+                            store,
+                            response,
+                            &idempotency_key,
+                        )
+                    }
+                    // Rejection: persist the idempotency record the engine recorded
+                    // so a duplicate submit replays the same rejection and the
+                    // envelope is reconstructable after reopen. A rejection's only
+                    // durable change is that record, so a full diff yields exactly
+                    // it.
+                    Err(_) => full_snapshot_delta(snapshot, store),
+                },
+            )
+            .instrument(turn_state_write_span(
+                "submit_turn",
+                Some(&request.scope),
+                request.requested_run_id.as_ref(),
+            ))
+            .await;
+        outcome?
     }
 
     async fn resume_turn(
@@ -123,16 +147,34 @@ where
     async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
         let scope = request.scope.clone();
         let run_id = request.run_id;
-        self.apply(RunnerLeaseOverlay::None, |store| {
-            let request = request.clone();
-            async move { store.retry_turn(request).await }
-        })
-        .instrument(turn_state_write_span(
-            "retry_turn",
-            Some(&scope),
-            Some(&run_id),
-        ))
-        .await
+        // Wrap the engine result so its durable side effects are ALWAYS committed,
+        // matching the engine's own persistence: on success a new Queued run plus
+        // a linked loop checkpoint, and on `ThreadBusy` / `RunNotRetryable` a
+        // persisted (non-replayable) retry idempotency record. The plain `apply`
+        // path discarded every state change on an `Err`, so a rejected retry
+        // silently dropped the idempotency record the engine had recorded, and a
+        // successful retry's new loop checkpoint was clobbered by
+        // `preserve_loop_checkpoints` (#6263). `retry_turn_full_delta` captures
+        // both without that clobber. `AdmissionRejected` persists nothing, so its
+        // diff is empty and nothing is written.
+        let outcome = self
+            .apply_with_targeted_delta(
+                RunnerLeaseOverlay::None,
+                |store| {
+                    let request = request.clone();
+                    async move { Ok(store.retry_turn(request).await) }
+                },
+                |snapshot, _latest_event_cursor, store, _response| {
+                    retry_turn_full_delta(snapshot, store)
+                },
+            )
+            .instrument(turn_state_write_span(
+                "retry_turn",
+                Some(&scope),
+                Some(&run_id),
+            ))
+            .await;
+        outcome?
     }
 
     async fn request_cancel(
@@ -384,28 +426,44 @@ where
         );
         async move {
             self.ensure_not_degraded().await?;
-            let record = loop_checkpoint_record_from_request(request);
-            let delta = SnapshotDelta::default().set_loop_checkpoints_upsert(vec![record.clone()]);
-            // A loop checkpoint is normally non-critical — under write-behind it
-            // lazy-flushes, and a gate-park's checkpoint is flushed by the block
-            // transition's synchronous barrier. The EXCEPTION is
-            // `BeforeSideEffect`: it is written immediately before a capability's
-            // external side effect, and expired-lease recovery treats the ABSENCE
-            // of a durable checkpoint as proof no side effect occurred (and
-            // requeues the run). If it lazy-flushed, a crash after the capability
-            // ran but before the flush would replay a non-idempotent side effect
-            // (#6298 IronLoop f5). Keep it synchronous (critical) so it is durable
-            // BEFORE the capability executes.
-            let checkpoint_critical = matches!(
-                record.kind,
-                crate::run_profile::LoopCheckpointKind::BeforeSideEffect
-            );
-            let ack = {
+            let (record, checkpoint_critical, ack) = {
                 // Serialize the durable enqueue on the shared snapshot-state lock
                 // — the same lock every apply path holds across its
                 // read-seq -> enqueue window — so the delta journal observes a
                 // consistent append order without a separate commit gate.
                 let mut guard = self.snapshot_state.lock().await;
+                self.ensure_snapshot_cache_for_mutation(&mut guard).await?;
+                let cached_store = {
+                    let state = guard.as_ref().ok_or_else(|| TurnError::Unavailable {
+                        reason: "row snapshot cache was not initialized".to_string(),
+                    })?;
+                    std::sync::Arc::clone(&state.store)
+                };
+                // Insert THROUGH the cached engine so its loop-checkpoint set stays
+                // authoritative: the engine's terminal/fail transition resolves the
+                // latest resumable loop checkpoint from that in-memory set, and a
+                // snapshot-only `apply_delta` (which mutates only the snapshot rows
+                // and indexes, never `state.store`) left the cached engine blind to
+                // it — so a `fail_run` on the same cached engine dropped the run's
+                // `checkpoint_id` and silently made the failed run non-retryable
+                // (#6263). The record's durable row is persisted below.
+                let record = cached_store.put_loop_checkpoint(request).await?;
+                // A loop checkpoint is normally non-critical — under write-behind it
+                // lazy-flushes, and a gate-park's checkpoint is flushed by the block
+                // transition's synchronous barrier. The EXCEPTION is
+                // `BeforeSideEffect`: it is written immediately before a capability's
+                // external side effect, and expired-lease recovery treats the ABSENCE
+                // of a durable checkpoint as proof no side effect occurred (and
+                // requeues the run). If it lazy-flushed, a crash after the capability
+                // ran but before the flush would replay a non-idempotent side effect
+                // (#6298 IronLoop f5). Keep it synchronous (critical) so it is durable
+                // BEFORE the capability executes.
+                let checkpoint_critical = matches!(
+                    record.kind,
+                    crate::run_profile::LoopCheckpointKind::BeforeSideEffect
+                );
+                let delta =
+                    SnapshotDelta::default().set_loop_checkpoints_upsert(vec![record.clone()]);
                 // Bound the pending window BEFORE enqueue on the async path
                 // (#6263 Step 3): reserve a slot here, under snapshot_state, so
                 // concurrent checkpoints can't grow the journal channel past the
@@ -427,17 +485,19 @@ where
                 {
                     // A failed in-memory apply may leave the cached snapshot
                     // partially mutated; drop it so the next read rebuilds from
-                    // durable state, matching `apply` / `apply_with_targeted_delta`.
-                    // (The durable enqueue already succeeded, so recovery replays
-                    // it — the cache is the only thing to invalidate.)
+                    // durable state. (The durable enqueue already succeeded, so
+                    // recovery replays it — the cache is the only thing to
+                    // invalidate; the engine already holds the record.)
                     *guard = None;
                     return Err(error);
                 }
                 // Track the ack in the bounded window and return `None` on the
                 // async path so `commit_pending` lazy-flushes (no await); on
                 // write-through it returns the ack unchanged to be awaited.
-                self.track_write_behind_ack_if_async(checkpoint_critical, ack)
-                    .await
+                let ack = self
+                    .track_write_behind_ack_if_async(checkpoint_critical, ack)
+                    .await;
+                (record, checkpoint_critical, ack)
             };
             self.commit_pending(
                 PendingRowCommit {

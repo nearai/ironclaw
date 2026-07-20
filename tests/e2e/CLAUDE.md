@@ -5,7 +5,7 @@ Python/Playwright test suite that runs against a live ironclaw instance. Added i
 **Two surfaces are covered, not one.** The suite drives both:
 
 - the **legacy `ironclaw` gateway** (`/`, `#auth-screen`, `/api/chat/*`) via the `ironclaw_binary` + `page` fixtures, and
-- the **Reborn `ironclaw-reborn serve` WebChat v2 SPA** (`/`, `/api/webchat/v2/*`) via the `ironclaw_reborn_binary` + `reborn_v2_server` / `reborn_v2_browser` / `reborn_v2_page` fixtures.
+- the **Reborn `ironclaw serve` WebChat v2 SPA** (`/`, `/api/webchat/v2/*`) via the `ironclaw_reborn_binary` + `reborn_v2_server` / `reborn_v2_browser` / `reborn_v2_page` fixtures.
 
 When adding a browser test for the v2 SPA, use the `reborn_v2_*` fixtures and `SEL_V2` selectors — **not** the legacy `page`/`SEL`. See `test_reborn_webui_v2_smoke.py` for the canonical v2 example.
 
@@ -68,7 +68,7 @@ from `tests/e2e/` for the full, current set.
 | `test_tool_approval.py` | Approval card appears, buttons disable on approve/deny; waiting-approval regression uses a real HTTP tool call |
 | `test_dom_resource_limits.py` | DOM pruning at `MAX_DOM_MESSAGES`, no `setInterval` leaks across reconnect cycles |
 
-**Reborn `ironclaw-reborn serve` WebChat v2 SPA (browser via `reborn_v2_*` / `SEL_V2`):**
+**Reborn `ironclaw serve` WebChat v2 SPA (browser via `reborn_v2_*` / `SEL_V2`):**
 
 | File | What it tests |
 |------|--------------|
@@ -82,7 +82,7 @@ from `tests/e2e/` for the full, current set.
 
 The Code Coverage workflow does **not** run the entire historical Python E2E
 tree. It reads `tests/e2e/reborn_coverage_tests.txt`, which is limited to
-scenarios that start the standalone `ironclaw-reborn serve` binary and exercise
+scenarios that start the standalone `ironclaw serve` binary and exercise
 the Reborn WebChat v2 or OpenAI-compatible API surface. The manifest may use
 pytest node IDs to include only the Reborn binary/API checks from a broader
 scenario file.
@@ -121,8 +121,8 @@ All fixtures are defined in `tests/e2e/conftest.py`. Running `pytest scenarios/`
 | Fixture | What it does |
 |---------|-------------|
 | `ironclaw_binary` | Legacy gateway binary. Checks `target/debug/ironclaw`; if absent, runs `cargo build --no-default-features --features libsql` (timeout 600s). |
-| `ironclaw_reborn_binary` | Reborn v2 binary. Builds `target/debug/ironclaw-reborn` with default features (`libsql`) when stale/missing. Used by the v2 SPA scenarios. |
-| `reborn_v2_server` | Starts `ironclaw-reborn serve` (v2 SPA at `/`, `local-dev` profile) against `mock_llm_server`; config written via `_write_config_toml` (selects the `openai` provider pointed at the mock). Waits for `/api/health`; SIGINT teardown. (Module-scoped, defined in `test_reborn_webui_v2_smoke.py`.) |
+| `ironclaw_reborn_binary` | Reborn v2 binary. Builds `target/debug/ironclaw` with default features (`libsql`) when stale/missing. Used by the v2 SPA scenarios. |
+| `reborn_v2_server` | Starts `ironclaw serve` (v2 SPA at `/`, `local-dev` profile) against `mock_llm_server`; config written via `_write_config_toml` (selects the `openai` provider pointed at the mock). Waits for `/api/health`; SIGINT teardown. (Module-scoped, defined in `test_reborn_webui_v2_smoke.py`.) |
 | `reborn_v2_browser` | Chromium instance for the v2 scenarios, independent of the legacy `browser` fixture (generous launch timeout + retry). |
 | `mock_llm_server` | Starts `mock_llm.py --port 0`, reads the assigned port from stdout, waits for `/v1/models` to return 200. Yields the base URL. Serves canned responses including delayed ones (e.g. `"editable composer slow response"` → ~5s) so tests can act while a run is in flight. |
 | `emulate_google_server` | Starts `npx --yes emulate@0.7.0 --service google` with `fixtures/emulate/google_gmail.yaml`, waits for the Gmail messages endpoint to serve the seeded account, and yields the base URL for HTTP rewrite maps. The seed covers Gmail, Calendar, and Drive. Local runs skip if `npx` is unavailable; CI fails. |

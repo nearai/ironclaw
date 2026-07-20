@@ -13,7 +13,6 @@ publish = false
 [package.metadata.ironclaw]
 layer = "products"
 
-[features]
 [dependencies]
 async-trait = "0.1"
 axum = { version = "0.8" }

@@ -5,7 +5,7 @@
 //! ## Why this file exists (issue #6263, Step 3 prerequisite)
 //!
 //! The row store is a write-ahead-log durable store: every mutation delegates
-//! to the embedded `InMemoryTurnStateStore` engine, diffs the resulting
+//! to the embedded `TurnStateEngine`, diffs the resulting
 //! snapshot into a typed delta, appends that delta to a single-writer journal,
 //! and (today) awaits the durable ack before returning `Ok` — i.e. it is
 //! **write-through**. A background task materializes the journal tail into
@@ -31,7 +31,7 @@
 //!   the in-memory snapshot cache and the in-flight journal, forcing recovery
 //!   through `load_snapshot_from_rows` (the exact pattern the sibling contract
 //!   suite uses via `strict_row_store`).
-//! * **Reference model** — a second, direct `InMemoryTurnStateStore` (the row
+//! * **Reference model** — a second, never-crashed `FilesystemTurnStateRowStore` (the row
 //!   store's own engine) driven with the *same* requests. Every op the row
 //!   store acked (`Ok`) is applied to the model; ops it rejected (domain error
 //!   or injected fault) are not. After every crash+recovery, the recovered
@@ -64,14 +64,13 @@ use ironclaw_host_api::{
 use ironclaw_turns::{
     AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, CancelRunRequest,
     CheckpointSchemaId, FilesystemTurnStateRowStore, GateRef, GetLoopCheckpointRequest,
-    GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver, InMemoryTurnStateStore,
-    InMemoryTurnStateStoreLimits, LoopCheckpointStore, PutLoopCheckpointRequest,
-    ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest, RunProfileRequest,
-    RunProfileVersion, SanitizedCancelReason, SanitizedFailure, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnError,
-    TurnEventProjectionSource, TurnId, TurnLeaseToken, TurnPersistenceSnapshot, TurnRunId,
-    TurnRunnerId, TurnScope, TurnSpawnTreeStateStore, TurnStateDurabilityPolicy, TurnStateStore,
-    TurnStatus, is_recoverability_critical,
+    GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver, LoopCheckpointStore,
+    PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
+    RunProfileRequest, RunProfileVersion, SanitizedCancelReason, SanitizedFailure,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId,
+    TurnError, TurnEventProjectionSource, TurnId, TurnLeaseToken, TurnPersistenceSnapshot,
+    TurnRunId, TurnRunnerId, TurnScope, TurnSpawnTreeStateStore, TurnStateDurabilityPolicy,
+    TurnStateStore, TurnStateStoreLimits, TurnStatus, is_recoverability_critical,
     run_profile::{LoopCheckpointKind, LoopCheckpointStateRef},
     runner::{
         BlockRunRequest, ClaimRunRequest, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
@@ -392,12 +391,12 @@ fn fault_scoped(backend: Arc<FaultBackend>) -> Arc<ScopedFilesystem<FaultBackend
     Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
 }
 
-fn limits() -> InMemoryTurnStateStoreLimits {
+fn limits() -> TurnStateStoreLimits {
     // Default limits keep retention/eviction out of play so the row store's
-    // durable projection and the direct-engine model evict identically (i.e.
+    // durable projection and the reference model evict identically (i.e.
     // not at all) across a short chaos run. Eviction parity is a separate
     // (#6263 gap-5) concern.
-    InMemoryTurnStateStoreLimits::default()
+    TurnStateStoreLimits::default()
 }
 
 /// Open a fresh row store in the strict cross-store reservation mode the
@@ -447,8 +446,16 @@ fn open_row_store_lenient_with_policy(
         .with_durability_policy(policy)
 }
 
-fn model_store() -> InMemoryTurnStateStore {
-    InMemoryTurnStateStore::with_limits(limits())
+/// The never-crashed ground-truth reference model: a `WriteThrough` row store
+/// over a fresh, fault-free `InMemoryBackend`. It runs the same embedded engine
+/// as the store under test and is never fault-injected, so its durable
+/// projection is the canonical expected state. (Replaces the former direct
+/// in-memory engine reference, now private to the crate — #6263.)
+fn model_store() -> FilesystemTurnStateRowStore<FaultBackend> {
+    open_row_store_with_policy(
+        fault_scoped(Arc::new(FaultBackend::new(InMemoryBackend::new()))),
+        TurnStateDurabilityPolicy::WriteThrough,
+    )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1106,7 +1113,7 @@ impl Harness {
 /// In BOTH modes: internal invariants + `assert_recoverability_critical_survives`.
 async fn assert_recovered_matches_model(
     recovered: &FilesystemTurnStateRowStore<FaultBackend>,
-    model: &InMemoryTurnStateStore,
+    model: &FilesystemTurnStateRowStore<FaultBackend>,
     seed: u64,
     log: &[String],
     policy: TurnStateDurabilityPolicy,
@@ -1115,7 +1122,7 @@ async fn assert_recovered_matches_model(
         .persistence_snapshot()
         .await
         .expect("recovered snapshot");
-    let model_snapshot = model.persistence_snapshot();
+    let model_snapshot = model.persistence_snapshot().await.expect("model snapshot");
 
     if let Err(violation) = check_internal_invariants(&recovered_snapshot) {
         panic!(
@@ -1432,13 +1439,16 @@ async fn run_chaos(
                 // a difference the crash legitimately introduced. The loss being
                 // *redoable* (not corruption) is proven separately by
                 // `write_behind_lost_noncritical_tail_reapplies_to_model`.
-                let recovered_snapshot = store
-                    .persistence_snapshot()
-                    .await
-                    .expect("recovered snapshot");
-                model =
-                    InMemoryTurnStateStore::from_persistence_snapshot(recovered_snapshot, limits())
-                        .expect("rebuild reference model from recovered prefix");
+                // Rebuild the reference model to match the recovered prefix.
+                // The row store has no `from_persistence_snapshot`; instead fork
+                // the recovered store's durable bytes into an independent,
+                // fault-free backend and open a fresh WriteThrough model over
+                // it — semantically the "restore durable bytes at moment T"
+                // primitive the old snapshot-rebuild provided.
+                model = open_row_store_with_policy(
+                    backend.fork_durable_bytes().await,
+                    TurnStateDurabilityPolicy::WriteThrough,
+                );
             }
         }
     }
@@ -1453,7 +1463,7 @@ async fn run_chaos(
 /// update the tracked run handles.
 async fn apply_to_model_and_bookkeep(
     h: &mut Harness,
-    model: &InMemoryTurnStateStore,
+    model: &FilesystemTurnStateRowStore<FaultBackend>,
     plan: &Plan,
     rs_result: &Result<Effect, TurnError>,
 ) {
@@ -2037,7 +2047,7 @@ async fn byte_state_fork_recovers_to_model_snapshot() {
     let forked = open_row_store(forked_scoped);
 
     let forked_projection = project(&forked.persistence_snapshot().await.unwrap());
-    let model_projection = project(&model.persistence_snapshot());
+    let model_projection = project(&model.persistence_snapshot().await.unwrap());
     assert_eq!(
         forked_projection, model_projection,
         "independent byte-state fork must recover to the acked model projection"
@@ -2050,7 +2060,7 @@ async fn byte_state_fork_recovers_to_model_snapshot() {
 ///
 /// NOTE on the literal coordinator ask ("recover_expired_leases returns the run
 /// to a *claimable* state; never Failed"): the shared turn engine does NOT
-/// re-queue an expired lease — `InMemoryTurnStateStore::recover_expired_leases`
+/// re-queue an expired lease — the store`s `recover_expired_leases`
 /// terminates the abandoned run as `Failed(lease_expired)` (a
 /// resumable-checkpointed run keeps its checkpoint and is retryable; a
 /// checkpoint-less one does not — see the ignored reproducer below). That is
@@ -2904,7 +2914,7 @@ async fn write_behind_lost_noncritical_tail_reapplies_to_model() {
     // Recover from the fork: only the base is durable (the K were lost).
     let recovered = open_row_store_with_policy(fork_before, policy);
     let recovered_snapshot = recovered.persistence_snapshot().await.unwrap();
-    let model_snapshot = model.persistence_snapshot();
+    let model_snapshot = model.persistence_snapshot().await.expect("model snapshot");
 
     // Consistent legal prefix: invariants + critical-survives (R Completed) +
     // prefix (the K Queued submits are simply absent, nothing invented).
@@ -2930,7 +2940,7 @@ async fn write_behind_lost_noncritical_tail_reapplies_to_model() {
             .expect("re-applying a lost non-critical op must succeed");
     }
     let converged = project(&recovered.persistence_snapshot().await.unwrap());
-    let model_projection = project(&model.persistence_snapshot());
+    let model_projection = project(&model.persistence_snapshot().await.unwrap());
     assert_eq!(
         converged, model_projection,
         "re-applying the deterministically-lost non-critical tail must converge to the model \

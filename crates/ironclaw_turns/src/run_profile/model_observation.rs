@@ -1,4 +1,4 @@
-use ironclaw_host_api::DispatchInputIssueCode;
+use ironclaw_host_api::{DispatchInputIssueCode, HostRemediation};
 use serde::{Deserialize, Serialize};
 
 use super::host::CapabilityFailureKind;
@@ -26,6 +26,17 @@ pub enum CapabilityFailureDetail {
     /// validator rejects — the producer redacts secret VALUES instead.
     Diagnostic {
         text: String,
+    },
+    /// Host-authored operator remediation — the TRUSTED text channel.
+    ///
+    /// Carries the validated [`HostRemediation`] newtype rather than a bare
+    /// `String` (unlike its siblings) precisely so PROVENANCE travels with the
+    /// value: a producer cannot land text on this arm without going through the
+    /// host-only constructor and its credential-value guard. Untrusted
+    /// capability output stays on [`Self::Diagnostic`] and keeps collapsing to
+    /// the safe-summary placeholder.
+    HostRemediation {
+        text: HostRemediation,
     },
 }
 
@@ -299,7 +310,24 @@ pub enum CapabilityRecoveryHint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObservationTrust {
+    /// The observation carries capability output — a WASM tool's result, an MCP
+    /// server's error body, a provider response. Every downstream text guard
+    /// applies in full.
     UntrustedToolOutput,
+    /// The observation was authored entirely by the host: a fixed remediation
+    /// template plus a fixed failure summary, with no capability output mixed
+    /// in. Set ONLY by the renderer for a
+    /// [`CapabilityFailureDetail::HostRemediation`] failure, whose payload
+    /// already passed [`HostRemediation`]'s credential-VALUE guard at
+    /// construction.
+    ///
+    /// This is what lets the persistence validator in `ironclaw_threads` know
+    /// the text's PROVENANCE instead of re-deriving it by sniffing content. It
+    /// exempts host-authored text from the credential-VOCABULARY scan (a
+    /// host-authored instruction must be able to say `client_secret`), and
+    /// nothing else — the control-character and credential-VALUE guards still
+    /// apply.
+    HostAuthored,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

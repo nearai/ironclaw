@@ -279,6 +279,7 @@ registerPack("pt-BR", {
   "settings.exportSuccess": "Configurações exportadas",
   "settings.importSuccess": "Configurações importadas",
   "settings.importInvalid": "O arquivo selecionado deve conter um objeto de configurações",
+  "settings.importNoSupported": "Nenhuma configuração compatível foi encontrada no arquivo selecionado",
   "settings.importFailed": "Falha na importação: {message}",
 
   // Settings — restart banner
@@ -744,6 +745,7 @@ registerPack("pt-BR", {
   "automations.filter.completed": "Concluídas",
   "automations.refresh": "Atualizar automações",
   "automations.error.loadFailed": "Não é possível carregar automações",
+  "automations.error.actionFailed": "Não foi possível atualizar a automação. Tente novamente.",
   "automations.rename.action": "Renomear automação",
   "automations.rename.nameLabel": "Nome da automação",
   "automations.rename.nameRequired": "O nome da automação é obrigatório.",

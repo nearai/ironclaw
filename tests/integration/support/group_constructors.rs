@@ -59,6 +59,17 @@ impl RebornIntegrationGroup {
         Self::builder().extension_lifecycle().await
     }
 
+    /// Same group as [`Self::extension_lifecycle`], with a Google OAuth
+    /// backend configured at composition time. Proves the
+    /// provider-instance readiness check does not false-positive once an
+    /// operator has run `config set` + restarted — activation falls through
+    /// to the ordinary per-account credential gate.
+    pub async fn extension_lifecycle_google_oauth_configured() -> HarnessResult<Self> {
+        Self::builder()
+            .extension_lifecycle_google_oauth_configured()
+            .await
+    }
+
     /// Group with the two-capability visibility-probe fixture published into
     /// the active registry and BOTH capabilities granted, so tests can pin
     /// that only the manifest `visibility` value keeps the `host_internal`
@@ -257,16 +268,43 @@ impl RebornIntegrationGroupBuilder {
     }
 
     /// Build an extension-lifecycle group. See [`RebornIntegrationGroup::extension_lifecycle`].
-    pub async fn extension_lifecycle(mut self) -> HarnessResult<RebornIntegrationGroup> {
+    pub async fn extension_lifecycle(self) -> HarnessResult<RebornIntegrationGroup> {
+        self.extension_lifecycle_with_profile(
+            super::super::harness::profiles::extension::extension_lifecycle_tools_profile()?,
+        )
+        .await
+    }
+
+    /// Same group as [`Self::extension_lifecycle`], but with a Google OAuth
+    /// backend configured at composition time (the "config set" + restart
+    /// arm of the provider-instance readiness map). A SEPARATE composition
+    /// build rather than a toggle on the shared `extension_lifecycle()`
+    /// group — a real `config
+    /// set` + service restart is a new process, not a live flip, so a second
+    /// `#[tokio::test]`-local build is the honest analog. See
+    /// [`RebornIntegrationGroup::extension_lifecycle_google_oauth_configured`].
+    pub async fn extension_lifecycle_google_oauth_configured(
+        self,
+    ) -> HarnessResult<RebornIntegrationGroup> {
+        self.extension_lifecycle_with_profile(
+            super::super::harness::profiles::extension::extension_lifecycle_tools_profile_google_oauth_configured()?,
+        )
+        .await
+    }
+
+    /// Shared assembly for [`Self::extension_lifecycle`] and
+    /// [`Self::extension_lifecycle_google_oauth_configured`] — identical
+    /// except for which `ToolsProfile` the caller already built (with or
+    /// without the Google OAuth backend option).
+    async fn extension_lifecycle_with_profile(
+        mut self,
+        profile: ToolsProfile,
+    ) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
         // Lifecycle ownership is caller-derived. Align the shared capability
         // harness with the group's canonical binding subject so install and
         // remove execute under the same user scope as the turn.
-        let host_runtime = build_group_capability_with_base(
-            super::super::harness::profiles::extension::extension_lifecycle_tools_profile()?,
-            &base,
-        )
-        .await?;
+        let host_runtime = build_group_capability_with_base(profile, &base).await?;
         // C-SLACK-LIFECYCLE (issue #6105): wire the REAL Slack channel-connection
         // facade over this harness's own `RebornServices`, mirroring the
         // production `build_webui_services_with_slack_host_beta_mounts` slot

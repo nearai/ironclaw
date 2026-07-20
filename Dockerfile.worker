@@ -15,7 +15,7 @@ WORKDIR /build
 COPY . .
 
 # Build only the ironclaw binary (release mode)
-RUN cargo build --release --package ironclaw --bin ironclaw-legacy
+RUN cargo build --release --package ironclaw_legacy --bin ironclaw-legacy
 
 # ---
 

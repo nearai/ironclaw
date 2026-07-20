@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_turns::test_support::{in_memory_turn_state_store, in_memory_turns_filesystem};
 use ironclaw_turns::{
     AcceptedMessageRef, AgentLoopDriverDescriptor, CancellationPolicy, CapabilitySurfaceProfileId,
     CheckpointPolicy, CheckpointSchemaId, CheckpointStateRecord, ConcurrencyClass,
-    ContextProfileId, EventCursor, GateRef, GetLoopCheckpointRequest, InMemoryTurnStateStore,
-    InMemoryTurnStateStoreLimits, LoopCheckpointStateRef, LoopCheckpointStore, LoopDriverId,
-    ModelProfileId, PutCheckpointStateRequest, PutLoopCheckpointRequest, RedactedCheckpointPayload,
+    ContextProfileId, EventCursor, FilesystemTurnStateRowStore, GateRef, GetLoopCheckpointRequest,
+    LoopCheckpointStateRef, LoopCheckpointStore, LoopDriverId, ModelProfileId,
+    PutCheckpointStateRequest, PutLoopCheckpointRequest, RedactedCheckpointPayload,
     RedactedRunProfileProvenance, ReplyTargetBindingRef, ResolvedRunProfile, ResourceBudgetPolicy,
     ResourceBudgetTier, RunClassId, RunProfileFingerprint, RunProfileId, RunProfileVersion,
     RuntimeProfileConstraints, SchedulingClass, SourceBindingRef, SteeringPolicy, TurnActor,
@@ -25,7 +26,7 @@ use ironclaw_turns::{
 
 #[tokio::test]
 async fn loop_checkpoint_store_maps_checkpoint_ids_to_staged_state_refs() {
-    let checkpoint_store = InMemoryTurnStateStore::default();
+    let checkpoint_store = in_memory_turn_state_store();
     let scope = turn_scope("thread-loop-checkpoint-roundtrip");
     let turn_id = TurnId::new();
     let run_id = TurnRunId::new();
@@ -65,7 +66,7 @@ async fn loop_checkpoint_store_maps_checkpoint_ids_to_staged_state_refs() {
 
 #[tokio::test]
 async fn loop_checkpoint_store_handles_parallel_puts() {
-    let checkpoint_store = Arc::new(InMemoryTurnStateStore::default());
+    let checkpoint_store = Arc::new(in_memory_turn_state_store());
     let scope = turn_scope("thread-loop-checkpoint-parallel");
     let turn_id = TurnId::new();
     let run_id = TurnRunId::new();
@@ -119,7 +120,8 @@ async fn loop_checkpoint_store_handles_parallel_puts() {
 
 #[tokio::test]
 async fn turn_state_loop_checkpoint_store_survives_persistence_snapshot() {
-    let checkpoint_store = InMemoryTurnStateStore::default();
+    let scoped = in_memory_turns_filesystem();
+    let checkpoint_store = FilesystemTurnStateRowStore::new(scoped.clone());
     let scope = turn_scope("thread-loop-checkpoint-snapshot");
     let turn_id = TurnId::new();
     let run_id = TurnRunId::new();
@@ -139,14 +141,10 @@ async fn turn_state_loop_checkpoint_store_survives_persistence_snapshot() {
         .await
         .unwrap();
 
-    let snapshot = checkpoint_store.persistence_snapshot();
+    let snapshot = checkpoint_store.persistence_snapshot().await.unwrap();
     assert_eq!(snapshot.loop_checkpoints.len(), 1);
 
-    let reopened = InMemoryTurnStateStore::from_persistence_snapshot(
-        snapshot,
-        InMemoryTurnStateStoreLimits::default(),
-    )
-    .unwrap();
+    let reopened = FilesystemTurnStateRowStore::new(scoped.clone());
     let loaded = reopened
         .get_loop_checkpoint(GetLoopCheckpointRequest {
             scope,
@@ -163,7 +161,8 @@ async fn turn_state_loop_checkpoint_store_survives_persistence_snapshot() {
 
 #[tokio::test]
 async fn turn_state_loop_checkpoint_store_rejects_cross_scope_after_snapshot_reload() {
-    let checkpoint_store = InMemoryTurnStateStore::default();
+    let scoped = in_memory_turns_filesystem();
+    let checkpoint_store = FilesystemTurnStateRowStore::new(scoped.clone());
     let scope = turn_scope("thread-loop-checkpoint-snapshot-scope-a");
     let turn_id = TurnId::new();
     let run_id = TurnRunId::new();
@@ -182,11 +181,7 @@ async fn turn_state_loop_checkpoint_store_rejects_cross_scope_after_snapshot_rel
         .await
         .unwrap();
 
-    let reopened = InMemoryTurnStateStore::from_persistence_snapshot(
-        checkpoint_store.persistence_snapshot(),
-        InMemoryTurnStateStoreLimits::default(),
-    )
-    .unwrap();
+    let reopened = FilesystemTurnStateRowStore::new(scoped.clone());
     let loaded = reopened
         .get_loop_checkpoint(GetLoopCheckpointRequest {
             scope: turn_scope("thread-loop-checkpoint-snapshot-scope-b"),
@@ -202,7 +197,7 @@ async fn turn_state_loop_checkpoint_store_rejects_cross_scope_after_snapshot_rel
 
 #[tokio::test]
 async fn loop_checkpoint_store_rejects_cross_run_checkpoint_id() {
-    let checkpoint_store = InMemoryTurnStateStore::default();
+    let checkpoint_store = in_memory_turn_state_store();
     let scope = turn_scope("thread-loop-checkpoint-cross-run");
     let turn_id = TurnId::new();
     let run_id = TurnRunId::new();
