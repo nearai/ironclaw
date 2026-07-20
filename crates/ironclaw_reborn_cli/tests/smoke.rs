@@ -126,11 +126,8 @@ fn dockerfile_reborn_builds_with_production_features() {
         .expect("Dockerfile.reborn");
 
     assert!(
-        dockerfile
-            .matches("libsql,postgres,inmemory-turn-state")
-            .count()
-            >= 2,
-        "Dockerfile.reborn must compile both cargo-chef deps and final binary with libsql, postgres, and the in-memory turn-state authority: {dockerfile}"
+        dockerfile.matches("libsql,postgres").count() >= 2,
+        "Dockerfile.reborn must compile both cargo-chef deps and final binary with libsql and postgres: {dockerfile}"
     );
     assert!(
         dockerfile.contains("--bin ironclaw")
@@ -203,7 +200,7 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         ("aarch64-apple-darwin", "macos-15"),
         ("x86_64-pc-windows-msvc", "windows-2022"),
     ];
-    let release_features = "libsql,postgres,inmemory-turn-state";
+    let release_features = "libsql,postgres";
 
     assert_eq!(
         compile_workflow.matches("          - target: ").count(),
@@ -373,8 +370,7 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
     assert!(
         cli_manifest.contains("[package]\nname = \"ironclaw\"\nversion = \"")
             && cli_manifest.contains("[package.metadata.dist]\ndist = true")
-            && cli_manifest
-                .contains("features = [\"libsql\", \"postgres\", \"inmemory-turn-state\"]")
+            && cli_manifest.contains("features = [\"libsql\", \"postgres\"]")
             && cli_manifest.contains("[package.metadata.wix]")
             && cli_manifest.contains("[[bin]]\nname = \"ironclaw\""),
         "the canonical Reborn package must be cargo-dist enabled with production features and WiX metadata"

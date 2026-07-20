@@ -191,10 +191,6 @@ pub(crate) fn render_parent_summary(args: &Args, run_id: &str, summaries: &[RunS
                 args.turn_state_backend.as_str().to_string(),
             ),
             (
-                "turn_state_durability",
-                args.turn_state_durability.as_str().to_string(),
-            ),
-            (
                 "turn_state_max_terminal_records",
                 format_optional(args.turn_state_max_terminal_records),
             ),

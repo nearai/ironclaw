@@ -7,19 +7,19 @@ use std::{
 
 use futures_util::stream::{self, StreamExt, TryStreamExt};
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FILESYSTEM_APPLY_TIMEOUT, FileType, FilesystemError,
-    RecordVersion, RootFilesystem, ScopedFilesystem, SeqNo,
+    FILESYSTEM_APPLY_TIMEOUT, FileType, FilesystemError, RecordVersion, RootFilesystem,
+    ScopedFilesystem, SeqNo,
 };
-use ironclaw_host_api::{ResourceScope, ScopedPath, UserId};
+use ironclaw_host_api::{ResourceScope, UserId};
 use serde::de::DeserializeOwned;
 use tokio::sync::{Mutex as AsyncMutex, RwLock};
 use tracing::{Instrument, field};
 
 use crate::{
     AllowAllTurnAdmissionLimitProvider, CancelRunRequest, EventCursor, GetLoopCheckpointRequest,
-    GetRunStateRequest, LoopCheckpointRecord, TurnActiveLockRecord, TurnAdmissionLimitProvider,
-    TurnError, TurnEventPage, TurnPersistenceSnapshot, TurnRecord, TurnRunId, TurnRunRecord,
-    TurnRunState, TurnScope, TurnStateStoreLimits, TurnStatus,
+    GetRunStateRequest, LoopCheckpointRecord, TurnAdmissionLimitProvider, TurnError, TurnEventPage,
+    TurnPersistenceSnapshot, TurnRecord, TurnRunId, TurnRunRecord, TurnRunState, TurnScope,
+    TurnStateStoreLimits, TurnStatus,
     events::project_turn_events,
     runner::{ClaimedTurnRun, HeartbeatRequest, RelinquishRunRequest, TurnRunTransitionPort},
 };
@@ -38,11 +38,11 @@ mod traits;
 use delta::{
     RowPersistError, RowSnapshotState, RowStoreMeta, SnapshotDelta, active_lock_record_key,
     event_record_key, keyed_records, preserve_loop_checkpoints, row_store_durable_delta,
-    row_store_hot_cache_snapshot, run_record_key, snapshot_delta,
+    row_store_hot_cache_snapshot, snapshot_delta,
 };
 use io::{
-    delta_log_path, deserialize_materialized_row, deserialize_row, fs_error, materialized_row_seq,
-    meta_path, row_dir, row_path, serialize_materialized_row,
+    delta_log_path, deserialize_materialized_row, deserialize_row, fs_error, meta_path, row_dir,
+    row_path,
 };
 use journal::{DeltaAck, DeltaJournal, materialize_delta_log};
 
@@ -57,30 +57,19 @@ const ADMISSION_RESERVATION_ROWS: &str = "admission-reservations";
 const SPAWN_TREE_RESERVATION_ROWS: &str = "spawn-tree-reservations";
 const ROW_COLLECTION_READ_CONCURRENCY: usize = 32;
 
-/// Durability mode for [`FilesystemTurnStateRowStore`] (#6263 Step 3).
-///
-/// * [`WriteThrough`](Self::WriteThrough) — today's behavior, byte-for-byte:
-///   every mutation enqueues its delta and awaits the durable ack before
-///   returning `Ok`. No crash-loss window. This is the safety default.
-/// * [`WriteBehind`](Self::WriteBehind) — a mutation whose resulting run status
-///   is NOT [`is_recoverability_critical`](crate::is_recoverability_critical)
-///   returns `Ok` immediately after enqueue, WITHOUT awaiting the ack; the
-///   flusher persists it in the background (memory-speed non-critical writes,
-///   at the cost of a bounded crash-loss window for trailing non-critical
-///   transitions). Recoverability-critical transitions (gate-park + terminal)
-///   still await synchronously, and because the journal is a strictly
-///   sequential single-writer, awaiting a critical op's ack flushes its entire
-///   preceding async tail — critical ops are natural durability barriers.
-///
-/// The default is `WriteThrough`; `WriteBehind` is opt-in via
-/// [`FilesystemTurnStateRowStore::with_durability_policy`]. Wiring it onto a
-/// deployment profile is a separate follow-on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TurnStateDurabilityPolicy {
-    #[default]
-    WriteThrough,
-    WriteBehind,
-}
+// #6263 Step 5b: `FilesystemTurnStateRowStore` no longer has a durability-mode
+// choice. A mutation whose resulting run status is NOT
+// [`is_recoverability_critical`](crate::is_recoverability_critical) returns
+// `Ok` immediately after enqueue, WITHOUT awaiting the durable ack; the
+// flusher persists it in the background (memory-speed non-critical writes, at
+// the cost of a bounded crash-loss window for trailing non-critical
+// transitions). Recoverability-critical transitions (gate-park, terminal, and
+// brand-new run creation) still await synchronously, and because the journal
+// is a strictly sequential single-writer, awaiting a critical op's ack
+// flushes its entire preceding async tail — critical ops are natural
+// durability barriers. There is exactly one mode; the former
+// `TurnStateDurabilityPolicy::WriteThrough` variant (and its opt-in
+// `with_durability_policy` setter) is gone.
 
 /// Filesystem-backed turn-state store using typed append-log deltas.
 ///
@@ -108,59 +97,20 @@ where
     runner_leases: RunnerLeaseMemory,
     delta_journal: DeltaJournal,
     apply_timeout: Duration,
-    preappend_row_reservations: bool,
-    durability_policy: TurnStateDurabilityPolicy,
-    /// WriteBehind backpressure window: the enqueued-but-un-acked non-critical
-    /// delta acks, oldest first. Bounded by
-    /// [`TurnStateStoreLimits::max_pending_write_behind_deltas`]; at the
-    /// cap the next non-critical op awaits the oldest before enqueuing. Empty and
-    /// unused under `WriteThrough`.
+    /// Backpressure window: the enqueued-but-un-acked non-critical delta
+    /// acks, oldest first. Bounded by
+    /// [`TurnStateStoreLimits::max_pending_write_behind_deltas`]; at the cap
+    /// the next non-critical op awaits the oldest before enqueuing.
     pending_write_behind: AsyncMutex<VecDeque<DeltaAck>>,
-}
-
-enum ActiveLockReservation {
-    Created {
-        key: String,
-        run: Option<RunRowReservation>,
-    },
-    Updated {
-        key: String,
-        previous: Box<TurnActiveLockRecord>,
-        previous_seq: SeqNo,
-        version: RecordVersion,
-    },
-}
-
-enum RunRowReservation {
-    Created {
-        turn_key: Option<String>,
-        run_key: Option<String>,
-    },
-    UpdatedRun {
-        key: String,
-        previous: Box<TurnRunRecord>,
-        previous_seq: SeqNo,
-        version: RecordVersion,
-    },
-}
-
-impl ActiveLockReservation {
-    fn key(&self) -> &str {
-        match self {
-            Self::Created { key, .. } | Self::Updated { key, .. } => key,
-        }
-    }
 }
 
 struct PendingRowCommit<T> {
     value: T,
     ack: Option<DeltaAck>,
-    active_lock_reservations: Vec<ActiveLockReservation>,
-    run_row_reservations: Vec<RunRowReservation>,
-    /// Whether the resulting run status is recoverability-critical (gate-park or
-    /// terminal). Under `WriteBehind` a critical commit awaits synchronously (a
-    /// barrier); a non-critical one registers for backpressure and returns
-    /// without awaiting. Ignored under `WriteThrough` (every commit awaits).
+    /// Whether the resulting run status is recoverability-critical (gate-park,
+    /// terminal, or brand-new run creation). A critical commit awaits its
+    /// durable ack synchronously (a barrier); a non-critical one registers for
+    /// backpressure and returns without awaiting.
     critical: bool,
 }
 
@@ -195,30 +145,12 @@ where
             runner_leases: Arc::new(RwLock::new(HashMap::new())),
             delta_journal: DeltaJournal::new(filesystem, materialize_gate),
             apply_timeout: FILESYSTEM_APPLY_TIMEOUT,
-            preappend_row_reservations: false,
-            durability_policy: TurnStateDurabilityPolicy::default(),
             pending_write_behind: AsyncMutex::new(VecDeque::new()),
         }
     }
 
     pub fn with_limits(mut self, limits: TurnStateStoreLimits) -> Self {
         self.limits = limits;
-        self
-    }
-
-    /// Select the durable-commit mode (default [`TurnStateDurabilityPolicy::WriteThrough`]).
-    ///
-    /// `WriteBehind` moves non-[`is_recoverability_critical`](crate::is_recoverability_critical)
-    /// transitions off the synchronous durable ack; see
-    /// [`TurnStateDurabilityPolicy`] for the guarantees and the crash-loss
-    /// window. Gate-park + terminal transitions stay synchronously durable in
-    /// both modes.
-    pub fn with_durability_policy(mut self, durability_policy: TurnStateDurabilityPolicy) -> Self {
-        self.durability_policy = durability_policy;
-        self.delta_journal.set_write_behind(matches!(
-            durability_policy,
-            TurnStateDurabilityPolicy::WriteBehind
-        ));
         self
     }
 
@@ -232,15 +164,6 @@ where
 
     pub fn with_apply_timeout(mut self, apply_timeout: Duration) -> Self {
         self.apply_timeout = apply_timeout;
-        self
-    }
-
-    /// Enable the strict cross-store reservation mode used by crash/recovery
-    /// contract tests. Hosted single-tenant production keeps a process-local
-    /// authority and persists through the delta journal; pre-append row writes
-    /// would put materialized rows back on the hot path.
-    pub fn with_preappend_row_reservations(mut self) -> Self {
-        self.preappend_row_reservations = true;
         self
     }
 
@@ -334,19 +257,17 @@ where
         Ok(self.read_engine().await?.running_conversation_count(tenant))
     }
 
-    /// Flush the `WriteBehind` tail: await every enqueued-but-un-acked
+    /// Flush the write-behind tail: await every enqueued-but-un-acked
     /// non-critical delta ack so nothing un-durable remains when the process
     /// exits.
     ///
-    /// Under [`TurnStateDurabilityPolicy::WriteThrough`] the pending window is
-    /// always empty (every commit already awaited its own ack), so this is a
-    /// no-op. Under [`TurnStateDurabilityPolicy::WriteBehind`] it awaits the
-    /// oldest-first backpressure window drained by
-    /// [`register_write_behind_commit`](Self::register_write_behind_commit),
+    /// Awaits the oldest-first backpressure window populated by
+    /// [`track_write_behind_ack_if_async`](Self::track_write_behind_ack_if_async),
     /// giving a planned/graceful restart a clean durable tail. A hard crash
     /// (SIGKILL/OOM) still loses only the un-acked non-critical (non-critical =
-    /// not gate-park/terminal) tail; gate-park and terminal transitions are
-    /// synchronously durable in both modes and never wait on this drain.
+    /// not gate-park/terminal/brand-new-run) tail; gate-park, terminal, and
+    /// brand-new-run transitions are synchronously durable and never wait on
+    /// this drain.
     ///
     /// Idempotent. On an append failure the flusher has halted and latched the
     /// store degraded; the error is surfaced and the hot cache is rolled back to
@@ -417,64 +338,37 @@ where
         }
     }
 
-    fn is_write_behind(&self) -> bool {
-        matches!(
-            self.durability_policy,
-            TurnStateDurabilityPolicy::WriteBehind
-        )
-    }
-
-    /// Whether this commit takes the async (non-awaited) write-behind path: only
-    /// non-critical transitions under `WriteBehind`.
+    /// Whether this commit takes the async (non-awaited) write-behind path:
+    /// only non-critical transitions (write-behind is unconditional; every
+    /// commit takes this path unless it is recoverability-critical).
     fn write_behind_async(&self, critical: bool) -> bool {
-        self.is_write_behind() && !critical
+        !critical
     }
 
     /// Whether reads must serve from the process-local hot snapshot to honor
-    /// read-your-writes. Under `WriteBehind` a non-critical mutation returns
-    /// `Ok` after updating the hot cache but before its durable append, so a
-    /// durable-row read could miss it. The hot cache is the single-writer
-    /// authority under write-behind. Once the journal has degraded the cache is
-    /// cleared and reads must fall back to the last consistent durable point.
+    /// read-your-writes. A non-critical mutation returns `Ok` after updating
+    /// the hot cache but before its durable append, so a durable-row read
+    /// could miss it. The hot cache is the single-writer authority. Once the
+    /// journal has degraded the cache is cleared and reads must fall back to
+    /// the last consistent durable point.
     fn is_write_behind_healthy(&self) -> bool {
-        self.is_write_behind() && !self.delta_journal.is_degraded()
-    }
-
-    /// Whether to pre-append cross-store row reservations for this commit.
-    ///
-    /// Pre-append reservations are a WRITE-THROUGH / strict cross-store-CAS
-    /// mechanism: they CAS the *durable* run/active-lock rows before the journal
-    /// append. Under `WriteBehind` non-critical ops return `Ok` before their
-    /// durable append, so those durable rows do not yet exist — a later critical
-    /// op's reservation CAS would find "durable run row disappeared". Write-behind
-    /// is the single-writer/hot-cache-authority model where cross-store CAS is
-    /// unnecessary anyway, so it never pre-appends; a critical op is a plain
-    /// enqueue+await barrier and durability comes from the journal→materialize
-    /// path. Write-through is unchanged (reserve iff the strict flag is set).
-    fn should_preappend(&self) -> bool {
-        self.preappend_row_reservations && !self.is_write_behind()
+        !self.delta_journal.is_degraded()
     }
 
     /// Reset the hot cache after a mutation the embedded engine REJECTED (a
     /// domain error such as `ThreadBusy` / `InvalidTransition`).
     ///
-    /// The op ran against the shared cached engine, so it may have left a partial
-    /// mutation; that must be discarded. Under `WriteThrough` the cache is
-    /// dropped (`*guard = None`) and the next access reloads from durable — which
-    /// equals the cache, since every prior op flushed synchronously. Under
-    /// `WriteBehind` durable LAGS the cache (un-acked non-critical ops), so a
-    /// reload-from-durable would silently drop acked-but-unflushed ops the caller
-    /// was told succeeded. Instead, rebuild the embedded engine from the cached
-    /// snapshot (which still includes those un-flushed ops), discarding only the
-    /// failed op's partial mutation.
+    /// The op ran against the shared cached engine, so it may have left a
+    /// partial mutation; that must be discarded. Durable LAGS the cache
+    /// (un-acked non-critical ops), so a reload-from-durable would silently
+    /// drop acked-but-unflushed ops the caller was told succeeded. Instead,
+    /// rebuild the embedded engine from the cached snapshot (which still
+    /// includes those un-flushed ops), discarding only the failed op's
+    /// partial mutation.
     fn reset_cache_after_rejected_mutation(
         &self,
         guard: &mut Option<RowSnapshotState>,
     ) -> Result<(), TurnError> {
-        if !self.is_write_behind() {
-            *guard = None;
-            return Ok(());
-        }
         if let Some(state) = guard.as_mut() {
             state.store = Arc::new(self.build_in_memory_store(state.snapshot.clone())?);
         }
@@ -495,14 +389,12 @@ where
         Ok(())
     }
 
-    /// Commit a prepared [`PendingRowCommit`] under the active durability policy.
+    /// Commit a prepared [`PendingRowCommit`].
     ///
-    /// * `WriteThrough` — always await the durable ack (unchanged behavior).
-    /// * `WriteBehind` + critical — await the ack (a barrier: awaiting a critical
-    ///   op's ack implies the whole preceding async tail is durable).
-    /// * `WriteBehind` + non-critical — already enqueued and tracked in the
-    ///   bounded pending window by `apply` (returns `ack: None`), so nothing is
-    ///   awaited here.
+    /// * Critical — await the ack (a barrier: awaiting a critical op's ack
+    ///   implies the whole preceding async tail is durable).
+    /// * Non-critical — already enqueued and tracked in the bounded pending
+    ///   window by `apply` (returns `ack: None`), so nothing is awaited here.
     async fn commit_pending<T>(
         &self,
         pending: PendingRowCommit<T>,
@@ -514,9 +406,9 @@ where
         if pending.ack.is_none() {
             return Ok(pending.value);
         }
-        // A durable ack is present ⇒ write-through, or a critical write-behind
-        // barrier: await it. A non-critical write-behind commit never reaches
-        // here — `track_write_behind_ack_if_async` returned `ack: None` above.
+        // A durable ack is present ⇒ a critical write-behind barrier: await
+        // it. A non-critical write-behind commit never reaches here —
+        // `track_write_behind_ack_if_async` returned `ack: None` above.
         debug_assert!(
             !self.write_behind_async(pending.critical),
             "non-critical write-behind commit must be tracked in apply, not awaited",
@@ -559,7 +451,7 @@ where
     /// [`reserve_write_behind_slot`](Self::reserve_write_behind_slot) before the
     /// enqueue) and return `None` so [`commit_pending`](Self::commit_pending)
     /// returns without awaiting. Otherwise return the ack unchanged for the
-    /// caller to await (write-through / critical barrier). Runs under
+    /// caller to await (a critical barrier). Runs under
     /// `snapshot_state`, so the reserve→enqueue→track sequence is serialized and
     /// the window can never exceed the cap.
     async fn track_write_behind_ack_if_async(
@@ -582,12 +474,12 @@ where
     /// `get_loop_checkpoint`) read materialized durable rows so they preserve the
     /// contracts a bounded hot cache cannot: cross-writer freshness and
     /// queryability of terminal runs / events the cache has EVICTED but the
-    /// durable store retains. Under `WriteBehind`, however, a non-critical
-    /// mutation returns `Ok` after merely ENQUEUEing its delta — before the
-    /// flusher appends it and the materializer writes its rows. A durable read
-    /// issued in that window would miss the just-acked write (`get_run_state` →
-    /// `Ok(None)` → `ScopeNotFound`, an empty event page, a missing checkpoint),
-    /// failing every runtime `submit_turn` → `get_run_state`.
+    /// durable store retains. However, a non-critical mutation returns `Ok`
+    /// after merely ENQUEUEing its delta — before the flusher appends it and
+    /// the materializer writes its rows. A durable read issued in that window
+    /// would miss the just-acked write (`get_run_state` → `Ok(None)` →
+    /// `ScopeNotFound`, an empty event page, a missing checkpoint), failing
+    /// every runtime `submit_turn` → `get_run_state`.
     ///
     /// Draining the enqueued-but-un-acked non-critical window here — bounded by
     /// [`TurnStateStoreLimits::max_pending_write_behind_deltas`], typically
@@ -595,15 +487,11 @@ where
     /// the subsequent durable read (which force-materializes the journal tail)
     /// observes them. This is a read-side barrier symmetric to a critical
     /// transition's write-side barrier, and keeps the durable read's exact
-    /// semantics in BOTH modes (only WHEN it reads changes, never WHAT it reads).
-    /// A no-op under `WriteThrough` (the window is always empty), so write-through
-    /// reads stay byte-for-byte unchanged. On a drained ack failure the flusher
-    /// has halted and latched the store degraded; clear the diverged hot cache and
-    /// surface the retryable error, mirroring the backpressure path.
+    /// semantics stable (only WHEN it reads changes, never WHAT it reads). On a
+    /// drained ack failure the flusher has halted and latched the store
+    /// degraded; clear the diverged hot cache and surface the retryable error,
+    /// mirroring the backpressure path.
     async fn flush_pending_write_behind_for_read(&self) -> Result<(), TurnError> {
-        if !self.is_write_behind() {
-            return Ok(());
-        }
         // Await each pending ack IN PLACE under the window lock (peek-await-pop),
         // removing it only once it resolves. Holding the lock across the awaits
         // bounds the set to the writes present when the flush began — no later
@@ -1265,30 +1153,15 @@ where
                     *guard = Some(next_state);
                     return Ok(RowApplyOutcome::Ready(value));
                 }
-                let delta_critical = delta_is_recoverability_critical(&persist_delta);
+                let delta_critical = delta_is_recoverability_critical(&baseline, &persist_delta);
                 let reservation_seq = current_journal_seq.next();
                 let next_state = RowSnapshotState::new(new_snapshot, store, reservation_seq)?;
-                let (run_row_reservations, active_lock_reservations) = if self.should_preappend() {
-                    match self
-                        .reserve_preappend_rows(&baseline, &persist_delta, reservation_seq)
-                        .await
-                    {
-                        Ok(reservations) => reservations,
-                        Err(error) => {
-                            *guard = None;
-                            return Err(error);
-                        }
-                    }
-                } else {
-                    (Vec::new(), Vec::new())
-                };
                 // Bound the pending window BEFORE enqueue (#6263 Step 3): a
                 // non-critical write-behind op reserves a slot here, under
                 // `snapshot_state`, so concurrent callers can never grow the
                 // journal channel past the cap while the flusher is stalled.
-                // Write-behind never pre-appends, so there are no reservations to
-                // roll back; a degraded reservation → clear the hot cache (next
-                // read reloads from durable) and fail fast.
+                // A degraded reservation → clear the hot cache (next read
+                // reloads from durable) and fail fast.
                 if self.write_behind_async(delta_critical)
                     && let Err(error) = self.reserve_write_behind_slot().await
                 {
@@ -1298,11 +1171,6 @@ where
                 let ack = match self.enqueue_delta(persist_delta) {
                     Ok(ack) => ack,
                     Err(RowPersistError::Turn(error)) => {
-                        self.rollback_row_reservations(
-                            active_lock_reservations,
-                            run_row_reservations,
-                        )
-                        .await;
                         *guard = None;
                         return Err(error);
                     }
@@ -1314,8 +1182,6 @@ where
                 return Ok(RowApplyOutcome::Pending(PendingRowCommit {
                     value,
                     ack,
-                    active_lock_reservations,
-                    run_row_reservations,
                     critical: delta_critical,
                 }));
             }
@@ -1359,11 +1225,6 @@ where
         match tokio::time::timeout(self.apply_timeout, self.await_delta_ack(pending.ack)).await {
             Ok(Ok(())) => Ok(pending.value),
             Ok(Err(error)) => {
-                self.rollback_row_reservations(
-                    pending.active_lock_reservations,
-                    pending.run_row_reservations,
-                )
-                .await;
                 self.clear_snapshot_cache().await;
                 Err(error.into_turn())
             }
@@ -1372,681 +1233,6 @@ where
                 Err(TurnError::Unavailable {
                     reason: timeout_reason.to_string(),
                 })
-            }
-        }
-    }
-
-    async fn reserve_active_lock_writes(
-        &self,
-        baseline: &TurnPersistenceSnapshot,
-        delta: &SnapshotDelta,
-        reservation_seq: SeqNo,
-    ) -> Result<Vec<ActiveLockReservation>, RowPersistError> {
-        let mut reservations = Vec::new();
-        for record in &delta.active_locks_upsert {
-            let key = active_lock_record_key(record)?;
-            let path = row_path(ACTIVE_LOCK_ROWS, &key)?;
-
-            let Some(previous) = baseline_committed_active_lock(baseline, record) else {
-                let mut run_reservation = self
-                    .reserve_run_row_for_active_lock(record, delta, reservation_seq)
-                    .await?;
-                let mut reserved = false;
-                for attempt in 0..3 {
-                    let entry = active_lock_entry(record, reservation_seq)?;
-                    match self
-                        .filesystem
-                        .put(
-                            &ResourceScope::system(),
-                            &path,
-                            entry,
-                            CasExpectation::Absent,
-                        )
-                        .await
-                    {
-                        Ok(_version) => {
-                            reservations.push(ActiveLockReservation::Created {
-                                key,
-                                run: run_reservation.take(),
-                            });
-                            reserved = true;
-                            break;
-                        }
-                        Err(FilesystemError::VersionMismatch { .. }) => {
-                            let current =
-                                match self.filesystem.get(&ResourceScope::system(), &path).await {
-                                    Ok(current) => current,
-                                    Err(error) => {
-                                        self.rollback_run_row_reservation(run_reservation.take())
-                                            .await;
-                                        self.rollback_active_lock_reservations(reservations).await;
-                                        return Err(RowPersistError::Turn(fs_error(error)));
-                                    }
-                                };
-                            if let Some(current) = current {
-                                let current_record: Option<TurnActiveLockRecord> =
-                                    deserialize_materialized_row(
-                                        &current.entry.body,
-                                        ACTIVE_LOCK_ROWS,
-                                    )?;
-                                if current_record.is_none() {
-                                    let current_seq = materialized_row_seq(
-                                        &current.entry.body,
-                                        ACTIVE_LOCK_ROWS,
-                                    )?;
-                                    let entry = active_lock_entry(
-                                        record,
-                                        current_seq.max(reservation_seq),
-                                    )?;
-                                    match self
-                                        .filesystem
-                                        .put(
-                                            &ResourceScope::system(),
-                                            &path,
-                                            entry,
-                                            CasExpectation::Version(current.version),
-                                        )
-                                        .await
-                                    {
-                                        Ok(_version) => {
-                                            reservations.push(ActiveLockReservation::Created {
-                                                key,
-                                                run: run_reservation.take(),
-                                            });
-                                            reserved = true;
-                                            break;
-                                        }
-                                        Err(FilesystemError::VersionMismatch { .. }) => continue,
-                                        Err(error) => {
-                                            self.rollback_run_row_reservation(
-                                                run_reservation.take(),
-                                            )
-                                            .await;
-                                            self.rollback_active_lock_reservations(reservations)
-                                                .await;
-                                            return Err(RowPersistError::Turn(fs_error(error)));
-                                        }
-                                    }
-                                }
-                            }
-                            if self
-                                .delete_orphan_active_lock_if_present(&key, &path)
-                                .await?
-                            {
-                                continue;
-                            }
-                            if attempt == 0 {
-                                materialize_delta_log(
-                                    self.filesystem.as_ref(),
-                                    &self.materialize_gate,
-                                    None,
-                                )
-                                .await?;
-                                continue;
-                            }
-                            self.rollback_run_row_reservation(run_reservation.take())
-                                .await;
-                            self.rollback_active_lock_reservations(reservations).await;
-                            return Err(RowPersistError::Turn(TurnError::Conflict {
-                                reason: "turn scope already has a durable active lock".to_string(),
-                            }));
-                        }
-                        Err(error) => {
-                            self.rollback_run_row_reservation(run_reservation.take())
-                                .await;
-                            self.rollback_active_lock_reservations(reservations).await;
-                            return Err(RowPersistError::Turn(fs_error(error)));
-                        }
-                    }
-                }
-                if !reserved {
-                    self.rollback_run_row_reservation(run_reservation.take())
-                        .await;
-                    self.rollback_active_lock_reservations(reservations).await;
-                    return Err(RowPersistError::Turn(TurnError::Conflict {
-                        reason: "turn scope already has a durable active lock".to_string(),
-                    }));
-                }
-                continue;
-            };
-
-            if previous == record {
-                continue;
-            }
-
-            for attempt in 0..2 {
-                let current = match self.filesystem.get(&ResourceScope::system(), &path).await {
-                    Ok(Some(current)) => current,
-                    Ok(None) if attempt == 0 => {
-                        materialize_delta_log(
-                            self.filesystem.as_ref(),
-                            &self.materialize_gate,
-                            None,
-                        )
-                        .await?;
-                        continue;
-                    }
-                    Ok(None) => {
-                        self.rollback_active_lock_reservations(reservations).await;
-                        return Err(RowPersistError::Turn(TurnError::Conflict {
-                            reason: "durable active lock disappeared before update".to_string(),
-                        }));
-                    }
-                    Err(error) => {
-                        self.rollback_active_lock_reservations(reservations).await;
-                        return Err(RowPersistError::Turn(fs_error(error)));
-                    }
-                };
-                let current_record: TurnActiveLockRecord =
-                    deserialize_materialized_row(&current.entry.body, ACTIVE_LOCK_ROWS)?
-                        .ok_or_else(|| {
-                            RowPersistError::Turn(TurnError::Conflict {
-                                reason: "durable active lock row was deleted before update"
-                                    .to_string(),
-                            })
-                        })?;
-                let previous_seq = materialized_row_seq(&current.entry.body, ACTIVE_LOCK_ROWS)?;
-                if &current_record != previous {
-                    if attempt == 0 {
-                        materialize_delta_log(
-                            self.filesystem.as_ref(),
-                            &self.materialize_gate,
-                            None,
-                        )
-                        .await?;
-                        continue;
-                    }
-                    self.rollback_active_lock_reservations(reservations).await;
-                    return Err(RowPersistError::Turn(TurnError::Conflict {
-                        reason: "durable active lock changed before update".to_string(),
-                    }));
-                }
-                let entry = active_lock_entry(record, reservation_seq)?;
-                match self
-                    .filesystem
-                    .put(
-                        &ResourceScope::system(),
-                        &path,
-                        entry,
-                        CasExpectation::Version(current.version),
-                    )
-                    .await
-                {
-                    Ok(version) => {
-                        reservations.push(ActiveLockReservation::Updated {
-                            key,
-                            previous: Box::new(previous.clone()),
-                            previous_seq,
-                            version,
-                        });
-                        break;
-                    }
-                    Err(FilesystemError::VersionMismatch { .. }) if attempt == 0 => {
-                        materialize_delta_log(
-                            self.filesystem.as_ref(),
-                            &self.materialize_gate,
-                            None,
-                        )
-                        .await?;
-                    }
-                    Err(FilesystemError::VersionMismatch { .. }) => {
-                        self.rollback_active_lock_reservations(reservations).await;
-                        return Err(RowPersistError::Turn(TurnError::Conflict {
-                            reason: "durable active lock changed before update".to_string(),
-                        }));
-                    }
-                    Err(error) => {
-                        self.rollback_active_lock_reservations(reservations).await;
-                        return Err(RowPersistError::Turn(fs_error(error)));
-                    }
-                }
-            }
-        }
-        Ok(reservations)
-    }
-
-    async fn reserve_preappend_rows(
-        &self,
-        baseline: &TurnPersistenceSnapshot,
-        delta: &SnapshotDelta,
-        reservation_seq: SeqNo,
-    ) -> Result<(Vec<RunRowReservation>, Vec<ActiveLockReservation>), TurnError> {
-        if !self.preappend_row_reservations {
-            return Ok((Vec::new(), Vec::new()));
-        }
-        let run_row_reservations = match self
-            .reserve_run_row_updates(baseline, delta, reservation_seq)
-            .await
-        {
-            Ok(reservations) => reservations,
-            Err(error) => return Err(error.into_turn()),
-        };
-        let active_lock_reservations = match self
-            .reserve_active_lock_writes(baseline, delta, reservation_seq)
-            .await
-        {
-            Ok(reservations) => reservations,
-            Err(error) => {
-                self.rollback_run_row_reservations(run_row_reservations)
-                    .await;
-                return Err(error.into_turn());
-            }
-        };
-        Ok((run_row_reservations, active_lock_reservations))
-    }
-
-    async fn reserve_run_row_for_active_lock(
-        &self,
-        record: &TurnActiveLockRecord,
-        delta: &SnapshotDelta,
-        reservation_seq: SeqNo,
-    ) -> Result<Option<RunRowReservation>, RowPersistError> {
-        let run = delta
-            .runs_upsert
-            .iter()
-            .find(|run| run.run_id == record.run_id)
-            .ok_or_else(|| {
-                RowPersistError::Turn(TurnError::Unavailable {
-                    reason: "turn-state active-lock create missing matching run row".to_string(),
-                })
-            })?;
-        let turn = delta
-            .turns_upsert
-            .iter()
-            .find(|turn| turn.turn_id == run.turn_id)
-            .ok_or_else(|| {
-                RowPersistError::Turn(TurnError::Unavailable {
-                    reason: "turn-state active-lock create missing matching turn row".to_string(),
-                })
-            })?;
-        let turn_key = match self
-            .reserve_json_row(TURN_ROWS, &turn.turn_id.to_string(), turn, reservation_seq)
-            .await
-        {
-            Ok(key) => key,
-            Err(error) => return Err(error),
-        };
-        let run_key = match self
-            .reserve_json_row(RUN_ROWS, &run_record_key(run)?, run, reservation_seq)
-            .await
-        {
-            Ok(key) => key,
-            Err(error) => {
-                self.rollback_run_row_reservation(Some(RunRowReservation::Created {
-                    turn_key,
-                    run_key: None,
-                }))
-                .await;
-                return Err(error);
-            }
-        };
-        if turn_key.is_none() && run_key.is_none() {
-            Ok(None)
-        } else {
-            Ok(Some(RunRowReservation::Created { turn_key, run_key }))
-        }
-    }
-
-    async fn reserve_run_row_updates(
-        &self,
-        baseline: &TurnPersistenceSnapshot,
-        delta: &SnapshotDelta,
-        reservation_seq: SeqNo,
-    ) -> Result<Vec<RunRowReservation>, RowPersistError> {
-        let mut reservations = Vec::new();
-        for run in &delta.runs_upsert {
-            if baseline
-                .runs
-                .iter()
-                .any(|previous| previous.run_id == run.run_id)
-                && let Some(reservation) = self
-                    .reserve_run_row_update(run, baseline, reservation_seq)
-                    .await?
-            {
-                reservations.push(reservation);
-            }
-        }
-        Ok(reservations)
-    }
-
-    async fn reserve_run_row_update(
-        &self,
-        run: &TurnRunRecord,
-        baseline: &TurnPersistenceSnapshot,
-        reservation_seq: SeqNo,
-    ) -> Result<Option<RunRowReservation>, RowPersistError> {
-        let previous = baseline
-            .runs
-            .iter()
-            .find(|previous| previous.run_id == run.run_id)
-            .ok_or_else(|| {
-                RowPersistError::Turn(TurnError::Unavailable {
-                    reason: "turn-state run-row update missing baseline run row".to_string(),
-                })
-            })?;
-        if previous == run {
-            return Ok(None);
-        }
-
-        let key = run_record_key(run)?;
-        let path = row_path(RUN_ROWS, &key)?;
-        for attempt in 0..2 {
-            let current = match self.filesystem.get(&ResourceScope::system(), &path).await {
-                Ok(Some(current)) => current,
-                Ok(None) if attempt == 0 => {
-                    materialize_delta_log(self.filesystem.as_ref(), &self.materialize_gate, None)
-                        .await?;
-                    continue;
-                }
-                Ok(None) => {
-                    return Err(RowPersistError::Turn(TurnError::Conflict {
-                        reason: "durable run row disappeared before reservation".to_string(),
-                    }));
-                }
-                Err(error) => return Err(RowPersistError::Turn(fs_error(error))),
-            };
-            let current_record: TurnRunRecord =
-                deserialize_materialized_row(&current.entry.body, RUN_ROWS)?.ok_or_else(|| {
-                    RowPersistError::Turn(TurnError::Conflict {
-                        reason: "durable run row was deleted before reservation".to_string(),
-                    })
-                })?;
-            let previous_seq = materialized_row_seq(&current.entry.body, RUN_ROWS)?;
-            if &current_record != previous {
-                if attempt == 0 {
-                    materialize_delta_log(self.filesystem.as_ref(), &self.materialize_gate, None)
-                        .await?;
-                    continue;
-                }
-                return Err(RowPersistError::Turn(TurnError::Conflict {
-                    reason: "durable run row changed before reservation".to_string(),
-                }));
-            }
-            let entry = row_entry(RUN_ROWS, run, reservation_seq)?;
-            match self
-                .filesystem
-                .put(
-                    &ResourceScope::system(),
-                    &path,
-                    entry,
-                    CasExpectation::Version(current.version),
-                )
-                .await
-            {
-                Ok(version) => {
-                    return Ok(Some(RunRowReservation::UpdatedRun {
-                        key,
-                        previous: Box::new(previous.clone()),
-                        previous_seq,
-                        version,
-                    }));
-                }
-                Err(FilesystemError::VersionMismatch { .. }) if attempt == 0 => {
-                    materialize_delta_log(self.filesystem.as_ref(), &self.materialize_gate, None)
-                        .await?;
-                }
-                Err(FilesystemError::VersionMismatch { .. }) => {
-                    return Err(RowPersistError::Turn(TurnError::Conflict {
-                        reason: "durable run row changed before reservation".to_string(),
-                    }));
-                }
-                Err(error) => return Err(RowPersistError::Turn(fs_error(error))),
-            }
-        }
-        Err(RowPersistError::Turn(TurnError::Conflict {
-            reason: "durable run row changed before active-lock update".to_string(),
-        }))
-    }
-
-    async fn reserve_json_row<T>(
-        &self,
-        collection: &'static str,
-        key: &str,
-        record: &T,
-        reservation_seq: SeqNo,
-    ) -> Result<Option<String>, RowPersistError>
-    where
-        T: serde::Serialize + DeserializeOwned + PartialEq,
-    {
-        let path = row_path(collection, key)?;
-        let entry = row_entry(collection, record, reservation_seq)?;
-        match self
-            .filesystem
-            .put(
-                &ResourceScope::system(),
-                &path,
-                entry,
-                CasExpectation::Absent,
-            )
-            .await
-        {
-            Ok(_version) => Ok(Some(key.to_string())),
-            Err(FilesystemError::VersionMismatch { .. }) => {
-                let current = self
-                    .filesystem
-                    .get(&ResourceScope::system(), &path)
-                    .await
-                    .map_err(fs_error)?
-                    .ok_or_else(|| {
-                        RowPersistError::Turn(TurnError::Conflict {
-                            reason: format!(
-                                "durable {collection} row changed before active-lock reservation"
-                            ),
-                        })
-                    })?;
-                let current_record: Option<T> =
-                    deserialize_materialized_row(&current.entry.body, collection)?;
-                match current_record {
-                    Some(current_record) if current_record == *record => Ok(None),
-                    None => {
-                        let current_seq = materialized_row_seq(&current.entry.body, collection)?;
-                        let entry =
-                            row_entry(collection, record, current_seq.max(reservation_seq))?;
-                        match self
-                            .filesystem
-                            .put(
-                                &ResourceScope::system(),
-                                &path,
-                                entry,
-                                CasExpectation::Version(current.version),
-                            )
-                            .await
-                        {
-                            Ok(_version) => Ok(Some(key.to_string())),
-                            Err(FilesystemError::VersionMismatch { .. }) => {
-                                Err(RowPersistError::Turn(TurnError::Conflict {
-                                    reason: format!(
-                                        "durable {collection} row changed before active-lock reservation"
-                                    ),
-                                }))
-                            }
-                            Err(error) => Err(RowPersistError::Turn(fs_error(error))),
-                        }
-                    }
-                    Some(_) => Err(RowPersistError::Turn(TurnError::Conflict {
-                        reason: format!(
-                            "durable {collection} row changed before active-lock reservation"
-                        ),
-                    })),
-                }
-            }
-            Err(error) => Err(RowPersistError::Turn(fs_error(error))),
-        }
-    }
-
-    async fn delete_orphan_active_lock_if_present(
-        &self,
-        key: &str,
-        path: &ScopedPath,
-    ) -> Result<bool, RowPersistError> {
-        let current = match self.filesystem.get(&ResourceScope::system(), path).await {
-            Ok(Some(current)) => current,
-            Ok(None) => return Ok(false),
-            Err(error) => return Err(RowPersistError::Turn(fs_error(error))),
-        };
-        let current_record: Option<TurnActiveLockRecord> =
-            deserialize_materialized_row(&current.entry.body, ACTIVE_LOCK_ROWS)?;
-        let Some(current_record) = current_record else {
-            return Ok(true);
-        };
-        let run_path = row_path(RUN_ROWS, &current_record.run_id.to_string())?;
-        match self
-            .filesystem
-            .get(&ResourceScope::system(), &run_path)
-            .await
-        {
-            Ok(Some(_)) => Ok(false),
-            Ok(None) => {
-                self.filesystem
-                    .delete(&ResourceScope::system(), path)
-                    .await
-                    .map_err(fs_error)?;
-                tracing::warn!(
-                    active_lock_key = %key,
-                    run_id = %current_record.run_id,
-                    "removed orphan turn-state active-lock row while reserving a new lock",
-                );
-                Ok(true)
-            }
-            Err(error) => Err(RowPersistError::Turn(fs_error(error))),
-        }
-    }
-
-    async fn rollback_run_row_reservation(&self, reservation: Option<RunRowReservation>) {
-        let Some(reservation) = reservation else {
-            return;
-        };
-        match reservation {
-            RunRowReservation::Created { turn_key, run_key } => {
-                for (collection, key) in [(RUN_ROWS, run_key), (TURN_ROWS, turn_key)] {
-                    let Some(key) = key else {
-                        continue;
-                    };
-                    let Ok(path) = row_path(collection, &key) else {
-                        continue;
-                    };
-                    if let Err(error) = self
-                        .filesystem
-                        .delete(&ResourceScope::system(), &path)
-                        .await
-                    {
-                        tracing::warn!(
-                            error = %error,
-                            collection,
-                            row_key = %key,
-                            "failed to roll back row reservation after active-lock reservation failure",
-                        );
-                    }
-                }
-            }
-            RunRowReservation::UpdatedRun {
-                key,
-                previous,
-                previous_seq,
-                version,
-            } => {
-                let Ok(path) = row_path(RUN_ROWS, &key) else {
-                    return;
-                };
-                let entry = match row_entry(RUN_ROWS, previous.as_ref(), previous_seq) {
-                    Ok(entry) => entry,
-                    Err(error) => {
-                        let error = error.into_turn();
-                        tracing::warn!(
-                            error = %error,
-                            row_key = %key,
-                            "failed to serialize run-row rollback after active-lock reservation failure",
-                        );
-                        return;
-                    }
-                };
-                if let Err(error) = self
-                    .filesystem
-                    .put(
-                        &ResourceScope::system(),
-                        &path,
-                        entry,
-                        CasExpectation::Version(version),
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        error = %error,
-                        row_key = %key,
-                        "failed to roll back run-row reservation after active-lock reservation failure",
-                    );
-                }
-            }
-        }
-    }
-
-    async fn rollback_run_row_reservations(&self, reservations: Vec<RunRowReservation>) {
-        for reservation in reservations {
-            self.rollback_run_row_reservation(Some(reservation)).await;
-        }
-    }
-
-    async fn rollback_row_reservations(
-        &self,
-        active_lock_reservations: Vec<ActiveLockReservation>,
-        run_row_reservations: Vec<RunRowReservation>,
-    ) {
-        self.rollback_active_lock_reservations(active_lock_reservations)
-            .await;
-        self.rollback_run_row_reservations(run_row_reservations)
-            .await;
-    }
-
-    async fn rollback_active_lock_reservations(&self, reservations: Vec<ActiveLockReservation>) {
-        for reservation in reservations {
-            let key = reservation.key().to_string();
-            let Ok(path) = row_path(ACTIVE_LOCK_ROWS, &key) else {
-                continue;
-            };
-            let result = match reservation {
-                ActiveLockReservation::Created { run, .. } => {
-                    let result = self
-                        .filesystem
-                        .delete(&ResourceScope::system(), &path)
-                        .await;
-                    self.rollback_run_row_reservation(run).await;
-                    result
-                }
-                ActiveLockReservation::Updated {
-                    previous,
-                    previous_seq,
-                    version,
-                    ..
-                } => {
-                    let entry = match active_lock_entry(previous.as_ref(), previous_seq) {
-                        Ok(entry) => entry,
-                        Err(error) => {
-                            let error = error.into_turn();
-                            tracing::warn!(
-                                error = %error,
-                                active_lock_key = %key,
-                                "failed to serialize active-lock rollback after turn-state append failure",
-                            );
-                            continue;
-                        }
-                    };
-                    self.filesystem
-                        .put(
-                            &ResourceScope::system(),
-                            &path,
-                            entry,
-                            CasExpectation::Version(version),
-                        )
-                        .await
-                        .map(|_| ())
-                }
-            };
-            if let Err(error) = result {
-                tracing::warn!(
-                    error = %error,
-                    active_lock_key = %key,
-                    "failed to roll back active-lock reservation after turn-state append failure",
-                );
             }
         }
     }
@@ -2117,21 +1303,19 @@ where
                 let build_delta = build_delta.take().ok_or_else(|| TurnError::Unavailable {
                     reason: "turn state row-store targeted delta builder was reused".to_string(),
                 })?;
-                let (delta, persist_delta, delta_critical, reservation_baseline, reservation_seq) = {
+                let (delta, persist_delta, delta_critical, reservation_seq) = {
                     let state = guard.as_ref().ok_or_else(|| TurnError::Unavailable {
                         reason: "row snapshot cache was not initialized".to_string(),
                     })?;
                     let delta =
                         build_delta(&state.snapshot, latest_event_cursor, store.as_ref(), &value)?;
                     let persist_delta = row_store_durable_delta(delta.clone());
-                    let delta_critical = delta_is_recoverability_critical(&persist_delta);
-                    let reservation_baseline =
-                        self.should_preappend().then(|| state.snapshot.clone());
+                    let delta_critical =
+                        delta_is_recoverability_critical(&state.snapshot, &persist_delta);
                     (
                         delta,
                         persist_delta,
                         delta_critical,
-                        reservation_baseline,
                         state.journal_seq.next(),
                     )
                 };
@@ -2139,13 +1323,12 @@ where
                 // must NOT consume a reservation sequence. `enqueue_delta` skips an
                 // empty delta (no backend append happens), so advancing the
                 // hot-cache journal seq here would desync it from the backend
-                // append log: the next mutation's rows — and its pre-append
-                // reservations — would be written one sequence ahead of the real
-                // append, and a later active-lock DELETE (materialized at the real
-                // seq) would then collide with the stale reserved row and be
-                // dropped, leaking the lock across a crash (#6263). Apply the
-                // hot-cache delta at the CURRENT seq (no advance), enqueue nothing,
-                // and return.
+                // append log: the next mutation's rows would be written one
+                // sequence ahead of the real append, and a later active-lock
+                // DELETE (materialized at the real seq) would then collide with
+                // the stale row and be dropped, leaking the lock across a crash
+                // (#6263). Apply the hot-cache delta at the CURRENT seq (no
+                // advance), enqueue nothing, and return.
                 if persist_delta.is_empty() {
                     if let Some(state) = guard.as_mut() {
                         let current_seq = state.journal_seq;
@@ -2158,33 +1341,11 @@ where
                     return Ok(PendingRowCommit {
                         value,
                         ack: None,
-                        active_lock_reservations: Vec::new(),
-                        run_row_reservations: Vec::new(),
                         critical: delta_critical,
                     });
                 }
-                let (run_row_reservations, active_lock_reservations) =
-                    if let Some(baseline) = reservation_baseline.as_ref() {
-                        match self
-                            .reserve_preappend_rows(baseline, &persist_delta, reservation_seq)
-                            .await
-                        {
-                            Ok(reservations) => reservations,
-                            Err(error) => {
-                                *guard = None;
-                                return Err(error);
-                            }
-                        }
-                    } else {
-                        (Vec::new(), Vec::new())
-                    };
                 if let Some(state) = guard.as_mut() {
                     if let Err(error) = state.apply_delta(delta, reservation_seq) {
-                        self.rollback_row_reservations(
-                            active_lock_reservations,
-                            run_row_reservations,
-                        )
-                        .await;
                         *guard = None;
                         return Err(error);
                     }
@@ -2195,11 +1356,6 @@ where
                     let next_state = match RowSnapshotState::new(snapshot, store, reservation_seq) {
                         Ok(state) => state,
                         Err(error) => {
-                            self.rollback_row_reservations(
-                                active_lock_reservations,
-                                run_row_reservations,
-                            )
-                            .await;
                             *guard = None;
                             return Err(error);
                         }
@@ -2217,11 +1373,6 @@ where
                 let ack = match self.enqueue_delta(persist_delta) {
                     Ok(ack) => ack,
                     Err(RowPersistError::Turn(error)) => {
-                        self.rollback_row_reservations(
-                            active_lock_reservations,
-                            run_row_reservations,
-                        )
-                        .await;
                         *guard = None;
                         return Err(error);
                     }
@@ -2232,8 +1383,6 @@ where
                 return Ok(PendingRowCommit {
                     value,
                     ack,
-                    active_lock_reservations,
-                    run_row_reservations,
                     critical: delta_critical,
                 });
             }
@@ -2357,17 +1506,29 @@ where
     }
 }
 
-/// Whether a durable delta carries a recoverability-critical run transition
-/// (gate-park or terminal). Keyed on the run records the delta upserts, using
-/// the production [`crate::is_recoverability_critical`] boundary. Under
-/// `WriteBehind` this decides the sync-durable barrier vs the async path; a
-/// delta with no critical run upsert (submit/claim/resume/relinquish churn,
-/// loop checkpoints, tree reservations) is non-critical.
-fn delta_is_recoverability_critical(delta: &SnapshotDelta) -> bool {
-    delta
-        .runs_upsert
-        .iter()
-        .any(|run| crate::is_recoverability_critical(run.status))
+/// Whether a durable delta carries a recoverability-critical run transition:
+/// gate-park, terminal (the production [`crate::is_recoverability_critical`]
+/// boundary), OR the first durable row for a run `baseline` has never seen.
+/// This decides the sync-durable barrier vs. the async write-behind path; a
+/// delta touching only ALREADY-durable runs (claim/relinquish churn, loop
+/// checkpoints, tree reservations) is non-critical — losing its trailing async
+/// tail on crash still leaves the run recoverable from its last durable row.
+/// A brand-new run (`submit_turn`, `submit_child_turn`, and the runs
+/// `resume_turn`/`retry_turn` spawn) has no such fallback: if its creation
+/// never reaches the durable log, the run has no trace at all and the caller's
+/// `Ok` response describes a run that crash recovery can never find. Keep
+/// every new-run creation on the synchronous barrier.
+fn delta_is_recoverability_critical(
+    baseline: &TurnPersistenceSnapshot,
+    delta: &SnapshotDelta,
+) -> bool {
+    delta.runs_upsert.iter().any(|run| {
+        crate::is_recoverability_critical(run.status)
+            || !baseline
+                .runs
+                .iter()
+                .any(|existing| existing.run_id == run.run_id)
+    })
 }
 
 fn turn_state_write_span(
@@ -2398,38 +1559,4 @@ fn turn_state_write_span(
     }
 
     span
-}
-
-fn active_lock_entry(
-    record: &TurnActiveLockRecord,
-    journal_seq: SeqNo,
-) -> Result<Entry, RowPersistError> {
-    row_entry(ACTIVE_LOCK_ROWS, record, journal_seq)
-}
-
-fn row_entry<T>(
-    collection: &'static str,
-    record: &T,
-    journal_seq: SeqNo,
-) -> Result<Entry, RowPersistError>
-where
-    T: serde::Serialize,
-{
-    let body = serialize_materialized_row(journal_seq, Some(record), collection)?;
-    Ok(Entry::bytes(body).with_content_type(ContentType::json()))
-}
-
-fn baseline_committed_active_lock<'a>(
-    baseline: &'a TurnPersistenceSnapshot,
-    record: &TurnActiveLockRecord,
-) -> Option<&'a TurnActiveLockRecord> {
-    let existing = baseline
-        .active_locks
-        .iter()
-        .find(|existing| existing.key == record.key && existing.run_id == record.run_id)?;
-    baseline
-        .runs
-        .iter()
-        .any(|run| run.run_id == record.run_id)
-        .then_some(existing)
 }

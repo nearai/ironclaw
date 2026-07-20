@@ -33,8 +33,7 @@ use ironclaw_turns::{
     FilesystemTurnStateStore, GateRef, IdempotencyKey, LoopCheckpointStateRef,
     ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest, SourceBindingRef,
     SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnCoordinator, TurnError,
-    TurnErrorCategory, TurnLeaseToken, TurnRunnerId, TurnStateDurabilityPolicy, TurnStateStore,
-    TurnStateStoreLimits,
+    TurnErrorCategory, TurnLeaseToken, TurnRunnerId, TurnStateStore, TurnStateStoreLimits,
     runner::{
         BlockRunRequest, ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, TurnRunTransitionPort,
     },
@@ -74,9 +73,6 @@ where
     target: String,
     turn_state_backend: TurnStateBackend,
     turn_state_limits: TurnStateStoreLimits,
-    /// Durable-commit policy applied to the row-store backends (`filesystem-row`,
-    /// `row-memory`). Ignored by the blob filesystem backend.
-    turn_state_durability: TurnStateDurabilityPolicy,
     /// Shared row-store authorities keyed by tenant/user mount. This preserves
     /// durable filesystem writes while avoiding a full row-set reload for every
     /// measured operation in the same process.
@@ -218,7 +214,6 @@ async fn build_libsql_user_turn_workload(
         model_latency,
         args.turn_state_backend,
         args.turn_state_store_limits(),
-        args.turn_state_durability.to_policy(),
     )?))
 }
 
@@ -237,7 +232,6 @@ async fn build_postgres_user_turn_workload(
         model_latency,
         args.turn_state_backend,
         args.turn_state_store_limits(),
-        args.turn_state_durability.to_policy(),
     )?))
 }
 
@@ -1676,15 +1670,13 @@ where
                     ));
                     Arc::new(
                         FilesystemTurnStateRowStore::new(scoped)
-                            .with_limits(self.turn_state_limits)
-                            .with_durability_policy(self.turn_state_durability),
+                            .with_limits(self.turn_state_limits),
                     )
                 })
             }
             // Same row-store mechanism, but over the shared in-process
-            // in-memory backend — models replacing the direct in-memory
-            // authority in the `inmemory-turn-state` profile with the row
-            // store (journal/delta semantics, no durable-backend cost).
+            // in-memory backend (journal/delta semantics, no durable-backend
+            // cost).
             TurnStateBackend::RowMemory => {
                 let resource_scope = context.turn_scope.to_resource_scope();
                 self.cached_row_store(&resource_scope, |view| {
@@ -1694,8 +1686,7 @@ where
                     ));
                     Arc::new(
                         FilesystemTurnStateRowStore::new(scoped)
-                            .with_limits(self.turn_state_limits)
-                            .with_durability_policy(self.turn_state_durability),
+                            .with_limits(self.turn_state_limits),
                     )
                 })
             }
@@ -1770,7 +1761,6 @@ fn user_turn_services_from_root<F>(
     model_latency: Arc<ModelLatencyDriver>,
     turn_state_backend: TurnStateBackend,
     turn_state_limits: TurnStateStoreLimits,
-    turn_state_durability: TurnStateDurabilityPolicy,
 ) -> Result<UserTurnServices<F>, String>
 where
     F: RootFilesystem + 'static,
@@ -1789,7 +1779,6 @@ where
         target,
         turn_state_backend,
         turn_state_limits,
-        turn_state_durability,
         row_turn_stores: Mutex::new(HashMap::new()),
         memory_root: Arc::new(InMemoryBackend::new()),
     })

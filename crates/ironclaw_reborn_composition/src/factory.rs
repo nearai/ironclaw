@@ -250,11 +250,10 @@ impl ironclaw_network::NetworkHttpEgress for TestNetworkHttpEgress {
 }
 
 // One turn-state store, backend-injected — the production
-// `FilesystemTurnStateStoreKind<F>` (row layout) every deployment uses, never a
-// bespoke private turn-state engine standalone authority (arch-simplification
-// §4.3). The `inmemory-turn-state` feature no longer selects the store TYPE, only
-// the durability POLICY: it flips this store to `WriteBehind` at the build arm.
-// The no-durable-features build backs it with `InMemoryBackend` directly
+// `FilesystemTurnStateStoreKind<F>` (row layout) every deployment uses
+// unconditionally, at its single write-behind durability mode (arch-simplification
+// §4.3 / #6263 Step 5b — there is no longer a durability-mode or store-type
+// choice). The no-durable-features build backs it with `InMemoryBackend` directly
 // (volatile, `LocalOnly`), matching the sibling run-state/approval/lease stores.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type ComposedTurnStateStore = FilesystemTurnStateStoreKind<CompositeRootFilesystem>;
@@ -2482,47 +2481,23 @@ async fn build_local_runtime_store_graph(
     let persistent_approval_policies = Arc::new(FilesystemPersistentApprovalPolicyStore::new(
         Arc::clone(&scoped_filesystem),
     ));
-    // #6263 Step 4 — the `inmemory-turn-state` profile no longer stands up the raw
-    // in-memory authority + block-persistence snapshot. EVERY deployment now
-    // composes the durable filesystem ROW store (typed journal/delta rows + a hot
-    // in-process snapshot cache). `ComposedTurnStateStore` is
-    // `FilesystemTurnStateStoreKind<F>` unconditionally, so the feature no longer
-    // selects the store TYPE. The row store is crash-recoverable (rehydrates from
-    // its own rows on boot) and, unlike the old blob store, has NO per-user
-    // `state.json` CAS livelock (journal/row model, not whole-snapshot CAS) — so it
-    // is strictly more durable than the former in-memory authority (which lost
-    // in-flight turns on crash and persisted only the gate-blocked set + a graceful
-    // shutdown snapshot). Existing deployments migrate automatically: their on-disk
+    // #6263 Step 5b — every deployment composes the durable filesystem ROW store
+    // (typed journal/delta rows + a hot in-process snapshot cache), unconditionally
+    // and with no durability-mode choice: `FilesystemTurnStateRowStore` has exactly
+    // one behavior (write-behind, with gate-park/terminal/new-run transitions on a
+    // synchronous durability barrier — see `filesystem_store/row_store.rs`). The
+    // read-after-submit gap that used to justify pinning to a stricter mode
+    // (`get_run_state` et al. returning `ScopeNotFound` for an async-materializing
+    // run) was closed in #6263 Step 3.5/read-your-writes: those query paths now
+    // serve from the hot cache, so write-behind's query paths are cache-aware. The
+    // row store is crash-recoverable (rehydrates from its own rows on boot) and has
+    // no per-user `state.json` CAS livelock (journal/row model, not whole-snapshot
+    // CAS). Existing deployments migrate automatically: their on-disk
     // block-persistence snapshot at `/turns/state.json` is imported as the row
     // store's first delta on an empty-rows boot
     // (`FilesystemTurnStateRowStore::migrate_legacy_blob_if_needed` reads the SAME
     // path/format the block-persistence sink wrote), so no gate-parked/approval turn
     // is lost on first boot after the flip.
-    //
-    // POLICY: ships at the `WriteThrough` default (every transition synchronously
-    // durable). The async `WriteBehind` policy that this flip was intended to select
-    // under `inmemory-turn-state` is DELIBERATELY NOT wired here yet: its durable
-    // query paths (`FilesystemTurnStateRowStore::get_run_state` et al. read
-    // materialized rows, not the hot cache — see
-    // `filesystem_store/row_store/traits.rs`), so a just-submitted run whose row is
-    // still async-materializing reads back `ScopeNotFound`. That breaks the
-    // runtime's read-after-submit (`send_user_message` → `wait_for_terminal` →
-    // `get_run_state`) on EVERY turn (proven: `budget_approval_e2e` fails under
-    // `WriteBehind`, passes under `WriteThrough`; store-tier submit→get_run_state
-    // returns `ScopeNotFound` single-threaded). `WriteBehind` must make its query
-    // paths cache-aware — validated by the §11.4 reference-model suite — before it
-    // can be selected here. The feature arm below is the seam that flip lands on.
-    #[cfg(feature = "inmemory-turn-state")]
-    let turn_state = Arc::new(
-        production_turn_state_store(Arc::clone(&turn_state_filesystem), turn_state_store_limits)
-            // TODO(#6263 Step 4): `TurnStateDurabilityPolicy::WriteBehind` here once
-            // the row store's durable-read query paths are cache-aware (they
-            // currently return `ScopeNotFound` for an async-materializing run,
-            // breaking runtime read-after-submit). Pinned to `WriteThrough` so the
-            // profile is on the durable row store safely, with no regression.
-            .with_durability_policy(ironclaw_turns::TurnStateDurabilityPolicy::WriteThrough),
-    );
-    #[cfg(not(feature = "inmemory-turn-state"))]
     let turn_state = Arc::new(production_turn_state_store(
         Arc::clone(&turn_state_filesystem),
         turn_state_store_limits,

@@ -77,7 +77,7 @@ use profile_resolver::PreResolvedRunProfileResolver;
 use runner_lease::{RunnerLeaseMemory, RunnerLeaseOverlay, RunnerLeaseRecord, RunnerLeaseStore};
 use turn_state_engine::TurnStateEngine;
 
-pub use row_store::{FilesystemTurnStateRowStore, TurnStateDurabilityPolicy};
+pub use row_store::FilesystemTurnStateRowStore;
 pub use turn_state_engine::TurnStateStoreLimits;
 
 #[cfg(test)]
@@ -670,24 +670,10 @@ where
         }
     }
 
-    /// Select the durable-commit mode. Forwards to the row store's
-    /// [`with_durability_policy`](FilesystemTurnStateRowStore::with_durability_policy);
-    /// the blob layout is `WriteThrough`-only (it persists every transition
-    /// synchronously via whole-snapshot CAS and buffers nothing), so the policy
-    /// is a no-op there and the store is returned unchanged.
-    pub fn with_durability_policy(self, durability_policy: TurnStateDurabilityPolicy) -> Self {
-        match self {
-            Self::Blob(store) => Self::Blob(store),
-            Self::Row(store) => {
-                Self::Row(Box::new((*store).with_durability_policy(durability_policy)))
-            }
-        }
-    }
-
-    /// Flush any pending `WriteBehind` durable tail so a planned shutdown leaves
+    /// Flush any pending write-behind durable tail so a planned shutdown leaves
     /// nothing un-durable. Forwards to the row store's
     /// [`drain`](FilesystemTurnStateRowStore::drain); the blob layout buffers
-    /// nothing (`WriteThrough`-only), so draining it is a no-op.
+    /// nothing, so draining it is a no-op.
     pub async fn drain(&self) -> Result<(), TurnError> {
         match self {
             Self::Blob(_) => Ok(()),

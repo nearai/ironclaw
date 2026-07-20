@@ -59,7 +59,7 @@ pub use external_tool_catalog::{
 };
 pub use filesystem_store::{
     FilesystemTurnStateBlockPersistence, FilesystemTurnStateRowStore, FilesystemTurnStateStore,
-    FilesystemTurnStateStoreKind, TurnStateDurabilityPolicy, TurnStateStoreLimits,
+    FilesystemTurnStateStoreKind, TurnStateStoreLimits,
 };
 pub use ids::{
     AcceptedMessageRef, CapabilityActivityId, GateRef, IdempotencyKey, LoopDiagnosticRef,

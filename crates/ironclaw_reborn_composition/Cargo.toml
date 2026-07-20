@@ -22,20 +22,6 @@ layer = "app"
 # default names one instead of declaring a build shape nothing uses.
 # `--no-default-features --features postgres` selects the other.
 default = ["libsql"]
-# Use the single-process in-memory turn-state authority for the local-dev /
-# hosted runtime family instead of the per-user `state.json` filesystem CAS
-# store, even in libSQL/Postgres builds. This is the runtime-wedge fix: all of a
-# user's concurrent turns (foreground + routines) coordinate in one in-process
-# `InMemoryTurnStateStore` (no per-step CAS livelock) rather than contending on a
-# single per-user turn-state document. Durability trade-off: in-flight compute
-# turns are volatile across a process restart (short-lived, re-triggerable), but
-# turns parked on a human gate (approval/auth) are persisted off the hot path via
-# persist-on-block and rehydrated on startup, so a deploy does not silently drop
-# an "Approve"-pending turn. Intended to be enabled by the
-# hosted-single-tenant-volume deployment build; see
-# `tools/ironclaw_stress/results/2026-06-30-turn-state-inmemory/` for the
-# contention measurements that motivated it.
-inmemory-turn-state = []
 # Expose test-only helpers (mock LLM gateway, budget runtime accessors)
 # so integration tests in this crate's `tests/` directory and downstream
 # crates can drive `build_reborn_runtime` with a stub model gateway
