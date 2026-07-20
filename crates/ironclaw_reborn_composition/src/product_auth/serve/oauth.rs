@@ -1190,7 +1190,7 @@ pub(super) async fn callback_outcome_from_query(
 }
 
 fn is_explicit_oauth_denial(provider_error: &str) -> bool {
-    provider_error == "access_denied"
+    provider_error.eq_ignore_ascii_case("access_denied")
 }
 
 async fn pkce_verifier_for_known_callback_flow(
@@ -2086,7 +2086,7 @@ mod tests {
         .expect("oauth state");
         let encoded_state =
             url::form_urlencoded::byte_serialize(second_state_value.as_bytes()).collect::<String>();
-        let uri = format!("{GOOGLE_OAUTH_CALLBACK_PATH}?state={encoded_state}&error=access_denied")
+        let uri = format!("{GOOGLE_OAUTH_CALLBACK_PATH}?state={encoded_state}&error=ACCESS_DENIED")
             .parse::<Uri>()
             .expect("callback uri");
         let raw_query = uri.query().map(str::to_string);
