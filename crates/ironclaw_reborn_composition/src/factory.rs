@@ -150,7 +150,7 @@ use crate::extension_host::{
 };
 use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle_auth_continuation::{
-    LifecycleAuthContinuationDispatcher, LifecycleProductFacadeSlot,
+    LifecycleAuthResolutionDispatcher, LifecycleProductFacadeSlot,
 };
 use crate::local_dev_authorization::{StoreApprovalSettingsProvider, local_dev_authorizer};
 use crate::local_dev_mounts::{
@@ -165,7 +165,7 @@ use crate::root::default_system_prompt::seed_default_system_prompt;
 use crate::runtime_input::RebornRuntimeIdentity;
 use crate::web_access::register_bundled_web_access_first_party_handlers;
 use crate::{
-    RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
+    RebornAuthResolutionDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
     RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornWorkerReadiness,
 };
 use ironclaw_run_state::{FilesystemApprovalRequestStore, FilesystemRunStateStore};
@@ -1340,8 +1340,8 @@ fn auth_continuation_dispatcher(
         Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>,
     >,
     lifecycle: LifecycleProductFacadeSlot,
-) -> Arc<dyn RebornAuthContinuationDispatcher> {
-    let single_run: Arc<dyn RebornAuthContinuationDispatcher> = Arc::new(
+) -> Arc<dyn RebornAuthResolutionDispatcher> {
+    let single_run: Arc<dyn RebornAuthResolutionDispatcher> = Arc::new(
         ProductAuthTurnGateResumeDispatcher::new(Arc::clone(&turn_coordinator)),
     );
     let turn_dispatcher = match blocked_auth_snapshot_source {
@@ -1358,7 +1358,7 @@ fn auth_continuation_dispatcher(
         }
         None => single_run,
     };
-    Arc::new(LifecycleAuthContinuationDispatcher::new(
+    Arc::new(LifecycleAuthResolutionDispatcher::new(
         turn_dispatcher,
         lifecycle,
     ))
@@ -6455,11 +6455,20 @@ mod tests {
             .unwrap();
         let completed_flow = flows
             .iter()
-            .find(|flow| flow.credential_account_id == Some(submitted.account_id))
+            .find(|flow| {
+                flow.state
+                    == ironclaw_auth::AuthFlowState::Resolved(
+                        ironclaw_auth::AuthFlowOutcome::Authorized {
+                            account_id: submitted.account_id,
+                        },
+                    )
+            })
             .expect("manual-token completion should remain visible to auth gates");
         assert_eq!(
-            completed_flow.status,
-            ironclaw_auth::AuthFlowStatus::Completed
+            completed_flow.state,
+            ironclaw_auth::AuthFlowState::Resolved(ironclaw_auth::AuthFlowOutcome::Authorized {
+                account_id: submitted.account_id,
+            },)
         );
     }
 

@@ -26,7 +26,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_auth::{AuthContinuationEvent, AuthContinuationRef, AuthProductError};
+use ironclaw_auth::{AuthContinuationRef, AuthFlowOutcome, AuthProductError, AuthResolved};
 use ironclaw_turns::{
     IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator,
     TurnPersistenceSnapshot, TurnRunId, TurnStatus,
@@ -34,7 +34,7 @@ use ironclaw_turns::{
 use uuid::Uuid;
 
 use crate::turn_run_snapshot::TurnRunSnapshotSource;
-use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
+use ironclaw_channel_host::auth_continuation::RebornAuthResolutionDispatcher;
 
 /// Source of the durable turn-state snapshot the fan-out scans. Split out so
 /// tests can hand-build snapshots without a filesystem-backed store.
@@ -65,14 +65,14 @@ where
 /// Decorates the single-run continuation dispatcher with the caller-wide
 /// blocked-run fan-out described in the module docs.
 pub(crate) struct BlockedAuthResumeFanout {
-    inner: Arc<dyn RebornAuthContinuationDispatcher>,
+    inner: Arc<dyn RebornAuthResolutionDispatcher>,
     snapshot_source: Arc<dyn BlockedAuthSnapshotSource>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
 }
 
 impl BlockedAuthResumeFanout {
     pub(crate) fn new(
-        inner: Arc<dyn RebornAuthContinuationDispatcher>,
+        inner: Arc<dyn RebornAuthResolutionDispatcher>,
         snapshot_source: Arc<dyn BlockedAuthSnapshotSource>,
         turn_coordinator: Arc<dyn TurnCoordinator>,
     ) -> Self {
@@ -83,10 +83,10 @@ impl BlockedAuthResumeFanout {
         }
     }
 
-    async fn fan_out(&self, event: &AuthContinuationEvent) -> Result<(), AuthProductError> {
+    async fn fan_out(&self, event: &AuthResolved) -> Result<(), AuthProductError> {
         let primary_run_id = primary_run_id(&event.continuation);
         let Some(snapshot) = self.snapshot_source.snapshot().await else {
-            tracing::warn!("blocked-auth fan-out could not read the durable turn snapshot");
+            tracing::debug!("blocked-auth fan-out could not read the durable turn snapshot");
             return Err(AuthProductError::BackendUnavailable);
         };
         let tenant_id = &event.scope.resource.tenant_id;
@@ -128,7 +128,7 @@ impl BlockedAuthResumeFanout {
                 .find(|turn| turn.turn_id == run.turn_id)
                 .map(|turn| turn.actor.clone())
             else {
-                tracing::warn!(
+                tracing::debug!(
                     run_id = %run.run_id,
                     "blocked-auth fan-out found a blocked run with no parent turn record"
                 );
@@ -139,7 +139,7 @@ impl BlockedAuthResumeFanout {
                 "blocked-auth-fanout-{}-{}",
                 event.flow_id, run.run_id
             )) else {
-                tracing::warn!(
+                tracing::debug!(
                     run_id = %run.run_id,
                     "blocked-auth fan-out could not build a resume idempotency key"
                 );
@@ -165,7 +165,7 @@ impl BlockedAuthResumeFanout {
                 Ok(_) => resumed += 1,
                 Err(error) => {
                     incomplete = true;
-                    tracing::warn!(
+                    tracing::debug!(
                         run_id = %run.run_id,
                         flow_id = %event.flow_id,
                         %error,
@@ -202,12 +202,12 @@ fn primary_run_id(continuation: &AuthContinuationRef) -> Option<TurnRunId> {
 }
 
 #[async_trait]
-impl RebornAuthContinuationDispatcher for BlockedAuthResumeFanout {
-    async fn dispatch_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        let primary = self.inner.dispatch_auth_continuation(event.clone()).await;
+impl RebornAuthResolutionDispatcher for BlockedAuthResumeFanout {
+    async fn dispatch_auth_resolved(&self, event: AuthResolved) -> Result<(), AuthProductError> {
+        if !matches!(event.outcome, AuthFlowOutcome::Authorized { .. }) {
+            return self.inner.dispatch_auth_resolved(event).await;
+        }
+        let primary = self.inner.dispatch_auth_resolved(event.clone()).await;
         // Fan out regardless of the primary outcome: the credential account
         // exists once this event is emitted, and the caller's other parked
         // runs deserve the resume even if the primary run's own resume hit a
@@ -218,13 +218,6 @@ impl RebornAuthContinuationDispatcher for BlockedAuthResumeFanout {
             (Ok(()), Ok(())) => Ok(()),
         }
     }
-
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        self.inner.dispatch_canceled_auth_continuation(event).await
-    }
 }
 
 #[cfg(test)]
@@ -234,7 +227,8 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use ironclaw_auth::{
-        AuthFlowId, AuthGateRef, AuthProductScope, AuthProviderId, AuthSurface, TurnRunRef,
+        AuthFlowId, AuthGateRef, AuthProductScope, AuthProviderId, AuthSurface,
+        CredentialAccountId, TurnRunRef,
     };
     use ironclaw_host_api::{
         ExtensionId, InvocationId, ResourceScope, RuntimeCredentialAccountProviderId,
@@ -253,14 +247,14 @@ mod tests {
     };
 
     struct RecordingInnerDispatcher {
-        events: Mutex<Vec<AuthContinuationEvent>>,
+        events: Mutex<Vec<AuthResolved>>,
     }
 
     #[async_trait]
-    impl RebornAuthContinuationDispatcher for RecordingInnerDispatcher {
-        async fn dispatch_auth_continuation(
+    impl RebornAuthResolutionDispatcher for RecordingInnerDispatcher {
+        async fn dispatch_auth_resolved(
             &self,
-            event: AuthContinuationEvent,
+            event: AuthResolved,
         ) -> Result<(), AuthProductError> {
             self.events.lock().expect("inner events lock").push(event);
             Ok(())
@@ -477,7 +471,7 @@ mod tests {
         }
     }
 
-    fn event(provider: &str, continuation: AuthContinuationRef) -> AuthContinuationEvent {
+    fn event(provider: &str, continuation: AuthContinuationRef) -> AuthResolved {
         let resource = ResourceScope {
             tenant_id: TenantId::new(TENANT).expect("tenant"),
             user_id: UserId::new(OWNER).expect("user"),
@@ -487,13 +481,15 @@ mod tests {
             thread_id: None,
             invocation_id: InvocationId::new(),
         };
-        AuthContinuationEvent {
+        AuthResolved {
             flow_id: AuthFlowId::new(),
             scope: AuthProductScope::new(resource, AuthSurface::Callback),
             continuation,
             provider: AuthProviderId::new(provider).expect("provider"),
-            credential_account_id: None,
-            emitted_at: Utc::now(),
+            outcome: AuthFlowOutcome::Authorized {
+                account_id: CredentialAccountId::new(),
+            },
+            resolved_at: Utc::now(),
         }
     }
 
@@ -550,7 +546,7 @@ mod tests {
         let (fanout, coordinator, inner) = fanout_with(snapshot, false);
 
         fanout
-            .dispatch_auth_continuation(event(
+            .dispatch_auth_resolved(event(
                 "slack_personal",
                 AuthContinuationRef::TurnGateResume {
                     turn_run_ref: TurnRunRef::new(primary.run_id.to_string())
@@ -587,7 +583,7 @@ mod tests {
         let (fanout, coordinator, _inner) = fanout_with(snapshot, false);
 
         fanout
-            .dispatch_auth_continuation(event("slack_personal", AuthContinuationRef::SetupOnly))
+            .dispatch_auth_resolved(event("slack_personal", AuthContinuationRef::SetupOnly))
             .await
             .expect("dispatch succeeds");
 
@@ -613,7 +609,7 @@ mod tests {
         let (fanout, coordinator, inner) = fanout_with(snapshot, true);
 
         let error = fanout
-            .dispatch_auth_continuation(event("slack_personal", AuthContinuationRef::SetupOnly))
+            .dispatch_auth_resolved(event("slack_personal", AuthContinuationRef::SetupOnly))
             .await
             .expect_err("resume failures must prevent dispatched acknowledgement");
 

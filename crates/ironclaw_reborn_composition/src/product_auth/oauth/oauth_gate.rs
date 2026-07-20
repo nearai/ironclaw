@@ -615,7 +615,7 @@ mod tests {
     use std::time::Duration;
 
     use ironclaw_auth::{
-        AuthFlowStatus, GOOGLE_CALENDAR_READONLY_SCOPE, InMemoryAuthProductServices,
+        AuthFlowState, GOOGLE_CALENDAR_READONLY_SCOPE, InMemoryAuthProductServices,
         OAuthAuthorizationUrl,
     };
     use ironclaw_host_api::{
@@ -668,7 +668,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(expired.status, AuthFlowStatus::Canceled);
+        assert_eq!(
+            expired.state,
+            AuthFlowState::Resolved(ironclaw_auth::AuthFlowOutcome::UserAborted)
+        );
         assert_eq!(fixture.active_gate_flows().await.len(), 1);
     }
 
@@ -756,7 +759,7 @@ mod tests {
         let active = shared
             .flow_records_snapshot()
             .into_iter()
-            .filter(|flow| flow.status == AuthFlowStatus::AwaitingUser)
+            .filter(|flow| flow.state == AuthFlowState::Open)
             .collect::<Vec<_>>();
         assert_eq!(active.len(), 1, "the race must publish one auth flow");
         assert_eq!(active[0].id, state.current_epoch().unwrap());
@@ -825,7 +828,7 @@ mod tests {
         let active = shared
             .flow_records_snapshot()
             .into_iter()
-            .filter(|flow| flow.status == AuthFlowStatus::AwaitingUser)
+            .filter(|flow| flow.state == AuthFlowState::Open)
             .collect::<Vec<_>>();
         assert_eq!(active.len(), 1);
         assert_eq!(state.current_epoch(), Some(active[0].id));
@@ -1170,7 +1173,7 @@ mod tests {
                 .unwrap()
                 .into_iter()
                 .filter(|flow| {
-                    flow.status == AuthFlowStatus::AwaitingUser
+                    flow.state == AuthFlowState::Open
                         && matches!(
                             flow.continuation,
                             AuthContinuationRef::TurnGateResume { .. }

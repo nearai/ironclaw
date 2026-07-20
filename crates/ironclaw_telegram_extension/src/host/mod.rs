@@ -6,7 +6,7 @@ mod revision;
 use std::sync::Arc;
 
 use ironclaw_channel_delivery::PostSubmitDeliveryHook;
-use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
+use ironclaw_channel_host::auth_continuation::RebornAuthResolutionDispatcher;
 use ironclaw_channel_host::outbound_targets::OutboundDeliveryTargetProvider;
 use ironclaw_conversations::{
     ConversationActorPairingService,
@@ -85,7 +85,7 @@ pub struct TelegramHostInput {
     pub state: Arc<FilesystemTelegramHostState>,
     pub secret_store: Arc<dyn SecretStore>,
     pub host_egress: HostRuntimeHttpEgressPort,
-    pub continuation: Arc<dyn RebornAuthContinuationDispatcher>,
+    pub continuation: Arc<dyn RebornAuthResolutionDispatcher>,
     pub conversation_bindings: Arc<dyn DurableConversationBindingService>,
     pub actor_pairings: Arc<dyn ConversationActorPairingService>,
     pub idempotency_ledger: Arc<dyn IdempotencyLedger>,

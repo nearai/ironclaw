@@ -4,9 +4,9 @@ use ironclaw_filesystem::{CasExpectation, RootFilesystem};
 
 use super::FilesystemAuthProductServices;
 use ironclaw_auth::{
-    AuthContinuationEvent, AuthContinuationRef, AuthFlowManager, AuthProductError,
-    CredentialAccountId, CredentialAccountOwnerScope, CredentialAccountStatus, CredentialOwnership,
-    OAuthCompletionCompensationOutcome, OAuthCompletionCompensationRequest,
+    AuthContinuationRef, AuthFlowManager, AuthFlowOutcome, AuthFlowState, AuthProductError,
+    AuthResolved, CredentialAccountId, CredentialAccountOwnerScope, CredentialAccountStatus,
+    CredentialOwnership, OAuthCompletionCompensationOutcome, OAuthCompletionCompensationRequest,
     OAuthExchangeCleanupRequest, SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest,
     SecretCleanupService,
 };
@@ -41,13 +41,15 @@ where
             .get_flow(&request.scope, request.flow_id)
             .await?
             .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
-        if flow.status != ironclaw_auth::AuthFlowStatus::Failed
+        if flow.state
+            != AuthFlowState::Resolved(AuthFlowOutcome::Authorized {
+                account_id: request.credential_account_id,
+            })
             || !matches!(
                 flow.continuation,
                 AuthContinuationRef::LifecycleActivation { .. }
             )
             || flow.provider != request.provider
-            || flow.credential_account_id != Some(request.credential_account_id)
             || flow.credential_secret_fingerprint
                 != Some(request.expected_secret_fingerprint.clone())
         {
@@ -107,31 +109,27 @@ where
                 .lifecycle_flows_for_owner_provider(&request.scope.resource, provider)
                 .await?
             {
-                let canceled = match flow.status {
-                    status if ironclaw_auth::is_terminal_status(status) => flow,
-                    _ => match self.cancel_flow(&flow.scope, flow.id).await {
-                        Ok(canceled) => canceled,
-                        Err(AuthProductError::Canceled) => flow,
-                        Err(AuthProductError::FlowAlreadyTerminal) => flow,
-                        Err(error) => return Err(error),
-                    },
+                let canceled = match flow.state {
+                    AuthFlowState::Resolved(_) => flow,
+                    _ => self.cancel_flow(&flow.scope, flow.id).await?,
                 };
-                if canceled.continuation_emitted_at.is_none()
+                if canceled.resolution_delivered_at.is_none()
                     && matches!(
                         canceled.continuation,
                         AuthContinuationRef::TurnGateResume { .. }
                     )
                 {
-                    report
-                        .canceled_turn_gate_continuations
-                        .push(AuthContinuationEvent {
-                            flow_id: canceled.id,
-                            scope: canceled.scope.clone(),
-                            continuation: canceled.continuation.clone(),
-                            provider: canceled.provider.clone(),
-                            credential_account_id: canceled.credential_account_id,
-                            emitted_at: Utc::now(),
-                        });
+                    let AuthFlowState::Resolved(outcome) = canceled.state else {
+                        continue;
+                    };
+                    report.auth_resolutions.push(AuthResolved {
+                        flow_id: canceled.id,
+                        scope: canceled.scope.clone(),
+                        continuation: canceled.continuation.clone(),
+                        provider: canceled.provider.clone(),
+                        outcome,
+                        resolved_at: canceled.updated_at,
+                    });
                 }
             }
         }
@@ -257,27 +255,25 @@ where
         &self,
         request: &OAuthCompletionCompensationRequest,
     ) -> Result<(), AuthProductError> {
-        let lock = self.lock_for(format!("flow:{}", request.flow_id));
-        let _guard = lock.lock().await;
-        let (mut flow, version) = self
-            .read_flow(&request.scope, request.flow_id)
-            .await?
-            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
-        if flow.status != ironclaw_auth::AuthFlowStatus::Failed
-            || flow.provider != request.provider
-            || flow.credential_account_id != Some(request.credential_account_id)
-        {
-            return Err(AuthProductError::CrossScopeDenied);
-        }
-        match flow.credential_secret_fingerprint.as_ref() {
-            None => return Ok(()),
-            Some(current) if current == &request.expected_secret_fingerprint => {}
-            Some(_) => return Err(AuthProductError::CrossScopeDenied),
-        }
-        flow.credential_secret_fingerprint = None;
-        flow.updated_at = Utc::now();
-        self.write_flow(&request.scope, &flow, CasExpectation::Version(version))
-            .await?;
+        self.update_flow_with_cas(&request.scope, request.flow_id, |flow| {
+            if flow.state
+                != AuthFlowState::Resolved(AuthFlowOutcome::Authorized {
+                    account_id: request.credential_account_id,
+                })
+                || flow.provider != request.provider
+            {
+                return Err(AuthProductError::CrossScopeDenied);
+            }
+            match flow.credential_secret_fingerprint.as_ref() {
+                None => return Ok(()),
+                Some(current) if current == &request.expected_secret_fingerprint => {}
+                Some(_) => return Err(AuthProductError::CrossScopeDenied),
+            }
+            flow.credential_secret_fingerprint = None;
+            flow.updated_at = Utc::now();
+            Ok(())
+        })
+        .await?;
         Ok(())
     }
 }

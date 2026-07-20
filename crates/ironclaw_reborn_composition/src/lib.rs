@@ -184,7 +184,7 @@ pub use observability::trajectory_observer::RebornTrajectoryObserver;
 // host crates can hold it without a composition dependency; composition's
 // facade re-exports it for its own downstream consumers (root test suites,
 // the CLI) alongside the product-auth service surface that produces it.
-pub use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
+pub use ironclaw_channel_host::auth_continuation::RebornAuthResolutionDispatcher;
 #[cfg(feature = "slack-v2-host-beta")]
 pub use ironclaw_channel_host::identity::{
     RebornUserIdentityLookup, RebornUserIdentityLookupError,

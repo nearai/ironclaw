@@ -59,7 +59,7 @@ pub(super) async fn oauth_start_handler(
 
     Ok(Json(OAuthStartResponse {
         flow_id: flow.id,
-        status: flow.status,
+        status: flow.state,
         provider,
         authorization_url,
         expires_at: flow.expires_at,
@@ -87,14 +87,12 @@ pub(super) async fn oauth_flow_status_handler(
     State(state): State<ProductAuthRouteState>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(flow_id): Path<String>,
-    axum::extract::Query(query): axum::extract::Query<OAuthFlowStatusQuery>,
-) -> Result<Json<OAuthFlowStatusResponse>, ProductAuthRouteFailure> {
+    axum::extract::Query(query): axum::extract::Query<OAuthFlowStateQuery>,
+) -> Result<Json<OAuthFlowStateResponse>, ProductAuthRouteFailure> {
     let (scope, flow_id) = oauth_flow_scope(&caller, &flow_id, query)?;
     let flow = run_with_backend_timeout(state.product_auth.flow_record_for_status(&scope, flow_id))
         .await?;
-    Ok(Json(OAuthFlowStatusResponse {
-        status: flow.status,
-    }))
+    Ok(Json(OAuthFlowStateResponse { status: flow.state }))
 }
 
 /// Explicit recovery command for a durable OAuth flow.
@@ -107,17 +105,17 @@ pub(super) async fn oauth_flow_reconcile_handler(
     State(state): State<ProductAuthRouteState>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(flow_id): Path<String>,
-    axum::extract::Query(query): axum::extract::Query<OAuthFlowStatusQuery>,
-) -> Result<Json<OAuthFlowStatusResponse>, ProductAuthRouteFailure> {
+    axum::extract::Query(query): axum::extract::Query<OAuthFlowStateQuery>,
+) -> Result<Json<OAuthFlowStateResponse>, ProductAuthRouteFailure> {
     let (scope, flow_id) = oauth_flow_scope(&caller, &flow_id, query)?;
     let status = run_with_backend_timeout(reconcile_oauth_flow(&state, &scope, flow_id)).await?;
-    Ok(Json(OAuthFlowStatusResponse { status }))
+    Ok(Json(OAuthFlowStateResponse { status }))
 }
 
 fn oauth_flow_scope(
     caller: &WebUiAuthenticatedCaller,
     flow_id: &str,
-    query: OAuthFlowStatusQuery,
+    query: OAuthFlowStateQuery,
 ) -> Result<(AuthProductScope, AuthFlowId), ProductAuthRouteFailure> {
     let flow_id = AuthFlowId::from_uuid(Uuid::parse_str(flow_id).map_err(|error| {
         tracing::debug!(%error, "malformed flow id in oauth flow status/reconcile path");
@@ -136,59 +134,12 @@ async fn reconcile_oauth_flow(
     state: &ProductAuthRouteState,
     scope: &AuthProductScope,
     flow_id: AuthFlowId,
-) -> Result<AuthFlowStatus, ProductAuthRouteFailure> {
-    let before = state
-        .product_auth
-        .flow_record_for_status(scope, flow_id)
-        .await
-        .map_err(ProductAuthRouteFailure::from)?;
-    let terminal_cleanup_error = if before.status == AuthFlowStatus::Failed {
-        if let Some(descriptor) = oauth_callback_descriptor_for_provider(&before.provider) {
-            terminal_failure_hook(
-                state,
-                descriptor,
-                scope,
-                flow_id,
-                RebornOAuthCallbackFailureStage::ContinuationSideEffect,
-            )
-            .await
-            .err()
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    // Credential compensation and provider-owned binding cleanup are
-    // independent journals. Always attempt both; report failure until both
-    // converge so the browser keeps polling.
-    let status = state
+) -> Result<AuthFlowState, ProductAuthRouteFailure> {
+    state
         .product_auth
         .reconcile_oauth_flow(scope, flow_id)
         .await
-        .map_err(ProductAuthRouteFailure::from)?;
-    if status == AuthFlowStatus::Failed && before.status != AuthFlowStatus::Failed {
-        let after = state
-            .product_auth
-            .flow_record_for_status(scope, flow_id)
-            .await
-            .map_err(ProductAuthRouteFailure::from)?;
-        let provider = after.provider;
-        if let Some(descriptor) = oauth_callback_descriptor_for_provider(&provider) {
-            terminal_failure_hook(
-                state,
-                descriptor,
-                scope,
-                flow_id,
-                RebornOAuthCallbackFailureStage::ContinuationSideEffect,
-            )
-            .await?;
-        }
-    }
-    if let Some(error) = terminal_cleanup_error {
-        return Err(error);
-    }
-    Ok(status)
+        .map_err(ProductAuthRouteFailure::from)
 }
 
 pub(super) async fn abort_started_extension_oauth_flow(
@@ -334,7 +285,7 @@ async fn start_dcr_extension_oauth_flow(
 
     Ok(Json(ProductOAuthStartResponse {
         flow_id: flow.id,
-        status: flow.status,
+        status: flow.state,
         provider,
         authorization_url: authorization_url.clone(),
         expires_at: flow.expires_at,
@@ -432,7 +383,7 @@ async fn start_google_oauth_flow(
 
     Ok(Json(ProductOAuthStartResponse {
         flow_id: flow.id,
-        status: flow.status,
+        status: flow.state,
         provider,
         authorization_url,
         expires_at: flow.expires_at,
@@ -852,17 +803,14 @@ async fn oauth_provider_callback_attempt(
         }
         if !matches!(
             stage,
-            RebornOAuthCallbackFailureStage::ContinuationAcknowledgement
-                | RebornOAuthCallbackFailureStage::ContinuationRetryable
-                | RebornOAuthCallbackFailureStage::ContinuationCompensation
+            RebornOAuthCallbackFailureStage::ContinuationRetryable
         ) {
             state.remove_pkce_verifier(flow_id);
         }
         if !terminal_failure_hook_attempted
             && !matches!(
                 stage,
-                RebornOAuthCallbackFailureStage::ContinuationAcknowledgement
-                    | RebornOAuthCallbackFailureStage::ContinuationRetryable
+                RebornOAuthCallbackFailureStage::ContinuationRetryable
             )
         {
             run_terminal_failure_hook_best_effort(
@@ -1038,11 +986,11 @@ fn oauth_callback_signal_script(payload: &serde_json::Value) -> String {
 
 fn oauth_callback_completion_html(response: &RebornOAuthCallbackResponse) -> Response {
     let (title, message) = match response.status {
-        AuthFlowStatus::Completed => (
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized { .. }) => (
             "Authorization complete",
             "Authorization complete. You can close this window.",
         ),
-        AuthFlowStatus::Failed => (
+        AuthFlowState::Resolved(_) => (
             "Authorization failed",
             "Authorization failed. No permissions were selected, or authorization was denied. Please retry authorization and select the requested permissions.",
         ),
@@ -1097,7 +1045,9 @@ fn oauth_callback_failure_html(
     let script = oauth_callback_signal_script(&json!({
         "type": OAUTH_CALLBACK_SIGNAL_MESSAGE_TYPE,
         "flowId": flow_id,
-        "status": ironclaw_auth::AuthFlowStatus::Failed,
+        "status": ironclaw_auth::AuthFlowState::Resolved(
+            ironclaw_auth::AuthFlowOutcome::Failed { error: error.code }
+        ),
         "errorCode": error.code,
     }));
     let html = format!(
@@ -1268,7 +1218,7 @@ fn dcr_callback_state_from_oauth_state(
 mod tests {
     use super::*;
     use crate::AuthChallengeProvider;
-    use crate::RebornAuthContinuationDispatcher;
+    use crate::RebornAuthResolutionDispatcher;
     use crate::input::OAuthClientConfig;
     use crate::product_auth::oauth::oauth_gate::{
         GoogleOAuthGateProvider, OAuthGateFlowDriver, OAuthGateProviderRegistry,
@@ -1304,8 +1254,7 @@ mod tests {
     };
     #[cfg(feature = "slack-v2-host-beta")]
     use crate::slack::slack_personal_binding::{
-        RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
-        RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
+        RebornUserIdentityBinding, RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
         SlackConnectionCleanupSelector, SlackConnectionEpoch, SlackConnectionOwner,
         SlackConnectionState, SlackDisconnectFence, SlackPersonalBindingInstallation,
         SlackPersonalUserBindingService, SlackUserBindingLifecycleError,
@@ -1643,7 +1592,7 @@ mod tests {
             shared
                 .flow_records_snapshot()
                 .into_iter()
-                .filter(|flow| flow.status == AuthFlowStatus::AwaitingUser)
+                .filter(|flow| flow.state == AuthFlowState::Open)
                 .count(),
             1,
             "one caller-wide Slack connection attempt must back every blocked thread"
@@ -1949,7 +1898,7 @@ mod tests {
         assert!(body.contains("No permissions were selected"));
         assert!(!body.contains("malformed_callback"));
         // The failure page must emit the same cross-window completion signal as
-        // the success page (status "failed"), and close the popup, so the
+        // the success page (with the canonical resolved failure), and close the popup, so the
         // parent Extensions modal / in-chat card can surface a retryable error
         // instead of spinning until timeout.
         let flow_id = OAuthCallbackState::decode(OAuthCallbackStateKind::GOOGLE, &state_value)
@@ -1960,8 +1909,8 @@ mod tests {
             "failure page must broadcast the completion signal: {body}"
         );
         assert!(
-            body.contains(r#""status":"failed""#),
-            "failure signal must carry status failed: {body}"
+            body.contains(r#""state":"resolved""#) && body.contains(r#""type":"failed""#),
+            "failure signal must carry the canonical resolved failure: {body}"
         );
         assert!(
             body.contains(&flow_id.to_string()),
@@ -2243,7 +2192,8 @@ mod tests {
             body.contains(r#"new BroadcastChannel("ironclaw-product-auth")"#),
             "exchange-failure page must broadcast the completion signal: {body}"
         );
-        assert!(body.contains(r#""status":"failed""#));
+        assert!(body.contains(r#""state":"resolved""#));
+        assert!(body.contains(r#""type":"failed""#));
         assert!(body.contains(&flow_id.to_string()));
         assert!(body.contains("window.close()"));
     }
@@ -2500,16 +2450,18 @@ mod tests {
             .await
             .expect("read pending denial")
             .expect("flow exists");
-        assert_eq!(pending.status, AuthFlowStatus::Failed);
-        assert_eq!(pending.error, Some(AuthErrorCode::ProviderDenied));
-        assert!(pending.continuation_emitted_at.is_none());
+        assert_eq!(
+            pending.state,
+            AuthFlowState::Resolved(AuthFlowOutcome::ProviderDenied)
+        );
+        assert!(pending.resolution_delivered_at.is_none());
 
         assert_eq!(
             services
                 .reconcile_oauth_flow(&scope, flow.id)
                 .await
                 .expect("reconcile provider denial marker"),
-            AuthFlowStatus::Failed
+            AuthFlowState::Resolved(AuthFlowOutcome::ProviderDenied)
         );
         assert_eq!(dispatcher.events().len(), 2, "delivery is at least once");
         assert_eq!(flow_manager.marker_calls(), 2);
@@ -2519,7 +2471,7 @@ mod tests {
                 .await
                 .expect("read acknowledged denial")
                 .expect("flow exists")
-                .continuation_emitted_at
+                .resolution_delivered_at
                 .is_some()
         );
     }
@@ -2681,7 +2633,7 @@ mod tests {
             &SLACK_PERSONAL_CALLBACK_DESCRIPTOR,
             &callback_scope,
             AuthFlowId::new(),
-            RebornOAuthCallbackFailureStage::ContinuationSideEffect,
+            RebornOAuthCallbackFailureStage::ContinuationRetryable,
         )
         .await
         .expect_err("missing Slack cleanup authority must keep status retryable");
@@ -2990,8 +2942,10 @@ mod tests {
                 .flow_record_for_status(first_callback_state.scope(), first_start.flow_id)
                 .await
                 .expect("load malformed callback flow")
-                .status,
-            AuthFlowStatus::Failed,
+                .state,
+            AuthFlowState::Resolved(AuthFlowOutcome::Failed {
+                error: AuthErrorCode::MalformedCallback,
+            }),
             "known malformed callback must durably terminalize the flow"
         );
         let first_epoch = SlackConnectionEpoch::new(first_start.flow_id);
@@ -3095,8 +3049,10 @@ mod tests {
                 .flow_record_for_status(third_callback_state.scope(), third_start.flow_id)
                 .await
                 .expect("load missing-PKCE callback flow")
-                .status,
-            AuthFlowStatus::Failed,
+                .state,
+            AuthFlowState::Resolved(AuthFlowOutcome::Failed {
+                error: AuthErrorCode::MalformedCallback,
+            }),
             "missing one-shot PKCE material must durably terminalize the known flow"
         );
         let third_epoch = SlackConnectionEpoch::new(third_start.flow_id);
@@ -3347,7 +3303,8 @@ mod tests {
             ),
             "duplicate identity failure should tell the user how to fix it: {body}"
         );
-        assert!(body.contains(r#""status":"failed""#));
+        assert!(body.contains(r#""state":"resolved""#));
+        assert!(body.contains(r#""type":"failed""#));
 
         let owner_scope = AuthProductScope::new(
             ResourceScope {
@@ -3490,11 +3447,11 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingDispatcher {
-        events: Mutex<Vec<ironclaw_auth::AuthContinuationEvent>>,
+        events: Mutex<Vec<ironclaw_auth::AuthResolved>>,
     }
 
     impl RecordingDispatcher {
-        fn events(&self) -> Vec<ironclaw_auth::AuthContinuationEvent> {
+        fn events(&self) -> Vec<ironclaw_auth::AuthResolved> {
             self.events
                 .lock()
                 .expect("recording dispatcher lock")
@@ -3503,21 +3460,10 @@ mod tests {
     }
 
     #[async_trait]
-    impl RebornAuthContinuationDispatcher for RecordingDispatcher {
-        async fn dispatch_auth_continuation(
+    impl RebornAuthResolutionDispatcher for RecordingDispatcher {
+        async fn dispatch_auth_resolved(
             &self,
-            event: ironclaw_auth::AuthContinuationEvent,
-        ) -> Result<(), AuthProductError> {
-            self.events
-                .lock()
-                .expect("recording dispatcher lock")
-                .push(event);
-            Ok(())
-        }
-
-        async fn dispatch_canceled_auth_continuation(
-            &self,
-            event: ironclaw_auth::AuthContinuationEvent,
+            event: ironclaw_auth::AuthResolved,
         ) -> Result<(), AuthProductError> {
             self.events
                 .lock()
@@ -3532,10 +3478,10 @@ mod tests {
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[async_trait]
-    impl RebornAuthContinuationDispatcher for RejectingContinuationDispatcher {
-        async fn dispatch_auth_continuation(
+    impl RebornAuthResolutionDispatcher for RejectingContinuationDispatcher {
+        async fn dispatch_auth_resolved(
             &self,
-            _event: ironclaw_auth::AuthContinuationEvent,
+            _event: ironclaw_auth::AuthResolved,
         ) -> Result<(), AuthProductError> {
             Err(AuthProductError::BackendUnavailable)
         }
@@ -3549,10 +3495,10 @@ mod tests {
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[async_trait]
-    impl RebornAuthContinuationDispatcher for RejectingSecondContinuationDispatcher {
-        async fn dispatch_auth_continuation(
+    impl RebornAuthResolutionDispatcher for RejectingSecondContinuationDispatcher {
+        async fn dispatch_auth_resolved(
             &self,
-            _event: ironclaw_auth::AuthContinuationEvent,
+            _event: ironclaw_auth::AuthResolved,
         ) -> Result<(), AuthProductError> {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 Ok(())
@@ -4305,26 +4251,15 @@ mod tests {
     #[cfg(feature = "slack-v2-host-beta")]
     struct FailingOnceContinuationMarkerFlowManager {
         inner: Arc<InMemoryAuthProductServices>,
-        fail_settlement_once: AtomicBool,
         fail_direct_mark_once: AtomicBool,
         marker_calls: AtomicUsize,
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
     impl FailingOnceContinuationMarkerFlowManager {
-        fn new(inner: Arc<InMemoryAuthProductServices>) -> Self {
-            Self {
-                inner,
-                fail_settlement_once: AtomicBool::new(true),
-                fail_direct_mark_once: AtomicBool::new(false),
-                marker_calls: AtomicUsize::new(0),
-            }
-        }
-
         fn failing_direct_mark(inner: Arc<InMemoryAuthProductServices>) -> Self {
             Self {
                 inner,
-                fail_settlement_once: AtomicBool::new(false),
                 fail_direct_mark_once: AtomicBool::new(true),
                 marker_calls: AtomicUsize::new(0),
             }
@@ -4404,30 +4339,14 @@ mod tests {
             self.inner.fail_oauth_callback(scope, input).await
         }
 
-        async fn claim_continuation_dispatch(
-            &self,
-            scope: &AuthProductScope,
-            input: ironclaw_auth::AuthContinuationDispatchClaimInput,
-        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
-            self.inner.claim_continuation_dispatch(scope, input).await
-        }
-
-        async fn settle_continuation_dispatch(
-            &self,
-            scope: &AuthProductScope,
-            input: ironclaw_auth::AuthContinuationDispatchSettlementInput,
-        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
-            self.inner.settle_continuation_dispatch(scope, input).await
-        }
-
-        async fn mark_continuation_dispatched(
+        async fn mark_resolution_delivered(
             &self,
             scope: &AuthProductScope,
             flow_id: ironclaw_auth::AuthFlowId,
-            emitted_at: ironclaw_auth::Timestamp,
+            delivered_at: ironclaw_auth::Timestamp,
         ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
             self.inner
-                .mark_continuation_dispatched(scope, flow_id, emitted_at)
+                .mark_resolution_delivered(scope, flow_id, delivered_at)
                 .await
         }
 
@@ -4437,39 +4356,6 @@ mod tests {
             flow_id: ironclaw_auth::AuthFlowId,
         ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
             self.inner.cancel_flow(scope, flow_id).await
-        }
-
-        async fn reserve_cancellation(
-            &self,
-            scope: &AuthProductScope,
-            flow_id: ironclaw_auth::AuthFlowId,
-            observed_at: ironclaw_auth::Timestamp,
-        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
-            self.inner
-                .reserve_cancellation(scope, flow_id, observed_at)
-                .await
-        }
-
-        async fn finalize_cancellation(
-            &self,
-            scope: &AuthProductScope,
-            flow_id: ironclaw_auth::AuthFlowId,
-            expected_claimed_at: ironclaw_auth::Timestamp,
-        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
-            self.inner
-                .finalize_cancellation(scope, flow_id, expected_claimed_at)
-                .await
-        }
-
-        async fn rollback_cancellation(
-            &self,
-            scope: &AuthProductScope,
-            flow_id: ironclaw_auth::AuthFlowId,
-            expected_claimed_at: ironclaw_auth::Timestamp,
-        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
-            self.inner
-                .rollback_cancellation(scope, flow_id, expected_claimed_at)
-                .await
         }
     }
 
@@ -4539,38 +4425,18 @@ mod tests {
             self.inner.fail_oauth_callback(scope, input).await
         }
 
-        async fn claim_continuation_dispatch(
-            &self,
-            scope: &AuthProductScope,
-            input: ironclaw_auth::AuthContinuationDispatchClaimInput,
-        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
-            self.inner.claim_continuation_dispatch(scope, input).await
-        }
-
-        async fn settle_continuation_dispatch(
-            &self,
-            scope: &AuthProductScope,
-            input: ironclaw_auth::AuthContinuationDispatchSettlementInput,
-        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
-            self.marker_calls.fetch_add(1, Ordering::SeqCst);
-            if self.fail_settlement_once.swap(false, Ordering::SeqCst) {
-                return Err(AuthProductError::BackendUnavailable);
-            }
-            self.inner.settle_continuation_dispatch(scope, input).await
-        }
-
-        async fn mark_continuation_dispatched(
+        async fn mark_resolution_delivered(
             &self,
             scope: &AuthProductScope,
             flow_id: ironclaw_auth::AuthFlowId,
-            emitted_at: ironclaw_auth::Timestamp,
+            delivered_at: ironclaw_auth::Timestamp,
         ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
             self.marker_calls.fetch_add(1, Ordering::SeqCst);
             if self.fail_direct_mark_once.swap(false, Ordering::SeqCst) {
                 return Err(AuthProductError::BackendUnavailable);
             }
             self.inner
-                .mark_continuation_dispatched(scope, flow_id, emitted_at)
+                .mark_resolution_delivered(scope, flow_id, delivered_at)
                 .await
         }
 
@@ -4580,39 +4446,6 @@ mod tests {
             flow_id: ironclaw_auth::AuthFlowId,
         ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
             self.inner.cancel_flow(scope, flow_id).await
-        }
-
-        async fn reserve_cancellation(
-            &self,
-            scope: &AuthProductScope,
-            flow_id: ironclaw_auth::AuthFlowId,
-            observed_at: ironclaw_auth::Timestamp,
-        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
-            self.inner
-                .reserve_cancellation(scope, flow_id, observed_at)
-                .await
-        }
-
-        async fn finalize_cancellation(
-            &self,
-            scope: &AuthProductScope,
-            flow_id: ironclaw_auth::AuthFlowId,
-            expected_claimed_at: ironclaw_auth::Timestamp,
-        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
-            self.inner
-                .finalize_cancellation(scope, flow_id, expected_claimed_at)
-                .await
-        }
-
-        async fn rollback_cancellation(
-            &self,
-            scope: &AuthProductScope,
-            flow_id: ironclaw_auth::AuthFlowId,
-            expected_claimed_at: ironclaw_auth::Timestamp,
-        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
-            self.inner
-                .rollback_cancellation(scope, flow_id, expected_claimed_at)
-                .await
         }
     }
 
@@ -4729,7 +4562,7 @@ mod tests {
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
-    async fn slack_personal_oauth_callback_compensates_when_lifecycle_activation_fails() {
+    async fn slack_personal_oauth_callback_preserves_authorized_outbox_when_activation_fails() {
         let shared = Arc::new(InMemoryAuthProductServices::new());
         let provider_identity = OAuthProviderIdentity::new(
             "U123",
@@ -4850,35 +4683,40 @@ mod tests {
             .into_iter()
             .find(|flow| flow.id == start_response.flow_id)
             .expect("completed OAuth flow remains durable");
-        assert_eq!(completed_flow.status, AuthFlowStatus::Failed);
-        assert!(completed_flow.credential_account_id.is_some());
-        assert!(
-            binding_store.bindings().is_empty(),
-            "failed lifecycle activation must roll back the Slack identity"
+        let completed_account_id = match completed_flow.state {
+            AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id }) => account_id,
+            other => panic!("OAuth outcome must remain authorized for retry, got {other:?}"),
+        };
+        assert_eq!(
+            binding_store.bindings().len(),
+            1,
+            "the provider identity remains available for idempotent redelivery"
         );
         assert_eq!(
             lifecycle_store
                 .connection_state(&owner)
                 .await
-                .expect("rolled-back connection state"),
+                .expect("retryable connection state"),
             Some((
                 SlackConnectionEpoch::new(start_response.flow_id),
-                SlackConnectionState::Disconnected,
+                SlackConnectionState::Active,
             )),
-            "failed lifecycle activation must abandon the Slack connection epoch"
+            "a retryable lifecycle failure must preserve the completed provider effect"
         );
         let accounts = shared
             .accounts_for_owner(&callback_state.scope().to_credential_owner())
             .await
-            .expect("credential account after lifecycle compensation");
+            .expect("credential account after lifecycle failure");
         assert_eq!(accounts.len(), 2);
-        let failed_account = accounts
+        let retryable_account = accounts
             .iter()
-            .find(|account| Some(account.id) == completed_flow.credential_account_id)
-            .expect("failed callback account");
-        assert_eq!(failed_account.status, CredentialAccountStatus::Revoked);
-        assert!(failed_account.access_secret.is_none());
-        assert!(failed_account.refresh_secret.is_none());
+            .find(|account| account.id == completed_account_id)
+            .expect("retryable callback account");
+        assert_eq!(
+            retryable_account.status,
+            CredentialAccountStatus::Configured
+        );
+        assert!(retryable_account.access_secret.is_some());
         let unrelated_account = accounts
             .iter()
             .find(|account| account.id == unrelated_account.id)
@@ -4886,130 +4724,16 @@ mod tests {
         assert_eq!(
             unrelated_account.status,
             CredentialAccountStatus::Configured,
-            "activation compensation must not revoke another account for the same provider"
+            "retryable activation must not change another account for the same provider"
         );
         assert!(unrelated_account.access_secret.is_some());
-
-        // Recreate the exact stale terminal state a restart can expose after
-        // the callback wrapper failed between durable Failed settlement and
-        // provider cleanup. The first status attempt has an injected binding
-        // delete failure; it must remain retryable, and a later poll must still
-        // converge even after the interactive OAuth flow has expired.
-        let connection_epoch = SlackConnectionEpoch::new(start_response.flow_id);
-        lifecycle_store
-            .begin_connection(
-                &owner,
-                connection_epoch,
-                Utc::now() + ChronoDuration::minutes(5),
-            )
+        assert!(completed_flow.resolution_delivered_at.is_none());
+        let retry = state
+            .product_auth
+            .reconcile_oauth_flow(callback_state.scope(), start_response.flow_id)
             .await
-            .expect("recreate stale lifecycle owner");
-        binding_store
-            .bind_user_identity_for_epoch(
-                RebornUserIdentityBinding {
-                    provider: RebornIdentityProviderId::new(
-                        crate::slack::slack_actor_identity::SLACK_IDENTITY_PROVIDER,
-                    )
-                    .expect("identity provider"),
-                    provider_user_id: RebornIdentityProviderUserId::new("install-alpha:U123")
-                        .expect("provider user id"),
-                    user_id: callback_state.scope().resource.user_id.clone(),
-                },
-                connection_epoch,
-            )
-            .await
-            .expect("recreate stale identity binding");
-        binding_store.fail_next_delete();
-        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
-        let caller = WebUiAuthenticatedCaller::new(
-            callback_state.scope().resource.tenant_id.clone(),
-            callback_state.scope().resource.user_id.clone(),
-            None,
-            None,
-        );
-        let status_query = OAuthFlowStatusQuery {
-            invocation_id: Some(callback_state.scope().resource.invocation_id.to_string()),
-        };
-        let Json(observed_status) = oauth_flow_status_handler(
-            State(state.clone()),
-            Extension(caller.clone()),
-            Path(start_response.flow_id.to_string()),
-            axum::extract::Query(status_query),
-        )
-        .await
-        .expect("observational status read");
-        assert_eq!(observed_status.status, AuthFlowStatus::Failed);
-        assert_eq!(
-            binding_store.bindings().len(),
-            1,
-            "GET status must not run provider-owned cleanup"
-        );
-        assert_eq!(
-            lifecycle_store
-                .connection_state(&owner)
-                .await
-                .expect("connection state after observational read"),
-            Some((connection_epoch, SlackConnectionState::Connecting)),
-            "GET status must not mutate lifecycle state"
-        );
-        let status_query = OAuthFlowStatusQuery {
-            invocation_id: Some(callback_state.scope().resource.invocation_id.to_string()),
-        };
-        let first_status = oauth_flow_reconcile_handler(
-            State(state.clone()),
-            Extension(caller.clone()),
-            Path(start_response.flow_id.to_string()),
-            axum::extract::Query(status_query),
-        )
-        .await
-        .expect_err("failed binding cleanup keeps terminal status retryable");
-        assert_eq!(first_status.body.code, AuthErrorCode::BackendUnavailable);
-        assert_eq!(
-            lifecycle_store
-                .connection_state(&owner)
-                .await
-                .expect("fenced connection state"),
-            Some((connection_epoch, SlackConnectionState::Disconnecting)),
-            "the failed epoch must be fenced before fallible identity deletion"
-        );
-        binding_store.fail_next_delete();
-        let second_status = oauth_flow_reconcile_handler(
-            State(state.clone()),
-            Extension(caller.clone()),
-            Path(start_response.flow_id.to_string()),
-            axum::extract::Query(OAuthFlowStatusQuery {
-                invocation_id: Some(callback_state.scope().resource.invocation_id.to_string()),
-            }),
-        )
-        .await
-        .expect_err("a second identity failure remains retryable and fenced");
-        assert_eq!(second_status.body.code, AuthErrorCode::BackendUnavailable);
-        assert_eq!(
-            lifecycle_store
-                .connection_state(&owner)
-                .await
-                .expect("connection state after second cleanup failure"),
-            Some((connection_epoch, SlackConnectionState::Disconnecting))
-        );
-        let Json(status_response) = oauth_flow_reconcile_handler(
-            State(state),
-            Extension(caller),
-            Path(start_response.flow_id.to_string()),
-            axum::extract::Query(OAuthFlowStatusQuery {
-                invocation_id: Some(callback_state.scope().resource.invocation_id.to_string()),
-            }),
-        )
-        .await
-        .expect("expired failed flow cleanup converges on retry");
-        assert_eq!(status_response.status, AuthFlowStatus::Failed);
-        assert!(binding_store.bindings().is_empty());
-        assert_eq!(
-            lifecycle_store
-                .connection_state(&owner)
-                .await
-                .expect("terminal connection state"),
-            Some((connection_epoch, SlackConnectionState::Disconnected))
-        );
+            .expect_err("reconciliation retries the same rejected lifecycle event");
+        assert_eq!(retry.code, AuthErrorCode::BackendUnavailable);
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
@@ -5024,9 +4748,8 @@ mod tests {
         )
         .expect("provider identity");
         let provider_client = Arc::new(SlackIdentityProviderClient::new(provider_identity));
-        let flow_manager = Arc::new(FailingOnceContinuationMarkerFlowManager::new(
-            shared.clone(),
-        ));
+        let flow_manager =
+            Arc::new(FailingOnceContinuationMarkerFlowManager::failing_direct_mark(shared.clone()));
         let dispatcher = Arc::new(RecordingDispatcher::default());
         let product_auth = Arc::new(RebornProductAuthServices::new(
             flow_manager.clone(),
@@ -5117,18 +4840,17 @@ mod tests {
         assert_eq!(dispatcher.events().len(), 1, "activation dispatched once");
         assert_eq!(
             flow_manager.marker_calls(),
-            2,
-            "failed acknowledgement releases the durable claim"
+            1,
+            "the first durable delivery-marker write fails"
         );
-        assert_eq!(
+        assert!(matches!(
             state
                 .product_auth
                 .reconcile_oauth_flow(callback_state.scope(), start_response.flow_id)
                 .await
                 .expect("status after acknowledgement failure"),
-            AuthFlowStatus::Completed,
-            "status polling redrives and acknowledges the released lifecycle claim"
-        );
+            AuthFlowState::Resolved(AuthFlowOutcome::Authorized { .. })
+        ));
         assert_eq!(binding_store.bindings().len(), 1);
         assert_eq!(
             lifecycle_store
@@ -5162,7 +4884,7 @@ mod tests {
         assert_eq!(dispatcher.events().len(), 2, "delivery is at least once");
         assert_eq!(
             flow_manager.marker_calls(),
-            3,
+            2,
             "status polling, not provider exchange, persists the retry marker"
         );
         let completed = shared
@@ -5170,14 +4892,17 @@ mod tests {
             .into_iter()
             .find(|flow| flow.id == start_response.flow_id)
             .expect("completed flow");
-        assert_eq!(completed.status, AuthFlowStatus::Completed);
-        assert!(completed.continuation_emitted_at.is_some());
+        assert!(matches!(
+            completed.state,
+            AuthFlowState::Resolved(AuthFlowOutcome::Authorized { .. })
+        ));
+        assert!(completed.resolution_delivered_at.is_some());
         assert_eq!(binding_store.bindings().len(), 1);
     }
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
-    async fn slack_personal_oauth_activation_failure_after_reconfigure_fully_disconnects_owner() {
+    async fn slack_personal_oauth_activation_failure_after_reconfigure_remains_retryable() {
         let shared = Arc::new(InMemoryAuthProductServices::new());
         let provider_identity = OAuthProviderIdentity::new(
             "U123",
@@ -5316,23 +5041,19 @@ mod tests {
             "reconfigure updates the existing account"
         );
         assert_eq!(accounts[0].id, existing_account_id);
-        assert_eq!(accounts[0].status, CredentialAccountStatus::Revoked);
-        assert!(accounts[0].access_secret.is_none());
-        assert!(accounts[0].refresh_secret.is_none());
-        assert!(
-            binding_store.bindings().is_empty(),
-            "the previous identity must not be restored after its credential was overwritten"
-        );
+        assert_eq!(accounts[0].status, CredentialAccountStatus::Configured);
+        assert!(accounts[0].access_secret.is_some());
+        assert_eq!(binding_store.bindings().len(), 1);
         assert_eq!(
             lifecycle_store
                 .connection_state(&owner)
                 .await
-                .expect("disconnected lifecycle"),
+                .expect("retryable lifecycle"),
             Some((
                 SlackConnectionEpoch::new(reconfigure.flow_id),
-                SlackConnectionState::Disconnected,
+                SlackConnectionState::Active,
             )),
-            "failed reconfigure activation must fully disconnect the Slack owner"
+            "failed reconfigure activation remains durable for idempotent redelivery"
         );
     }
 

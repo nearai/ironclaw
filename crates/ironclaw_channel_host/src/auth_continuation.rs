@@ -1,58 +1,47 @@
-//! The continuation-dispatch port channel hosts use to resume blocked turns.
+//! The auth-resolution dispatch port channel hosts use to resume blocked turns.
 //!
-//! Pairing completions and OAuth callbacks resume `BlockedAuth` runs through
-//! the same composed dispatcher; the port lives below composition so a channel
-//! host crate can hold `Arc<dyn RebornAuthContinuationDispatcher>` without a
-//! composition dependency. The production implementation is
-//! [`ProductAuthTurnGateResumeDispatcher`], adapted here.
+//! OAuth callbacks durably resolve an auth flow before handing its exact
+//! [`AuthResolved`] value to this port. The port lives below composition so
+//! production decorators can add lifecycle activation and compatible-request
+//! fanout without introducing a composition dependency.
 
 use async_trait::async_trait;
-use ironclaw_auth::{AuthContinuationEvent, AuthProductError};
+use ironclaw_auth::{AuthProductError, AuthResolved};
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 
-/// Dispatches a typed continuation event once an OAuth callback flow has
-/// completed.
+/// Dispatches one durable terminal auth resolution.
 ///
-/// # Idempotency contract
-///
-/// Implementations MUST be idempotent on `flow_id`.  The product-auth layer
-/// guarantees *at-least-once* delivery: if `dispatch_auth_continuation`
-/// succeeds but the subsequent `mark_continuation_dispatched` call fails
-/// (e.g. a transient `BackendConflict` or `BackendUnavailable`), the caller
-/// will retry the full callback path and dispatch the same `flow_id` again.
-/// An implementation that assumes exactly-once delivery will process duplicate
-/// continuations and is incorrect.
+/// Implementations MUST be idempotent on `flow_id`: delivery is at least once
+/// when the durable delivery marker cannot be recorded after an effect succeeds.
 #[async_trait]
-pub trait RebornAuthContinuationDispatcher: Send + Sync {
-    async fn dispatch_auth_continuation(
+pub trait RebornAuthResolutionDispatcher: Send + Sync {
+    async fn dispatch_auth_resolved(
         &self,
-        event: AuthContinuationEvent,
+        resolution: AuthResolved,
     ) -> Result<(), AuthProductError>;
-
-    /// Deny a turn gate whose backing auth flow ended without credentials,
-    /// including provider-owned denial and lifecycle cleanup. Non-turn
-    /// continuations remain terminal without a turn side effect.
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        _event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        Err(AuthProductError::BackendUnavailable)
-    }
 }
 
 #[async_trait]
-impl RebornAuthContinuationDispatcher for ProductAuthTurnGateResumeDispatcher {
-    async fn dispatch_auth_continuation(
+impl RebornAuthResolutionDispatcher for ProductAuthTurnGateResumeDispatcher {
+    async fn dispatch_auth_resolved(
         &self,
-        event: AuthContinuationEvent,
+        resolution: AuthResolved,
     ) -> Result<(), AuthProductError> {
-        ProductAuthTurnGateResumeDispatcher::dispatch_auth_continuation(self, event).await
+        ProductAuthTurnGateResumeDispatcher::dispatch_auth_resolved(self, resolution)
+            .await
+            .map(|_| ())
+            .map_err(|_| AuthProductError::BackendUnavailable)
     }
+}
 
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        ProductAuthTurnGateResumeDispatcher::dispatch_canceled_auth_continuation(self, event).await
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dispatcher_contract<T: RebornAuthResolutionDispatcher>() {}
+
+    #[test]
+    fn product_dispatcher_implements_the_single_resolution_contract() {
+        dispatcher_contract::<ProductAuthTurnGateResumeDispatcher>();
     }
 }

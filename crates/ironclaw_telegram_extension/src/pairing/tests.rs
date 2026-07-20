@@ -94,8 +94,8 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_auth::{AuthContinuationEvent, AuthContinuationRef, AuthProductError};
-use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
+use ironclaw_auth::{AuthContinuationRef, AuthProductError, AuthResolved};
+use ironclaw_channel_host::auth_continuation::RebornAuthResolutionDispatcher;
 use ironclaw_host_api::{AgentId, TenantId, UserId};
 use ironclaw_product_adapters::AdapterInstallationId;
 use ironclaw_secrets::FilesystemSecretStore;
@@ -109,7 +109,7 @@ use crate::test_support::{RecordingBotApi, fault_injected_telegram_state, telegr
 
 #[derive(Debug, Default)]
 struct RecordingDispatcher {
-    events: StdMutex<Vec<AuthContinuationEvent>>,
+    events: StdMutex<Vec<AuthResolved>>,
     fail_remaining: std::sync::atomic::AtomicUsize,
 }
 
@@ -123,11 +123,8 @@ impl RecordingDispatcher {
 }
 
 #[async_trait]
-impl RebornAuthContinuationDispatcher for RecordingDispatcher {
-    async fn dispatch_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
+impl RebornAuthResolutionDispatcher for RecordingDispatcher {
+    async fn dispatch_auth_resolved(&self, event: AuthResolved) -> Result<(), AuthProductError> {
         if self
             .fail_remaining
             .fetch_update(
@@ -197,7 +194,7 @@ async fn fixture_with_state(
         None,
         Arc::clone(&setup),
         Arc::clone(&state),
-        Arc::clone(&dispatcher) as Arc<dyn RebornAuthContinuationDispatcher>,
+        Arc::clone(&dispatcher) as Arc<dyn RebornAuthResolutionDispatcher>,
         Arc::clone(&actor_pairings)
             as Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
     );

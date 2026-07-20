@@ -1525,8 +1525,8 @@ mod tests {
         let flows = auth.flows_for_owner(sample_flow_owner()).await.unwrap();
         assert_eq!(flows.len(), 1, "rollback should leave one terminal flow");
         assert_eq!(
-            flows[0].status,
-            ironclaw_auth::AuthFlowStatus::Canceled,
+            flows[0].state,
+            ironclaw_auth::AuthFlowState::Resolved(ironclaw_auth::AuthFlowOutcome::UserAborted,),
             "failed DCR setup storage must cancel the newly created flow"
         );
         assert!(
@@ -2081,27 +2081,11 @@ mod tests {
             unreachable!("create-flow failure test does not fail callbacks")
         }
 
-        async fn claim_continuation_dispatch(
-            &self,
-            _scope: &AuthProductScope,
-            _input: ironclaw_auth::AuthContinuationDispatchClaimInput,
-        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
-            unreachable!("create-flow failure test does not claim continuations")
-        }
-
-        async fn settle_continuation_dispatch(
-            &self,
-            _scope: &AuthProductScope,
-            _input: ironclaw_auth::AuthContinuationDispatchSettlementInput,
-        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
-            unreachable!("create-flow failure test does not settle continuations")
-        }
-
-        async fn mark_continuation_dispatched(
+        async fn mark_resolution_delivered(
             &self,
             _scope: &AuthProductScope,
             _flow_id: AuthFlowId,
-            _emitted_at: ironclaw_auth::Timestamp,
+            _delivered_at: ironclaw_auth::Timestamp,
         ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
             unreachable!("create-flow failure test does not mark continuations")
         }
@@ -2112,33 +2096,6 @@ mod tests {
             _flow_id: AuthFlowId,
         ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
             unreachable!("create-flow failure test does not cancel flows")
-        }
-
-        async fn reserve_cancellation(
-            &self,
-            _scope: &AuthProductScope,
-            _flow_id: AuthFlowId,
-            _observed_at: ironclaw_auth::Timestamp,
-        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
-            unreachable!("create-flow failure test does not reserve flow cancellation")
-        }
-
-        async fn finalize_cancellation(
-            &self,
-            _scope: &AuthProductScope,
-            _flow_id: AuthFlowId,
-            _expected_claimed_at: ironclaw_auth::Timestamp,
-        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
-            unreachable!("create-flow failure test does not finalize flow cancellation")
-        }
-
-        async fn rollback_cancellation(
-            &self,
-            _scope: &AuthProductScope,
-            _flow_id: AuthFlowId,
-            _expected_claimed_at: ironclaw_auth::Timestamp,
-        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
-            unreachable!("create-flow failure test does not roll back flow cancellation")
         }
     }
 

@@ -6,19 +6,19 @@ use std::sync::{
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use ironclaw_auth::{
-    AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthErrorCode, AuthFlowId,
-    AuthFlowKind, AuthFlowManager, AuthProductError, AuthProductScope, AuthProviderClient,
-    AuthProviderId, AuthSessionId, AuthSurface, AuthorizationCodeHash, CredentialAccountId,
-    CredentialAccountLabel, CredentialAccountRecordSource, CredentialAccountStatus,
-    InMemoryAuthProductServices, LifecyclePackageRef, NewAuthFlow, OAuthAuthorizationCode,
-    OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OAuthProviderExchange,
-    OAuthProviderExchangeContext, OAuthProviderIdentity, OAuthProviderRefresh,
-    OAuthProviderRefreshRequest, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret,
-    ProviderScope,
+    AuthChallenge, AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowKind, AuthFlowManager,
+    AuthFlowOutcome, AuthFlowState, AuthProductError, AuthProductScope, AuthProviderClient,
+    AuthProviderId, AuthResolved, AuthSessionId, AuthSurface, AuthorizationCodeHash,
+    CredentialAccountId, CredentialAccountLabel, CredentialAccountRecordSource,
+    CredentialAccountStatus, InMemoryAuthProductServices, LifecyclePackageRef, NewAuthFlow,
+    OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthProviderCallbackRequest,
+    OAuthProviderExchange, OAuthProviderExchangeContext, OAuthProviderIdentity,
+    OAuthProviderRefresh, OAuthProviderRefreshRequest, OpaqueStateHash, PkceVerifierHash,
+    PkceVerifierSecret, ProviderScope,
 };
 use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
 use ironclaw_reborn_composition::{
-    RebornAuthContinuationDispatcher, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
+    RebornAuthResolutionDispatcher, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
     RebornOAuthCallbackResponse, RebornProductAuthServices,
 };
 use secrecy::SecretString;
@@ -26,11 +26,11 @@ use tokio::sync::Semaphore;
 
 #[derive(Default)]
 struct RecordingContinuationDispatcher {
-    events: Mutex<Vec<AuthContinuationEvent>>,
+    events: Mutex<Vec<AuthResolved>>,
 }
 
 impl RecordingContinuationDispatcher {
-    fn events(&self) -> Vec<AuthContinuationEvent> {
+    fn events(&self) -> Vec<AuthResolved> {
         self.events
             .lock()
             .expect("continuation event lock poisoned")
@@ -39,11 +39,8 @@ impl RecordingContinuationDispatcher {
 }
 
 #[async_trait]
-impl RebornAuthContinuationDispatcher for RecordingContinuationDispatcher {
-    async fn dispatch_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
+impl RebornAuthResolutionDispatcher for RecordingContinuationDispatcher {
+    async fn dispatch_auth_resolved(&self, event: AuthResolved) -> Result<(), AuthProductError> {
         self.events
             .lock()
             .expect("continuation event lock poisoned")
@@ -203,11 +200,8 @@ impl BlockingContinuationDispatcher {
 }
 
 #[async_trait]
-impl RebornAuthContinuationDispatcher for BlockingContinuationDispatcher {
-    async fn dispatch_auth_continuation(
-        &self,
-        _event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
+impl RebornAuthResolutionDispatcher for BlockingContinuationDispatcher {
+    async fn dispatch_auth_resolved(&self, _event: AuthResolved) -> Result<(), AuthProductError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.entered.add_permits(1);
         self.release
@@ -273,11 +267,8 @@ impl AuthProviderClient for CleanupRecordingProviderClient {
 }
 
 #[async_trait]
-impl RebornAuthContinuationDispatcher for FailingContinuationDispatcher {
-    async fn dispatch_auth_continuation(
-        &self,
-        _event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
+impl RebornAuthResolutionDispatcher for FailingContinuationDispatcher {
+    async fn dispatch_auth_resolved(&self, _event: AuthResolved) -> Result<(), AuthProductError> {
         Err(self.error.clone())
     }
 }
@@ -431,8 +422,12 @@ async fn oauth_callback_handler_completes_flow_and_dispatches_typed_continuation
     assert_eq!(events[0].scope, owner);
     assert_eq!(events[0].continuation, response.continuation);
     assert_eq!(
-        events[0].credential_account_id,
-        response.credential_account_id
+        events[0].outcome,
+        AuthFlowOutcome::Authorized {
+            account_id: response
+                .credential_account_id
+                .expect("authorized response account"),
+        }
     );
 
     let serialized = serde_json::to_string(&response).unwrap();
@@ -491,12 +486,12 @@ async fn oauth_callback_handler_returns_provider_identity_for_host_binding() {
 }
 
 #[tokio::test]
-async fn oauth_callback_handler_terminalizes_and_compensates_lifecycle_activation_failure() {
+async fn oauth_callback_handler_retries_authorized_lifecycle_dispatch_failure() {
     let shared_auth = Arc::new(InMemoryAuthProductServices::new());
     let services = RebornProductAuthServices::from_shared(
         shared_auth.clone(),
         Arc::new(FailingContinuationDispatcher {
-            error: AuthProductError::TokenExchangeFailed,
+            error: AuthProductError::BackendUnavailable,
         }),
     );
     let owner = scope("alice");
@@ -514,9 +509,8 @@ async fn oauth_callback_handler_terminalizes_and_compensates_lifecycle_activatio
         .await
         .expect("accounts after failed lifecycle activation");
     assert_eq!(accounts.len(), 1);
-    assert_eq!(accounts[0].status, CredentialAccountStatus::Revoked);
-    assert!(accounts[0].access_secret.is_none());
-    assert!(accounts[0].refresh_secret.is_none());
+    assert_eq!(accounts[0].status, CredentialAccountStatus::Configured);
+    assert!(accounts[0].access_secret.is_some());
 
     let dispatcher = Arc::new(RecordingContinuationDispatcher::default());
     let provider_client = Arc::new(SuccessfulCountingProviderClient::default());
@@ -529,14 +523,17 @@ async fn oauth_callback_handler_terminalizes_and_compensates_lifecycle_activatio
         shared_auth,
         dispatcher.clone(),
     );
-    let retry_error = retry_services
+    let retry = retry_services
         .handle_oauth_callback(authorized_request(owner.clone(), flow_id))
         .await
-        .expect_err("terminal lifecycle failure cannot redispatch");
+        .expect("authorized lifecycle outcome remains retryable");
 
-    assert_eq!(retry_error.code, AuthErrorCode::FlowAlreadyTerminal);
+    assert!(matches!(
+        retry.status,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized { .. })
+    ));
     assert_eq!(provider_client.calls(), 0);
-    assert!(dispatcher.events().is_empty());
+    assert_eq!(dispatcher.events().len(), 1);
 }
 
 #[tokio::test]
@@ -545,7 +542,7 @@ async fn oauth_callback_handler_keeps_non_lifecycle_continuation_failure_retryab
     let services = RebornProductAuthServices::from_shared(
         shared_auth.clone(),
         Arc::new(FailingContinuationDispatcher {
-            error: AuthProductError::TokenExchangeFailed,
+            error: AuthProductError::BackendUnavailable,
         }),
     );
     let owner = scope("alice");
@@ -583,13 +580,16 @@ async fn oauth_callback_handler_keeps_non_lifecycle_continuation_failure_retryab
         .handle_oauth_callback(authorized_request(owner, flow_id))
         .await
         .expect("non-lifecycle continuation can be retried");
-    assert_eq!(retry.status, ironclaw_auth::AuthFlowStatus::Completed);
+    assert!(matches!(
+        retry.status,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized { .. })
+    ));
     assert_eq!(provider_client.calls(), 0);
     assert_eq!(dispatcher.events().len(), 1);
 }
 
 #[tokio::test]
-async fn concurrent_lifecycle_callbacks_dispatch_once_and_never_reexchange() {
+async fn concurrent_lifecycle_callbacks_safely_redeliver_and_never_reexchange() {
     let shared_auth = Arc::new(InMemoryAuthProductServices::new());
     let dispatcher = Arc::new(BlockingContinuationDispatcher::default());
     let provider_client = Arc::new(SuccessfulCountingProviderClient::default());
@@ -621,35 +621,39 @@ async fn concurrent_lifecycle_callbacks_dispatch_once_and_never_reexchange() {
             .handle_oauth_callback(authorized_request(second_owner, flow_id))
             .await
     });
-    let concurrent = second
-        .await
-        .expect("second callback task")
-        .expect_err("an active continuation lease is retryable");
-    assert_eq!(concurrent.code, AuthErrorCode::BackendUnavailable);
-    assert!(concurrent.retryable);
+    dispatcher.wait_until_entered().await;
     assert_eq!(provider_client.calls(), 1);
-    assert_eq!(dispatcher.calls(), 1);
+    assert_eq!(dispatcher.calls(), 2);
 
+    dispatcher.release();
     dispatcher.release();
     let winner = first
         .await
         .expect("first callback task")
         .expect("claim owner completes callback");
+    let concurrent = second
+        .await
+        .expect("second callback task")
+        .expect("resolved outbox may safely redeliver before either marker wins");
+    assert_eq!(concurrent.status, winner.status);
     let replay = services
         .handle_oauth_callback(authorized_request(owner.clone(), flow_id))
         .await
         .expect("retry observes the acknowledged success");
-    assert_eq!(winner.status, ironclaw_auth::AuthFlowStatus::Completed);
-    assert_eq!(replay.status, ironclaw_auth::AuthFlowStatus::Completed);
+    assert!(matches!(
+        winner.status,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized { .. })
+    ));
+    assert_eq!(replay.status, winner.status);
     assert_eq!(provider_client.calls(), 1);
-    assert_eq!(dispatcher.calls(), 1);
+    assert_eq!(dispatcher.calls(), 2);
     let flow = shared_auth
         .get_flow(&owner, flow_id)
         .await
         .unwrap()
         .expect("completed flow");
-    assert_eq!(flow.status, ironclaw_auth::AuthFlowStatus::Completed);
-    assert!(flow.continuation_emitted_at.is_some());
+    assert_eq!(flow.state, winner.status);
+    assert!(flow.resolution_delivered_at.is_some());
 }
 
 #[tokio::test]
@@ -771,7 +775,15 @@ async fn oauth_callback_handler_returns_sanitized_failures_without_dispatch() {
         .expect_err("foreign callback denied");
     assert_eq!(cross_scope.code, AuthErrorCode::CrossScopeDenied);
 
-    assert!(dispatcher.events().is_empty());
+    let events = dispatcher.events();
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        events[0].outcome,
+        AuthFlowOutcome::Failed {
+            error: AuthErrorCode::MalformedCallback,
+        }
+    );
+    assert_eq!(events[1].outcome, AuthFlowOutcome::ProviderDenied);
 }
 
 #[tokio::test]
@@ -791,7 +803,14 @@ async fn oauth_callback_handler_routes_exchange_failures_through_provider_bounda
 
     assert_eq!(error.code, AuthErrorCode::TokenExchangeFailed);
     assert!(!error.retryable);
-    assert!(dispatcher.events().is_empty());
+    let events = dispatcher.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].outcome,
+        AuthFlowOutcome::Failed {
+            error: AuthErrorCode::TokenExchangeFailed,
+        }
+    );
     let serialized = serde_json::to_string(&error).unwrap();
     let parsed: ironclaw_reborn_composition::RebornOAuthCallbackError =
         serde_json::from_str(&serialized).unwrap();
@@ -805,12 +824,16 @@ async fn oauth_callback_handler_routes_exchange_failures_through_provider_bounda
         .await
         .expect("flow lookup")
         .expect("flow record");
-    assert_eq!(flow.status, ironclaw_auth::AuthFlowStatus::Failed);
-    assert_eq!(flow.error, Some(AuthErrorCode::TokenExchangeFailed));
+    assert_eq!(
+        flow.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Failed {
+            error: AuthErrorCode::TokenExchangeFailed,
+        })
+    );
 
     let retry = services
         .handle_oauth_callback(authorized_request(owner, flow_id))
         .await
         .expect_err("failed flow rejects retry");
-    assert_eq!(retry.code, AuthErrorCode::FlowAlreadyTerminal);
+    assert_eq!(retry.code, AuthErrorCode::TokenExchangeFailed);
 }

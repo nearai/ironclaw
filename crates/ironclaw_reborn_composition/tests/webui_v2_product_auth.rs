@@ -13,9 +13,9 @@ use axum::extract::ConnectInfo;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
-    AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthFlowId, AuthFlowKind,
-    AuthFlowManager, AuthInteractionId, AuthInteractionService, AuthProductError, AuthProductScope,
-    AuthProviderClient, AuthProviderId, AuthSurface, CredentialAccountLabel,
+    AuthChallenge, AuthContinuationRef, AuthFlowId, AuthFlowKind, AuthFlowManager,
+    AuthInteractionId, AuthInteractionService, AuthProductError, AuthProductScope,
+    AuthProviderClient, AuthProviderId, AuthResolved, AuthSurface, CredentialAccountLabel,
     CredentialAccountService, CredentialAccountStatus, CredentialOwnership, CredentialSetupService,
     GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE, InMemoryAuthProductServices,
     ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthAuthorizationUrl,
@@ -43,7 +43,7 @@ use ironclaw_product_workflow::{
     WebUiSetupExtensionRequest, rejecting_reborn_services_error,
 };
 use ironclaw_reborn_composition::{
-    GoogleOAuthRouteConfig, RebornAuthContinuationDispatcher, RebornProductAuthServices,
+    GoogleOAuthRouteConfig, RebornAuthResolutionDispatcher, RebornProductAuthServices,
     RebornReadiness, RebornWebuiBundle,
 };
 use ironclaw_webui::{WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app};
@@ -70,21 +70,18 @@ impl WebuiAuthenticator for OnlyValidToken {
 
 #[derive(Default)]
 struct RecordingAuthDispatcher {
-    events: Mutex<Vec<AuthContinuationEvent>>,
+    events: Mutex<Vec<AuthResolved>>,
 }
 
 impl RecordingAuthDispatcher {
-    fn events(&self) -> Vec<AuthContinuationEvent> {
+    fn events(&self) -> Vec<AuthResolved> {
         self.events.lock().expect("auth events lock").clone()
     }
 }
 
 #[async_trait]
-impl RebornAuthContinuationDispatcher for RecordingAuthDispatcher {
-    async fn dispatch_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
+impl RebornAuthResolutionDispatcher for RecordingAuthDispatcher {
+    async fn dispatch_auth_resolved(&self, event: AuthResolved) -> Result<(), AuthProductError> {
         self.events.lock().expect("auth events lock").push(event);
         Ok(())
     }

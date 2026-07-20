@@ -48,8 +48,8 @@ const MAX_OWNER_SESSION_ROOTS_PER_SURFACE: usize = 1024;
 const MAX_OWNER_RECORDS_PER_ROOT: usize = 1024;
 
 fn flow_requires_lifecycle_cleanup(flow: &AuthFlowRecord) -> bool {
-    !ironclaw_auth::is_terminal_status(flow.status)
-        || (flow.continuation_emitted_at.is_none()
+    !ironclaw_auth::is_terminal_state(flow.state)
+        || (flow.resolution_delivered_at.is_none()
             && matches!(
                 flow.continuation,
                 AuthContinuationRef::TurnGateResume { .. }
@@ -978,4 +978,4 @@ fn map_auth_cas_error(error: CasUpdateError<AuthProductError>) -> AuthProductErr
     }
 }
 
-use ironclaw_auth::{credential_status_for_completed_flow, is_terminal_status, scope_matches};
+use ironclaw_auth::{credential_status_for_completed_flow, scope_matches};

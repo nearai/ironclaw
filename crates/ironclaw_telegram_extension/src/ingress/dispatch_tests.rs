@@ -4,8 +4,8 @@ pub(crate) mod test_fixtures {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use async_trait::async_trait;
-    use ironclaw_auth::AuthContinuationEvent;
     use ironclaw_auth::AuthProductError;
+    use ironclaw_auth::AuthResolved;
     use ironclaw_host_api::{AgentId, TenantId, UserId};
     use ironclaw_product_adapters::{
         ProductAdapterError, ProductInboundAck, ProductInboundEnvelope,
@@ -19,7 +19,7 @@ pub(crate) mod test_fixtures {
     use crate::state::FilesystemTelegramHostState;
     pub(crate) use crate::test_support::RecordingBotApi;
     use crate::test_support::telegram_state;
-    use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
+    use ironclaw_channel_host::auth_continuation::RebornAuthResolutionDispatcher;
     use ironclaw_channel_host::identity::RebornUserIdentityLookupError;
 
     pub(crate) const FIXTURE_BOT_ID: i64 = 4242;
@@ -27,14 +27,14 @@ pub(crate) mod test_fixtures {
 
     #[derive(Debug, Default)]
     pub(crate) struct RecordingContinuationDispatcher {
-        events: StdMutex<Vec<AuthContinuationEvent>>,
+        events: StdMutex<Vec<AuthResolved>>,
     }
 
     #[async_trait]
-    impl RebornAuthContinuationDispatcher for RecordingContinuationDispatcher {
-        async fn dispatch_auth_continuation(
+    impl RebornAuthResolutionDispatcher for RecordingContinuationDispatcher {
+        async fn dispatch_auth_resolved(
             &self,
-            event: AuthContinuationEvent,
+            event: AuthResolved,
         ) -> Result<(), AuthProductError> {
             self.events.lock().expect("lock").push(event); // safety: test-only fixture
             Ok(())

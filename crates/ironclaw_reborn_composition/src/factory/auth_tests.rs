@@ -104,10 +104,10 @@ fn auth_error_mapping_run_state(request: &GetRunStateRequest) -> TurnRunState {
 struct NoopContinuationDispatcher;
 
 #[async_trait::async_trait]
-impl RebornAuthContinuationDispatcher for NoopContinuationDispatcher {
-    async fn dispatch_auth_continuation(
+impl RebornAuthResolutionDispatcher for NoopContinuationDispatcher {
+    async fn dispatch_auth_resolved(
         &self,
-        _event: ironclaw_auth::AuthContinuationEvent,
+        _event: ironclaw_auth::AuthResolved,
     ) -> Result<(), ironclaw_auth::AuthProductError> {
         Ok(())
     }
@@ -604,7 +604,7 @@ async fn local_dev_google_oauth_backend_accepts_optional_client_secret_config() 
 }
 
 #[tokio::test]
-async fn oauth_callback_with_stale_gate_maps_to_terminal_invalid_request() {
+async fn oauth_callback_with_stale_gate_is_an_idempotent_noop() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_reborn_services(
         RebornBuildInput::local_dev("local-dev-auth-stale-owner", dir.path().join("local-dev"))
@@ -639,13 +639,15 @@ async fn oauth_callback_with_stale_gate_maps_to_terminal_invalid_request() {
     )
     .await;
 
-    let error = product_auth
+    let response = product_auth
         .handle_oauth_callback(authorized_request(auth_scope, flow_id))
         .await
-        .expect_err("stale auth gate should not resume");
+        .expect("a stale exact gate has no remaining authority");
 
-    assert_eq!(error.code, AuthErrorCode::InvalidRequest);
-    assert!(!error.retryable);
+    assert!(matches!(
+        response.status,
+        ironclaw_auth::AuthFlowState::Resolved(ironclaw_auth::AuthFlowOutcome::Authorized { .. })
+    ));
 }
 
 #[tokio::test]
@@ -858,36 +860,28 @@ async fn failed_lifecycle_activation_is_not_projected_as_completed_oauth() {
         .await
         .expect_err("uninstalled extension cannot activate after OAuth");
 
-    assert_eq!(
-        product_auth
-            .reconcile_oauth_flow(&auth_scope, flow_id)
-            .await
-            .expect("sanitized flow status"),
-        ironclaw_auth::AuthFlowStatus::Failed,
-        "the popup poll must terminate after lifecycle activation fails"
+    let record = product_auth
+        .flow_record_for_status(&auth_scope, flow_id)
+        .await
+        .expect("durable flow status");
+    assert!(matches!(
+        record.state,
+        ironclaw_auth::AuthFlowState::Resolved(ironclaw_auth::AuthFlowOutcome::Authorized { .. })
+    ));
+    assert!(
+        record.resolution_delivered_at.is_none(),
+        "failed lifecycle activation remains available for reconciliation"
     );
 }
 
 #[tokio::test]
 async fn oauth_callback_continuation_dispatch_maps_turn_error_categories() {
-    for (turn_error, expected_code, expected_retryable) in [
-        (
-            TurnError::Unavailable {
-                reason: "turn coordinator offline".to_string(),
-            },
-            AuthErrorCode::BackendUnavailable,
-            true,
-        ),
-        (
-            TurnError::Unauthorized,
-            AuthErrorCode::CrossScopeDenied,
-            false,
-        ),
-        (
-            TurnError::ScopeNotFound,
-            AuthErrorCode::UnknownOrExpiredFlow,
-            false,
-        ),
+    for turn_error in [
+        TurnError::Unavailable {
+            reason: "turn coordinator offline".to_string(),
+        },
+        TurnError::Unauthorized,
+        TurnError::ScopeNotFound,
     ] {
         let coordinator = Arc::new(ErrorTurnCoordinator {
             resume_error: turn_error,
@@ -917,8 +911,8 @@ async fn oauth_callback_continuation_dispatch_maps_turn_error_categories() {
             .await
             .expect_err("continuation dispatch error should surface");
 
-        assert_eq!(error.code, expected_code);
-        assert_eq!(error.retryable, expected_retryable);
+        assert_eq!(error.code, AuthErrorCode::BackendUnavailable);
+        assert!(error.retryable);
 
         let events = security_audit_sink.snapshot();
         assert_eq!(events.len(), 1);

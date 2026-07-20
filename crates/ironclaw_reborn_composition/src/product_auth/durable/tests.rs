@@ -28,17 +28,16 @@ use crate::product_auth::credentials::runtime_credentials::{
 };
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthErrorCode, AuthFlowKind, AuthFlowManager,
-    AuthFlowOwnerScope, AuthFlowRecordSource, AuthFlowStatus, AuthGateRef, AuthInteractionId,
-    AuthInteractionService, AuthProductError, AuthProductScope, AuthProviderId, AuthSessionId,
-    AuthSurface, AuthorizationCodeHash, CredentialAccountChoiceRequest, CredentialAccountLabel,
-    CredentialAccountListRequest, CredentialAccountLookupRequest, CredentialAccountRecordSource,
-    CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
-    CredentialAccountUpdateBinding, CredentialOwnership, ManualTokenCompletionInput,
-    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthAuthorizationUrl,
-    OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
-    OAuthCompletionCompensationOutcome, OAuthCompletionCompensationRequest, OAuthProviderExchange,
-    OpaqueStateHash, PkceVerifierHash, ProviderScope, SecretCleanupService, SecretSubmitRequest,
-    TurnRunRef,
+    AuthFlowOutcome, AuthFlowOwnerScope, AuthFlowRecordSource, AuthFlowState, AuthGateRef,
+    AuthInteractionId, AuthInteractionService, AuthProductError, AuthProductScope, AuthProviderId,
+    AuthSessionId, AuthSurface, AuthorizationCodeHash, CredentialAccountChoiceRequest,
+    CredentialAccountLabel, CredentialAccountListRequest, CredentialAccountLookupRequest,
+    CredentialAccountRecordSource, CredentialAccountSelectionRequest, CredentialAccountService,
+    CredentialAccountStatus, CredentialAccountUpdateBinding, CredentialOwnership,
+    ManualTokenCompletionInput, ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount,
+    OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
+    OAuthCallbackInput, OAuthProviderExchange, OpaqueStateHash, PkceVerifierHash, ProviderScope,
+    SecretSubmitRequest, TurnRunRef,
 };
 
 fn test_scope() -> AuthProductScope {
@@ -795,8 +794,12 @@ async fn filesystem_manual_token_completion_persists_auth_flow_account() {
         .unwrap();
 
     assert_eq!(completed.id, flow.id);
-    assert_eq!(completed.status, AuthFlowStatus::Completed);
-    assert_eq!(completed.credential_account_id, Some(submitted.account_id));
+    assert_eq!(
+        completed.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized {
+            account_id: submitted.account_id,
+        })
+    );
 }
 
 #[tokio::test]
@@ -911,7 +914,10 @@ async fn filesystem_manual_token_completion_expires_stale_auth_flow() {
     assert_eq!(err, AuthProductError::UnknownOrExpiredFlow);
     let flows = service.flows_for_scope(&scope).await.unwrap();
     assert_eq!(flows.len(), 1);
-    assert_eq!(flows[0].0.status, AuthFlowStatus::Expired);
+    assert_eq!(
+        flows[0].0.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Expired)
+    );
 }
 
 #[tokio::test]
@@ -928,13 +934,19 @@ async fn filesystem_manual_token_cancel_marks_flow_canceled_and_is_idempotent() 
         .await
         .unwrap()
         .expect("manual-token flow should be canceled");
-    assert_eq!(canceled.status, AuthFlowStatus::Canceled);
+    assert_eq!(
+        canceled.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::UserAborted)
+    );
     let still_canceled = service
         .cancel_manual_token(&scope, interaction_id)
         .await
         .unwrap()
         .expect("terminal flow should still be returned");
-    assert_eq!(still_canceled.status, AuthFlowStatus::Canceled);
+    assert_eq!(
+        still_canceled.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::UserAborted)
+    );
     let unknown = service
         .cancel_manual_token(&scope, AuthInteractionId::new())
         .await
@@ -946,7 +958,7 @@ async fn create_pending_setup_flow(
     service: &FilesystemAuthProductServices<InMemoryBackend>,
     scope: &AuthProductScope,
     provider: &AuthProviderId,
-) -> AuthFlowStatus {
+) -> AuthFlowState {
     let expires_at = Utc::now() + Duration::minutes(10);
     service
         .create_flow(NewAuthFlow {
@@ -969,7 +981,7 @@ async fn create_pending_setup_flow(
         })
         .await
         .unwrap()
-        .status
+        .state
 }
 
 #[tokio::test]
@@ -988,11 +1000,11 @@ async fn cleanup_for_lifecycle_cancels_pending_flows_for_the_disconnected_provid
     let untouched = AuthProviderId::new("github").unwrap();
     assert_eq!(
         create_pending_setup_flow(&service, &scope, &disconnected).await,
-        AuthFlowStatus::AwaitingUser
+        AuthFlowState::Open
     );
     assert_eq!(
         create_pending_setup_flow(&service, &scope, &untouched).await,
-        AuthFlowStatus::AwaitingUser
+        AuthFlowState::Open
     );
     let turn_flow = service
         .create_flow(NewAuthFlow {
@@ -1070,9 +1082,9 @@ async fn cleanup_for_lifecycle_cancels_pending_flows_for_the_disconnected_provid
     )
     .await
     .unwrap();
-    assert_eq!(report.canceled_turn_gate_continuations.len(), 2);
+    assert_eq!(report.auth_resolutions.len(), 2);
     let cleanup_flow_ids = report
-        .canceled_turn_gate_continuations
+        .auth_resolutions
         .iter()
         .map(|event| event.flow_id)
         .collect::<std::collections::BTreeSet<_>>();
@@ -1080,9 +1092,9 @@ async fn cleanup_for_lifecycle_cancels_pending_flows_for_the_disconnected_provid
         cleanup_flow_ids,
         [turn_flow.id, failed_turn_flow.id].into_iter().collect()
     );
-    for event in &report.canceled_turn_gate_continuations {
+    for event in &report.auth_resolutions {
         service
-            .mark_continuation_dispatched(&event.scope, event.flow_id, event.emitted_at)
+            .mark_resolution_delivered(&event.scope, event.flow_id, event.resolved_at)
             .await
             .expect("cleanup denial acknowledgement supports canceled and failed flows");
     }
@@ -1091,8 +1103,13 @@ async fn cleanup_for_lifecycle_cancels_pending_flows_for_the_disconnected_provid
         .await
         .expect("failed flow lookup")
         .expect("failed flow remains durable");
-    assert_eq!(failed_after_ack.status, AuthFlowStatus::Failed);
-    assert!(failed_after_ack.continuation_emitted_at.is_some());
+    assert_eq!(
+        failed_after_ack.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Failed {
+            error: AuthErrorCode::TokenExchangeFailed,
+        })
+    );
+    assert!(failed_after_ack.resolution_delivered_at.is_some());
     let retry = ironclaw_auth::SecretCleanupService::cleanup_for_lifecycle(
         &service,
         ironclaw_auth::SecretCleanupRequest {
@@ -1104,7 +1121,7 @@ async fn cleanup_for_lifecycle_cancels_pending_flows_for_the_disconnected_provid
     )
     .await
     .expect("cleanup retry");
-    assert!(retry.canceled_turn_gate_continuations.is_empty());
+    assert!(retry.auth_resolutions.is_empty());
 
     // LLM data is never deleted: flow records are retained (filterable by their
     // terminal status), not removed.
@@ -1116,19 +1133,19 @@ async fn cleanup_for_lifecycle_cancels_pending_flows_for_the_disconnected_provid
                 &flow.provider == provider
                     && matches!(flow.continuation, AuthContinuationRef::SetupOnly)
             })
-            .map(|(flow, _)| flow.status)
+            .map(|(flow, _)| flow.state)
     };
     // The disconnected provider's pending flow is canceled...
     assert_eq!(
         status_of(&disconnected),
-        Some(AuthFlowStatus::Canceled),
+        Some(AuthFlowState::Resolved(AuthFlowOutcome::UserAborted)),
         "cleanup must cancel the disconnected provider's pending flow"
     );
     // ...and a DIFFERENT provider's flow is untouched (correctly provider-scoped,
     // not a blanket cancel).
     assert_eq!(
         status_of(&untouched),
-        Some(AuthFlowStatus::AwaitingUser),
+        Some(AuthFlowState::Open),
         "cleanup must not touch other providers' flows"
     );
 }
@@ -1161,10 +1178,10 @@ async fn removal_doors_cancel_pending_flow_through_the_shared_cleanup() {
     #[derive(Debug, Default)]
     struct NoopDispatcher;
     #[async_trait::async_trait]
-    impl crate::RebornAuthContinuationDispatcher for NoopDispatcher {
-        async fn dispatch_auth_continuation(
+    impl crate::RebornAuthResolutionDispatcher for NoopDispatcher {
+        async fn dispatch_auth_resolved(
             &self,
-            _event: ironclaw_auth::AuthContinuationEvent,
+            _event: ironclaw_auth::AuthResolved,
         ) -> Result<(), AuthProductError> {
             Ok(())
         }
@@ -1189,7 +1206,7 @@ async fn removal_doors_cancel_pending_flow_through_the_shared_cleanup() {
         let scope = test_scope();
         assert_eq!(
             create_pending_setup_flow(&durable, &scope, provider).await,
-            AuthFlowStatus::AwaitingUser
+            AuthFlowState::Open
         );
         let services = crate::RebornProductAuthServices::new(
             durable.clone(),
@@ -1212,10 +1229,10 @@ async fn removal_doors_cancel_pending_flow_through_the_shared_cleanup() {
         let status = flows
             .iter()
             .find(|(flow, _)| &flow.provider == provider)
-            .map(|(flow, _)| flow.status);
+            .map(|(flow, _)| flow.state);
         assert_eq!(
             status,
-            Some(AuthFlowStatus::Canceled),
+            Some(AuthFlowState::Resolved(AuthFlowOutcome::UserAborted)),
             "removal door must cancel the pending flow through the shared cleanup"
         );
     }
@@ -1338,11 +1355,18 @@ async fn filesystem_flow_record_source_projects_session_scoped_manual_flows() {
         .find(|record| record.id == flow.id)
         .expect("session-scoped flow should be projected for auth gates");
 
-    assert_eq!(projected.status, AuthFlowStatus::Completed);
+    assert_eq!(
+        projected.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized {
+            account_id: submitted.account_id,
+        })
+    );
     assert_eq!(projected.scope.session_id, scope.session_id);
     assert_eq!(
-        projected.credential_account_id,
-        Some(submitted.account_id),
+        projected.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized {
+            account_id: submitted.account_id,
+        }),
         "manual-token completion must remain visible to the auth read model"
     );
 
@@ -1592,7 +1616,7 @@ async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
         .claim_oauth_callback(&scope, claim.clone())
         .await
         .unwrap();
-    assert_eq!(claimed.status, AuthFlowStatus::CallbackReceived);
+    assert_eq!(claimed.state, AuthFlowState::Processing);
 
     let second_claim = service
         .claim_oauth_callback(&scope, claim.clone())
@@ -1623,12 +1647,14 @@ async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
         )
         .await
         .unwrap();
-    assert_eq!(completed.status, AuthFlowStatus::Completed);
-    assert!(completed.credential_account_id.is_some());
+    assert!(matches!(
+        completed.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized { .. })
+    ));
 
-    let emitted_at = Utc::now();
+    let delivered_at = Utc::now();
     service
-        .mark_continuation_dispatched(&scope, flow.id, emitted_at)
+        .mark_resolution_delivered(&scope, flow.id, delivered_at)
         .await
         .unwrap();
 
@@ -1638,15 +1664,15 @@ async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
         .await
         .unwrap()
         .expect("completed flow should be durable");
-    assert_eq!(stored.status, AuthFlowStatus::Completed);
-    assert_eq!(stored.continuation_emitted_at, Some(emitted_at));
+    assert_eq!(stored.state, completed.state);
+    assert_eq!(stored.resolution_delivered_at, Some(delivered_at));
 
     let completed_replay = recreated
         .claim_oauth_callback(&scope, claim)
         .await
         .expect("completed callback replay should not reclaim provider exchange");
-    assert_eq!(completed_replay.status, AuthFlowStatus::Completed);
-    assert_eq!(completed_replay.continuation_emitted_at, Some(emitted_at));
+    assert_eq!(completed_replay.state, completed.state);
+    assert_eq!(completed_replay.resolution_delivered_at, Some(delivered_at));
 }
 
 #[tokio::test]
@@ -1919,7 +1945,10 @@ async fn filesystem_disconnect_cleans_account_when_callback_completes_before_flo
         )
         .await
         .expect("callback wins the flow terminal-state race");
-    assert_eq!(completed.status, AuthFlowStatus::Completed);
+    assert!(matches!(
+        completed.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized { .. })
+    ));
 
     backend.resume_flow_list();
     cleanup
@@ -2178,18 +2207,22 @@ async fn assert_stale_bound_callback_restores_newer_reconnect(failure: StaleBoun
         }
     }
     backend.resume_account_get();
-    let stale_error = stale_callback
+    let stale_result = stale_callback
         .await
-        .expect("stale callback task must finish")
-        .expect_err("canceled stale callback must not complete");
-    assert_eq!(
-        stale_error,
-        match failure {
-            StaleBoundRollbackFailure::RestoreWrite => AuthProductError::Canceled,
-            StaleBoundRollbackFailure::CleanupAccountWrite
-            | StaleBoundRollbackFailure::SecretDelete => AuthProductError::BackendUnavailable,
-        }
-    );
+        .expect("stale callback task must finish");
+    match failure {
+        StaleBoundRollbackFailure::RestoreWrite => assert_eq!(
+            stale_result
+                .expect("loser observes the durable winning outcome")
+                .state,
+            AuthFlowState::Resolved(AuthFlowOutcome::UserAborted)
+        ),
+        StaleBoundRollbackFailure::CleanupAccountWrite
+        | StaleBoundRollbackFailure::SecretDelete => assert_eq!(
+            stale_result.expect_err("failed rollback remains retryable"),
+            AuthProductError::BackendUnavailable
+        ),
+    }
 
     let stored = newer_service
         .get_account(CredentialAccountLookupRequest::new(
@@ -2366,7 +2399,7 @@ fn fs_error_maps_version_mismatch_to_backend_conflict() {
     );
 }
 
-// ─── fix: mark_continuation_dispatched is idempotent ─────────────────────────
+// ─── fix: mark_resolution_delivered is idempotent ─────────────────────────
 
 #[tokio::test]
 async fn filesystem_oauth_continuation_marker_is_idempotent() {
@@ -2395,7 +2428,7 @@ async fn filesystem_oauth_continuation_marker_is_idempotent() {
         .await
         .unwrap();
 
-    // Complete the flow so mark_continuation_dispatched is valid.
+    // Complete the flow so mark_resolution_delivered is valid.
     service
         .claim_oauth_callback(
             &scope,
@@ -2434,21 +2467,21 @@ async fn filesystem_oauth_continuation_marker_is_idempotent() {
 
     let first_at = Utc::now();
     let first = service
-        .mark_continuation_dispatched(&scope, flow.id, first_at)
+        .mark_resolution_delivered(&scope, flow.id, first_at)
         .await
         .unwrap();
-    assert_eq!(first.continuation_emitted_at, Some(first_at));
+    assert_eq!(first.resolution_delivered_at, Some(first_at));
 
     // Second call with a different timestamp must NOT overwrite.
     let second_at = first_at + Duration::seconds(1);
     let second = service
-        .mark_continuation_dispatched(&scope, flow.id, second_at)
+        .mark_resolution_delivered(&scope, flow.id, second_at)
         .await
         .unwrap();
     assert_eq!(
-        second.continuation_emitted_at,
+        second.resolution_delivered_at,
         Some(first_at),
-        "idempotent: second call must not overwrite the first emitted_at"
+        "idempotent: second call must not overwrite the first delivered_at"
     );
 }
 
@@ -3256,9 +3289,10 @@ async fn filesystem_oauth_reauth_retains_failed_old_secret_deletion_for_lifecycl
         )
         .await
         .unwrap();
-    let account_id = completed1
-        .credential_account_id
-        .expect("first OAuth flow must produce a credential account");
+    let account_id = match completed1.state {
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id }) => account_id,
+        other => panic!("first OAuth flow must authorize an account, got {other:?}"),
+    };
 
     // v1 handles must be present before re-auth.
     assert!(
@@ -3678,9 +3712,10 @@ async fn filesystem_oauth_reauth_updates_bound_account_across_fresh_invocation()
         )
         .await
         .unwrap();
-    let account_id = completed1
-        .credential_account_id
-        .expect("first OAuth flow must produce a credential account");
+    let account_id = match completed1.state {
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id }) => account_id,
+        other => panic!("first OAuth flow must authorize an account, got {other:?}"),
+    };
 
     // ── Step 2: reconnect from a DIFFERENT context — fresh invocation plus a
     // different thread/mission, same owner (tenant/user/agent/project/session).
@@ -3754,8 +3789,8 @@ async fn filesystem_oauth_reauth_updates_bound_account_across_fresh_invocation()
     // The bound account was UPDATED in place across the transient scope diff —
     // same account id, carrying the re-auth's access secret, and not forked.
     assert_eq!(
-        completed2.credential_account_id,
-        Some(account_id),
+        completed2.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id }),
         "reconnect must complete against the same owner account, not a fork",
     );
     let owner_accounts = service.accounts_for_owner(&setup_scope).await.unwrap();
@@ -3974,568 +4009,12 @@ async fn filesystem_oauth_callback_cas_conflict_reuses_concurrent_account() {
         .unwrap();
 
     assert_eq!(
-        completed.credential_account_id,
-        Some(preseeded_id),
+        completed.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized {
+            account_id: preseeded_id,
+        }),
         "CAS-conflict branch must reuse the pre-seeded account id"
     );
-    assert_eq!(completed.status, AuthFlowStatus::Completed);
-}
-
-#[tokio::test]
-async fn filesystem_oauth_compensation_preserves_newer_secret_material() {
-    let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
-    let scope = test_scope();
-    let service = test_service(filesystem, secret_store);
-    let account = service
-        .create_account(NewCredentialAccount {
-            scope: scope.clone(),
-            provider: google_provider(),
-            label: account_label(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(SecretHandle::new("original-access").unwrap()),
-            refresh_secret: None,
-            scopes: Vec::new(),
-        })
-        .await
-        .unwrap();
-
-    let first = complete_bound_oauth_generation(&service, &scope, &account, "first").await;
-    let first_fingerprint = first
-        .credential_secret_fingerprint
-        .clone()
-        .expect("first secret fingerprint");
-    let first_claim = service
-        .claim_continuation_dispatch(
-            &scope,
-            ironclaw_auth::AuthContinuationDispatchClaimInput {
-                flow_id: first.id,
-                claimed_at: Utc::now(),
-            },
-        )
-        .await
-        .expect("first continuation claim");
-    service
-        .settle_continuation_dispatch(
-            &scope,
-            ironclaw_auth::AuthContinuationDispatchSettlementInput {
-                flow_id: first.id,
-                expected_claimed_at: first_claim.updated_at,
-                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
-                    error: AuthErrorCode::BackendUnavailable,
-                },
-            },
-        )
-        .await
-        .expect("first continuation failure");
-    let second = complete_bound_oauth_generation(&service, &scope, &account, "second").await;
-    assert_ne!(
-        second.credential_secret_fingerprint,
-        Some(first_fingerprint.clone()),
-        "a reconnect must replace the secret fingerprint"
-    );
-
-    let outcome = service
-        .compensate_oauth_completion(OAuthCompletionCompensationRequest {
-            scope: scope.clone(),
-            flow_id: first.id,
-            provider: google_provider(),
-            credential_account_id: account.id,
-            expected_secret_fingerprint: first_fingerprint,
-        })
-        .await
-        .unwrap();
-    assert_eq!(outcome, OAuthCompletionCompensationOutcome::Superseded);
-    let current = service
-        .get_account(CredentialAccountLookupRequest::new(scope, account.id))
-        .await
-        .unwrap()
-        .expect("newer account remains");
-    assert_eq!(current.status, CredentialAccountStatus::Configured);
-    assert_eq!(
-        current.access_secret,
-        Some(SecretHandle::new("second-access").unwrap())
-    );
-}
-
-#[tokio::test]
-async fn filesystem_oauth_compensation_revokes_only_the_exact_account() {
-    let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
-    let scope = test_scope();
-    let service = test_service(filesystem, secret_store);
-    let failed_account = service
-        .create_account(NewCredentialAccount {
-            scope: scope.clone(),
-            provider: google_provider(),
-            label: account_label(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(SecretHandle::new("failed-old-access").unwrap()),
-            refresh_secret: None,
-            scopes: Vec::new(),
-        })
-        .await
-        .unwrap();
-    let unrelated_account = service
-        .create_account(NewCredentialAccount {
-            scope: scope.clone(),
-            provider: google_provider(),
-            label: CredentialAccountLabel::new("unrelated google").unwrap(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(SecretHandle::new("unrelated-access").unwrap()),
-            refresh_secret: None,
-            scopes: Vec::new(),
-        })
-        .await
-        .unwrap();
-    let completed =
-        complete_bound_oauth_generation(&service, &scope, &failed_account, "failed").await;
-    let expected_secret_fingerprint = completed
-        .credential_secret_fingerprint
-        .clone()
-        .expect("completed secret fingerprint");
-    let claim = service
-        .claim_continuation_dispatch(
-            &scope,
-            ironclaw_auth::AuthContinuationDispatchClaimInput {
-                flow_id: completed.id,
-                claimed_at: Utc::now(),
-            },
-        )
-        .await
-        .expect("continuation claim");
-    service
-        .settle_continuation_dispatch(
-            &scope,
-            ironclaw_auth::AuthContinuationDispatchSettlementInput {
-                flow_id: completed.id,
-                expected_claimed_at: claim.updated_at,
-                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
-                    error: AuthErrorCode::BackendUnavailable,
-                },
-            },
-        )
-        .await
-        .expect("continuation failure");
-
-    let outcome = service
-        .compensate_oauth_completion(OAuthCompletionCompensationRequest {
-            scope: scope.clone(),
-            flow_id: completed.id,
-            provider: google_provider(),
-            credential_account_id: failed_account.id,
-            expected_secret_fingerprint,
-        })
-        .await
-        .unwrap();
-    assert_eq!(outcome, OAuthCompletionCompensationOutcome::Compensated);
-    let failed = service
-        .get_account(CredentialAccountLookupRequest::new(
-            scope.clone(),
-            failed_account.id,
-        ))
-        .await
-        .unwrap()
-        .expect("failed account retained as tombstone");
-    assert_eq!(failed.status, CredentialAccountStatus::Revoked);
-    assert!(failed.access_secret.is_none());
-    let unrelated = service
-        .get_account(CredentialAccountLookupRequest::new(
-            scope,
-            unrelated_account.id,
-        ))
-        .await
-        .unwrap()
-        .expect("unrelated account remains");
-    assert_eq!(unrelated.status, CredentialAccountStatus::Configured);
-    assert!(unrelated.access_secret.is_some());
-}
-
-#[tokio::test]
-async fn filesystem_oauth_compensation_retries_after_restart_without_losing_its_journal() {
-    let filesystem = test_filesystem();
-    let concrete_secret_store = Arc::new(FailFirstDeleteSecretStore::new());
-    let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
-    let scope = test_scope();
-    let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
-    let account = service
-        .create_account(NewCredentialAccount {
-            scope: scope.clone(),
-            provider: google_provider(),
-            label: account_label(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(SecretHandle::new("restart-old-access").unwrap()),
-            refresh_secret: None,
-            scopes: Vec::new(),
-        })
-        .await
-        .unwrap();
-    let completed =
-        complete_bound_oauth_generation(&service, &scope, &account, "restart-failed").await;
-    let expected_secret_fingerprint = completed
-        .credential_secret_fingerprint
-        .clone()
-        .expect("completed secret fingerprint");
-    let claim = service
-        .claim_continuation_dispatch(
-            &scope,
-            ironclaw_auth::AuthContinuationDispatchClaimInput {
-                flow_id: completed.id,
-                claimed_at: Utc::now(),
-            },
-        )
-        .await
-        .unwrap();
-    service
-        .settle_continuation_dispatch(
-            &scope,
-            ironclaw_auth::AuthContinuationDispatchSettlementInput {
-                flow_id: completed.id,
-                expected_claimed_at: claim.updated_at,
-                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
-                    error: AuthErrorCode::BackendUnavailable,
-                },
-            },
-        )
-        .await
-        .unwrap();
-    let request = OAuthCompletionCompensationRequest {
-        scope: scope.clone(),
-        flow_id: completed.id,
-        provider: google_provider(),
-        credential_account_id: account.id,
-        expected_secret_fingerprint,
-    };
-
-    // Bound OAuth completion may clean the replaced generation first; inject
-    // the failure specifically at compensation so the failed flow is already
-    // durable when deletion stops.
-    concrete_secret_store.set_delete_failure(true);
-
-    assert_eq!(
-        service.compensate_oauth_completion(request.clone()).await,
-        Err(AuthProductError::BackendUnavailable)
-    );
-    let pending = service
-        .get_flow(&scope, completed.id)
-        .await
-        .unwrap()
-        .expect("failed flow remains durable");
-    assert_eq!(pending.status, AuthFlowStatus::Failed);
-    assert!(
-        pending.credential_secret_fingerprint.is_some(),
-        "the fingerprint is the durable pending-compensation journal"
-    );
-
-    let reopened = test_service(filesystem, secret_store);
-    assert_eq!(
-        reopened.compensate_oauth_completion(request).await.unwrap(),
-        OAuthCompletionCompensationOutcome::Compensated
-    );
-    let converged = reopened
-        .get_flow(&scope, completed.id)
-        .await
-        .unwrap()
-        .expect("flow after retry");
-    assert!(converged.credential_secret_fingerprint.is_none());
-    let revoked = reopened
-        .get_account(CredentialAccountLookupRequest::new(scope, account.id))
-        .await
-        .unwrap()
-        .expect("revoked tombstone");
-    assert_eq!(revoked.status, CredentialAccountStatus::Revoked);
-    assert!(revoked.access_secret.is_none());
-    assert!(revoked.refresh_secret.is_none());
-}
-
-#[tokio::test]
-async fn filesystem_continuation_failure_is_durable_and_fenced() {
-    let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
-    let scope = test_scope();
-    let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
-    let account = service
-        .create_account(NewCredentialAccount {
-            scope: scope.clone(),
-            provider: google_provider(),
-            label: account_label(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(SecretHandle::new("before-failure").unwrap()),
-            refresh_secret: None,
-            scopes: Vec::new(),
-        })
-        .await
-        .unwrap();
-    let completed =
-        complete_bound_oauth_generation(&service, &scope, &account, "continuation-failure").await;
-    let claim = service
-        .claim_continuation_dispatch(
-            &scope,
-            ironclaw_auth::AuthContinuationDispatchClaimInput {
-                flow_id: completed.id,
-                claimed_at: Utc::now(),
-            },
-        )
-        .await
-        .expect("claim continuation");
-    service
-        .settle_continuation_dispatch(
-            &scope,
-            ironclaw_auth::AuthContinuationDispatchSettlementInput {
-                flow_id: completed.id,
-                expected_claimed_at: claim.updated_at,
-                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
-                    error: AuthErrorCode::BackendUnavailable,
-                },
-            },
-        )
-        .await
-        .expect("mark continuation failed");
-
-    let reopened = test_service(filesystem, secret_store);
-    let persisted = reopened
-        .get_flow(&scope, completed.id)
-        .await
-        .unwrap()
-        .expect("persisted flow");
-    assert_eq!(persisted.status, AuthFlowStatus::Failed);
-    assert_eq!(persisted.error, Some(AuthErrorCode::BackendUnavailable));
-    let stale = reopened
-        .settle_continuation_dispatch(
-            &scope,
-            ironclaw_auth::AuthContinuationDispatchSettlementInput {
-                flow_id: completed.id,
-                expected_claimed_at: claim.updated_at,
-                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
-                    error: AuthErrorCode::BackendUnavailable,
-                },
-            },
-        )
-        .await
-        .expect_err("stale failure is fenced");
-    assert_eq!(stale, AuthProductError::FlowAlreadyTerminal);
-}
-
-#[tokio::test]
-async fn filesystem_continuation_claim_has_one_owner_across_service_instances() {
-    let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
-    let scope = test_scope();
-    let first_service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
-    let second_service = test_service(filesystem, secret_store);
-    let account = first_service
-        .create_account(NewCredentialAccount {
-            scope: scope.clone(),
-            provider: google_provider(),
-            label: account_label(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(SecretHandle::new("claim-owner-before").unwrap()),
-            refresh_secret: None,
-            scopes: Vec::new(),
-        })
-        .await
-        .unwrap();
-    let completed =
-        complete_bound_oauth_generation(&first_service, &scope, &account, "claim-owner").await;
-    let claimed_at = Utc::now();
-
-    let (first, second) = tokio::join!(
-        first_service.claim_continuation_dispatch(
-            &scope,
-            ironclaw_auth::AuthContinuationDispatchClaimInput {
-                flow_id: completed.id,
-                claimed_at,
-            },
-        ),
-        second_service.claim_continuation_dispatch(
-            &scope,
-            ironclaw_auth::AuthContinuationDispatchClaimInput {
-                flow_id: completed.id,
-                claimed_at,
-            },
-        )
-    );
-
-    assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
-    let loser = first
-        .err()
-        .or_else(|| second.err())
-        .expect("one losing claim");
-    assert!(matches!(
-        loser,
-        AuthProductError::BackendUnavailable | AuthProductError::BackendConflict
-    ));
-}
-
-#[tokio::test]
-async fn filesystem_continuation_recovery_fences_the_stale_lease_owner() {
-    let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
-    let scope = test_scope();
-    let stale_service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
-    let recovery_service = test_service(filesystem, secret_store);
-    let account = stale_service
-        .create_account(NewCredentialAccount {
-            scope: scope.clone(),
-            provider: google_provider(),
-            label: account_label(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(SecretHandle::new("stale-owner-before").unwrap()),
-            refresh_secret: None,
-            scopes: Vec::new(),
-        })
-        .await
-        .unwrap();
-    let completed =
-        complete_bound_oauth_generation(&stale_service, &scope, &account, "stale-owner").await;
-    let stale_claim = stale_service
-        .claim_continuation_dispatch(
-            &scope,
-            ironclaw_auth::AuthContinuationDispatchClaimInput {
-                flow_id: completed.id,
-                claimed_at: Utc::now()
-                    - Duration::seconds(
-                        ironclaw_auth::AUTH_CONTINUATION_DISPATCH_LEASE_SECONDS + 1,
-                    ),
-            },
-        )
-        .await
-        .expect("stale lease claim");
-    let recovered_claim = recovery_service
-        .claim_continuation_dispatch(
-            &scope,
-            ironclaw_auth::AuthContinuationDispatchClaimInput {
-                flow_id: completed.id,
-                claimed_at: Utc::now(),
-            },
-        )
-        .await
-        .expect("recover expired lease");
-
-    let stale_settlement = stale_service
-        .settle_continuation_dispatch(
-            &scope,
-            ironclaw_auth::AuthContinuationDispatchSettlementInput {
-                flow_id: completed.id,
-                expected_claimed_at: stale_claim.updated_at,
-                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::Dispatched {
-                    emitted_at: Utc::now(),
-                },
-            },
-        )
-        .await
-        .expect_err("stale lease owner must be fenced");
-    assert_eq!(stale_settlement, AuthProductError::FlowAlreadyTerminal);
-
-    recovery_service
-        .settle_continuation_dispatch(
-            &scope,
-            ironclaw_auth::AuthContinuationDispatchSettlementInput {
-                flow_id: completed.id,
-                expected_claimed_at: recovered_claim.updated_at,
-                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::Dispatched {
-                    emitted_at: Utc::now(),
-                },
-            },
-        )
-        .await
-        .expect("current lease owner settles");
-}
-
-#[tokio::test]
-async fn filesystem_oauth_compensation_converges_when_account_is_already_absent() {
-    let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
-    let scope = test_scope();
-    let service = test_service(Arc::clone(&filesystem), secret_store);
-    let account = service
-        .create_account(NewCredentialAccount {
-            scope: scope.clone(),
-            provider: google_provider(),
-            label: account_label(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(SecretHandle::new("already-absent-before").unwrap()),
-            refresh_secret: None,
-            scopes: Vec::new(),
-        })
-        .await
-        .unwrap();
-    let completed =
-        complete_bound_oauth_generation(&service, &scope, &account, "already-absent").await;
-    let expected_secret_fingerprint = completed
-        .credential_secret_fingerprint
-        .clone()
-        .expect("completed secret fingerprint");
-    let claim = service
-        .claim_continuation_dispatch(
-            &scope,
-            ironclaw_auth::AuthContinuationDispatchClaimInput {
-                flow_id: completed.id,
-                claimed_at: Utc::now(),
-            },
-        )
-        .await
-        .expect("continuation claim");
-    service
-        .settle_continuation_dispatch(
-            &scope,
-            ironclaw_auth::AuthContinuationDispatchSettlementInput {
-                flow_id: completed.id,
-                expected_claimed_at: claim.updated_at,
-                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
-                    error: AuthErrorCode::BackendUnavailable,
-                },
-            },
-        )
-        .await
-        .expect("continuation failure");
-    let account_path = super::paths::account_path(&scope, account.id).expect("account path");
-    filesystem
-        .delete(&scope.resource, &account_path)
-        .await
-        .expect("remove account before compensation");
-
-    let outcome = service
-        .compensate_oauth_completion(OAuthCompletionCompensationRequest {
-            scope: scope.clone(),
-            flow_id: completed.id,
-            provider: google_provider(),
-            credential_account_id: account.id,
-            expected_secret_fingerprint,
-        })
-        .await
-        .expect("already-absent compensation converges");
-    assert_eq!(outcome, OAuthCompletionCompensationOutcome::AlreadyAbsent);
-    let converged = service
-        .get_flow(&scope, completed.id)
-        .await
-        .expect("flow read")
-        .expect("failed flow retained");
-    assert!(converged.credential_secret_fingerprint.is_none());
 }
 
 async fn complete_bound_oauth_generation(
@@ -4834,14 +4313,17 @@ async fn filesystem_cancel_flow_and_terminal_state_rejection() {
         .unwrap();
 
     let cancelled = service.cancel_flow(&scope, flow.id).await.unwrap();
-    assert_eq!(cancelled.status, AuthFlowStatus::Canceled);
+    assert_eq!(
+        cancelled.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::UserAborted)
+    );
 
-    // Second cancel on already-terminal flow returns Canceled error.
-    let err = service
+    // An identical terminal write is idempotent and returns the durable winner.
+    let replay = service
         .cancel_flow(&scope, flow.id)
         .await
-        .expect_err("second cancel must fail");
-    assert_eq!(err, AuthProductError::Canceled);
+        .expect("second cancel observes the same terminal outcome");
+    assert_eq!(replay, cancelled);
 }
 
 #[tokio::test]
@@ -4896,8 +4378,10 @@ async fn filesystem_fail_oauth_callback_marks_flow_failed() {
         )
         .await
         .unwrap();
-    assert_eq!(failed.status, AuthFlowStatus::Failed);
-    assert_eq!(failed.error, Some(AuthErrorCode::ProviderDenied));
+    assert_eq!(
+        failed.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::ProviderDenied)
+    );
 }
 
 #[tokio::test]
@@ -4953,8 +4437,12 @@ async fn filesystem_complete_credential_selection_completes_flow() {
         )
         .await
         .unwrap();
-    assert_eq!(completed.status, AuthFlowStatus::Completed);
-    assert_eq!(completed.credential_account_id, Some(account.id));
+    assert_eq!(
+        completed.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized {
+            account_id: account.id,
+        })
+    );
 }
 
 // ─── tests: create_flow update_binding validation ─────────────────────────────
@@ -5295,13 +4783,13 @@ async fn filesystem_expired_flow_status_persisted_before_returning_error() {
         .await
         .unwrap()
         .expect("flow must still exist");
-    assert_eq!(persisted.status, AuthFlowStatus::Expired);
-    assert_eq!(persisted.error, Some(AuthErrorCode::UnknownOrExpiredFlow));
+    assert_eq!(
+        persisted.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Expired)
+    );
 
-    // fail_oauth_callback on already-expired flow returns FlowAlreadyTerminal
-    // because Expired is a terminal status; the record was already persisted
-    // as Expired by claim_oauth_callback above.
-    let err2 = service
+    // A conflicting callback after expiry observes the already-persisted winner.
+    let expired_replay = service
         .fail_oauth_callback(
             &scope,
             OAuthCallbackFailureInput {
@@ -5311,20 +4799,18 @@ async fn filesystem_expired_flow_status_persisted_before_returning_error() {
             },
         )
         .await
-        .expect_err("expired flow must be rejected");
-    assert_eq!(
-        err2,
-        AuthProductError::FlowAlreadyTerminal,
-        "already-expired flow returns FlowAlreadyTerminal"
-    );
+        .expect("expired winner remains observable");
+    assert_eq!(expired_replay, persisted);
 
     let persisted2 = service
         .get_flow(&scope, flow.id)
         .await
         .unwrap()
         .expect("flow must still exist");
-    assert_eq!(persisted2.status, AuthFlowStatus::Expired);
-    assert_eq!(persisted2.error, Some(AuthErrorCode::UnknownOrExpiredFlow));
+    assert_eq!(
+        persisted2.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Expired)
+    );
 
     // complete_oauth_callback on a fresh expired flow (never claimed) must also
     // persist the Expired status before returning error.
@@ -5370,8 +4856,10 @@ async fn filesystem_expired_flow_status_persisted_before_returning_error() {
         .await
         .unwrap()
         .expect("flow2 must still exist");
-    assert_eq!(persisted3.status, AuthFlowStatus::Expired);
-    assert_eq!(persisted3.error, Some(AuthErrorCode::UnknownOrExpiredFlow));
+    assert_eq!(
+        persisted3.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Expired)
+    );
 }
 
 // ─── fix: abbyshekit review — OAuth CAS-conflict branch purges old secrets ───
@@ -5493,8 +4981,10 @@ async fn filesystem_oauth_cas_conflict_branch_purges_previous_secrets() {
         .unwrap();
 
     assert_eq!(
-        completed.credential_account_id,
-        Some(preseeded_id),
+        completed.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized {
+            account_id: preseeded_id,
+        }),
         "CAS-conflict branch must reuse pre-seeded account"
     );
 
@@ -5980,13 +5470,17 @@ async fn filesystem_complete_manual_token_succeeds_across_different_invocation_i
         );
 
     assert_eq!(
-        completed.status,
-        AuthFlowStatus::Completed,
+        completed.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized {
+            account_id: account.id,
+        }),
         "flow must reach Completed status on cross-invocation reconnect"
     );
     assert_eq!(
-        completed.credential_account_id,
-        Some(account.id),
+        completed.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized {
+            account_id: account.id,
+        }),
         "completed flow must reference the pre-existing credential account"
     );
 }
@@ -6283,13 +5777,17 @@ async fn filesystem_complete_credential_selection_succeeds_across_different_invo
         );
 
     assert_eq!(
-        completed.status,
-        AuthFlowStatus::Completed,
+        completed.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized {
+            account_id: account.id,
+        }),
         "flow must reach Completed status on cross-invocation selection"
     );
     assert_eq!(
-        completed.credential_account_id,
-        Some(account.id),
+        completed.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized {
+            account_id: account.id,
+        }),
         "completed flow must reference the pre-existing credential account"
     );
 }

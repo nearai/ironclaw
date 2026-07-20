@@ -1,28 +1,28 @@
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
-use ironclaw_auth::{AuthContinuationEvent, AuthContinuationRef, AuthProductError};
+use ironclaw_auth::{AuthContinuationRef, AuthFlowOutcome, AuthProductError, AuthResolved};
 use ironclaw_product_workflow::{
     LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductAction,
     LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
     LifecycleProductSurfaceContext, LifecycleReadinessBlocker,
 };
 
-use crate::RebornAuthContinuationDispatcher;
+use crate::RebornAuthResolutionDispatcher;
 
 pub(crate) type LifecycleProductFacadeSlot = Arc<OnceLock<Arc<dyn LifecycleProductFacade>>>;
 
 /// Dispatches extension-auth completion through the same lifecycle facade used
 /// by WebUI activation, then delegates turn-gate continuations to the existing
 /// resume/fanout dispatcher.
-pub(crate) struct LifecycleAuthContinuationDispatcher {
-    inner: Arc<dyn RebornAuthContinuationDispatcher>,
+pub(crate) struct LifecycleAuthResolutionDispatcher {
+    inner: Arc<dyn RebornAuthResolutionDispatcher>,
     lifecycle: LifecycleProductFacadeSlot,
 }
 
-impl LifecycleAuthContinuationDispatcher {
+impl LifecycleAuthResolutionDispatcher {
     pub(crate) fn new(
-        inner: Arc<dyn RebornAuthContinuationDispatcher>,
+        inner: Arc<dyn RebornAuthResolutionDispatcher>,
         lifecycle: LifecycleProductFacadeSlot,
     ) -> Self {
         Self { inner, lifecycle }
@@ -30,13 +30,13 @@ impl LifecycleAuthContinuationDispatcher {
 }
 
 #[async_trait]
-impl RebornAuthContinuationDispatcher for LifecycleAuthContinuationDispatcher {
-    async fn dispatch_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
+impl RebornAuthResolutionDispatcher for LifecycleAuthResolutionDispatcher {
+    async fn dispatch_auth_resolved(&self, event: AuthResolved) -> Result<(), AuthProductError> {
+        if !matches!(event.outcome, AuthFlowOutcome::Authorized { .. }) {
+            return self.inner.dispatch_auth_resolved(event).await;
+        }
         let AuthContinuationRef::LifecycleActivation { package_ref } = &event.continuation else {
-            return self.inner.dispatch_auth_continuation(event).await;
+            return self.inner.dispatch_auth_resolved(event).await;
         };
         let lifecycle = self.lifecycle.get().ok_or_else(|| {
             tracing::error!(
@@ -66,7 +66,7 @@ impl RebornAuthContinuationDispatcher for LifecycleAuthContinuationDispatcher {
             )
             .await
             .map_err(|error| {
-                tracing::warn!(%error, flow_id = %event.flow_id, "OAuth completed but extension activation failed");
+                tracing::debug!(%error, flow_id = %event.flow_id, "OAuth completed but extension activation failed");
                 AuthProductError::BackendUnavailable
             })?;
         if response.phase == LifecyclePhase::Active
@@ -78,7 +78,7 @@ impl RebornAuthContinuationDispatcher for LifecycleAuthContinuationDispatcher {
                 })
             )
         {
-            return self.inner.dispatch_auth_continuation(event).await;
+            return self.inner.dispatch_auth_resolved(event).await;
         }
         if matches!(
             response.payload,
@@ -99,19 +99,12 @@ impl RebornAuthContinuationDispatcher for LifecycleAuthContinuationDispatcher {
             );
             return Ok(());
         }
-        tracing::warn!(
+        tracing::debug!(
             flow_id = %event.flow_id,
             phase = ?response.phase,
             "OAuth lifecycle continuation did not produce an active extension"
         );
         Err(AuthProductError::BackendUnavailable)
-    }
-
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        self.inner.dispatch_canceled_auth_continuation(event).await
     }
 }
 
@@ -120,7 +113,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use ironclaw_auth::{
-        AuthFlowId, AuthProductScope, AuthProviderId, AuthSurface,
+        AuthFlowId, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId,
         LifecyclePackageRef as AuthPackageRef,
     };
     use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
@@ -159,25 +152,18 @@ mod tests {
     }
 
     #[async_trait]
-    impl RebornAuthContinuationDispatcher for RecordingInnerDispatcher {
-        async fn dispatch_auth_continuation(
+    impl RebornAuthResolutionDispatcher for RecordingInnerDispatcher {
+        async fn dispatch_auth_resolved(
             &self,
-            _event: AuthContinuationEvent,
+            _event: AuthResolved,
         ) -> Result<(), AuthProductError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
-
-        async fn dispatch_canceled_auth_continuation(
-            &self,
-            _event: AuthContinuationEvent,
-        ) -> Result<(), AuthProductError> {
-            Ok(())
-        }
     }
 
-    fn event() -> AuthContinuationEvent {
-        AuthContinuationEvent {
+    fn event() -> AuthResolved {
+        AuthResolved {
             flow_id: AuthFlowId::new(),
             scope: AuthProductScope::new(
                 ResourceScope::local_default(
@@ -191,15 +177,17 @@ mod tests {
                 package_ref: AuthPackageRef::new("slack").expect("package ref"),
             },
             provider: AuthProviderId::new("slack_personal").expect("provider"),
-            credential_account_id: None,
-            emitted_at: chrono::Utc::now(),
+            outcome: AuthFlowOutcome::Authorized {
+                account_id: CredentialAccountId::new(),
+            },
+            resolved_at: chrono::Utc::now(),
         }
     }
 
     fn dispatcher(
         response: LifecycleProductResponse,
     ) -> (
-        LifecycleAuthContinuationDispatcher,
+        LifecycleAuthResolutionDispatcher,
         Arc<RecordingInnerDispatcher>,
     ) {
         let inner = Arc::new(RecordingInnerDispatcher::default());
@@ -209,7 +197,7 @@ mod tests {
                 .is_ok()
         );
         (
-            LifecycleAuthContinuationDispatcher::new(inner.clone(), slot),
+            LifecycleAuthResolutionDispatcher::new(inner.clone(), slot),
             inner,
         )
     }
@@ -229,7 +217,7 @@ mod tests {
         });
 
         dispatcher
-            .dispatch_auth_continuation(event())
+            .dispatch_auth_resolved(event())
             .await
             .expect("dispatch continuation");
 
@@ -253,7 +241,7 @@ mod tests {
         });
 
         dispatcher
-            .dispatch_auth_continuation(event())
+            .dispatch_auth_resolved(event())
             .await
             .expect("incomplete credentials are not an activation failure");
 

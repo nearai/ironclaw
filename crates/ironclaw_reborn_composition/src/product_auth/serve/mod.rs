@@ -36,19 +36,19 @@ use axum::{
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
-    AuthChallenge, AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowStatus, AuthGateRef,
-    AuthInteractionId, AuthProductError, AuthProductScope, AuthProviderId, AuthSessionId,
-    AuthSurface, AuthorizationCodeHash, CredentialAccountChoiceRequest, CredentialAccountId,
-    CredentialAccountLabel, CredentialAccountListPage, CredentialAccountListRequest,
-    CredentialAccountProjection, CredentialAccountSelectionRequest, CredentialAccountStatus,
-    CredentialAccountUpdateBinding, CredentialRecoveryProjection, CredentialRecoveryRequest,
-    CredentialRefreshReport, CredentialRefreshRequest, GOOGLE_PROVIDER_ID, GoogleOAuthRouteConfig,
-    OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthCallbackState, OAuthCallbackStateKind,
-    OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret,
-    ProviderScope, SLACK_PERSONAL_PROVIDER_ID, SecretCleanupAction, SecretCleanupReport,
-    SecretCleanupRequest, Timestamp, TurnRunRef, binding_scope_owns_account,
-    build_google_authorization_url, parse_google_callback_scopes, parse_google_requested_scopes,
-    pkce_s256_challenge,
+    AuthChallenge, AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowOutcome, AuthFlowState,
+    AuthGateRef, AuthInteractionId, AuthProductError, AuthProductScope, AuthProviderId,
+    AuthSessionId, AuthSurface, AuthorizationCodeHash, CredentialAccountChoiceRequest,
+    CredentialAccountId, CredentialAccountLabel, CredentialAccountListPage,
+    CredentialAccountListRequest, CredentialAccountProjection, CredentialAccountSelectionRequest,
+    CredentialAccountStatus, CredentialAccountUpdateBinding, CredentialRecoveryProjection,
+    CredentialRecoveryRequest, CredentialRefreshReport, CredentialRefreshRequest,
+    GOOGLE_PROVIDER_ID, GoogleOAuthRouteConfig, OAuthAuthorizationCode, OAuthAuthorizationUrl,
+    OAuthCallbackState, OAuthCallbackStateKind, OAuthProviderCallbackRequest, OpaqueStateHash,
+    PkceVerifierHash, PkceVerifierSecret, ProviderScope, SLACK_PERSONAL_PROVIDER_ID,
+    SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest, Timestamp, TurnRunRef,
+    binding_scope_owns_account, build_google_authorization_url, parse_google_callback_scopes,
+    parse_google_requested_scopes, pkce_s256_challenge,
 };
 use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::ingress::{
@@ -885,7 +885,7 @@ pub(super) struct ManualTokenSubmitRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct OAuthStartResponse {
     pub(crate) flow_id: AuthFlowId,
-    pub(crate) status: AuthFlowStatus,
+    pub(crate) status: AuthFlowState,
     pub(crate) provider: AuthProviderId,
     pub(crate) authorization_url: OAuthAuthorizationUrl,
     pub(crate) expires_at: Timestamp,
@@ -896,7 +896,7 @@ pub(crate) struct OAuthStartResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ProductOAuthStartResponse {
     pub(crate) flow_id: AuthFlowId,
-    pub(crate) status: AuthFlowStatus,
+    pub(crate) status: AuthFlowState,
     pub(crate) provider: AuthProviderId,
     pub(crate) authorization_url: OAuthAuthorizationUrl,
     pub(crate) expires_at: Timestamp,
@@ -908,8 +908,8 @@ pub(crate) struct ProductOAuthStartResponse {
 /// OAuth flow-status poll. Carries the lifecycle status enum ONLY — never
 /// tokens, PKCE verifiers, authorization codes, or opaque state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct OAuthFlowStatusResponse {
-    pub(crate) status: AuthFlowStatus,
+pub(crate) struct OAuthFlowStateResponse {
+    pub(crate) status: AuthFlowState,
 }
 
 /// Query fields for the flow-status poll. The browser echoes back the
@@ -919,7 +919,7 @@ pub(crate) struct OAuthFlowStatusResponse {
 /// tenant/user/agent/project still come from the authenticated caller, so a
 /// forged `invocation_id` cannot reach another owner's flow.
 #[derive(Deserialize)]
-pub(super) struct OAuthFlowStatusQuery {
+pub(super) struct OAuthFlowStateQuery {
     invocation_id: Option<String>,
 }
 
@@ -1728,7 +1728,7 @@ where
 mod tests {
     use super::*;
     use crate::AuthChallengeProvider;
-    use crate::RebornAuthContinuationDispatcher;
+    use crate::RebornAuthResolutionDispatcher;
     use crate::product_auth::oauth::notion_oauth::notion_provider_spec;
     use crate::product_auth::oauth::oauth_dcr::{
         OAuthDcrProvider, OAuthDcrProviderConfig, OAuthDcrProviderRegistry,
@@ -1802,10 +1802,10 @@ mod tests {
     struct NoopDispatcher;
 
     #[async_trait]
-    impl RebornAuthContinuationDispatcher for NoopDispatcher {
-        async fn dispatch_auth_continuation(
+    impl RebornAuthResolutionDispatcher for NoopDispatcher {
+        async fn dispatch_auth_resolved(
             &self,
-            _event: ironclaw_auth::AuthContinuationEvent,
+            _event: ironclaw_auth::AuthResolved,
         ) -> Result<(), AuthProductError> {
             Ok(())
         }
@@ -1828,11 +1828,11 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingDispatcher {
-        events: Mutex<Vec<ironclaw_auth::AuthContinuationEvent>>,
+        events: Mutex<Vec<ironclaw_auth::AuthResolved>>,
     }
 
     impl RecordingDispatcher {
-        fn events(&self) -> Vec<ironclaw_auth::AuthContinuationEvent> {
+        fn events(&self) -> Vec<ironclaw_auth::AuthResolved> {
             self.events
                 .lock()
                 .expect("recording dispatcher lock")
@@ -1841,10 +1841,10 @@ mod tests {
     }
 
     #[async_trait]
-    impl RebornAuthContinuationDispatcher for RecordingDispatcher {
-        async fn dispatch_auth_continuation(
+    impl RebornAuthResolutionDispatcher for RecordingDispatcher {
+        async fn dispatch_auth_resolved(
             &self,
-            event: ironclaw_auth::AuthContinuationEvent,
+            event: ironclaw_auth::AuthResolved,
         ) -> Result<(), AuthProductError> {
             self.events
                 .lock()
@@ -2065,7 +2065,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CONFLICT);
         let flows = shared.flow_records_snapshot();
         assert_eq!(flows.len(), 1);
-        assert_eq!(flows[0].status, AuthFlowStatus::Canceled);
+        assert_eq!(
+            flows[0].state,
+            AuthFlowState::Resolved(AuthFlowOutcome::UserAborted)
+        );
     }
 
     #[tokio::test]
@@ -2290,9 +2293,10 @@ mod tests {
             .await
             .expect("completed flow lookup")
             .expect("completed flow");
-        let account_id = completed_flow
-            .credential_account_id
-            .expect("callback should persist account id");
+        let account_id = match completed_flow.state {
+            AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id }) => account_id,
+            other => panic!("callback should persist an authorized account, got {other:?}"),
+        };
         let account = shared
             .get_account(CredentialAccountLookupRequest {
                 scope: flow_scope,

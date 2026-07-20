@@ -247,12 +247,12 @@ impl ironclaw_capabilities::CapabilityObligationHandler for TestNoopObligationHa
 struct TestNoopContinuationDispatcher;
 
 #[async_trait]
-impl ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher
+impl ironclaw_channel_host::auth_continuation::RebornAuthResolutionDispatcher
     for TestNoopContinuationDispatcher
 {
-    async fn dispatch_auth_continuation(
+    async fn dispatch_auth_resolved(
         &self,
-        _event: ironclaw_auth::AuthContinuationEvent,
+        _event: ironclaw_auth::AuthResolved,
     ) -> Result<(), ironclaw_auth::AuthProductError> {
         Ok(())
     }

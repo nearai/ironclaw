@@ -24,7 +24,7 @@ mod tests {
     use tower::ServiceExt;
     use uuid::Uuid;
 
-    use crate::RebornAuthContinuationDispatcher;
+    use crate::RebornAuthResolutionDispatcher;
     use crate::product_auth::oauth::notion_oauth::notion_provider_spec;
     use crate::product_auth::oauth::oauth_dcr::{
         OAuthDcrProvider, OAuthDcrProviderConfig, OAuthDcrProviderRegistry,
@@ -34,10 +34,10 @@ mod tests {
     struct NoopDispatcher;
 
     #[async_trait]
-    impl RebornAuthContinuationDispatcher for NoopDispatcher {
-        async fn dispatch_auth_continuation(
+    impl RebornAuthResolutionDispatcher for NoopDispatcher {
+        async fn dispatch_auth_resolved(
             &self,
-            _event: ironclaw_auth::AuthContinuationEvent,
+            _event: ironclaw_auth::AuthResolved,
         ) -> Result<(), AuthProductError> {
             Ok(())
         }

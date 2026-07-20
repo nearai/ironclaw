@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_auth::{
-    AuthContinuationEvent, AuthProductError, CredentialAccountLabel, InMemoryAuthProductServices,
+    AuthProductError, AuthResolved, CredentialAccountLabel, InMemoryAuthProductServices,
 };
 use ironclaw_capabilities::{CapabilityObligationHandler, CapabilityObligationRequest};
 use ironclaw_host_api::{
@@ -17,7 +17,7 @@ use crate::product_auth::api::auth::RebornProductAuthServices;
 use crate::product_auth::oauth::oauth_dcr::{
     OAuthDcrProvider, OAuthDcrProviderConfig, OAuthDcrProviderRegistry,
 };
-use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
+use ironclaw_channel_host::auth_continuation::RebornAuthResolutionDispatcher;
 
 #[tokio::test]
 async fn dcr_challenge_errors_propagate_through_product_auth_provider() {
@@ -136,11 +136,8 @@ async fn dcr_registry_returns_none_for_zero_and_multiple_requirements() {
 struct NoopAuthDispatcher;
 
 #[async_trait]
-impl RebornAuthContinuationDispatcher for NoopAuthDispatcher {
-    async fn dispatch_auth_continuation(
-        &self,
-        _event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
+impl RebornAuthResolutionDispatcher for NoopAuthDispatcher {
+    async fn dispatch_auth_resolved(&self, _event: AuthResolved) -> Result<(), AuthProductError> {
         Ok(())
     }
 }

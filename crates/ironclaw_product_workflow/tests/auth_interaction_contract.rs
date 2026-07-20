@@ -829,13 +829,14 @@ async fn callback_completed_resumes_completed_auth_gate() {
     let scope = turn_scope("alice", "thread-a");
     let run_id = TurnRunId::new();
     let gate_ref = make_gate_ref("gate:auth-callback");
+    let account_id = CredentialAccountId::new();
     let flow = auth_flow(
         TestAuthFlowState::ResolvedAuthorized,
         &scope,
         &actor,
         run_id,
         &gate_ref,
-        None,
+        Some(account_id),
         setup_challenge(),
     );
     let callback_ref = flow.id;
@@ -868,13 +869,14 @@ async fn callback_completed_rejects_mismatched_callback_ref() {
     let scope = turn_scope("alice", "thread-a");
     let run_id = TurnRunId::new();
     let gate_ref = make_gate_ref("gate:auth-callback-mismatch");
+    let account_id = CredentialAccountId::new();
     let flow = auth_flow(
         TestAuthFlowState::ResolvedAuthorized,
         &scope,
         &actor,
         run_id,
         &gate_ref,
-        None,
+        Some(account_id),
         setup_challenge(),
     );
     let (service, _flow_manager, coordinator) =
@@ -904,18 +906,19 @@ async fn callback_completed_rejects_mismatched_callback_ref() {
 }
 
 #[tokio::test]
-async fn credential_provided_rejects_completed_flow_without_account_id() {
+async fn credential_provided_rejects_completed_flow_with_a_different_account_id() {
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let scope = turn_scope("alice", "thread-a");
     let run_id = TurnRunId::new();
     let gate_ref = make_gate_ref("gate:auth-missing-account");
+    let completed_account_id = CredentialAccountId::new();
     let flow = auth_flow(
         TestAuthFlowState::ResolvedAuthorized,
         &scope,
         &actor,
         run_id,
         &gate_ref,
-        None,
+        Some(completed_account_id),
         setup_challenge(),
     );
     let (service, _flow_manager, coordinator) =
@@ -930,15 +933,15 @@ async fn credential_provided_rejects_completed_flow_without_account_id() {
             decision: AuthInteractionDecision::CredentialProvided {
                 credential_ref: CredentialAccountId::new(),
             },
-            idempotency_key: IdempotencyKey::new("auth-action-missing-account").unwrap(),
+            idempotency_key: IdempotencyKey::new("auth-action-different-account").unwrap(),
         })
         .await
-        .expect_err("missing account id must be stale");
+        .expect_err("a different credential account must be rejected");
 
     assert!(matches!(
         error,
         ProductWorkflowError::AuthInteractionRejected {
-            kind: AuthInteractionRejectionKind::StaleAuth
+            kind: AuthInteractionRejectionKind::InvalidCredentialRef
         }
     ));
     assert!(coordinator.resumes().is_empty());
@@ -952,13 +955,14 @@ async fn deny_on_completed_flow_converges_on_completion() {
     let scope = turn_scope("alice", "thread-a");
     let run_id = TurnRunId::new();
     let gate_ref = make_gate_ref("gate:auth-deny-completed");
+    let account_id = CredentialAccountId::new();
     let flow = auth_flow(
         TestAuthFlowState::ResolvedAuthorized,
         &scope,
         &actor,
         run_id,
         &gate_ref,
-        None,
+        Some(account_id),
         setup_challenge(),
     );
     let (service, _flow_manager, coordinator) =
@@ -1638,7 +1642,7 @@ async fn cross_scope_auth_gate_is_denied_before_resume() {
 }
 
 #[tokio::test]
-async fn auth_resolution_rejects_run_state_actor_mismatch() {
+async fn auth_resolution_uses_the_authoritative_run_state_actor() {
     let caller = TurnActor::new(UserId::new("alice").unwrap());
     let state_actor = TurnActor::new(UserId::new("bob").unwrap());
     let scope = turn_scope("alice", "thread-a");
@@ -1654,10 +1658,14 @@ async fn auth_resolution_rejects_run_state_actor_mismatch() {
         Some(account_id),
         setup_challenge(),
     );
-    let (service, _flow_manager, coordinator) =
-        service_parts(flow.clone(), vec![flow], state_actor, gate_ref.clone());
+    let (service, _flow_manager, coordinator) = service_parts(
+        flow.clone(),
+        vec![flow],
+        state_actor.clone(),
+        gate_ref.clone(),
+    );
 
-    let error = service
+    let response = service
         .resolve(ResolveAuthInteractionRequest {
             scope,
             actor: caller,
@@ -1669,15 +1677,15 @@ async fn auth_resolution_rejects_run_state_actor_mismatch() {
             idempotency_key: IdempotencyKey::new("auth-action-actor-mismatch").unwrap(),
         })
         .await
-        .expect_err("run-state actor mismatch must be denied");
+        .expect("the scoped run-state actor is authoritative");
 
     assert!(matches!(
-        error,
-        ProductWorkflowError::AuthInteractionRejected {
-            kind: AuthInteractionRejectionKind::CrossScopeDenied
-        }
+        response,
+        ResolveAuthInteractionResponse::Resumed(_)
     ));
-    assert!(coordinator.resumes().is_empty());
+    let resumes = coordinator.resumes();
+    assert_eq!(resumes.len(), 1);
+    assert_eq!(resumes[0].actor, state_actor);
     assert!(coordinator.cancellations().is_empty());
 }
 

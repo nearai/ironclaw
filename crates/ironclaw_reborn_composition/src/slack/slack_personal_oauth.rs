@@ -18,7 +18,7 @@ use axum::{
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
     AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowRecord, AuthFlowRecordSource,
-    AuthFlowStatus, AuthProductError, AuthProductScope, AuthProviderId, CredentialAccountLabel,
+    AuthFlowState, AuthProductError, AuthProductScope, AuthProviderId, CredentialAccountLabel,
     OAuthAuthorizationEndpoint, OAuthAuthorizationUrl, OAuthAuthorizeUrlRequest,
     OAuthCallbackState, OAuthCallbackStateKind, OAuthExtraParam, OAuthProviderIdentity,
     OAuthRedirectUri, OAuthScopeParam, OAuthState, PkceCodeChallenge, PkceVerifierSecret,
@@ -275,7 +275,7 @@ pub(crate) async fn start_extension_oauth_flow(
 
     Ok(Json(ProductOAuthStartResponse {
         flow_id: flow.id,
-        status: flow.status,
+        status: flow.state,
         provider,
         authorization_url,
         expires_at: flow.expires_at,
@@ -361,8 +361,7 @@ fn slack_personal_oauth_abandon_hook(
         let provider_user_id_prefix = format!("{}:", connection_owner.installation_id().as_str());
         if matches!(
             failure_stage,
-            RebornOAuthCallbackFailureStage::ContinuationSideEffect
-                | RebornOAuthCallbackFailureStage::ContinuationCompensation
+            RebornOAuthCallbackFailureStage::ContinuationRetryable
         ) {
             if let Err(error) = config
                 .lifecycle_store
@@ -644,7 +643,7 @@ impl OAuthGateProvider for SlackPersonalOAuthGateProvider {
         if connection_state.is_none()
             && let Some(exact) = exact.as_ref()
             && exact.provider.as_str() == SLACK_PERSONAL_PROVIDER_ID
-            && exact.status == AuthFlowStatus::AwaitingUser
+            && exact.state == AuthFlowState::Open
             && exact.expires_at > Utc::now()
         {
             lifecycle
@@ -686,17 +685,15 @@ impl OAuthGateProvider for SlackPersonalOAuthGateProvider {
         match flow {
             Some(flow)
                 if flow.provider.as_str() == SLACK_PERSONAL_PROVIDER_ID
-                    && flow.status == AuthFlowStatus::AwaitingUser
+                    && flow.state == AuthFlowState::Open
                     && flow.expires_at > now =>
             {
                 Ok(Some(flow))
             }
             Some(flow)
                 if flow.provider.as_str() == SLACK_PERSONAL_PROVIDER_ID
-                    && (matches!(
-                        flow.status,
-                        AuthFlowStatus::Canceled | AuthFlowStatus::Expired | AuthFlowStatus::Failed
-                    ) || flow.expires_at <= now) =>
+                    && (matches!(flow.state, AuthFlowState::Resolved(_))
+                        || flow.expires_at <= now) =>
             {
                 lifecycle
                     .lifecycle_store

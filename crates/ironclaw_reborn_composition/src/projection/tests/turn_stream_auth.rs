@@ -426,18 +426,18 @@ async fn webui_event_stream_creates_google_oauth_prompt_for_runtime_credential_g
         GoogleOAuthGateProvider, OAuthGateFlowDriver, OAuthGateProviderRegistry,
     };
     use async_trait::async_trait;
-    use ironclaw_auth::{AuthContinuationEvent, InMemoryAuthProductServices};
-    use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
+    use ironclaw_auth::{AuthResolved, InMemoryAuthProductServices};
+    use ironclaw_channel_host::auth_continuation::RebornAuthResolutionDispatcher;
     use ironclaw_secrets::FilesystemSecretStore;
 
     #[derive(Debug)]
     struct NoopDispatcher;
 
     #[async_trait]
-    impl RebornAuthContinuationDispatcher for NoopDispatcher {
-        async fn dispatch_auth_continuation(
+    impl RebornAuthResolutionDispatcher for NoopDispatcher {
+        async fn dispatch_auth_resolved(
             &self,
-            _event: AuthContinuationEvent,
+            _event: AuthResolved,
         ) -> Result<(), ironclaw_auth::AuthProductError> {
             Ok(())
         }
@@ -549,21 +549,19 @@ async fn webui_event_stream_creates_notion_dcr_oauth_prompt_for_runtime_credenti
         OAuthDcrProvider, OAuthDcrProviderConfig, OAuthDcrProviderRegistry,
     };
     use async_trait::async_trait;
-    use ironclaw_auth::{
-        AuthContinuationEvent, CredentialAccountLabel, InMemoryAuthProductServices,
-    };
+    use ironclaw_auth::{AuthResolved, CredentialAccountLabel, InMemoryAuthProductServices};
     use ironclaw_capabilities::{CapabilityObligationHandler, CapabilityObligationRequest};
-    use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
+    use ironclaw_channel_host::auth_continuation::RebornAuthResolutionDispatcher;
     use ironclaw_secrets::FilesystemSecretStore;
 
     #[derive(Debug)]
     struct NoopDispatcher;
 
     #[async_trait]
-    impl RebornAuthContinuationDispatcher for NoopDispatcher {
-        async fn dispatch_auth_continuation(
+    impl RebornAuthResolutionDispatcher for NoopDispatcher {
+        async fn dispatch_auth_resolved(
             &self,
-            _event: AuthContinuationEvent,
+            _event: AuthResolved,
         ) -> Result<(), ironclaw_auth::AuthProductError> {
             Ok(())
         }
