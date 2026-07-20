@@ -652,9 +652,10 @@ impl HostRuntimeCapabilityHarness {
         if let Some(egress) = network_http_egress_for_test {
             input = input.with_network_http_egress_for_test(egress);
         }
-        // `ironclaw_reborn_composition` is ALWAYS built with
-        // `slack-v2-host-beta` in this workspace (root `Cargo.toml`'s
-        // dependency declaration), and every extension-lifecycle group wires
+        // The Slack adapter is an unconditional path dependency of
+        // `ironclaw_reborn_composition` — #6296 deleted the
+        // `slack-v2-host-beta` feature that used to gate it, so the modules
+        // compile in every build — and every extension-lifecycle group wires
         // a real Slack channel-connection bundle post-build
         // (`group_constructors.rs::extension_lifecycle_with_profile`)
         // unconditionally — this test tier never represents a genuinely

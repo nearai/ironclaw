@@ -133,14 +133,27 @@ pub fn apply_step_text() -> &'static str {
     "Run `ironclaw service restart` to apply the change, then ask again."
 }
 
+/// The console steps plus the apply step — the complete "here is how to
+/// configure Google on this instance" body.
+///
+/// TWO independent enforcement points produce a "Google is not configured"
+/// message, and they stay separate on purpose (defense in depth at different
+/// lifecycle stages): the activation-time readiness map
+/// (`extension_host::provider_instance_readiness`) and the dispatch-time
+/// backstop (`extension_host::gsuite`). What they must NOT do is compose the
+/// same body two different ways — that is how the two strings drift. Both call
+/// this one function; only the leading sentence differs.
+pub fn google_setup_steps_text() -> String {
+    format!("{}\n\n{}", google_remediation_text(), apply_step_text())
+}
+
 /// Pre-dispatch "no Google OAuth backend configured on this instance at all"
 /// text — distinct from a per-account credential problem. Consumed by
 /// `ironclaw_reborn_composition::extension_host::gsuite`.
 pub fn google_not_configured_text() -> String {
     format!(
-        "Google Workspace access is not configured on this ironclaw instance.\n\n{}\n\n{}",
-        google_remediation_text(),
-        apply_step_text()
+        "Google Workspace access is not configured on this ironclaw instance.\n\n{}",
+        google_setup_steps_text()
     )
 }
 
@@ -171,9 +184,10 @@ pub fn google_backend_auth_text() -> String {
 /// google readiness scenario, so when the host_api hop started collapsing
 /// host-authored text to the safe-summary placeholder, every OTHER producer
 /// degraded silently and nothing went red. A hand-maintained list inside a test
-/// rots the same way. Adding a variant here makes [`Self::text`] and
-/// [`Self::all`] non-exhaustive, so a new producer fails to COMPILE until it is
-/// covered by `host_remediation_texts_survive_the_whole_path`.
+/// rots the same way. Adding a variant here breaks the exhaustive `match` in
+/// [`Self::text`], so a new producer cannot ship without at least being given
+/// its text here — and [`Self::all`]'s witness match points the author at the
+/// array they must extend (see that method's note on the residual gap).
 ///
 /// Only fixed texts live here. Two producers build their text from a runtime
 /// `reason` string (`ProductWorkflowError::ProviderInstanceNotConfigured` and
@@ -217,8 +231,15 @@ impl HostRemediationText {
         }
     }
 
-    /// Every variant. The witness match below is what enforces the coverage
-    /// contract: adding a variant without adding it to `ALL` fails to compile.
+    /// Every variant.
+    ///
+    /// The witness match below is a REMINDER, not a proof: a variant added to
+    /// the enum and to [`Self::text`] but omitted from `ALL` still compiles
+    /// (the witness only iterates what `ALL` already contains) and would escape
+    /// coverage. Rust cannot enumerate a variant set without naming it, so the
+    /// residual gap is documented rather than claimed away. The length
+    /// annotation on `ALL` is the second guard: adding an entry without
+    /// bumping it fails to compile.
     pub fn all() -> Vec<Self> {
         const ALL: [HostRemediationText; 6] = [
             HostRemediationText::GoogleNotConfigured,
@@ -263,6 +284,22 @@ mod tests {
         assert!(google.contains("config set google.client_id"));
         assert!(google.contains("config set google.client_secret"));
         assert!(google.contains("config set google.redirect_uri"));
+    }
+
+    /// The two independent "Google is not configured" enforcement points
+    /// (activation-time readiness map, dispatch-time gsuite backstop) stay
+    /// separate BY DESIGN — they gate different lifecycle stages. What they
+    /// must share is the body, so the console steps and the apply step cannot
+    /// drift between them.
+    #[test]
+    fn google_not_configured_text_embeds_the_shared_setup_steps_verbatim() {
+        let steps = google_setup_steps_text();
+        assert!(steps.contains("config set google.client_id"));
+        assert!(steps.contains("ironclaw service restart"));
+        assert!(
+            google_not_configured_text().contains(&steps),
+            "the dispatch-time text must embed the shared body verbatim, not recompose it"
+        );
     }
 
     fn both_gaps() -> SlackSetupGaps {

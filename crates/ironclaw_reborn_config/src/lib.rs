@@ -40,8 +40,8 @@ pub use budget::{
 };
 pub use capability_remediation::{
     HostRemediationText, SlackSetupGaps, apply_step_text, google_backend_auth_text,
-    google_not_configured_text, google_remediation_text, slack_remediation_text,
-    slack_remediation_text_with_base_url,
+    google_not_configured_text, google_remediation_text, google_setup_steps_text,
+    slack_remediation_text, slack_remediation_text_with_base_url,
 };
 pub use config_file::{
     BootSection, BudgetSection, DefaultLlmSlotUpdate, DefaultLlmSlotUpdateSession, DriversSection,

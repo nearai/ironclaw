@@ -146,20 +146,39 @@ fn validate_host_remediation(value: &str) -> Result<(), HostApiError> {
 /// base64/hex secret is far longer.
 const HIGH_ENTROPY_RUN_MIN_LEN: usize = 32;
 
-/// True when any purely alphanumeric run of [`HIGH_ENTROPY_RUN_MIN_LEN`]+
-/// characters mixes letters and digits — the shape of a base64/hex credential
-/// value, and a shape no host-authored English instruction produces. Splitting
-/// on every non-alphanumeric character means `_`/`-`/`.`/`/` all break runs, so
-/// long screaming-snake env var names (`IRONCLAW_REBORN_SLACK_…`), dotted config
-/// keys, and URLs stay well under the bound.
+/// Characters that CONTINUE a candidate credential run rather than breaking it.
+///
+/// Splitting on every non-alphanumeric character (the original rule) let two
+/// real credential shapes fragment below the bound and escape: standard base64
+/// bodies, whose `+`/`/`/`=` alphabet chopped a 300-char blob into sub-32
+/// pieces, and dot-delimited JWTs. Those four characters therefore stay INSIDE
+/// a run.
+///
+/// `_` and `-` deliberately keep BREAKING runs: they are the separators of the
+/// long host-authored identifiers this guard must not false-positive on
+/// (`IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI`, kebab-case project
+/// slugs). Credential values that use them (`ghp_…`, `xoxb-…`, `sk_live_…`) are
+/// caught by the prefix detector in `credential_redaction`, not by this rule.
+fn is_run_character(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '.')
+}
+
+/// True when any run of [`HIGH_ENTROPY_RUN_MIN_LEN`]+ [run
+/// characters](is_run_character) mixes letters and digits — the shape of a
+/// base64/hex/JWT credential value, and a shape no host-authored English
+/// instruction produces.
+///
+/// The letters-AND-digits requirement is what keeps the widened run charset
+/// safe: URLs long enough to clear the bound (`https://console.cloud.google.com
+/// /apis/credentials`) are pure letters, and pure-digit runs are version or id
+/// numbers. Both are deliberately exempt — see
+/// `pure_alphabetic_and_pure_numeric_runs_are_exempt`.
 fn contains_high_entropy_run(value: &str) -> bool {
-    value
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|run| {
-            run.len() >= HIGH_ENTROPY_RUN_MIN_LEN
-                && run.chars().any(|c| c.is_ascii_digit())
-                && run.chars().any(|c| c.is_ascii_alphabetic())
-        })
+    value.split(|c: char| !is_run_character(c)).any(|run| {
+        run.len() >= HIGH_ENTROPY_RUN_MIN_LEN
+            && run.chars().any(|c| c.is_ascii_digit())
+            && run.chars().any(|c| c.is_ascii_alphabetic())
+    })
 }
 
 #[cfg(test)]
@@ -236,6 +255,66 @@ mod tests {
         ] {
             assert!(HostRemediation::new(ok).is_ok(), "should accept {ok:?}");
         }
+    }
+
+    /// The two shapes the original run-splitter let through: standard base64
+    /// (whose `+`/`/`/`=` alphabet fragmented a long blob into sub-32 pieces)
+    /// and a dot-delimited JWT.
+    #[test]
+    fn rejects_base64_and_jwt_values_that_used_to_fragment_below_the_bound() {
+        for bad in [
+            // Standard-alphabet base64: every run between `+`/`/` is short.
+            "paste this: aG9t+ZXdv/cmsx+MjM0/NTY3+ODkw/YWJj+ZGVm/Z2hp+amsx/MjM0+NTY3",
+            // Trailing `=` padding on a body whose pieces are also short.
+            "value ab+cd/ef+gh/ij+kl/mn+op/qr+st/uv+wx/yz+01/23+45/67+89==",
+            // A JWT: three dot-separated base64url segments.
+            "Authorize with eyJhbG.ciOiJIUzI1.NiIsInR5cCI6IkpXVCJ9.abc123def456",
+        ] {
+            let why = rejection(bad);
+            assert!(
+                why.contains("high-entropy") || why.contains("credential-shaped tokens"),
+                "should reject {bad:?} as a credential VALUE, got: {why}"
+            );
+        }
+    }
+
+    /// The threshold is a bound, not a vibe: 31 run characters pass, 32 fail.
+    #[test]
+    fn high_entropy_run_bound_is_exactly_thirty_two_characters() {
+        let below = format!("token {}1", "a".repeat(HIGH_ENTROPY_RUN_MIN_LEN - 2));
+        assert_eq!(below.len() - "token ".len(), HIGH_ENTROPY_RUN_MIN_LEN - 1);
+        assert!(
+            HostRemediation::new(&below).is_ok(),
+            "a {}-character mixed run is below the bound: {below}",
+            HIGH_ENTROPY_RUN_MIN_LEN - 1
+        );
+
+        let at_bound = format!("token {}1", "a".repeat(HIGH_ENTROPY_RUN_MIN_LEN - 1));
+        assert_eq!(at_bound.len() - "token ".len(), HIGH_ENTROPY_RUN_MIN_LEN);
+        assert!(
+            rejection(&at_bound).contains("high-entropy"),
+            "a {HIGH_ENTROPY_RUN_MIN_LEN}-character mixed run is at the bound: {at_bound}"
+        );
+    }
+
+    /// Deliberate exemptions, pinned so a future tightening is a conscious
+    /// choice rather than an accident: a run must mix letters AND digits.
+    /// Pure-alphabetic runs are long URLs and prose; pure-numeric runs are ids,
+    /// ports, and version numbers. Neither is a credential value shape.
+    #[test]
+    fn pure_alphabetic_and_pure_numeric_runs_are_exempt() {
+        let pure_alphabetic = format!("see {}", "a".repeat(HIGH_ENTROPY_RUN_MIN_LEN * 2));
+        assert!(HostRemediation::new(&pure_alphabetic).is_ok());
+        let pure_numeric = format!("id {}", "1".repeat(HIGH_ENTROPY_RUN_MIN_LEN * 2));
+        assert!(HostRemediation::new(&pure_numeric).is_ok());
+        // The widened run charset does not change that: a URL long enough to
+        // clear the bound is still pure letters across `.` and `/`.
+        assert!(
+            HostRemediation::new(
+                "https://console.cloud.google.com/apis/credentials/oauthclient/edit"
+            )
+            .is_ok()
+        );
     }
 
     #[test]

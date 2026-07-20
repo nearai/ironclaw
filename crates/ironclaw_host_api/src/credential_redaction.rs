@@ -104,6 +104,16 @@ fn is_secret_like_token(token: &str) -> bool {
     [
         "sk-",
         "sk-ant-",
+        // Stripe's underscore forms. The hyphenated `sk-` above does not
+        // match them, and `has_secret_like_prefix` re-tests after every
+        // `-`/`_`/`.` separator, so these catch both `sk_live_…` and
+        // `memo_sk_live_…`.
+        "sk_live_",
+        "sk_test_",
+        "pk_live_",
+        "pk_test_",
+        "rk_live_",
+        "rk_test_",
         "ghp_",
         "github_pat_",
         "gho_",
@@ -167,6 +177,12 @@ mod tests {
         assert!(contains_secret_like_token("secret gocspx-abc123def456"));
         assert!(contains_secret_like_token("xoxb-1234-5678-abcdefghij"));
         assert!(contains_secret_like_token("xoxp-1234-5678-abcdefghij"));
+        // Stripe's underscore forms — the hyphenated `sk-` prefix never
+        // matched these, so they used to pass the guard untouched.
+        assert!(contains_secret_like_token("sk_live_0123456789abcdef"));
+        assert!(contains_secret_like_token("sk_test_0123456789abcdef"));
+        assert!(contains_secret_like_token("key pk_live_0123456789abcdef"));
+        assert!(contains_secret_like_token("memo_sk_test_0123456789abcdef"));
         // A hyphenated ordinary phrase must not false-positive.
         assert!(!contains_secret_like_token("risk-based task-list check"));
     }

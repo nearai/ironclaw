@@ -350,18 +350,22 @@ const PROVIDER_INSTANCE_NOT_CONFIGURED_SAFE_SUMMARY: &str =
 
 fn lifecycle_error(error: ProductWorkflowError) -> FirstPartyCapabilityError {
     match error {
-        // Host/manifest/composition-authored reason only (audited) — routes
-        // the reason onto the TRUSTED host-remediation channel instead of
-        // silently dropping it, so a model-visible tool result carries
-        // actionable remediation. The trusted channel is correct here
-        // precisely because the reason is host-authored; the untrusted
-        // diagnostic channel would collapse it to the safe-summary
-        // placeholder at the host_api boundary (#6299). Scope deliberately narrow: other reason-bearing
-        // variants (e.g. `Transient`) interpolate internal error
-        // Display/Debug text at their construction sites and must not ride
-        // this channel verbatim.
+        // UNTRUSTED on purpose. `InvalidBindingRequest` has ~40 construction
+        // sites and several interpolate externally-influenced text: a hosted
+        // MCP server's live `tools/list` tool names
+        // (`hosted_mcp_discovery.rs` -> `hosted_mcp_discovery_error`), the
+        // MODEL-chosen `extension_id` (charset-validated only, e.g. "extension
+        // {} is not installed"), and uploaded-zip entry names
+        // (`extension_bundle.rs`). `HostRemediation::new` is a VALUE guard, not
+        // a provenance guard — it rejects credential-SHAPED tokens but allows
+        // adversarial prose — so routing this whole class onto the trusted
+        // channel would stamp `ObservationTrust::HostAuthored` on attacker
+        // -influenced text and skip the credential-vocabulary scan
+        // `ironclaw_threads` applies to untrusted output. The trusted channel
+        // is reserved for reasons built entirely from host-authored constants
+        // (the `ProviderInstanceNotConfigured` arm below).
         ProductWorkflowError::InvalidBindingRequest { reason } => {
-            FirstPartyCapabilityError::dispatch_with_host_remediation(
+            FirstPartyCapabilityError::dispatch_with_diagnostic(
                 RuntimeDispatchErrorKind::InputEncode,
                 None,
                 reason,
@@ -2045,11 +2049,14 @@ credential_handle = "channel_ext_token"
         assert_eq!(text.as_str(), reason);
     }
 
-    /// `InvalidBindingRequest` keeps its existing `InputEncode` kind but now
-    /// also carries its reason on the trusted host-remediation channel instead
-    /// of silently dropping it (scope narrowed to this arm alone).
+    /// `InvalidBindingRequest` keeps its existing `InputEncode` kind and
+    /// carries its reason on the UNTRUSTED diagnostic channel. Several of its
+    /// ~40 construction sites interpolate externally-influenced text (hosted
+    /// MCP tool names, the model-chosen `extension_id`, uploaded-zip entry
+    /// names), so the whole class must stay scanned; only reasons built
+    /// entirely from host-authored constants may ride the trusted channel.
     #[test]
-    fn invalid_binding_request_carries_reason_on_host_remediation_channel() {
+    fn invalid_binding_request_carries_reason_on_the_untrusted_diagnostic_channel() {
         let mapped = lifecycle_error(ProductWorkflowError::InvalidBindingRequest {
             reason: "telegram account setup was declared without a mounted host".to_string(),
         });
@@ -2058,10 +2065,33 @@ credential_handle = "channel_ext_token"
             panic!("expected a Dispatch failure, got {mapped:?}");
         };
         assert_eq!(kind, RuntimeDispatchErrorKind::InputEncode);
-        let detail = detail.expect("remediation detail must be present");
-        let ironclaw_host_api::DispatchFailureDetail::HostRemediation { text } = *detail else {
-            panic!("expected a HostRemediation detail, got {detail:?}");
+        let detail = detail.expect("diagnostic detail must be present");
+        let ironclaw_host_api::DispatchFailureDetail::Diagnostic { text } = *detail else {
+            panic!("expected a Diagnostic detail, got {detail:?}");
         };
-        assert!(text.as_str().contains("mounted host"));
+        assert!(text.contains("mounted host"));
+    }
+
+    /// The provenance regression itself, at the unit seam: a reason carrying
+    /// credential vocabulary (the shape a model-chosen `extension_id` can
+    /// produce) must NOT land on the trusted host-remediation channel, where
+    /// `ObservationTrust::HostAuthored` would exempt it from the downstream
+    /// credential-vocabulary scan.
+    #[test]
+    fn model_influenced_invalid_binding_reason_never_reaches_the_trusted_channel() {
+        let mapped = lifecycle_error(ProductWorkflowError::InvalidBindingRequest {
+            reason: "extension api_key is not installed".to_string(),
+        });
+
+        let FirstPartyCapabilityError::Dispatch { detail, .. } = mapped else {
+            panic!("expected a Dispatch failure, got {mapped:?}");
+        };
+        assert!(
+            matches!(
+                detail.as_deref(),
+                Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic { .. })
+            ),
+            "externally-influenced text must stay on the scanned channel, got {detail:?}"
+        );
     }
 }

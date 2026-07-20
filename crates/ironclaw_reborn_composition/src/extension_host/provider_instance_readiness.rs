@@ -55,11 +55,11 @@ pub(crate) fn provider_instance_readiness_map(
     if !inputs.google_oauth_configured {
         map.insert(
             RuntimeCredentialAccountProviderId::new(ironclaw_auth::GOOGLE_PROVIDER_ID)?,
-            format!(
-                "{}\n\n{}",
-                ironclaw_reborn_config::google_remediation_text(),
-                ironclaw_reborn_config::apply_step_text()
-            ),
+            // The SAME body the dispatch-time backstop
+            // (`gsuite::google_oauth_not_configured_error`) uses. The two
+            // enforcement points stay separate (they gate different lifecycle
+            // stages) but must not compose the text two different ways.
+            ironclaw_reborn_config::google_setup_steps_text(),
         );
     }
     let slack_gaps = ironclaw_reborn_config::SlackSetupGaps {
