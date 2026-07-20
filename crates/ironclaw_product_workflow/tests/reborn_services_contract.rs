@@ -5016,42 +5016,46 @@ async fn create_thread_explicit_id_collision_remaps_to_not_found() {
 
 // Regression: cancel_run is not gate-aware, so without a parked-on-gate check
 // a denied/cancelled resolution carrying a stale or attacker-supplied gate_ref
-// would cancel any non-terminal run with the matching run_id. Mismatched gate
-// must produce Conflict and cancel_run must never be invoked.
+// would cancel any non-terminal run with the matching run_id. Resource and
+// dependent-run mismatches retain the pre-auth-refactor BlockedApproval error
+// contract and cancel_run must never be invoked.
 #[tokio::test]
-async fn denied_gate_resolution_with_stale_gate_ref_returns_conflict() {
-    let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(
-        Arc::new(InMemorySessionThreadService::default()),
-        coordinator.clone(),
-    );
-    create_thread_for(&services, caller(), "thread-alpha").await;
-    // The run is parked on `gate-current`, but the browser supplies `gate-stale`.
-    coordinator.set_parked_gate(GateRef::new("gate-current").expect("gate"));
+async fn denied_resource_and_dependent_gate_with_stale_ref_preserves_error_contract() {
+    for (case, status) in [
+        ("resource", TurnStatus::BlockedResource),
+        ("dependent", TurnStatus::BlockedDependentRun),
+    ] {
+        let coordinator = Arc::new(FakeTurnCoordinator::default());
+        let services = RebornServices::new(
+            Arc::new(InMemorySessionThreadService::default()),
+            coordinator.clone(),
+        );
+        let thread_id = format!("thread-{case}");
+        create_thread_for(&services, caller(), &thread_id).await;
+        coordinator.set_run_state_status(status);
+        coordinator.set_parked_gate(GateRef::new(format!("gate-{case}-current")).expect("gate"));
 
-    let err = services
-        .resolve_gate(
-            caller(),
-            serde_json::from_value::<WebUiResolveGateRequest>(json!({
-                "client_action_id": "gate-stale",
-                "thread_id": "thread-alpha",
-                "run_id": run_id_string(),
-                "gate_ref": "gate-stale",
-                "resolution": "denied"
-            }))
-            .expect("request"),
-        )
-        .await
-        .expect_err("stale gate_ref must produce Conflict, not silent cancel");
+        let err = services
+            .resolve_gate(
+                caller(),
+                serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                    "client_action_id": format!("gate-{case}-stale"),
+                    "thread_id": thread_id,
+                    "run_id": run_id_string(),
+                    "gate_ref": format!("gate-{case}-stale"),
+                    "resolution": "denied"
+                }))
+                .expect("request"),
+            )
+            .await
+            .expect_err("stale gate_ref must preserve the generic gate contract");
 
-    assert_eq!(err.code, RebornServicesErrorCode::Conflict);
-    assert_eq!(err.kind, RebornServicesErrorKind::Conflict);
-    assert_eq!(err.status_code, 409);
-    assert_eq!(
-        coordinator.cancellation_count(),
-        0,
-        "cancel_run must NOT be called for stale gate_ref"
-    );
+        assert_eq!(err.code, RebornServicesErrorCode::Conflict, "{case}");
+        assert_eq!(err.kind, RebornServicesErrorKind::BlockedApproval, "{case}");
+        assert_eq!(err.status_code, 409, "{case}");
+        assert!(!err.retryable, "{case}");
+        assert_eq!(coordinator.cancellation_count(), 0, "{case}");
+    }
 }
 
 #[tokio::test]

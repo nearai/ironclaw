@@ -20,7 +20,11 @@ use crate::binding_ref::{
 };
 use crate::{AuthContinuationRejectionKind, ProductWorkflowError};
 
-/// User-visible effect produced by delivering one durable auth resolution.
+/// Result of idempotently delivering one durable auth resolution.
+///
+/// `Resumed` and `Canceled` describe the operation's stable result. They do
+/// not prove this call applied a new mutation: a concurrent duplicate may
+/// receive the original result from the turn coordinator's idempotency cache.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthResolutionDispatchOutcome {
     Resumed(ResumeTurnResponse),
@@ -94,11 +98,11 @@ impl ProductAuthTurnGateResumeDispatcher {
                 let result = self
                     .turn_coordinator
                     .cancel_run(CancelRunRequest {
-                        scope,
+                        scope: scope.clone(),
                         actor,
                         run_id,
                         precondition: Some(CancelRunPrecondition::BlockedAuthGate {
-                            gate_ref: gate_resolution_ref,
+                            gate_ref: gate_resolution_ref.clone(),
                         }),
                         reason: SanitizedCancelReason::UserRequested,
                         idempotency_key,
@@ -106,10 +110,10 @@ impl ProductAuthTurnGateResumeDispatcher {
                     .await;
                 match result {
                     Ok(response) => Ok(AuthResolutionDispatchOutcome::Canceled(response)),
-                    Err(error) if stale_gate_transition(&error) => {
-                        Ok(AuthResolutionDispatchOutcome::Ignored)
+                    Err(error) => {
+                        self.classify_transition_error(error, &scope, run_id, &gate_resolution_ref)
+                            .await
                     }
-                    Err(error) => Err(map_auth_resolution_error(error)),
                 }
             }
             outcome => {
@@ -125,10 +129,10 @@ impl ProductAuthTurnGateResumeDispatcher {
                 let result = self
                     .turn_coordinator
                     .resume_turn(ResumeTurnRequest {
-                        scope,
+                        scope: scope.clone(),
                         actor,
                         run_id,
-                        gate_resolution_ref,
+                        gate_resolution_ref: gate_resolution_ref.clone(),
                         source_binding_ref: state.source_binding_ref,
                         reply_target_binding_ref: state.reply_target_binding_ref,
                         idempotency_key,
@@ -138,23 +142,50 @@ impl ProductAuthTurnGateResumeDispatcher {
                     .await;
                 match result {
                     Ok(response) => Ok(AuthResolutionDispatchOutcome::Resumed(response)),
-                    Err(error) if stale_gate_transition(&error) => {
-                        Ok(AuthResolutionDispatchOutcome::Ignored)
+                    Err(error) => {
+                        self.classify_transition_error(error, &scope, run_id, &gate_resolution_ref)
+                            .await
                     }
-                    Err(error) => Err(map_auth_resolution_error(error)),
                 }
             }
         }
     }
-}
 
-fn stale_gate_transition(error: &TurnError) -> bool {
-    matches!(
-        error,
-        TurnError::ScopeNotFound
-            | TurnError::InvalidTransition { .. }
-            | TurnError::InvalidRequest { .. }
-    )
+    async fn classify_transition_error(
+        &self,
+        error: TurnError,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        gate_ref: &GateRef,
+    ) -> Result<AuthResolutionDispatchOutcome, ProductWorkflowError> {
+        if !matches!(
+            error,
+            TurnError::ScopeNotFound
+                | TurnError::InvalidTransition { .. }
+                | TurnError::InvalidRequest { .. }
+        ) {
+            return Err(map_auth_resolution_error(error));
+        }
+
+        let current = self
+            .turn_coordinator
+            .get_run_state(GetRunStateRequest {
+                scope: scope.clone(),
+                run_id,
+            })
+            .await;
+        match current {
+            Err(TurnError::ScopeNotFound) => Ok(AuthResolutionDispatchOutcome::Ignored),
+            Ok(state)
+                if state.status != TurnStatus::BlockedAuth
+                    || state.gate_ref.as_ref() != Some(gate_ref) =>
+            {
+                Ok(AuthResolutionDispatchOutcome::Ignored)
+            }
+            Ok(_) => Err(map_auth_resolution_error(error)),
+            Err(read_error) => Err(map_auth_resolution_error(read_error)),
+        }
+    }
 }
 
 fn map_auth_resolution_error(error: TurnError) -> ProductWorkflowError {

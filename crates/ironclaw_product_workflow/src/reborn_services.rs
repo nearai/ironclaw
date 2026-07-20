@@ -6452,7 +6452,7 @@ async fn assert_generic_run_parked_on_gate(
         Some(parked) if parked == expected_gate_ref => Ok(()),
         _ => Err(RebornServicesError::from_status_kind(
             RebornServicesErrorCode::Conflict,
-            RebornServicesErrorKind::Conflict,
+            RebornServicesErrorKind::BlockedApproval,
             409,
             false,
         )),

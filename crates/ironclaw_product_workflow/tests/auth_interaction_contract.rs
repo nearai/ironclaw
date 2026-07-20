@@ -30,6 +30,7 @@ use ironclaw_turns::{
     SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
     TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
+use tokio::sync::Barrier;
 
 #[derive(Default)]
 struct FakeAuthReadModel {
@@ -300,7 +301,10 @@ struct RecordingTurnCoordinator {
     resumes: Mutex<Vec<ResumeTurnRequest>>,
     cancellations: Mutex<Vec<CancelRunRequest>>,
     get_run_state_error: Mutex<Option<TurnError>>,
+    resume_error: Mutex<Option<TurnError>>,
     transition_before_cancel: Mutex<Option<(TurnStatus, Option<GateRef>)>>,
+    resume_barrier: Mutex<Option<Arc<Barrier>>>,
+    resume_effect_count: Mutex<usize>,
     /// Idempotency cache: maps (run_id, idempotency_key) → cached ResumeTurnResponse.
     /// A second resume_turn call with the same key returns the cached response
     /// before any precondition or status check, mirroring real TurnCoordinator behaviour.
@@ -317,7 +321,10 @@ impl RecordingTurnCoordinator {
             resumes: Mutex::new(Vec::new()),
             cancellations: Mutex::new(Vec::new()),
             get_run_state_error: Mutex::new(None),
+            resume_error: Mutex::new(None),
             transition_before_cancel: Mutex::new(None),
+            resume_barrier: Mutex::new(None),
+            resume_effect_count: Mutex::new(0),
             resume_cache: Mutex::new(HashMap::new()),
             cancel_cache: Mutex::new(HashMap::new()),
         }
@@ -337,6 +344,18 @@ impl RecordingTurnCoordinator {
 
     fn set_get_run_state_error(&self, error: TurnError) {
         *self.get_run_state_error.lock().expect("lock") = Some(error);
+    }
+
+    fn set_resume_error(&self, error: TurnError) {
+        *self.resume_error.lock().expect("lock") = Some(error);
+    }
+
+    fn hold_concurrent_resumes_after_reads(&self, barrier: Arc<Barrier>) {
+        *self.resume_barrier.lock().expect("lock") = Some(barrier);
+    }
+
+    fn resume_effect_count(&self) -> usize {
+        *self.resume_effect_count.lock().expect("lock")
     }
 
     fn transition_before_cancel(&self, status: TurnStatus, gate_ref: Option<GateRef>) {
@@ -380,15 +399,17 @@ impl TurnCoordinator for RecordingTurnCoordinator {
         let run_id = request.run_id;
         let cache_key = (run_id, request.idempotency_key.clone());
         self.resumes.lock().expect("lock").push(request);
+        let barrier = self.resume_barrier.lock().expect("lock").clone();
+        if let Some(barrier) = barrier {
+            barrier.wait().await;
+        }
+        if let Some(error) = self.resume_error.lock().expect("lock").clone() {
+            return Err(error);
+        }
         // Idempotency: return cached response for a repeated key before any
         // other check, matching real TurnCoordinator behaviour.
-        if let Some(cached) = self
-            .resume_cache
-            .lock()
-            .expect("lock")
-            .get(&cache_key)
-            .cloned()
-        {
+        let mut cache = self.resume_cache.lock().expect("lock");
+        if let Some(cached) = cache.get(&cache_key).cloned() {
             return Ok(cached);
         }
         let response = ResumeTurnResponse {
@@ -396,10 +417,10 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             status: TurnStatus::Queued,
             event_cursor: EventCursor(41),
         };
-        self.resume_cache
-            .lock()
-            .expect("lock")
-            .insert(cache_key, response.clone());
+        cache.insert(cache_key, response.clone());
+        *self.resume_effect_count.lock().expect("lock") += 1;
+        *self.status.lock().expect("lock") = TurnStatus::Queued;
+        *self.gate_ref.lock().expect("lock") = None;
         Ok(response)
     }
 
@@ -694,6 +715,52 @@ async fn credential_provided_resumes_completed_auth_gate() {
     );
     assert_eq!(resumes[0].source_binding_ref.as_str(), "src:auth");
     assert_eq!(resumes[0].reply_target_binding_ref.as_str(), "reply:auth");
+}
+
+#[tokio::test]
+async fn exact_gate_invalid_request_is_retried_without_marking_resolution_delivered() {
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let scope = turn_scope("alice", "thread-invalid-request");
+    let run_id = TurnRunId::new();
+    let gate_ref = make_gate_ref("gate:auth-invalid-request");
+    let account_id = CredentialAccountId::new();
+    let flow = auth_flow(
+        TestAuthFlowState::ResolvedAuthorized,
+        &scope,
+        &actor,
+        run_id,
+        &gate_ref,
+        Some(account_id),
+        setup_challenge(),
+    );
+    let (service, flow_manager, coordinator) =
+        service_parts(flow.clone(), vec![flow], actor.clone(), gate_ref.clone());
+    coordinator.set_resume_error(TurnError::InvalidRequest {
+        reason: "coordinator rejected a non-gate request invariant".to_string(),
+    });
+
+    let error = service
+        .resolve(ResolveAuthInteractionRequest {
+            scope,
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: AuthInteractionDecision::CredentialProvided {
+                credential_ref: account_id,
+            },
+            idempotency_key: IdempotencyKey::new("auth-invalid-request").unwrap(),
+        })
+        .await
+        .expect_err("a non-stale coordinator rejection must remain retryable");
+
+    assert!(matches!(
+        error,
+        ProductWorkflowError::TurnSubmissionFailed {
+            error: TurnError::InvalidRequest { .. }
+        }
+    ));
+    assert!(!flow_manager.resolution_was_delivered());
+    assert_eq!(coordinator.resumes().len(), 1);
 }
 
 #[tokio::test]
@@ -2096,7 +2163,7 @@ async fn stale_missing_terminal_and_newer_auth_resolution_deliveries_are_ignored
 }
 
 #[tokio::test]
-async fn duplicate_delivery_and_final_cancel_race_have_no_second_effect() {
+async fn concurrent_duplicate_delivery_replays_one_idempotent_resume_effect() {
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let scope = turn_scope("alice", "dispatcher-duplicate");
     let run_id = TurnRunId::new();
@@ -2105,6 +2172,7 @@ async fn duplicate_delivery_and_final_cancel_race_have_no_second_effect() {
         actor.clone(),
         gate_ref.clone(),
     ));
+    coordinator.hold_concurrent_resumes_after_reads(Arc::new(Barrier::new(2)));
     let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator.clone());
     let event = auth_resolution(
         &scope,
@@ -2113,20 +2181,26 @@ async fn duplicate_delivery_and_final_cancel_race_have_no_second_effect() {
         &gate_ref,
         AuthFlowOutcome::ProviderDenied,
     );
-    assert!(matches!(
-        dispatcher
-            .dispatch_auth_resolved(event.clone())
-            .await
-            .unwrap(),
-        AuthResolutionDispatchOutcome::Resumed(_)
-    ));
-    coordinator.set_status(TurnStatus::Queued);
-    assert_eq!(
-        dispatcher.dispatch_auth_resolved(event).await.unwrap(),
-        AuthResolutionDispatchOutcome::Ignored
+    let (first, second) = tokio::join!(
+        dispatcher.dispatch_auth_resolved(event.clone()),
+        dispatcher.dispatch_auth_resolved(event),
     );
-    assert_eq!(coordinator.resumes().len(), 1);
+    let first = first.expect("first delivery returns the operation result");
+    let second = second.expect("coordinator replay returns the operation result");
 
+    assert!(matches!(first, AuthResolutionDispatchOutcome::Resumed(_)));
+    assert!(matches!(second, AuthResolutionDispatchOutcome::Resumed(_)));
+    assert_eq!(coordinator.resumes().len(), 2);
+    assert_eq!(coordinator.resume_effect_count(), 1);
+    assert_eq!(coordinator.status(), TurnStatus::Queued);
+}
+
+#[tokio::test]
+async fn final_cancel_race_has_no_effect() {
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let scope = turn_scope("alice", "dispatcher-cancel-race");
+    let run_id = TurnRunId::new();
+    let gate_ref = make_gate_ref("gate:dispatcher-cancel-race");
     let abort_coordinator = Arc::new(RecordingTurnCoordinator::blocked_auth(
         actor.clone(),
         gate_ref.clone(),
