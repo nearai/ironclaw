@@ -124,6 +124,51 @@ async fn capability_host_returns_approval_store_missing_when_approval_cannot_be_
     assert!(!dispatcher.has_request());
 }
 
+/// Credential pre-flight (§5.3.2/§9) must run inside `authorize()` BEFORE the
+/// approval decision: a missing credential surfaces as
+/// `AuthorizationRequiresAuth`, never the approval outcome.
+///
+/// The authorizer here (`ApprovalAuthorizer`) would `RequireApproval` — and with
+/// no approval stores wired the approval path returns `ApprovalStoreMissing`
+/// (see `capability_host_returns_approval_store_missing_...` above). Proving we
+/// instead get `AuthorizationRequiresAuth` proves the credential check ordered
+/// ahead of the approval decision, so a human approval is never consumed for an
+/// action blocked on a missing credential. Regression for the credential
+/// pre-flight relocation from host_runtime into the kernel.
+#[tokio::test]
+async fn capability_host_missing_credential_blocks_before_approval_decision() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = RecordingDispatcher::default();
+    let host = capability_host_with_policy_facts(
+        &registry,
+        &dispatcher,
+        &ApprovalAuthorizer,
+        &MissingCredentialPolicyFacts,
+    );
+    let context = execution_context(CapabilitySet {
+        grants: vec![dispatch_grant()],
+    });
+
+    let err = host
+        .invoke_json(CapabilityInvocationRequest {
+            context,
+            capability_id: capability_id(),
+            estimate: ResourceEstimate::default(),
+            input: json!({"message": "needs credential"}),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            CapabilityInvocationError::AuthorizationRequiresAuth { .. }
+        ),
+        "credential pre-flight must fire before the approval decision; got {err:?}"
+    );
+    assert!(!dispatcher.has_request());
+}
+
 #[tokio::test]
 async fn capability_host_fails_closed_on_unsupported_obligations_before_dispatch() {
     let registry = registry_with_echo_capability();

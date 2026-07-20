@@ -533,39 +533,13 @@ impl HostRuntime for DefaultHostRuntime {
             return Err(HostRuntimeError::invalid_request(error.to_string()));
         }
 
-        // Pre-flight credential check: surface AuthRequired BEFORE the approval
-        // gate fires. This prevents a human approval being consumed for an action
-        // that cannot yet succeed because a required credential is missing.
-        //
-        // Design note: the pre-flight is trust-class-agnostic by design — it runs
-        // before the authorizer and trust/authorization checks. The dispatch-time
-        // obligation check (which runs after those checks) is the enforcing layer.
-        // The pre-flight provides ordering only (credentials before approval gate).
-        let credential_preflight_started_at = live_latency_started_at();
-        if let Some(auth_required) = self
-            .credential_preflight_check(&capability_id, &scope, &registry)
-            .await
-        {
-            trace_capability_latency_ok(
-                "credential_preflight_check",
-                &capability_id,
-                &scope,
-                credential_preflight_started_at,
-            );
-            trace_capability_latency_ok(
-                "invoke_capability_auth_required",
-                &capability_id,
-                &scope,
-                total_started_at,
-            );
-            return Ok(auth_required);
-        }
-        trace_capability_latency_ok(
-            "credential_preflight_check",
-            &capability_id,
-            &scope,
-            credential_preflight_started_at,
-        );
+        // Credential pre-flight now runs inside the capability kernel's
+        // `authorize()` fold (§5.3.2/§9), reading `HostPolicyFacts` (impl'd by
+        // this runtime). A missing credential surfaces as
+        // `CapabilityInvocationError::AuthorizationRequiresAuth`, which
+        // `translate_invocation_error` maps back to `auth_required_outcome`
+        // (same gate id, same fields). The kernel orders it before the approval
+        // decision, preserving the credential-before-approval invariant.
 
         let approval_started_at = live_latency_started_at();
         self.apply_persistent_approval_policy(
@@ -703,16 +677,9 @@ impl HostRuntime for DefaultHostRuntime {
             return Err(HostRuntimeError::invalid_request(error.to_string()));
         }
 
-        // Pre-flight credential check: surface AuthRequired BEFORE the approval
-        // gate fires. The pre-flight is trust-class-agnostic by design — the
-        // dispatch-time obligation check (which runs after trust/authorization)
-        // is the enforcing layer.
-        if let Some(auth_required) = self
-            .credential_preflight_check(&capability_id, &scope, &registry)
-            .await
-        {
-            return Ok(auth_required);
-        }
+        // Credential pre-flight now runs inside the kernel's spawn authorize fold
+        // (§5.3.2/§9) via `HostPolicyFacts`, surfacing a missing credential as
+        // `AuthorizationRequiresAuth` before the spawn-approval decision.
 
         self.apply_persistent_approval_policy(
             &mut context,
@@ -1261,6 +1228,10 @@ impl DefaultHostRuntime {
             self.authorizer.as_ref(),
             self.trust_policy.as_ref(),
             &self.runtime_policy,
+            // `DefaultHostRuntime` supplies the host-mediated policy facts the
+            // kernel's `authorize()` fold reads (credential pre-flight); `self`
+            // coerces to `&dyn HostPolicyFacts`.
+            self,
         );
         if let Some(run_state_approval_store) = &self.run_state_approval_store {
             host = host.with_run_state_approval_store(run_state_approval_store.as_ref());
@@ -1706,91 +1677,140 @@ impl DefaultHostRuntime {
             .map_err(unavailable_from_run_state)?;
         Ok(record.and_then(|record| record.approval_request_id))
     }
+}
 
-    /// Checks whether all required credentials declared in the capability
-    /// manifest are present in the secret store.
-    ///
-    /// `registry` is the already-snapshotted registry from the caller; the
-    /// caller is responsible for taking a single snapshot and passing it here
-    /// to avoid a redundant `registry.snapshot()` inside this method.
-    ///
-    /// Returns `Some(RuntimeCapabilityOutcome::AuthRequired)` if any required
-    /// secret is absent, or `None` when all secrets are present (or when no
-    /// secret store is wired, i.e. pre-flight is disabled).
-    ///
-    /// The dispatch-time obligation check remains the enforcement backstop —
-    /// this method provides ordering only (credentials before approval gate).
-    ///
-    /// ## Failure handling
-    ///
-    /// On a transient secret-store `Err`, the pre-flight is skipped entirely
-    /// (returns `None`) rather than treating the error as "credential absent"
-    /// and firing `AuthRequired`. A backend failure must not burn a user auth
-    /// interaction — the dispatch-time obligation check enforces the credential
-    /// requirement and will catch genuine absences at execution time.
-    async fn credential_preflight_check(
+/// `DefaultHostRuntime` is the sole production implementor of the kernel's
+/// [`ironclaw_capabilities::HostPolicyFacts`] port (§5.3.2/§9). It surfaces
+/// host-mediated policy *facts* — never a verdict — that the capability kernel's
+/// `authorize()` fold maps into the sealed authorization result:
+///
+/// - [`credential_presence`](DefaultHostRuntime::credential_presence) is the
+///   relocation of the former `credential_preflight_check`; and
+/// - [`persistent_grants`](DefaultHostRuntime::persistent_grants) mirrors the
+///   persistent-approval lookup in
+///   [`apply_persistent_approval_policy`](DefaultHostRuntime::apply_persistent_approval_policy).
+///   It is implemented now but not yet consumed by the kernel — the approval
+///   relocation slice wires the re-authorize loop that reads it.
+#[async_trait]
+impl ironclaw_capabilities::HostPolicyFacts for DefaultHostRuntime {
+    async fn credential_presence(
         &self,
         capability_id: &CapabilityId,
         scope: &ResourceScope,
-        registry: &ExtensionRegistry,
-    ) -> Option<RuntimeCapabilityOutcome> {
-        let secret_store = self.credential_preflight_store.as_ref()?;
+    ) -> ironclaw_capabilities::CredentialPresence {
+        use ironclaw_capabilities::CredentialPresence;
 
-        let descriptor = registry.get_capability(capability_id)?;
-
-        let (required_secrets, credential_requirements) =
-            capability_credential_requirements(descriptor);
-
+        // No store wired ⇒ pre-flight disabled (as before): treat as satisfied so
+        // the kernel proceeds and the dispatch-time obligation check enforces.
+        let Some(secret_store) = self.credential_preflight_store.as_ref() else {
+            return CredentialPresence::Satisfied;
+        };
+        // The kernel already validated the descriptor exists; if this fresh
+        // snapshot cannot see it there is nothing to pre-flight — satisfied.
+        let registry = self.registry.snapshot();
+        let Some(descriptor) = registry.get_capability(capability_id) else {
+            return CredentialPresence::Satisfied;
+        };
+        let (required_secrets, requirements) = capability_credential_requirements(descriptor);
         if required_secrets.is_empty() {
-            return None;
+            return CredentialPresence::Satisfied;
         }
 
         for handle in &required_secrets {
-            // `secret_owner_scope` is the single owner of the presence+ownership rule,
-            // shared with the dispatch-time obligation backstop
-            // (obligations::preflight_secret_injection / inject_secrets) so the paths
-            // cannot drift on "what counts as a present credential" or "which scope owns
-            // it". Here we only need presence (Some vs None) for gate ordering; the happy
-            // path intentionally re-checks at dispatch time, where the backstop is the
-            // authority. (Accepted double-read.)
-            match secret_owner_scope(secret_store.as_ref(), scope, handle)
-                .await
-                .map(|owner| owner.is_some())
-            {
-                Ok(true) => {
-                    // Secret present — continue checking.
+            // `secret_owner_scope` is the single owner of the presence+ownership
+            // rule, shared with the dispatch-time obligation backstop so the two
+            // paths cannot drift on "what counts as a present credential". Here we
+            // need presence only (Some vs None) for gate ordering.
+            match secret_owner_scope(secret_store.as_ref(), scope, handle).await {
+                Ok(Some(_)) => {
+                    // Present — keep checking the remaining handles.
                 }
-                Ok(false) => {
+                Ok(None) => {
                     tracing::debug!(
                         capability_id = %capability_id,
                         secret_handle = handle.as_str(),
-                        "credential pre-flight: required secret absent; surfacing AuthRequired before approval gate"
+                        "credential pre-flight (kernel): required secret absent; surfacing AuthRequired before approval gate"
                     );
-                    return Some(auth_required_outcome(
-                        capability_id.clone(),
+                    return CredentialPresence::Missing {
                         required_secrets,
-                        credential_requirements,
-                    ));
+                        requirements,
+                    };
                 }
                 Err(error) => {
-                    // Fail-open: a transient store error must not masquerade as a
-                    // missing credential and burn a user auth interaction. Skip the
-                    // pre-flight entirely — the dispatch-time obligation check is the
-                    // enforcement backstop and will catch genuine absences at execution
-                    // time. The cause is logged (sanitized; SecretStoreError carries no
-                    // raw secret material) so a backend outage still leaves a trail.
+                    // Fail-open: a transient store fault must not masquerade as a
+                    // missing credential and burn a user auth interaction. The
+                    // kernel maps `Indeterminate` to "skip the pre-flight"; the
+                    // dispatch-time obligation check is the enforcing backstop.
                     tracing::debug!(
                         capability_id = %capability_id,
                         secret_handle = handle.as_str(),
                         error = %error,
-                        "credential pre-flight: secret store metadata query failed; skipping pre-flight (dispatch-time check enforces)"
+                        "credential pre-flight (kernel): secret store metadata query failed; treating as indeterminate (dispatch-time check enforces)"
                     );
-                    return None; // silent-ok: transient store error must not burn a user auth interaction; dispatch-time obligation check is the backstop
+                    return CredentialPresence::Indeterminate;
                 }
             }
         }
 
-        None
+        CredentialPresence::Satisfied
+    }
+
+    async fn persistent_grants(
+        &self,
+        capability_id: &CapabilityId,
+        scope: &ResourceScope,
+        action: ironclaw_capabilities::PolicyAction,
+    ) -> Vec<ironclaw_host_api::CapabilityGrant> {
+        let Some(policies) = self.persistent_approval_policies.as_ref() else {
+            return Vec::new();
+        };
+        let action = match action {
+            ironclaw_capabilities::PolicyAction::Dispatch => PersistentApprovalAction::Dispatch,
+            ironclaw_capabilities::PolicyAction::SpawnCapability => {
+                PersistentApprovalAction::SpawnCapability
+            }
+        };
+        // Mirror `apply_persistent_approval_policy`'s scope × grantee fan-out.
+        //
+        // Grantees are derived from the `ResourceScope` alone, which carries no
+        // `extension_id` — so the `Principal::Extension` grantee that
+        // `apply_persistent_approval_policy` also probes cannot be reproduced
+        // here. This method is not yet consumed by the kernel; the approval
+        // relocation slice that wires the re-authorize loop must thread the
+        // extension identity (or evolve this port) to recover extension-grantee
+        // policies. Scope-derived grantees (user/agent/project/mission) match the
+        // settings-page policies that dominate lookup order today.
+        let scopes = persistent_approval_lookup_scopes(scope);
+        let grantees = persistent_approval_grantees_from_scope(scope);
+        let mut grants = Vec::new();
+        for policy_scope in &scopes {
+            for grantee in &grantees {
+                let key = PersistentApprovalPolicyKey {
+                    scope: policy_scope.clone(),
+                    action,
+                    capability_id: capability_id.clone(),
+                    grantee: grantee.clone(),
+                };
+                match policies.lookup(&key).await {
+                    Ok(Some(policy)) => {
+                        if let Some(grant) = policy.active_grant() {
+                            grants.push(grant);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        // A lookup fault yields no synthesized grant; skip the
+                        // entry and fall back to normal authorization.
+                        tracing::warn!(
+                            capability_id = %capability_id,
+                            error = %error,
+                            "persistent approval policy lookup failed; skipping grant"
+                        );
+                    }
+                }
+            }
+        }
+        grants
     }
 }
 
@@ -2223,6 +2243,27 @@ fn persistent_approval_grantees(context: &ironclaw_host_api::ExecutionContext) -
     // `ApprovalRequest.requested_by`, which is `Principal::User` or
     // `Principal::Extension`), so looking one up could never match. Persistent
     // approvals are deliberately thread-agnostic (see #4825).
+    grantees
+}
+
+/// Scope-derived grantees for the `HostPolicyFacts::persistent_grants` lookup.
+///
+/// A [`ResourceScope`] carries no `extension_id`, so — unlike
+/// [`persistent_approval_grantees`], which derives from a full
+/// `ExecutionContext` — this cannot include the `Principal::Extension` grantee.
+/// See the note on `DefaultHostRuntime::persistent_grants`; the method is not
+/// yet consumed, and the wiring slice must recover the extension grantee.
+fn persistent_approval_grantees_from_scope(scope: &ResourceScope) -> Vec<Principal> {
+    let mut grantees = vec![Principal::User(scope.user_id.clone())];
+    if let Some(agent_id) = &scope.agent_id {
+        grantees.push(Principal::Agent(agent_id.clone()));
+    }
+    if let Some(project_id) = &scope.project_id {
+        grantees.push(Principal::Project(project_id.clone()));
+    }
+    if let Some(mission_id) = &scope.mission_id {
+        grantees.push(Principal::Mission(mission_id.clone()));
+    }
     grantees
 }
 

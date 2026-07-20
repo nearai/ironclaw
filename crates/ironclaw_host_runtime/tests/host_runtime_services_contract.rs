@@ -5896,6 +5896,7 @@ async fn spawned_obligation_lifecycle_abort_cleans_up_when_process_start_fails()
         fixture.authorizer.as_ref(),
         &trust_policy,
         &runtime_policy,
+        &PermissiveHostPolicyFacts,
     )
     .with_obligation_handler(fixture.handler.as_ref())
     .with_process_manager(&failing_manager);

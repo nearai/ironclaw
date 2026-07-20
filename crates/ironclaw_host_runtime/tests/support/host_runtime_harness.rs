@@ -19,7 +19,8 @@ use ironclaw_authorization::{
 };
 use ironclaw_capabilities::{
     CapabilityHost, CapabilityObligationHandler, CapabilityObligationPhase,
-    CapabilityObligationRequest, CapabilitySpawnRequest,
+    CapabilityObligationRequest, CapabilitySpawnRequest, CredentialPresence, HostPolicyFacts,
+    PolicyAction,
 };
 use ironclaw_events::{
     DurableAuditLog, EventCursor, EventError, EventReplay, EventStreamKey, InMemoryAuditSink,
@@ -83,6 +84,33 @@ use ironclaw_wasm::{
 use serde_json::json;
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
 use wit_parser::Resolve;
+
+/// Permissive [`HostPolicyFacts`] double for kernel-tier `CapabilityHost` tests:
+/// every credential is present and no persistent grants exist, so the in-fold
+/// credential pre-flight (§5.3.2/§9) never fires. Production credential
+/// pre-flight behavior is covered through the `DefaultHostRuntime` caller in the
+/// host_runtime integration suites, not here.
+pub(crate) struct PermissiveHostPolicyFacts;
+
+#[async_trait]
+impl HostPolicyFacts for PermissiveHostPolicyFacts {
+    async fn credential_presence(
+        &self,
+        _capability_id: &CapabilityId,
+        _scope: &ResourceScope,
+    ) -> CredentialPresence {
+        CredentialPresence::Satisfied
+    }
+
+    async fn persistent_grants(
+        &self,
+        _capability_id: &CapabilityId,
+        _scope: &ResourceScope,
+        _action: PolicyAction,
+    ) -> Vec<CapabilityGrant> {
+        Vec::new()
+    }
+}
 
 /// Construct an [`Arc<ScopedFilesystem<LibSqlRootFilesystem>>`] that exposes
 /// the `/turns` mount alias over a libSQL-backed [`RootFilesystem`]. Mirrors
@@ -1034,6 +1062,7 @@ impl SpawnObligationFixture {
             self.authorizer.as_ref(),
             &trust_policy,
             &runtime_policy,
+            &PermissiveHostPolicyFacts,
         )
         .with_obligation_handler(self.handler.as_ref())
         .with_process_manager(self.process_manager.as_ref());

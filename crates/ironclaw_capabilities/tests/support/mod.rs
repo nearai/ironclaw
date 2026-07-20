@@ -10,7 +10,7 @@ use std::sync::LazyLock;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::*;
-use ironclaw_capabilities::CapabilityHost;
+use ironclaw_capabilities::{CapabilityHost, CredentialPresence, HostPolicyFacts, PolicyAction};
 use ironclaw_extensions::*;
 use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, FilesystemBackendKind, NetworkMode,
@@ -53,6 +53,68 @@ static DEFAULT_RUNTIME_POLICY: LazyLock<EffectiveRuntimePolicy> =
         audit_mode: AuditMode::LocalMinimal,
     });
 
+/// Permissive `HostPolicyFacts` double: every credential is present and no
+/// persistent grants exist, so the kernel's in-fold credential pre-flight
+/// (§5.3.2/§9) never fires and existing test outcomes are unchanged.
+pub struct PermissiveHostPolicyFacts;
+
+#[async_trait]
+impl HostPolicyFacts for PermissiveHostPolicyFacts {
+    async fn credential_presence(
+        &self,
+        _capability_id: &CapabilityId,
+        _scope: &ResourceScope,
+    ) -> CredentialPresence {
+        CredentialPresence::Satisfied
+    }
+
+    async fn persistent_grants(
+        &self,
+        _capability_id: &CapabilityId,
+        _scope: &ResourceScope,
+        _action: PolicyAction,
+    ) -> Vec<CapabilityGrant> {
+        Vec::new()
+    }
+}
+
+static DEFAULT_POLICY_FACTS: LazyLock<PermissiveHostPolicyFacts> =
+    LazyLock::new(|| PermissiveHostPolicyFacts);
+
+/// `HostPolicyFacts` double whose credential pre-flight always reports a missing
+/// credential (one required secret + one requirement). Drives the
+/// credential-before-approval regression: the kernel must return
+/// `AuthorizationRequiresAuth` before the authorizer's approval decision.
+pub struct MissingCredentialPolicyFacts;
+
+#[async_trait]
+impl HostPolicyFacts for MissingCredentialPolicyFacts {
+    async fn credential_presence(
+        &self,
+        _capability_id: &CapabilityId,
+        _scope: &ResourceScope,
+    ) -> CredentialPresence {
+        CredentialPresence::Missing {
+            required_secrets: vec![SecretHandle::new("test_missing_token").unwrap()],
+            requirements: vec![RuntimeCredentialAuthRequirement {
+                provider: RuntimeCredentialAccountProviderId::new("test_provider").unwrap(),
+                setup: RuntimeCredentialAccountSetup::ManualToken,
+                requester_extension: ExtensionId::new("caller").unwrap(),
+                provider_scopes: Vec::new(),
+            }],
+        }
+    }
+
+    async fn persistent_grants(
+        &self,
+        _capability_id: &CapabilityId,
+        _scope: &ResourceScope,
+        _action: PolicyAction,
+    ) -> Vec<CapabilityGrant> {
+        Vec::new()
+    }
+}
+
 /// Central constructor for `CapabilityHost` in tests.
 ///
 /// Every test builds its host through this helper instead of calling
@@ -74,6 +136,30 @@ where
         authorizer,
         &*DEFAULT_TRUST_POLICY,
         &DEFAULT_RUNTIME_POLICY,
+        &*DEFAULT_POLICY_FACTS,
+    )
+}
+
+/// `capability_host` variant that injects a caller-supplied [`HostPolicyFacts`]
+/// double (trust and runtime policy stay the permissive defaults). Use when a
+/// test needs the kernel's in-fold credential pre-flight to fire — e.g. the
+/// credential-before-approval regression with [`MissingCredentialPolicyFacts`].
+pub fn capability_host_with_policy_facts<'a, D>(
+    registry: &'a ExtensionRegistry,
+    dispatcher: &'a D,
+    authorizer: &'a dyn TrustAwareCapabilityDispatchAuthorizer,
+    policy_facts: &'a dyn HostPolicyFacts,
+) -> CapabilityHost<'a, D>
+where
+    D: CapabilityDispatcher + ?Sized,
+{
+    CapabilityHost::new(
+        registry,
+        dispatcher,
+        authorizer,
+        &*DEFAULT_TRUST_POLICY,
+        &DEFAULT_RUNTIME_POLICY,
+        policy_facts,
     )
 }
 
@@ -116,6 +202,7 @@ where
         authorizer,
         trust_policy,
         &DEFAULT_RUNTIME_POLICY,
+        &*DEFAULT_POLICY_FACTS,
     )
 }
 

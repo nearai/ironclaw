@@ -32,6 +32,7 @@ use crate::helpers::{
     run_state_error_kind, validate_approval_request_matches_invocation,
 };
 use crate::obligations::post_dispatch_obligations;
+use crate::ports::{CredentialPresence, HostPolicyFacts};
 use crate::{
     CapabilityAuthResumeRequest, CapabilityInvocationError, CapabilityInvocationRequest,
     CapabilityInvocationResult, CapabilityObligationAbortRequest,
@@ -54,6 +55,12 @@ where
     /// Resolved runtime policy the in-fold planner (`plan_capability`) enforces
     /// before dispatch — the relocation of host_runtime's `enforce_runtime_policy`.
     runtime_policy: &'a EffectiveRuntimePolicy,
+    /// Host-mediated policy *facts* the `authorize()` fold reads (§5.3.2/§9).
+    /// Supplies credential-presence facts so a missing credential surfaces as
+    /// `AuthorizationRequiresAuth` *before* the approval decision — the
+    /// relocation of host_runtime's `credential_preflight_check`. Facts only:
+    /// the kernel maps them to the verdict; the port never decides.
+    policy_facts: &'a dyn HostPolicyFacts,
     run_state: Option<&'a dyn RunStateStore>,
     approval_requests: Option<&'a dyn ApprovalRequestStore>,
     run_state_approval_store: Option<&'a dyn RunStateApprovalStore>,
@@ -178,6 +185,7 @@ where
         authorizer: &'a dyn TrustAwareCapabilityDispatchAuthorizer,
         trust_policy: &'a dyn TrustPolicy,
         runtime_policy: &'a EffectiveRuntimePolicy,
+        policy_facts: &'a dyn HostPolicyFacts,
     ) -> Self {
         Self {
             registry,
@@ -185,6 +193,7 @@ where
             authorizer,
             trust_policy,
             runtime_policy,
+            policy_facts,
             run_state: None,
             approval_requests: None,
             run_state_approval_store: None,
@@ -535,6 +544,41 @@ where
                 .await;
             return Err(error);
         }
+
+        // Credential pre-flight (§5.3.2/§9), relocated from host_runtime's
+        // `credential_preflight_check`. Ordered credential-before-approval on
+        // purpose: a missing credential surfaces as `AuthorizationRequiresAuth`
+        // *before* the authorizer's approval decision, so a human approval is
+        // never consumed for an action that cannot yet execute. The port returns
+        // facts only; the kernel maps them. `Indeterminate` (transient store
+        // fault) skips the pre-flight — the dispatch-time obligation check is the
+        // enforcing backstop and a fault must not burn a user auth interaction.
+        match self
+            .policy_facts
+            .credential_presence(&request.capability_id, &scope)
+            .await
+        {
+            CredentialPresence::Satisfied | CredentialPresence::Indeterminate => {}
+            CredentialPresence::Missing {
+                required_secrets,
+                requirements,
+            } => {
+                let error = CapabilityInvocationError::AuthorizationRequiresAuth {
+                    capability: request.capability_id.clone(),
+                    required_secrets,
+                    credential_requirements: requirements,
+                };
+                apply_run_state_transition_if_configured(
+                    self.run_state,
+                    &scope,
+                    invocation_id,
+                    &error,
+                )
+                .await;
+                return Err(error);
+            }
+        }
+
         let mut authorize_context = request.context.clone();
         authorize_context.trust = trust_decision.effective_trust.class();
 
@@ -1958,6 +2002,36 @@ where
                 .await;
             return Err(error);
         }
+
+        // Credential pre-flight on the spawn path, mirroring `authorize()`
+        // (§5.3.2/§9): a missing credential surfaces as `AuthorizationRequiresAuth`
+        // before the spawn-approval decision. Facts only; `Indeterminate` skips.
+        match self
+            .policy_facts
+            .credential_presence(&request.capability_id, &scope)
+            .await
+        {
+            CredentialPresence::Satisfied | CredentialPresence::Indeterminate => {}
+            CredentialPresence::Missing {
+                required_secrets,
+                requirements,
+            } => {
+                let error = CapabilityInvocationError::AuthorizationRequiresAuth {
+                    capability: request.capability_id.clone(),
+                    required_secrets,
+                    credential_requirements: requirements,
+                };
+                apply_run_state_transition_if_configured(
+                    self.run_state,
+                    &scope,
+                    invocation_id,
+                    &error,
+                )
+                .await;
+                return Err(error);
+            }
+        }
+
         let mut authorize_context = request.context.clone();
         authorize_context.trust = trust_decision.effective_trust.class();
 
@@ -3100,6 +3174,30 @@ mod tests {
         }
     }
 
+    // Permissive policy-facts double: credential pre-flight always satisfied and
+    // no persistent grants, so the in-fold credential check never fires.
+    struct SatisfiedPolicyFacts;
+
+    #[async_trait::async_trait]
+    impl HostPolicyFacts for SatisfiedPolicyFacts {
+        async fn credential_presence(
+            &self,
+            _capability_id: &CapabilityId,
+            _scope: &ResourceScope,
+        ) -> CredentialPresence {
+            CredentialPresence::Satisfied
+        }
+
+        async fn persistent_grants(
+            &self,
+            _capability_id: &CapabilityId,
+            _scope: &ResourceScope,
+            _action: crate::ports::PolicyAction,
+        ) -> Vec<ironclaw_host_api::CapabilityGrant> {
+            Vec::new()
+        }
+    }
+
     // `authorize()` never dispatches; this satisfies the `CapabilityHost` type
     // parameter without pulling in the integration-tier recording dispatcher.
     struct UnusedDispatcher;
@@ -3234,12 +3332,14 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
         let authorizer = AllowAuthorizer;
         let trust_policy = StaticTrustPolicy;
         let runtime_policy = permissive_runtime_policy();
+        let policy_facts = SatisfiedPolicyFacts;
         let host = CapabilityHost::new(
             &registry,
             &dispatcher,
             &authorizer,
             &trust_policy,
             &runtime_policy,
+            &policy_facts,
         );
 
         let request = allow_request();
