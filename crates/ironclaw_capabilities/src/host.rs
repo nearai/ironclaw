@@ -730,7 +730,7 @@ where
                 }
                 Ok(AuthorizeFold::Blocked {
                     result: AuthorizeResult::Blocked(Blocked::Approval(GateWaypoint::new(
-                        GateRef::from_uuid(approval_request_id.as_uuid()),
+                        GateRef::for_approval_request(approval_request_id),
                     ))),
                 })
             }
@@ -2036,7 +2036,7 @@ where
                 }
                 Ok(AuthorizeFold::Blocked {
                     result: AuthorizeResult::Blocked(Blocked::Approval(GateWaypoint::new(
-                        GateRef::from_uuid(approval_request_id.as_uuid()),
+                        GateRef::for_approval_request(approval_request_id),
                     ))),
                 })
             }

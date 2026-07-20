@@ -181,7 +181,6 @@ impl LiveProjectionPublisher {
     /// the in-run [`SkillActivationObserver`] only fires at prompt-build for
     /// skill *selection*, so a learned-skill notification has no producer
     /// otherwise. Best-effort — drops silently if names/feedback sanitize empty.
-    #[cfg(feature = "root-llm-provider")]
     pub(crate) fn publish_skill_learned(
         &self,
         owner: Option<&UserId>,

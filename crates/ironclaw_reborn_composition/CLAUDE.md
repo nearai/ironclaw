@@ -54,7 +54,7 @@
   calling `SessionThreadService`; do not append with the runtime/base
   `ThreadScope` directly in multi-user WebUI paths.
 
-## WebUI v2 native surface (`webui-v2-beta` feature)
+## WebUI v2 native surface
 
 The Reborn-side host composition for the WebChat v2 HTTP gateway lives
 in this crate. Implements Path A of
@@ -120,7 +120,7 @@ Inbound order (outer → inner → handler):
    `config.tenant_id` plus the authentication result's `UserId`, and a
    request-scoped `WebUiV2Capabilities` extension from the same
    authentication result.
-   When `openai-compat-beta` is enabled, the same verified bearer result also
+   The same verified bearer result also
    inserts an `OpenAiCompatAuthenticatedCaller` extension with tenant-scoped
    verified auth evidence for protected OpenAI-compatible route mounts; route
    crates must not mint this evidence.

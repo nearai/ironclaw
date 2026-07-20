@@ -1,15 +1,14 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{InvocationId, UserId};
+use ironclaw_host_api::{InvocationId, Resolution, UserId};
 use ironclaw_loop_host::{CapabilityResultWrite, DurablePersistence};
 use ironclaw_product_workflow::{
     ProjectCaller, ProjectService, ProjectServiceError, RebornCreateProjectRequest,
 };
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailure, CapabilityFailureKind,
-    CapabilityOutcome, CapabilityProgress, CapabilityResultMessage, ConcurrencyHint,
-    LoopRunContext,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureKind, CapabilityProgress,
+    ConcurrencyHint, LoopRunContext, resolution,
 };
 
 use crate::runtime::local_dev::synthetic_capability::{
@@ -62,7 +61,7 @@ impl SyntheticCapabilityHandler for ProjectCreateHandler {
     async fn invoke(
         &self,
         invocation: SyntheticCapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         let input = parse_project_create_input(&invocation.input)?;
         // Identity is authority-bearing: the caller is derived from the trusted
         // run scope, never from the model's arguments. The capability accepts
@@ -109,15 +108,15 @@ impl SyntheticCapabilityHandler for ProjectCreateHandler {
                 durable_persistence: DurablePersistence::Persist,
             })
             .await?;
-        Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
-            result_ref: write_result.result_ref,
+        Ok(resolution::completed(
+            write_result.result_ref,
             safe_summary,
-            progress: CapabilityProgress::MadeProgress,
-            terminate_hint: false,
-            byte_len: write_result.byte_len,
-            output_digest: write_result.output_digest,
-            model_observation: write_result.model_observation,
-        }))
+            CapabilityProgress::MadeProgress,
+            false,
+            write_result.byte_len,
+            write_result.output_digest,
+            write_result.model_observation,
+        ))
     }
 }
 
@@ -187,9 +186,7 @@ fn project_create_input_schema() -> serde_json::Value {
 /// genuine internal bug stays terminal — invalid input, conflicts, denials, and
 /// transient unavailability are all surfaced to the model instead of killing
 /// the turn.
-fn project_service_outcome(
-    error: ProjectServiceError,
-) -> Result<CapabilityOutcome, AgentLoopHostError> {
+fn project_service_outcome(error: ProjectServiceError) -> Result<Resolution, AgentLoopHostError> {
     let (error_kind, safe_summary) = match error {
         // Keep the safe summary fixed and host-authored — `field` is a
         // free-form `String` and could carry a forbidden delimiter/marker
@@ -224,11 +221,7 @@ fn project_service_outcome(
             ));
         }
     };
-    Ok(CapabilityOutcome::Failed(CapabilityFailure {
-        error_kind,
-        safe_summary,
-        detail: None,
-    }))
+    Ok(resolution::failed(error_kind, safe_summary, None))
 }
 
 /// Resolve the user the run acts on behalf of: the explicit thread owner, else
@@ -293,12 +286,7 @@ mod tests {
         })
         .expect("invalid input must be a model-visible failure, not terminal");
 
-        match outcome {
-            CapabilityOutcome::Failed(failure) => {
-                assert_eq!(failure.error_kind, CapabilityFailureKind::InvalidInput);
-            }
-            other => panic!("expected CapabilityOutcome::Failed, got {other:?}"),
-        }
+        assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::InvalidInput);
     }
 
     #[test]
@@ -306,11 +294,22 @@ mod tests {
         let outcome = project_service_outcome(ProjectServiceError::Unavailable)
             .expect("transient unavailability must not kill the run");
 
-        match outcome {
-            CapabilityOutcome::Failed(failure) => {
-                assert_eq!(failure.error_kind, CapabilityFailureKind::Unavailable);
-            }
-            other => panic!("expected CapabilityOutcome::Failed, got {other:?}"),
+        assert_recoverable_failure(&outcome, ironclaw_host_api::FailureKind::Unavailable);
+    }
+
+    /// A recoverable model-visible failure is `Resolution::Done` carrying the
+    /// expected `RecoverableFailure` verdict (the §5.3 collapse of the old
+    /// `CapabilityOutcome::Failed`).
+    fn assert_recoverable_failure(
+        resolution: &ironclaw_host_api::Resolution,
+        expected: ironclaw_host_api::FailureKind,
+    ) {
+        match resolution {
+            ironclaw_host_api::Resolution::Done(outcome) => assert_eq!(
+                outcome.verdict,
+                ironclaw_host_api::ToolVerdict::recoverable_failure(expected)
+            ),
+            other => panic!("expected Resolution::Done recoverable failure, got {other:?}"),
         }
     }
 

@@ -886,7 +886,6 @@ mod tests {
     /// OAuth client credentials) must not swallow the whole gate: pre-fix, a
     /// requirements list with `slack_personal` first errored `challenge_for_gate`
     /// entirely and the user got no auth prompt at all.
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn gate_registry_falls_through_unavailable_provider_to_next_requirement() {
         use crate::slack::slack_personal_oauth::SlackPersonalOAuthGateProvider;

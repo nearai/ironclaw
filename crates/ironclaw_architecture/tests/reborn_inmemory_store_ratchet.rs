@@ -115,7 +115,7 @@ const JUSTIFIED_KEEP_INMEMORY_STORES: &[&str] = &[
     //     (`product_extension_host_api_contract_registry`,
     //     `default_host_port_catalog`) into a constructor parameter. ---
     "InMemoryExtensionInstallationStore",
-    // --- Dev/test-only by explicit feature gate (`dev-in-memory-session`).
+    // --- Dev/test-only by explicit feature gate (`test-support`).
     //     The production counterpart already exists and is restart-safe by
     //     being STATELESS: `SignedTokenSessionStore` (HMAC-signed bearers,
     //     signed_session_login.rs); durable revocation is an optional

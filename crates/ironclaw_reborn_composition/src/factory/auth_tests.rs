@@ -711,7 +711,6 @@ async fn oauth_callback_with_lifecycle_activation_activates_and_publishes_extens
     );
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 #[tokio::test]
 async fn slack_oauth_callback_activates_and_publishes_all_personal_tools() {
     let dir = tempfile::tempdir().expect("tempdir");

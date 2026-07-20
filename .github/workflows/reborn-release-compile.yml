@@ -17,7 +17,7 @@ env:
   # Docker changes so this workflow does not depend on the #6122 migration.
   # Keep the production LLM provider explicit even though Cargo defaults also
   # enable it today, so a future default-feature change cannot weaken releases.
-  REBORN_RELEASE_FEATURES: root-llm-provider,webui-v2-beta,slack-v2-host-beta,libsql,postgres,inmemory-turn-state
+  REBORN_RELEASE_FEATURES: libsql,postgres,inmemory-turn-state
 
 jobs:
   compile:
@@ -75,7 +75,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # webui-v2-beta embeds the frontend during compilation and requires Node/pnpm.
+      # The CLI embeds the WebChat v2 frontend during compilation, which requires Node/pnpm.
       - name: Install Node.js for the embedded WebUI
         uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
         with:

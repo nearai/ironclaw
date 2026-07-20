@@ -3,7 +3,6 @@ use ironclaw_runner::model_routes::{
     ModelRouteResolver, ModelSelectionMode, ModelSlot, StaticModelRouteResolver,
 };
 
-#[cfg(feature = "root-llm-provider")]
 use ironclaw_llm::{LlmConfig, NearAiConfig, SessionConfig};
 
 #[test]
@@ -17,7 +16,6 @@ fn active_llm_settings_resolve_to_default_model_route() {
     assert_eq!(route.model_id(), "anthropic/claude-sonnet-4");
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[test]
 fn llm_config_resolves_to_default_model_route_settings() {
     let config = nearai_config("qwen3-coder");
@@ -211,7 +209,6 @@ fn route_validation_rejects_secret_like_model_ids() {
     assert_eq!(error.kind().as_str(), "invalid_route");
 }
 
-#[cfg(feature = "root-llm-provider")]
 fn nearai_config(model: &str) -> LlmConfig {
     LlmConfig {
         backend: "nearai".to_string(),

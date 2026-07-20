@@ -17,9 +17,9 @@ use ironclaw_turns::{
     DefaultTurnLifecycleEventBus, GateRef, GetRunStateRequest, IdempotencyKey,
     InMemoryRunProfileResolver, InMemoryTurnEventSink, InMemoryTurnStateStore,
     InMemoryTurnStateStoreLimits, LifecyclePublicationErrorPort, LifecyclePublishingTurnStateStore,
-    LoopBlockedKind, LoopCheckpointStateRef, LoopExitMapping, LoopGateRef, LoopResultRef,
-    ProductTurnContext, ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest,
-    RetryTurnRequest, RetryTurnResponse, RunOriginAdapter, RunProfileId, RunProfileRequest,
+    LoopBlockedKind, LoopCheckpointStateRef, LoopExitMapping, LoopGateRef, ProductTurnContext,
+    ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest, RetryTurnRequest,
+    RetryTurnResponse, RunOriginAdapter, RunProfileId, RunProfileRequest,
     RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
     SanitizedCancelReason, SanitizedFailure, SourceBindingRef, StaticTurnAdmissionLimitProvider,
     SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
@@ -35,11 +35,7 @@ use ironclaw_turns::{
     TurnSpawnTreePort, TurnSpawnTreeStateStore, TurnStateBlockPersistence, TurnStateStore,
     TurnStatus, TurnSurfaceType,
     events::EventCursor,
-    run_profile::{
-        CapabilityOutcome, LoopGateKind, LoopModelRouteSnapshot, LoopModelUsage,
-        ModelVisibleToolObservation, ObservationTrust, ToolObservationDetail,
-        ToolObservationStatus,
-    },
+    run_profile::{LoopGateKind, LoopModelRouteSnapshot, LoopModelUsage},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
@@ -149,152 +145,6 @@ fn turn_scope_agent_id_is_optional() {
     );
 
     assert_eq!(scope.agent_id, None);
-}
-
-#[test]
-fn subagent_capability_outcomes_round_trip_with_suspension_semantics() {
-    let child_run_id = TurnRunId::new();
-    let result_ref = LoopResultRef::new("result:child").unwrap();
-    let spawned = CapabilityOutcome::SpawnedChildRun {
-        child_run_id,
-        result_ref: result_ref.clone(),
-        safe_summary: "spawned in background".to_string(),
-        byte_len: 0,
-        model_observation: None,
-    };
-    let spawned_json = serde_json::to_value(&spawned).unwrap();
-    // #[serde(default)] ensures legacy wire payloads (without byte_len) decode
-    // cleanly with byte_len = 0. Non-zero values must always round-trip through
-    // serialize→deserialize since byte_len has no skip_serializing_if attribute
-    // (so 0 is also always present on the wire, as this assertion verifies).
-    assert_eq!(
-        spawned_json,
-        serde_json::json!({
-            "spawned_child_run": {
-                "child_run_id": child_run_id,
-                "result_ref": result_ref,
-                "safe_summary": "spawned in background",
-                "byte_len": 0
-            }
-        })
-    );
-    assert!(!spawned.is_suspension());
-    assert_eq!(
-        serde_json::from_value::<CapabilityOutcome>(spawned_json).unwrap(),
-        spawned
-    );
-
-    let gate_ref = LoopGateRef::new("gate:dependent-run").unwrap();
-    let result_ref = LoopResultRef::new("result:dependent-run").unwrap();
-    let awaiting = CapabilityOutcome::AwaitDependentRun {
-        gate_ref: gate_ref.clone(),
-        result_ref: result_ref.clone(),
-        safe_summary: "waiting on child".to_string(),
-        byte_len: 0,
-        model_observation: None,
-    };
-    let awaiting_json = serde_json::to_value(&awaiting).unwrap();
-    assert_eq!(
-        awaiting_json,
-        serde_json::json!({
-            "await_dependent_run": {
-                "gate_ref": gate_ref,
-                "result_ref": result_ref,
-                "safe_summary": "waiting on child",
-                "byte_len": 0
-            }
-        })
-    );
-    assert!(awaiting.is_suspension());
-    assert_eq!(
-        serde_json::from_value::<CapabilityOutcome>(awaiting_json).unwrap(),
-        awaiting
-    );
-}
-
-#[test]
-fn subagent_capability_outcomes_round_trip_with_non_zero_byte_len() {
-    // Verify byte_len survives serde round-trip for BOTH AwaitDependentRun
-    // and SpawnedChildRun (each variant). A regression that silently
-    // decoded byte_len: 0 from the wire would defeat ByteCapStrategy for
-    // exactly these paths.
-    let gate_ref = LoopGateRef::new("gate:test-bytes").expect("valid");
-    let result_ref = LoopResultRef::new("result:test-bytes").expect("valid");
-    let await_dep = CapabilityOutcome::AwaitDependentRun {
-        gate_ref,
-        result_ref,
-        safe_summary: "await large".to_string(),
-        byte_len: 48_500,
-        model_observation: None,
-    };
-    let json = serde_json::to_value(&await_dep).expect("serialize");
-    let decoded: CapabilityOutcome = serde_json::from_value(json).expect("decode");
-    if let CapabilityOutcome::AwaitDependentRun { byte_len, .. } = decoded {
-        assert_eq!(byte_len, 48_500);
-    } else {
-        panic!("expected AwaitDependentRun variant");
-    }
-
-    let child_run_id = TurnRunId::new();
-    let result_ref = LoopResultRef::new("result:child-bytes").expect("valid");
-    let spawn = CapabilityOutcome::SpawnedChildRun {
-        child_run_id,
-        result_ref,
-        safe_summary: "spawn large".to_string(),
-        byte_len: 60_000,
-        model_observation: None,
-    };
-    let json = serde_json::to_value(&spawn).expect("serialize");
-    let decoded: CapabilityOutcome = serde_json::from_value(json).expect("decode");
-    if let CapabilityOutcome::SpawnedChildRun { byte_len, .. } = decoded {
-        assert_eq!(byte_len, 60_000);
-    } else {
-        panic!("expected SpawnedChildRun variant");
-    }
-}
-
-#[test]
-fn subagent_capability_outcomes_round_trip_model_observation() {
-    let result_ref = LoopResultRef::new("result:child-observation").expect("valid");
-    let observation = ModelVisibleToolObservation {
-        schema_version: 1,
-        status: ToolObservationStatus::Success,
-        summary: "Use result_read to continue this child result.".to_string(),
-        detail: ToolObservationDetail::ResultReference {
-            result_ref: result_ref.as_str().to_string(),
-            byte_len: 2_048,
-            preview: Some("first bounded chunk".to_string()),
-            total_bytes: Some(4_096),
-            next_offset: Some(2_048),
-            item_count: None,
-        },
-        artifacts: Vec::new(),
-        recovery: None,
-        trust: ObservationTrust::UntrustedToolOutput,
-    };
-    let spawned = CapabilityOutcome::SpawnedChildRun {
-        child_run_id: TurnRunId::new(),
-        result_ref: result_ref.clone(),
-        safe_summary: "spawned child".to_string(),
-        byte_len: 2_048,
-        model_observation: Some(observation.clone()),
-    };
-    let awaiting = CapabilityOutcome::AwaitDependentRun {
-        gate_ref: LoopGateRef::new("gate:child-observation").expect("valid"),
-        result_ref,
-        safe_summary: "awaiting child".to_string(),
-        byte_len: 2_048,
-        model_observation: Some(observation),
-    };
-
-    for outcome in [spawned, awaiting] {
-        let serialized = serde_json::to_value(&outcome).expect("serialize");
-        assert!(serialized.to_string().contains("next_offset"));
-        assert_eq!(
-            serde_json::from_value::<CapabilityOutcome>(serialized).expect("deserialize"),
-            outcome
-        );
-    }
 }
 
 #[test]

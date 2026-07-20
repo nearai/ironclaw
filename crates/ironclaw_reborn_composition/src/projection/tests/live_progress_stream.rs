@@ -343,7 +343,6 @@ async fn live_assistant_text_burst_stays_subscribed_and_flushes_before_tool_acti
 // projection stream as a `SkillActivation` item (regression: the live
 // `SkillActivation` envelope was silently dropped before reaching the SSE
 // drain, so users never saw "learned a skill" feedback).
-#[cfg(feature = "root-llm-provider")]
 #[tokio::test]
 async fn webui_event_stream_drains_skill_learned_projection_from_update_source() {
     let fixture = live_projection_fixture("webui-skill-learned");
@@ -396,7 +395,6 @@ async fn webui_event_stream_drains_skill_learned_projection_from_update_source()
 // only on a fresh `after_cursor: None` subscription. The earlier
 // `*_from_update_source` test (publish-then-fresh-drain) passed while real
 // users still saw nothing, because it never exercised the resume path.
-#[cfg(feature = "root-llm-provider")]
 #[tokio::test]
 async fn skill_learned_bubble_delivers_when_sse_resumes_from_advanced_durable_cursor() {
     let tenant_id = TenantId::new("skill-resume-tenant").unwrap();

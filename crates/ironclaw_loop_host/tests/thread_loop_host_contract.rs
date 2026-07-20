@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    AgentId, CapabilityId, DispatchInputIssueCode, MissionId, ProjectId, ProviderToolName,
-    ResourceScope, TenantId, ThreadId, UserId,
+    AgentId, CapabilityId, DenyReason, DispatchInputIssueCode, MissionId, ProjectId,
+    ProviderToolName, Resolution, ResolutionBatch, ResourceScope, TenantId, ThreadId, UserId,
 };
 use ironclaw_loop_host::{
     EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
@@ -43,9 +43,8 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
         AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityBatchInvocation,
-        CapabilityBatchOutcome, CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInputIssue,
-        CapabilityInputRef, CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
-        FinalizeAssistantMessage, HostManagedLoopPromptPort,
+        CapabilityDeniedReasonKind, CapabilityInputIssue, CapabilityInputRef, CapabilityInvocation,
+        CapabilitySurfaceVersion, FinalizeAssistantMessage, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
         InMemoryRunProfileResolver, LoopCapabilityPort, LoopContextBundle,
         LoopContextCompactionKind, LoopContextMessage, LoopContextPort, LoopContextRequest,
@@ -57,7 +56,7 @@ use ironclaw_turns::{
         ParentLoopOutput, PersonalContextPolicy, PromptMode, PromptSkillContextMetadata,
         ProviderToolCallReference, ProviderToolDefinition, SkillVisibility, ToolObservationDetail,
         ToolObservationStatus, UpdateAssistantDraft, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        VisibleCapabilitySurface, resolution,
     },
 };
 use tracing_test::traced_test;
@@ -3041,10 +3040,17 @@ async fn empty_capability_batch_returns_typed_denial_reason() {
         .await
         .unwrap();
 
+    // The loop-side `EmptySurface` reason has no host_api `DenyReason` tag, so the
+    // §5.3 collapse buckets it into `PolicyDenied`; the empty-surface specificity
+    // survives on the denial summary instead of the typed reason.
     assert!(matches!(
-        outcome.outcomes.as_slice(),
-        [CapabilityOutcome::Denied(denied)]
-            if denied.reason_kind == CapabilityDeniedReasonKind::EmptySurface
+        outcome.resolutions.as_slice(),
+        [Resolution::Denied(denied)]
+            if denied.reason_kind == Some(DenyReason::PolicyDenied)
+                && denied
+                    .summary
+                    .as_ref()
+                    .is_some_and(|summary| summary.as_str().contains("capabilities"))
     ));
 }
 
@@ -4927,28 +4933,31 @@ impl LoopCapabilityPort for StaticToolDefinitionPort {
     async fn invoke_capability(
         &self,
         _request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
-        Ok(CapabilityOutcome::Denied(CapabilityDenied {
-            reason_kind: CapabilityDeniedReasonKind::EmptySurface,
-            safe_summary: "test capability port does not execute tools".to_string(),
-        }))
+    ) -> Result<Resolution, AgentLoopHostError> {
+        Ok(resolution::denied(
+            CapabilityDeniedReasonKind::EmptySurface,
+            "test capability port does not execute tools".to_string(),
+        )
+        .resolution)
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-        Ok(CapabilityBatchOutcome {
-            outcomes: request
-                .invocations
-                .into_iter()
-                .map(|_| {
-                    CapabilityOutcome::Denied(CapabilityDenied {
-                        reason_kind: CapabilityDeniedReasonKind::EmptySurface,
-                        safe_summary: "test capability port does not execute tools".to_string(),
-                    })
-                })
-                .collect(),
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
+        let resolutions = request
+            .invocations
+            .into_iter()
+            .map(|_| {
+                resolution::denied(
+                    CapabilityDeniedReasonKind::EmptySurface,
+                    "test capability port does not execute tools".to_string(),
+                )
+                .resolution
+            })
+            .collect();
+        Ok(ResolutionBatch {
+            resolutions,
             stopped_on_suspension: false,
         })
     }

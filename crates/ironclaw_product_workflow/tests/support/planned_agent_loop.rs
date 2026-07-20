@@ -10,8 +10,8 @@ use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
     ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant, MountPermissions,
-    MountView, NetworkPolicy, Principal, ResourceScope, RuntimeKind, TenantId, ThreadId,
-    TrustClass, UserId, VirtualPath,
+    MountView, NetworkPolicy, Principal, Resolution, ResolutionBatch, ResourceScope, RuntimeKind,
+    TenantId, ThreadId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{CapabilitySurfacePolicy, SurfaceKind};
 use ironclaw_loop_host::{
@@ -63,13 +63,13 @@ use ironclaw_turns::{
     SanitizedCancelReason, TurnActor, TurnCoordinator, TurnRunId, TurnRunState, TurnRunWake,
     TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
-        AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome,
-        CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
-        CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilitySurfaceVersion,
-        ConcurrencyHint, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
-        LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken,
-        LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard, ParentLoopOutput, PromptMode,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        AgentLoopHostError, CapabilityBatchInvocation, CapabilityCallCandidate,
+        CapabilityDescriptorView, CapabilityInputRef, CapabilityInvocation,
+        CapabilitySurfaceVersion, ConcurrencyHint, InMemoryLoopHostMilestoneSink,
+        InstructionSafetyContext, LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken,
+        LoopInputCursorToken, LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard,
+        ParentLoopOutput, PromptMode, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        resolution,
     },
 };
 use tokio::time::{sleep, timeout};
@@ -294,8 +294,33 @@ impl ProductLiveAgentLoopHarness {
         let cancellation_factory = Arc::new(ReadyRunCancellationFactory::default());
         let capability_invocations = Arc::new(Mutex::new(Vec::new()));
         let capability_results = Arc::new(Mutex::new(Vec::new()));
+        // The durable gate-record store is shared between the ProductLive
+        // capability port (which persists the record) and the turn executor
+        // (which re-sources an auth block's credential requirements from it,
+        // §5.2.9). Capture it here so the SAME store is wired into both — else the
+        // executor gets `None` and an auth block is applied with empty
+        // requirements / fails the exit (#6287 IronLoop). `None` for the
+        // non-ProductLive fakes (which do not persist gate records), preserving
+        // the executor's tolerant "no store wired" path.
+        let mut turn_executor_gate_store: Option<Arc<dyn ironclaw_run_state::GateRecordStore>> =
+            None;
         let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
             if let Some(capability) = config.host_runtime_capability {
+                // Durable gate-record + replay-payload stores over ONE in-memory
+                // filesystem (production mount view via `wrap_scoped`), shared by
+                // both stores so a raise and its resume round-trip through the
+                // same records.
+                let capability_store_filesystem =
+                    ironclaw_reborn_composition::wrap_scoped(Arc::new(InMemoryBackend::new()));
+                let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore> =
+                    Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                        Arc::clone(&capability_store_filesystem),
+                    ));
+                turn_executor_gate_store = Some(Arc::clone(&gate_record_store));
+                let replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore> =
+                    Arc::new(ironclaw_capabilities::FilesystemReplayPayloadStore::new(
+                        capability_store_filesystem,
+                    ));
                 Arc::new(ProductLiveHostRuntimeCapabilityFactory {
                     services: host_runtime_services.expect("host runtime services"),
                     io: host_runtime_io.expect("host runtime capability io"),
@@ -311,6 +336,8 @@ impl ProductLiveAgentLoopHarness {
                     cancellation_factory: cancellation_factory.clone(),
                     model_provider: config.model_provider.clone(),
                     model_id: config.model_id.clone(),
+                    gate_record_store,
+                    replay_payload_store,
                 })
             } else if let Some(capability) = config.capability {
                 Arc::new(RecordingCapabilityFactory {
@@ -358,6 +385,7 @@ impl ProductLiveAgentLoopHarness {
         ));
         let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
             attachment_read_port: None,
+            gate_record_store: turn_executor_gate_store,
             turn_state: turn_state_for_runtime,
             thread_service: Arc::new(thread_service.clone()),
             thread_scope: thread_scope.clone(),
@@ -703,6 +731,12 @@ struct ProductLiveHostRuntimeCapabilityFactory {
     cancellation_factory: Arc<ReadyRunCancellationFactory>,
     model_provider: String,
     model_id: String,
+    // Durable gate-record + replay-payload stores wired into the ProductLive
+    // capability port, so a raise and its later resume round-trip through the
+    // SAME store (both built over one in-memory filesystem below). Modeling the
+    // production wiring the local-dev path already has (#6287).
+    gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
+    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
 }
 
 #[async_trait]
@@ -757,6 +791,8 @@ impl LoopCapabilityPortFactory for ProductLiveHostRuntimeCapabilityFactory {
                 model_budget_accountant: Arc::new(NoOpBudgetAccountant),
                 safety_context: test_safety_context(),
                 milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+                gate_record_store: Arc::clone(&self.gate_record_store),
+                replay_payload_store: Arc::clone(&self.replay_payload_store),
             },
         )
         .map_err(adapter_error)?;
@@ -796,43 +832,54 @@ impl LoopCapabilityPort for RecordingDelegatingCapabilityPort {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         self.invocations
             .lock()
             .expect("harness capability invocation lock poisoned")
             .push(request.clone());
-        let outcome = self.inner.invoke_capability(request).await?;
-        self.record_completed_result(&outcome)?;
-        Ok(outcome)
+        let resolution = self.inner.invoke_capability(request).await?;
+        self.record_completed_result(&resolution)?;
+        Ok(resolution)
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
         self.invocations
             .lock()
             .expect("harness capability invocation lock poisoned")
             .extend(request.invocations.iter().cloned());
-        let outcome = self.inner.invoke_capability_batch(request).await?;
-        for item in &outcome.outcomes {
+        let batch = self.inner.invoke_capability_batch(request).await?;
+        for item in &batch.resolutions {
             self.record_completed_result(item)?;
         }
-        Ok(outcome)
+        Ok(batch)
     }
 }
 
 impl RecordingDelegatingCapabilityPort {
-    fn record_completed_result(
-        &self,
-        outcome: &CapabilityOutcome,
-    ) -> Result<(), AgentLoopHostError> {
-        let CapabilityOutcome::Completed(completed) = outcome else {
+    fn record_completed_result(&self, resolution: &Resolution) -> Result<(), AgentLoopHostError> {
+        // Only a successful `Done` staged output to record (the flip's acceptance
+        // table maps the old `Completed` variant to `Done` + `ToolVerdict::Success`).
+        // The host mints an opaque `refs.result` uuid; the originating loop result
+        // ref the staged value is keyed by is preserved on `refs.origin`.
+        let Resolution::Done(outcome) = resolution else {
             return Ok(());
         };
-        let value = self
-            .io
-            .result_for_ref(&self.run_context, &completed.result_ref)?;
+        if !outcome.verdict.is_success() {
+            return Ok(());
+        }
+        let Some(origin) = outcome.refs.origin.as_ref() else {
+            return Ok(());
+        };
+        let result_ref = LoopResultRef::new(origin.as_str()).map_err(|error| {
+            AgentLoopHostError::new(
+                ironclaw_turns::run_profile::AgentLoopHostErrorKind::InvalidInvocation,
+                format!("invalid preserved loop result ref: {error}"),
+            )
+        })?;
+        let value = self.io.result_for_ref(&self.run_context, &result_ref)?;
         self.results
             .lock()
             .expect("harness capability results lock poisoned")
@@ -903,39 +950,42 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         self.invocations
             .lock()
             .expect("harness capability invocation lock poisoned")
             .push(request);
-        Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
-            result_ref: LoopResultRef::new(self.capability.result_ref.clone())
+        let outcome = resolution::completed(
+            LoopResultRef::new(self.capability.result_ref.clone())
                 .expect("valid harness result ref"),
-            safe_summary: self.capability.safe_summary.clone(),
-            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-            terminate_hint: self.capability.terminate_hint,
-            byte_len: 0,
-            output_digest: None,
-            model_observation: None,
-        }))
+            self.capability.safe_summary.clone(),
+            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            self.capability.terminate_hint,
+            0,
+            None,
+            None,
+        );
+        Ok(outcome)
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-        let mut outcomes = Vec::new();
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
+        let mut resolutions = Vec::new();
         let mut stopped_on_suspension = false;
         for invocation in request.invocations {
-            let outcome = self.invoke_capability(invocation).await?;
-            stopped_on_suspension |= request.stop_on_first_suspension && outcome.is_suspension();
-            outcomes.push(outcome);
+            let resolution = self.invoke_capability(invocation).await?;
+            // `parks()` is the batch-stop predicate (true for gates and
+            // suspensions); this producer only ever completes, so it never parks.
+            stopped_on_suspension |= request.stop_on_first_suspension && resolution.parks();
+            resolutions.push(resolution);
             if stopped_on_suspension {
                 break;
             }
         }
-        Ok(CapabilityBatchOutcome {
-            outcomes,
+        Ok(ResolutionBatch {
+            resolutions,
             stopped_on_suspension,
         })
     }

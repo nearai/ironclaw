@@ -1,40 +1,21 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
-#[cfg(any(
-    feature = "slack-v2-host-beta",
-    feature = "telegram-v2-host-beta",
-    test
-))]
 use std::sync::OnceLock;
 
 use async_trait::async_trait;
-#[cfg(any(
-    feature = "slack-v2-host-beta",
-    feature = "telegram-v2-host-beta",
-    test
-))]
 pub(crate) use ironclaw_extensions::ExtensionRemovalChannelId;
 pub(crate) use ironclaw_extensions::{
     ExtensionRemovalCleanupAdapterId, ExtensionRemovalCleanupBinding,
     ExtensionRemovalCleanupRequirement,
 };
 use ironclaw_host_api::{ResourceScope, UserId};
-#[cfg(any(
-    feature = "slack-v2-host-beta",
-    feature = "telegram-v2-host-beta",
-    test
-))]
 use ironclaw_product_workflow::{ChannelConnectionFacade, WebUiAuthenticatedCaller};
 use ironclaw_product_workflow::{ProductWorkflowError, RebornServicesError};
 
-#[cfg(any(feature = "slack-v2-host-beta", test))]
 pub(crate) const SLACK_PERSONAL_CONNECTION_CLEANUP_ADAPTER_ID: &str = "slack.personal_connection";
-#[cfg(any(feature = "slack-v2-host-beta", test))]
 pub(crate) const SLACK_EXTENSION_REMOVAL_CHANNEL_ID: &str = "slack";
-#[cfg(any(feature = "telegram-v2-host-beta", test))]
 pub(crate) const TELEGRAM_PAIRING_CONNECTION_CLEANUP_ADAPTER_ID: &str =
     "telegram.pairing_connection";
-#[cfg(any(feature = "telegram-v2-host-beta", test))]
 pub(crate) const TELEGRAM_EXTENSION_REMOVAL_CHANNEL_ID: &str = "telegram";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,13 +113,11 @@ impl ExtensionRemovalCleanupRegistry {
     }
 }
 
-#[cfg(any(feature = "slack-v2-host-beta", test))]
 pub(crate) struct SlackPersonalConnectionCleanupAdapter {
     adapter_id: ExtensionRemovalCleanupAdapterId,
     channel_connection: Arc<OnceLock<Arc<dyn ChannelConnectionFacade>>>,
 }
 
-#[cfg(any(feature = "slack-v2-host-beta", test))]
 impl SlackPersonalConnectionCleanupAdapter {
     pub(crate) fn new(
         channel_connection: Arc<OnceLock<Arc<dyn ChannelConnectionFacade>>>,
@@ -156,7 +135,6 @@ impl SlackPersonalConnectionCleanupAdapter {
 }
 
 #[async_trait]
-#[cfg(any(feature = "slack-v2-host-beta", test))]
 impl ExtensionRemovalCleanupAdapter for SlackPersonalConnectionCleanupAdapter {
     fn adapter_id(&self) -> ExtensionRemovalCleanupAdapterId {
         self.adapter_id.clone()
@@ -197,13 +175,11 @@ impl ExtensionRemovalCleanupAdapter for SlackPersonalConnectionCleanupAdapter {
 /// and DM delivery target and invalidates any pending pairing code. Only the
 /// removing user is affected; an unfilled slot fails the removal closed
 /// (never a silent skip).
-#[cfg(any(feature = "telegram-v2-host-beta", test))]
 pub(crate) struct TelegramPairingConnectionCleanupAdapter {
     adapter_id: ExtensionRemovalCleanupAdapterId,
     channel_connection: Arc<OnceLock<Arc<dyn ChannelConnectionFacade>>>,
 }
 
-#[cfg(any(feature = "telegram-v2-host-beta", test))]
 impl TelegramPairingConnectionCleanupAdapter {
     pub(crate) fn new(
         channel_connection: Arc<OnceLock<Arc<dyn ChannelConnectionFacade>>>,
@@ -221,7 +197,6 @@ impl TelegramPairingConnectionCleanupAdapter {
 }
 
 #[async_trait]
-#[cfg(any(feature = "telegram-v2-host-beta", test))]
 impl ExtensionRemovalCleanupAdapter for TelegramPairingConnectionCleanupAdapter {
     fn adapter_id(&self) -> ExtensionRemovalCleanupAdapterId {
         self.adapter_id.clone()
