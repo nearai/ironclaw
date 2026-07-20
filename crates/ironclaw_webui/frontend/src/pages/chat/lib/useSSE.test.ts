@@ -45,6 +45,7 @@ function createHarness({
 
   const context = {
     CONNECTION_STATUS,
+    authScope: () => "tenant:user",
     EventSource,
     JSON,
     Math,
@@ -114,6 +115,10 @@ function createHarness({
     });
     return result;
   }
+  function remount(threadId = "thread-1") {
+    refs.length = 0;
+    return render(threadId);
+  }
   render();
 
   return {
@@ -124,6 +129,7 @@ function createHarness({
       return result;
     },
     render,
+    remount,
     statuses,
     streams,
     timers,
@@ -306,6 +312,23 @@ test("useSSE resumes each thread from its own cursor after switching", () => {
   render("thread-2");
   assert.equal(streams[3].args.threadId, "thread-2");
   assert.equal(streams[3].args.afterCursor, "thread-2-cursor");
+
+  cleanup();
+});
+
+test("useSSE keeps a thread cursor when the chat page remounts", () => {
+  const { cleanup, remount, streams } = createHarness();
+
+  streams[0].listener("projection_update")({
+    data: JSON.stringify({
+      type: "projection_update",
+      state: { items: [] },
+    }),
+    lastEventId: "before-navigation",
+  });
+
+  remount("thread-1");
+  assert.equal(streams[1].args.afterCursor, "before-navigation");
 
   cleanup();
 });

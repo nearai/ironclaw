@@ -34,11 +34,6 @@ use crate::session::SessionManager;
 use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 use ironclaw_common::llm_costs as costs;
 
-const MAX_STREAM_CONTINUATIONS: u32 = 1;
-const STREAM_CONTINUATION_TIMEOUT_SECS: u64 = 20;
-const MIN_CONTINUATION_OVERLAP_BYTES: usize = 8;
-const STREAM_CONTINUATION_PROMPT: &str = "The previous assistant response was interrupted by the transport. Continue exactly from where it stopped. Return only the missing continuation, without repeating any text already written.";
-
 /// Information about an available model from NEAR AI API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
@@ -156,6 +151,8 @@ pub fn default_models() -> Vec<(String, String)> {
 /// NEAR AI provider (Chat Completions API, dual auth).
 pub struct NearAiChatProvider {
     client: Client,
+    streaming_client: Client,
+    stream_idle_timeout: Duration,
     config: NearAiConfig,
     /// Session manager for session token auth (used when no API key is set).
     session: Arc<SessionManager>,
@@ -208,12 +205,19 @@ impl NearAiChatProvider {
             &config.base_url,
             crate::config::hardened_client_builder(request_timeout_secs),
         )?;
+        let streaming_client = crate::url_check::build_http_client(
+            "nearai_chat",
+            &config.base_url,
+            crate::config::hardened_streaming_client_builder(),
+        )?;
 
         let active_model = std::sync::RwLock::new(config.model.clone());
         let pricing = Arc::new(std::sync::RwLock::new(HashMap::new()));
 
         let provider = Self {
             client,
+            streaming_client,
+            stream_idle_timeout: Duration::from_secs(request_timeout_secs),
             config,
             session,
             active_model,
@@ -465,132 +469,46 @@ impl NearAiChatProvider {
         &self,
         body: &ChatCompletionRequest,
         sink: Arc<dyn CompletionStreamSink>,
-        request_timeout: Option<Duration>,
     ) -> Result<NearAiStreamingResponse, LlmError> {
         match self
-            .send_streaming_request_inner(body, Arc::clone(&sink), request_timeout)
+            .send_streaming_request_inner(body, Arc::clone(&sink))
             .await
         {
             Ok(result) => Ok(result),
             Err(LlmError::SessionExpired { .. }) if !self.uses_api_key() => {
                 self.session.handle_auth_failure().await?;
-                self.send_streaming_request_inner(body, sink, request_timeout)
-                    .await
+                self.send_streaming_request_inner(body, sink).await
             }
             Err(e) => Err(e),
         }
-    }
-
-    /// Finish an interrupted plain-text stream without replaying text that was
-    /// already published to the caller. A continuation is a new semantic model
-    /// request, not a transport retry: the partial assistant response is added
-    /// to context and the model is asked for only the missing suffix.
-    async fn send_streaming_request_with_continuation(
-        &self,
-        request: &mut ChatCompletionRequest,
-        sink: Arc<dyn CompletionStreamSink>,
-    ) -> Result<NearAiStreamingResponse, LlmError> {
-        let mut response = self
-            .send_streaming_request(request, Arc::clone(&sink), None)
-            .await?;
-        if response.stream_completed {
-            return Ok(response);
-        }
-
-        let mut accumulated_content = response.content.clone();
-        let mut recovered_content = String::new();
-        let mut previous_segment = response.content.clone();
-
-        for continuation_attempt in 1..=MAX_STREAM_CONTINUATIONS {
-            append_stream_continuation_turn(request, previous_segment);
-            if request.tools.is_some() {
-                // The interrupted response was plain text. Do not let a
-                // continuation turn introduce a tool call that cannot be
-                // reconciled with the already-published assistant text.
-                request.tool_choice = Some("none".to_string());
-            }
-
-            tracing::warn!(
-                provider = "nearai_chat",
-                continuation_attempt,
-                max_continuations = MAX_STREAM_CONTINUATIONS,
-                partial_content_bytes = accumulated_content.len(),
-                "NEAR AI Chat SSE stream ended without a terminal marker; requesting a bounded continuation"
-            );
-
-            // Buffer continuation deltas. The model may repeat a suffix of the
-            // prior response even when instructed not to; publishing those
-            // deltas immediately would make the UI irreversibly duplicate text.
-            let continuation = self
-                .send_streaming_request(
-                    request,
-                    Arc::new(DiscardCompletionStreamSink),
-                    Some(Duration::from_secs(STREAM_CONTINUATION_TIMEOUT_SECS)),
-                )
-                .await?;
-            if !continuation.tool_calls.is_empty() {
-                return Err(incomplete_stream_error(
-                    "continuation unexpectedly returned tool calls",
-                ));
-            }
-
-            let novel_content =
-                continuation_without_overlap(&accumulated_content, continuation.content.as_str());
-            accumulated_content.push_str(novel_content);
-            recovered_content.push_str(novel_content);
-            response.input_tokens = response
-                .input_tokens
-                .saturating_add(continuation.input_tokens);
-            response.output_tokens = response
-                .output_tokens
-                .saturating_add(continuation.output_tokens);
-            response.cache_read_input_tokens = response
-                .cache_read_input_tokens
-                .saturating_add(continuation.cache_read_input_tokens);
-            response.reasoning.push_str(&continuation.reasoning);
-
-            if continuation.stream_completed {
-                if !recovered_content.is_empty() {
-                    sink.text_delta(recovered_content).await;
-                }
-                response.content = accumulated_content;
-                response.finish_reason = continuation.finish_reason;
-                response.stream_completed = true;
-                return Ok(response);
-            }
-
-            previous_segment = continuation.content;
-        }
-
-        Err(incomplete_stream_error(
-            "stream remained incomplete after bounded continuation attempts",
-        ))
     }
 
     async fn send_streaming_request_inner(
         &self,
         body: &ChatCompletionRequest,
         sink: Arc<dyn CompletionStreamSink>,
-        request_timeout: Option<Duration>,
     ) -> Result<NearAiStreamingResponse, LlmError> {
         let url = self.api_url("chat/completions");
         let token = self.resolve_bearer_token().await?;
 
         tracing::debug!("Sending streaming request to NEAR AI Chat: {}", url);
 
-        let mut request_builder = self
-            .client
+        let request = self
+            .streaming_client
             .post(&url)
             .header("Authorization", format!("Bearer {}", token))
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
             .json(body);
-        if let Some(request_timeout) = request_timeout {
-            request_builder = request_builder.timeout(request_timeout);
-        }
-        let response = request_builder
-            .send()
+        let response = tokio::time::timeout(self.stream_idle_timeout, request.send())
             .await
+            .map_err(|_| LlmError::RequestFailed {
+                provider: "nearai_chat".to_string(),
+                reason: format!(
+                    "timed out waiting {}s for streaming response headers",
+                    self.stream_idle_timeout.as_secs()
+                ),
+            })?
             .map_err(|e| LlmError::RequestFailed {
                 provider: "nearai_chat".to_string(),
                 reason: e.to_string(),
@@ -660,20 +578,23 @@ impl NearAiChatProvider {
         let mut stream_completed = false;
         let mut tool_calls: HashMap<usize, NearAiStreamingToolCallState> = HashMap::new();
 
-        while let Some(event) = stream.next().await {
+        loop {
+            let next_event = tokio::time::timeout(self.stream_idle_timeout, stream.next())
+                .await
+                .map_err(|_| LlmError::RequestFailed {
+                    provider: "nearai_chat".to_string(),
+                    reason: format!(
+                        "SSE stream was idle for {} seconds",
+                        self.stream_idle_timeout.as_secs()
+                    ),
+                })?;
+            let Some(event) = next_event else {
+                break;
+            };
             let event = match event {
                 Ok(event) => event,
                 Err(e) => {
-                    if stream_completed || can_continue_incomplete_text_stream(&parsed, &tool_calls)
-                    {
-                        tracing::debug!(
-                            provider = "nearai_chat",
-                            error = %e,
-                            stream_completed,
-                            content_bytes = parsed.content.len(),
-                            reasoning_bytes = parsed.reasoning.len(),
-                            "NEAR AI Chat SSE stream ended with a transport error after usable assistant text; preparing continuation"
-                        );
+                    if stream_completed {
                         break;
                     }
                     return Err(LlmError::RequestFailed {
@@ -742,7 +663,7 @@ impl NearAiChatProvider {
             }
         }
 
-        if !stream_completed && !can_continue_incomplete_text_stream(&parsed, &tool_calls) {
+        if !stream_completed {
             return Err(incomplete_stream_error(
                 "stream ended before terminal completion marker",
             ));
@@ -757,7 +678,6 @@ impl NearAiChatProvider {
             }
         }
         parsed.tool_calls = parsed_tool_calls;
-        parsed.stream_completed = stream_completed;
         Ok(parsed)
     }
 
@@ -926,7 +846,7 @@ impl LlmProvider for NearAiChatProvider {
             raw
         };
 
-        let mut request = ChatCompletionRequest {
+        let request = ChatCompletionRequest {
             model,
             messages,
             temperature: req.temperature,
@@ -938,9 +858,7 @@ impl LlmProvider for NearAiChatProvider {
             stream_options: None,
         };
 
-        let response = self
-            .send_streaming_request_with_continuation(&mut request, sink)
-            .await?;
+        let response = self.send_streaming_request(&request, sink).await?;
         let provider_reasoning =
             (!response.reasoning.trim().is_empty()).then(|| response.reasoning.clone());
         emit_reasoning_trace(provider_reasoning.as_deref());
@@ -1111,9 +1029,7 @@ impl LlmProvider for NearAiChatProvider {
         request.stream = true;
         request.stream_options = None;
 
-        let response = self
-            .send_streaming_request_with_continuation(&mut request, sink)
-            .await?;
+        let response = self.send_streaming_request(&request, sink).await?;
         let provider_reasoning =
             (!response.reasoning.trim().is_empty()).then(|| response.reasoning.clone());
         emit_reasoning_trace(provider_reasoning.as_deref());
@@ -1626,7 +1542,6 @@ struct NearAiStreamingResponse {
     output_tokens: u32,
     cache_read_input_tokens: u32,
     finish_reason: FinishReason,
-    stream_completed: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1721,60 +1636,11 @@ impl NearAiStreamingToolCallState {
     }
 }
 
-fn can_continue_incomplete_text_stream(
-    parsed: &NearAiStreamingResponse,
-    tool_calls: &HashMap<usize, NearAiStreamingToolCallState>,
-) -> bool {
-    !parsed.content.trim().is_empty() && tool_calls.is_empty()
-}
-
 fn incomplete_stream_error(reason: impl Into<String>) -> LlmError {
     LlmError::InvalidResponse {
         provider: "nearai_chat".to_string(),
         reason: reason.into(),
     }
-}
-
-fn append_stream_continuation_turn(request: &mut ChatCompletionRequest, partial_content: String) {
-    request.messages.push(ChatCompletionMessage {
-        role: "assistant".to_string(),
-        content: Some(MessageContent::Text(partial_content)),
-        tool_call_id: None,
-        name: None,
-        tool_calls: None,
-    });
-    request.messages.push(ChatCompletionMessage {
-        role: "user".to_string(),
-        content: Some(MessageContent::Text(STREAM_CONTINUATION_PROMPT.to_string())),
-        tool_call_id: None,
-        name: None,
-        tool_calls: None,
-    });
-}
-
-/// Remove the largest prefix of `continuation` that repeats a suffix already
-/// present in `prior`. Both slice points are UTF-8 character boundaries.
-fn continuation_without_overlap<'a>(prior: &str, continuation: &'a str) -> &'a str {
-    let max_overlap = prior.len().min(continuation.len());
-    let overlap = continuation
-        .char_indices()
-        .map(|(index, _)| index)
-        .chain(std::iter::once(continuation.len()))
-        .filter(|&length| length <= max_overlap && prior.is_char_boundary(prior.len() - length))
-        // Prefer a small duplicate over silently deleting legitimate text
-        // because adjacent segments happen to share one or two characters.
-        .filter(|&length| length == prior.len() || length >= MIN_CONTINUATION_OVERLAP_BYTES)
-        .filter(|&length| prior.ends_with(&continuation[..length]))
-        .max()
-        .unwrap_or(0);
-    &continuation[overlap..]
-}
-
-struct DiscardCompletionStreamSink;
-
-#[async_trait]
-impl CompletionStreamSink for DiscardCompletionStreamSink {
-    async fn text_delta(&self, _delta: String) {}
 }
 
 fn saturate_u32(val: u64) -> u32 {
@@ -2057,18 +1923,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn continuation_overlap_removes_repeated_suffix_but_keeps_incidental_character_match() {
-        assert_eq!(
-            continuation_without_overlap("The answer is incom", "is incomplete."),
-            "plete."
-        );
-        assert_eq!(
-            continuation_without_overlap("the", "example continues"),
-            "example continues"
-        );
-    }
-
     fn search_tool_definition() -> crate::provider::ToolDefinition {
         crate::provider::ToolDefinition {
             name: "search".to_string(),
@@ -2196,220 +2050,71 @@ data: [DONE]
     }
 
     #[tokio::test]
-    async fn complete_streaming_continues_text_when_stream_ends_after_delta() {
+    async fn complete_streaming_allows_total_duration_longer_than_idle_timeout() {
         use tokio::io::AsyncWriteExt;
         use tokio::net::TcpListener;
-        use tokio::sync::mpsc;
-        use tokio::time::{Duration, timeout};
+        use tokio::time::{Duration, sleep, timeout};
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
         let server_task = tokio::spawn(async move {
-            let (mut socket, request_json) = accept_chat_request(&listener).await;
-            assert_eq!(request_json["stream"], true);
-
-            socket
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n",
-                )
-                .await
-                .expect("write sse headers");
-            socket
-                .write_all(
-                    br#"data: {"choices":[{"delta":{"content":"The answer is incom"},"finish_reason":null}],"usage":{"prompt_tokens":3,"completion_tokens":4}}
-
-"#,
-                )
-                .await
-                .expect("write partial content chunk");
-            drop(socket);
-
-            let (mut socket, continuation_json) = accept_chat_request(&listener).await;
-            assert_eq!(continuation_json["stream"], true);
-            let messages = continuation_json["messages"]
-                .as_array()
-                .expect("continuation messages");
-            assert_eq!(messages[messages.len() - 2]["role"], "assistant");
-            assert_eq!(
-                messages[messages.len() - 2]["content"],
-                "The answer is incom"
-            );
-            assert_eq!(messages[messages.len() - 1]["role"], "user");
-            assert_eq!(
-                messages[messages.len() - 1]["content"],
-                STREAM_CONTINUATION_PROMPT
-            );
-
-            socket
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n",
-                )
-                .await
-                .expect("write continuation headers");
-            socket
-                .write_all(
-                    br#"data: {"choices":[{"delta":{"content":"is incomplete."},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}
-
-data: [DONE]
-
-"#,
-                )
-                .await
-                .expect("write continuation chunks");
-        });
-
-        let provider = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
-            .expect("provider");
-        let (delta_tx, mut delta_rx) = mpsc::unbounded_channel();
-        let sink = Arc::new(RecordingCompletionStreamSink { sender: delta_tx });
-        let response = provider
-            .complete_streaming(
-                CompletionRequest::new(vec![ChatMessage::user("say something")]),
-                sink,
-            )
-            .await
-            .expect("interrupted assistant text should be continued");
-
-        server_task.await.expect("server task");
-        let initial_delta = timeout(Duration::from_secs(2), delta_rx.recv())
-            .await
-            .expect("stream delta should be captured")
-            .expect("stream delta");
-        let recovered_delta = timeout(Duration::from_secs(2), delta_rx.recv())
-            .await
-            .expect("continuation delta should be captured")
-            .expect("continuation delta");
-        assert_eq!(initial_delta, "The answer is incom");
-        assert_eq!(recovered_delta, "plete.");
-        assert!(delta_rx.try_recv().is_err(), "text must not be duplicated");
-        assert_eq!(response.content, "The answer is incomplete.");
-        assert_eq!(response.finish_reason, FinishReason::Stop);
-        assert_eq!(response.input_tokens, 13);
-        assert_eq!(response.output_tokens, 6);
-    }
-
-    #[tokio::test]
-    async fn complete_streaming_continues_text_when_decoder_errors_after_delta() {
-        use tokio::io::AsyncWriteExt;
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base_url = format!("http://{}", listener.local_addr().unwrap());
-        let server_task = tokio::spawn(async move {
-            let (mut socket, request_json) = accept_chat_request(&listener).await;
-            assert_eq!(request_json["stream"], true);
-
-            socket
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n",
-                )
-                .await
-                .expect("write sse headers");
-            socket
-                .write_all(
-                    b"data: {\"choices\":[{\"delta\":{\"content\":\"usable\"},\"finish_reason\":null}]}\n\n\xff",
-                )
-                .await
-                .expect("write invalid utf-8 after content chunk");
-            drop(socket);
-
             let (mut socket, _) = accept_chat_request(&listener).await;
             socket
                 .write_all(
-                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\" continuation\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"one\"},\"finish_reason\":null}]}\n\n",
                 )
                 .await
-                .expect("write continuation response");
+                .expect("write first event");
+            sleep(Duration::from_millis(600)).await;
+            socket
+                .write_all(
+                    b"data: {\"choices\":[{\"delta\":{\"content\":\" two\"},\"finish_reason\":null}]}\n\n",
+                )
+                .await
+                .expect("write second event");
+            sleep(Duration::from_millis(600)).await;
+            socket
+                .write_all(
+                    b"data: {\"choices\":[{\"delta\":{\"content\":\" three\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                )
+                .await
+                .expect("write terminal events");
         });
 
-        let provider = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
-            .expect("provider");
+        let provider =
+            NearAiChatProvider::new_with_timeout(test_nearai_config(&base_url), test_session(), 1)
+                .expect("provider");
         let (delta_tx, _delta_rx) = tokio::sync::mpsc::unbounded_channel();
-        let sink = Arc::new(RecordingCompletionStreamSink { sender: delta_tx });
-        let response = provider
-            .complete_streaming(
-                CompletionRequest::new(vec![ChatMessage::user("say something")]),
-                sink,
-            )
-            .await
-            .expect("streamed assistant text should continue after decode error");
+        let response = timeout(
+            Duration::from_secs(3),
+            provider.complete_streaming(
+                CompletionRequest::new(vec![ChatMessage::user("count")]),
+                Arc::new(RecordingCompletionStreamSink { sender: delta_tx }),
+            ),
+        )
+        .await
+        .expect("active stream should finish")
+        .expect("active stream should not hit its idle timeout");
 
         server_task.await.expect("server task");
-        assert_eq!(response.content, "usable continuation");
-        assert_eq!(response.finish_reason, FinishReason::Stop);
+        assert_eq!(response.content, "one two three");
     }
 
     #[tokio::test]
-    async fn complete_with_tools_streaming_continues_plain_text_without_enabling_tools() {
+    async fn complete_streaming_rejects_partial_text_without_terminal_marker() {
         use tokio::io::AsyncWriteExt;
         use tokio::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
         let server_task = tokio::spawn(async move {
-            let (mut socket, initial_json) = accept_chat_request(&listener).await;
-            assert!(initial_json["tools"].is_array());
+            let (mut socket, _) = accept_chat_request(&listener).await;
             socket
                 .write_all(
-                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"tool-aware answer\"},\"finish_reason\":null}]}\n\n",
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
                 )
                 .await
-                .expect("write interrupted tool-capable response");
-            drop(socket);
-
-            let (mut socket, continuation_json) = accept_chat_request(&listener).await;
-            assert_eq!(continuation_json["tool_choice"], "none");
-            assert!(continuation_json["tools"].is_array());
-            socket
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\" finished\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
-                )
-                .await
-                .expect("write terminal continuation");
-        });
-
-        let provider = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
-            .expect("provider");
-        let response = complete_search_tool_streaming(provider)
-            .await
-            .expect("tool-capable plain text should continue");
-
-        server_task.await.expect("server task");
-        assert_eq!(
-            response.content.as_deref(),
-            Some("tool-aware answer finished")
-        );
-        assert!(response.tool_calls.is_empty());
-        assert_eq!(response.finish_reason, FinishReason::Stop);
-    }
-
-    #[tokio::test]
-    async fn complete_streaming_fails_after_bounded_incomplete_continuations() {
-        use tokio::io::AsyncWriteExt;
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base_url = format!("http://{}", listener.local_addr().unwrap());
-        let server_task = tokio::spawn(async move {
-            for segment in ["first", " second"] {
-                let (mut socket, _) = accept_chat_request(&listener).await;
-                socket
-                    .write_all(
-                        b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n",
-                    )
-                    .await
-                    .expect("write incomplete response headers");
-                socket
-                    .write_all(
-                        format!(
-                            "data: {{\"choices\":[{{\"delta\":{{\"content\":{}}},\"finish_reason\":null}}]}}\n\n",
-                            serde_json::to_string(segment).expect("segment json")
-                        )
-                        .as_bytes(),
-                    )
-                    .await
-                    .expect("write incomplete response");
-            }
+                .expect("write incomplete response");
         });
 
         let provider = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
@@ -2426,9 +2131,9 @@ data: [DONE]
         match result {
             Err(LlmError::InvalidResponse { provider, reason }) => {
                 assert_eq!(provider, "nearai_chat");
-                assert!(reason.contains("bounded continuation attempts"), "{reason}");
+                assert!(reason.contains("terminal completion marker"), "{reason}");
             }
-            other => panic!("expected bounded continuation failure, got {other:?}"),
+            other => panic!("expected incomplete stream failure, got {other:?}"),
         }
     }
 

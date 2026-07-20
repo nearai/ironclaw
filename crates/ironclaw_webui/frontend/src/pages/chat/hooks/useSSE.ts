@@ -1,5 +1,6 @@
 import React from "react";
 import { openEventStream } from "../../../lib/api";
+import { authScope } from "../../../lib/auth-scope";
 import {
   CONNECTION_STATUS,
   type ConnectionStatus,
@@ -32,6 +33,31 @@ const V2_EVENT_NAMES = [
 
 const EVENT_SOURCE_CLOSED = 2;
 const EVENT_SOURCE_OPEN = 1;
+const MAX_CACHED_CURSORS = 30;
+const lastEventIdByThread = new Map<string, string>();
+
+function cursorKey(threadId: string) {
+  return `${authScope()}:${threadId}`;
+}
+
+function getLastEventId(threadId: string) {
+  return lastEventIdByThread.get(cursorKey(threadId));
+}
+
+function setLastEventId(threadId: string, eventId: string) {
+  const key = cursorKey(threadId);
+  lastEventIdByThread.delete(key);
+  lastEventIdByThread.set(key, eventId);
+  while (lastEventIdByThread.size > MAX_CACHED_CURSORS) {
+    const oldestKey = lastEventIdByThread.keys().next().value;
+    if (oldestKey === undefined) break;
+    lastEventIdByThread.delete(oldestKey);
+  }
+}
+
+function deleteLastEventId(threadId: string) {
+  lastEventIdByThread.delete(cursorKey(threadId));
+}
 
 function eventSourceReadyStateConstant(staticValue: unknown, fallback: number) {
   return typeof staticValue === "number" ? staticValue : fallback;
@@ -61,13 +87,6 @@ export function useSSE({ threadId, onEvent, enabled }) {
   );
   const onEventRef = React.useRef(onEvent);
   onEventRef.current = onEvent;
-  // Last cursor received for each thread visited while this chat view is
-  // mounted. EventSource remembers Last-Event-ID only for one instance, so a
-  // thread switch must retain the old thread's cursor explicitly; otherwise
-  // returning to it starts from projection origin and visually replays every
-  // buffered cumulative assistant-text update.
-  const lastEventIdByThreadRef = React.useRef(new Map());
-
   React.useEffect(() => {
     if (!enabled || !threadId) {
       setStatus(CONNECTION_STATUS.IDLE);
@@ -130,7 +149,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
 
       es = openEventStream({
         threadId,
-        afterCursor: lastEventIdByThreadRef.current.get(threadId) || undefined,
+        afterCursor: getLastEventId(threadId) || undefined,
       });
       const source = es;
 
@@ -159,7 +178,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
         }
         if (!frame || typeof frame !== "object") return;
         if (event.lastEventId) {
-          lastEventIdByThreadRef.current.set(threadId, event.lastEventId);
+          setLastEventId(threadId, event.lastEventId);
         }
         const type = frame.type || fallbackType;
         onEventRef.current?.({
@@ -181,7 +200,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
           frame.retryable === true &&
           es === source
         ) {
-          lastEventIdByThreadRef.current.delete(threadId);
+          deleteLastEventId(threadId);
           reconnectWithTimer(CONNECTION_STATUS.RECONNECTING);
         }
       };
