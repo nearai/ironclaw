@@ -133,3 +133,40 @@ export function isRunFailureMessageId(value: unknown): boolean {
     !id.startsWith(STREAM_FAILURE_ID_PREFIX)
   );
 }
+
+// An SSE error can arrive after a message send begins but before the POST
+// response identifies its run. Once that id is known, preserve the original
+// message (and its timestamp) while giving it the stable run-failure id that a
+// terminal projection updates in place.
+export function promoteProvisionalStreamFailureMessage(
+  messages: ChatMessage[],
+  {
+    provisionalMessageId,
+    runId,
+  }: {
+    provisionalMessageId?: string | null;
+    runId?: string | null;
+  },
+): ChatMessage[] {
+  if (!provisionalMessageId || !runId) return messages;
+
+  const provisionalIndex = messages.findIndex(
+    (message) => message.id === provisionalMessageId,
+  );
+  if (provisionalIndex < 0) return messages;
+
+  const runFailureMessageId = `${RUN_FAILURE_ID_PREFIX}${runId}`;
+  if (messages.some((message) => message.id === runFailureMessageId)) {
+    // A terminal projection won the race with the admission response. Its
+    // failure summary is already authoritative, so remove only the provisional
+    // transport error instead of replacing that summary.
+    return messages.filter((_, index) => index !== provisionalIndex);
+  }
+
+  const next = [...messages];
+  next[provisionalIndex] = {
+    ...next[provisionalIndex],
+    id: runFailureMessageId,
+  };
+  return next;
+}

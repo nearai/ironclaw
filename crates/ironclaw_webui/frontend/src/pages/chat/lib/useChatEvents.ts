@@ -66,6 +66,7 @@ export function useChatEvents({
   connectionContextForRunFailure = emptyConnectionContext,
   onStreamError = noop,
   onRunSettled,
+  provisionalStreamFailureIdForAdmission = noop,
 }) {
   // Track which runIds we've already settled so that SSE replays
   // (reconnect with `last-event-id`, repeated snapshots) don't trigger
@@ -235,6 +236,15 @@ export function useChatEvents({
         }
 
         case "error": {
+          // An SSE error does not include a run id, but while a run is active it
+          // describes that same execution. Give it the run failure id so a later
+          // terminal projection can replace this provisional transport error with
+          // the run's more actionable failure summary instead of adding a second
+          // error bubble.
+          const runId = activeRunRef?.current?.runId || null;
+          const provisionalMessageId = runId
+            ? null
+            : provisionalStreamFailureIdForAdmission();
           setPendingGate(null);
           setIsProcessing(false);
           setActiveRun?.(null);
@@ -244,6 +254,8 @@ export function useChatEvents({
             retryable: frame.retryable === true,
           });
           appendStreamFailureMessage(setMessages, {
+            runId,
+            provisionalMessageId,
             error: frame.error,
             kind: frame.kind,
             retryable: frame.retryable === true,
@@ -291,6 +303,7 @@ export function useChatEvents({
       noteConnectionInterruptedRunId,
       connectionContextForRunFailure,
       onRunSettled,
+      provisionalStreamFailureIdForAdmission,
     ],
   );
 }
@@ -460,9 +473,27 @@ function applyProjectionItems({
         continue;
       }
       if (isStaleLocalRunStatus) {
+        replaceExistingRunFailureMessage(setMessages, {
+          runId,
+          status,
+          failureCategory,
+          failureSummary,
+          connectionContextForRunFailure,
+        });
         continue;
       }
       if (isStaleTerminalStatus) {
+        if (SUCCESS_RUN_STATUSES.has(status)) {
+          clearProvisionalStreamFailureMessage(setMessages, runId);
+        } else {
+          replaceExistingRunFailureMessage(setMessages, {
+            runId,
+            status,
+            failureCategory,
+            failureSummary,
+            connectionContextForRunFailure,
+          });
+        }
         const activeResolvedPromptState = locallyResolvedStateForRun(
           locallyResolvedGatesRef,
           activeRunRef?.current?.runId,
@@ -557,7 +588,9 @@ function applyProjectionItems({
           runId,
           SUCCESS_RUN_STATUSES.has(status),
         );
-        if (status === "failed" || status === "recovery_required") {
+        if (SUCCESS_RUN_STATUSES.has(status)) {
+          clearProvisionalStreamFailureMessage(setMessages, runId);
+        } else if (status === "failed" || status === "recovery_required") {
           appendRunFailureMessage(setMessages, {
             runId,
             status,
@@ -783,6 +816,7 @@ function appendRunFailureMessage(
     failureCategory,
     failureSummary,
     connectionContextForRunFailure,
+    onlyIfPresent = false,
   },
 ) {
   // Dedup by `err-<runId>` so replays of the same projection
@@ -804,7 +838,11 @@ function appendRunFailureMessage(
       ...connectionContext,
     });
     if (existing >= 0) {
-      const hasUsefulUpdate = Boolean(failureSummary || failureCategory);
+      const hasUsefulUpdate = Boolean(
+        failureSummary ||
+          failureCategory ||
+          prev[existing].failureStatus === "stream_error",
+      );
       if (!hasUsefulUpdate || prev[existing].content === content) return prev;
       const next = [...prev];
       next[existing] = {
@@ -816,6 +854,7 @@ function appendRunFailureMessage(
       };
       return next;
     }
+    if (onlyIfPresent) return prev;
     const lastMessage = prev[prev.length - 1];
     if (isAdjacentDuplicateRunFailure(lastMessage, content)) {
       const replacement = promotedRunFailureMessage(lastMessage, messageId);
@@ -838,6 +877,25 @@ function appendRunFailureMessage(
   });
 }
 
+function replaceExistingRunFailureMessage(setMessages, details) {
+  if (details.status !== "failed" && details.status !== "recovery_required") {
+    return;
+  }
+  appendRunFailureMessage(setMessages, { ...details, onlyIfPresent: true });
+}
+
+function clearProvisionalStreamFailureMessage(setMessages, runId) {
+  if (!runId) return;
+  const messageId = `${RUN_FAILURE_ID_PREFIX}${runId}`;
+  setMessages((prev) => {
+    const existing = prev.findIndex((message) => message.id === messageId);
+    if (existing < 0 || prev[existing].failureStatus !== "stream_error") {
+      return prev;
+    }
+    return prev.filter((_, index) => index !== existing);
+  });
+}
+
 // A projection can report an unknown run failure before the send response maps
 // the optimistic message to a concrete run id. Keep adjacent run failures
 // deduped, and promote `err-unknown` to `err-<runId>` once the id arrives.
@@ -856,12 +914,51 @@ function promotedRunFailureMessage(message, messageId) {
     : message;
 }
 
-function appendStreamFailureMessage(setMessages, { error, kind, retryable }) {
+function appendStreamFailureMessage(
+  setMessages,
+  { runId, provisionalMessageId, error, kind, retryable },
+) {
   const baseMessageId = streamFailureMessageId({ error, kind, retryable });
+  if (runId) {
+    const messageId = `${RUN_FAILURE_ID_PREFIX}${runId}`;
+    const content = failureMessageForStreamError({ error, kind, retryable });
+    setMessages((prev) => {
+      const existing = prev.findIndex((message) => message.id === messageId);
+      if (existing >= 0 && prev[existing].failureStatus !== "stream_error") {
+        // A terminal run status already replaced the provisional message.
+        return prev;
+      }
+      if (
+        existing >= 0 &&
+        prev[existing].failureCategory === baseMessageId
+      ) {
+        return prev;
+      }
+      const nextMessage = createErrorChatMessage({
+        id: messageId,
+        content,
+        timestamp: prev[existing]?.timestamp || new Date().toISOString(),
+        // Keep the sanitized stream identity so repeated SSE errors can still
+        // dedupe after the first error clears the active run.
+        failureStatus: "stream_error",
+        failureCategory: baseMessageId,
+        failureSummary: content,
+      });
+      if (existing < 0) return [...prev, nextMessage];
+      const next = [...prev];
+      next[existing] = nextMessage;
+      return next;
+    });
+    return;
+  }
+
   setMessages((prev) => {
     const lastMessage = prev[prev.length - 1];
     if (isSameStreamFailureMessage(lastMessage, baseMessageId)) return prev;
-    const messageId = uniqueStreamFailureMessageId(baseMessageId, prev);
+    const messageId =
+      typeof provisionalMessageId === "string" && provisionalMessageId
+        ? provisionalMessageId
+        : uniqueStreamFailureMessageId(baseMessageId, prev);
     return [
       ...prev,
       createErrorChatMessage({
@@ -875,7 +972,12 @@ function appendStreamFailureMessage(setMessages, { error, kind, retryable }) {
 
 function isSameStreamFailureMessage(message, baseMessageId) {
   const id = typeof message?.id === "string" ? message.id : "";
-  return id === baseMessageId || id.startsWith(`${baseMessageId}-`);
+  return (
+    (message?.failureStatus === "stream_error" &&
+      message?.failureCategory === baseMessageId) ||
+    id === baseMessageId ||
+    id.startsWith(`${baseMessageId}-`)
+  );
 }
 
 function uniqueStreamFailureMessageId(baseMessageId, messages) {

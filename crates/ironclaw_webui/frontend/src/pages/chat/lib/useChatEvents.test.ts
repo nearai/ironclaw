@@ -67,6 +67,7 @@ function createUseChatEventsHarness({
   noteConnectionInterruptedRunId = () => {},
   connectionContextForRunFailure = () => ({}),
   onStreamError = () => {},
+  provisionalStreamFailureIdForAdmission = () => null,
 } = {}) {
   let messages = [];
   let pendingGate = null;
@@ -96,6 +97,7 @@ function createUseChatEventsHarness({
     isFinalAssistantForRun,
     replaceAssistantReplyForRun,
     RUN_FAILURE_ID_PREFIX,
+    provisionalStreamFailureIdForAdmission,
     STREAM_FAILURE_ID_PREFIX,
     toolCardFromActivity,
     toolCardFromPreview,
@@ -129,6 +131,7 @@ function createUseChatEventsHarness({
     connectionContextForRunFailure,
     onStreamError,
     onRunSettled: (runId, { success }) => settledRuns.push({ runId, success }),
+    provisionalStreamFailureIdForAdmission,
   });
 
   return {
@@ -2537,6 +2540,7 @@ test("useChatEvents: stream error event appends inline error and clears active s
   assert.equal(harness.activeRun, null);
   assert.equal(harness.messages.length, 1);
   assert.equal(harness.messages[0].role, "error");
+  assert.equal(harness.messages[0].id, "err-run-stream-error");
   assert.equal(harness.messages[0].content, "The chat stream failed inline.");
   assert.deepEqual(plain(seenStreamErrors), [
     {
@@ -2555,6 +2559,215 @@ test("useChatEvents: stream error event appends inline error and clears active s
       error: "unavailable",
       kind: "service_unavailable",
       retryable: true,
+    },
+  ]);
+});
+
+test("useChatEvents: terminal run failure replaces its provisional stream error", () => {
+  const harness = createUseChatEventsHarness({
+    failureMessageForRunStatus: ({ failureSummary }) =>
+      failureSummary || "The run failed before producing a reply.",
+  });
+  harness.setCurrentActiveRun({
+    runId: "run-context-limit",
+    threadId: "thread-1",
+    status: "running",
+  });
+
+  harness.handleEvent({
+    type: "error",
+    frame: {
+      error: "unavailable",
+      kind: "service_unavailable",
+      retryable: true,
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: "run-context-limit",
+              status: "failed",
+              failure_category: "model_context_limit",
+              failure_summary:
+                "The request exceeded the model's context limit. Start a new chat or shorten the request.",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.deepEqual(plain(harness.messages[0]), {
+    id: "err-run-context-limit",
+    role: "error",
+    content:
+      "The request exceeded the model's context limit. Start a new chat or shorten the request.",
+    timestamp: harness.messages[0].timestamp,
+    failureStatus: "failed",
+    failureCategory: "model_context_limit",
+    failureSummary:
+      "The request exceeded the model's context limit. Start a new chat or shorten the request.",
+  });
+});
+
+test("useChatEvents: admission-window stream error keeps its provisional identity", () => {
+  const provisionalMessageId = "err-stream-admission-pending-1";
+  const harness = createUseChatEventsHarness({
+    provisionalStreamFailureIdForAdmission: () => provisionalMessageId,
+  });
+
+  harness.handleEvent({
+    type: "error",
+    frame: {
+      error: "unavailable",
+      kind: "service_unavailable",
+      retryable: true,
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, provisionalMessageId);
+});
+
+test("useChatEvents: terminal success clears its provisional stream error", () => {
+  const harness = createUseChatEventsHarness();
+  harness.setCurrentActiveRun({
+    runId: "run-stream-recovered",
+    threadId: "thread-1",
+    status: "running",
+  });
+
+  harness.handleEvent({
+    type: "error",
+    frame: {
+      error: "unavailable",
+      kind: "service_unavailable",
+      retryable: true,
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-stream-recovered", status: "completed" } },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(plain(harness.messages), []);
+  assert.deepEqual(harness.settledRuns, [
+    { runId: "run-stream-recovered", success: true },
+  ]);
+});
+
+test("useChatEvents: metadata-free terminal failure replaces its stream error", () => {
+  const harness = createUseChatEventsHarness({ failureMessageForRunStatus });
+  harness.setCurrentActiveRun({
+    runId: "run-terminal-fallback",
+    threadId: "thread-1",
+    status: "running",
+  });
+
+  harness.handleEvent({
+    type: "error",
+    frame: {
+      error: "unavailable",
+      kind: "service_unavailable",
+      retryable: true,
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: "run-terminal-fallback",
+              status: "failed",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.deepEqual(plain(harness.messages[0]), {
+    id: "err-run-terminal-fallback",
+    role: "error",
+    content: "The run failed before producing a reply.",
+    timestamp: harness.messages[0].timestamp,
+    failureStatus: "failed",
+  });
+});
+
+test("useChatEvents: stale terminal failure promotes its own stream error after retry", () => {
+  const harness = createUseChatEventsHarness({
+    failureMessageForRunStatus: ({ failureSummary }) =>
+      failureSummary || "The run failed before producing a reply.",
+  });
+  harness.setCurrentActiveRun({
+    runId: "run-before-retry",
+    threadId: "thread-1",
+    status: "running",
+  });
+
+  harness.handleEvent({
+    type: "error",
+    frame: {
+      error: "connection lost",
+      kind: "service_unavailable",
+      retryable: true,
+    },
+  });
+
+  harness.setCurrentActiveRun({
+    runId: "run-after-retry",
+    threadId: "thread-1",
+    status: "running",
+    source: "local",
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            run_status: {
+              run_id: "run-before-retry",
+              status: "failed",
+              failure_category: "model_context_limit",
+              failure_summary: "The request exceeded the model's context limit.",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(plain(harness.activeRun), {
+    runId: "run-after-retry",
+    threadId: "thread-1",
+    status: "running",
+    source: "local",
+  });
+  assert.deepEqual(plain(harness.messages), [
+    {
+      id: "err-run-before-retry",
+      role: "error",
+      content: "The request exceeded the model's context limit.",
+      timestamp: harness.messages[0].timestamp,
+      failureStatus: "failed",
+      failureCategory: "model_context_limit",
+      failureSummary: "The request exceeded the model's context limit.",
     },
   ]);
 });

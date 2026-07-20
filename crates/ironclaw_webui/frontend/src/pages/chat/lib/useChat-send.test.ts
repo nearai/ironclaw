@@ -31,7 +31,9 @@ import {
   createErrorChatMessage,
   createRequestFailureChatMessage,
   isRequestFailureForMessage,
+  promoteProvisionalStreamFailureMessage,
   requestFailureIdForMessage,
+  STREAM_FAILURE_ID_PREFIX,
 } from "./message-types";
 import {
   channelConnectionContinuationMessage,
@@ -107,8 +109,10 @@ function runUseChatSource(context) {
     forgetChannelConnectionWaiter,
     isRequestFailureForMessage,
     normalizeConnectionChannel,
+    promoteProvisionalStreamFailureMessage,
     rememberChannelConnectionWaiter,
     requestFailureIdForMessage,
+    STREAM_FAILURE_ID_PREFIX,
   });
   if (!context.subscribeChannelConnected) {
     context.subscribeChannelConnected = subscribeChannelConnected;
@@ -5797,6 +5801,117 @@ test("useChat.send: stream error clears same-thread local admission", async () =
 
   assert.equal(second.run_id, "run-2");
   assert.equal(sendCalls, 2);
+});
+
+test("useChat.send: promotes an admission-window stream error when the run id arrives", async () => {
+  const threadId = "thread-admission-window-error";
+  let renderedMessages = [];
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub(),
+    addPending,
+    toRenderAttachment,
+    toWireAttachment,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("thread should already exist");
+    },
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("ordinary prompts should not fetch connectable channels");
+    },
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("ordinary prompts should not fetch connectable channels");
+      },
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    timelineMessageIdFromAcceptedRef,
+    resolveGateRequest: async () => {},
+    sendMessage: async ({ threadId: sendThreadId }) => {
+      const provisionalMessageId =
+        context.chatEventsArgs.provisionalStreamFailureIdForAdmission();
+      context.chatEventsArgs.setMessages((prev) => [
+        ...prev,
+        {
+          id: provisionalMessageId,
+          role: "error",
+          content: "The chat stream failed: service unavailable.",
+        },
+      ]);
+      context.chatEventsArgs.onStreamError({
+        error: "unavailable",
+        kind: "service_unavailable",
+        retryable: true,
+      });
+      context.chatEventsArgs.setMessages((prev) => [
+        ...prev,
+        {
+          id: "err-run-admission-window-error",
+          role: "error",
+          content: "The request exceeded the model's context limit.",
+          failureStatus: "failed",
+          failureCategory: "model_context_limit",
+        },
+      ]);
+      context.chatEventsArgs.onRunSettled("run-admission-window-error", {
+        success: false,
+      });
+      return {
+        accepted_message_ref: "msg:admission-window-error",
+        run_id: "run-admission-window-error",
+        status: "queued",
+        thread_id: sendThreadId,
+      };
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: (args) => {
+      context.chatEventsArgs = args;
+      return () => {};
+    },
+    useHistory: () => ({
+      messages: renderedMessages,
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      seedThreadMessages: () => {},
+      setMessages: (updater) => {
+        renderedMessages =
+          typeof updater === "function" ? updater(renderedMessages) : updater;
+      },
+    }),
+    useSSE: () => ({ status: CONNECTION_STATUS.IDLE }),
+  };
+
+  runUseChatSource(context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  const response = await chat.send("first request");
+
+  assert.equal(response.run_id, "run-admission-window-error");
+  assert.deepEqual(
+    renderedMessages.filter((message) => message.role === "error"),
+    [
+      {
+        id: "err-run-admission-window-error",
+        role: "error",
+        content: "The request exceeded the model's context limit.",
+        failureStatus: "failed",
+        failureCategory: "model_context_limit",
+      },
+    ],
+  );
 });
 
 test("useChat.send: a send to another thread is not blocked by an unsettled run (submitBusyRef deadlock #5256)", async () => {
