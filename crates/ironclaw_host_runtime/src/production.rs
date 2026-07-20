@@ -2121,11 +2121,18 @@ fn stable_auth_gate_id(
         .map(|requirement| {
             let mut scopes = requirement.provider_scopes.clone();
             scopes.sort();
+            // Include `setup` in the fingerprint: two requirements that differ
+            // only in setup kind (ManualToken vs OAuth vs Pairing) or in OAuth
+            // setup scopes are DIFFERENT auth flows and must derive distinct
+            // write-once gate-record keys. Otherwise changing a capability's
+            // setup collides with a stale `GateRecord::Auth` and the runner
+            // reloads the obsolete flow on resume (#6299 IronLoop).
             format!(
-                "credential={}:{}:{}",
+                "credential={}:{}:{}:{}",
                 requirement.provider.as_str(),
                 requirement.requester_extension.as_str(),
-                scopes.join(",")
+                scopes.join(","),
+                auth_setup_fingerprint(&requirement.setup),
             )
         })
         .collect::<Vec<_>>();
@@ -2136,6 +2143,27 @@ fn stable_auth_gate_id(
     let suffix = digest.strip_prefix("sha256:").unwrap_or(&digest);
     RuntimeGateId::from_stable_suffix(&format!("auth-{suffix}"))
         .unwrap_or_else(|_| RuntimeGateId::new())
+}
+
+/// Deterministic fingerprint of a credential auth setup for the auth gate-record
+/// key ([`stable_auth_gate_id`]). Distinct setup kinds — and distinct OAuth
+/// setup scope sets — MUST hash apart so a capability whose setup changes (e.g.
+/// ManualToken → OAuth, or an OAuth scope change) derives a NEW write-once
+/// gate-record key instead of colliding with the stale record from the old flow
+/// (#6299 IronLoop). Exhaustive match: a new setup variant fails the build here
+/// rather than silently sharing a fingerprint.
+fn auth_setup_fingerprint(setup: &ironclaw_host_api::RuntimeCredentialAccountSetup) -> String {
+    use ironclaw_host_api::RuntimeCredentialAccountSetup as Setup;
+    match setup {
+        Setup::ManualToken => "manual_token".to_string(),
+        Setup::OAuth { scopes } => {
+            let mut scopes = scopes.clone();
+            scopes.sort();
+            format!("oauth:{}", scopes.join(","))
+        }
+        Setup::Pairing => "pairing".to_string(),
+        Setup::Retired => "retired".to_string(),
+    }
 }
 
 fn spawned_process_outcome_from(
@@ -2515,6 +2543,54 @@ mod tests {
             requester_extension: ExtensionId::new("notion").unwrap(),
             provider_scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
         }
+    }
+
+    /// #6299 IronLoop — the auth gate-record key must fingerprint
+    /// `RuntimeCredentialAuthRequirement.setup`. Two requirements identical
+    /// except for setup (ManualToken vs OAuth, or different OAuth setup scopes)
+    /// are DIFFERENT auth flows; sharing a write-once `GateRecord::Auth` key
+    /// would make a changed setup resume the stale, obsolete flow.
+    #[test]
+    fn stable_auth_gate_id_distinguishes_credential_setup() {
+        use ironclaw_host_api::RuntimeCredentialAccountSetup as Setup;
+        let with_setup = |setup| RuntimeCredentialAuthRequirement {
+            provider: RuntimeCredentialAccountProviderId::new("notion").unwrap(),
+            setup,
+            requester_extension: ExtensionId::new("notion").unwrap(),
+            provider_scopes: vec!["read".to_string()],
+        };
+        let id = |req: &RuntimeCredentialAuthRequirement| {
+            stable_auth_gate_id(&cap(), &[], std::slice::from_ref(req))
+        };
+
+        let manual = with_setup(Setup::ManualToken);
+        let oauth = with_setup(Setup::OAuth {
+            scopes: vec!["s1".to_string()],
+        });
+        let oauth_other = with_setup(Setup::OAuth {
+            scopes: vec!["s2".to_string()],
+        });
+
+        // ManualToken vs OAuth: distinct keys.
+        assert_ne!(
+            id(&manual),
+            id(&oauth),
+            "ManualToken and OAuth setups must not share a gate-record key",
+        );
+        // OAuth setups differing only in setup scopes: distinct keys.
+        assert_ne!(
+            id(&oauth),
+            id(&oauth_other),
+            "OAuth setups with different setup scopes must not share a gate-record key",
+        );
+        // Identical requirement (incl. setup): stable, deterministic key.
+        assert_eq!(
+            id(&oauth),
+            id(&with_setup(Setup::OAuth {
+                scopes: vec!["s1".to_string()],
+            })),
+            "identical requirements must derive the identical key",
+        );
     }
 
     #[test]
