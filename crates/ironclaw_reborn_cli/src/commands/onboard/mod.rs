@@ -39,6 +39,11 @@ pub(crate) struct OnboardCommand {
     #[arg(long = "import-history")]
     import_history: bool,
 
+    /// Scaffold only — never offer to launch the REPL at the end, even on a
+    /// TTY. Use in scripts and CI.
+    #[arg(long = "no-launch")]
+    no_launch: bool,
+
     /// Skip installing/starting the OS service (launchd/systemd) at the end
     /// of onboarding. Always effectively on in a non-interactive session
     /// (headless CI, a piped/scripted invocation) regardless of this flag —
@@ -174,7 +179,67 @@ impl OnboardCommand {
         #[cfg(feature = "webui-v2-beta")]
         self.finish_with_service_and_login_link(&context, home, prompts.is_interactive())?;
 
+        // Offer to jump straight into a session. Web UI is offered only when
+        // this binary was built with `serve` (webui-v2-beta); otherwise just
+        // REPL.
+        self.maybe_offer_launch()?;
+
         Ok(())
+    }
+
+    /// After onboarding, offer to re-exec into a live session so the user lands
+    /// in chat instead of a bare shell prompt. Offers REPL and — when `serve`
+    /// is compiled in — Web UI. No-op for `--no-launch` or non-interactive.
+    fn maybe_offer_launch(&self) -> anyhow::Result<()> {
+        use std::io::{IsTerminal, Write};
+
+        if self.no_launch || !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+            return Ok(());
+        }
+        let webui = cfg!(feature = "webui-v2-beta");
+        if webui {
+            print!("\nStart now?  [1] Command line   [2] Web UI   [Enter] skip: ");
+        } else {
+            print!("\nStart a command-line chat now? [Y/n]: ");
+        }
+        std::io::stdout().flush()?;
+        let mut answer = String::new();
+        if std::io::stdin().read_line(&mut answer)? == 0 {
+            return skip_launch_hint(webui); // EOF
+        }
+        let answer = answer.trim().to_ascii_lowercase();
+        let subcommand = if webui {
+            match answer.as_str() {
+                "1" | "cli" | "command line" | "commandline" | "terminal" | "repl" => "repl",
+                "2" | "web" | "web ui" | "webui" | "w" => "serve",
+                _ => return skip_launch_hint(true), // Enter / anything else = skip
+            }
+        } else {
+            match answer.as_str() {
+                "" | "y" | "yes" => "repl",
+                _ => return skip_launch_hint(false),
+            }
+        };
+        let exe = std::env::current_exe()?;
+        let label = match subcommand {
+            "serve" => "web UI",
+            _ => "command-line chat",
+        };
+        println!("starting {label}…");
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // exec replaces this process; only returns on failure.
+            Err(std::process::Command::new(&exe)
+                .arg(subcommand)
+                .exec()
+                .into())
+        }
+        #[cfg(not(unix))]
+        {
+            let status = std::process::Command::new(&exe).arg(subcommand).status()?;
+            std::process::exit(status.code().unwrap_or(1));
+        }
     }
 
     /// Onboarding's last two steps, gated behind `webui-v2-beta` (both depend
@@ -250,7 +315,12 @@ impl OnboardCommand {
     /// is the sole `IsTerminal` check in this command) rather than re-deriving it here.
     #[cfg(feature = "webui-v2-beta")]
     fn should_install_service(&self, interactive: bool) -> bool {
-        !self.no_service && interactive
+        // Only when the interactive launcher is off (`--no-launch`). With the
+        // launcher active (default), the user picks REPL / Web UI and a
+        // foreground `serve` runs — installing a background service too would
+        // fight it for the port. So the background service is the `--no-launch`
+        // (headless/scripted) path's way to keep the Web UI running.
+        !self.no_service && interactive && self.no_launch
     }
 }
 
@@ -276,6 +346,18 @@ impl ServiceStartOutcome {
             Self::Failed(reason) => format!("failed: {reason}"),
         }
     }
+}
+
+/// Print how to start a session later when the user skips the launch prompt.
+fn skip_launch_hint(webui: bool) -> anyhow::Result<()> {
+    if webui {
+        println!(
+            "skipped. Start anytime with `ironclaw repl` (command line) or `ironclaw serve` (web UI)."
+        );
+    } else {
+        println!("skipped. Start anytime with `ironclaw repl`.");
+    }
+    Ok(())
 }
 
 pub(crate) fn onboarding_marker_path(home: &RebornHome) -> PathBuf {

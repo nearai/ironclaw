@@ -106,6 +106,37 @@ impl ironclaw_reborn_composition::AdminApiTokenMinter for SignedSessionTokenMint
     }
 }
 
+/// Auto-open the WebUI sign-in URL in the default browser — but only for an
+/// interactive foreground `serve` on a loopback address (never from a
+/// background service or a remote bind). Best-effort; the URL is also printed.
+fn maybe_open_browser(no_browser: bool, addr: SocketAddr, token: &str) {
+    use std::io::IsTerminal;
+    if no_browser || !std::io::stderr().is_terminal() || !addr.ip().is_loopback() {
+        return;
+    }
+    let url = format!("http://{addr}/v2/?token={token}");
+    eprintln!("ironclaw serve: opening {url}");
+    spawn_browser_open(url);
+}
+
+/// Best-effort open a URL in the default browser (macOS `open`, Linux
+/// `xdg-open`, Windows `start`), after a short delay so the listener is bound
+/// first. Failures are ignored — the URL was already printed.
+fn spawn_browser_open(url: String) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let opener: &[&str] = if cfg!(target_os = "macos") {
+            &["open"]
+        } else if cfg!(target_os = "windows") {
+            &["cmd", "/C", "start", ""]
+        } else {
+            &["xdg-open"]
+        };
+        let (cmd, pre) = opener.split_first().expect("opener is non-empty");
+        let _ = std::process::Command::new(cmd).args(pre).arg(&url).status();
+    });
+}
+
 #[derive(Debug, Args)]
 pub(crate) struct ServeCommand {
     /// Host interface for the Reborn WebChat v2 HTTP listener.
@@ -131,6 +162,11 @@ pub(crate) struct ServeCommand {
     /// Confirm trusted-laptop host filesystem access for local-dev-yolo.
     #[arg(long = "confirm-host-access")]
     confirm_host_access: bool,
+
+    /// Do not auto-open the browser when running `serve` interactively in the
+    /// foreground on a loopback address.
+    #[arg(long = "no-browser")]
+    no_browser: bool,
 }
 
 impl ServeCommand {
@@ -195,6 +231,9 @@ impl ServeCommand {
         )?;
         let webui_token_source = resolved_token.source;
         let token_value = resolved_token.value;
+        // Kept for the auto-open sign-in URL below; `token_value` is moved into
+        // the session-signing secret / authenticator before the listener binds.
+        let browser_token = token_value.clone();
         let user_id_raw = resolve_webui_user_id_raw(env_user_id_var, config_file.as_ref())?;
         let user_id = UserId::new(&user_id_raw)
             .map_err(|err| anyhow!("{env_user_id_var} value `{user_id_raw}` is invalid: {err}"))?;
@@ -777,6 +816,7 @@ impl ServeCommand {
                     .await
                     .context("hosted single-tenant startup WebChat v2 serve task failed to join")?
             } else {
+                maybe_open_browser(self.no_browser, listen_addr, &browser_token);
                 serve_webui_v2(RebornWebuiServeOptions {
                     addr: listen_addr,
                     router,

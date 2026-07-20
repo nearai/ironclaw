@@ -132,7 +132,19 @@ fn required_frontend_dist_files(dist_dir: &Path) -> [PathBuf; 3] {
 }
 
 fn run_command(command: &str, args: &[&str], cwd: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let status = Command::new(command).args(args).current_dir(cwd).status()?;
+    let status = match Command::new(command).args(args).current_dir(cwd).status() {
+        Ok(status) => status,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(std::io::Error::other(format!(
+                "`{command}` was not found on PATH — the `webui-v2-beta` feature builds the \
+                 WebChat v2 frontend and needs Node 22 (which bundles corepack). Install Node 22+ \
+                 from https://nodejs.org (then `corepack enable`), or `npm i -g pnpm`. To build \
+                 without Node, ship a prebuilt SPA bundle. Underlying error: {err}"
+            ))
+            .into());
+        }
+        Err(err) => return Err(err.into()),
+    };
     if status.success() {
         return Ok(());
     }
