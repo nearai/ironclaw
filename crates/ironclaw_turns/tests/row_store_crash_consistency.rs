@@ -63,13 +63,15 @@ use ironclaw_host_api::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, CancelRunRequest,
-    CheckpointSchemaId, FilesystemTurnStateRowStore, GateRef, GetRunStateRequest, IdempotencyKey,
-    InMemoryRunProfileResolver, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits,
-    LoopCheckpointStore, PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnPrecondition,
-    ResumeTurnRequest, RunProfileRequest, RunProfileVersion, SanitizedCancelReason,
-    SanitizedFailure, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCheckpointId, TurnError, TurnLeaseToken, TurnPersistenceSnapshot, TurnRunId, TurnRunnerId,
-    TurnScope, TurnStateDurabilityPolicy, TurnStateStore, TurnStatus, is_recoverability_critical,
+    CheckpointSchemaId, FilesystemTurnStateRowStore, GateRef, GetLoopCheckpointRequest,
+    GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver, InMemoryTurnStateStore,
+    InMemoryTurnStateStoreLimits, LoopCheckpointStore, PutLoopCheckpointRequest,
+    ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest, RunProfileRequest,
+    RunProfileVersion, SanitizedCancelReason, SanitizedFailure, SourceBindingRef,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnError,
+    TurnEventProjectionSource, TurnLeaseToken, TurnPersistenceSnapshot, TurnRunId, TurnRunnerId,
+    TurnScope, TurnSpawnTreeStateStore, TurnStateDurabilityPolicy, TurnStateStore, TurnStatus,
+    is_recoverability_critical,
     run_profile::{LoopCheckpointKind, LoopCheckpointStateRef},
     runner::{
         BlockRunRequest, ClaimRunRequest, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
@@ -3121,4 +3123,199 @@ async fn write_behind_concurrent_writers_under_cap_stay_consistent() {
         assert_eq!(state.status, TurnStatus::Queued);
     }
     check_internal_invariants(&store.persistence_snapshot().await.unwrap()).unwrap();
+}
+
+/// #6298 — LIVE read-your-writes PROPERTY: drive a `WriteBehind` store and the
+/// acked reference model through the same seeded op stream and, after EVERY acked
+/// op (no crash), assert the caller-facing `get_run_state` query on every live run
+/// matches the model. This is the property-scale complement to
+/// `live_reads_are_read_your_writes_consistent_in_both_durability_modes`: it
+/// exercises the query path after every transition type (submit / claim / block /
+/// resume / complete / fail / cancel / recover), not just a lone submit, across
+/// many seeds.
+///
+/// It is deliberately a SEPARATE, crash-free run rather than folded into
+/// `run_chaos`: `get_run_state` drains the pending write-behind tail to durability
+/// before reading (the #6298 read barrier), which would empty the crash-loss
+/// window `run_chaos` exists to exercise. With no crash, that drain is harmless and
+/// exactly what we want — it forces the durable read to observe every acked
+/// write. Pre-#6298 (a durable read WITHOUT the barrier) this fails the moment a
+/// just-acked, not-yet-materialized run is queried: `Ok(model)` vs
+/// `Err(ScopeNotFound)` (store).
+#[tokio::test]
+async fn write_behind_live_get_run_state_tracks_model_across_ops() {
+    let policy = TurnStateDurabilityPolicy::WriteBehind;
+    for seed in [2, 11, 53, 211, 1009, 40009] {
+        let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
+        let scoped = fault_scoped(Arc::clone(&backend));
+        let store = open_row_store_lenient_with_policy(Arc::clone(&scoped), policy);
+        let model = model_store();
+        let mut h = Harness::new(seed);
+
+        for op_index in 0..48 {
+            let plan = h.plan_next();
+            h.log.push(format!("#{op_index} {}", plan.describe()));
+            let scope_list = h.scope_list.clone();
+            let handles = h.handles.clone();
+            let rs_result = apply(&store, &plan, &scope_list, &handles).await;
+
+            if rs_result.is_ok() && !matches!(plan, Plan::Heartbeat { .. }) {
+                apply_to_model_and_bookkeep(&mut h, &model, &plan, &rs_result).await;
+            }
+            if rs_result.is_err() {
+                continue;
+            }
+
+            // After each acked op, the caller-facing query must be read-your-writes
+            // consistent for every tracked run: found-vs-ScopeNotFound must agree
+            // with the model, and status must match. Status (not full state) is
+            // compared so process-local lease/heartbeat timing cannot cause a false
+            // failure.
+            for handle in &h.handles {
+                let request = GetRunStateRequest {
+                    scope: h.scope_list[handle.scope_idx].clone(),
+                    run_id: handle.run_id,
+                };
+                let model_state = model.get_run_state(request.clone()).await;
+                let store_state = store.get_run_state(request).await;
+                match (&model_state, &store_state) {
+                    (Ok(model_run), Ok(store_run)) => assert!(
+                        model_run.status == store_run.status,
+                        "live get_run_state status divergence for run {}: model={:?} store={:?}\nseed={seed}\nops:\n  {}",
+                        handle.run_id,
+                        model_run.status,
+                        store_run.status,
+                        h.log.join("\n  "),
+                    ),
+                    (Err(TurnError::ScopeNotFound), Err(TurnError::ScopeNotFound)) => {}
+                    _ => panic!(
+                        "live get_run_state divergence for run {}: model={model_state:?} store={store_state:?}\nseed={seed}\nops:\n  {}",
+                        handle.run_id,
+                        h.log.join("\n  "),
+                    ),
+                }
+            }
+        }
+    }
+}
+
+/// #6298 — LIVE read-your-writes: every durable-read query path must serve from
+/// the hot cache (which reflects every acked write, durable or not), NOT from
+/// materialized durable rows.
+///
+/// ## The defect this pins
+///
+/// Under `WriteBehind`, a non-critical mutation (`submit_turn` → `Queued`)
+/// returns `Ok` after the delta is ENQUEUED but before the flusher appends it
+/// and the materializer writes durable rows (the flusher even coalesces for
+/// [`DELTA_JOURNAL_FLUSH_COALESCE_DELAY`] before appending). The pre-#6298 query
+/// methods read materialized durable rows:
+///   * `get_run_state` → `read_run_state_from_durable_rows`
+///   * `read_turn_events_after` → `read_turn_events_from_durable_rows`
+///   * `get_loop_checkpoint` → `read_loop_checkpoint_from_durable_rows`
+/// so an immediate read after an acked non-critical write raced the async
+/// materialize and observed NOTHING — `get_run_state` returned `Ok(None)` →
+/// `ScopeNotFound`, `read_turn_events_after` an empty page, `get_loop_checkpoint`
+/// `None`. In the runtime, `submit_turn` → `get_run_state` then failed with
+/// `ScopeNotFound` on essentially every turn. `WriteThrough` masked it because
+/// the write awaits durability, so durable rows == the hot cache.
+///
+/// Post-#6298 every query serves from the cached snapshot, so the reads are
+/// read-your-writes-consistent under BOTH policies. Asserting both proves the
+/// `WriteThrough` behavior is observably unchanged and the `WriteBehind` symptom
+/// is gone at the store tier.
+#[tokio::test]
+async fn live_reads_are_read_your_writes_consistent_in_both_durability_modes() {
+    for policy in [
+        TurnStateDurabilityPolicy::WriteThrough,
+        TurnStateDurabilityPolicy::WriteBehind,
+    ] {
+        let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
+        let scoped = fault_scoped(Arc::clone(&backend));
+        // Hosted single-tenant production shape (lenient: durable rows are written
+        // only by the background materializer), the shape where the runtime hits
+        // the defect.
+        let store = open_row_store_lenient_with_policy(Arc::clone(&scoped), policy);
+
+        let scope = only_scope();
+        let run_id = TurnRunId::new();
+
+        // ── submit, then IMMEDIATELY read (no yield that would let the async
+        //    flusher/materializer land the durable rows) ─────────────────────────
+        store
+            .submit_turn(
+                submit_request(scope.clone(), run_id, "idem-ryw"),
+                &AllowAllTurnAdmissionPolicy,
+                &InMemoryRunProfileResolver::default(),
+            )
+            .await
+            .expect("submit returns Ok after enqueue");
+
+        // get_run_state: the run is found and Queued — NOT ScopeNotFound. This is
+        // the exact runtime-breaking symptom under WriteBehind pre-#6298.
+        let state = store
+            .get_run_state(GetRunStateRequest {
+                scope: scope.clone(),
+                run_id,
+            })
+            .await
+            .unwrap_or_else(|error| {
+                panic!("live get_run_state after submit under {policy:?} failed: {error:?}")
+            });
+        assert_eq!(state.status, TurnStatus::Queued, "policy={policy:?}");
+        assert_eq!(state.run_id, run_id, "policy={policy:?}");
+        let turn_id = state.turn_id;
+
+        // get_run_record: the same live-read guarantee on the spawn-tree surface.
+        let record = store
+            .get_run_record(&scope, run_id)
+            .await
+            .expect("get_run_record read")
+            .unwrap_or_else(|| panic!("live get_run_record after submit missing under {policy:?}"));
+        assert_eq!(record.run_id, run_id, "policy={policy:?}");
+        assert_eq!(record.status, TurnStatus::Queued, "policy={policy:?}");
+
+        // read_turn_events_after: the submit lifecycle event is visible live.
+        let page = store
+            .read_turn_events_after(&scope, None, None, 100)
+            .await
+            .expect("read_turn_events_after read");
+        assert!(
+            page.entries
+                .iter()
+                .any(|event| event.run_id == run_id && event.status == TurnStatus::Queued),
+            "live submit event must be visible under {policy:?}; got {} entries",
+            page.entries.len(),
+        );
+
+        // get_loop_checkpoint: put a checkpoint (non-critical, lazy-flushed under
+        // WriteBehind), then read it back live.
+        let put = PutLoopCheckpointRequest {
+            scope: scope.clone(),
+            turn_id,
+            run_id,
+            state_ref: LoopCheckpointStateRef::new("checkpoint:ryw-state").unwrap(),
+            schema_id: CheckpointSchemaId::new("interactive_checkpoint_v1").unwrap(),
+            schema_version: RunProfileVersion::new(1),
+            kind: LoopCheckpointKind::BeforeModel,
+            gate_ref: None,
+        };
+        let checkpoint = store
+            .put_loop_checkpoint(put)
+            .await
+            .expect("put_loop_checkpoint returns Ok after enqueue");
+        let loaded = store
+            .get_loop_checkpoint(GetLoopCheckpointRequest {
+                scope: scope.clone(),
+                turn_id,
+                run_id,
+                checkpoint_id: checkpoint.checkpoint_id,
+            })
+            .await
+            .expect("get_loop_checkpoint read")
+            .unwrap_or_else(|| {
+                panic!("live get_loop_checkpoint after put missing under {policy:?}")
+            });
+        assert_eq!(loaded, checkpoint, "policy={policy:?}");
+    }
 }

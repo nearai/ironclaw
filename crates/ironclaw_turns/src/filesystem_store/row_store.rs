@@ -455,6 +455,51 @@ where
         ack
     }
 
+    /// Read-side write-behind barrier (#6298).
+    ///
+    /// The durable-read query methods (`get_run_state`, `read_turn_events_after`,
+    /// `get_loop_checkpoint`) read materialized durable rows so they preserve the
+    /// contracts a bounded hot cache cannot: cross-writer freshness and
+    /// queryability of terminal runs / events the cache has EVICTED but the
+    /// durable store retains. Under `WriteBehind`, however, a non-critical
+    /// mutation returns `Ok` after merely ENQUEUEing its delta — before the
+    /// flusher appends it and the materializer writes its rows. A durable read
+    /// issued in that window would miss the just-acked write (`get_run_state` →
+    /// `Ok(None)` → `ScopeNotFound`, an empty event page, a missing checkpoint),
+    /// failing every runtime `submit_turn` → `get_run_state`.
+    ///
+    /// Draining the enqueued-but-un-acked non-critical window here — bounded by
+    /// [`InMemoryTurnStateStoreLimits::max_pending_write_behind_deltas`], typically
+    /// just the caller's own trailing submit — awaits those durable appends, so
+    /// the subsequent durable read (which force-materializes the journal tail)
+    /// observes them. This is a read-side barrier symmetric to a critical
+    /// transition's write-side barrier, and keeps the durable read's exact
+    /// semantics in BOTH modes (only WHEN it reads changes, never WHAT it reads).
+    /// A no-op under `WriteThrough` (the window is always empty), so write-through
+    /// reads stay byte-for-byte unchanged. On a drained ack failure the flusher
+    /// has halted and latched the store degraded; clear the diverged hot cache and
+    /// surface the retryable error, mirroring the backpressure path.
+    async fn flush_pending_write_behind_for_read(&self) -> Result<(), TurnError> {
+        if !self.is_write_behind() {
+            return Ok(());
+        }
+        // Snapshot-and-drain once: awaiting concurrently-registered later writes is
+        // neither required (read-your-writes only covers writes that completed
+        // before this read began, which are already in the window) nor bounded, so
+        // take the current window contents and release the lock before awaiting.
+        let pending: Vec<DeltaAck> = {
+            let mut window = self.pending_write_behind.lock().await;
+            window.drain(..).collect()
+        };
+        for ack in pending {
+            if let Err(error) = DeltaJournal::await_ack(Some(ack)).await {
+                self.clear_snapshot_cache().await;
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
     async fn ensure_snapshot_cache_for_mutation(
         &self,
         guard: &mut Option<RowSnapshotState>,
@@ -737,6 +782,7 @@ where
         &self,
         request: &GetRunStateRequest,
     ) -> Result<Option<TurnRunState>, TurnError> {
+        self.flush_pending_write_behind_for_read().await?;
         materialize_delta_log(self.filesystem.as_ref(), &self.materialize_gate, None).await?;
         self.ensure_legacy_blob_migrated_for_direct_row_read()
             .await?;
@@ -792,6 +838,7 @@ where
         after: Option<EventCursor>,
         limit: usize,
     ) -> Result<TurnEventPage, TurnError> {
+        self.flush_pending_write_behind_for_read().await?;
         materialize_delta_log(self.filesystem.as_ref(), &self.materialize_gate, None).await?;
         self.ensure_legacy_blob_migrated_for_direct_row_read()
             .await?;
@@ -824,6 +871,7 @@ where
         &self,
         request: &GetLoopCheckpointRequest,
     ) -> Result<Option<LoopCheckpointRecord>, TurnError> {
+        self.flush_pending_write_behind_for_read().await?;
         materialize_delta_log(self.filesystem.as_ref(), &self.materialize_gate, None).await?;
         self.ensure_legacy_blob_migrated_for_direct_row_read()
             .await?;
