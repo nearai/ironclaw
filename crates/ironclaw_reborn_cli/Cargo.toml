@@ -1,6 +1,6 @@
 [package]
 name = "ironclaw_reborn_cli"
-version = "0.99.1-rc.2"
+version = "0.99.1-rc.3"
 edition = "2024"
 rust-version.workspace = true
 description = "Standalone IronClaw Reborn binary"

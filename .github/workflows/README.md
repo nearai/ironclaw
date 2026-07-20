@@ -64,10 +64,10 @@ Rules for a roll-up job that is (or may become) required:
 `release.yml` uses cargo-dist to build and publish the standalone Reborn
 `ironclaw` binary on matching release tags. The workspace cargo-dist config
 allow-lists `ironclaw_reborn_cli`, so the legacy root package named `ironclaw`
-is not selected. The cargo-dist tag namespace is `ironclaw-`, including the
-delimiter, so `ironclaw-vX.Y.Z` is parsed as the version tag `vX.Y.Z` rather
-than a singular release for the legacy root package. Release tags must match the
-Reborn CLI package version.
+does not own release artifacts. Cargo-dist still parses public
+`ironclaw-vX.Y.Z` tags as a singular release for the root package named
+`ironclaw`, so the root package version and Reborn CLI package version must both
+match the release tag version.
 
 `reborn-release-compile.yml` remains available as a direct
 `workflow_dispatch` compile-and-smoke preflight. It is not called from
