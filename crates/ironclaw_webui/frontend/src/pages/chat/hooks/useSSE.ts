@@ -258,7 +258,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
           scheduleOpenWatchdog(source);
           return;
         }
-        reconnectWithTimer(CONNECTION_STATUS.RECONNECTING);
+        reconnectWithTimer();
       };
 
       // Cover anything emitted without an `event:` field — defensive

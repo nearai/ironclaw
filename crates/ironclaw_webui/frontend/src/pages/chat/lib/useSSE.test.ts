@@ -251,7 +251,7 @@ test("useSSE falls back to app reconnect timer for closed streams", () => {
   stream.readyState = context.EventSource.CLOSED;
   stream.onerror({});
 
-  assert.deepEqual(statuses, ["connecting", "reconnecting"]);
+  assert.deepEqual(statuses, ["connecting", "disconnected"]);
   assert.equal(stream.closeCalls, 1);
   assert.equal(timers.length, 1);
   assert.equal(timers[0].delay, 2000);
@@ -259,7 +259,7 @@ test("useSSE falls back to app reconnect timer for closed streams", () => {
   timers[0].handler();
 
   assert.equal(streams.length, 2);
-  assert.deepEqual(statuses, ["connecting", "reconnecting", "reconnecting"]);
+  assert.deepEqual(statuses, ["connecting", "disconnected", "reconnecting"]);
 });
 
 test("useSSE replaces a reconnect attempt that never finishes opening", () => {
