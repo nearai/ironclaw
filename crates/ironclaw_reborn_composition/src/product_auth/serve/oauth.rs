@@ -59,7 +59,7 @@ pub(super) async fn oauth_start_handler(
 
     Ok(Json(OAuthStartResponse {
         flow_id: flow.id,
-        status: flow.state,
+        status: flow.state.into(),
         provider,
         authorization_url,
         expires_at: flow.expires_at,
@@ -92,7 +92,9 @@ pub(super) async fn oauth_flow_status_handler(
     let (scope, flow_id) = oauth_flow_scope(&caller, &flow_id, query)?;
     let flow = run_with_backend_timeout(state.product_auth.flow_record_for_status(&scope, flow_id))
         .await?;
-    Ok(Json(OAuthFlowStateResponse { status: flow.state }))
+    Ok(Json(OAuthFlowStateResponse {
+        status: flow.state.into(),
+    }))
 }
 
 /// Explicit recovery command for a durable OAuth flow.
@@ -109,7 +111,9 @@ pub(super) async fn oauth_flow_reconcile_handler(
 ) -> Result<Json<OAuthFlowStateResponse>, ProductAuthRouteFailure> {
     let (scope, flow_id) = oauth_flow_scope(&caller, &flow_id, query)?;
     let status = run_with_backend_timeout(reconcile_oauth_flow(&state, &scope, flow_id)).await?;
-    Ok(Json(OAuthFlowStateResponse { status }))
+    Ok(Json(OAuthFlowStateResponse {
+        status: status.into(),
+    }))
 }
 
 fn oauth_flow_scope(
@@ -135,11 +139,56 @@ async fn reconcile_oauth_flow(
     scope: &AuthProductScope,
     flow_id: AuthFlowId,
 ) -> Result<AuthFlowState, ProductAuthRouteFailure> {
-    state
+    let before = state
+        .product_auth
+        .flow_record_for_status(scope, flow_id)
+        .await
+        .map_err(ProductAuthRouteFailure::from)?;
+    let resolution = state
         .product_auth
         .reconcile_oauth_flow(scope, flow_id)
-        .await
-        .map_err(ProductAuthRouteFailure::from)
+        .await;
+    let after = state
+        .product_auth
+        .flow_record_for_status(scope, flow_id)
+        .await;
+    let cleanup_record = after.as_ref().unwrap_or(&before);
+    let provider_cleanup = if auth_flow_requires_provider_cleanup(cleanup_record.state) {
+        if let Some(descriptor) = oauth_callback_descriptor_for_provider(&cleanup_record.provider) {
+            run_terminal_failure_hook(
+                state,
+                descriptor,
+                scope,
+                flow_id,
+                RebornOAuthCallbackFailureStage::Terminal,
+            )
+            .await
+        } else {
+            Ok(())
+        }
+    } else {
+        Ok(())
+    };
+
+    // Exact-resolution delivery and provider-owned cleanup are independent,
+    // idempotent effects. Always attempt both, then report either failure so
+    // the browser keeps polling until both have converged.
+    let status = resolution.map_err(ProductAuthRouteFailure::from)?;
+    after.map_err(ProductAuthRouteFailure::from)?;
+    provider_cleanup?;
+    Ok(status)
+}
+
+fn auth_flow_requires_provider_cleanup(state: AuthFlowState) -> bool {
+    matches!(
+        state,
+        AuthFlowState::Resolved(
+            AuthFlowOutcome::ProviderDenied
+                | AuthFlowOutcome::UserAborted
+                | AuthFlowOutcome::Expired
+                | AuthFlowOutcome::Failed { .. }
+        )
+    )
 }
 
 pub(super) async fn abort_started_extension_oauth_flow(
@@ -285,7 +334,7 @@ async fn start_dcr_extension_oauth_flow(
 
     Ok(Json(ProductOAuthStartResponse {
         flow_id: flow.id,
-        status: flow.state,
+        status: flow.state.into(),
         provider,
         authorization_url: authorization_url.clone(),
         expires_at: flow.expires_at,
@@ -383,7 +432,7 @@ async fn start_google_oauth_flow(
 
     Ok(Json(ProductOAuthStartResponse {
         flow_id: flow.id,
-        status: flow.state,
+        status: flow.state.into(),
         provider,
         authorization_url,
         expires_at: flow.expires_at,
@@ -932,7 +981,13 @@ fn oauth_callback_response(headers: &HeaderMap, response: RebornOAuthCallbackRes
     if wants_oauth_callback_html(headers) {
         return oauth_callback_completion_html(&response);
     }
-    Json(response).into_response()
+    Json(json!({
+        "flow_id": response.flow_id,
+        "status": OAuthFlowWireStatus::from(response.status),
+        "credential_account_id": response.credential_account_id,
+        "continuation": response.continuation,
+    }))
+    .into_response()
 }
 
 fn wants_oauth_callback_html(headers: &HeaderMap) -> bool {
@@ -1003,7 +1058,7 @@ fn oauth_callback_completion_html(response: &RebornOAuthCallbackResponse) -> Res
     let script = oauth_callback_signal_script(&json!({
         "type": OAUTH_CALLBACK_SIGNAL_MESSAGE_TYPE,
         "flowId": response.flow_id,
-        "status": response.status,
+        "status": OAuthFlowWireStatus::from(response.status),
         "continuation": response.continuation,
     }));
     let html = format!(
@@ -1045,9 +1100,7 @@ fn oauth_callback_failure_html(
     let script = oauth_callback_signal_script(&json!({
         "type": OAUTH_CALLBACK_SIGNAL_MESSAGE_TYPE,
         "flowId": flow_id,
-        "status": ironclaw_auth::AuthFlowState::Resolved(
-            ironclaw_auth::AuthFlowOutcome::Failed { error: error.code }
-        ),
+        "status": OAuthFlowWireStatus::Failed,
         "errorCode": error.code,
     }));
     let html = format!(
@@ -2716,6 +2769,121 @@ mod tests {
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
+    async fn slack_terminal_cleanup_failure_retries_through_flow_reconciliation() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+            shared.clone(),
+            Arc::new(RecordingDispatcher::default()),
+        ));
+        let tenant_id = TenantId::new("tenant-alpha").expect("tenant");
+        let user_id = UserId::new("user-alpha").expect("user");
+        let installation_id = AdapterInstallationId::new("install-alpha").expect("installation");
+        let binding_store = Arc::new(RecordingBindingStore::default());
+        let binding_service = Arc::new(SlackPersonalUserBindingService::new(
+            [SlackPersonalBindingInstallation {
+                tenant_id: tenant_id.clone(),
+                installation_id: installation_id.clone(),
+                selector: SlackInstallationSelector::app_team("A123", "T123"),
+            }],
+            binding_store.clone(),
+        ));
+        let lifecycle_store = Arc::new(TestSlackLifecycleStore::default());
+        let state = ProductAuthRouteState::new(product_auth.clone(), tenant_id.clone(), None, None)
+            .with_slack_personal_oauth_binding(SlackPersonalOAuthBindingConfig::new(
+                binding_service,
+                Arc::new(StaticSlackPersonalConnectionScopeResolver::new(Some(
+                    SlackPersonalConnectionScope {
+                        installation_id: installation_id.clone(),
+                    },
+                ))),
+                binding_store,
+                lifecycle_store.clone(),
+            ));
+        let scope = AuthProductScope::new(
+            ResourceScope {
+                tenant_id: tenant_id.clone(),
+                user_id: user_id.clone(),
+                agent_id: None,
+                project_id: None,
+                mission_id: None,
+                thread_id: None,
+                invocation_id: InvocationId::new(),
+            },
+            AuthSurface::Callback,
+        );
+        let flow_id = AuthFlowId::new();
+        let expires_at = Utc::now() + ChronoDuration::minutes(5);
+        let state_hash =
+            ironclaw_auth::OpaqueStateHash::new("d".repeat(64)).expect("opaque state hash");
+        shared
+            .create_flow(ironclaw_auth::NewAuthFlow {
+                id: Some(flow_id),
+                scope: scope.clone(),
+                kind: ironclaw_auth::AuthFlowKind::IntegrationCredential,
+                provider: AuthProviderId::new(SLACK_PERSONAL_PROVIDER_ID).expect("provider"),
+                challenge: ironclaw_auth::AuthChallenge::OAuthUrl {
+                    authorization_url: ironclaw_auth::OAuthAuthorizationUrl::new(
+                        "https://slack.com/oauth/v2/authorize",
+                    )
+                    .expect("authorization URL"),
+                    expires_at,
+                },
+                continuation: AuthContinuationRef::SetupOnly,
+                update_binding: None,
+                opaque_state_hash: Some(state_hash.clone()),
+                pkce_verifier_hash: None,
+                expires_at,
+            })
+            .await
+            .expect("create Slack flow");
+        let owner = SlackConnectionOwner::new(tenant_id, user_id, installation_id);
+        let epoch = SlackConnectionEpoch::new(flow_id);
+        lifecycle_store
+            .begin_connection(&owner, epoch, expires_at)
+            .await
+            .expect("connection begins");
+        product_auth
+            .handle_oauth_callback(RebornOAuthCallbackRequest {
+                scope: scope.clone(),
+                flow_id,
+                opaque_state_hash: state_hash,
+                outcome: RebornOAuthCallbackOutcome::ProviderDenied,
+            })
+            .await
+            .expect_err("provider denial remains a callback failure");
+
+        lifecycle_store
+            .fail_next_abandon
+            .store(true, Ordering::SeqCst);
+        let first = reconcile_oauth_flow(&state, &scope, flow_id)
+            .await
+            .expect_err("transient provider cleanup failure remains retryable");
+        assert_eq!(first.body.code, AuthErrorCode::BackendUnavailable);
+        assert_eq!(
+            lifecycle_store
+                .connection_state(&owner)
+                .await
+                .expect("connection state"),
+            Some((epoch, SlackConnectionState::Connecting))
+        );
+
+        assert_eq!(
+            reconcile_oauth_flow(&state, &scope, flow_id)
+                .await
+                .expect("next reconciliation converges provider cleanup"),
+            AuthFlowState::Resolved(AuthFlowOutcome::ProviderDenied)
+        );
+        assert_eq!(
+            lifecycle_store
+                .connection_state(&owner)
+                .await
+                .expect("connection state"),
+            Some((epoch, SlackConnectionState::Disconnected))
+        );
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[tokio::test]
     async fn slack_personal_oauth_callback_binds_authenticated_user_to_slack_identity() {
         let shared = Arc::new(InMemoryAuthProductServices::new());
         let dispatcher = Arc::new(RecordingDispatcher::default());
@@ -4339,6 +4507,15 @@ mod tests {
             self.inner.fail_oauth_callback(scope, input).await
         }
 
+        async fn expire_flow(
+            &self,
+            scope: &AuthProductScope,
+            flow_id: ironclaw_auth::AuthFlowId,
+            observed_at: ironclaw_auth::Timestamp,
+        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
+            self.inner.expire_flow(scope, flow_id, observed_at).await
+        }
+
         async fn mark_resolution_delivered(
             &self,
             scope: &AuthProductScope,
@@ -4423,6 +4600,15 @@ mod tests {
             input: ironclaw_auth::OAuthCallbackFailureInput,
         ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
             self.inner.fail_oauth_callback(scope, input).await
+        }
+
+        async fn expire_flow(
+            &self,
+            scope: &AuthProductScope,
+            flow_id: ironclaw_auth::AuthFlowId,
+            observed_at: ironclaw_auth::Timestamp,
+        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
+            self.inner.expire_flow(scope, flow_id, observed_at).await
         }
 
         async fn mark_resolution_delivered(

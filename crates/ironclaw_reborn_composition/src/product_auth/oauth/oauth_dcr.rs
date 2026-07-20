@@ -2081,6 +2081,15 @@ mod tests {
             unreachable!("create-flow failure test does not fail callbacks")
         }
 
+        async fn expire_flow(
+            &self,
+            _scope: &AuthProductScope,
+            _flow_id: AuthFlowId,
+            _observed_at: ironclaw_auth::Timestamp,
+        ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
+            unreachable!("create-flow failure test does not expire flows")
+        }
+
         async fn mark_resolution_delivered(
             &self,
             _scope: &AuthProductScope,

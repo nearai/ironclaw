@@ -430,6 +430,26 @@ where
             .await
     }
 
+    async fn expire_flow(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+        flow_id: AuthFlowId,
+        observed_at: ironclaw_auth::Timestamp,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        self.update_flow_with_cas(scope, flow_id, |record| {
+            if matches!(record.state, AuthFlowState::Resolved(_)) {
+                return Ok(());
+            }
+            if observed_at <= record.expires_at {
+                return Err(AuthProductError::FlowAlreadyTerminal);
+            }
+            record.state = AuthFlowState::Resolved(AuthFlowOutcome::Expired);
+            record.updated_at = observed_at;
+            Ok(())
+        })
+        .await
+    }
+
     async fn cancel_flow(
         &self,
         scope: &ironclaw_auth::AuthProductScope,

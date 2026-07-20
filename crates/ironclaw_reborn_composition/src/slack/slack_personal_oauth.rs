@@ -275,7 +275,7 @@ pub(crate) async fn start_extension_oauth_flow(
 
     Ok(Json(ProductOAuthStartResponse {
         flow_id: flow.id,
-        status: flow.state,
+        status: flow.state.into(),
         provider,
         authorization_url,
         expires_at: flow.expires_at,

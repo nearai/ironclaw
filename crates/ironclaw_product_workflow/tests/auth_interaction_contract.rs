@@ -235,6 +235,15 @@ impl AuthFlowManager for RecordingFlowManager {
         Err(AuthProductError::BackendUnavailable)
     }
 
+    async fn expire_flow(
+        &self,
+        _scope: &AuthProductScope,
+        _flow_id: AuthFlowId,
+        _observed_at: ironclaw_auth::Timestamp,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        Err(AuthProductError::BackendUnavailable)
+    }
+
     async fn cancel_flow(
         &self,
         scope: &AuthProductScope,

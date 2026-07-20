@@ -1,3 +1,5 @@
+//! Telegram auth-flow journey: visible OAuth authorization link.
+
 use super::harness::*;
 use super::reborn_support::reply::RebornScriptedReply;
 use axum::http::StatusCode;

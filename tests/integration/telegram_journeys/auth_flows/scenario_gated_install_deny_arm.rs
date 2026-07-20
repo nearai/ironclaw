@@ -1,3 +1,5 @@
+//! Telegram auth-flow journey: install gate denial feedback.
+
 use super::harness::*;
 use super::reborn_support::reply::RebornScriptedReply;
 use axum::http::StatusCode;

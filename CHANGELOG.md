@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - *(filesystem)* make libSQL descendant listings seek through the path index instead of scanning the full root-filesystem table, preventing extension-readiness fan-out from stalling unrelated WebUI requests.
-- *(reborn)* make OAuth denial lifecycle channel-neutral: explicit auth denial cancels the blocked run, provider-popup denial resumes the exact gate as denied, and Slack personal OAuth targets the configured workspace.
+- *(reborn)* make OAuth denial lifecycle channel-neutral: explicit auth denial cancels the exact blocked run, provider-popup denial resumes the exact gate as denied, stale delivery is a no-op, and Slack personal OAuth targets the configured workspace. Durable auth now records `Open -> Processing -> Resolved(outcome)` and retries one exact resolution instead of coordinating cancellation leases and rollback states.
 - *(webui-v2)* expose per-user secret provisioning in Admin user details with write-only values, handle-only listings, and confirmed deletion ([#6118](https://github.com/nearai/ironclaw/issues/6118)).
 - *(webui-v2)* render the Extensions Registry as soon as catalog data arrives instead of holding the skeleton screen for slower installed-extension enrichment ([#6052](https://github.com/nearai/ironclaw/issues/6052)).
 - *(webui-v2)* submit the latest composer value when Enter follows input before React rerenders, avoiding intermittently dropped follow-up messages ([#6044](https://github.com/nearai/ironclaw/issues/6044)).

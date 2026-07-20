@@ -1,3 +1,5 @@
+//! Telegram auth-flow journey: explicit in-chat abort.
+
 use super::harness::*;
 use super::reborn_support::reply::RebornScriptedReply;
 use axum::http::StatusCode;

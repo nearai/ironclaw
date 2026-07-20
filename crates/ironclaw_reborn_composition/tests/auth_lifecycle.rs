@@ -257,6 +257,59 @@ async fn lifecycle_uninstall_retries_user_abort_after_exact_run_cancellation_fai
     assert_lifecycle_uninstall_denies_blocked_auth_gate(false, true).await;
 }
 
+#[tokio::test]
+async fn expired_auth_resolution_requeues_only_the_exact_gate_with_error() {
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let run_id = TurnRunId::new();
+    let gate_ref = GateRef::new("gate:expired-oauth").unwrap();
+    let thread_id = ThreadId::new("thread-expired-oauth").unwrap();
+    let mut flow_scope = scope("alice");
+    flow_scope.resource.thread_id = Some(thread_id.clone());
+    let turn_scope = TurnScope::new_with_owner(
+        flow_scope.resource.tenant_id.clone(),
+        flow_scope.resource.agent_id.clone(),
+        flow_scope.resource.project_id.clone(),
+        thread_id,
+        Some(actor.user_id.clone()),
+    );
+    let coordinator = Arc::new(LifecycleTurnCoordinator::blocked_auth(
+        actor.clone(),
+        turn_scope,
+        run_id,
+        gate_ref.clone(),
+    ));
+    let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator.clone());
+
+    dispatcher
+        .dispatch_auth_resolved(AuthResolved {
+            flow_id: ironclaw_auth::AuthFlowId::new(),
+            scope: flow_scope,
+            continuation: AuthContinuationRef::TurnGateResume {
+                turn_run_ref: TurnRunRef::new(run_id.to_string()).unwrap(),
+                gate_ref: AuthGateRef::new(gate_ref.as_str()).unwrap(),
+            },
+            provider: provider(),
+            outcome: AuthFlowOutcome::Expired,
+            resolved_at: Utc::now(),
+        })
+        .await
+        .expect("expired auth resumes the parked run");
+
+    assert_eq!(coordinator.status(), TurnStatus::Queued);
+    assert!(coordinator.cancellations().is_empty());
+    let resumes = coordinator.resumes();
+    assert_eq!(resumes.len(), 1);
+    assert_eq!(resumes[0].actor, actor);
+    assert_eq!(
+        resumes[0].precondition,
+        ResumeTurnPrecondition::BlockedAuthGate
+    );
+    assert_eq!(
+        resumes[0].resume_disposition,
+        Some(GateResumeDisposition::Error)
+    );
+}
+
 async fn assert_lifecycle_uninstall_denies_blocked_auth_gate(
     fail_flow_before_uninstall: bool,
     fail_first_cancel: bool,

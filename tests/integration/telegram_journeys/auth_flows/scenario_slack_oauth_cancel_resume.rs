@@ -1,3 +1,5 @@
+//! Telegram auth-flow journey: Slack provider denial and exact-gate recovery.
+
 use super::harness::*;
 use super::reborn_support::reply::RebornScriptedReply;
 use axum::http::{Method, StatusCode};

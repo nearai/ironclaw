@@ -294,6 +294,15 @@ impl AuthFlowManager for FailingManualTokenFlowManager {
         unreachable!("manual-token cleanup tests do not fail OAuth callbacks")
     }
 
+    async fn expire_flow(
+        &self,
+        _scope: &AuthProductScope,
+        _flow_id: AuthFlowId,
+        _observed_at: Timestamp,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        unreachable!("manual-token cleanup tests do not expire OAuth flows")
+    }
+
     async fn mark_resolution_delivered(
         &self,
         _scope: &AuthProductScope,

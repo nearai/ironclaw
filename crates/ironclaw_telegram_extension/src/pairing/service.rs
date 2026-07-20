@@ -107,13 +107,18 @@ impl TelegramPairingService {
                 let installation_id = setup
                     .installation_id()
                     .map_err(TelegramPairingError::from)?;
-                if let Some(chat_id) = self
+                if let Some((chat_id, flow_id)) = self
                     .state
-                    .pending_pairing_completion_chat(&installation_id, caller)
+                    .pending_pairing_completion(&installation_id, caller)
                     .await?
                 {
-                    self.finish_pending_pairing_completion(&installation_id, caller, chat_id)
-                        .await?;
+                    self.finish_pending_pairing_completion(
+                        &installation_id,
+                        caller,
+                        chat_id,
+                        flow_id,
+                    )
+                    .await?;
                 }
                 self.state
                     .dm_target_for_user(&installation_id, caller)
@@ -228,11 +233,17 @@ impl TelegramPairingService {
         // connected. Status polling retries this outbox entry after a failed
         // dispatch or process restart; the user never needs to resend a
         // consumed code to unstrand the blocked run.
-        self.state
+        let flow_id = self
+            .state
             .persist_pairing_completion(&record.installation_id, &record.user_id, chat_id)
             .await?;
-        self.finish_pending_pairing_completion(&record.installation_id, &record.user_id, chat_id)
-            .await
+        self.finish_pending_pairing_completion(
+            &record.installation_id,
+            &record.user_id,
+            chat_id,
+            flow_id,
+        )
+        .await
     }
 
     async fn finish_pending_pairing_completion(
@@ -240,8 +251,9 @@ impl TelegramPairingService {
         installation_id: &AdapterInstallationId,
         user_id: &UserId,
         chat_id: i64,
+        flow_id: AuthFlowId,
     ) -> Result<(), TelegramPairingError> {
-        self.dispatch_pairing_completion(user_id).await?;
+        self.dispatch_pairing_completion(user_id, flow_id).await?;
         self.state
             .upsert_dm_target(
                 installation_id,
@@ -252,7 +264,7 @@ impl TelegramPairingService {
             )
             .await?;
         self.state
-            .finish_pairing_completion(installation_id, user_id, chat_id)
+            .finish_pairing_completion(installation_id, user_id, chat_id, flow_id)
             .await
     }
 
@@ -375,13 +387,13 @@ impl TelegramPairingService {
     async fn dispatch_pairing_completion(
         &self,
         user_id: &UserId,
+        flow_id: AuthFlowId,
     ) -> Result<(), TelegramPairingError> {
         let provider = AuthProviderId::new(TELEGRAM_IDENTITY_PROVIDER).map_err(|error| {
             TelegramPairingError::ContinuationDispatch {
                 reason: error.to_string(),
             }
         })?;
-        let flow_id = AuthFlowId::new();
         let event = AuthResolved {
             flow_id,
             scope: AuthProductScope::new(

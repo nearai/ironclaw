@@ -1058,6 +1058,10 @@ impl RebornProductAuthServices {
             .map_err(RebornOAuthCallbackAttemptError::from)?
             .ok_or(AuthProductError::UnknownOrExpiredFlow)
             .map_err(RebornOAuthCallbackAttemptError::from)?;
+        let existing = self
+            .settle_expired_flow(existing, Utc::now())
+            .await
+            .map_err(RebornOAuthCallbackAttemptError::from)?;
         if matches!(existing.state, AuthFlowState::Resolved(_)) {
             let delivered = self
                 .dispatch_completed_continuation(existing)
@@ -1301,7 +1305,11 @@ impl RebornProductAuthServices {
         else {
             return Err(AuthProductError::UnknownOrExpiredFlow.into());
         };
-        if record.expires_at <= Utc::now() {
+        let record = self
+            .settle_expired_flow(record, Utc::now())
+            .await
+            .map_err(RebornOAuthCallbackError::from)?;
+        if record.state == AuthFlowState::Resolved(AuthFlowOutcome::Expired) {
             return Err(AuthProductError::UnknownOrExpiredFlow.into());
         }
         Ok(record.provider)
@@ -1349,6 +1357,10 @@ impl RebornProductAuthServices {
     ) -> Result<AuthFlowState, RebornOAuthCallbackError> {
         match self.flow_manager.get_flow(scope, flow_id).await {
             Ok(Some(record)) => {
+                let record = self
+                    .settle_expired_flow(record, Utc::now())
+                    .await
+                    .map_err(RebornOAuthCallbackError::from)?;
                 if matches!(record.state, AuthFlowState::Resolved(_))
                     && record.resolution_delivered_at.is_none()
                 {
@@ -1618,6 +1630,37 @@ impl RebornProductAuthServices {
             .mark_resolution_delivered(&event.scope, event.flow_id, Utc::now())
             .await
             .map_err(ContinuationDispatchFailure::Acknowledgement)
+    }
+
+    /// Settle an overdue flow and deliver its exact terminal resolution.
+    ///
+    /// `expire_flow` owns the atomic winner selection, so a concurrent
+    /// successful callback is returned unchanged. A process that dies after
+    /// claiming a callback leaves `Processing`; once the original flow TTL is
+    /// reached, any service instance can converge it through this same path.
+    async fn settle_expired_flow(
+        &self,
+        record: AuthFlowRecord,
+        observed_at: ironclaw_auth::Timestamp,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        let settled = if observed_at > record.expires_at
+            && !matches!(record.state, AuthFlowState::Resolved(_))
+        {
+            self.flow_manager
+                .expire_flow(&record.scope, record.id, observed_at)
+                .await?
+        } else {
+            record
+        };
+        if settled.state == AuthFlowState::Resolved(AuthFlowOutcome::Expired)
+            && settled.resolution_delivered_at.is_none()
+        {
+            return self
+                .dispatch_completed_continuation(settled)
+                .await
+                .map_err(ContinuationDispatchFailure::into_auth_error);
+        }
+        Ok(settled)
     }
 
     fn record_auth_continuation_dispatch_failure(&self, completed: &AuthFlowRecord) {
@@ -2035,6 +2078,92 @@ mod tests {
         assert_eq!(dispatcher.events().len(), 1);
     }
 
+    #[tokio::test]
+    async fn expired_processing_flow_recovers_on_another_service_instance() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let dispatcher = Arc::new(RecordingCanceledContinuation::default());
+        let scope = test_auth_product_scope();
+        let state_hash = OpaqueStateHash::new("e".repeat(64)).expect("state hash");
+        let pkce_hash = PkceVerifierHash::new("a".repeat(64)).expect("PKCE hash");
+        let expires_at = Utc::now() + chrono::Duration::milliseconds(25);
+        let run_ref = TurnRunRef::new(TurnRunId::new().to_string()).expect("run ref");
+        let gate_ref = AuthGateRef::new("gate:processing-expired").expect("gate ref");
+        let provider = AuthProviderId::new("test-provider").expect("provider");
+        let flow = shared
+            .create_flow(NewAuthFlow {
+                id: None,
+                scope: scope.clone(),
+                kind: AuthFlowKind::IntegrationCredential,
+                provider: provider.clone(),
+                challenge: AuthChallenge::OAuthUrl {
+                    authorization_url: OAuthAuthorizationUrl::new(
+                        "https://provider.example/authorize",
+                    )
+                    .expect("authorization URL"),
+                    expires_at,
+                },
+                continuation: AuthContinuationRef::TurnGateResume {
+                    turn_run_ref: run_ref.clone(),
+                    gate_ref: gate_ref.clone(),
+                },
+                update_binding: None,
+                opaque_state_hash: Some(state_hash.clone()),
+                pkce_verifier_hash: Some(pkce_hash.clone()),
+                expires_at,
+            })
+            .await
+            .expect("create flow");
+        shared
+            .claim_oauth_callback(
+                &scope,
+                OAuthCallbackClaimRequest {
+                    flow_id: flow.id,
+                    opaque_state_hash: state_hash,
+                    provider,
+                    pkce_verifier_hash: pkce_hash,
+                },
+            )
+            .await
+            .expect("claim callback before simulated crash");
+
+        tokio::time::sleep(std::time::Duration::from_millis(35)).await;
+        let recovering_service = RebornProductAuthServices::from_shared(
+            shared.clone(),
+            dispatcher.clone() as Arc<dyn RebornAuthResolutionDispatcher>,
+        );
+        assert_eq!(
+            recovering_service
+                .reconcile_oauth_flow(&scope, flow.id)
+                .await
+                .expect("second service settles stranded callback"),
+            AuthFlowState::Resolved(AuthFlowOutcome::Expired)
+        );
+
+        let persisted = shared
+            .get_flow(&scope, flow.id)
+            .await
+            .expect("load recovered flow")
+            .expect("flow exists");
+        assert!(persisted.resolution_delivered_at.is_some());
+        let events = dispatcher.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].flow_id, flow.id);
+        assert_eq!(events[0].scope, scope);
+        assert_eq!(
+            events[0].continuation,
+            AuthContinuationRef::TurnGateResume {
+                turn_run_ref: run_ref,
+                gate_ref,
+            }
+        );
+        assert_eq!(
+            events[0].provider,
+            AuthProviderId::new("test-provider").expect("provider")
+        );
+        assert_eq!(events[0].outcome, AuthFlowOutcome::Expired);
+        assert!(events[0].resolved_at <= persisted.updated_at);
+    }
+
     #[async_trait::async_trait]
     impl AuthFlowManager for SharedAuthTestDouble {
         async fn create_flow(
@@ -2096,6 +2225,15 @@ mod tests {
             &self,
             _scope: &AuthProductScope,
             _input: OAuthCallbackFailureInput,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            unreachable!("constructor tests do not call auth-flow methods")
+        }
+
+        async fn expire_flow(
+            &self,
+            _scope: &AuthProductScope,
+            _flow_id: AuthFlowId,
+            _observed_at: ironclaw_auth::Timestamp,
         ) -> Result<AuthFlowRecord, AuthProductError> {
             unreachable!("constructor tests do not call auth-flow methods")
         }

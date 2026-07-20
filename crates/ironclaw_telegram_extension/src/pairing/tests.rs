@@ -110,6 +110,7 @@ use crate::test_support::{RecordingBotApi, fault_injected_telegram_state, telegr
 #[derive(Debug, Default)]
 struct RecordingDispatcher {
     events: StdMutex<Vec<AuthResolved>>,
+    attempts: StdMutex<Vec<AuthResolved>>,
     fail_remaining: std::sync::atomic::AtomicUsize,
 }
 
@@ -117,6 +118,7 @@ impl RecordingDispatcher {
     fn failing_once() -> Self {
         Self {
             events: StdMutex::new(Vec::new()),
+            attempts: StdMutex::new(Vec::new()),
             fail_remaining: std::sync::atomic::AtomicUsize::new(1),
         }
     }
@@ -125,6 +127,7 @@ impl RecordingDispatcher {
 #[async_trait]
 impl RebornAuthResolutionDispatcher for RecordingDispatcher {
     async fn dispatch_auth_resolved(&self, event: AuthResolved) -> Result<(), AuthProductError> {
+        self.attempts.lock().expect("lock").push(event.clone());
         if self
             .fail_remaining
             .fetch_update(
@@ -523,6 +526,13 @@ async fn status_poll_retries_durable_completion_after_dispatch_failure() {
     let events = fixture.dispatcher.events.lock().expect("lock").clone();
     assert_eq!(events.len(), 1, "repair re-dispatches the continuation");
     assert_eq!(events[0].scope.resource.user_id, ben);
+    let attempts = fixture.dispatcher.attempts.lock().expect("lock").clone();
+    assert_eq!(attempts.len(), 2, "the durable outbox was attempted twice");
+    assert_eq!(
+        attempts[0].flow_id, attempts[1].flow_id,
+        "outbox retries preserve one auth-resolution id"
+    );
+    assert_eq!(attempts[0].outcome, attempts[1].outcome);
 }
 
 #[tokio::test]

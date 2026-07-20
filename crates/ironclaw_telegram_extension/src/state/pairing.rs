@@ -1,4 +1,5 @@
 use chrono::Utc;
+use ironclaw_auth::AuthFlowId;
 use ironclaw_filesystem::{
     CasApply, CasExpectation, CasUpdateError, ContentType, Entry, FilesystemError, cas_update,
 };
@@ -18,7 +19,7 @@ impl FilesystemTelegramHostState {
         installation_id: &AdapterInstallationId,
         user_id: &UserId,
         chat_id: i64,
-    ) -> Result<(), TelegramPairingError> {
+    ) -> Result<AuthFlowId, TelegramPairingError> {
         let path = pairing_completion_path(installation_id, user_id).map_err(map_fs_pairing)?;
         let installation_id = installation_id.clone();
         let user_id = user_id.clone();
@@ -28,27 +29,38 @@ impl FilesystemTelegramHostState {
             &path,
             decode_pairing_completion,
             encode_pairing_completion,
-            move |_current: Option<StoredPairingCompletion>| {
+            move |current: Option<StoredPairingCompletion>| {
+                let resolution_flow_id = current
+                    .as_ref()
+                    .filter(|completion| {
+                        !completion.completed
+                            && completion.installation_id == installation_id
+                            && completion.user_id == user_id
+                            && completion.chat_id == chat_id
+                    })
+                    .and_then(|completion| completion.resolution_flow_id)
+                    .unwrap_or_else(AuthFlowId::new);
                 let completion = StoredPairingCompletion {
                     installation_id: installation_id.clone(),
                     user_id: user_id.clone(),
                     chat_id,
+                    resolution_flow_id: Some(resolution_flow_id),
                     completed: false,
                 };
-                async move { Ok(CasApply::new(completion, ())) }
+                async move { Ok(CasApply::new(completion, resolution_flow_id)) }
             },
         )
         .await
         .map_err(map_cas_pairing)
     }
 
-    pub async fn pending_pairing_completion_chat(
+    pub async fn pending_pairing_completion(
         &self,
         installation_id: &AdapterInstallationId,
         user_id: &UserId,
-    ) -> Result<Option<i64>, TelegramPairingError> {
+    ) -> Result<Option<(i64, AuthFlowId)>, TelegramPairingError> {
         let path = pairing_completion_path(installation_id, user_id).map_err(map_fs_pairing)?;
-        Ok(self
+        let pending = self
             .read_record::<StoredPairingCompletion>(&path)
             .await
             .map_err(map_fs_pairing)?
@@ -57,8 +69,18 @@ impl FilesystemTelegramHostState {
                 !record.completed
                     && &record.installation_id == installation_id
                     && &record.user_id == user_id
-            })
-            .map(|record| record.chat_id))
+            });
+        let Some(record) = pending else {
+            return Ok(None);
+        };
+        let flow_id = match record.resolution_flow_id {
+            Some(flow_id) => flow_id,
+            None => {
+                self.persist_pairing_completion(installation_id, user_id, record.chat_id)
+                    .await?
+            }
+        };
+        Ok(Some((record.chat_id, flow_id)))
     }
 
     pub async fn finish_pairing_completion(
@@ -66,6 +88,7 @@ impl FilesystemTelegramHostState {
         installation_id: &AdapterInstallationId,
         user_id: &UserId,
         chat_id: i64,
+        resolution_flow_id: AuthFlowId,
     ) -> Result<(), TelegramPairingError> {
         let path = pairing_completion_path(installation_id, user_id).map_err(map_fs_pairing)?;
         let installation_id = installation_id.clone();
@@ -85,6 +108,7 @@ impl FilesystemTelegramHostState {
                             installation_id,
                             user_id,
                             chat_id,
+                            resolution_flow_id: Some(resolution_flow_id),
                             completed: true,
                         };
                         return Ok(CasApply::no_op(missing, ()));
@@ -92,6 +116,7 @@ impl FilesystemTelegramHostState {
                     if completion.installation_id != installation_id
                         || completion.user_id != user_id
                         || completion.chat_id != chat_id
+                        || completion.resolution_flow_id != Some(resolution_flow_id)
                     {
                         return Err(TelegramPairingError::StoreUnavailable {
                             reason: "pairing completion identity changed concurrently".to_string(),

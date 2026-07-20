@@ -1676,6 +1676,68 @@ async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
 }
 
 #[tokio::test]
+async fn filesystem_second_instance_expires_stranded_processing_flow() {
+    let filesystem = test_filesystem();
+    let first = test_service(
+        filesystem.clone(),
+        Arc::new(FilesystemSecretStore::ephemeral()),
+    );
+    let second = test_service(filesystem, Arc::new(FilesystemSecretStore::ephemeral()));
+    let scope = test_scope();
+    let expires_at = Utc::now() + Duration::milliseconds(25);
+    let flow = first
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                    .unwrap(),
+                expires_at,
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: Some(state_hash("stranded-state")),
+            pkce_verifier_hash: Some(pkce_hash("stranded-pkce")),
+            expires_at,
+        })
+        .await
+        .unwrap();
+    first
+        .claim_oauth_callback(
+            &scope,
+            OAuthCallbackClaimRequest {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash("stranded-state"),
+                provider: google_provider(),
+                pkce_verifier_hash: pkce_hash("stranded-pkce"),
+            },
+        )
+        .await
+        .unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(35)).await;
+    let recovered = second
+        .expire_flow(&scope, flow.id, Utc::now())
+        .await
+        .expect("another service instance settles the expired callback");
+    assert_eq!(
+        recovered.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Expired)
+    );
+    assert_eq!(
+        first
+            .get_flow(&scope, flow.id)
+            .await
+            .unwrap()
+            .expect("first instance sees shared winner")
+            .state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Expired)
+    );
+}
+
+#[tokio::test]
 async fn filesystem_oauth_callback_canceled_after_flow_read_cannot_leave_configured_account() {
     use ironclaw_auth::{SecretCleanupAction, SecretCleanupRequest, SecretCleanupService as _};
 

@@ -462,6 +462,18 @@ pub trait AuthFlowManager: Send + Sync {
         input: OAuthCallbackFailureInput,
     ) -> Result<AuthFlowRecord, AuthProductError>;
 
+    /// Resolve an overdue open or processing flow as expired.
+    ///
+    /// Implementations must make this transition with their normal atomic
+    /// update primitive. Terminal winners are returned unchanged so concurrent
+    /// completion and expiry remain idempotent.
+    async fn expire_flow(
+        &self,
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+        observed_at: Timestamp,
+    ) -> Result<AuthFlowRecord, AuthProductError>;
+
     async fn mark_resolution_delivered(
         &self,
         scope: &AuthProductScope,

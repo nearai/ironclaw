@@ -490,6 +490,31 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         Ok(record.clone())
     }
 
+    async fn expire_flow(
+        &self,
+        scope: &crate::AuthProductScope,
+        flow_id: AuthFlowId,
+        observed_at: Timestamp,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        let mut state = self.lock_state();
+        let record = state
+            .flows
+            .get_mut(&flow_id)
+            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        if !scope_matches(scope, &record.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if matches!(record.state, AuthFlowState::Resolved(_)) {
+            return Ok(record.clone());
+        }
+        if observed_at <= record.expires_at {
+            return Err(AuthProductError::FlowAlreadyTerminal);
+        }
+        record.state = AuthFlowState::Resolved(AuthFlowOutcome::Expired);
+        record.updated_at = observed_at;
+        Ok(record.clone())
+    }
+
     async fn cancel_flow(
         &self,
         scope: &crate::AuthProductScope,

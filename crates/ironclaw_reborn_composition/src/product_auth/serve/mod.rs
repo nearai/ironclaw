@@ -885,7 +885,7 @@ pub(super) struct ManualTokenSubmitRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct OAuthStartResponse {
     pub(crate) flow_id: AuthFlowId,
-    pub(crate) status: AuthFlowState,
+    pub(crate) status: OAuthFlowWireStatus,
     pub(crate) provider: AuthProviderId,
     pub(crate) authorization_url: OAuthAuthorizationUrl,
     pub(crate) expires_at: Timestamp,
@@ -896,7 +896,7 @@ pub(crate) struct OAuthStartResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ProductOAuthStartResponse {
     pub(crate) flow_id: AuthFlowId,
-    pub(crate) status: AuthFlowState,
+    pub(crate) status: OAuthFlowWireStatus,
     pub(crate) provider: AuthProviderId,
     pub(crate) authorization_url: OAuthAuthorizationUrl,
     pub(crate) expires_at: Timestamp,
@@ -909,7 +909,38 @@ pub(crate) struct ProductOAuthStartResponse {
 /// tokens, PKCE verifiers, authorization codes, or opaque state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct OAuthFlowStateResponse {
-    pub(crate) status: AuthFlowState,
+    pub(crate) status: OAuthFlowWireStatus,
+}
+
+/// Stable browser-facing projection of the richer durable auth-flow state.
+///
+/// This boundary enum preserves the string contract consumed by popup signals
+/// and flow polling. Durable state remains [`AuthFlowState`], so presentation
+/// terminology does not leak into the domain model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum OAuthFlowWireStatus {
+    Pending,
+    Processing,
+    Completed,
+    Failed,
+    Canceled,
+    Expired,
+}
+
+impl From<AuthFlowState> for OAuthFlowWireStatus {
+    fn from(state: AuthFlowState) -> Self {
+        match state {
+            AuthFlowState::Open => Self::Pending,
+            AuthFlowState::Processing => Self::Processing,
+            AuthFlowState::Resolved(AuthFlowOutcome::Authorized { .. }) => Self::Completed,
+            AuthFlowState::Resolved(
+                AuthFlowOutcome::ProviderDenied | AuthFlowOutcome::Failed { .. },
+            ) => Self::Failed,
+            AuthFlowState::Resolved(AuthFlowOutcome::UserAborted) => Self::Canceled,
+            AuthFlowState::Resolved(AuthFlowOutcome::Expired) => Self::Expired,
+        }
+    }
 }
 
 /// Query fields for the flow-status poll. The browser echoes back the

@@ -50,7 +50,8 @@
 //! that cannot affect a newer gate.
 //!
 //! One scenario file per user journey (catalog row ids in each
-//! scenario's doc-comment); the shared stack lives in `harness.rs`.
+//! scenario's doc-comment). Auth-specific journeys are grouped under
+//! `auth_flows/`; the shared production stack lives in `harness.rs`.
 
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
@@ -62,10 +63,14 @@ mod support;
 mod harness;
 
 mod scenario_admin_setup_pair_resume_reply;
+#[path = "auth_flows/scenario_decline_in_chat.rs"]
 mod scenario_decline_in_chat;
 mod scenario_delivery_honesty;
+#[path = "auth_flows/scenario_gated_install_deny_arm.rs"]
 mod scenario_gated_install_deny_arm;
+#[path = "auth_flows/scenario_gated_install_oauth_link.rs"]
 mod scenario_gated_install_oauth_link;
 mod scenario_multiuser_isolation;
+#[path = "auth_flows/scenario_slack_oauth_cancel_resume.rs"]
 mod scenario_slack_oauth_cancel_resume;
 mod scenario_unpair_repair_fresh_slate;

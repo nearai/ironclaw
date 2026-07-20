@@ -1,3 +1,4 @@
+use ironclaw_auth::AuthFlowId;
 use ironclaw_common::hashing::sha256_hex;
 use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
 use ironclaw_host_api::{ScopedPath, UserId};
@@ -43,6 +44,11 @@ pub(super) struct StoredPairingCompletion {
     pub(super) installation_id: AdapterInstallationId,
     pub(super) user_id: UserId,
     pub(super) chat_id: i64,
+    /// Stable idempotency key for the auth-resolution outbox event. `None`
+    /// decodes records written before this field existed and is upgraded on
+    /// the next pending-completion retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) resolution_flow_id: Option<AuthFlowId>,
     pub(super) completed: bool,
 }
 
