@@ -1349,9 +1349,6 @@ impl Agent {
                     crate::trace_client::TraceClientAutonomousCaptureRequest {
                         scope: trace_scope.clone(),
                         channel: crate::trace_client::trace_channel_from_host_channel(&channel),
-                        channel_origin: crate::trace_client::trace_channel_origin_from_host_channel(
-                            &channel,
-                        ),
                         messages: &messages,
                         policy: &policy,
                         max_turns: 5,

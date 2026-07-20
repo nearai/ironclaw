@@ -5,6 +5,15 @@
 //! durable flow state and credential storage stay with the product-auth
 //! services.
 
+// v1 compatibility surface: the monolith's `src/auth/oauth.rs` re-exports the
+// loopback callback transport under this historical path. The items live in
+// [`crate::loopback_oauth`] (v1-only; see its header). Delete this re-export
+// with v1.
+pub use crate::loopback_oauth::{
+    OAUTH_CALLBACK_PORT, OAuthCallbackError, bind_callback_listener, callback_host, callback_url,
+    is_loopback_host, landing_html, wait_for_callback,
+};
+
 use std::fmt;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};

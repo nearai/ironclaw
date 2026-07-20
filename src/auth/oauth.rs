@@ -24,12 +24,10 @@ use crate::secrets::{CreateSecretParams, SecretsStore};
 
 // ── Shared callback server ──────────────────────────────────────────────
 
-// The loopback OAuth callback transport (fixed-port listener + branded landing
-// pages) lives in `ironclaw_auth::loopback_oauth` after the W2.1 fold moved it
-// out of the retired `ironclaw_oauth` crate. That module is v1-only (see its
-// header) and re-exported here so existing `crate::auth::oauth::...` call sites
-// keep compiling while v1 remains alive.
-pub use ironclaw_auth::loopback_oauth::{
+// Core OAuth callback infrastructure lives in `ironclaw_auth::oauth` after the
+// W2.1 fold. Re-exported here so existing `crate::auth::oauth::...` call sites
+// continue to compile while v1 remains alive.
+pub use ironclaw_auth::oauth::{
     OAUTH_CALLBACK_PORT, OAuthCallbackError, bind_callback_listener, callback_host, callback_url,
     is_loopback_host, landing_html, wait_for_callback,
 };

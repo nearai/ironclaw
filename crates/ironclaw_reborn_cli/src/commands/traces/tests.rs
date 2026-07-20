@@ -115,8 +115,8 @@ fn trace_queue_envelope_fixture(
             engine_version: None,
             feature_flags: BTreeMap::new(),
             channel: TraceChannel::Cli,
-            channel_origin: None,
             model_name: None,
+            channel_origin: None,
         },
         consent: ConsentMetadata {
             policy_version: TRACE_CONTRIBUTION_POLICY_VERSION.to_string(),
