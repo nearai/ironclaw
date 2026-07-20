@@ -4,6 +4,42 @@ import { useT } from "../../../lib/i18n";
 import { listWorkspace } from "../lib/workspace-api";
 import { areaDisplayName, sortEntries } from "../lib/workspace-presenters";
 
+type WorkspaceEntry = {
+  name: string;
+  path: string;
+  is_dir: boolean;
+};
+
+type TreeNodeProps = {
+  entry: WorkspaceEntry;
+  depth: number;
+  selectedPath: string;
+  expandedPaths: Set<string>;
+  filter: string;
+  onToggleDirectory: (path: string) => void;
+  onSelectFile: (path: string) => void;
+  focusedPathRef: React.RefObject<string>;
+  registerTreeItem: (path: string, item: HTMLElement | null) => void;
+  onTreeItemFocus: (item: HTMLElement) => void;
+  onTreeItemKeyDown: (
+    event: React.KeyboardEvent<HTMLDivElement>,
+    entry: WorkspaceEntry,
+    isExpanded: boolean,
+  ) => void;
+  positionInSet: number;
+  siblingCount: number;
+};
+
+type WorkspaceTreeProps = {
+  entries: WorkspaceEntry[];
+  selectedPath: string;
+  expandedPaths: Set<string>;
+  filter: string;
+  onToggleDirectory: (path: string) => void;
+  onSelectFile: (path: string) => void;
+  isLoading: boolean;
+};
+
 function isUiHiddenWorkspacePath(path = "") {
   return String(path)
     .split("/")
@@ -28,7 +64,7 @@ function visibleEntries(entries, filter, expandedPaths) {
   return sortEntries(filtered);
 }
 
-function TreeNode({
+const TreeNode = React.memo(function WorkspaceTreeNode({
   entry,
   depth,
   selectedPath,
@@ -36,13 +72,18 @@ function TreeNode({
   filter,
   onToggleDirectory,
   onSelectFile,
-  focusedPath,
-  setFocusedPath,
+  focusedPathRef,
+  registerTreeItem,
+  onTreeItemFocus,
   onTreeItemKeyDown,
   positionInSet,
   siblingCount,
-}) {
+}: TreeNodeProps) {
   const t = useT();
+  const treeItemRef = React.useCallback(
+    (item) => registerTreeItem(entry.path, item),
+    [entry.path, registerTreeItem],
+  );
   const isExpanded = expandedPaths.has(entry.path);
   const displayName = depth === 0 ? areaDisplayName(entry.path, t) : entry.name;
   const childQuery = useQuery({
@@ -55,22 +96,23 @@ function TreeNode({
     const children = visibleEntries(childQuery.data?.entries, filter, expandedPaths);
     return (
       <div
+        ref={treeItemRef}
         role="treeitem"
-        tabIndex={focusedPath === entry.path ? 0 : -1}
+        tabIndex={focusedPathRef.current === entry.path ? 0 : -1}
         aria-label={displayName}
         aria-expanded={isExpanded}
+        aria-busy={isExpanded && childQuery.isLoading ? true : undefined}
         aria-selected={selectedPath === entry.path}
         aria-level={depth + 1}
         aria-posinset={positionInSet}
         aria-setsize={siblingCount}
         data-tree-path={entry.path}
         data-tree-depth={depth}
-        onFocus={() => setFocusedPath(entry.path)}
+        onFocus={(event) => onTreeItemFocus(event.currentTarget)}
         onClick={(event) => {
           const clickedTreeItem = (event.target as Element).closest('[role="treeitem"]');
           if (clickedTreeItem !== event.currentTarget) return;
           event.currentTarget.focus();
-          setFocusedPath(entry.path);
           // Navigate so the main pane lists this folder, and toggle its
           // expansion in the tree — one click drives both the master (tree)
           // and detail (pane); clicking again collapses it.
@@ -98,7 +140,7 @@ function TreeNode({
         {isExpanded && (
           <div role="group" className="space-y-1">
             {childQuery.isLoading
-              ? (<div className="px-4 py-2 text-xs text-iron-400">{t("workspace.loading")}</div>)
+              ? (<div role="status" className="px-4 py-2 text-xs text-iron-400">{t("workspace.loading")}</div>)
               : childQuery.isError
               ? (<div role="alert" className="px-4 py-2 text-xs text-red-300">{t("workspace.unableOpenDirectory")}</div>)
               : children.map((child, index) => (
@@ -111,8 +153,9 @@ function TreeNode({
                     filter={filter}
                     onToggleDirectory={onToggleDirectory}
                     onSelectFile={onSelectFile}
-                    focusedPath={focusedPath}
-                    setFocusedPath={setFocusedPath}
+                    focusedPathRef={focusedPathRef}
+                    registerTreeItem={registerTreeItem}
+                    onTreeItemFocus={onTreeItemFocus}
                     onTreeItemKeyDown={onTreeItemKeyDown}
                     positionInSet={index + 1}
                     siblingCount={children.length}
@@ -126,8 +169,9 @@ function TreeNode({
 
   return (
     <div
+      ref={treeItemRef}
       role="treeitem"
-      tabIndex={focusedPath === entry.path ? 0 : -1}
+      tabIndex={focusedPathRef.current === entry.path ? 0 : -1}
       aria-label={displayName}
       aria-selected={selectedPath === entry.path}
       aria-level={depth + 1}
@@ -135,10 +179,9 @@ function TreeNode({
       aria-setsize={siblingCount}
       data-tree-path={entry.path}
       data-tree-depth={depth}
-      onFocus={() => setFocusedPath(entry.path)}
+      onFocus={(event) => onTreeItemFocus(event.currentTarget)}
       onClick={(event) => {
         event.currentTarget.focus();
-        setFocusedPath(entry.path);
         onSelectFile(entry.path);
       }}
       onKeyDown={(event) => onTreeItemKeyDown(event, entry, false)}
@@ -153,14 +196,87 @@ function TreeNode({
       <span className="min-w-0 truncate">{displayName}</span>
     </div>
   );
+});
+
+function directTreeItem(parent: Element, fromEnd = false) {
+  let child = fromEnd ? parent.lastElementChild : parent.firstElementChild;
+  while (child) {
+    if (child.getAttribute("role") === "treeitem") return child as HTMLElement;
+    child = fromEnd ? child.previousElementSibling : child.nextElementSibling;
+  }
+  return null;
 }
 
-function focusTreeItem(items, index, setFocusedPath) {
-  const item = items[index];
-  if (!item) return;
-  setFocusedPath(item.dataset.treePath || "");
-  item.focus();
+function directGroup(item: HTMLElement) {
+  let child = item.firstElementChild;
+  while (child) {
+    if (child.getAttribute("role") === "group") return child as HTMLElement;
+    child = child.nextElementSibling;
+  }
+  return null;
 }
+
+function firstChildTreeItem(item: HTMLElement) {
+  const group = directGroup(item);
+  return group ? directTreeItem(group) : null;
+}
+
+function deepestVisibleTreeItem(item: HTMLElement) {
+  let current = item;
+  let child = firstChildTreeItem(current);
+  while (child) {
+    const group = directGroup(current);
+    const lastChild = group ? directTreeItem(group, true) : null;
+    if (!lastChild) break;
+    current = lastChild;
+    child = firstChildTreeItem(current);
+  }
+  return current;
+}
+
+function nextVisibleTreeItem(item: HTMLElement) {
+  const child = firstChildTreeItem(item);
+  if (child) return child;
+
+  let current = item;
+  while (current) {
+    let sibling = current.nextElementSibling;
+    while (sibling) {
+      if (sibling.getAttribute("role") === "treeitem") return sibling as HTMLElement;
+      sibling = sibling.nextElementSibling;
+    }
+    const group = current.parentElement;
+    if (group?.getAttribute("role") !== "group") return null;
+    const parent = group.parentElement;
+    if (parent?.getAttribute("role") !== "treeitem") return null;
+    current = parent;
+  }
+  return null;
+}
+
+function previousVisibleTreeItem(item: HTMLElement) {
+  let sibling = item.previousElementSibling;
+  while (sibling) {
+    if (sibling.getAttribute("role") === "treeitem") {
+      return deepestVisibleTreeItem(sibling as HTMLElement);
+    }
+    sibling = sibling.previousElementSibling;
+  }
+  const group = item.parentElement;
+  if (group?.getAttribute("role") !== "group") return null;
+  const parent = group.parentElement;
+  return parent?.getAttribute("role") === "treeitem" ? parent : null;
+}
+
+function parentTreeItem(item: HTMLElement) {
+  const group = item.parentElement;
+  if (group?.getAttribute("role") !== "group") return null;
+  const parent = group.parentElement;
+  return parent?.getAttribute("role") === "treeitem" ? parent : null;
+}
+
+const useBrowserLayoutEffect =
+  typeof window === "undefined" ? React.useEffect : React.useLayoutEffect;
 
 export function WorkspaceTree({
   entries,
@@ -170,44 +286,106 @@ export function WorkspaceTree({
   onToggleDirectory,
   onSelectFile,
   isLoading,
-}) {
+}: WorkspaceTreeProps) {
   const t = useT();
-  const treeRef = React.useRef<HTMLDivElement>(null);
-  const previousSelectedPathRef = React.useRef(selectedPath);
-  const [focusedPath, setFocusedPath] = React.useState("");
-
   const rootEntries = sortEntries(
     entries.filter((entry) => !isUiHiddenWorkspacePath(entry.path)),
     (entry) => areaDisplayName(entry.path, t),
   );
-  const effectiveFocusedPath = focusedPath || rootEntries[0]?.path || "";
+  const treeRef = React.useRef<HTMLDivElement>(null);
+  const treeItemsByPathRef = React.useRef(new Map<string, HTMLElement>());
+  const focusedPathRef = React.useRef(selectedPath || rootEntries[0]?.path || "");
+  const focusedItemRef = React.useRef<HTMLElement | null>(null);
+  const previousSelectedPathRef = React.useRef(selectedPath);
+  const selectedPathRef = React.useRef(selectedPath);
+  const pendingSelectedPathRef = React.useRef(selectedPath);
+  selectedPathRef.current = selectedPath;
+
+  const setRovingTabStop = React.useCallback((item: HTMLElement, moveDomFocus = false) => {
+    const previous = focusedItemRef.current;
+    if (previous && previous !== item) previous.tabIndex = -1;
+    item.tabIndex = 0;
+    focusedItemRef.current = item;
+    focusedPathRef.current = item.dataset.treePath || "";
+    if (moveDomFocus) item.focus();
+  }, []);
+
+  const syncFallbackTabStop = React.useCallback(() => {
+    if (focusedItemRef.current) return;
+    const selected = treeItemsByPathRef.current.get(selectedPathRef.current);
+    const first = treeRef.current ? directTreeItem(treeRef.current) : null;
+    const fallback = selected || first;
+    if (fallback) setRovingTabStop(fallback);
+  }, [setRovingTabStop]);
+
+  const registerTreeItem = React.useCallback(
+    (path: string, item: HTMLElement | null) => {
+      if (item) {
+        treeItemsByPathRef.current.set(path, item);
+        if (focusedPathRef.current === path) setRovingTabStop(item);
+        if (pendingSelectedPathRef.current === path) {
+          pendingSelectedPathRef.current = "";
+          setRovingTabStop(item);
+        }
+        return;
+      }
+
+      const registered = treeItemsByPathRef.current.get(path);
+      treeItemsByPathRef.current.delete(path);
+      if (focusedItemRef.current === registered) {
+        focusedItemRef.current = null;
+        queueMicrotask(syncFallbackTabStop);
+      }
+    },
+    [setRovingTabStop, syncFallbackTabStop],
+  );
+
+  const onTreeItemFocus = React.useCallback(
+    (item: HTMLElement) => {
+      pendingSelectedPathRef.current = "";
+      setRovingTabStop(item);
+    },
+    [setRovingTabStop],
+  );
+
+  const moveTreeFocus = React.useCallback(
+    (item: HTMLElement | null) => {
+      if (!item) return;
+      pendingSelectedPathRef.current = "";
+      setRovingTabStop(item, true);
+    },
+    [setRovingTabStop],
+  );
 
   const onTreeItemKeyDown = React.useCallback(
-    (event, entry, isExpanded) => {
-      const items = Array.from(
-        treeRef.current?.querySelectorAll<HTMLElement>('[role="treeitem"]') || [],
-      );
-      const currentIndex = items.indexOf(event.currentTarget);
-      if (currentIndex < 0) return;
+    (
+      event: React.KeyboardEvent<HTMLDivElement>,
+      entry: WorkspaceEntry,
+      isExpanded: boolean,
+    ) => {
+      const current = event.currentTarget;
 
       if (event.key === "ArrowDown") {
         event.preventDefault();
-        focusTreeItem(items, Math.min(currentIndex + 1, items.length - 1), setFocusedPath);
+        moveTreeFocus(nextVisibleTreeItem(current));
         return;
       }
       if (event.key === "ArrowUp") {
         event.preventDefault();
-        focusTreeItem(items, Math.max(currentIndex - 1, 0), setFocusedPath);
+        moveTreeFocus(previousVisibleTreeItem(current));
         return;
       }
       if (event.key === "Home") {
         event.preventDefault();
-        focusTreeItem(items, 0, setFocusedPath);
+        moveTreeFocus(treeRef.current ? directTreeItem(treeRef.current) : null);
         return;
       }
       if (event.key === "End") {
         event.preventDefault();
-        focusTreeItem(items, items.length - 1, setFocusedPath);
+        const lastRoot = treeRef.current
+          ? directTreeItem(treeRef.current, true)
+          : null;
+        moveTreeFocus(lastRoot ? deepestVisibleTreeItem(lastRoot) : null);
         return;
       }
       if (event.key === "ArrowRight" && entry.is_dir) {
@@ -216,11 +394,9 @@ export function WorkspaceTree({
           onToggleDirectory(entry.path);
           return;
         }
-        const next = items[currentIndex + 1];
-        const currentDepth = Number(event.currentTarget.dataset.treeDepth);
-        if (next && Number(next.dataset.treeDepth) > currentDepth) {
-          focusTreeItem(items, currentIndex + 1, setFocusedPath);
-        }
+        // ARIA trees leave focus in place when an open node has no visible
+        // child (for example, an empty or currently filtered directory).
+        moveTreeFocus(firstChildTreeItem(current));
         return;
       }
       if (event.key === "ArrowLeft") {
@@ -229,13 +405,7 @@ export function WorkspaceTree({
           onToggleDirectory(entry.path);
           return;
         }
-        const parentDepth = Number(event.currentTarget.dataset.treeDepth) - 1;
-        for (let index = currentIndex - 1; index >= 0; index -= 1) {
-          if (Number(items[index].dataset.treeDepth) === parentDepth) {
-            focusTreeItem(items, index, setFocusedPath);
-            break;
-          }
-        }
+        moveTreeFocus(parentTreeItem(current));
         return;
       }
       if (event.key === "Enter" || event.key === " ") {
@@ -243,29 +413,40 @@ export function WorkspaceTree({
         onSelectFile(entry.path);
       }
     },
-    [onSelectFile, onToggleDirectory],
+    [moveTreeFocus, onSelectFile, onToggleDirectory],
   );
 
-  React.useEffect(() => {
-    const items = Array.from(
-      treeRef.current?.querySelectorAll<HTMLElement>('[role="treeitem"]') || [],
-    );
-    if (!items.length) return;
+  useBrowserLayoutEffect(() => {
+    const items = treeItemsByPathRef.current;
+    if (!items.size) return;
 
     const selectedPathChanged = previousSelectedPathRef.current !== selectedPath;
     previousSelectedPathRef.current = selectedPath;
     if (selectedPathChanged) {
-      const selected = items.find((item) => item.dataset.treePath === selectedPath);
+      const selected = items.get(selectedPath);
       if (selected) {
-        setFocusedPath(selectedPath);
+        pendingSelectedPathRef.current = "";
+        setRovingTabStop(selected);
         return;
       }
+      pendingSelectedPathRef.current = selectedPath;
     }
 
-    if (items.some((item) => item.dataset.treePath === focusedPath)) return;
-    const selected = items.find((item) => item.dataset.treePath === selectedPath);
-    setFocusedPath(selected?.dataset.treePath || items[0].dataset.treePath || "");
-  }, [entries, expandedPaths, filter, focusedPath, selectedPath]);
+    const focused = items.get(focusedPathRef.current);
+    if (focused) {
+      setRovingTabStop(focused);
+      return;
+    }
+    focusedItemRef.current = null;
+    syncFallbackTabStop();
+  }, [
+    entries,
+    expandedPaths,
+    filter,
+    selectedPath,
+    setRovingTabStop,
+    syncFallbackTabStop,
+  ]);
 
   if (isLoading) {
     return (<div className="space-y-2 p-3">{[1, 2, 3, 4].map((i) => (<div key={i} className="v2-skeleton h-8 rounded-md" />))}</div>);
@@ -294,8 +475,9 @@ export function WorkspaceTree({
           filter={filter}
           onToggleDirectory={onToggleDirectory}
           onSelectFile={onSelectFile}
-          focusedPath={effectiveFocusedPath}
-          setFocusedPath={setFocusedPath}
+          focusedPathRef={focusedPathRef}
+          registerTreeItem={registerTreeItem}
+          onTreeItemFocus={onTreeItemFocus}
           onTreeItemKeyDown={onTreeItemKeyDown}
           positionInSet={index + 1}
           siblingCount={rootEntries.length}

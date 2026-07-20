@@ -127,6 +127,24 @@ test("workspace tree directory failures are announced as alerts", () => {
   assert.match(html, /Ordner konnte nicht geöffnet werden/);
 });
 
+test("workspace tree announces loading expanded directories", () => {
+  queryState.value = { data: null, isLoading: true, isError: false };
+  const html = renderToStaticMarkup(
+    <WorkspaceTree
+      entries={[{ name: "workspace", path: "workspace", is_dir: true }]}
+      selectedPath="workspace"
+      expandedPaths={new Set(["workspace"])}
+      filter=""
+      onToggleDirectory={() => {}}
+      onSelectFile={() => {}}
+      isLoading={false}
+    />,
+  );
+
+  assert.match(html, /role="treeitem"[^>]*aria-busy="true"/);
+  assert.match(html, /role="status"/);
+});
+
 test("workspace viewer renders a locale-aware human-readable file size", () => {
   const html = renderToStaticMarkup(
     <WorkspaceViewer
