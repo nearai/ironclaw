@@ -61,13 +61,13 @@ Rules for a roll-up job that is (or may become) required:
 
 ## Reborn release binary compile matrix
 
-`reborn-release-compile.yml` is a compile-and-smoke preflight for the shipping
+`reborn-release-compile.yml` is the compile-and-smoke matrix for the shipping
 Reborn `ironclaw` binary. The tag-only `release.yml` calls it for matching
-release tags. Under #6160's temporary compile-only policy below, the legacy
-`host` job stays disabled; if that job is restored, its dependency and success
-gate still prevent it from running unless every target succeeds. The preflight
-workflow can also run directly through `workflow_dispatch`; it is not triggered
-by pull requests, so ordinary CLI and WebUI changes do not start the
+release tags, then packages those matrix outputs into a GitHub Release through
+the Reborn-specific `publish-reborn-binaries` job. The reusable preflight
+workflow can also run directly through `workflow_dispatch`; direct dispatch only
+uploads temporary evidence artifacts and does not publish a release. It is not
+triggered by pull requests, so ordinary CLI and WebUI changes do not start the
 seven-platform release matrix.
 
 | Rust target | GitHub runner |
@@ -92,11 +92,13 @@ This is shallow CLI startup coverage; it does not validate `serve`, external
 services, installers, or cargo-dist release packaging. The feature list is
 intentionally not inferred from Docker or #6122.
 
-The uploaded `reborn-compile-*` artifacts are short-lived preflight evidence.
-Their prefix deliberately does not match the release host's `artifacts-*`
-download pattern, so they are not attached to the GitHub Release. Until #3483
-defines the canonical Reborn package/tag/installer contract,
-`ironclaw_reborn_cli` remains `dist = false`.
+The uploaded `reborn-compile-*` artifacts are the handoff from the compile
+matrix to `release.yml`'s Reborn publisher. On tag pushes, the publisher
+downloads them, emits per-target `ironclaw-<target>.tar.gz` assets plus
+per-asset `.sha256` files and `sha256.sum`, and creates or updates the GitHub
+Release for the tag. Until #3483 defines the canonical Reborn package/tag/
+installer contract, `ironclaw_reborn_cli` remains `dist = false` and these
+archives are intentionally produced outside cargo-dist.
 
 ## Deep tier (nightly)
 
@@ -155,23 +157,23 @@ When adding a new workflow that runs on `push` to `main`, add its workflow
 
 ## Reborn-only release validation policy
 
-For #6160, `release.yml` temporarily keeps the legacy cargo-dist release chain
-visible but disables its `plan` root with the impossible
+For #6160/#3483, `release.yml` temporarily keeps the legacy cargo-dist release
+chain visible but disables its `plan` root with the impossible
 `github.repository == ''` guard. Its dependent local/global artifact, WASM,
-GitHub Release host, registry-checksum, and announcement jobs therefore skip.
-The Reborn compile matrix merged in #6176 is the only intended active path.
-This compile-only mode produces short-lived Actions evidence artifacts; it does
-not create a GitHub Release or permanent downloadable release assets.
+legacy GitHub Release host, registry-checksum, and announcement jobs therefore
+skip. The Reborn compile matrix plus `publish-reborn-binaries` job is the only
+intended active tag-release path.
 
 The release Docker caller retains its own impossible guard as an explicit
 defense against image publication. The reusable `docker.yml` workflow is
 unchanged, so its manual and hourly entry points remain available. Changes to
 the release, Docker, or reusable Reborn compile workflow enter the Reborn CLI
 smoke selector, and the required Code Style roll-up propagates that contract
-result. To restore the non-Docker legacy release path, remove `plan`'s
-impossible guard; the workflow's tag-only trigger already scopes it to release
-tags. Restore the Docker caller's host-success condition separately only when
-release image publication is intentionally re-enabled.
+result. To restore the non-Docker legacy cargo-dist release path, remove
+`plan`'s impossible guard and retire or reconcile the Reborn-specific publisher;
+the workflow's tag-only trigger already scopes it to release tags. Restore the
+Docker caller's host-success condition separately only when release image
+publication is intentionally re-enabled.
 
 ## Known accepted gaps (deliberate, revisit as needed)
 

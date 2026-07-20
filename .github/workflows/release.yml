@@ -13,9 +13,9 @@
 # Note that the GitHub Release will be created with a generated
 # title/body based on your changelogs.
 #
-# Temporary #6160 policy: only the Reborn compile preflight below runs;
-# the generated cargo-dist/WASM/GitHub Release and Docker jobs stay defined
-# for rollback but are skipped.
+# Temporary #6160/#3483 policy: publish the Reborn binaries built by the
+# explicit compile matrix below. The generated cargo-dist/WASM release chain and
+# Docker jobs stay defined for rollback but are skipped.
 
 name: Release
 permissions:
@@ -57,9 +57,106 @@ jobs:
     with:
       ref: ${{ github.sha }}
 
+  publish-reborn-binaries:
+    name: Publish Reborn release binaries
+    needs:
+      - reborn-binary-compile
+    runs-on: "ubuntu-22.04"
+    if: ${{ needs.reborn-binary-compile.result == 'success' }}
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ github.ref_name }}
+      RELEASE_COMMIT: ${{ github.sha }}
+    steps:
+      - name: Download Reborn binary artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: reborn-compile-*
+          path: reborn-compile-artifacts
+
+      - name: Package Reborn release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p release-assets
+          shopt -s nullglob
+
+          artifact_dirs=(reborn-compile-artifacts/reborn-compile-*)
+          if [ "${#artifact_dirs[@]}" -eq 0 ]; then
+            echo "::error::No Reborn compile artifacts were downloaded"
+            exit 1
+          fi
+
+          for artifact_dir in "${artifact_dirs[@]}"; do
+            target="${artifact_dir##*/reborn-compile-}"
+            binary_path=""
+            for candidate in "$artifact_dir"/ironclaw "$artifact_dir"/ironclaw.exe; do
+              if [ -f "$candidate" ]; then
+                binary_path="$candidate"
+                break
+              fi
+            done
+
+            if [ -z "$binary_path" ]; then
+              echo "::error::No ironclaw binary found in $artifact_dir"
+              find "$artifact_dir" -maxdepth 2 -type f -print
+              exit 1
+            fi
+
+            binary_name="$(basename "$binary_path")"
+            staging="$RUNNER_TEMP/reborn-release/$target"
+            rm -rf "$staging"
+            mkdir -p "$staging"
+            cp "$binary_path" "$staging/$binary_name"
+
+            asset_name="ironclaw-${target}.tar.gz"
+            chmod 755 "$staging/$binary_name"
+            tar -C "$staging" -czf "release-assets/$asset_name" "$binary_name"
+            (cd release-assets && sha256sum "$asset_name" > "$asset_name.sha256")
+          done
+
+          (cd release-assets && sha256sum *.tar.gz > sha256.sum)
+          ls -la release-assets
+
+      - name: Create or update GitHub Release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          prerelease_flag=()
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            prerelease_flag=(--prerelease)
+          fi
+
+          notes="$RUNNER_TEMP/reborn-release-notes.md"
+          {
+            echo "IronClaw binary release for \`$RELEASE_TAG\`."
+            echo
+            echo "This release publishes the Reborn \`ironclaw\` binaries built by the release compile matrix."
+            echo "Docker image publication remains disabled for this release path."
+          } > "$notes"
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-assets/* --clobber
+            gh release edit "$RELEASE_TAG" \
+              "${prerelease_flag[@]}" \
+              --title "IronClaw $RELEASE_TAG" \
+              --notes-file "$notes"
+          else
+            gh release create "$RELEASE_TAG" \
+              --target "$RELEASE_COMMIT" \
+              "${prerelease_flag[@]}" \
+              --title "IronClaw $RELEASE_TAG" \
+              --notes-file "$notes" \
+              release-assets/*
+          fi
+
   # Keep the legacy cargo-dist/WASM/GitHub Release chain visible for rollback,
-  # but disable its root while #6160 makes this workflow Reborn-compile-only.
-  # The Reborn compile matrix above remains the only active release path.
+  # but disable its root while #6160/#3483 uses the Reborn-specific publisher
+  # above. Docker image publication remains disabled below.
   plan:
     if: github.repository == ''
     runs-on: "ubuntu-22.04"

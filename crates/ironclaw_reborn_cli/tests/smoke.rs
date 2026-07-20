@@ -6781,7 +6781,7 @@ api_key_env = "REBORN_TEST_UNSET_BC8F4D_KEY"
 }
 
 #[test]
-fn release_ci_skips_legacy_publish_dag_without_disabling_independent_docker_runs() {
+fn release_ci_publishes_reborn_binaries_without_legacy_or_docker_publish() {
     let root = workspace_root();
     let release_workflow = std::fs::read_to_string(root.join(".github/workflows/release.yml"))
         .expect("release workflow")
@@ -6827,6 +6827,20 @@ fn release_ci_skips_legacy_publish_dag_without_disabling_independent_docker_runs
                 .lines()
                 .any(|line| line.starts_with("    if:")),
         "the Reborn compile matrix must remain the active release path"
+    );
+
+    let publish_job = release_job("publish-reborn-binaries");
+    assert!(
+        publish_job.contains("\n      - reborn-binary-compile\n")
+            && publish_job.contains("contents: write")
+            && publish_job.contains("pattern: reborn-compile-*")
+            && publish_job.contains("ironclaw-${target}.tar.gz")
+            && publish_job.contains("$asset_name.sha256")
+            && publish_job.contains("sha256.sum")
+            && publish_job.contains("gh release create")
+            && publish_job.contains("gh release upload")
+            && !publish_job.contains("uses: ./.github/workflows/docker.yml"),
+        "release CI must publish Reborn binary archives from the compile matrix without invoking Docker"
     );
 
     let plan_job = release_job("plan");
