@@ -1933,7 +1933,7 @@ mod tests {
         assert!(body.contains("No permissions were selected"));
         assert!(!body.contains("malformed_callback"));
         // The failure page must emit the same cross-window completion signal as
-        // the success page (with the canonical resolved failure), and close the popup, so the
+        // the success page (status "failed"), and close the popup, so the
         // parent Extensions modal / in-chat card can surface a retryable error
         // instead of spinning until timeout.
         let flow_id = OAuthCallbackState::decode(OAuthCallbackStateKind::GOOGLE, &state_value)
@@ -1944,8 +1944,8 @@ mod tests {
             "failure page must broadcast the completion signal: {body}"
         );
         assert!(
-            body.contains(r#""state":"resolved""#) && body.contains(r#""type":"failed""#),
-            "failure signal must carry the canonical resolved failure: {body}"
+            body.contains(r#""status":"failed""#),
+            "failure signal must carry status failed: {body}"
         );
         assert!(
             body.contains(&flow_id.to_string()),
@@ -2227,8 +2227,7 @@ mod tests {
             body.contains(r#"new BroadcastChannel("ironclaw-product-auth")"#),
             "exchange-failure page must broadcast the completion signal: {body}"
         );
-        assert!(body.contains(r#""state":"resolved""#));
-        assert!(body.contains(r#""type":"failed""#));
+        assert!(body.contains(r#""status":"failed""#));
         assert!(body.contains(&flow_id.to_string()));
         assert!(body.contains("window.close()"));
     }
@@ -3440,8 +3439,7 @@ mod tests {
             ),
             "duplicate identity failure should tell the user how to fix it: {body}"
         );
-        assert!(body.contains(r#""state":"resolved""#));
-        assert!(body.contains(r#""type":"failed""#));
+        assert!(body.contains(r#""status":"failed""#));
 
         let owner_scope = AuthProductScope::new(
             ResourceScope {

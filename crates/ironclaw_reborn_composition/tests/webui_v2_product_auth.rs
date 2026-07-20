@@ -11,7 +11,7 @@ use axum::extract::ConnectInfo;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
-    AuthChallenge, AuthContinuationRef, AuthFlowId, AuthFlowKind, AuthFlowManager,
+    AuthChallenge, AuthContinuationRef, AuthFlowId, AuthFlowKind, AuthFlowManager, AuthFlowOutcome,
     AuthInteractionId, AuthInteractionService, AuthProductError, AuthProductScope,
     AuthProviderClient, AuthProviderId, AuthResolved, AuthSurface, CredentialAccountLabel,
     CredentialAccountService, CredentialAccountStatus, CredentialOwnership, CredentialSetupService,
@@ -75,6 +75,12 @@ impl RecordingAuthDispatcher {
     fn events(&self) -> Vec<AuthResolved> {
         self.events.lock().expect("auth events lock").clone()
     }
+}
+
+fn assert_single_auth_outcome(dispatcher: &RecordingAuthDispatcher, expected: AuthFlowOutcome) {
+    let events = dispatcher.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].outcome, expected);
 }
 
 #[async_trait]
@@ -1743,7 +1749,7 @@ async fn product_auth_google_oauth_callback_rejects_disallowed_scopes() {
     assert!(!body.contains(&state));
     assert!(!body.contains("google-auth-code"));
     assert!(!body.contains(DISALLOWED_GOOGLE_SCOPE));
-    assert!(dispatcher.events().is_empty());
+    assert_single_auth_outcome(&dispatcher, AuthFlowOutcome::ProviderDenied);
 
     let replay_response = app
         .oneshot(callback_request(format!(
@@ -1751,11 +1757,11 @@ async fn product_auth_google_oauth_callback_rejects_disallowed_scopes() {
         )))
         .await
         .expect("oneshot");
-    assert_eq!(replay_response.status(), StatusCode::CONFLICT);
+    assert_eq!(replay_response.status(), StatusCode::BAD_REQUEST);
     assert!(
         read_body_string(replay_response)
             .await
-            .contains("\"code\":\"flow_already_terminal\"")
+            .contains("\"code\":\"provider_denied\"")
     );
 }
 
@@ -1776,7 +1782,7 @@ async fn product_auth_google_oauth_callback_provider_denial_is_sanitized() {
     assert!(body.contains("\"code\":\"provider_denied\""));
     assert!(!body.contains(&state));
     assert!(!body.contains("access_denied"));
-    assert!(dispatcher.events().is_empty());
+    assert_single_auth_outcome(&dispatcher, AuthFlowOutcome::ProviderDenied);
 }
 
 #[tokio::test]
@@ -1796,9 +1802,11 @@ async fn product_auth_google_oauth_callback_non_denial_error_is_malformed() {
     assert!(body.contains("\"code\":\"malformed_callback\""));
     assert!(!body.contains(&state));
     assert!(!body.contains("temporarily_unavailable"));
-    assert!(
-        dispatcher.events().is_empty(),
-        "provider failures must not dispatch a denial continuation"
+    assert_single_auth_outcome(
+        &dispatcher,
+        AuthFlowOutcome::Failed {
+            error: ironclaw_auth::AuthErrorCode::MalformedCallback,
+        },
     );
 }
 
@@ -1840,7 +1848,7 @@ async fn product_auth_google_oauth_callback_rejects_empty_parsed_scopes() {
     assert!(body.contains("\"code\":\"provider_denied\""));
     assert!(!body.contains(&state));
     assert!(!body.contains("google-auth-code"));
-    assert!(dispatcher.events().is_empty());
+    assert_single_auth_outcome(&dispatcher, AuthFlowOutcome::ProviderDenied);
 
     let replay_response = app
         .oneshot(callback_request(format!(
@@ -1848,11 +1856,11 @@ async fn product_auth_google_oauth_callback_rejects_empty_parsed_scopes() {
         )))
         .await
         .expect("oneshot");
-    assert_eq!(replay_response.status(), StatusCode::CONFLICT);
+    assert_eq!(replay_response.status(), StatusCode::BAD_REQUEST);
     assert!(
         read_body_string(replay_response)
             .await
-            .contains("\"code\":\"flow_already_terminal\"")
+            .contains("\"code\":\"provider_denied\"")
     );
 }
 
@@ -1882,7 +1890,7 @@ async fn product_auth_callback_provider_denial_is_sanitized() {
     assert!(body.contains("\"code\":\"provider_denied\""));
     assert!(!body.contains("provider-denied-state"));
     assert!(!body.contains("access_denied"));
-    assert!(dispatcher.events().is_empty());
+    assert_single_auth_outcome(&dispatcher, AuthFlowOutcome::ProviderDenied);
 }
 
 #[tokio::test]
@@ -1912,9 +1920,11 @@ async fn product_auth_callback_non_denial_error_is_malformed() {
     assert!(body.contains("\"code\":\"malformed_callback\""));
     assert!(!body.contains("provider-failure-state"));
     assert!(!body.contains("temporarily_unavailable"));
-    assert!(
-        dispatcher.events().is_empty(),
-        "provider failures must not dispatch a denial continuation"
+    assert_single_auth_outcome(
+        &dispatcher,
+        AuthFlowOutcome::Failed {
+            error: ironclaw_auth::AuthErrorCode::MalformedCallback,
+        },
     );
 }
 
@@ -2163,7 +2173,12 @@ async fn product_auth_callback_provider_exchange_failure_is_sanitized() {
     assert!(!body.contains("exchange-failed-state"));
     assert!(!body.contains("exchange-failed-pkce"));
     assert!(!body.contains("exchange-failed-code"));
-    assert!(dispatcher.events().is_empty());
+    assert_single_auth_outcome(
+        &dispatcher,
+        AuthFlowOutcome::Failed {
+            error: ironclaw_auth::AuthErrorCode::TokenExchangeFailed,
+        },
+    );
 }
 
 #[tokio::test]
