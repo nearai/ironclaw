@@ -73,6 +73,15 @@ async fn local_dev_runtime_injects_default_system_prompt_into_model_request() {
         }),
         "local-dev runtime should send the editable default system prompt to the model gateway"
     );
+    assert!(
+        recorded_requests[0].messages.iter().any(|message| {
+            message.role == HostManagedModelMessageRole::System
+                && message
+                    .content
+                    .contains("Respond in the same language as the user's current message")
+        }),
+        "local-dev runtime should tell the model to preserve the user's response language"
+    );
     // Disclosure is default-on: the system prompt must teach the model the
     // tool_search/tool_describe/tool_call protocol, or a weak model never reaches
     // the deferred long tail.
