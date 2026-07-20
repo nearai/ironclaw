@@ -608,6 +608,10 @@ impl Agent {
             scheduler.set_runtime_policy(policy.clone());
         }
         let scheduler = Arc::new(scheduler);
+        let context_monitor = match config.context_token_limit {
+            Some(limit) => ContextMonitor::new().with_limit(limit),
+            None => ContextMonitor::new(),
+        };
 
         Self {
             config,
@@ -617,7 +621,7 @@ impl Agent {
             scheduler,
             router: Router::new(),
             session_manager,
-            context_monitor: ContextMonitor::new(),
+            context_monitor,
             heartbeat_config,
             hygiene_config,
             routine_config,
@@ -2555,6 +2559,7 @@ mod tests {
                 multi_tenant: false,
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
+                context_token_limit: None,
             },
             deps,
             Arc::new(crate::channels::ChannelManager::new()),

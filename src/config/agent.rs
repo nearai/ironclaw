@@ -44,6 +44,14 @@ pub struct AgentConfig {
     pub max_llm_concurrent_per_user: Option<usize>,
     /// Maximum concurrent jobs per user. None = use default (3).
     pub max_jobs_concurrent_per_user: Option<usize>,
+    /// Override `ContextMonitor`'s context-window limit (tokens). None = use
+    /// its own default (`DEFAULT_CONTEXT_LIMIT`, currently 100_000, compaction
+    /// fires at 80% of it). Exists so callers driving the legacy Agent loop
+    /// directly (benchmarks, evals) can test the same session with compaction
+    /// on vs. off — a raw-context control against the shipped default,
+    /// without a code change per comparison. Settable via
+    /// `AGENT_CONTEXT_TOKEN_LIMIT`.
+    pub context_token_limit: Option<usize>,
 }
 
 impl AgentConfig {
@@ -71,6 +79,7 @@ impl AgentConfig {
             multi_tenant: false,
             max_llm_concurrent_per_user: None,
             max_jobs_concurrent_per_user: None,
+            context_token_limit: None,
         }
     }
 
@@ -152,6 +161,7 @@ impl AgentConfig {
             multi_tenant: parse_bool_env("AGENT_MULTI_TENANT", false)?,
             max_llm_concurrent_per_user: parse_option_env("TENANT_MAX_LLM_CONCURRENT")?,
             max_jobs_concurrent_per_user: parse_option_env("TENANT_MAX_JOBS_CONCURRENT")?,
+            context_token_limit: parse_option_env("AGENT_CONTEXT_TOKEN_LIMIT")?,
         })
     }
 }
@@ -174,5 +184,40 @@ mod tests {
         let settings = Settings::default(); // default is "UTC"
         let config = AgentConfig::resolve(&settings).expect("resolve");
         assert_eq!(config.default_timezone, "UTC");
+    }
+
+    // Serializes tests that mutate AGENT_CONTEXT_TOKEN_LIMIT (process-global
+    // state) so they don't race under the default parallel test runner.
+    static CONTEXT_TOKEN_LIMIT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn test_context_token_limit_defaults_to_none() {
+        let _guard = CONTEXT_TOKEN_LIMIT_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // SAFETY: serialized by the lock above.
+        unsafe {
+            std::env::remove_var("AGENT_CONTEXT_TOKEN_LIMIT");
+        }
+        let settings = Settings::default();
+        let config = AgentConfig::resolve(&settings).expect("resolve");
+        assert_eq!(config.context_token_limit, None);
+    }
+
+    #[test]
+    fn test_context_token_limit_reads_env_override() {
+        let _guard = CONTEXT_TOKEN_LIMIT_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // SAFETY: serialized by the lock above; restored before return.
+        unsafe {
+            std::env::set_var("AGENT_CONTEXT_TOKEN_LIMIT", "500000");
+        }
+        let settings = Settings::default();
+        let config = AgentConfig::resolve(&settings).expect("resolve");
+        unsafe {
+            std::env::remove_var("AGENT_CONTEXT_TOKEN_LIMIT");
+        }
+        assert_eq!(config.context_token_limit, Some(500_000));
     }
 }
