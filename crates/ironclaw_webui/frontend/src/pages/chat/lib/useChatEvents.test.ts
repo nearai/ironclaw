@@ -2612,6 +2612,39 @@ test("useChatEvents: terminal run failure replaces its provisional stream error"
   });
 });
 
+test("useChatEvents: terminal success clears its provisional stream error", () => {
+  const harness = createUseChatEventsHarness();
+  harness.setCurrentActiveRun({
+    runId: "run-stream-recovered",
+    threadId: "thread-1",
+    status: "running",
+  });
+
+  harness.handleEvent({
+    type: "error",
+    frame: {
+      error: "unavailable",
+      kind: "service_unavailable",
+      retryable: true,
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-stream-recovered", status: "completed" } },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(plain(harness.messages), []);
+  assert.deepEqual(harness.settledRuns, [
+    { runId: "run-stream-recovered", success: true },
+  ]);
+});
+
 test("useChatEvents: metadata-free terminal failure replaces its stream error", () => {
   const harness = createUseChatEventsHarness({ failureMessageForRunStatus });
   harness.setCurrentActiveRun({

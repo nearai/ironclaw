@@ -477,13 +477,17 @@ function applyProjectionItems({
         continue;
       }
       if (isStaleTerminalStatus) {
-        replaceExistingRunFailureMessage(setMessages, {
-          runId,
-          status,
-          failureCategory,
-          failureSummary,
-          connectionContextForRunFailure,
-        });
+        if (SUCCESS_RUN_STATUSES.has(status)) {
+          clearProvisionalStreamFailureMessage(setMessages, runId);
+        } else {
+          replaceExistingRunFailureMessage(setMessages, {
+            runId,
+            status,
+            failureCategory,
+            failureSummary,
+            connectionContextForRunFailure,
+          });
+        }
         const activeResolvedPromptState = locallyResolvedStateForRun(
           locallyResolvedGatesRef,
           activeRunRef?.current?.runId,
@@ -578,7 +582,9 @@ function applyProjectionItems({
           runId,
           SUCCESS_RUN_STATUSES.has(status),
         );
-        if (status === "failed" || status === "recovery_required") {
+        if (SUCCESS_RUN_STATUSES.has(status)) {
+          clearProvisionalStreamFailureMessage(setMessages, runId);
+        } else if (status === "failed" || status === "recovery_required") {
           appendRunFailureMessage(setMessages, {
             runId,
             status,
@@ -870,6 +876,18 @@ function replaceExistingRunFailureMessage(setMessages, details) {
     return;
   }
   appendRunFailureMessage(setMessages, { ...details, onlyIfPresent: true });
+}
+
+function clearProvisionalStreamFailureMessage(setMessages, runId) {
+  if (!runId) return;
+  const messageId = `${RUN_FAILURE_ID_PREFIX}${runId}`;
+  setMessages((prev) => {
+    const existing = prev.findIndex((message) => message.id === messageId);
+    if (existing < 0 || prev[existing].failureStatus !== "stream_error") {
+      return prev;
+    }
+    return prev.filter((_, index) => index !== existing);
+  });
 }
 
 // A projection can report an unknown run failure before the send response maps
