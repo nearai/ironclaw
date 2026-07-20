@@ -354,11 +354,12 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
     );
     assert!(
         workspace_manifest.contains("packages = [\"ironclaw_reborn_cli\"]")
-            && workspace_manifest.contains("tag-namespace = \"ironclaw\""),
+            && workspace_manifest.contains("tag-namespace = \"ironclaw-\""),
         "cargo-dist must select only the Reborn CLI while preserving ironclaw-v* release tags"
     );
     assert!(
-        cli_manifest.contains("[package.metadata.dist]\ndist = true")
+        cli_manifest.contains("version = \"0.99.1-rc.2\"")
+            && cli_manifest.contains("[package.metadata.dist]\ndist = true")
             && cli_manifest.contains("display-name = \"ironclaw\"")
             && cli_manifest
                 .contains("features = [\"libsql\", \"postgres\", \"inmemory-turn-state\"]"),
