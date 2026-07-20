@@ -84,6 +84,7 @@ closed (`500`) if that layer is missing (locked by
 | `webui.v2.delete_thread` | DELETE | `/api/webchat/v2/threads/{thread_id}` | — | `ProductWorkflow` |
 | `webui.v2.send_message` | POST | `/api/webchat/v2/threads/{thread_id}/messages` | — | `TurnCoordinator` |
 | `webui.v2.get_timeline` | GET | `/api/webchat/v2/threads/{thread_id}/timeline` (`?limit&cursor`) | — | `ProjectionOnly` |
+| `webui.v2.get_run_artifact` | GET | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/artifact` | — | `ProjectionOnly` |
 | `webui.v2.logs` | GET | `/api/webchat/v2/logs` | — | `ProjectionOnly` |
 | `webui.v2.stream_events` | GET | `/api/webchat/v2/threads/{thread_id}/events` | **SSE** | `ProjectionOnly` |
 | `webui.v2.stream_events_ws` | GET | `/api/webchat/v2/threads/{thread_id}/ws` | **WebSocket** | `ProjectionOnly` |
@@ -101,6 +102,15 @@ The exact per-route set (methods, query params, auth, rate/body limits) is the
 descriptor table in `src/webui_v2/descriptors.rs`; the count/shape is locked by
 `tests/webui_v2_descriptors_contract.rs`. Add a route → add a handler **and** a
 `webui_v2_routes()` entry, or that test fails.
+
+`webui.v2.get_run_artifact` exports one exact caller-owned run as the versioned
+`ironclaw.run_artifact.v1` evidence schema. The facade authorizes the thread
+from authenticated tenant/user scope before selecting records by `turn_run_id`,
+reconstructs provider tool-call metadata through the model-context read path,
+and applies deterministic trace redaction before serialization. Its logs are a
+bounded process-local diagnostic sidecar: `logs.complete` is always false and
+availability/truncation are explicit. Deployment-wide logs are not exposed
+through this caller route.
 
 **Operator-gating.** LLM config, operator setup/config/service-control, and
 extension zip-import routes are operator-wide: `webui_v2_app` mounts them only

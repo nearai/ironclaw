@@ -77,8 +77,10 @@ mod lifecycle_setup;
 mod llm_config;
 mod project_fs;
 mod projects;
+mod run_artifact;
 mod trace_credits;
 mod types;
+mod views;
 
 use admin_users::{
     ADMIN_USER_LIST_DEFAULT_LIMIT, ADMIN_USER_LIST_MAX_LIMIT, RejectingAdminUserService,
@@ -128,6 +130,10 @@ pub use projects::{
     RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole, RebornProjectState,
     RebornRemoveMemberRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
 };
+pub use run_artifact::{
+    RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornRunArtifact, RebornRunArtifactRequest,
+    RunArtifactLogs, RunArtifactMessage, RunArtifactRedaction, RunArtifactToolCall,
+};
 pub use types::{
     RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationActiveHold,
     RebornAutomationHoldReason, RebornAutomationInfo, RebornAutomationMutationResponse,
@@ -165,6 +171,7 @@ pub use types::{
     RebornStreamEventsSubscription, RebornSubmitTurnResponse, RebornTimelineRequest,
     RebornTimelineResponse,
 };
+pub use views::{RebornViewDescriptor, RebornViewPage, RebornViewQuery};
 
 type SkillActivationRecorder =
     dyn Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), RebornServicesError> + Send + Sync;
@@ -1783,6 +1790,18 @@ pub trait RebornServicesApi: Send + Sync {
         _caller: WebUiAuthenticatedCaller,
     ) -> Result<bool, RebornServicesError> {
         Ok(false)
+    }
+
+    /// Query one descriptor-declared, read-only product view. This is the
+    /// generic read conduit; new views register an id rather than growing this
+    /// facade with per-feature methods.
+    async fn query(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: RebornViewQuery,
+    ) -> Result<RebornViewPage, RebornServicesError> {
+        let _ = (caller, query);
+        Err(RebornServicesError::service_unavailable(false))
     }
 
     /// Read the raw bytes of one landed attachment so the browser can render an
@@ -3906,6 +3925,27 @@ impl RebornServicesApi for RebornServices {
             summary_artifacts,
             next_cursor,
         })
+    }
+
+    async fn query(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: RebornViewQuery,
+    ) -> Result<RebornViewPage, RebornServicesError> {
+        match query.view_id.as_str() {
+            id if id == RUN_ARTIFACT_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(RebornServicesError::internal_from)?;
+                let artifact = self.build_run_artifact(caller, request).await?;
+                let payload =
+                    serde_json::to_value(artifact).map_err(RebornServicesError::internal_from)?;
+                Ok(RebornViewPage {
+                    payload,
+                    next_cursor: None,
+                })
+            }
+            _ => Err(RebornServicesError::not_found()),
+        }
     }
 
     async fn list_project_dir(

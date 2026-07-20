@@ -12,6 +12,9 @@
 //!
 //! [`RebornServicesApi`]: ironclaw_product_workflow::RebornServicesApi
 
+mod run_artifact;
+pub use run_artifact::get_run_artifact;
+
 use std::convert::Infallible;
 use std::time::Duration;
 

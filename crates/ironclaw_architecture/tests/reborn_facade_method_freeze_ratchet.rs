@@ -8,7 +8,8 @@
 //! `RebornServicesApi` method set so any *new* method fails CI and the migration
 //! stops the bleeding before it starts.
 //!
-//! This test **freezes the current 88-method `RebornServicesApi` trait block**
+//! This test freezes the legacy `RebornServicesApi` method set plus the one
+//! generic `query` read conduit designated by the target architecture
 //! (`crates/ironclaw_product_workflow/src/reborn_services.rs`) as a set-membership
 //! allowlist (§10: compare set membership, never a count) and fails on any change:
 //!
@@ -69,6 +70,7 @@ const FROZEN_REBORN_SERVICES_METHODS: &[&str] = &[
     "resolve_gate",
     "retry_run",
     "get_run_state",
+    "query",
     // --- filesystem / project browsing (→ view descriptors, §5.2.2) ---
     "list_project_dir",
     "stat_project_path",
