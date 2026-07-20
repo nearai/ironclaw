@@ -18,7 +18,7 @@ use ironclaw_host_runtime::TenantSandboxProcessPort;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_trust::HostTrustPolicy;
-use ironclaw_turns::{TurnStateStoreLimits, TurnRunWakeNotifier};
+use ironclaw_turns::{TurnRunWakeNotifier, TurnStateStoreLimits};
 use secrecy::SecretString;
 
 #[cfg(feature = "postgres")]
@@ -789,10 +789,7 @@ impl RebornBuildInput {
     /// Called by `build_reborn_runtime` after mapping from `TurnRunnerSettings` so the
     /// factory can apply them when constructing the store. Callers should use
     /// `RebornRuntimeInput::with_runner_settings` rather than calling this directly.
-    pub(crate) fn with_turn_state_store_limits(
-        mut self,
-        limits: TurnStateStoreLimits,
-    ) -> Self {
+    pub(crate) fn with_turn_state_store_limits(mut self, limits: TurnStateStoreLimits) -> Self {
         self.turn_state_store_limits = limits;
         self
     }

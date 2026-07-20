@@ -53,8 +53,8 @@ use ironclaw_runner::{
 use ironclaw_threads::{InMemorySessionThreadService, SessionThreadService, ThreadScope};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::{
-    CheckpointStateStore, LoopCheckpointStore, LoopResultRef,
-    RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope, TurnStateStore,
+    CheckpointStateStore, LoopCheckpointStore, LoopResultRef, RunProfileResolutionRequest,
+    RunProfileResolver, TurnId, TurnRunId, TurnScope, TurnStateStore,
     run_profile::{
         AgentLoopHostError, CapabilityInputRef, CapabilityInvocation,
         InMemoryLoopHostMilestoneSink, InstructionSafetyContext, LoopCancelReasonKind,

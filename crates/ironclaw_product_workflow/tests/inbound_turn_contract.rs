@@ -57,9 +57,8 @@ use ironclaw_turns::{
     CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator, EventCursor,
     FilesystemTurnStateRowStore, GetRunStateRequest, IdempotencyKey, ResumeTurnRequest,
     ResumeTurnResponse, RunProfileId, RunProfileVersion, SanitizedCancelReason, SubmitTurnRequest,
-    SubmitTurnResponse, ThreadBusy,
-    TurnActor, TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState,
-    TurnRunWake, TurnScope, TurnStateStore, TurnStatus,
+    SubmitTurnResponse, ThreadBusy, TurnActor, TurnCoordinator, TurnError, TurnId, TurnOriginKind,
+    TurnRunId, TurnRunState, TurnRunWake, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
         LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken,
@@ -425,7 +424,9 @@ impl RunCancellationFactory for UnretainedRunCancellationFactory {
     }
 }
 
-fn turn_state_store_dyn(store: &Arc<FilesystemTurnStateRowStore<InMemoryBackend>>) -> Arc<dyn TurnStateStore> {
+fn turn_state_store_dyn(
+    store: &Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
+) -> Arc<dyn TurnStateStore> {
     Arc::clone(store) as Arc<dyn TurnStateStore>
 }
 
