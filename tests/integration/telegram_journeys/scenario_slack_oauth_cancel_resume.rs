@@ -1,8 +1,13 @@
 use super::harness::*;
 use super::reborn_support::reply::RebornScriptedReply;
 use axum::http::{Method, StatusCode};
-use ironclaw_auth::{AuthFlowOutcome, AuthFlowState, OAuthCallbackState, OAuthCallbackStateKind};
-use ironclaw_turns::TurnStatus;
+use ironclaw_auth::{
+    AuthFlowOutcome, AuthFlowState, AuthResolved, OAuthCallbackState, OAuthCallbackStateKind,
+};
+use ironclaw_product_workflow::{
+    AuthResolutionDispatchOutcome, ProductAuthTurnGateResumeDispatcher,
+};
+use ironclaw_turns::{GetRunStateRequest, TurnStatus};
 use serde_json::json;
 use std::time::Duration;
 use url::Url;
@@ -182,6 +187,14 @@ async fn telegram_dm_slack_oauth_targets_workspace_and_popup_cancel_resumes_thre
         failed_flow.state,
         AuthFlowState::Resolved(AuthFlowOutcome::ProviderDenied)
     );
+    let old_resolution = AuthResolved {
+        flow_id: failed_flow.id,
+        scope: failed_flow.scope.clone(),
+        continuation: failed_flow.continuation.clone(),
+        provider: failed_flow.provider.clone(),
+        outcome: AuthFlowOutcome::ProviderDenied,
+        resolved_at: failed_flow.updated_at,
+    };
 
     wait_for_run_status(
         &stack.runtime.webui_turn_coordinator_for_test(),
@@ -211,9 +224,9 @@ async fn telegram_dm_slack_oauth_targets_workspace_and_popup_cancel_resumes_thre
     );
     assert_eq!(stack.model_trace.calls(), 4);
 
-    // A later user request creates a distinct, newer Slack auth gate. Replaying
-    // the old provider-denial callback must be an idempotent no-op against the
-    // old exact references and cannot release or cancel this newer gate.
+    // A later user request creates a distinct, newer Slack auth gate. Delivering
+    // the old exact terminal event again through the single resolution seam must
+    // return its typed no-op result and cannot release or cancel this newer gate.
     let retry_text = "please try connecting Slack again";
     let retry_baseline = stack.network.request_bodies_for("/sendMessage").len();
     let status = stack.webhook_dm_without_drain(&secret, 4, retry_text).await;
@@ -253,23 +266,37 @@ async fn telegram_dm_slack_oauth_targets_workspace_and_popup_cancel_resumes_thre
     )
     .await
     .expect("the newer Telegram run is parked on its own Slack auth gate");
-
-    let _ = call_route(
-        stack
-            .oauth_callback_public
-            .clone()
-            .expect("Slack journey exposes the public OAuth callback"),
-        Method::GET,
-        &callback_path,
-        None,
-        &[("accept", "text/html,application/xhtml+xml")],
-        None,
-    )
-    .await;
-    stack
-        .assert_run_stays_status(&retry_turn_scope, retry_run_id, TurnStatus::BlockedAuth)
+    let coordinator = stack.runtime.webui_turn_coordinator_for_test();
+    let retry_gate_ref = coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: retry_turn_scope.clone(),
+            run_id: retry_run_id,
+        })
         .await
-        .expect("redelivering the old terminal result cannot affect the newer exact gate");
+        .expect("newer run state is readable")
+        .gate_ref
+        .expect("newer run carries an auth gate ref");
+    let dispatch = ProductAuthTurnGateResumeDispatcher::new(coordinator.clone())
+        .dispatch_auth_resolved(old_resolution)
+        .await
+        .expect("stale resolution delivery is an idempotent success");
+    assert_eq!(dispatch, AuthResolutionDispatchOutcome::Ignored);
+    for _ in 0..40 {
+        let state = coordinator
+            .get_run_state(GetRunStateRequest {
+                scope: retry_turn_scope.clone(),
+                run_id: retry_run_id,
+            })
+            .await
+            .expect("newer run state remains readable");
+        assert_eq!(state.status, TurnStatus::BlockedAuth);
+        assert_eq!(
+            state.gate_ref.as_ref(),
+            Some(&retry_gate_ref),
+            "redelivering the old terminal result cannot replace the newer exact gate"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     assert_eq!(stack.model_trace.calls(), 5);
 
     stack.runtime.shutdown().await.expect("runtime shuts down");

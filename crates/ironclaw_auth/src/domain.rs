@@ -71,25 +71,8 @@ pub fn validate_callback_claim(
     if let AuthFlowState::Resolved(outcome) = record.state {
         return match outcome {
             AuthFlowOutcome::Authorized { .. } => Ok(()),
-            AuthFlowOutcome::Failed { .. }
-                if record.credential_secret_fingerprint.is_some()
-                    && matches!(
-                        record.continuation,
-                        crate::AuthContinuationRef::LifecycleActivation { .. }
-                    ) =>
-            {
-                Ok(())
-            }
             _ => Err(error_for_terminal_outcome(outcome)),
         };
-    }
-    if record.state == AuthFlowState::Processing
-        && matches!(
-            record.continuation,
-            crate::AuthContinuationRef::LifecycleActivation { .. }
-        )
-    {
-        return Ok(());
     }
     expire_if_needed(record, now)?;
     if record.state != AuthFlowState::Open {
@@ -563,13 +546,63 @@ fn recovery_kind_and_reason_for_status(
 mod tests {
     use super::*;
     use crate::{
-        AuthProviderId, CredentialAccountId, CredentialAccountLabel, CredentialAccountStatus,
-        OAuthAuthorizationCode, OAuthProviderExchange, OAuthProviderIdentity, PkceVerifierSecret,
-        ProviderScope,
+        AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowKind, AuthProviderId,
+        CredentialAccountId, CredentialAccountLabel, CredentialAccountStatus,
+        CredentialSecretFingerprint, LifecyclePackageRef, OAuthAuthorizationCode,
+        OAuthCallbackClaimRequest, OAuthProviderExchange, OAuthProviderIdentity, OpaqueStateHash,
+        PkceVerifierHash, PkceVerifierSecret, ProviderScope,
     };
     use chrono::Utc;
     use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
     use secrecy::SecretString;
+
+    #[test]
+    fn lifecycle_failed_record_with_committed_fingerprint_rejects_callback_claim_replay() {
+        let now = Utc::now();
+        let scope = crate::AuthProductScope::new(
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap(),
+            crate::AuthSurface::Api,
+        );
+        let state_hash = OpaqueStateHash::new("a".repeat(64)).expect("state hash");
+        let pkce_hash = PkceVerifierHash::new("b".repeat(64)).expect("PKCE hash");
+        let mut record = AuthFlowRecord {
+            id: AuthFlowId::new(),
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            state: AuthFlowState::Resolved(AuthFlowOutcome::Failed {
+                error: AuthErrorCode::TokenExchangeFailed,
+            }),
+            provider: AuthProviderId::new("github").expect("provider"),
+            challenge: None,
+            continuation: AuthContinuationRef::LifecycleActivation {
+                package_ref: LifecyclePackageRef::new("github-extension")
+                    .expect("lifecycle package"),
+            },
+            credential_secret_fingerprint: Some(
+                CredentialSecretFingerprint::new("c".repeat(64)).expect("fingerprint"),
+            ),
+            update_binding: None,
+            opaque_state_hash: Some(state_hash.clone()),
+            pkce_verifier_hash: Some(pkce_hash.clone()),
+            authorization_code_hash: None,
+            resolution_delivered_at: None,
+            created_at: now,
+            updated_at: now,
+            expires_at: now + chrono::Duration::minutes(5),
+        };
+        let request = OAuthCallbackClaimRequest {
+            flow_id: record.id,
+            opaque_state_hash: state_hash,
+            provider: record.provider.clone(),
+            pkce_verifier_hash: pkce_hash,
+        };
+
+        let error = validate_callback_claim(&mut record, &scope, &request, now)
+            .expect_err("Resolved(Failed) must never be exposed as callback success");
+
+        assert_eq!(error, AuthProductError::FlowAlreadyTerminal);
+    }
 
     #[test]
     fn update_account_from_exchange_replaces_provider_reported_scopes() {

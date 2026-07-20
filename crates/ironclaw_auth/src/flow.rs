@@ -158,8 +158,16 @@ struct AuthFlowRecordWire {
     id: AuthFlowId,
     scope: AuthProductScope,
     kind: AuthFlowKind,
-    #[serde(flatten)]
-    lifecycle: AuthFlowLifecycleWire,
+    #[serde(default)]
+    state: Option<CanonicalAuthFlowState>,
+    #[serde(default)]
+    outcome: Option<AuthFlowOutcome>,
+    #[serde(default)]
+    status: Option<LegacyAuthFlowStatus>,
+    #[serde(default)]
+    credential_account_id: Option<CredentialAccountId>,
+    #[serde(default)]
+    error: Option<AuthErrorCode>,
     provider: AuthProviderId,
     challenge: Option<AuthChallenge>,
     continuation: AuthContinuationRef,
@@ -180,20 +188,12 @@ struct AuthFlowRecordWire {
     expires_at: Timestamp,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum AuthFlowLifecycleWire {
-    Canonical(AuthFlowState),
-    Legacy(LegacyAuthFlowLifecycle),
-}
-
-#[derive(Debug, Deserialize)]
-struct LegacyAuthFlowLifecycle {
-    status: LegacyAuthFlowStatus,
-    #[serde(default)]
-    credential_account_id: Option<CredentialAccountId>,
-    #[serde(default)]
-    error: Option<AuthErrorCode>,
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CanonicalAuthFlowState {
+    Open,
+    Processing,
+    Resolved,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -210,50 +210,90 @@ enum LegacyAuthFlowStatus {
     Canceled,
 }
 
-impl LegacyAuthFlowLifecycle {
-    fn into_state<E: serde::de::Error>(self) -> Result<AuthFlowState, E> {
-        let state = match self.status {
-            LegacyAuthFlowStatus::Pending | LegacyAuthFlowStatus::AwaitingUser => {
-                AuthFlowState::Open
-            }
-            LegacyAuthFlowStatus::CallbackReceived => AuthFlowState::Processing,
-            LegacyAuthFlowStatus::Completing => match self.credential_account_id {
-                Some(account_id) => {
-                    AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id })
+fn decode_auth_flow_lifecycle<E: serde::de::Error>(
+    canonical_state: Option<CanonicalAuthFlowState>,
+    canonical_outcome: Option<AuthFlowOutcome>,
+    legacy_status: Option<LegacyAuthFlowStatus>,
+    legacy_account_id: Option<CredentialAccountId>,
+    legacy_error: Option<AuthErrorCode>,
+) -> Result<AuthFlowState, E> {
+    let has_canonical_fields = canonical_state.is_some() || canonical_outcome.is_some();
+    let has_legacy_fields =
+        legacy_status.is_some() || legacy_account_id.is_some() || legacy_error.is_some();
+    match (has_canonical_fields, has_legacy_fields) {
+        (true, true) => {
+            return Err(E::custom(
+                "auth flow contains both canonical and legacy lifecycle fields",
+            ));
+        }
+        (false, false) => {
+            return Err(E::custom("auth flow is missing lifecycle fields"));
+        }
+        (true, false) => {
+            let state = canonical_state
+                .ok_or_else(|| E::custom("canonical auth flow is missing its state"))?;
+            return match (state, canonical_outcome) {
+                (CanonicalAuthFlowState::Open, None) => Ok(AuthFlowState::Open),
+                (CanonicalAuthFlowState::Processing, None) => Ok(AuthFlowState::Processing),
+                (CanonicalAuthFlowState::Resolved, Some(outcome)) => {
+                    Ok(AuthFlowState::Resolved(outcome))
                 }
-                None => AuthFlowState::Processing,
-            },
-            LegacyAuthFlowStatus::Completed => {
-                let account_id = self.credential_account_id.ok_or_else(|| {
-                    E::custom("legacy completed auth flow is missing its credential account")
-                })?;
-                AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id })
-            }
-            LegacyAuthFlowStatus::Failed => match self.error {
-                Some(AuthErrorCode::ProviderDenied) => {
-                    AuthFlowState::Resolved(AuthFlowOutcome::ProviderDenied)
+                (CanonicalAuthFlowState::Open, Some(_)) => {
+                    Err(E::custom("canonical open auth flow carries an outcome"))
                 }
-                Some(error) => AuthFlowState::Resolved(AuthFlowOutcome::Failed { error }),
-                None => {
-                    return Err(E::custom("legacy failed auth flow is missing its error"));
-                }
-            },
-            LegacyAuthFlowStatus::Expired => AuthFlowState::Resolved(AuthFlowOutcome::Expired),
-            LegacyAuthFlowStatus::Canceling | LegacyAuthFlowStatus::Canceled => {
-                AuthFlowState::Resolved(AuthFlowOutcome::UserAborted)
-            }
-        };
-        Ok(state)
+                (CanonicalAuthFlowState::Processing, Some(_)) => Err(E::custom(
+                    "canonical processing auth flow carries an outcome",
+                )),
+                (CanonicalAuthFlowState::Resolved, None) => Err(E::custom(
+                    "canonical resolved auth flow is missing its outcome",
+                )),
+            };
+        }
+        (false, true) => {}
     }
+
+    let status =
+        legacy_status.ok_or_else(|| E::custom("legacy auth flow is missing its status"))?;
+    let state = match status {
+        LegacyAuthFlowStatus::Pending | LegacyAuthFlowStatus::AwaitingUser => AuthFlowState::Open,
+        LegacyAuthFlowStatus::CallbackReceived => AuthFlowState::Processing,
+        LegacyAuthFlowStatus::Completing => match legacy_account_id {
+            Some(account_id) => AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id }),
+            None => AuthFlowState::Processing,
+        },
+        LegacyAuthFlowStatus::Completed => {
+            let account_id = legacy_account_id.ok_or_else(|| {
+                E::custom("legacy completed auth flow is missing its credential account")
+            })?;
+            AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id })
+        }
+        LegacyAuthFlowStatus::Failed => match legacy_error {
+            Some(AuthErrorCode::ProviderDenied) => {
+                AuthFlowState::Resolved(AuthFlowOutcome::ProviderDenied)
+            }
+            Some(error) => AuthFlowState::Resolved(AuthFlowOutcome::Failed { error }),
+            None => {
+                return Err(E::custom("legacy failed auth flow is missing its error"));
+            }
+        },
+        LegacyAuthFlowStatus::Expired => AuthFlowState::Resolved(AuthFlowOutcome::Expired),
+        LegacyAuthFlowStatus::Canceling | LegacyAuthFlowStatus::Canceled => {
+            AuthFlowState::Resolved(AuthFlowOutcome::UserAborted)
+        }
+    };
+    Ok(state)
 }
 
 impl<'de> Deserialize<'de> for AuthFlowRecord {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let wire = AuthFlowRecordWire::deserialize(deserializer)?;
-        let state = match wire.lifecycle {
-            AuthFlowLifecycleWire::Canonical(state) => state,
-            AuthFlowLifecycleWire::Legacy(legacy) => legacy.into_state::<D::Error>()?,
-        };
+        let state = decode_auth_flow_lifecycle::<D::Error>(
+            wire.state,
+            wire.outcome,
+            wire.status,
+            wire.credential_account_id,
+            wire.error,
+        )?;
         Ok(Self {
             id: wire.id,
             scope: wire.scope,

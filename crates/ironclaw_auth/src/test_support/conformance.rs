@@ -27,11 +27,11 @@
 use chrono::{Duration, Utc};
 
 use crate::{
-    AuthChallenge, AuthContinuationRef, AuthFlowId, AuthFlowKind, AuthFlowManager, AuthFlowOutcome,
-    AuthFlowRecord, AuthFlowState, AuthProductError, AuthProductScope, AuthProviderId,
-    AuthorizationCodeHash, CredentialAccountLabel, NewAuthFlow, OAuthAuthorizationUrl,
-    OAuthCallbackInput, OAuthProviderExchange, OpaqueStateHash, PkceVerifierHash,
-    ProviderCallbackOutcome,
+    AuthChallenge, AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowKind, AuthFlowManager,
+    AuthFlowOutcome, AuthFlowRecord, AuthFlowState, AuthProductError, AuthProductScope,
+    AuthProviderId, AuthorizationCodeHash, CredentialAccountLabel, LifecyclePackageRef,
+    NewAuthFlow, OAuthAuthorizationUrl, OAuthCallbackFailureInput, OAuthCallbackInput,
+    OAuthProviderExchange, OpaqueStateHash, PkceVerifierHash, ProviderCallbackOutcome,
 };
 use ironclaw_host_api::SecretHandle;
 
@@ -75,6 +75,20 @@ fn new_flow(
         pkce_verifier_hash: Some(pkce_hash(tag)),
         expires_at,
     }
+}
+
+fn new_lifecycle_flow(
+    scope: &AuthProductScope,
+    provider: &AuthProviderId,
+    tag: &str,
+    expires_at: chrono::DateTime<Utc>,
+) -> NewAuthFlow {
+    let mut flow = new_flow(scope, provider, tag, expires_at);
+    flow.continuation = AuthContinuationRef::LifecycleActivation {
+        package_ref: LifecyclePackageRef::new("conformance-extension")
+            .expect("conformance lifecycle package ref is valid"),
+    };
+    flow
 }
 
 fn authorized_outcome(provider: &AuthProviderId, tag: &str) -> ProviderCallbackOutcome {
@@ -131,10 +145,90 @@ pub async fn assert_auth_flow_callback_conformance(
     provider: &AuthProviderId,
 ) {
     completed_flow_claim_idempotent_and_complete_rejects_replay(flows, scope, provider).await;
+    lifecycle_processing_and_failed_claims_reject_replay(flows, scope, provider).await;
     expired_flow_rejects_and_marks_expired(flows, scope, provider).await;
     canceled_flow_rejects_completion_as_canceled(flows, scope, provider).await;
     unknown_flow_rejects_completion(flows, scope, provider).await;
     state_hash_mismatch_denies_without_burning_the_flow(flows, scope, provider).await;
+}
+
+/// Lifecycle activation uses the same callback claim contract as every other
+/// continuation. A claim in flight and a terminal failure are delivery/recovery
+/// concerns, not permission for a second provider callback claimant.
+async fn lifecycle_processing_and_failed_claims_reject_replay(
+    flows: &dyn AuthFlowManager,
+    scope: &AuthProductScope,
+    provider: &AuthProviderId,
+) {
+    const CASE: &str = "lifecycle callback claim replay";
+    let processing_tag = "conformance-lifecycle-processing";
+    let processing = flows
+        .create_flow(new_lifecycle_flow(
+            scope,
+            provider,
+            processing_tag,
+            Utc::now() + Duration::minutes(5),
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("[{CASE}] create processing flow: {error:?}"));
+    let request = crate::OAuthCallbackClaimRequest {
+        flow_id: processing.id,
+        opaque_state_hash: state_hash(processing_tag),
+        provider: provider.clone(),
+        pkce_verifier_hash: pkce_hash(processing_tag),
+    };
+    flows
+        .claim_oauth_callback(scope, request.clone())
+        .await
+        .unwrap_or_else(|error| panic!("[{CASE}] first claim: {error:?}"));
+    let duplicate = flows
+        .claim_oauth_callback(scope, request)
+        .await
+        .expect_err("a lifecycle flow already Processing must reject a duplicate claim");
+    assert_eq!(
+        duplicate,
+        AuthProductError::FlowAlreadyTerminal,
+        "[{CASE}] Processing rejects duplicate callback claims"
+    );
+
+    let failed_tag = "conformance-lifecycle-failed";
+    let failed = flows
+        .create_flow(new_lifecycle_flow(
+            scope,
+            provider,
+            failed_tag,
+            Utc::now() + Duration::minutes(5),
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("[{CASE}] create failed flow: {error:?}"));
+    flows
+        .fail_oauth_callback(
+            scope,
+            OAuthCallbackFailureInput {
+                flow_id: failed.id,
+                opaque_state_hash: state_hash(failed_tag),
+                error: AuthErrorCode::TokenExchangeFailed,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("[{CASE}] fail callback: {error:?}"));
+    let failed_claim = flows
+        .claim_oauth_callback(
+            scope,
+            crate::OAuthCallbackClaimRequest {
+                flow_id: failed.id,
+                opaque_state_hash: state_hash(failed_tag),
+                provider: provider.clone(),
+                pkce_verifier_hash: pkce_hash(failed_tag),
+            },
+        )
+        .await
+        .expect_err("a Resolved(Failed) lifecycle flow must reject callback claims");
+    assert_eq!(
+        failed_claim,
+        AuthProductError::FlowAlreadyTerminal,
+        "[{CASE}] Resolved(Failed) rejects callback claims"
+    );
 }
 
 /// Happy completion, then both replay arms — the exact split the hosted

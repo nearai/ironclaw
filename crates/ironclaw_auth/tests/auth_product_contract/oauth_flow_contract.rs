@@ -130,14 +130,147 @@ async fn terminal_actions_resolve_to_their_exact_outcomes() {
 }
 
 #[tokio::test]
+async fn callback_claim_replay_rejects_every_non_authorized_terminal_outcome() {
+    let services = InMemoryAuthProductServices::new();
+
+    let denied_owner = scope("claim-provider-denied");
+    let denied = oauth_flow(&services, denied_owner.clone()).await;
+    let denial = services
+        .complete_oauth_callback(
+            &denied_owner,
+            OAuthCallbackInput {
+                flow_id: denied.id,
+                opaque_state_hash: state_hash("state-hash"),
+                outcome: ProviderCallbackOutcome::Denied,
+            },
+        )
+        .await
+        .expect_err("provider denial resolves the flow");
+    assert_eq!(denial, AuthProductError::ProviderDenied);
+
+    let aborted_owner = scope("claim-user-aborted");
+    let aborted = oauth_flow(&services, aborted_owner.clone()).await;
+    services
+        .cancel_flow(&aborted_owner, aborted.id)
+        .await
+        .expect("user abort resolves the flow");
+
+    let failed_owner = scope("claim-failed");
+    let failed = oauth_flow(&services, failed_owner.clone()).await;
+    services
+        .fail_oauth_callback(
+            &failed_owner,
+            ironclaw_auth::OAuthCallbackFailureInput {
+                flow_id: failed.id,
+                opaque_state_hash: state_hash("state-hash"),
+                error: AuthErrorCode::TokenExchangeFailed,
+            },
+        )
+        .await
+        .expect("callback failure resolves the flow");
+
+    let expired_owner = scope("claim-expired");
+    let expired = services
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: expired_owner.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: provider(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: authorization_url("https://provider.example/oauth"),
+                expires_at: Utc::now() - Duration::minutes(1),
+            },
+            continuation: AuthContinuationRef::LifecycleActivation {
+                package_ref: LifecyclePackageRef::new("github-extension").expect("valid package"),
+            },
+            update_binding: None,
+            opaque_state_hash: Some(state_hash("state-hash")),
+            pkce_verifier_hash: Some(pkce_hash("pkce-hash")),
+            expires_at: Utc::now() - Duration::minutes(1),
+        })
+        .await
+        .expect("expired flow record is created");
+    let first_expired_claim = services
+        .claim_oauth_callback(
+            &expired_owner,
+            ironclaw_auth::OAuthCallbackClaimRequest {
+                flow_id: expired.id,
+                opaque_state_hash: state_hash("state-hash"),
+                provider: provider(),
+                pkce_verifier_hash: pkce_hash("pkce-hash"),
+            },
+        )
+        .await
+        .expect_err("first claim marks an expired flow terminal");
+    assert_eq!(first_expired_claim, AuthProductError::UnknownOrExpiredFlow);
+
+    for (label, owner, flow_id, expected_error) in [
+        (
+            "provider denied",
+            denied_owner,
+            denied.id,
+            AuthProductError::FlowAlreadyTerminal,
+        ),
+        (
+            "user aborted",
+            aborted_owner,
+            aborted.id,
+            AuthProductError::Canceled,
+        ),
+        (
+            "failed",
+            failed_owner,
+            failed.id,
+            AuthProductError::FlowAlreadyTerminal,
+        ),
+        (
+            "expired",
+            expired_owner,
+            expired.id,
+            AuthProductError::FlowAlreadyTerminal,
+        ),
+    ] {
+        let error = services
+            .claim_oauth_callback(
+                &owner,
+                ironclaw_auth::OAuthCallbackClaimRequest {
+                    flow_id,
+                    opaque_state_hash: state_hash("state-hash"),
+                    provider: provider(),
+                    pkce_verifier_hash: pkce_hash("pkce-hash"),
+                },
+            )
+            .await
+            .expect_err("every non-authorized terminal outcome rejects callback claims");
+        assert_eq!(error, expected_error, "{label}");
+    }
+}
+
+#[tokio::test]
 async fn auth_flow_wire_writes_only_the_canonical_state_and_resolution_marker() {
     let services = InMemoryAuthProductServices::new();
-    let mut record = serde_json::to_value(oauth_flow(&services, scope("wire")).await)
-        .expect("sample flow serializes");
-    let object = record.as_object_mut().expect("flow record is an object");
-    assert_eq!(object.get("state"), Some(&serde_json::json!("open")));
-    assert!(!object.contains_key("outcome"));
-    assert!(object.contains_key("resolution_delivered_at"));
+    let owner = scope("wire");
+    let flow = oauth_flow(&services, owner.clone()).await;
+    let resolved = services
+        .cancel_flow(&owner, flow.id)
+        .await
+        .expect("flow resolves as user-aborted");
+    let delivered_at = "2026-07-20T12:00:00Z".parse().expect("timestamp");
+    let resolved = services
+        .mark_resolution_delivered(&owner, resolved.id, delivered_at)
+        .await
+        .expect("resolution delivery is acknowledged");
+    let record = serde_json::to_value(resolved).expect("resolved flow serializes");
+    let object = record.as_object().expect("flow record is an object");
+    assert_eq!(object.get("state"), Some(&serde_json::json!("resolved")));
+    assert_eq!(
+        object.get("outcome"),
+        Some(&serde_json::json!({"type": "user_aborted"}))
+    );
+    assert_eq!(
+        object.get("resolution_delivered_at"),
+        Some(&serde_json::json!("2026-07-20T12:00:00Z"))
+    );
     for removed in [
         "status",
         "credential_account_id",
@@ -150,16 +283,71 @@ async fn auth_flow_wire_writes_only_the_canonical_state_and_resolution_marker() 
         );
     }
 
-    object.insert("state".to_string(), serde_json::json!("resolved"));
-    object.insert(
+    let decoded: ironclaw_auth::AuthFlowRecord =
+        serde_json::from_value(record).expect("canonical resolved flow decodes");
+    assert_eq!(
+        decoded.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::UserAborted)
+    );
+}
+
+#[tokio::test]
+async fn mixed_canonical_and_legacy_lifecycle_fields_fail_closed() {
+    let services = InMemoryAuthProductServices::new();
+    let canonical = serde_json::to_value(oauth_flow(&services, scope("mixed-wire")).await)
+        .expect("sample flow serializes");
+    let base = canonical.as_object().expect("record object");
+
+    let mut consistent = base.clone();
+    consistent.insert("status".to_string(), serde_json::json!("awaiting_user"));
+    assert!(
+        serde_json::from_value::<ironclaw_auth::AuthFlowRecord>(serde_json::Value::Object(
+            consistent
+        ))
+        .is_err(),
+        "even equivalent canonical and legacy lifecycle fields are ambiguous"
+    );
+
+    let mut contradictory = base.clone();
+    contradictory.insert("state".to_string(), serde_json::json!("resolved"));
+    contradictory.insert(
         "outcome".to_string(),
         serde_json::json!({"type": "provider_denied"}),
     );
-    let resolved: ironclaw_auth::AuthFlowRecord =
-        serde_json::from_value(record).expect("canonical resolved flow decodes");
-    assert_eq!(
-        resolved.state,
-        AuthFlowState::Resolved(AuthFlowOutcome::ProviderDenied)
+    contradictory.insert("status".to_string(), serde_json::json!("completed"));
+    contradictory.insert(
+        "credential_account_id".to_string(),
+        serde_json::json!(CredentialAccountId::new()),
+    );
+    assert!(
+        serde_json::from_value::<ironclaw_auth::AuthFlowRecord>(serde_json::Value::Object(
+            contradictory
+        ))
+        .is_err(),
+        "contradictory terminal lifecycle representations must fail closed"
+    );
+
+    let mut malformed_canonical_with_valid_legacy = base.clone();
+    malformed_canonical_with_valid_legacy
+        .insert("state".to_string(), serde_json::json!("resolved"));
+    malformed_canonical_with_valid_legacy.remove("outcome");
+    malformed_canonical_with_valid_legacy
+        .insert("status".to_string(), serde_json::json!("canceled"));
+    assert!(
+        serde_json::from_value::<ironclaw_auth::AuthFlowRecord>(serde_json::Value::Object(
+            malformed_canonical_with_valid_legacy
+        ))
+        .is_err(),
+        "a malformed canonical lifecycle cannot fall through to valid legacy fields"
+    );
+
+    let mut neither = base.clone();
+    neither.remove("state");
+    neither.remove("outcome");
+    assert!(
+        serde_json::from_value::<ironclaw_auth::AuthFlowRecord>(serde_json::Value::Object(neither))
+            .is_err(),
+        "a record with neither lifecycle representation must fail closed"
     );
 }
 
