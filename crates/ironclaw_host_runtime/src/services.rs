@@ -177,6 +177,7 @@ where
 /// must not receive the mutable handoff stores that back those ports.
 #[derive(Clone)]
 pub struct ProductAuthProviderRuntimePorts {
+    network_policy_store: Arc<NetworkObligationPolicyStore>,
     runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
     obligation_handler: Arc<dyn CapabilityObligationHandler>,
     secret_store: Arc<dyn SecretStore>,
@@ -189,16 +190,53 @@ pub type ProductAuthCredentialStageError = RuntimeSecretStageError;
 
 impl ProductAuthProviderRuntimePorts {
     fn new(
+        network_policy_store: Arc<NetworkObligationPolicyStore>,
         runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
         obligation_handler: Arc<dyn CapabilityObligationHandler>,
         secret_store: Arc<dyn SecretStore>,
         secret_injection_store: Arc<RuntimeSecretInjectionStore>,
     ) -> Self {
         Self {
+            network_policy_store,
             runtime_http_egress,
             obligation_handler,
             secret_store,
             secret_injection_store,
+        }
+    }
+
+    /// Stage a network policy for one host-mediated egress call outside the
+    /// dispatch-obligation path (e.g. hosted-MCP tools/list discovery). The
+    /// egress pipeline requires a staged policy for (scope, capability); the
+    /// dispatch path stages it via ApplyNetworkPolicy obligations, and this
+    /// is the equivalent for host-driven discovery calls.
+    pub fn stage_network_policy_once(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        policy: ironclaw_host_api::NetworkPolicy,
+    ) {
+        self.network_policy_store.insert(scope, capability_id, policy);
+    }
+
+    /// Discard staged discovery state (network policy + secret material) for
+    /// (scope, capability) after a host-driven egress call completes.
+    pub fn discard_staged_discovery_state(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+    ) {
+        self.network_policy_store
+            .discard_for_capability(scope, capability_id);
+        if let Err(error) = self
+            .secret_injection_store
+            .discard_for_capability(scope, capability_id)
+        {
+            tracing::debug!(
+                error = ?error,
+                capability_id = %capability_id,
+                "failed to discard staged discovery secret material"
+            );
         }
     }
 
@@ -532,6 +570,7 @@ where
         let runtime_http_egress = self.runtime_http_egress()?;
         let secret_store = self.secret_store.clone()?;
         Some(ProductAuthProviderRuntimePorts::new(
+            Arc::clone(&self.network_policy_store),
             runtime_http_egress,
             self.obligation_handler(),
             secret_store,

@@ -157,6 +157,15 @@ impl HostedMcpOverlayRefresher {
             }
         }
 
+        // The egress pipeline requires a STAGED network policy for
+        // (scope, capability) — the dispatch path stages it via the
+        // ApplyNetworkPolicy obligation; stage the equivalent hosted-MCP
+        // policy for this discovery call.
+        self.runtime_ports.stage_network_policy_once(
+            scope,
+            capability_id,
+            hosted_mcp_discovery_network_policy(package),
+        );
         let discovery = tokio::time::timeout(
             TURN_DISCOVERY_TIMEOUT,
             discover_hosted_mcp_package(
@@ -166,6 +175,8 @@ impl HostedMcpOverlayRefresher {
             ),
         )
         .await;
+        self.runtime_ports
+            .discard_staged_discovery_state(scope, capability_id);
         match discovery {
             Ok(Ok(discovered)) => {
                 tracing::debug!(
@@ -259,6 +270,32 @@ impl HostedMcpOverlayRefresher {
 /// template) binds at least one [`SecretHandle`]-sourced runtime credential.
 /// Product-auth-account providers (e.g. NEAR AI) keep their activation-time
 /// discovery semantics and are not refreshed per user here.
+/// The discovery egress network policy: allow exactly the provider's audience
+/// host(s) over https, mirroring the grant-constraint policy the dispatch path
+/// stages for the same extension.
+fn hosted_mcp_discovery_network_policy(
+    package: &ExtensionPackage,
+) -> ironclaw_host_api::NetworkPolicy {
+    let mut allowed_targets = Vec::new();
+    for capability in &package.manifest.capabilities {
+        for credential in &capability.runtime_credentials {
+            if !allowed_targets.contains(&credential.audience) {
+                allowed_targets.push(credential.audience.clone());
+            }
+        }
+        for target in &capability.network_targets {
+            if !allowed_targets.contains(target) {
+                allowed_targets.push(target.clone());
+            }
+        }
+    }
+    ironclaw_host_api::NetworkPolicy {
+        allowed_targets,
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(2 * 1024 * 1024),
+    }
+}
+
 fn per_user_secret_discovery_template(
     package: &ExtensionPackage,
 ) -> Option<(CapabilityId, SecretHandle)> {
