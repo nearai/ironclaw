@@ -117,18 +117,23 @@ fn runtime_image_declares_and_prepares_ironclaw_home() {
         "runtime image must set HOME to /home/ironclaw for ~/.ironclaw state",
     );
     assert!(
-        dockerfile.contains("WORKDIR /home/ironclaw"),
-        "runtime image must start in the ironclaw home directory",
+        dockerfile.contains("WORKDIR /workspace"),
+        "runtime image must start in the /workspace working directory",
     );
     assert!(
-        dockerfile.contains("mkdir -p /home/ironclaw/.ironclaw"),
-        "runtime image must pre-create ~/.ironclaw before dropping privileges",
+        dockerfile.contains("mkdir -p /data/ironclaw-reborn /workspace"),
+        "runtime image must pre-create the Reborn state dir and workspace before dropping privileges",
+    );
+    assert!(
+        dockerfile
+            .contains("chown -R ironclaw:ironclaw /home/ironclaw /data/ironclaw-reborn /workspace"),
+        "runtime image must hand the home, Reborn state dir, and workspace to the non-root user",
     );
 }
 
 #[test]
 fn reborn_dockerfile_keeps_bundled_skills_in_build_context() {
-    let dockerfile = read_repo_file("Dockerfile.reborn");
+    let dockerfile = read_repo_file("Dockerfile");
     let dockerignore = read_repo_file(".dockerignore");
 
     assert!(
@@ -147,7 +152,7 @@ fn reborn_dockerfile_keeps_bundled_skills_in_build_context() {
 
 #[test]
 fn reborn_dockerfile_uses_feature_matched_cache_and_loopback_default() {
-    let dockerfile = read_repo_file("Dockerfile.reborn");
+    let dockerfile = read_repo_file("Dockerfile");
 
     assert!(
         dockerfile.contains(
@@ -171,7 +176,7 @@ fn reborn_dockerfile_uses_feature_matched_cache_and_loopback_default() {
 
 #[test]
 fn reborn_runtime_image_includes_sql_debug_clients() {
-    let dockerfile = read_repo_file("Dockerfile.reborn");
+    let dockerfile = read_repo_file("Dockerfile");
 
     assert!(
         dockerfile.contains("postgresql-client"),
@@ -263,10 +268,11 @@ fn reborn_hosted_single_tenant_seed_config_keeps_disabled_slack_legacy_free() {
 
 #[test]
 fn reborn_dockerfile_build_is_covered_by_ci() {
-    // The Reborn Dockerfile build can live in any CI workflow — it moved from
-    // test.yml to platform-and-compat.yml when the cross-cutting jobs were
-    // extracted. Assert it is built by *some* workflow rather than pinning a
-    // single file, so future reorganizations don't silently drop coverage.
+    // The Reborn Dockerfile is now the canonical root `Dockerfile` (it absorbed
+    // the former `Dockerfile.reborn` under Tier B), so CI builds it as the
+    // default context with the `runtime` target rather than via `-f`. Assert it
+    // is built by *some* workflow rather than pinning a single file, so future
+    // reorganizations don't silently drop coverage.
     let workflows_dir = repo_file(".github/workflows");
     let covered = std::fs::read_dir(&workflows_dir)
         .expect("workflows dir should be readable")
@@ -279,13 +285,13 @@ fn reborn_dockerfile_build_is_covered_by_ci() {
         })
         .any(|entry| {
             std::fs::read_to_string(entry.path())
-                .map(|content| content.contains("docker build -f Dockerfile.reborn"))
+                .map(|content| content.contains("docker build --target runtime"))
                 .unwrap_or(false)
         });
 
     assert!(
         covered,
-        "some CI workflow must build the Reborn CLI Dockerfile (`docker build -f Dockerfile.reborn`)"
+        "some CI workflow must build the canonical Reborn Dockerfile (`docker build --target runtime … .`)"
     );
 }
 
@@ -332,6 +338,67 @@ fn reborn_entrypoint_copies_config_and_builds_default_serve_args() {
     assert_eq!(
         std::fs::read_to_string(&fake.args_file).expect("captured args"),
         "serve\n--host\n0.0.0.0\n--port\n4321\n--confirm-host-access\n"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn reborn_entrypoint_binds_all_interfaces_on_railway_without_explicit_host() {
+    // Regression: with no explicit IRONCLAW_REBORN_SERVE_HOST, a Railway
+    // deployment (detected via RAILWAY_* markers) must bind 0.0.0.0 so the
+    // platform health check / ingress can reach the container. A loopback bind
+    // fails the deploy — the class the checked-in Railway config previously hit.
+    let fake = setup_fake_entrypoint();
+    let output = Command::new("sh")
+        .arg(repo_file("docker/reborn/entrypoint.sh"))
+        .env_clear()
+        .env("PATH", fake.path_env())
+        .env("IRONCLAW_REBORN_HOME", &fake.home_dir)
+        .env("IRONCLAW_REBORN_DEFAULT_CONFIG", &fake.default_config)
+        .env("RAILWAY_ENVIRONMENT", "production")
+        .env("IRONCLAW_REBORN_ALLOW_EPHEMERAL_RAILWAY", "true")
+        .env("PORT", "8080")
+        .env("IRONCLAW_REBORN_TEST_ARGS_FILE", &fake.args_file)
+        .output()
+        .expect("entrypoint should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&fake.args_file).expect("captured args"),
+        "serve\n--host\n0.0.0.0\n--port\n8080\n"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn reborn_entrypoint_keeps_loopback_default_off_railway() {
+    // Off-Railway (no RAILWAY_* markers, no explicit host) the conservative
+    // loopback default is preserved so a local `docker run` does not bind
+    // publicly by surprise.
+    let fake = setup_fake_entrypoint();
+    let output = Command::new("sh")
+        .arg(repo_file("docker/reborn/entrypoint.sh"))
+        .env_clear()
+        .env("PATH", fake.path_env())
+        .env("IRONCLAW_REBORN_HOME", &fake.home_dir)
+        .env("IRONCLAW_REBORN_DEFAULT_CONFIG", &fake.default_config)
+        .env("PORT", "8080")
+        .env("IRONCLAW_REBORN_TEST_ARGS_FILE", &fake.args_file)
+        .output()
+        .expect("entrypoint should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&fake.args_file).expect("captured args"),
+        "serve\n--host\n127.0.0.1\n--port\n8080\n"
     );
 }
 

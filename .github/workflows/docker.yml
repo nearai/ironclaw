@@ -56,10 +56,14 @@ jobs:
           echo "sha=${SOURCE_SHA}" >> "$GITHUB_OUTPUT"
           echo "Source commit: ${SOURCE_SHA}"
 
-      - name: Extract version from Cargo.toml
+      - name: Extract version from the ironclaw CLI Cargo.toml
         id: version
         run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          # The shipped image is the Reborn CLI (`ironclaw`), so the release
+          # version is that package's version — NOT the root workspace manifest,
+          # which is the test-only `ironclaw_reborn_integration_tests` package
+          # pinned at 0.1.0 since Tier B deleted the v1 monolith.
+          VERSION=$(grep '^version' crates/ironclaw_reborn_cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::Extracted version '${VERSION}' must match MAJOR.MINOR.PATCH[-prerelease] (Docker tags forbid '+')"
             exit 1

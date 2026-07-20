@@ -220,7 +220,8 @@ postgres = []
 # dedicated CI job instead of the default Rust test matrix.
 integration = []
 # Replay-gate snapshot tests promoted out of `--ignored` into a dedicated CI
-# job. Enabled by `.github/workflows/replay-gate.yml`.
+# job. Enabled by `.github/workflows/replay-gate.yml`. Implies `libsql` so the
+# test rig can spin up its embedded database.
 replay = ["libsql"]
 
 [[test]]

@@ -122,8 +122,8 @@ fn write_sparse_reborn_config(reborn_home: &Path) {
 
 #[test]
 fn dockerfile_reborn_builds_with_production_features() {
-    let dockerfile = std::fs::read_to_string(workspace_root().join("Dockerfile"))
-        .expect("Dockerfile");
+    let dockerfile =
+        std::fs::read_to_string(workspace_root().join("Dockerfile")).expect("Dockerfile");
 
     assert!(
         dockerfile.matches("libsql,postgres").count() >= 2,
@@ -379,8 +379,8 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
 
 #[test]
 fn dockerfile_reborn_ships_extension_ownership_migration() {
-    let dockerfile = std::fs::read_to_string(workspace_root().join("Dockerfile"))
-        .expect("Dockerfile");
+    let dockerfile =
+        std::fs::read_to_string(workspace_root().join("Dockerfile")).expect("Dockerfile");
     let deps_stage = dockerfile
         .split_once("FROM chef AS deps")
         .and_then(|(_, stages)| stages.split_once("FROM deps AS builder"))

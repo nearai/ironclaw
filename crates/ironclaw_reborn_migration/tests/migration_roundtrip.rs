@@ -59,7 +59,10 @@ async fn open_v1_fixture_db(path: &Path) -> libsql::Database {
 // `src/legacy_snapshot/types.rs`).
 
 fn cron_trigger(expr: &str) -> (&'static str, serde_json::Value) {
-    ("cron", serde_json::json!({ "schedule": expr, "timezone": "UTC" }))
+    (
+        "cron",
+        serde_json::json!({ "schedule": expr, "timezone": "UTC" }),
+    )
 }
 
 fn event_trigger(channel: &str, pattern: &str) -> (&'static str, serde_json::Value) {
@@ -114,7 +117,6 @@ fn full_job_action() -> (&'static str, serde_json::Value) {
 /// Seed one `routines` row. Field values (guardrails/notify/counters) match
 /// what the original fixture populated via the real v1 `Routine` struct, so
 /// the field-loss assertions downstream have the same things to find.
-#[allow(clippy::too_many_arguments)]
 async fn insert_routine(
     conn: &libsql::Connection,
     name: &str,
@@ -190,7 +192,12 @@ async fn insert_conversation_message(
     .expect("seed conversation message");
 }
 
-async fn insert_memory_document(conn: &libsql::Connection, user_id: &str, path: &str, content: &str) {
+async fn insert_memory_document(
+    conn: &libsql::Connection,
+    user_id: &str,
+    path: &str,
+    content: &str,
+) {
     conn.execute(
         "INSERT INTO memory_documents (id, user_id, agent_id, path, content, metadata) \
          VALUES (?1, ?2, NULL, ?3, ?4, '{}')",
@@ -200,7 +207,12 @@ async fn insert_memory_document(conn: &libsql::Connection, user_id: &str, path: 
     .expect("seed memory document");
 }
 
-async fn insert_setting(conn: &libsql::Connection, user_id: &str, key: &str, value: &serde_json::Value) {
+async fn insert_setting(
+    conn: &libsql::Connection,
+    user_id: &str,
+    key: &str,
+    value: &serde_json::Value,
+) {
     conn.execute(
         "INSERT INTO settings (user_id, key, value) VALUES (?1, ?2, ?3)",
         libsql::params![user_id, key, value.to_string()],
@@ -413,7 +425,15 @@ async fn seed_v1_fixture(dir: &std::path::Path) -> PathBuf {
         now,
     )
     .await;
-    insert_routine(&conn, "manual-r", manual_trigger(), lightweight_action(), true, now).await;
+    insert_routine(
+        &conn,
+        "manual-r",
+        manual_trigger(),
+        lightweight_action(),
+        true,
+        now,
+    )
+    .await;
 
     // ── engine-v2 state: mission + thread blobs in memory_documents ──
     let mission_thread_id = Uuid::new_v4();
