@@ -2285,7 +2285,7 @@ fn dead_endpoint_nearai_config(session_path: std::path::PathBuf) -> ironclaw_llm
 }
 
 /// Regression guard for Firat's review: the provider factory (caller
-/// instrumentation) must survive a live config reload. `build_llm_gateway`
+/// instrumentation) must survive a live config reload. `wrap_swappable_gateway`
 /// wraps the factory over the `SwappableLlmProvider`, so reloading — which
 /// swaps the swappable's *inner* — keeps the wrapper in the call path. If the
 /// factory were applied to the bare provider instead, the first reload would
@@ -2346,6 +2346,64 @@ async fn provider_factory_survives_live_reload() {
         calls.load(std::sync::atomic::Ordering::SeqCst),
         2,
         "the instrumentation wrapper must still observe model calls after a live reload"
+    );
+}
+
+/// Regression guard for the benchmark instrumentation seam: a
+/// `ResolvedRebornLlm` carrying a `provider_factory` must have that factory
+/// invoked during `build_reborn_runtime`, i.e. the caller's instrumentation
+/// wrapper is threaded into the cold-boot gateway.
+///
+/// PR #6174 collapsed the boot path to `build_placeholder_llm_gateway()`, which
+/// hardcoded `None` for the factory, so `ResolvedRebornLlm::with_provider_factory`
+/// silently never ran on the production path — the benchmark harness saw every
+/// task fail with zero model calls (no instrumented provider). The
+/// `provider_factory_survives_live_reload` test above exercises the
+/// `wrap_swappable_gateway` helper directly with `Some(..)`, so it cannot catch
+/// a boot path that never calls the helper with a factory at all. This drives
+/// the real caller (`build_reborn_runtime`) instead.
+#[cfg(feature = "root-llm-provider")]
+#[tokio::test]
+async fn provider_factory_runs_during_production_boot() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let session_dir = tempfile::tempdir().expect("session tempdir");
+    let local_dev_root = root.path().join("local-dev");
+
+    let factory_ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let factory_ran_for_closure = Arc::clone(&factory_ran);
+    // Identity decorator that only records that it was constructed: the factory
+    // runs once, at gateway construction, to wrap the swappable provider.
+    let factory: crate::runtime_input::RebornProviderFactory = Arc::new(move |inner| {
+        factory_ran_for_closure.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        inner
+    });
+
+    let config = dead_endpoint_nearai_config(session_dir.path().join("session.json"));
+    let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config)
+        .with_provider_factory(factory);
+
+    // No `boot` config is supplied, so the boot-time reload is skipped and the
+    // dead endpoint is never contacted; the factory still wraps the swappable
+    // at cold-boot construction.
+    let input = RebornRuntimeInput::from_services(
+        RebornBuildInput::local_dev("provider-factory-boot-owner", local_dev_root)
+            .with_runtime_policy(local_dev_runtime_policy()),
+    )
+    .with_resolved_llm(llm)
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: "provider-factory-boot-tenant".to_string(),
+        agent_id: "provider-factory-boot-agent".to_string(),
+        source_binding_id: "provider-factory-boot-source".to_string(),
+        reply_target_binding_id: "provider-factory-boot-reply".to_string(),
+    });
+
+    let _runtime = build_reborn_runtime(input).await.expect("runtime builds");
+
+    assert_eq!(
+        factory_ran.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the caller's provider_factory must be invoked once during boot so \
+         instrumentation wraps the swappable gateway (regression: #6174 dropped it)"
     );
 }
 

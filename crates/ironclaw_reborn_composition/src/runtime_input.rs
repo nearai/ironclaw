@@ -132,12 +132,15 @@ pub struct ResolvedRebornLlm {
     provider_id: String,
     model: String,
     pub(crate) config: ironclaw_llm::LlmConfig,
-    /// Optional decorator applied to the provider the gateway builds from
-    /// `config`. `config` is always the construction source (so it stays the
-    /// single source of truth for `provider_id`/`model` and budget cost-table
-    /// derivation); the factory only *wraps* the built provider — e.g. a
-    /// benchmark harness layering token/reasoning instrumentation over it.
-    /// When `None` the gateway uses the config-built provider as-is.
+    /// Optional decorator applied over the gateway's *swappable* provider at
+    /// cold boot — e.g. a benchmark harness layering token/reasoning
+    /// instrumentation. `config` stays the construction source (single source of
+    /// truth for `provider_id`/`model` and budget cost-table derivation); the
+    /// factory only *wraps* the swappable, so it survives the boot-time reload
+    /// that swaps a real provider into the placeholder. When `None` the gateway
+    /// drives the swappable directly. Threaded through
+    /// `build_production_model_gateway` → `build_placeholder_llm_gateway` →
+    /// `wrap_swappable_gateway`.
     pub(crate) provider_factory: Option<RebornProviderFactory>,
 }
 
@@ -190,12 +193,14 @@ impl ResolvedRebornLlm {
     /// provider.
     ///
     /// This is the instrumentation seam (feature-gated on `root-llm-provider`).
-    /// The composition still constructs the provider from `config` and hands it
-    /// to the factory, so `config` remains the single source of truth and the
-    /// raw `ironclaw_llm::LlmProvider` substrate handle is never accepted
-    /// wholesale through the facade — the caller only supplies a decorator over
-    /// a provider the composition built. `build_llm_gateway` applies the factory
-    /// and never re-exposes the provider.
+    /// The composition still constructs the provider from `config` and hands the
+    /// factory the *swappable* wrapper over it, so `config` remains the single
+    /// source of truth and the raw `ironclaw_llm::LlmProvider` substrate handle
+    /// is never accepted wholesale through the facade — the caller only supplies
+    /// a decorator over a provider the composition built.
+    /// `build_placeholder_llm_gateway` applies the factory at cold boot and never
+    /// re-exposes the provider; because it wraps the swappable, the decorator
+    /// stays in the call path across the boot-time (and later) reloads.
     pub fn with_provider_factory(mut self, factory: RebornProviderFactory) -> Self {
         self.provider_factory = Some(factory);
         self

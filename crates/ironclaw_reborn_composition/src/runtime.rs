@@ -3372,16 +3372,27 @@ pub async fn build_reborn_runtime(
         Some(resolved) => build_skill_learning_provider(&resolved.config).await,
         None => None,
     };
+    // Caller instrumentation seam (e.g. a benchmark harness layering
+    // token/reasoning capture): carry the resolved LLM's provider factory into
+    // the cold-boot gateway so the wrapper wraps the swappable and stays in the
+    // call path across the boot-time reload. `llm` is held by shared reference
+    // here (already read above for the NEAR AI MCP bootstrap), so clone the
+    // cheap Arc handle rather than move the factory out of the borrow.
+    #[cfg(feature = "root-llm-provider")]
+    let boot_provider_factory = llm
+        .as_ref()
+        .and_then(|resolved| resolved.provider_factory.clone());
     #[cfg(all(feature = "root-llm-provider", any(test, feature = "test-support")))]
     let (model_gateway, llm_cost_table, llm_reload) = match model_gateway_override {
         Some(override_gateway) => (override_gateway, None, None),
-        None => build_production_model_gateway().await?,
+        None => build_production_model_gateway(boot_provider_factory).await?,
     };
     #[cfg(all(
         feature = "root-llm-provider",
         not(any(test, feature = "test-support"))
     ))]
-    let (model_gateway, llm_cost_table, llm_reload) = build_production_model_gateway().await?;
+    let (model_gateway, llm_cost_table, llm_reload) =
+        build_production_model_gateway(boot_provider_factory).await?;
     #[cfg(all(
         not(feature = "root-llm-provider"),
         any(test, feature = "test-support")
@@ -4568,8 +4579,18 @@ impl CapabilitySurfaceProfileResolver for AllowAllCapabilitySurfaceResolver {
 /// through the same live-reload path the settings UI uses
 /// (`RebornLlmReloadAdapter::reload`). No cost table is derived here: there's
 /// no real model to cost until that reload swaps in a real provider.
+///
+/// `provider_factory` is the caller's optional instrumentation decorator
+/// (e.g. a benchmark harness layering token/reasoning capture) carried on the
+/// resolved LLM. It wraps the *swappable* provider, so the wrapper stays in the
+/// call path across the boot-time reload that swaps a real provider into the
+/// placeholder (see [`wrap_swappable_gateway`]). Without threading it here the
+/// `ResolvedRebornLlm::with_provider_factory` seam would be silently dropped on
+/// the cold-boot path.
 #[cfg(feature = "root-llm-provider")]
-async fn build_production_model_gateway() -> Result<
+async fn build_production_model_gateway(
+    provider_factory: Option<crate::runtime_input::RebornProviderFactory>,
+) -> Result<
     (
         Arc<dyn ironclaw_loop_host::HostManagedModelGateway>,
         Option<ironclaw_loop_host::StaticModelCostTable>,
@@ -4579,7 +4600,7 @@ async fn build_production_model_gateway() -> Result<
 > {
     let LlmGatewayBundle {
         gateway, reload, ..
-    } = build_placeholder_llm_gateway().await?;
+    } = build_placeholder_llm_gateway(provider_factory).await?;
     Ok((gateway, None, Some(reload)))
 }
 
@@ -4657,12 +4678,19 @@ pub(crate) struct RebornLlmReloadParts {
 /// errors until swapped) so the model-gateway + reload seam exist from the
 /// start; the first configuration applied through the settings UI swaps the
 /// placeholder for a real provider chain with no restart.
+///
+/// `provider_factory` is the caller's optional instrumentation decorator. It is
+/// applied over the *swappable* wrapper (not the placeholder), so it survives
+/// the boot-time reload that swaps in the real provider — the reload-stable
+/// contract documented on [`wrap_swappable_gateway`].
 #[cfg(feature = "root-llm-provider")]
-async fn build_placeholder_llm_gateway() -> Result<LlmGatewayBundle, RebornRuntimeError> {
+async fn build_placeholder_llm_gateway(
+    provider_factory: Option<crate::runtime_input::RebornProviderFactory>,
+) -> Result<LlmGatewayBundle, RebornRuntimeError> {
     let session =
         ironclaw_llm::create_session_manager(ironclaw_llm::SessionConfig::default()).await;
     let raw: Arc<dyn ironclaw_llm::LlmProvider> = Arc::new(PlaceholderLlmProvider);
-    wrap_swappable_gateway(raw, session, None)
+    wrap_swappable_gateway(raw, session, provider_factory)
 }
 
 /// Wrap a raw provider in a [`SwappableLlmProvider`] + reload handle and build
