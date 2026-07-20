@@ -44,6 +44,48 @@ export function scrollToBottom(el) {
   el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
 }
 
+export function capturePrependScrollAnchor(el, anchorElement = null) {
+  if (!el) return null;
+  const anchorTop = anchorElement
+    ? anchorElement.getBoundingClientRect().top - el.getBoundingClientRect().top
+    : null;
+  return {
+    scrollHeight: el.scrollHeight,
+    scrollTop: el.scrollTop,
+    anchorElement,
+    anchorTop,
+  };
+}
+
+export function restorePrependScrollAnchor(el, anchor) {
+  if (!el || !anchor) return;
+  if (anchor.anchorElement?.isConnected && Number.isFinite(anchor.anchorTop)) {
+    const currentTop =
+      anchor.anchorElement.getBoundingClientRect().top -
+      el.getBoundingClientRect().top;
+    el.scrollTop = Math.max(0, el.scrollTop + currentTop - anchor.anchorTop);
+    return;
+  }
+  const prependedHeight = el.scrollHeight - anchor.scrollHeight;
+  el.scrollTop = Math.max(0, anchor.scrollTop + prependedHeight);
+}
+
+function firstVisibleContentElement(
+  viewport: HTMLElement | null,
+  content: HTMLElement | null,
+) {
+  if (!viewport || !content) return null;
+  const viewportTop = viewport.getBoundingClientRect().top;
+  return (
+    Array.from(content.children).find((child) => {
+      if (child.querySelector('[data-testid="message-list-load-older"]')) {
+        return false;
+      }
+      return child.getBoundingClientRect().bottom > viewportTop;
+    }) || null
+  );
+}
+
 export function messageKey(message) {
   if (!message?.id) return null;
   return `${message.role || ""}:${message.id}`;
@@ -79,6 +121,7 @@ export function MessageList({
   const scrollRafRef = React.useRef(null);
   const previousScrollTopRef = React.useRef(0);
   const userScrollIntentRef = React.useRef(false);
+  const historyPrependAnchorRef = React.useRef(null);
   const [showJumpToLatest, setShowJumpToLatest] = React.useState(false);
 
   const cancelFollow = React.useCallback(() => {
@@ -116,6 +159,62 @@ export function MessageList({
     window.cancelAnimationFrame(scrollRafRef.current);
     scrollRafRef.current = null;
   }, []);
+
+  const loadOlder = React.useCallback(() => {
+    const el = containerRef.current;
+    if (!el || !onLoadMore || isLoading || historyPrependAnchorRef.current) {
+      return;
+    }
+    const anchor = capturePrependScrollAnchor(
+      el,
+      firstVisibleContentElement(el, contentRef.current),
+    );
+    if (!anchor) return;
+    historyPrependAnchorRef.current = {
+      ...anchor,
+      firstMessageKey: messageKey(messages[0]),
+      threadId,
+    };
+    shouldScrollRef.current = false;
+    userScrollIntentRef.current = true;
+    cancelFollow();
+    try {
+      onLoadMore();
+    } catch (error) {
+      historyPrependAnchorRef.current = null;
+      throw error;
+    }
+  }, [cancelFollow, isLoading, messages, onLoadMore, threadId]);
+
+  React.useLayoutEffect(() => {
+    const anchor = historyPrependAnchorRef.current;
+    if (!anchor) return;
+    if (anchor.threadId !== threadId) {
+      historyPrependAnchorRef.current = null;
+      return;
+    }
+
+    const firstKey = messageKey(messages[0]);
+    const previousFirstStillPresent = messages.some(
+      (message) => messageKey(message) === anchor.firstMessageKey,
+    );
+    if (
+      firstKey &&
+      firstKey !== anchor.firstMessageKey &&
+      previousFirstStillPresent
+    ) {
+      const el = containerRef.current;
+      restorePrependScrollAnchor(el, anchor);
+      historyPrependAnchorRef.current = null;
+      if (el) {
+        previousScrollTopRef.current = el.scrollTop;
+        setShowJumpToLatest(shouldShowJumpToLatest(el));
+      }
+      return;
+    }
+
+    if (!isLoading) historyPrependAnchorRef.current = null;
+  }, [isLoading, messages, threadId]);
 
   // Keep the latest content in view. Re-runs on new messages and when the
   // run state flips — the typing indicator / streamed reply are rendered as
@@ -173,9 +272,9 @@ export function MessageList({
       onLoadMore &&
       !isLoading
     ) {
-      onLoadMore();
+      loadOlder();
     }
-  }, [hasMore, onLoadMore, isLoading, followLatest]);
+  }, [hasMore, onLoadMore, isLoading, followLatest, loadOlder]);
 
   const markUserScrollIntent = React.useCallback(() => {
     userScrollIntentRef.current = true;
@@ -257,7 +356,7 @@ export function MessageList({
         (
           <div className="text-center">
             <button
-              onClick={onLoadMore}
+              onClick={loadOlder}
               disabled={isLoading}
               data-testid="message-list-load-older"
               className="v2-button rounded-md border border-white/10 px-3 py-1.5 text-xs text-iron-300 hover:border-signal/35 hover:text-white disabled:opacity-50"
