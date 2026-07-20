@@ -151,7 +151,7 @@ fn reborn_dockerfile_uses_feature_matched_cache_and_loopback_default() {
 
     assert!(
         dockerfile.contains(
-            "cargo chef cook \\\n    --profile dist \\\n    --package ironclaw \\\n    --features libsql,postgres,inmemory-turn-state"
+            "cargo chef cook \\\n    --profile dist \\\n    --package ironclaw \\\n    --features libsql,postgres"
         ),
         "cargo chef cook must target the Reborn CLI package with the same features as the final build"
     );

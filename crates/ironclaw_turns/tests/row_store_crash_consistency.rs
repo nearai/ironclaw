@@ -2492,40 +2492,54 @@ fn scope_b_regression() -> TurnScope {
     )
 }
 
-/// #6263 Step 3 — critical ops are durability BARRIERS. Under `WriteBehind` a
-/// batch of non-critical transitions (submit/claim = Queued/Running) returns
-/// `Ok` before flushing; a following critical transition (terminal complete)
-/// awaits its ack, and because the journal is a strictly sequential
-/// single-writer, awaiting the critical op's ack implies EVERY prior enqueued
-/// delta is already durable. A crash immediately after the critical op's `Ok`
-/// must therefore recover the whole preceding async tail — with no explicit
-/// barrier mechanism.
+/// #6263 Step 3 — critical ops are durability BARRIERS. Under write-behind a
+/// batch of non-critical transitions (claim = Queued -> Running; new-run
+/// creation is critical since #6263 Step 5b, so `submit_turn` is not eligible
+/// for this tail) returns `Ok` before flushing; a following critical
+/// transition (terminal complete) awaits its ack, and because the journal is a
+/// strictly sequential single-writer, awaiting the critical op's ack implies
+/// EVERY prior enqueued delta is already durable. A crash immediately after
+/// the critical op's `Ok` must therefore recover the whole preceding async
+/// tail — with no explicit barrier mechanism.
 #[tokio::test]
 async fn write_behind_critical_op_is_a_barrier_flushing_the_async_tail() {
     let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
     let scoped = fault_scoped(Arc::clone(&backend));
     let scope_list = scopes();
 
-    // N non-critical submits (one per scope), then claim+complete run 0. The
-    // complete is terminal = critical; its barrier must flush all N submits and
-    // the intervening claim. Crash immediately after the complete's Ok.
+    // Setup: submit N runs durably (submit is critical, so this is fully synced
+    // before the barrier phase begins).
     let run_ids: Vec<TurnRunId> = {
         let store = open_row_store(Arc::clone(&scoped));
         let mut run_ids = Vec::new();
         for (i, scope) in scope_list.iter().enumerate() {
             run_ids.push(submit_one(&store, scope, &format!("idem-barrier-{i}")).await);
         }
-        let runner_id = TurnRunnerId::new();
-        let lease_token = TurnLeaseToken::new();
-        store
-            .claim_next_run(ClaimRunRequest {
-                runner_id,
-                lease_token,
-                scope_filter: Some(scope_list[0].clone()),
-            })
-            .await
-            .unwrap()
-            .expect("claim run 0 (non-critical)");
+        run_ids
+    };
+
+    // N non-critical claims (Queued -> Running, one per run), then complete
+    // run 0. The complete is terminal = critical; its barrier must flush all N
+    // claims. Crash immediately after the complete's Ok.
+    {
+        let store = open_row_store(Arc::clone(&scoped));
+        let mut leases = Vec::new();
+        for (i, scope) in scope_list.iter().enumerate() {
+            let runner_id = TurnRunnerId::new();
+            let lease_token = TurnLeaseToken::new();
+            store
+                .claim_next_run(ClaimRunRequest {
+                    runner_id,
+                    lease_token,
+                    scope_filter: Some(scope.clone()),
+                })
+                .await
+                .unwrap()
+                .filter(|claimed| claimed.state.run_id == run_ids[i])
+                .expect("claim (non-critical Queued -> Running transition)");
+            leases.push((runner_id, lease_token));
+        }
+        let (runner_id, lease_token) = leases[0];
         store
             .complete_run(CompleteRunRequest {
                 run_id: run_ids[0],
@@ -2536,11 +2550,10 @@ async fn write_behind_critical_op_is_a_barrier_flushing_the_async_tail() {
             .expect("complete run 0 (critical barrier)");
         // Crash synchronously — no await between the critical Ok and the drop.
         drop(store);
-        run_ids
-    };
+    }
 
     let recovered = open_row_store(Arc::clone(&scoped));
-    // Run 0 completed (critical) AND every prior async submit is durable: the
+    // Run 0 completed (critical) AND every prior async claim is durable: the
     // barrier flushed the whole tail.
     for (i, run_id) in run_ids.iter().enumerate() {
         let state = recovered
@@ -2551,14 +2564,14 @@ async fn write_behind_critical_op_is_a_barrier_flushing_the_async_tail() {
             .await
             .unwrap_or_else(|error| {
                 panic!(
-                    "the critical barrier must have flushed async submit #{i} ({run_id}) durably, \
+                    "the critical barrier must have flushed async claim #{i} ({run_id}) durably, \
                      got {error:?}"
                 )
             });
         let expected = if i == 0 {
             TurnStatus::Completed
         } else {
-            TurnStatus::Queued
+            TurnStatus::Running
         };
         assert_eq!(state.status, expected, "barrier-flushed run #{i}");
     }
@@ -2566,32 +2579,52 @@ async fn write_behind_critical_op_is_a_barrier_flushing_the_async_tail() {
 }
 
 /// #6263 Step 4 — `drain()` is the graceful-shutdown analog of the critical
-/// barrier. Under `WriteBehind` a batch of non-critical transitions returns `Ok`
-/// before flushing; calling [`FilesystemTurnStateRowStore::drain`] awaits the
-/// whole enqueued-but-un-acked async tail, so a crash (drop + reopen)
-/// immediately after the drain recovers every non-critical submit — with NO
-/// terminal op forcing a barrier. This is exactly what the runtime's graceful
-/// `shutdown()` relies on to recover in-flight (non-critical) runs across a
-/// planned restart under the flipped `inmemory-turn-state` profile.
+/// barrier. Under write-behind a batch of non-critical transitions (claim =
+/// Queued -> Running; new-run creation is critical since #6263 Step 5b, so
+/// `submit_turn` is not eligible for this tail) returns `Ok` before flushing;
+/// calling [`FilesystemTurnStateRowStore::drain`] awaits the whole
+/// enqueued-but-un-acked async tail, so a crash (drop + reopen) immediately
+/// after the drain recovers every non-critical claim — with NO terminal op
+/// forcing a barrier. This is exactly what the runtime's graceful `shutdown()`
+/// relies on to recover in-flight (non-critical) runs across a planned
+/// restart.
 #[tokio::test]
 async fn write_behind_drain_flushes_the_async_tail_for_graceful_restart() {
     let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
     let scoped = fault_scoped(Arc::clone(&backend));
     let scope_list = scopes();
 
+    // Setup: submit N runs durably (submit is critical, so this is fully synced
+    // before the drain phase begins).
     let run_ids: Vec<TurnRunId> = {
         let store = open_row_store(Arc::clone(&scoped));
         let mut run_ids = Vec::new();
         for (i, scope) in scope_list.iter().enumerate() {
-            // Non-critical (Queued): returns Ok before its durable ack.
             run_ids.push(submit_one(&store, scope, &format!("idem-drain-{i}")).await);
         }
-        // Graceful shutdown drains the WriteBehind tail; NO terminal op forces it.
+        run_ids
+    };
+
+    {
+        let store = open_row_store(Arc::clone(&scoped));
+        for (i, scope) in scope_list.iter().enumerate() {
+            // Non-critical (Queued -> Running): returns Ok before its durable ack.
+            store
+                .claim_next_run(ClaimRunRequest {
+                    runner_id: TurnRunnerId::new(),
+                    lease_token: TurnLeaseToken::new(),
+                    scope_filter: Some(scope.clone()),
+                })
+                .await
+                .unwrap()
+                .filter(|claimed| claimed.state.run_id == run_ids[i])
+                .expect("claim (non-critical Queued -> Running transition)");
+        }
+        // Graceful shutdown drains the write-behind tail; NO terminal op forces it.
         store.drain().await.expect("drain flushes the async tail");
         // Crash synchronously — no await between drain's Ok and the drop.
         drop(store);
-        run_ids
-    };
+    }
 
     let recovered = open_row_store(Arc::clone(&scoped));
     for (i, run_id) in run_ids.iter().enumerate() {
@@ -2602,11 +2635,9 @@ async fn write_behind_drain_flushes_the_async_tail_for_graceful_restart() {
             })
             .await
             .unwrap_or_else(|error| {
-                panic!(
-                    "drain must have flushed async submit #{i} ({run_id}) durably, got {error:?}"
-                )
+                panic!("drain must have flushed async claim #{i} ({run_id}) durably, got {error:?}")
             });
-        assert_eq!(state.status, TurnStatus::Queued, "drain-flushed run #{i}");
+        assert_eq!(state.status, TurnStatus::Running, "drain-flushed run #{i}");
     }
     check_internal_invariants(&recovered.persistence_snapshot().await.unwrap()).unwrap();
 }
@@ -2997,7 +3028,8 @@ async fn write_behind_cancel_of_running_run_survives_crash() {
             .await
             .unwrap()
             .expect("claim the queued run to Running");
-        // Submit (Queued) and claim (Running) are non-critical → async under
+        // Submit is critical (new-run creation, #6263 Step 5b) and already
+        // durable by this point; claim (Running) is non-critical → async under
         // write-behind. `request_cancel` → CancelRequested is now critical: it
         // awaits its durable ack, a barrier that flushes the whole prior tail.
         // Drop the store synchronously right after it returns (a crash) with no

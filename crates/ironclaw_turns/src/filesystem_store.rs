@@ -670,10 +670,10 @@ where
         }
     }
 
-    /// Flush any pending `WriteBehind` durable tail so a planned shutdown leaves
+    /// Flush any pending write-behind durable tail so a planned shutdown leaves
     /// nothing un-durable. Forwards to the row store's
     /// [`drain`](FilesystemTurnStateRowStore::drain); the blob layout buffers
-    /// nothing (`WriteThrough`-only), so draining it is a no-op.
+    /// nothing, so draining it is a no-op.
     pub async fn drain(&self) -> Result<(), TurnError> {
         match self {
             Self::Blob(_) => Ok(()),
