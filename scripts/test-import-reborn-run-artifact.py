@@ -137,6 +137,66 @@ class RunArtifactImporterTest(unittest.TestCase):
         self.assertEqual([turn["user_input"] for turn in candidate["turns"]], ["first", "second"])
         self.assertEqual(candidate["_review"]["source_schema"], MODULE.THREAD_SCHEMA)
         self.assertEqual(candidate["_review"]["source_thread_id"], "thread-1")
+    def test_thread_artifact_reports_accepted_message_without_run_id(self) -> None:
+        artifact = self.thread_artifact(
+            {"sequence": 1, "kind": "user", "status": "accepted", "content": "failed"},
+            {
+                "sequence": 2,
+                "run_id": "run-1",
+                "kind": "user",
+                "status": "submitted",
+                "content": "try again",
+            },
+            {
+                "sequence": 3,
+                "run_id": "run-1",
+                "kind": "assistant",
+                "status": "finalized",
+                "content": "done",
+            },
+        )
+
+        candidate = MODULE.trace_candidate(artifact, None)
+
+        self.assertEqual([turn["user_input"] for turn in candidate["turns"]], ["try again"])
+        self.assertEqual(
+            candidate["_review"]["skipped_unscoped_messages"],
+            [{"sequence": 1, "kind": "user", "status": "accepted"}],
+        )
+        self.assertIn(
+            "skipped_unscoped_messages",
+            candidate["_review"]["required_actions"][0],
+        )
+        self.assertNotIn("failed", str(candidate))
+
+    def test_thread_artifact_rejects_other_unscoped_messages(self) -> None:
+        artifact = self.thread_artifact(
+            {"sequence": 1, "kind": "system", "status": "finalized", "content": "prompt"},
+            {"sequence": 2, "run_id": "run-1", "kind": "user", "content": "retry"},
+            {"sequence": 3, "run_id": "run-1", "kind": "assistant", "content": "done"},
+        )
+
+        with self.assertRaisesRegex(ValueError, "no replayable user message"):
+            MODULE.trace_candidate(artifact, None)
+
+    def test_thread_artifact_rejects_when_every_message_is_unscoped(self) -> None:
+        artifact = self.thread_artifact(
+            {"sequence": 1, "kind": "user", "status": "accepted", "content": "failed"}
+        )
+
+        with self.assertRaisesRegex(ValueError, "no complete run-scoped replayable turns"):
+            MODULE.trace_candidate(artifact, None)
+
+    @staticmethod
+    def thread_artifact(*messages: dict[str, object]) -> dict[str, object]:
+        return {
+            "schema": MODULE.THREAD_SCHEMA,
+            "thread_id": "thread-1",
+            "logs": {"complete": False},
+            "redaction": {"pipeline": "deterministic-trace-redactor-v1"},
+            "messages": list(messages),
+        }
+
     @staticmethod
     def tool_message(
         sequence: int,

@@ -30,3 +30,8 @@ Before renaming or committing the candidate:
 The importer intentionally produces a candidate, not an automatically blessed
 golden fixture. Human QA evidence tells us what happened; a reviewer still owns
 the assertion of what must continue happening.
+
+For full-thread downloads, an accepted user message may lack a run id when turn
+submission failed before a run was created. The importer excludes only those
+incomplete submissions from replay turns and lists their sequence, kind, and
+status under `_review.skipped_unscoped_messages` for explicit review.

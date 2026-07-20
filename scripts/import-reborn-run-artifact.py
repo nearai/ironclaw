@@ -140,44 +140,72 @@ def build_turn(messages: list[dict[str, Any]]) -> tuple[dict[str, Any], list[str
     )
 
 
-def artifact_turns(artifact: dict[str, Any]) -> list[list[dict[str, Any]]]:
+def artifact_turns(
+    artifact: dict[str, Any],
+) -> tuple[list[list[dict[str, Any]]], list[dict[str, Any]]]:
     messages = sorted(artifact["messages"], key=lambda item: item.get("sequence", 0))
     if artifact.get("schema") == SCHEMA:
-        return [messages]
+        return [messages], []
 
     grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
+    skipped_unscoped: list[dict[str, Any]] = []
     for message in messages:
         run_id = str(message.get("run_id") or "").strip()
+        if (
+            not run_id
+            and message.get("kind") == "user"
+            and message.get("status") == "accepted"
+        ):
+            skipped_unscoped.append(
+                {
+                    "sequence": message.get("sequence"),
+                    "kind": message.get("kind"),
+                    "status": message.get("status"),
+                }
+            )
+            continue
         # Persisted submitted messages carry their run id. Keep an explicit
         # fallback group so malformed/manual artifacts fail review rather than
         # silently merging unscoped records into a neighboring run.
         key = run_id or f"unscoped:{message.get('sequence', len(grouped))}"
         grouped.setdefault(key, []).append(message)
-    return list(grouped.values())
+    return list(grouped.values()), skipped_unscoped
 
 
 def trace_candidate(artifact: dict[str, Any], model_override: str | None) -> dict[str, Any]:
     turns: list[dict[str, Any]] = []
     captured_models: list[str] = []
-    for messages in artifact_turns(artifact):
+    message_groups, skipped_unscoped = artifact_turns(artifact)
+    if not message_groups:
+        raise ValueError("thread artifact has no complete run-scoped replayable turns")
+    for messages in message_groups:
         turn, turn_models = build_turn(messages)
         turns.append(turn)
         captured_models.extend(turn_models)
 
     model_name = model_override or (captured_models[0] if captured_models else "reborn-qa-import")
+    required_actions = [
+        "Add scenario-specific expects and caller-level end-state assertions.",
+        "Review every redaction placeholder for acceptable fixture fidelity.",
+        "Record or mock external HTTP/service exchanges before enabling hermetic CI replay.",
+    ]
+    if skipped_unscoped:
+        required_actions.insert(
+            0,
+            "Review skipped_unscoped_messages from accepted submissions that never received a run ID.",
+        )
+    review = {
+        "status": "candidate",
+        "source_schema": artifact.get("schema"),
+        "source_run_id": artifact.get("run", {}).get("run_id"),
+        "source_thread_id": artifact.get("thread_id"),
+        "logs_complete": artifact.get("logs", {}).get("complete", False),
+        "required_actions": required_actions,
+    }
+    if skipped_unscoped:
+        review["skipped_unscoped_messages"] = skipped_unscoped
     return {
-        "_review": {
-            "status": "candidate",
-            "source_schema": artifact.get("schema"),
-            "source_run_id": artifact.get("run", {}).get("run_id"),
-            "source_thread_id": artifact.get("thread_id"),
-            "logs_complete": artifact.get("logs", {}).get("complete", False),
-            "required_actions": [
-                "Add scenario-specific expects and caller-level end-state assertions.",
-                "Review every redaction placeholder for acceptable fixture fidelity.",
-                "Record or mock external HTTP/service exchanges before enabling hermetic CI replay.",
-            ],
-        },
+        "_review": review,
         "model_name": model_name,
         "turns": turns,
     }
