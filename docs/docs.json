@@ -50,7 +50,13 @@
                   {
                     "group": "Core Capabilities",
                     "pages": [
-                      "security",
+                      {
+                        "group": "Security",
+                        "pages": [
+                          "security",
+                          "security/secrets-and-sandboxing"
+                        ]
+                      },
                       "capabilities/database",
                       "capabilities/configuration",
                       {
