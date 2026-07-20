@@ -6777,7 +6777,7 @@ api_key_env = "REBORN_TEST_UNSET_BC8F4D_KEY"
 }
 
 #[test]
-fn release_ci_publishes_reborn_rc_without_enabling_legacy_or_docker_paths() {
+fn release_ci_publishes_reborn_without_enabling_legacy_or_docker_paths() {
     let root = workspace_root();
     let release_workflow = std::fs::read_to_string(root.join(".github/workflows/release.yml"))
         .expect("release workflow")
