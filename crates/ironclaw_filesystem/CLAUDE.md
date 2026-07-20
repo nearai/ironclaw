@@ -154,10 +154,8 @@ consumers of the legacy methods — new code should call `put`/`get`/
 
 ## When you're editing this crate
 
-- Run the full crate tests, both feature combinations:
-  `cargo test -p ironclaw_filesystem --all-features`,
-  `cargo check -p ironclaw_filesystem --no-default-features --features libsql`,
-  `cargo check -p ironclaw_filesystem --no-default-features --features postgres`.
+- Run the full crate tests:
+  `cargo test -p ironclaw_filesystem`.
 - New `Entry` shapes (record kinds, indexed projections) belong in the
   consumer crate, not here. This crate only owns the trait surface and
   shared primitives.

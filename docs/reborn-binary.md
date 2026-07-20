@@ -1,54 +1,58 @@
-# `ironclaw-reborn` standalone binary
+# `ironclaw` standalone binary
 
-`ironclaw-reborn` is the standalone executable boundary for Reborn. It is separate from the current `ironclaw` binary so Reborn boot, config, state, and runtime composition can evolve without accidentally invoking v1 runtime paths.
+`ironclaw` is the canonical standalone executable for Reborn. The legacy v1
+implementation remains in the workspace during migration, but it is not part of
+the Reborn release package.
 
-This binary is available as the workspace package `ironclaw_reborn_cli` and builds the executable named `ironclaw-reborn`.
+The workspace package and executable are both named `ironclaw`; its source
+directory remains `crates/ironclaw_reborn_cli`.
 
 ## Current status
 
-`ironclaw-reborn` is an early operator/testing surface, not the default IronClaw runtime.
+`ironclaw` is the shipping Reborn CLI. Some commands remain early
+operator/testing surfaces as noted below.
 
 It currently supports:
 
 ```bash
-ironclaw-reborn --help
-ironclaw-reborn channels list              # disabled — errors, see below
-ironclaw-reborn channels list --json       # disabled — errors, see below
-ironclaw-reborn channels list --verbose    # disabled — errors, see below
-ironclaw-reborn completion --shell bash
-ironclaw-reborn completion --shell zsh
-ironclaw-reborn config path
-ironclaw-reborn doctor
-ironclaw-reborn extension search github
-ironclaw-reborn extension search github --json
-ironclaw-reborn extension install github-mcp
-ironclaw-reborn extension activate github-mcp
-ironclaw-reborn extension remove github-mcp
-ironclaw-reborn hooks list                 # disabled — errors, see below
-ironclaw-reborn hooks list --json          # disabled — errors, see below
-ironclaw-reborn hooks list --verbose       # disabled — errors, see below
-ironclaw-reborn logs                       # disabled — errors, see below
-ironclaw-reborn logs --json                # disabled — errors, see below
-ironclaw-reborn logs --verbose             # disabled — errors, see below
-ironclaw-reborn models list
-ironclaw-reborn models list --json
-ironclaw-reborn models status
-ironclaw-reborn models status --json
-ironclaw-reborn models set-provider openai --model gpt-5-mini
-ironclaw-reborn onboard
-ironclaw-reborn onboard --dry-run
-ironclaw-reborn onboard --force
-ironclaw-reborn onboard --import-history   # flag parsed, but history import not wired yet
-ironclaw-reborn profile list
-ironclaw-reborn profile list --json
-ironclaw-reborn repl
-ironclaw-reborn run
-ironclaw-reborn run --confirm-host-access
-ironclaw-reborn serve
-ironclaw-reborn serve --confirm-host-access
-ironclaw-reborn skills list
-ironclaw-reborn skills list --json
-ironclaw-reborn skills list --verbose
+ironclaw --help
+ironclaw channels list              # disabled — errors, see below
+ironclaw channels list --json       # disabled — errors, see below
+ironclaw channels list --verbose    # disabled — errors, see below
+ironclaw completion --shell bash
+ironclaw completion --shell zsh
+ironclaw config path
+ironclaw doctor
+ironclaw extension search github
+ironclaw extension search github --json
+ironclaw extension install github-mcp
+ironclaw extension activate github-mcp
+ironclaw extension remove github-mcp
+ironclaw hooks list                 # disabled — errors, see below
+ironclaw hooks list --json          # disabled — errors, see below
+ironclaw hooks list --verbose       # disabled — errors, see below
+ironclaw logs                       # disabled — errors, see below
+ironclaw logs --json                # disabled — errors, see below
+ironclaw logs --verbose             # disabled — errors, see below
+ironclaw models list
+ironclaw models list --json
+ironclaw models status
+ironclaw models status --json
+ironclaw models set-provider openai --model gpt-5-mini
+ironclaw onboard
+ironclaw onboard --dry-run
+ironclaw onboard --force
+ironclaw onboard --import-history   # flag parsed, but history import not wired yet
+ironclaw profile list
+ironclaw profile list --json
+ironclaw repl
+ironclaw run
+ironclaw run --confirm-host-access
+ironclaw serve
+ironclaw serve --confirm-host-access
+ironclaw skills list
+ironclaw skills list --json
+ironclaw skills list --verbose
 ```
 
 The `traces` command tree is a contributor-only trace client; see
@@ -108,7 +112,7 @@ export IRONCLAW_REBORN_HOME="$HOME/.ironclaw-reborn-demo"
 # 2. Configure a model route. NEAR AI shown here; swap the provider id and key
 #    env var for any row in the table below. set-provider records the credential
 #    env-var NAME in config.toml; the secret VALUE stays in the environment.
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- \
+cargo run -q -p ironclaw --bin ironclaw -- \
   models set-provider nearai
 export NEARAI_API_KEY="your-key-here"
 
@@ -119,7 +123,7 @@ export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"   # bearer token yo
 export IRONCLAW_REBORN_WEBUI_USER_ID="reborn-cli"             # must match [identity].default_owner
 
 # 4. Launch.
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- serve
+cargo run -q -p ironclaw --bin ironclaw -- serve
 ```
 
 Then open **`http://127.0.0.1:3000/`** and log in with the
@@ -149,7 +153,7 @@ API-key providers it records that provider's credential env-var name in
 So to use Anthropic instead of the quick-start example, swap step 2 for:
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- \
+cargo run -q -p ironclaw --bin ironclaw -- \
   models set-provider anthropic
 export ANTHROPIC_API_KEY="your-key-here"
 ```
@@ -240,9 +244,9 @@ returns an error and a non-zero exit instead of resolving Reborn home, reading v
 config, or printing channel data:
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- channels list
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- channels list --json
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- channels list --verbose
+cargo run -q -p ironclaw --bin ironclaw -- channels list
+cargo run -q -p ironclaw --bin ironclaw -- channels list --json
+cargo run -q -p ironclaw --bin ironclaw -- channels list --verbose
 ```
 
 All three forms (default/`--json`/`--verbose`) print the same message to
@@ -261,11 +265,11 @@ longer exists; do not implement against it.
 Searches and manages local-dev Reborn extensions through the same lifecycle facade exposed to product surfaces. Available extension packages are read from `/system/extensions`, which maps to `<reborn-home>/local-dev/system/extensions` for the local-dev profile.
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- extension search github
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- extension search github --json
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- extension install github-mcp
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- extension activate github-mcp
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- extension remove github-mcp
+cargo run -q -p ironclaw --bin ironclaw -- extension search github
+cargo run -q -p ironclaw --bin ironclaw -- extension search github --json
+cargo run -q -p ironclaw --bin ironclaw -- extension install github-mcp
+cargo run -q -p ironclaw --bin ironclaw -- extension activate github-mcp
+cargo run -q -p ironclaw --bin ironclaw -- extension remove github-mcp
 ```
 
 The commands are scoped to Reborn boot/config resolution and do not create or read v1 state directories.
@@ -283,8 +287,8 @@ Expected fields include:
 Generates shell completion scripts without resolving Reborn home, reading v1 state, or creating directories.
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- completion --shell zsh > ironclaw-reborn.zsh
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- completion --shell bash > ironclaw-reborn.bash
+cargo run -q -p ironclaw --bin ironclaw -- completion --shell zsh > ironclaw.zsh
+cargo run -q -p ironclaw --bin ironclaw -- completion --shell bash > ironclaw.bash
 ```
 
 The zsh output keeps the v1 CLI guard around `compdef` so the generated script is safe when zsh completion functions are not loaded yet.
@@ -294,7 +298,7 @@ The zsh output keeps the v1 CLI guard around `compdef` so the generated script i
 Shows the resolved Reborn state root, its source, selected profile, and explicit v1-state status without creating directories.
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- config path
+cargo run -q -p ironclaw --bin ironclaw -- config path
 ```
 
 Expected fields include:
@@ -312,7 +316,7 @@ state or seed config files.
 Validates and reports Reborn boot configuration without creating state directories or starting runtime services.
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- doctor
+cargo run -q -p ironclaw --bin ironclaw -- doctor
 ```
 
 Expected fields include:
@@ -330,9 +334,9 @@ wired yet, so the command stays visible but invoking `hooks list` errors instead
 of reporting hook data:
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- hooks list
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- hooks list --json
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- hooks list --verbose
+cargo run -q -p ironclaw --bin ironclaw -- hooks list
+cargo run -q -p ironclaw --bin ironclaw -- hooks list --json
+cargo run -q -p ironclaw --bin ironclaw -- hooks list --verbose
 ```
 
 ```
@@ -345,9 +349,9 @@ Same treatment: the Reborn log source is not wired yet, so `logs` stays
 visible but invoking it errors instead of reporting log data:
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- logs
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- logs --json
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- logs --verbose
+cargo run -q -p ironclaw --bin ironclaw -- logs
+cargo run -q -p ironclaw --bin ironclaw -- logs --json
+cargo run -q -p ironclaw --bin ironclaw -- logs --verbose
 ```
 
 ```
@@ -365,9 +369,9 @@ remaining setup work. It does not call into v1 `src/setup`, v1 database
 config, v1 channels, or v1 import state.
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- onboard
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- onboard --dry-run
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- onboard --force
+cargo run -q -p ironclaw --bin ironclaw -- onboard
+cargo run -q -p ironclaw --bin ironclaw -- onboard --dry-run
+cargo run -q -p ironclaw --bin ironclaw -- onboard --force
 ```
 
 `--dry-run` reports what would be initialized without writing files.
@@ -381,10 +385,10 @@ Shows Reborn model purpose slots and route status, and configures the default
 LLM route.
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models list
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models list --json
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models status
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models status --json
+cargo run -q -p ironclaw --bin ironclaw -- models list
+cargo run -q -p ironclaw --bin ironclaw -- models list --json
+cargo run -q -p ironclaw --bin ironclaw -- models status
+cargo run -q -p ironclaw --bin ironclaw -- models status --json
 ```
 
 `models status` reports the configured default route, including the exact env
@@ -414,8 +418,8 @@ get no `api_key_env`). `<provider>` is a provider id or alias (`openai`,
 provider's catalog default.
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models set-provider openai --model gpt-5-mini
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models set-provider nearai --model deepseek-ai/DeepSeek-V4-Flash
+cargo run -q -p ironclaw --bin ironclaw -- models set-provider openai --model gpt-5-mini
+cargo run -q -p ironclaw --bin ironclaw -- models set-provider nearai --model deepseek-ai/DeepSeek-V4-Flash
 ```
 
 The secret value still lives in the environment under the catalog's
@@ -433,8 +437,8 @@ build of the binary without `RebornProviderAdmin` linked in.
 Lists the supported Reborn boot profiles without resolving Reborn home, reading v1 state, or creating directories.
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- profile list
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- profile list --json
+cargo run -q -p ironclaw --bin ironclaw -- profile list
+cargo run -q -p ironclaw --bin ironclaw -- profile list --json
 ```
 
 Supported profiles:
@@ -451,14 +455,14 @@ Select a profile with `IRONCLAW_REBORN_PROFILE=<profile>`.
 Starts the standalone Reborn runtime and reads messages from stdin. The no-profile path targets the planned AgentLoop runtime (`reborn-planned-default`). Without model provider environment variables, the runtime still starts but messages fail cleanly because no LLM gateway is wired.
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- run
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- run --message "hello"
+cargo run -q -p ironclaw --bin ironclaw -- run
+cargo run -q -p ironclaw --bin ironclaw -- run --message "hello"
 ```
 
 Use `--dry-run` for the side-effect-free readiness snapshot:
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- run --dry-run
+cargo run -q -p ironclaw --bin ironclaw -- run --dry-run
 ```
 
 When `$IRONCLAW_REBORN_HOME/config.toml` is missing, the first stateful
@@ -472,7 +476,7 @@ file.
 
 Expected fields include:
 
-- `binary: ironclaw-reborn`
+- `binary: ironclaw`
 - `version`
 - `reborn_home`
 - `home_source`
@@ -519,7 +523,7 @@ turns from stdin. Same runtime as `run`, without the WebUI listener. Accepts
 `--confirm-host-access` for `local-dev-yolo`.
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- repl
+cargo run -q -p ironclaw --bin ironclaw -- repl
 ```
 
 ### `serve`
@@ -530,8 +534,8 @@ See [Running with the WebUI (`serve`)](#running-with-the-webui-serve) for the
 full walkthrough, auth setup, common startup errors, and an API smoke test.
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- serve
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- serve --host 127.0.0.1 --port 3000
+cargo run -q -p ironclaw --bin ironclaw -- serve
+cargo run -q -p ironclaw --bin ironclaw -- serve --host 127.0.0.1 --port 3000
 ```
 
 ### `skills list`
@@ -543,9 +547,9 @@ local-dev storage root is reported as an empty skill list without creating
 directories.
 
 ```bash
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- skills list
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- skills list --json
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- skills list --verbose
+cargo run -q -p ironclaw --bin ironclaw -- skills list
+cargo run -q -p ironclaw --bin ironclaw -- skills list --json
+cargo run -q -p ironclaw --bin ironclaw -- skills list --verbose
 ```
 
 Expected fields include:
@@ -589,7 +593,7 @@ Example:
 ```bash
 IRONCLAW_REBORN_HOME="$PWD/.reborn-home" \
 IRONCLAW_REBORN_PROFILE=production \
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- doctor
+cargo run -q -p ironclaw --bin ironclaw -- doctor
 ```
 
 ## Local smoke checks
@@ -598,25 +602,25 @@ Run these before changing Reborn CLI behavior:
 
 ```bash
 cargo fmt --all -- --check
-cargo test -p ironclaw_reborn_cli
+cargo test -p ironclaw
 cargo test -p ironclaw_reborn_config
 cargo test -p ironclaw_runner model_slots_are_exposed_in_cli_display_order
 cargo test -p ironclaw_architecture reborn
-cargo clippy -p ironclaw_reborn_cli --all-targets -- -D warnings
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- --help
+cargo clippy -p ironclaw --all-targets -- -D warnings
+cargo run -q -p ironclaw --bin ironclaw -- --help
 # channels/hooks/logs are disabled — these are expected to exit non-zero
 # with "is not implemented yet", not to succeed.
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- channels list; echo "exit: $?"
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- completion --shell zsh >"$(mktemp -d)/ironclaw-reborn.zsh"
+cargo run -q -p ironclaw --bin ironclaw -- channels list; echo "exit: $?"
+cargo run -q -p ironclaw --bin ironclaw -- completion --shell zsh >"$(mktemp -d)/ironclaw.zsh"
 IRONCLAW_REBORN_HOME="$(mktemp -d)/reborn-home" \
-  cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- config path
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- hooks list; echo "exit: $?"
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- logs; echo "exit: $?"
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- models status
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- profile list
+  cargo run -q -p ironclaw --bin ironclaw -- config path
+cargo run -q -p ironclaw --bin ironclaw -- hooks list; echo "exit: $?"
+cargo run -q -p ironclaw --bin ironclaw -- logs; echo "exit: $?"
+cargo run -q -p ironclaw --bin ironclaw -- models status
+cargo run -q -p ironclaw --bin ironclaw -- profile list
 IRONCLAW_REBORN_HOME="$(mktemp -d)/reborn-home" \
-  cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- run
-cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- skills list
+  cargo run -q -p ironclaw --bin ironclaw -- run
+cargo run -q -p ironclaw --bin ironclaw -- skills list
 ```
 
 ## Adding commands
@@ -633,43 +637,27 @@ Short version:
 2. register it in `commands::Command`;
 3. resolve and pass `RebornCliContext` from dispatch only when the command needs boot config;
 4. keep pure commands independent from Reborn home resolution;
-5. add a binary smoke test through `env!("CARGO_BIN_EXE_ironclaw-reborn")`;
+5. add a binary smoke test through `env!("CARGO_BIN_EXE_ironclaw")`;
 6. avoid v1 runtime imports and v1 state mutation unless explicitly scoped and guarded.
 
 Do not port the current `src/cli/*` command tree wholesale. Port commands one at a time, starting with Reborn-owned or read-only surfaces.
 
-## Release packaging decision
+## Release packaging
 
-The canonical Reborn `ironclaw` binary from `ironclaw_reborn_cli` is **not yet
-included in cargo-dist release artifacts**.
+Pushing a matching `ironclaw-v*` tag starts the cargo-dist release workflow for
+the Reborn `ironclaw` package. cargo-dist builds the binary for two GNU Linux,
+two musl Linux, two macOS, and one Windows target, then creates the platform
+archives, checksums, shell and PowerShell installers, and Windows MSI. The
+resulting GitHub Release title and body are generated from this
+repository's release metadata and `CHANGELOG.md`.
 
-The tag-driven release pipeline preflights the shipping binary directly through
-`.github/workflows/reborn-release-compile.yml`. That matrix performs a final
-link on the two GNU Linux, two musl Linux, two macOS, and one Windows target
-configured for releases, then runs the exact native output through config-free
-CLI startup checks. The musl jobs additionally reject `PT_INTERP` and
-`DT_NEEDED` entries so their outputs remain portable to systems without a musl
-loader. Its short-lived `reborn-compile-*` workflow artifacts are preflight
-evidence only and are excluded from the `artifacts-*` set uploaded to the
-GitHub Release. It does not claim `serve`, external-service, installer, or
-canonical Reborn packaging coverage.
+This tag path is Reborn-only. It does not compile or publish the legacy v1
+package, independently published WASM extensions, Docker images, or use the old
+registry-checksum/announcement path. cargo-dist's generated `announce` job is
+only the finalization step for the Reborn GitHub Release.
 
-While #6160's temporary Reborn-only release policy is active, matching tag runs
-stop after this compile matrix. The legacy cargo-dist plan, WASM build, GitHub
-Release host, registry-checksum, announcement, and release Docker caller all
-skip, so the run creates neither a GitHub Release nor published release assets
-or images. The independent manual and hourly entry points in `docker.yml`
-remain available.
-
-Current `dist plan --output-format=json` with `crates/ironclaw_reborn_cli` marked `dist = false` emits only the root legacy package artifacts (`ironclaw` package, `ironclaw-legacy` executable). Removing `dist = false` alone is not enough to ship the canonical Reborn `ironclaw` executable in the existing `ironclaw-v*` release workflow because that workflow is shaped around the root `ironclaw` package tag. Enabling the `ironclaw_reborn_cli` release also requires cargo-dist WiX metadata/template work and an explicit package/tag/versioning decision.
-
-Follow-up issue: #3483 tracks packaging the canonical Reborn binary in release artifacts.
-
-Until #3483 is resolved, keep:
-
-```toml
-[package.metadata.dist]
-dist = false
-```
-
-in `crates/ironclaw_reborn_cli/Cargo.toml` so releases do not silently claim to ship an unverified Reborn binary package.
+`.github/workflows/reborn-release-compile.yml` remains available as an
+independent manual compile-and-smoke preflight. It exercises the same seven
+native targets and adds config-free CLI startup checks; the musl jobs also
+reject `PT_INTERP` and `DT_NEEDED` entries. Its temporary artifacts are test
+evidence only and are not inputs to cargo-dist or the GitHub Release.

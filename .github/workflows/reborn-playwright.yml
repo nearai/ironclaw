@@ -102,7 +102,7 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Build ironclaw-reborn with WebUI surface
-        run: cargo build -p ironclaw_reborn_cli --bin ironclaw
+        run: cargo build -p ironclaw --bin ironclaw
 
       - name: Upload binaries
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

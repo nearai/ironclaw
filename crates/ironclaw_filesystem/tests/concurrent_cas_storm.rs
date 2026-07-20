@@ -195,8 +195,6 @@ async fn in_memory_concurrent_delete_if_version_storm_has_exactly_one_winner_per
     let fs = Arc::new(scoped(Arc::new(InMemoryBackend::new()), "/engine/counters"));
     run_delete_storm(fs).await;
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn libsql_concurrent_cas_storm_has_no_errors_or_lost_updates() {
     let dir = tempfile::tempdir().unwrap();
@@ -207,8 +205,6 @@ async fn libsql_concurrent_cas_storm_has_no_errors_or_lost_updates() {
     let fs = Arc::new(scoped(root, "/engine/counters"));
     run_storm(fs).await;
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn libsql_concurrent_delete_if_version_storm_has_exactly_one_winner_per_round() {
     let dir = tempfile::tempdir().unwrap();
@@ -225,7 +221,6 @@ async fn libsql_concurrent_delete_if_version_storm_has_exactly_one_winner_per_ro
 /// `db_root_filesystem_contract.rs`'s skip-when-unreachable pattern so
 /// environments without Postgres pass vacuously rather than failing CI on
 /// infrastructure this test doesn't own.
-#[cfg(feature = "postgres")]
 async fn connect_postgres_for_storm() -> Option<Arc<ironclaw_filesystem::PostgresRootFilesystem>> {
     if std::env::var("IRONCLAW_SKIP_POSTGRES_TESTS").is_ok() {
         return None;
@@ -245,8 +240,6 @@ async fn connect_postgres_for_storm() -> Option<Arc<ironclaw_filesystem::Postgre
     }
     Some(root)
 }
-
-#[cfg(feature = "postgres")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn postgres_concurrent_cas_storm_has_no_errors_or_lost_updates() {
     let Some(root) = connect_postgres_for_storm().await else {
@@ -258,8 +251,6 @@ async fn postgres_concurrent_cas_storm_has_no_errors_or_lost_updates() {
     let fs = Arc::new(scoped(root, &target));
     run_storm(fs).await;
 }
-
-#[cfg(feature = "postgres")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn postgres_concurrent_delete_if_version_storm_has_exactly_one_winner_per_round() {
     let Some(root) = connect_postgres_for_storm().await else {

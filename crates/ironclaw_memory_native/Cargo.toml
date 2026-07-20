@@ -14,7 +14,6 @@ publish = false
 layer = "substrates"
 
 [features]
-default = []
 # Exposes the trait-level contract test harness in
 # `src/contract_tests.rs` to downstream crates and integration tests.
 # Off by default so panic-style calls in the harness (`.expect`,

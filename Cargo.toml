@@ -65,7 +65,7 @@ dead_code = "warn"
 unused_must_use = "deny"
 
 [package]
-name = "ironclaw"
+name = "ironclaw_legacy"
 autobins = false
 version = "0.29.1"
 edition = "2024"
@@ -79,15 +79,16 @@ repository = "https://github.com/nearai/ironclaw"
 [package.metadata.ironclaw]
 layer = "legacy"
 
+[package.metadata.dist]
+dist = false
+
+[lib]
+name = "ironclaw"
+path = "src/lib.rs"
+
 [[bin]]
 name = "ironclaw-legacy"
 path = "src/main.rs"
-
-[package.metadata.wix]
-upgrade-guid = "D0156E61-BA37-451E-8AB9-1A2ECCCFA48F"
-path-guid = "F90B6EA6-87F7-499B-BB19-CF55DE1EB339"
-license = false
-eula = false
 
 [dependencies]
 # Async runtime
@@ -334,7 +335,7 @@ ironclaw_runner = { path = "crates/ironclaw_runner", version = "0.1.0" }
 # composing them in int-tier tests. All 17 of those modules are recompiled
 # into every int-tier test binary — a real, one-time build-time cost for the
 # lane, behaviorally inert for suites that never reference Slack types.
-ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support", "libsql"] }
+ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support"] }
 # Direct dev-dep: composition deliberately does NOT re-export the bare
 # `webui_v2_router`/`WebUiV2State` (facade-only rule), and the router smoke
 # drives the bare router, not the `webui_v2_app` wrapper. The v2 route surface
@@ -348,6 +349,12 @@ ironclaw_reborn_config = { path = "crates/ironclaw_reborn_config", version = "0.
 ironclaw_reborn_openai_compat = { path = "crates/ironclaw_reborn_openai_compat", version = "0.1.0"}
 ironclaw_run_state = { path = "crates/ironclaw_run_state", version = "0.1.0", features = ["test-support"] }
 ironclaw_threads = { path = "crates/ironclaw_threads", version = "0.1.0" }
+# `test-support` unlocks `ironclaw_turns::test_support::in_memory_turn_state_store`
+# — the shared `FilesystemTurnStateRowStore<InMemoryBackend>` double that replaced
+# the deleted public `InMemoryTurnStateStore` (refactor #6263). cfg(test) does not
+# propagate from an integration-test binary into its deps, so the feature is
+# explicit here.
+ironclaw_turns = { path = "crates/ironclaw_turns", version = "0.1.0", features = ["test-support"] }
 # `InMemoryDurableEventLog` for the W5-WEBUI-API-1 SSE scenario's test-local
 # `ProjectionStream` wiring (`build_webui_event_stream_for_test`).
 ironclaw_events = { path = "crates/ironclaw_events", version = "0.1.0" }
@@ -625,12 +632,19 @@ lto = "thin"
 [workspace.metadata.dist]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax)
 cargo-dist-version = "0.31.0"
-# Ignore out-of-date generated CI so custom release.yml jobs are allowed
+# cargo-dist 0.31 grants `contents: write` to every generated job. Keep the
+# checked-in CI customized so only the host job can publish a GitHub Release.
 allow-dirty = ["ci"]
+# Release only the canonical Reborn CLI.
+packages = ["ironclaw"]
 # CI backends to support
 ci = "github"
+# Match the canonical `ironclaw-v*` release tags.
+tag-namespace = "ironclaw"
+# Install build-only prerequisites before cargo-dist compiles each target.
+github-build-setup = "../dist-build-setup.yml"
 # The installers to generate for each app
-installers = ["shell", "powershell", "npm", "msi"]
+installers = ["shell", "powershell", "msi"]
 # Publish jobs to run in CI
 publish-jobs = []
 # Target platforms to build apps for (Rust target-triple syntax)
@@ -664,3 +678,9 @@ x86_64-unknown-linux-musl = "ubuntu-22.04"
 x86_64-pc-windows-msvc = "windows-2022"
 x86_64-apple-darwin = "macos-15-intel"
 aarch64-apple-darwin = "macos-14"
+
+[workspace.metadata.dist.github-action-commits]
+"actions/checkout" = "df4cb1c069e1874edd31b4311f1884172cec0e10"
+"actions/download-artifact" = "37930b1c2abaa49bbe596cd826c3c89aef350131"
+"actions/upload-artifact" = "b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+"swatinem/rust-cache" = "e18b497796c12c097a38f9edb9d0641fb99eee32"

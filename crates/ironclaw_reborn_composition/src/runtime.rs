@@ -86,10 +86,10 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
-    InMemoryTurnStateStoreLimits, LoopGateRef, ReplyTargetBindingRef, RunProfileResolutionRequest,
-    SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCoordinator, TurnError, TurnEventProjectionSource, TurnId, TurnPersistenceSnapshot,
-    TurnRunId, TurnRunRecord, TurnRunState, TurnRunWake, TurnScope, TurnSpawnTreeStateStore,
+    LoopGateRef, ReplyTargetBindingRef, RunProfileResolutionRequest, SanitizedCancelReason,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
+    TurnEventProjectionSource, TurnId, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord,
+    TurnRunState, TurnRunWake, TurnScope, TurnSpawnTreeStateStore, TurnStateStoreLimits,
     TurnStatus,
     events::EventCursor,
     run_profile::{LoopHostMilestoneSink, LoopRunContext},
@@ -3152,11 +3152,11 @@ pub async fn build_reborn_runtime(
     // Thread per-user and per-origin concurrency caps from TurnRunnerSettings into the
     // turn-state store. The factory reads these when constructing the store so limits
     // are applied from the very first claim.
-    let turn_state_limits = InMemoryTurnStateStoreLimits {
+    let turn_state_limits = TurnStateStoreLimits {
         max_concurrent_runs_per_user: runner.max_concurrent_runs_per_user,
         max_concurrent_trigger_runs: runner.max_concurrent_trigger_runs,
         max_concurrent_conversation_runs: runner.max_concurrent_conversation_runs,
-        ..InMemoryTurnStateStoreLimits::default()
+        ..TurnStateStoreLimits::default()
     };
     services_input = services_input.with_turn_state_store_limits(turn_state_limits);
     let actor_user_id =

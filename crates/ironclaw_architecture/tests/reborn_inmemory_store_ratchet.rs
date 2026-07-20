@@ -28,12 +28,17 @@
 //! owes a consolidation) and [`JUSTIFIED_KEEP_INMEMORY_STORES`] (audited
 //! keeps — each entry's annotation states why it is NOT a §1.4 lock-step
 //! duplicate and must not be blindly "consolidated"). **Definition of done for
-//! this axis (§10): the DEBT list shrinks to empty.** The mechanical
-//! consolidations (A1–A8: approvals, authorization, processes, run-state,
-//! budget-gate, the outbound family), the checkpoint cluster
-//! (checkpoint-state payloads, loop-checkpoint metadata), the Slack
-//! host-state test doubles, and the secrets cluster
-//! (`FilesystemSecretStore::ephemeral()`) are done.
+//! this axis (§10): the DEBT list shrinks to empty — and as of #6263 it IS
+//! empty.** Every hand-written `InMemory*Store` on the store-consolidation axis
+//! is now either deleted (consolidated onto the one production
+//! `Filesystem*Store<F>` over an `InMemoryBackend`) or a justified keep. The
+//! mechanical consolidations (A1–A8: approvals, authorization, processes,
+//! run-state, budget-gate, the outbound family), the checkpoint cluster
+//! (checkpoint-state payloads, loop-checkpoint metadata), the Slack host-state
+//! test doubles, the secrets cluster (`FilesystemSecretStore::ephemeral()`),
+//! and finally turns — `InMemoryTurnStateStore` collapsed into the crate-private
+//! `TurnStateEngine` embedded in `FilesystemTurnStateRowStore` — are all done.
+//! `FROZEN_DEBT_INMEMORY_STORES` is therefore empty; it must never grow again.
 
 mod ratchet_support;
 
@@ -57,30 +62,25 @@ fn is_inmemory_store(ident: &str) -> bool {
 /// scanner, so the per-entry status notes are documentation only — the
 /// enforced contract is the string set.
 ///
-/// **Status (re-assessed 2026-07-19).** Every entry here is blocked on
-/// deliberate, non-mechanical work, annotated with WHAT it needs so the next
-/// contributor picks up a scoped task instead of re-deriving the blocker.
+/// **Status (re-assessed 2026-07-20): the §4.3 store-consolidation axis debt is
+/// now ZERO.** Every hand-written `InMemory*Store` on this axis has been either
+/// deleted (consolidated onto the one production `Filesystem*Store<F>` over an
+/// `InMemoryBackend`) or moved to [`JUSTIFIED_KEEP_INMEMORY_STORES`] with an
+/// audited reason. The last entry — `InMemoryTurnStateStore`, the
+/// `inmemory-turn-state` runtime authority — was eliminated in #6263: its
+/// semantics engine is now a crate-private `TurnStateEngine` embedded inside
+/// `FilesystemTurnStateRowStore`, so there is exactly one public turn-state
+/// store. This list is therefore empty; it must never grow (a new
+/// `InMemory*Store` fails the scan below).
 const FROZEN_DEBT_INMEMORY_STORES: &[&str] = &[
-    // --- turns: DEFERRED, the trickiest store case (§9: "turns last").
-    //     `InMemoryTurnStateStore` is the `inmemory-turn-state` production
-    //     runtime authority (pessimistic Mutex, no-CAS-livelock); a
-    //     `FilesystemTurnStateStore<InMemoryBackend>` swap needs (a) the §11.4
-    //     reference-model property suite (Slice 0 — replacement oracle for the
-    //     lost independent implementation) and (b) a concurrency stress test
-    //     PROVING the swap keeps the no-livelock property (see
-    //     `tools/ironclaw_stress/results/2026-06-30-turn-state-inmemory/` for
-    //     the contention measurements that motivated the in-memory authority).
-    //     (Checkpoint-state payloads + loop-checkpoint metadata are DONE: the
-    //     payload store is `FilesystemCheckpointStateStore` everywhere, and
-    //     checkpoint metadata is served by the turn-state store's own
-    //     `LoopCheckpointStore` impl in both build paths.) ---
-    "InMemoryTurnStateStore",
-    // --- secrets cluster: DONE — `InMemorySecretStore` and its crate-private
-    //     `InMemorySecretsStore` engine (legacy_store.rs) are deleted; every
-    //     consumer is consolidated onto `FilesystemSecretStore::ephemeral()`
-    //     (the production encrypted store over `InMemoryBackend` with an
-    //     ephemeral master key and the tenant-rewriting `/secrets` mount
-    //     resolver). ---
+    // (empty — §4.3 store-consolidation debt is zero; see the doc comment above.)
+    //
+    // Historical, for provenance: `InMemorySecretStore`/`InMemorySecretsStore`
+    // (secrets cluster) were consolidated onto `FilesystemSecretStore::ephemeral()`;
+    // `InMemoryTurnStateStore` (turns, the trickiest/last case) was collapsed into
+    // the private `TurnStateEngine` inside `FilesystemTurnStateRowStore` (#6263),
+    // with the crash-consistency reference-model oracle
+    // (`row_store_crash_consistency.rs`) now driven by a never-crashed row store.
 ];
 
 /// Audited JUSTIFIED KEEPS: pub-visible `InMemory*Store` types that are NOT

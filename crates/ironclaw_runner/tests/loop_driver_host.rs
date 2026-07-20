@@ -107,14 +107,15 @@ use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustProvenance,
 };
+use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
     AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
     AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, CancelRunRequest, CancelRunResponse,
-    CheckpointStateStore, DefaultTurnCoordinator, EventCursor, GetCheckpointStateRequest,
-    GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver,
-    InMemoryTurnEventSink, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, LoopBlocked,
-    LoopBlockedKind, LoopCheckpointRecord, LoopCheckpointStore, LoopCompleted, LoopCompletionKind,
-    LoopExit, LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, PutCheckpointStateRequest,
+    CheckpointStateStore, DefaultTurnCoordinator, EventCursor, FilesystemTurnStateRowStore,
+    GetCheckpointStateRequest, GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey,
+    InMemoryRunProfileResolver, InMemoryTurnEventSink, LoopBlocked, LoopBlockedKind,
+    LoopCheckpointRecord, LoopCheckpointStore, LoopCompleted, LoopCompletionKind, LoopExit,
+    LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, PutCheckpointStateRequest,
     PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnRequest, RunProfileId,
     RunProfileRequest, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
     SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy,
@@ -160,7 +161,9 @@ fn driver_requirements_for(
     )])
 }
 
-fn turn_state_store_dyn(store: &Arc<InMemoryTurnStateStore>) -> Arc<dyn TurnStateStore> {
+fn turn_state_store_dyn(
+    store: &Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
+) -> Arc<dyn TurnStateStore> {
     Arc::clone(store) as Arc<dyn TurnStateStore>
 }
 
@@ -1734,7 +1737,8 @@ async fn turn_runner_worker_completes_queued_run_after_turn_store_reopen() {
         "hello after turn store restart",
     )
     .await;
-    let original_turn_store = InMemoryTurnStateStore::default();
+    let scoped = ironclaw_turns::test_support::in_memory_turns_filesystem();
+    let original_turn_store = FilesystemTurnStateRowStore::new(scoped.clone());
     let resolver = InMemoryRunProfileResolver::default();
     let resolved = resolver
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
@@ -1748,16 +1752,9 @@ async fn turn_runner_worker_completes_queued_run_after_turn_store_reopen() {
         "idem-runner-restart-e2e",
     )
     .await;
-    let snapshot = original_turn_store.persistence_snapshot();
     drop(original_turn_store);
 
-    let reopened_turn_store = Arc::new(
-        InMemoryTurnStateStore::from_persistence_snapshot(
-            snapshot,
-            InMemoryTurnStateStoreLimits::default(),
-        )
-        .unwrap(),
-    );
+    let reopened_turn_store = Arc::new(FilesystemTurnStateRowStore::new(scoped.clone()));
     let mut registry = DriverRegistry::new();
     registry
         .register_driver(
@@ -1846,7 +1843,7 @@ async fn turn_runner_worker_completes_queued_run_after_turn_store_reopen() {
 async fn turn_runner_worker_emits_thread_run_correlated_operator_log() {
     let fixture =
         HostFixture::new_unsubmitted("thread-runner-operator-log", "hello operator log").await;
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let resolver = InMemoryRunProfileResolver::default();
     let resolved = resolver
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
@@ -2195,7 +2192,7 @@ async fn libsql_filesystem_turn_store(
 #[tokio::test]
 async fn turn_runner_worker_drives_full_text_only_model_transcript_completion_after_missed_wake() {
     let fixture = HostFixture::new_unsubmitted("thread-runner-e2e", "hello full runner").await;
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let resolver = InMemoryRunProfileResolver::default();
     let resolved = resolver
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
@@ -2298,7 +2295,7 @@ async fn turn_runner_worker_drives_full_text_only_model_transcript_completion_af
 async fn turn_runner_worker_full_reborn_fails_when_checkpoint_state_disk_is_full() {
     let fixture =
         HostFixture::new_unsubmitted("thread-full-reborn-disk-full", "hello disk full").await;
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let resolver = default_planned_run_profile_resolver().expect("planned profile resolver");
     let run_id = queue_fixture_turn(
         &fixture,
@@ -2379,7 +2376,7 @@ async fn turn_runner_worker_full_reborn_fails_cleanly_when_model_provider_is_off
         HostManagedModelErrorKind::Unavailable,
         "connection refused at https://api.example.test with sk-provider-secret /host/path",
     );
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let resolver = default_planned_run_profile_resolver().expect("planned profile resolver");
     let run_id = queue_fixture_turn(
         &fixture,
@@ -2459,7 +2456,7 @@ async fn turn_runner_worker_full_reborn_completes_while_postgres_heartbeats_are_
     fixture
         .gateway
         .set_response_delay(std::time::Duration::from_millis(150));
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let transitions = Arc::new(
         SlowHeartbeatTransitionPort::new(turn_store.clone())
             .with_heartbeat_delay(std::time::Duration::from_millis(50)),
@@ -2537,7 +2534,7 @@ async fn turn_runner_worker_full_reborn_continues_after_tool_network_outage() {
     fixture
         .gateway
         .respond_with_capability_calls_then_reply("model recovered after tool outage");
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let resolver = default_planned_run_profile_resolver().expect("planned profile resolver");
     let run_id = queue_fixture_turn(
         &fixture,
@@ -2643,7 +2640,7 @@ async fn turn_runner_worker_drives_script_capability_through_real_host_runtime()
         "hello script capability runner",
     )
     .await;
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let resolver = InMemoryRunProfileResolver::default();
     let resolved = resolver
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
@@ -2795,7 +2792,7 @@ async fn turn_runner_rejects_driver_fabricated_approval_block_without_durable_ga
         "hello approval fail closed",
     )
     .await;
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let resolver = InMemoryRunProfileResolver::default();
     let resolved = resolver
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
@@ -2874,7 +2871,7 @@ async fn turn_runner_blocks_on_approval_then_coordinator_resume_completes_same_r
     let fixture =
         HostFixture::new_unsubmitted("thread-runner-approval-resume-e2e", "hello approval resume")
             .await;
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let resolver = InMemoryRunProfileResolver::default();
     let resolved = resolver
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
@@ -2950,14 +2947,21 @@ async fn turn_runner_blocks_on_approval_then_coordinator_resume_completes_same_r
         .unwrap();
     assert_eq!(resume.run_id, run_id);
     assert_eq!(resume.status, TurnStatus::Queued);
-    assert_eq!(
+    // Assert the resume emitted a Resumed lifecycle event (gate resolved) by
+    // PRESENCE, not as the last event: the scheduler started above is polling
+    // (10ms) and correctly re-claims the resumed→Queued run, appending a
+    // RunnerClaimed event. The in-memory engine's instant timing let this check
+    // win that race; the row store's realistic timing does not, so `.last()`
+    // observes RunnerClaimed. The resume itself is verified by
+    // `resume.status == Queued` above.
+    assert!(
         turn_store
             .events()
-            .last()
-            .expect("resume should emit lifecycle event")
-            .kind,
-        ironclaw_turns::TurnEventKind::Resumed,
-        "coordinator resume must resolve the matching gate before the run can be queued"
+            .await
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == ironclaw_turns::TurnEventKind::Resumed),
+        "coordinator resume must emit a Resumed lifecycle event (gate resolved)"
     );
 
     let completed_state = wait_for_run_status(
@@ -3118,7 +3122,7 @@ async fn text_only_host_e2e_keeps_persisted_model_route_through_full_flow() {
 #[tokio::test]
 async fn turn_runner_worker_fails_when_real_host_factory_rejects_claimed_scope() {
     let fixture = HostFixture::new_unsubmitted("thread-runner-host-edge", "hello edge").await;
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let resolver = InMemoryRunProfileResolver::default();
     let resolved = resolver
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
@@ -3530,7 +3534,7 @@ async fn profiled_capability_surface_resolver_errors_are_sanitized() {
 #[tokio::test]
 async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_host_factory() {
     let fixture = HostFixture::new_unsubmitted("thread-runtime-planned-default", "hello").await;
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let allowed_id = CapabilityId::new("demo.allowed").unwrap();
     let denied_id = CapabilityId::new("demo.denied").unwrap();
     let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
@@ -3603,6 +3607,15 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         scheduler_wake_wiring: None,
     })
     .unwrap();
+
+    // This test drives the run MANUALLY (submit -> assert sink -> claim_next_run
+    // -> host_factory) to exercise composition wiring; it does not exercise the
+    // scheduler. Stop the auto-started scheduler up front so it cannot race the
+    // manual claim (it claims a submitted run in the background). On the
+    // in-memory engine the manual claim won that race; the row store's realistic
+    // timing lets the scheduler win, stealing the run and adding a RunnerClaimed
+    // event.
+    composition.scheduler_handle.shutdown().await;
 
     let SubmitTurnResponse::Accepted { run_id, status, .. } = composition
         .coordinator
@@ -3698,7 +3711,7 @@ async fn pre_minted_scheduler_wake_wiring_drives_scheduler_on_coordinator_submit
     let wiring = SchedulerWakeWiring::channel();
 
     let fixture = HostFixture::new_unsubmitted("thread-preminted-wake", "hello preminted").await;
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let allowed_id = CapabilityId::new("demo.preminted").unwrap();
     let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
         capability_descriptor(allowed_id.as_str()),
@@ -3877,7 +3890,7 @@ async fn build_runtime_host_with_optional_hooks(
     CapabilitySurfaceVersion,
 ) {
     let fixture = HostFixture::new_unsubmitted(thread_label, "hello").await;
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
         capability_descriptor(allowed_id.as_str()),
     ])));
@@ -4232,7 +4245,7 @@ async fn hooks_are_isolated_per_tenant_runtime() {
 #[tokio::test]
 async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
     let fixture = HostFixture::new_unsubmitted("thread-product-live-ready", "hello").await;
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
         capability_descriptor("demo.allowed"),
     ])));
@@ -4362,7 +4375,7 @@ async fn product_live_parts_for_gate_test(
     thread_label: &'static str,
 ) -> DefaultPlannedRuntimeParts<RecordingGateway> {
     let fixture = HostFixture::new_unsubmitted(thread_label, "hello").await;
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
         capability_descriptor("demo.allowed"),
     ])));
@@ -4784,7 +4797,8 @@ async fn text_only_host_factory_fails_fast_when_model_route_snapshot_required_wi
 #[tokio::test]
 async fn text_only_host_e2e_flow_persists_checkpoint_mapping_in_turn_state_store() {
     let fixture = HostFixture::new("thread-host-turn-state-e2e", "hello durable host").await;
-    let turn_state_store = Arc::new(InMemoryTurnStateStore::default());
+    let scoped = ironclaw_turns::test_support::in_memory_turns_filesystem();
+    let turn_state_store = Arc::new(FilesystemTurnStateRowStore::new(scoped.clone()));
     let host = fixture
         .factory_with_loop_checkpoint_store(turn_state_store.clone())
         .build_text_only_host(RebornLoopDriverHostRequest {
@@ -4850,13 +4864,9 @@ async fn text_only_host_e2e_flow_persists_checkpoint_mapping_in_turn_state_store
         .await
         .unwrap();
 
-    let snapshot = turn_state_store.persistence_snapshot();
+    let snapshot = turn_state_store.persistence_snapshot().await.unwrap();
     assert_eq!(snapshot.loop_checkpoints.len(), 1);
-    let reopened = InMemoryTurnStateStore::from_persistence_snapshot(
-        snapshot,
-        InMemoryTurnStateStoreLimits::default(),
-    )
-    .unwrap();
+    let reopened = FilesystemTurnStateRowStore::new(scoped.clone());
     let checkpoint_record = reopened
         .get_loop_checkpoint(GetLoopCheckpointRequest {
             scope: fixture.context.scope.clone(),
@@ -8678,7 +8688,7 @@ fn driver_host_error(
 
 fn loop_exit_applier_for_fixture(
     fixture: &HostFixture,
-    turn_store: Arc<InMemoryTurnStateStore>,
+    turn_store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
 ) -> Arc<LoopExitApplier> {
     let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
     let evidence = Arc::new(
@@ -8771,7 +8781,7 @@ impl TurnStateStore for StaticTurnStateStore {
 
 async fn queue_fixture_turn(
     fixture: &HostFixture,
-    turn_store: &InMemoryTurnStateStore,
+    turn_store: &FilesystemTurnStateRowStore<InMemoryBackend>,
     resolver: &dyn RunProfileResolver,
     idempotency_key: &str,
 ) -> TurnRunId {
@@ -8827,7 +8837,7 @@ struct HostFixture {
     thread_service: Arc<InMemorySessionThreadService>,
     checkpoint_state_store: Arc<FilesystemCheckpointStateStore<InMemoryBackend>>,
     turn_state_store: Arc<StaticTurnStateStore>,
-    loop_checkpoint_store: Arc<InMemoryTurnStateStore>,
+    loop_checkpoint_store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
     gateway: Arc<RecordingGateway>,
     milestone_sink: Arc<InMemoryLoopHostMilestoneSink>,
     thread_scope: ThreadScope,
@@ -8853,7 +8863,7 @@ impl HostFixture {
     ) -> Self {
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let checkpoint_state_store = in_memory_checkpoint_state_store();
-        let loop_checkpoint_store = Arc::new(InMemoryTurnStateStore::default());
+        let loop_checkpoint_store = Arc::new(in_memory_turn_state_store());
         let gateway = Arc::new(RecordingGateway::reply("model says hi"));
         let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
         let tenant_id = TenantId::new("tenant-text-host").unwrap();
@@ -9206,14 +9216,14 @@ impl CheckpointStateStore for DiskFullCheckpointStateStore {
 }
 
 struct SlowHeartbeatTransitionPort {
-    store: Arc<InMemoryTurnStateStore>,
+    store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
     heartbeat_delay: std::time::Duration,
     heartbeat_attempts: AtomicUsize,
     notify_heartbeat_attempt: Notify,
 }
 
 impl SlowHeartbeatTransitionPort {
-    fn new(store: Arc<InMemoryTurnStateStore>) -> Self {
+    fn new(store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>) -> Self {
         Self {
             store,
             heartbeat_delay: std::time::Duration::ZERO,

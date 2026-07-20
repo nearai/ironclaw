@@ -66,8 +66,8 @@ use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPoli
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::{
-    InMemoryTurnStateStore,
     runner::{ClaimedTurnRun, TurnRunTransitionPort},
+    test_support::in_memory_turn_state_store,
 };
 #[cfg(feature = "postgres")]
 use postgres_support::assert_postgres_accepts_connections;
@@ -547,7 +547,7 @@ fn empty_trust_policy() -> Arc<HostTrustPolicy> {
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn live_wake_notifier() -> (Arc<SchedulerTurnRunWakeNotifier>, TurnRunSchedulerHandle) {
-    let transitions: Arc<dyn TurnRunTransitionPort> = Arc::new(InMemoryTurnStateStore::default());
+    let transitions: Arc<dyn TurnRunTransitionPort> = Arc::new(in_memory_turn_state_store());
     let executor: Arc<dyn TurnRunExecutor> = Arc::new(NoopTurnRunExecutor);
     let handle =
         TurnRunScheduler::new(transitions, executor, TurnRunSchedulerConfig::default()).start();

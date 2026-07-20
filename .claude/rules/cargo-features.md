@@ -56,7 +56,7 @@ when introduced:
   `ironclaw_outbound`** — declared, forwarded to by three crates, never
   read; they pulled `libsql`, `deadpool-postgres`, and `tokio-postgres`
   into builds that used none of them.
-- **`full` on `ironclaw_reborn_cli`** — an alias no build invoked.
+- **`full` on the `ironclaw` package** — an alias no build invoked.
 - **Six names for the one dev-seam concept.**
 
 ## Rules for adding one

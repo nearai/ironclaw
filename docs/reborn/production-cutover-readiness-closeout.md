@@ -49,7 +49,7 @@ layer.
 | Production fails closed on missing/local-only/unverified/unsupported services | `build_production_shaped` wiring validation, `ProductionWiringReport` mapping tests, and required-backend parity tests for libSQL/PostgreSQL. |
 | Redacted stable readiness diagnostics | `readiness_diagnostics_do_not_carry_sensitive_detail_fields`, backend URL/secret redaction assertions, and operator observability backend contract requirements. |
 | AppBuilder/default startup stays clear | Reborn production composition remains in `ironclaw_reborn_composition`; legacy `src/main.rs` is covered by `legacy_main_does_not_compose_reborn_runtime`. |
-| Reborn binary remains thin bootstrap | `ironclaw-reborn` delegates to command modules and Reborn-owned factories; `reborn_binary_main_is_thin_bootstrap` guards this mechanically. |
+| Reborn binary remains thin bootstrap | `ironclaw` delegates to command modules and Reborn-owned factories; `reborn_binary_main_is_thin_bootstrap` guards this mechanically. |
 | WebUI/Product Workflow consume facade APIs | `RebornWebuiBundle`, `build_webui_services`, product-live adapter tests, and crate guardrails in `crates/ironclaw_reborn_composition/CLAUDE.md`. |
 | Required graph components included or diagnosed | Host-runtime `ProductionWiringReport`, Reborn readiness diagnostic component mapping, and #4620 backend-parity readiness tests. |
 | PostgreSQL/libSQL parity evidence | #4620 tests plus #4551/#4615 production storage/runtime launch work. |

@@ -69,7 +69,7 @@ jobs:
       - name: Build
         run: >-
           cargo build
-          -p ironclaw
+          -p ironclaw_legacy
           --bin ironclaw-legacy
           --no-default-features
           --features libsql
