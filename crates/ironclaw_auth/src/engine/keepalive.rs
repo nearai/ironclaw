@@ -566,9 +566,23 @@ mod tests {
     }
 
     #[test]
-    fn jitter_is_bounded_by_max() {
-        let max = Duration::from_millis(25);
-        assert!(jitter_delay(max) <= max);
+    fn jitter_is_bounded_and_not_constant() {
+        // Regression pin for the PR #6116 review finding: jitter must come
+        // from a clock-independent random source. A wall-clock-derived
+        // implementation collapses to one repeated value when the clock's
+        // resolution is coarser than the draw cadence, so 64 back-to-back
+        // draws over a wide range would all collide.
+        let max = Duration::from_secs(3600);
+        let draws: std::collections::HashSet<Duration> =
+            (0..64).map(|_| jitter_delay(max)).collect();
+        assert!(
+            draws.iter().all(|delay| *delay <= max),
+            "every draw stays within max"
+        );
+        assert!(
+            draws.len() > 1,
+            "jitter_delay must not collapse to a constant value across draws"
+        );
     }
 
     #[test]
