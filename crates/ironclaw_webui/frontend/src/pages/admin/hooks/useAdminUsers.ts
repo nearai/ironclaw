@@ -46,6 +46,7 @@ export function useAdminUsers() {
         queryClient.invalidateQueries({
           queryKey: ["admin", "user", userId],
           exact: true,
+          refetchType: "active",
         }),
       );
     }
