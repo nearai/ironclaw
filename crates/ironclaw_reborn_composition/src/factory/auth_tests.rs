@@ -889,12 +889,24 @@ async fn failed_lifecycle_activation_is_not_projected_as_completed_oauth() {
 
 #[tokio::test]
 async fn oauth_callback_continuation_dispatch_maps_turn_error_categories() {
-    for turn_error in [
-        TurnError::Unavailable {
-            reason: "turn coordinator offline".to_string(),
-        },
-        TurnError::Unauthorized,
-        TurnError::ScopeNotFound,
+    for (turn_error, expected_code, expected_retryable) in [
+        (
+            TurnError::Unavailable {
+                reason: "turn coordinator offline".to_string(),
+            },
+            AuthErrorCode::BackendUnavailable,
+            true,
+        ),
+        (
+            TurnError::Unauthorized,
+            AuthErrorCode::CrossScopeDenied,
+            false,
+        ),
+        (
+            TurnError::ScopeNotFound,
+            AuthErrorCode::UnknownOrExpiredFlow,
+            false,
+        ),
     ] {
         let coordinator = Arc::new(ErrorTurnCoordinator {
             resume_error: turn_error,
@@ -924,8 +936,8 @@ async fn oauth_callback_continuation_dispatch_maps_turn_error_categories() {
             .await
             .expect_err("continuation dispatch error should surface");
 
-        assert_eq!(error.code, AuthErrorCode::BackendUnavailable);
-        assert!(error.retryable);
+        assert_eq!(error.code, expected_code);
+        assert_eq!(error.retryable, expected_retryable);
 
         let events = security_audit_sink.snapshot();
         assert_eq!(events.len(), 1);

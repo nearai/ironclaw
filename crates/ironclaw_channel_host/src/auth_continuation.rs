@@ -7,7 +7,8 @@
 
 use async_trait::async_trait;
 use ironclaw_auth::{AuthProductError, AuthResolved};
-use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
+use ironclaw_product_workflow::{ProductAuthTurnGateResumeDispatcher, ProductWorkflowError};
+use ironclaw_turns::TurnError;
 
 /// Dispatches one durable terminal auth resolution.
 ///
@@ -30,7 +31,24 @@ impl RebornAuthResolutionDispatcher for ProductAuthTurnGateResumeDispatcher {
         ProductAuthTurnGateResumeDispatcher::dispatch_auth_resolved(self, resolution)
             .await
             .map(|_| ())
-            .map_err(|_| AuthProductError::BackendUnavailable)
+            .map_err(|error| {
+                tracing::debug!(%error, "auth resolution dispatch failed");
+                match error {
+                    ProductWorkflowError::TurnSubmissionFailed {
+                        error: TurnError::Unauthorized,
+                    }
+                    | ProductWorkflowError::TurnResumeDenied {
+                        error: TurnError::Unauthorized,
+                    } => AuthProductError::CrossScopeDenied,
+                    ProductWorkflowError::TurnSubmissionFailed {
+                        error: TurnError::ScopeNotFound,
+                    }
+                    | ProductWorkflowError::TurnResumeDenied {
+                        error: TurnError::ScopeNotFound,
+                    } => AuthProductError::UnknownOrExpiredFlow,
+                    _ => AuthProductError::BackendUnavailable,
+                }
+            })
     }
 }
 
