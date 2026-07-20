@@ -2191,7 +2191,7 @@ knobs to calibrate against measured latency, not open architectural questions.
 
 ---
 
-## 14. Implementation status (as of 2026-07-19)
+## 14. Implementation status (as of 2026-07-20)
 
 This section tracks what has landed against the slices (§9) and axes (§10). It is
 the **mutable status log** — the design in §1–§13 is the frozen contract; this
@@ -2203,8 +2203,8 @@ open PR not yet on `main`.
 - **Slice C.1 — the `Invocation` payload vocabulary (§3).** `Invocation` is
   defined in `crates/ironclaw_host_api/src/invocation.rs` (#6223, under #6168) —
   the canonical host-side payload the mid-flight request mirrors collapse onto.
-  The `Resolution` / `Blocked` / `Suspension` / `HostFailure` / `Outcome` channel
-  enums are **not** yet merged (see *In flight*).
+  The `Resolution` / `Blocked` / `Suspension` / `HostFailure` channel enums are
+  **now merged too** — the §5.3 result flip landed on `main` (below).
 - **Slice A — delete in-memory stores (§4.3), most domains done.** Deleted and
   repointed to `Filesystem*Store<InMemoryBackend>`: approval stores (#6195,
   #6203), capability-lease (#6197), process stores (#6200, the §9 landed
@@ -2241,11 +2241,12 @@ open PR not yet on `main`.
   availability retries, iteration backstop, model-visible tool-failure reasons
   (#5959) — are the pre-existing base #6284's endgame builds on.
 
-### In flight — the §5.3 five-channel flip stack (`integration/reborn-flip-base`)
+### Merged — the §5.3 five-channel result flip (landed on `main` 2026-07-20)
 
-The resolution model (§5.3) lands as a dependency-ordered stack, not yet merged;
-`Resolution` currently lives at `crates/ironclaw_host_api/src/resolution.rs` on
-the integration branch:
+The resolution model (§5.3) landed as a dependency-ordered stack, squash-merged to
+`main` via #6299; `Resolution` lives at `crates/ironclaw_host_api/src/resolution.rs`.
+The **result-lane collapse is complete**: `host_api::Resolution` is the single
+loop-facing capability result and every result mirror is deleted.
 
 - **#6271** — Stage 2a-i: resume replay payload moves host-side via
   `ReplayPayloadStore` (base `main`).
@@ -2261,9 +2262,45 @@ the integration branch:
 - **#6287** — Stage 2, the flip: `invoke_capability` returns
   `host_api::Resolution`; ~49 impls migrated; the ten-variant `CapabilityOutcome`
   collapses onto the five channels at the `LoopCapabilityPort` boundary (the §5.3
-  acceptance table). `CapabilityOutcome` is retained for Stage 2b to delete.
+  acceptance table). `CapabilityOutcome` retained for Stage 2b to delete.
+- **#6293** — Stage 2b: producers emit `Resolution` directly; `CapabilityOutcome`
+  and every result mirror (`CapabilityBatchOutcome`, `CapabilityResultMessage`,
+  `CapabilityFailure`, `CapabilityDenied`, `ProcessHandleSummary`) **DELETED** — the
+  result-lane collapse is complete; the capability-DTO ratchet's result-side
+  entries are gone.
+- **#6299** — the integration stack squash-landed on `main`, reconciled with main's
+  advancing refactors (#6279 / #6277 / #6292; then #6296 post-merge).
+- **#6303** — follow-up: `stable_auth_gate_id` now fingerprints the credential
+  `setup` (an IronLoop finding — a ManualToken↔OAuth/Pairing setup change previously
+  collided on the deterministic auth-gate key and the write-once store kept the
+  stale record), plus injective scope-list encoding and CodeRabbit test cleanups.
 
 ### Not started
+
+- **Slice C down-path (request-side) — the remaining capability-DTO collapse.**
+  The result side is done (above); the **9 request-side mirrors** still stand
+  (`FROZEN_COLLAPSE_DTOS`): `CapabilityInvocation` (turns),
+  `RuntimeCapability{,Resume,AuthResume}Request` (host_runtime),
+  `Capability{Invocation,Resume,AuthResume}Request` (capabilities),
+  `CapabilityDispatchRequest` (host_api), `RuntimeAdapterRequest` (dispatcher). The
+  `Invocation` / `Authorized` / `AuthorizeResult` vocabulary exists and `authorize()`
+  is extracted (`capabilities/src/host.rs`), but still consumes
+  `CapabilityInvocationRequest` and mints the `Authorized` witness only as a
+  *forward-looking artifact* — `dispatch()` still routes via `obligation_outcome`,
+  not the witness (the §9 "later slice" markers). Planned slice sequence,
+  risk-ordered, each a small stacked PR with `ironclaw_architecture` green:
+  **D1** — `dispatch()`/dispatcher consume `Authorized` (+ resolved handles),
+  retire `CapabilityDispatchRequest` + `RuntimeAdapterRequest` (lower half, first-party
+  lane PoC per §9); **D2** — `authorize(&Invocation) -> AuthorizeResult`, host_runtime
+  builds `Invocation`, retire `RuntimeCapabilityRequest` + `CapabilityInvocationRequest`;
+  **D3** — the loop membrane (`loop_host::capability_port`) mints `Invocation` sealing
+  origin/actor/scope, retire `CapabilityInvocation`; **D4** — resume + auth-resume
+  reconstruct `Invocation` from the host-private `ReplayPayloadStore`, retire the four
+  resume mirrors → `FROZEN_COLLAPSE_DTOS` empty; **D5** — the **security milestone**:
+  inline the four policy checks into `authorize()` so the `Authorized` seal becomes
+  load-bearing (vacuous until then, §9 / §5.3.2); **D6** — ratchet-to-empty + measure
+  (type / `dyn` / boundary-test diff, §9 step 4). Invoke (D1–D3) precedes resume (D4)
+  because resume carries the replay/gate-reconstitution hazards of the #6287/#6299 class.
 
 - **Slice 0** — the reference-model property suite (§11.4), prerequisite for
   consolidating the turns-cluster store (Slice A's deferred remainder).
