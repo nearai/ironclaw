@@ -228,11 +228,22 @@ async def test_workspace_deep_link_expands_selected_file_parents(reborn_v2_yolo_
     )
     await expect(page.locator(SEL_V2["workspace_heading"])).to_be_visible(timeout=15000)
 
-    for label in ("Home", "projects", "ironclaw", "notes"):
-        expanded_directory = page.locator('button[aria-expanded="true"]').filter(
-            has_text=label
+    for path in (
+        "workspace",
+        "workspace/projects",
+        "workspace/projects/ironclaw",
+        "workspace/projects/ironclaw/notes",
+    ):
+        expanded_directory = page.locator(
+            SEL_V2["workspace_tree_entry_for"].format(path=path)
         )
-        await expect(expanded_directory).to_be_visible(timeout=5000)
+        await expect(expanded_directory).to_have_attribute(
+            "aria-expanded", "true", timeout=5000
+        )
 
-    selected_file = page.locator("button.min-h-8").filter(has_text="plan")
+    selected_file = page.locator(
+        SEL_V2["workspace_tree_entry_for"].format(
+            path="workspace/projects/ironclaw/notes/plan"
+        )
+    )
     await expect(selected_file).to_be_visible(timeout=5000)
