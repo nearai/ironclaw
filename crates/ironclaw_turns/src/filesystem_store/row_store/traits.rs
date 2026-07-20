@@ -207,7 +207,19 @@ where
         // single-writer authority under write-behind. Write-through (durable ==
         // cache) and the degraded path (cache cleared) read the durable rows.
         let state = if self.is_write_behind_healthy() {
-            self.read_run_state_from_hot_cache(&request).await?
+            match self.read_run_state_from_hot_cache(&request).await? {
+                Some(state) => Some(state),
+                // Hot-cache miss under healthy write-behind: the hot snapshot is
+                // bounded and evicts OLD TERMINAL runs, whose durable rows still
+                // persist and must stay queryable (the eviction contract). Flush
+                // our pending write-behind tail (so a not-yet-durable own write
+                // can't be a false miss) then read the durable rows (#6298
+                // IronLoop f6).
+                None => {
+                    self.flush_pending_write_behind_for_read().await?;
+                    self.read_run_state_from_durable_rows(&request).await?
+                }
+            }
         } else {
             self.read_run_state_from_durable_rows(&request).await?
         };
@@ -374,11 +386,20 @@ where
             self.ensure_not_degraded().await?;
             let record = loop_checkpoint_record_from_request(request);
             let delta = SnapshotDelta::default().set_loop_checkpoints_upsert(vec![record.clone()]);
-            // A loop checkpoint carries no run status transition, so it is never
-            // recoverability-critical: under write-behind it takes the async
-            // (lazy-flush) path. Any checkpoint a gate-park needs is flushed by
-            // the block transition's synchronous barrier.
-            const CHECKPOINT_CRITICAL: bool = false;
+            // A loop checkpoint is normally non-critical — under write-behind it
+            // lazy-flushes, and a gate-park's checkpoint is flushed by the block
+            // transition's synchronous barrier. The EXCEPTION is
+            // `BeforeSideEffect`: it is written immediately before a capability's
+            // external side effect, and expired-lease recovery treats the ABSENCE
+            // of a durable checkpoint as proof no side effect occurred (and
+            // requeues the run). If it lazy-flushed, a crash after the capability
+            // ran but before the flush would replay a non-idempotent side effect
+            // (#6298 IronLoop f5). Keep it synchronous (critical) so it is durable
+            // BEFORE the capability executes.
+            let checkpoint_critical = matches!(
+                record.kind,
+                crate::run_profile::LoopCheckpointKind::BeforeSideEffect
+            );
             let ack = {
                 // Serialize the durable enqueue on the shared snapshot-state lock
                 // — the same lock every apply path holds across its
@@ -390,7 +411,7 @@ where
                 // concurrent checkpoints can't grow the journal channel past the
                 // cap while a flush is in flight — the same reserve→enqueue→track
                 // flow every other async commit uses.
-                if self.write_behind_async(CHECKPOINT_CRITICAL)
+                if self.write_behind_async(checkpoint_critical)
                     && let Err(error) = self.reserve_write_behind_slot().await
                 {
                     *guard = None;
@@ -415,7 +436,7 @@ where
                 // Track the ack in the bounded window and return `None` on the
                 // async path so `commit_pending` lazy-flushes (no await); on
                 // write-through it returns the ack unchanged to be awaited.
-                self.track_write_behind_ack_if_async(CHECKPOINT_CRITICAL, ack)
+                self.track_write_behind_ack_if_async(checkpoint_critical, ack)
                     .await
             };
             self.commit_pending(
@@ -424,7 +445,7 @@ where
                     ack,
                     active_lock_reservations: Vec::new(),
                     run_row_reservations: Vec::new(),
-                    critical: CHECKPOINT_CRITICAL,
+                    critical: checkpoint_critical,
                 },
                 "timed out waiting for loop checkpoint row-store append",
             )

@@ -3092,6 +3092,131 @@ async fn write_behind_put_loop_checkpoint_takes_async_path() {
     check_internal_invariants(&store.persistence_snapshot().await.unwrap()).unwrap();
 }
 
+/// #6298 IronLoop f5 — `BeforeSideEffect` loop checkpoints are recoverability-
+/// critical: they gate side-effect replay (expired-lease recovery treats the
+/// absence of a durable checkpoint as "no side effect ran" and requeues). Under
+/// WriteBehind they must be SYNCHRONOUS, so a crash immediately after the
+/// checkpoint returns `Ok` still finds it durable — recovery does not replay the
+/// capability. (`BeforeModel` stays async — losing one is redoable work.)
+#[tokio::test]
+async fn write_behind_before_side_effect_checkpoint_survives_crash() {
+    let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
+    let scoped = fault_scoped(Arc::clone(&backend));
+    let scope = only_scope();
+
+    let (run_id, turn_id, checkpoint_id) = {
+        let store =
+            open_row_store_with_policy(Arc::clone(&scoped), TurnStateDurabilityPolicy::WriteBehind);
+        let run_id = submit_one(&store, &scope, "idem-wb-sidefx").await;
+        let turn_id = store
+            .persistence_snapshot()
+            .await
+            .unwrap()
+            .runs
+            .iter()
+            .find(|run| run.run_id == run_id)
+            .expect("submitted run present")
+            .turn_id;
+        let record = store
+            .put_loop_checkpoint(PutLoopCheckpointRequest {
+                scope: scope.clone(),
+                turn_id,
+                run_id,
+                state_ref: LoopCheckpointStateRef::new("checkpoint:before-side-effect").unwrap(),
+                schema_id: CheckpointSchemaId::new("interactive_checkpoint_v1").unwrap(),
+                schema_version: RunProfileVersion::new(1),
+                kind: LoopCheckpointKind::BeforeSideEffect,
+                gate_ref: None,
+            })
+            .await
+            .expect("BeforeSideEffect checkpoint Ok");
+        let checkpoint_id = record.checkpoint_id;
+        // Crash immediately after `Ok`, no flush await — only the checkpoint's
+        // own synchronous durability barrier can save it.
+        drop(store);
+        (run_id, turn_id, checkpoint_id)
+    };
+
+    let recovered =
+        open_row_store_with_policy(Arc::clone(&scoped), TurnStateDurabilityPolicy::WriteBehind);
+    let checkpoint = recovered
+        .get_loop_checkpoint(GetLoopCheckpointRequest {
+            scope,
+            turn_id,
+            run_id,
+            checkpoint_id,
+        })
+        .await
+        .expect("get_loop_checkpoint");
+    assert!(
+        checkpoint.is_some(),
+        "a BeforeSideEffect checkpoint must survive a write-behind crash so recovery does not \
+         replay the side effect",
+    );
+}
+
+/// #6298 IronLoop f6 — the hot cache is bounded and evicts OLD TERMINAL runs,
+/// but their durable rows persist. Under healthy WriteBehind, `get_run_state`
+/// must fall back to the durable rows on a hot-cache miss so an evicted terminal
+/// stays queryable (the eviction contract), not `ScopeNotFound`.
+#[tokio::test]
+async fn write_behind_get_run_state_finds_evicted_terminal_via_durable_fallback() {
+    let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
+    let scoped = fault_scoped(Arc::clone(&backend));
+    // Cap terminals at 1: completing a SECOND run evicts the first from the hot
+    // cache while its durable row remains.
+    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped))
+        .with_limits(limits().set_max_terminal_records(1))
+        .with_durability_policy(TurnStateDurabilityPolicy::WriteBehind);
+
+    // Drive a run to a terminal (Completed) — a critical transition, so durable.
+    async fn complete_a_run(
+        store: &FilesystemTurnStateRowStore<FaultBackend>,
+        scope: &TurnScope,
+        idem: &str,
+    ) -> TurnRunId {
+        let run_id = submit_one(store, scope, idem).await;
+        let runner_id = TurnRunnerId::new();
+        let lease_token = TurnLeaseToken::new();
+        store
+            .claim_next_run(ClaimRunRequest {
+                runner_id,
+                lease_token,
+                scope_filter: Some(scope.clone()),
+            })
+            .await
+            .unwrap()
+            .expect("claim the queued run");
+        store
+            .complete_run(CompleteRunRequest {
+                run_id,
+                runner_id,
+                lease_token,
+            })
+            .await
+            .expect("complete the run");
+        run_id
+    }
+
+    let scope_a = scope_bp(0);
+    let run_a = complete_a_run(&store, &scope_a, "idem-evict-a").await;
+    // Completing B pushes terminal count past the cap, evicting A's terminal from
+    // the hot cache (its durable row remains).
+    let _run_b = complete_a_run(&store, &scope_bp(1), "idem-evict-b").await;
+
+    let state_a = store
+        .get_run_state(GetRunStateRequest {
+            scope: scope_a,
+            run_id: run_a,
+        })
+        .await;
+    assert!(
+        matches!(&state_a, Ok(state) if state.run_id == run_a && state.status == TurnStatus::Completed),
+        "an evicted-but-durable terminal must stay queryable via the durable fallback, not \
+         ScopeNotFound; got {state_a:?}",
+    );
+}
+
 /// #6263 Step 3 (IronLoop f2) — read-your-writes under write-behind. A
 /// non-critical submit returns `Ok` after updating the hot snapshot but before
 /// its durable append; an immediate same-store `get_run_state` must still see it
