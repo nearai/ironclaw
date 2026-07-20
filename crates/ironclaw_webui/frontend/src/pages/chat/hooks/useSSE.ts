@@ -96,6 +96,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
     let reconnectTimer = null;
     let reconnectWatchdog = null;
     let reconnectAttempts = 0;
+    let disposed = false;
     const maxReconnectDelay = 30_000;
     const nativeReconnectWatchdogDelay = 10_000;
 
@@ -109,9 +110,14 @@ export function useSSE({ threadId, onEvent, enabled }) {
     function reconnectWithTimer(
       status: ConnectionStatus = CONNECTION_STATUS.DISCONNECTED,
     ) {
+      if (disposed) return;
       if (es) {
         es.close();
         es = null;
+      }
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
       }
       clearReconnectWatchdog();
       setStatus(status);
@@ -124,7 +130,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
       if (reconnectWatchdog) return;
       reconnectWatchdog = setTimeout(() => {
         reconnectWatchdog = null;
-        if (es !== source || !source) {
+        if (disposed || es !== source || !source) {
           return;
         }
         if (isEventSourceOpen(source)) {
@@ -137,6 +143,8 @@ export function useSSE({ threadId, onEvent, enabled }) {
     }
 
     function connect() {
+      reconnectTimer = null;
+      if (disposed) return;
       if (document.visibilityState === "hidden") {
         setStatus(CONNECTION_STATUS.PAUSED);
         return;
@@ -153,23 +161,25 @@ export function useSSE({ threadId, onEvent, enabled }) {
       });
       const source = es;
 
-      es.onopen = () => {
+      source.onopen = () => {
+        if (disposed || es !== source) return;
         clearReconnectWatchdog();
         reconnectAttempts = 0;
         setStatus(CONNECTION_STATUS.CONNECTED);
       };
 
-      es.onerror = () => {
-        if (!es) return;
-        if (!isEventSourceClosed(es)) {
+      source.onerror = () => {
+        if (disposed || es !== source) return;
+        if (!isEventSourceClosed(source)) {
           setStatus(CONNECTION_STATUS.RECONNECTING);
-          scheduleNativeReconnectWatchdog(es);
+          scheduleNativeReconnectWatchdog(source);
           return;
         }
         reconnectWithTimer();
       };
 
       const dispatchFrame = (event, fallbackType) => {
+        if (disposed || es !== source) return;
         let frame = null;
         try {
           frame = JSON.parse(event.data);
@@ -217,6 +227,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
     }
 
     function disconnectForHiddenTab() {
+      if (disposed) return;
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
@@ -230,6 +241,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
     }
 
     function handleVisibilityChange() {
+      if (disposed) return;
       if (document.visibilityState === "hidden") {
         disconnectForHiddenTab();
       } else if (!es) {
@@ -238,10 +250,12 @@ export function useSSE({ threadId, onEvent, enabled }) {
     }
 
     function handleNetworkOffline() {
+      if (disposed) return;
       setStatus(CONNECTION_STATUS.RECONNECTING);
     }
 
     function handleNetworkOnline() {
+      if (disposed) return;
       if (es && isEventSourceOpen(es)) {
         clearReconnectWatchdog();
         reconnectAttempts = 0;
@@ -266,12 +280,15 @@ export function useSSE({ threadId, onEvent, enabled }) {
     window.addEventListener("online", handleNetworkOnline);
 
     return () => {
+      disposed = true;
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("offline", handleNetworkOffline);
       window.removeEventListener("online", handleNetworkOnline);
       if (reconnectTimer) clearTimeout(reconnectTimer);
       clearReconnectWatchdog();
-      if (es) es.close();
+      const source = es;
+      es = null;
+      source?.close();
     };
   }, [enabled, threadId]);
 

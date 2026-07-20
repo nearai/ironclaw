@@ -6,6 +6,7 @@ use std::sync::{
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures_util::future::{Either, select};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -577,20 +578,17 @@ where
     F: Future<Output = T>,
 {
     tokio::pin!(future);
-    let idle = tokio::time::sleep(idle_timeout);
-    tokio::pin!(idle);
-    let mut progress_channel_open = true;
-
     loop {
-        tokio::select! {
-            result = &mut future => return Ok(result),
-            _ = &mut idle => return Err(()),
-            update = progress_updates.changed(), if progress_channel_open => {
-                if update.is_err() {
-                    progress_channel_open = false;
-                } else {
-                    idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
-                }
+        let progress_or_timeout = tokio::time::timeout(idle_timeout, progress_updates.changed());
+        tokio::pin!(progress_or_timeout);
+        match select(future.as_mut(), progress_or_timeout.as_mut()).await {
+            Either::Left((result, _progress)) => return Ok(result),
+            Either::Right((Ok(Ok(())), _future)) => continue,
+            Either::Right((Err(_elapsed), _future)) => return Err(()),
+            Either::Right((Ok(Err(_closed)), _future)) => {
+                return tokio::time::timeout(idle_timeout, future.as_mut())
+                    .await
+                    .map_err(|_elapsed| ());
             }
         }
     }

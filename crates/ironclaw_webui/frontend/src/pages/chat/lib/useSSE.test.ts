@@ -333,6 +333,33 @@ test("useSSE keeps a thread cursor when the chat page remounts", () => {
   cleanup();
 });
 
+test("useSSE ignores callbacks from a stream disposed by a thread switch", () => {
+  const { cleanup, render, statuses, streams, timers } = createHarness();
+  const disposedStream = streams[0];
+
+  render("thread-2");
+  assert.equal(disposedStream.closeCalls, 1);
+  assert.equal(streams.length, 2);
+
+  // A network error can already be queued when React cleans up the old
+  // effect. It must not schedule an orphan reconnect for the old thread.
+  disposedStream.onerror();
+  disposedStream.listener("error")({
+    data: JSON.stringify({
+      error: "unavailable",
+      kind: "replay_unavailable",
+      retryable: true,
+    }),
+    lastEventId: "",
+  });
+
+  assert.equal(timers.length, 0);
+  assert.equal(streams.length, 2);
+  assert.deepEqual(statuses, ["connecting", "connecting"]);
+
+  cleanup();
+});
+
 test("useSSE rebases from origin when the server rejects its replay cursor", () => {
   const events = [];
   const { statuses, streams, timers } = createHarness({
