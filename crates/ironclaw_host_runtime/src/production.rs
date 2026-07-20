@@ -2119,8 +2119,6 @@ fn stable_auth_gate_id(
     let mut requirements = credential_requirements
         .iter()
         .map(|requirement| {
-            let mut scopes = requirement.provider_scopes.clone();
-            scopes.sort();
             // `setup` MUST be part of the fingerprint (#6299 IronLoop): two
             // requirements that agree on provider/extension/provider_scopes but
             // differ in `setup` (e.g. a ManualToken record vs a later OAuth or
@@ -2134,7 +2132,7 @@ fn stable_auth_gate_id(
                 requirement.provider.as_str(),
                 requirement.requester_extension.as_str(),
                 stable_setup_token(&requirement.setup),
-                scopes.join(",")
+                canonical_scope_list(&requirement.provider_scopes),
             )
         })
         .collect::<Vec<_>>();
@@ -2151,20 +2149,32 @@ fn stable_auth_gate_id(
 /// so [`stable_auth_gate_id`] distinguishes auth requirements that differ only
 /// in their setup flow (#6299 IronLoop). Exhaustive by design: a new
 /// `RuntimeCredentialAccountSetup` variant fails the build here rather than
-/// silently hashing to an existing token. OAuth setup scopes are sorted to
-/// match the `provider_scopes` canonicalization.
+/// silently hashing to an existing token. OAuth setup scopes use the same
+/// injective [`canonical_scope_list`] encoding as `provider_scopes`.
 fn stable_setup_token(setup: &ironclaw_host_api::RuntimeCredentialAccountSetup) -> String {
     use ironclaw_host_api::RuntimeCredentialAccountSetup as Setup;
     match setup {
         Setup::ManualToken => "manual_token".to_string(),
-        Setup::OAuth { scopes } => {
-            let mut scopes = scopes.clone();
-            scopes.sort();
-            format!("oauth:{}", scopes.join(","))
-        }
+        Setup::OAuth { scopes } => format!("oauth:{}", canonical_scope_list(scopes)),
         Setup::Pairing => "pairing".to_string(),
         Setup::Retired => "retired".to_string(),
     }
+}
+
+/// Injective canonical encoding of a scope list for the auth-gate fingerprint
+/// (#6299 IronLoop). Scopes are not validated to exclude a join delimiter, so a
+/// plain `join(",")` is ambiguous — `["a,b"]` and `["a", "b"]` would collide and
+/// derive the same write-once gate key. Sort (a scope set is order-independent),
+/// then length-prefix each element (`<byte_len>:<scope>`) so distinct sets can
+/// never share an encoding regardless of which characters the scopes contain.
+fn canonical_scope_list(scopes: &[String]) -> String {
+    let mut sorted = scopes.to_vec();
+    sorted.sort();
+    sorted
+        .iter()
+        .map(|scope| format!("{}:{scope}", scope.len()))
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 fn spawned_process_outcome_from(
@@ -2680,6 +2690,21 @@ output_schema_ref = "schemas/test.output.json"
         assert_ne!(
             oauth, oauth_readwrite,
             "OAuth setups with different setup scopes must not collide"
+        );
+
+        // Injective encoding: a single scope containing the old `,` join
+        // delimiter must not collide with two scopes that join to the same
+        // string — `["a,b"]` and `["a", "b"]` are DIFFERENT scope sets. Before
+        // the length-prefixed `canonical_scope_list`, both encoded to "a,b".
+        let one_comma_scope = gate_id(Setup::OAuth {
+            scopes: vec!["a,b".to_string()],
+        });
+        let two_scopes = gate_id(Setup::OAuth {
+            scopes: vec!["a".to_string(), "b".to_string()],
+        });
+        assert_ne!(
+            one_comma_scope, two_scopes,
+            "OAuth setup scopes must encode injectively: [\"a,b\"] != [\"a\", \"b\"]",
         );
     }
 
