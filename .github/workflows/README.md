@@ -98,9 +98,13 @@ release host's `artifacts-*` download pattern. On a matching tag run, the
 Reborn publisher validates the exact seven-artifact allowlist, restores the
 binary mode, and creates target-qualified `ironclaw-<target>.tar.gz` archives
 with per-archive and aggregate SHA-256 files. Those archives become permanent
-GitHub Release assets. They are direct binary archives, not cargo-dist
-installers; `ironclaw_reborn_cli` remains `dist = false` until its package
-version and installer contracts are aligned.
+GitHub Release assets. The Release body keeps the legacy `Release Notes` and
+platform download-table shape, sourcing notes from the matching changelog
+section (or `Unreleased` for a prerelease without its own section), but omits
+installer commands for assets this path does not publish. Stable releases fail
+closed when their versioned changelog section is missing. These are direct
+archives, not cargo-dist installers. `ironclaw_reborn_cli` remains `dist = false`
+until its package version and installer contracts are aligned.
 
 ## Deep tier (nightly)
 

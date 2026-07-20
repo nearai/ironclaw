@@ -6853,6 +6853,7 @@ fn release_ci_publishes_reborn_without_enabling_legacy_or_docker() {
             && !reborn_publish_job.contains("pattern: artifacts-*")
             && !reborn_publish_job.contains("needs: plan")
             && !reborn_publish_job.contains("\n      - plan\n")
+            && reborn_publish_job.contains("bash .github/scripts/render-reborn-release-notes.sh")
             && reborn_publish_job.contains("gh release create")
             && reborn_publish_job.contains("release-assets/*")
             && reborn_publish_job.contains("--title \"Version $RELEASE_VERSION\"")
@@ -6887,14 +6888,22 @@ fn release_ci_publishes_reborn_without_enabling_legacy_or_docker() {
             && reborn_publish_job.contains(".digest // \"\"")
             && reborn_publish_job.contains(".target_commitish // \"\"")
             && reborn_publish_job.contains(".name // \"\"")
+            && reborn_publish_job.contains(".body // \"\"")
             && reborn_publish_job
                 .contains("[[ \"$actual_name\" != \"Version $RELEASE_VERSION\" ]]")
             && reborn_publish_job.contains("verify_release \"$draft_release\" true")
             && reborn_publish_job.contains("verify_release \"$published_release\" false")
             && reborn_publish_job.contains("publish_verified_draft \"${draft_ids[0]}\"")
             && reborn_publish_job.contains("Multiple draft Releases exist")
+            && reborn_publish_job.contains("gh api --include")
+            && reborn_publish_job.contains("[[ \"$release_lookup_status\" != \"404\" ]]")
+            && reborn_publish_job.contains("list_draft_release_ids")
+            && !reborn_publish_job.contains("mapfile -t draft_ids < <(\n            gh api")
+            && !reborn_publish_job
+                .contains("mapfile -t created_draft_ids < <(\n            gh api")
             && reborn_publish_job.matches("verify_tag_commit").count() >= 5
             && reborn_publish_job.contains("Existing Release assets differ")
+            && reborn_publish_job.contains("Existing Release notes differ")
             && reborn_publish_job.contains("${RELEASE_TAG#ironclaw-v}")
             && reborn_publish_job.contains("${release_version%%+*}")
             && reborn_publish_job.contains("[[ \"$release_core\" == *-* ]]")
@@ -6982,9 +6991,10 @@ fn release_ci_publishes_reborn_without_enabling_legacy_or_docker() {
         .find(|line| line.contains("grep -Eq") && line.contains("crates/ironclaw_reborn_cli/"))
         .expect("code style workflow should classify Reborn CLI changes");
     assert!(
-        reborn_cli_selector.contains(
-            r"\.github/workflows/(code_style|release|docker|reborn-release-compile)\.yml$"
-        ),
+        reborn_cli_selector.contains(r"\.github/scripts/render-reborn-release-notes\.sh$")
+            && reborn_cli_selector.contains(
+                r"\.github/workflows/(code_style|release|docker|reborn-release-compile)\.yml$"
+            ),
         "release workflow-only PRs must run the Reborn CLI smoke contract"
     );
     assert!(
@@ -6992,6 +7002,120 @@ fn release_ci_publishes_reborn_without_enabling_legacy_or_docker() {
             r#"if [[ "${{ needs.changes.outputs.has_reborn_cli }}" == "true" && "${{ needs.reborn-cli-smoke.result }}" != "success" ]]; then"#,
         ),
         "the required Code Style roll-up must propagate workflow-only Reborn CLI smoke failures"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn reborn_release_notes_preserve_the_legacy_notes_and_download_shape() {
+    let root = workspace_root();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let changelog = temp.path().join("CHANGELOG.md");
+    std::fs::write(
+        &changelog,
+        concat!(
+            "# Changelog\n\n",
+            "## [Unreleased]\n\n",
+            "### Added\n\n",
+            "- New Reborn behavior.\n\n",
+            "### Fixed\n\n",
+            "- A release regression.\n\n\n",
+            "## [1.2.2] - 2026-07-01\n\n",
+            "- Older notes must not leak into this release.\n",
+        ),
+    )
+    .expect("write changelog fixture");
+
+    let output = Command::new("/bin/bash")
+        .arg(root.join(".github/scripts/render-reborn-release-notes.sh"))
+        .args([
+            changelog.as_os_str(),
+            std::ffi::OsStr::new("example/ironclaw"),
+            std::ffi::OsStr::new("ironclaw-v1.2.3-rc.1"),
+            std::ffi::OsStr::new("1.2.3-rc.1"),
+        ])
+        .output()
+        .expect("render release notes");
+    assert!(
+        output.status.success(),
+        "release-note rendering should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let body = String::from_utf8(output.stdout).expect("UTF-8 release notes");
+    let expected = concat!(
+        "## Release Notes\n\n",
+        "### Added\n\n",
+        "- New Reborn behavior.\n\n",
+        "### Fixed\n\n",
+        "- A release regression.\n\n",
+        "## Download ironclaw 1.2.3-rc.1\n\n",
+        "|  File  | Platform | Checksum |\n",
+        "|--------|----------|----------|\n",
+        "| [ironclaw-aarch64-apple-darwin.tar.gz](https://github.com/example/ironclaw/releases/download/ironclaw-v1.2.3-rc.1/ironclaw-aarch64-apple-darwin.tar.gz) | Apple Silicon macOS | [checksum](https://github.com/example/ironclaw/releases/download/ironclaw-v1.2.3-rc.1/ironclaw-aarch64-apple-darwin.tar.gz.sha256) |\n",
+        "| [ironclaw-x86_64-apple-darwin.tar.gz](https://github.com/example/ironclaw/releases/download/ironclaw-v1.2.3-rc.1/ironclaw-x86_64-apple-darwin.tar.gz) | Intel macOS | [checksum](https://github.com/example/ironclaw/releases/download/ironclaw-v1.2.3-rc.1/ironclaw-x86_64-apple-darwin.tar.gz.sha256) |\n",
+        "| [ironclaw-x86_64-pc-windows-msvc.tar.gz](https://github.com/example/ironclaw/releases/download/ironclaw-v1.2.3-rc.1/ironclaw-x86_64-pc-windows-msvc.tar.gz) | x64 Windows | [checksum](https://github.com/example/ironclaw/releases/download/ironclaw-v1.2.3-rc.1/ironclaw-x86_64-pc-windows-msvc.tar.gz.sha256) |\n",
+        "| [ironclaw-aarch64-unknown-linux-gnu.tar.gz](https://github.com/example/ironclaw/releases/download/ironclaw-v1.2.3-rc.1/ironclaw-aarch64-unknown-linux-gnu.tar.gz) | ARM64 Linux | [checksum](https://github.com/example/ironclaw/releases/download/ironclaw-v1.2.3-rc.1/ironclaw-aarch64-unknown-linux-gnu.tar.gz.sha256) |\n",
+        "| [ironclaw-x86_64-unknown-linux-gnu.tar.gz](https://github.com/example/ironclaw/releases/download/ironclaw-v1.2.3-rc.1/ironclaw-x86_64-unknown-linux-gnu.tar.gz) | x64 Linux | [checksum](https://github.com/example/ironclaw/releases/download/ironclaw-v1.2.3-rc.1/ironclaw-x86_64-unknown-linux-gnu.tar.gz.sha256) |\n",
+        "| [ironclaw-aarch64-unknown-linux-musl.tar.gz](https://github.com/example/ironclaw/releases/download/ironclaw-v1.2.3-rc.1/ironclaw-aarch64-unknown-linux-musl.tar.gz) | ARM64 MUSL Linux | [checksum](https://github.com/example/ironclaw/releases/download/ironclaw-v1.2.3-rc.1/ironclaw-aarch64-unknown-linux-musl.tar.gz.sha256) |\n",
+        "| [ironclaw-x86_64-unknown-linux-musl.tar.gz](https://github.com/example/ironclaw/releases/download/ironclaw-v1.2.3-rc.1/ironclaw-x86_64-unknown-linux-musl.tar.gz) | x64 MUSL Linux | [checksum](https://github.com/example/ironclaw/releases/download/ironclaw-v1.2.3-rc.1/ironclaw-x86_64-unknown-linux-musl.tar.gz.sha256) |\n",
+    );
+    assert_eq!(body, expected);
+    assert!(!body.contains("## Install ironclaw"));
+    assert!(!body.contains("ironclaw-installer"));
+    assert!(!body.contains("npm install"));
+    assert!(!body.contains(".msi"));
+}
+
+#[cfg(unix)]
+#[test]
+fn reborn_release_notes_require_an_exact_changelog_section_for_stable_tags() {
+    let root = workspace_root();
+    let script = root.join(".github/scripts/render-reborn-release-notes.sh");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let changelog = temp.path().join("CHANGELOG.md");
+    std::fs::write(
+        &changelog,
+        concat!(
+            "# Changelog\n\n",
+            "## [Unreleased]\n\n",
+            "- Must not be used for a stable release.\n\n",
+            "## [1.2.3](https://example.com/compare) - 2026-07-20\n\n",
+            "### Fixed\n\n",
+            "- Stable release note.\n",
+        ),
+    )
+    .expect("write changelog fixture");
+
+    let exact_output = Command::new("/bin/bash")
+        .arg(&script)
+        .args([
+            changelog.as_os_str(),
+            std::ffi::OsStr::new("example/ironclaw"),
+            std::ffi::OsStr::new("ironclaw-v1.2.3"),
+            std::ffi::OsStr::new("1.2.3"),
+        ])
+        .output()
+        .expect("render stable release notes");
+    assert!(exact_output.status.success());
+    let exact_body = String::from_utf8(exact_output.stdout).expect("UTF-8 release notes");
+    assert!(exact_body.contains("- Stable release note."));
+    assert!(!exact_body.contains("Must not be used for a stable release"));
+
+    let missing_output = Command::new("/bin/bash")
+        .arg(&script)
+        .args([
+            changelog.as_os_str(),
+            std::ffi::OsStr::new("example/ironclaw"),
+            std::ffi::OsStr::new("ironclaw-v1.2.4"),
+            std::ffi::OsStr::new("1.2.4"),
+        ])
+        .output()
+        .expect("reject missing stable release notes");
+    assert!(!missing_output.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing_output.stderr)
+            .contains("no publishable notes for [1.2.4]")
     );
 }
 

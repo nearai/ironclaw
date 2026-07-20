@@ -654,9 +654,13 @@ loader. Its short-lived `reborn-compile-*` workflow artifacts remain excluded
 from the legacy cargo-dist `artifacts-*` namespace. For matching tag runs, an
 independent publisher strictly validates all seven staging artifacts, restores
 their binary mode, packages each as `ironclaw-<target>.tar.gz`, adds SHA-256
-files, and creates the tag's GitHub Release. A direct manual run of the reusable
-compile workflow does not publish. This path does not claim `serve`, external
-service, or installer coverage.
+files, and creates the tag's GitHub Release. The Release body retains the
+legacy changelog-backed `Release Notes` section and platform download table,
+while omitting install instructions for cargo-dist assets that are not
+published. Prereleases may source `Unreleased`; stable tags require their exact
+versioned changelog section. A direct manual run of the reusable compile
+workflow does not publish. This path does not claim `serve`, external service,
+or installer coverage.
 
 While #6160's temporary Reborn-only release policy is active, matching tag runs
 run the compile matrix and direct Reborn publisher. The legacy cargo-dist plan,

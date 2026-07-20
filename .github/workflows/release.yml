@@ -201,6 +201,18 @@ jobs:
           echo "version=$release_version" >> "$GITHUB_OUTPUT"
           echo "prerelease=$release_is_prerelease" >> "$GITHUB_OUTPUT"
 
+          notes_file="$RUNNER_TEMP/release-notes.md"
+          bash .github/scripts/render-reborn-release-notes.sh \
+            CHANGELOG.md \
+            "$GH_REPO" \
+            "$RELEASE_TAG" \
+            "$release_version" \
+            > "$notes_file"
+          if [[ ! -s "$notes_file" ]]; then
+            echo "::error::Rendered Release notes are empty"
+            exit 1
+          fi
+
       - name: Create Reborn GitHub Release
         shell: bash
         env:
@@ -208,6 +220,16 @@ jobs:
           RELEASE_VERSION: ${{ steps.prepare.outputs.version }}
         run: |
           set -euo pipefail
+
+          list_draft_release_ids() {
+            local ids_file="$1"
+            local releases_file="$2"
+
+            gh api --paginate "repos/$GH_REPO/releases?per_page=100" > "$releases_file"
+            jq -r --arg tag "$RELEASE_TAG" \
+              '.[] | select(.tag_name == $tag and .draft) | .id' \
+              "$releases_file" > "$ids_file"
+          }
 
           verify_tag_commit() {
             local tag_commit
@@ -222,6 +244,7 @@ jobs:
             local release_json="$1"
             local expected_draft="$2"
             local actual_manifest="$RUNNER_TEMP/actual-release-assets.tsv"
+            local actual_notes="$RUNNER_TEMP/actual-release-notes.md"
             local actual_draft actual_name actual_prerelease actual_target
             actual_draft="$(jq -r '.draft' "$release_json")"
             actual_name="$(jq -r '.name // ""' "$release_json")"
@@ -241,6 +264,12 @@ jobs:
             fi
             if [[ "$actual_target" != "$RELEASE_COMMIT" ]]; then
               echo "::error::Release targets $actual_target, expected $RELEASE_COMMIT"
+              return 1
+            fi
+            jq -j '.body // ""' "$release_json" > "$actual_notes"
+            if ! cmp -s "$RUNNER_TEMP/release-notes.md" "$actual_notes"; then
+              echo "::error::Existing Release notes differ from the rendered Reborn notes"
+              diff -u "$RUNNER_TEMP/release-notes.md" "$actual_notes" || true
               return 1
             fi
             jq -r '.assets[] | [.name, (.digest // "")] | @tsv' "$release_json" \
@@ -279,16 +308,29 @@ jobs:
 
           verify_tag_commit
           published_release="$RUNNER_TEMP/published-release.json"
-          if gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" > "$published_release" 2>/dev/null; then
+          release_lookup="$RUNNER_TEMP/published-release-lookup.txt"
+          release_lookup_error="$RUNNER_TEMP/published-release-lookup-error.txt"
+          if gh api --include "repos/$GH_REPO/releases/tags/$RELEASE_TAG" \
+            > "$release_lookup" 2> "$release_lookup_error"; then
+            gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" > "$published_release"
             verify_release "$published_release" false
             echo "Release $RELEASE_TAG already contains the verified Reborn assets"
             exit 0
           fi
+          release_lookup_status="$(
+            awk 'NR == 1 && $1 ~ /^HTTP\// { print $2; exit }' "$release_lookup"
+          )"
+          if [[ "$release_lookup_status" != "404" ]]; then
+            echo "::error::GitHub Release lookup failed with HTTP status ${release_lookup_status:-unknown}"
+            cat "$release_lookup_error" >&2
+            exit 1
+          fi
 
-          mapfile -t draft_ids < <(
-            gh api --paginate "repos/$GH_REPO/releases?per_page=100" \
-              | jq -r --arg tag "$RELEASE_TAG" '.[] | select(.tag_name == $tag and .draft) | .id'
-          )
+          draft_ids_file="$RUNNER_TEMP/draft-release-ids.txt"
+          list_draft_release_ids \
+            "$draft_ids_file" \
+            "$RUNNER_TEMP/releases-before-create.json"
+          mapfile -t draft_ids < "$draft_ids_file"
           if [[ "${#draft_ids[@]}" -gt 1 ]]; then
             echo "::error::Multiple draft Releases exist for $RELEASE_TAG; inspect them before retrying"
             printf 'Draft Release id: %s\n' "${draft_ids[@]}"
@@ -300,21 +342,12 @@ jobs:
             exit 0
           fi
 
-          notes_file="$RUNNER_TEMP/release-notes.md"
-          {
-            echo "Canonical IronClaw Reborn binaries for \`$RELEASE_TAG\`."
-            echo
-            echo "Each target-qualified archive contains the compiled \`ironclaw\` binary that passed the release matrix's native CLI smoke checks. The release also includes per-archive SHA-256 files and an aggregate \`sha256.sum\`."
-            echo
-            echo "Legacy cargo-dist installers, WASM extensions, registry updates, announcements, and Docker images are not published by this workflow. Tag/package version alignment and installer packaging are outside this workflow's scope."
-          } > "$notes_file"
-
           release_args=(
             "$RELEASE_TAG"
             --verify-tag
             --target "$RELEASE_COMMIT"
             --title "Version $RELEASE_VERSION"
-            --notes-file "$notes_file"
+            --notes-file "$RUNNER_TEMP/release-notes.md"
             --draft
           )
           if [[ "$RELEASE_IS_PRERELEASE" == "true" ]]; then
@@ -323,10 +356,11 @@ jobs:
           verify_tag_commit
           gh release create "${release_args[@]}" release-assets/*
 
-          mapfile -t created_draft_ids < <(
-            gh api --paginate "repos/$GH_REPO/releases?per_page=100" \
-              | jq -r --arg tag "$RELEASE_TAG" '.[] | select(.tag_name == $tag and .draft) | .id'
-          )
+          created_draft_ids_file="$RUNNER_TEMP/created-draft-release-ids.txt"
+          list_draft_release_ids \
+            "$created_draft_ids_file" \
+            "$RUNNER_TEMP/releases-after-create.json"
+          mapfile -t created_draft_ids < "$created_draft_ids_file"
           if [[ "${#created_draft_ids[@]}" -ne 1 ]]; then
             echo "::error::Expected exactly one draft Release for $RELEASE_TAG after creation"
             printf 'Draft Release id: %s\n' "${created_draft_ids[@]:-<none>}"
