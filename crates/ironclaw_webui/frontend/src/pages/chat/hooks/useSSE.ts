@@ -28,10 +28,9 @@ const V2_EVENT_NAMES = [
   "projection_snapshot",
   "projection_update",
   "keep_alive",
-  "error",
+  "stream_error",
 ];
 
-const EVENT_SOURCE_CLOSED = 2;
 const EVENT_SOURCE_OPEN = 1;
 const MAX_CACHED_CURSORS = 30;
 const lastEventIdByThread = new Map<string, string>();
@@ -63,13 +62,6 @@ function eventSourceReadyStateConstant(staticValue: unknown, fallback: number) {
   return typeof staticValue === "number" ? staticValue : fallback;
 }
 
-function isEventSourceClosed(source) {
-  const closedState = typeof EventSource === "function"
-    ? eventSourceReadyStateConstant(EventSource.CLOSED, EVENT_SOURCE_CLOSED)
-    : EVENT_SOURCE_CLOSED;
-  return source?.readyState === closedState;
-}
-
 function isEventSourceOpen(source) {
   const openState = typeof EventSource === "function"
     ? eventSourceReadyStateConstant(EventSource.OPEN, EVENT_SOURCE_OPEN)
@@ -94,19 +86,10 @@ export function useSSE({ threadId, onEvent, enabled }) {
     }
     let es = null;
     let reconnectTimer = null;
-    let reconnectWatchdog = null;
     let reconnectAttempts = 0;
     let disposed = false;
     let terminalErrorReceived = false;
     const maxReconnectDelay = 30_000;
-    const nativeReconnectWatchdogDelay = 10_000;
-
-    function clearReconnectWatchdog() {
-      if (reconnectWatchdog) {
-        clearTimeout(reconnectWatchdog);
-        reconnectWatchdog = null;
-      }
-    }
 
     function reconnectWithTimer(
       status: ConnectionStatus = CONNECTION_STATUS.DISCONNECTED,
@@ -120,27 +103,10 @@ export function useSSE({ threadId, onEvent, enabled }) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
       }
-      clearReconnectWatchdog();
       setStatus(status);
       reconnectAttempts++;
       const delay = Math.min(1000 * 2 ** reconnectAttempts, maxReconnectDelay);
       reconnectTimer = setTimeout(connect, delay);
-    }
-
-    function scheduleNativeReconnectWatchdog(source) {
-      if (reconnectWatchdog) return;
-      reconnectWatchdog = setTimeout(() => {
-        reconnectWatchdog = null;
-        if (disposed || es !== source || !source) {
-          return;
-        }
-        if (isEventSourceOpen(source)) {
-          reconnectAttempts = 0;
-          setStatus(CONNECTION_STATUS.CONNECTED);
-          return;
-        }
-        reconnectWithTimer();
-      }, nativeReconnectWatchdogDelay);
     }
 
     function connect() {
@@ -164,19 +130,8 @@ export function useSSE({ threadId, onEvent, enabled }) {
 
       source.onopen = () => {
         if (disposed || es !== source) return;
-        clearReconnectWatchdog();
         reconnectAttempts = 0;
         setStatus(CONNECTION_STATUS.CONNECTED);
-      };
-
-      source.onerror = () => {
-        if (disposed || terminalErrorReceived || es !== source) return;
-        if (!isEventSourceClosed(source)) {
-          setStatus(CONNECTION_STATUS.RECONNECTING);
-          scheduleNativeReconnectWatchdog(source);
-          return;
-        }
-        reconnectWithTimer();
       };
 
       const dispatchFrame = (event, fallbackType) => {
@@ -191,7 +146,8 @@ export function useSSE({ threadId, onEvent, enabled }) {
         if (event.lastEventId) {
           setLastEventId(threadId, event.lastEventId);
         }
-        const type = frame.type || fallbackType;
+        const type = frame.type ||
+          (fallbackType === "stream_error" ? "error" : fallbackType);
         onEventRef.current?.({
           // The frame's own `type` field is the canonical source;
           // `event.type` (from the SSE `event:` line) is the
@@ -209,7 +165,6 @@ export function useSSE({ threadId, onEvent, enabled }) {
         // reconnect loop.
         if (type === "error" && frame.retryable === false && es === source) {
           terminalErrorReceived = true;
-          clearReconnectWatchdog();
           if (reconnectTimer) {
             clearTimeout(reconnectTimer);
             reconnectTimer = null;
@@ -234,6 +189,24 @@ export function useSSE({ threadId, onEvent, enabled }) {
         }
       };
 
+      source.onerror = (event) => {
+        if (disposed || terminalErrorReceived || es !== source) return;
+        // Compatibility with servers that emitted application failures on
+        // the reserved `event: error` channel. Those arrive as MessageEvents
+        // with data; a native EventSource transport failure has no data.
+        // Parsing the former here prevents one browser event from also
+        // entering the transport reconnect state machine.
+        if (typeof event?.data === "string") {
+          dispatchFrame(event, "error");
+          return;
+        }
+        // EventSource's native retry state is opaque and can remain CONNECTING
+        // indefinitely after navigation or a rejected HTTP open. We already
+        // persist the last cursor per thread, so replace the source and resume
+        // deterministically instead of waiting for the browser to recover it.
+        reconnectWithTimer(CONNECTION_STATUS.RECONNECTING);
+      };
+
       // Cover anything emitted without an `event:` field — defensive
       // only; the Rust handler always tags its frames today.
       es.onmessage = (event) => dispatchFrame(event, "message");
@@ -251,7 +224,6 @@ export function useSSE({ threadId, onEvent, enabled }) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
       }
-      clearReconnectWatchdog();
       if (es) {
         es.close();
         es = null;
@@ -276,14 +248,13 @@ export function useSSE({ threadId, onEvent, enabled }) {
     function handleNetworkOnline() {
       if (disposed || terminalErrorReceived) return;
       if (es && isEventSourceOpen(es)) {
-        clearReconnectWatchdog();
         reconnectAttempts = 0;
         setStatus(CONNECTION_STATUS.CONNECTED);
         return;
       }
       setStatus(CONNECTION_STATUS.RECONNECTING);
       if (es) {
-        scheduleNativeReconnectWatchdog(es);
+        reconnectWithTimer(CONNECTION_STATUS.RECONNECTING);
         return;
       }
       if (reconnectTimer) {
@@ -304,7 +275,6 @@ export function useSSE({ threadId, onEvent, enabled }) {
       window.removeEventListener("offline", handleNetworkOffline);
       window.removeEventListener("online", handleNetworkOnline);
       if (reconnectTimer) clearTimeout(reconnectTimer);
-      clearReconnectWatchdog();
       const source = es;
       es = null;
       source?.close();
