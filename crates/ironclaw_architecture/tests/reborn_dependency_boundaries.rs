@@ -3687,7 +3687,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_capabilities",
                 "ironclaw_dispatcher",
                 "ironclaw_extensions",
-                // ironclaw_filesystem is permitted: FilesystemTurnStateStore
+                // ironclaw_filesystem is permitted: FilesystemTurnStateRowStore
                 // routes turn-coordination persistence through ScopedFilesystem
                 // under the universal-fs-dispatch rework (plan
                 // 2026-05-14-universal-fs-dispatch).

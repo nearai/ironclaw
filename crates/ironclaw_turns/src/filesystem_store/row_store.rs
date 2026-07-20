@@ -73,7 +73,7 @@ const ROW_COLLECTION_READ_CONCURRENCY: usize = 32;
 
 /// Filesystem-backed turn-state store using typed append-log deltas.
 ///
-/// This is intentionally separate from [`super::FilesystemTurnStateStore`].
+/// This is the one production turn-state store.
 /// When the row projection is empty, first load imports a legacy
 /// `/turns/state.json` blob by appending a full-snapshot row delta and then
 /// replaying the normal delta journal. Once any row data exists, rows are

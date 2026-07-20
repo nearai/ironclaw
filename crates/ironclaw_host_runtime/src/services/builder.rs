@@ -10,7 +10,7 @@ use super::{
     ApprovalRequestStore, AuditSink, CapabilityLeaseStore, CoalescingEventSink, DurableAuditLog,
     DurableAuditSink, DurableEventLog, DurableEventSink, EffectiveRuntimePolicy, EventBatchConfig,
     EventSink, FilesystemApprovalRequestStore, FilesystemResourceGovernor, FilesystemRunStateStore,
-    FilesystemTurnStateStore, FirstPartyCapabilityRegistry, HostRuntimeServices, McpExecutor,
+    FilesystemTurnStateRowStore, FirstPartyCapabilityRegistry, HostRuntimeServices, McpExecutor,
     NetworkHttpEgress, ProcessBackendKind, ProcessExecutor, ProcessObligationLifecycleStore,
     ProcessResultStore, ProcessStore, ProductionComponentType, ProductionImplementationReadiness,
     ProductionWiringComponent, ProductionWiringIssueKind, ProductionWiringReport,
@@ -485,7 +485,7 @@ where
     where
         FsBackend: RootFilesystem + 'static,
     {
-        let store = Arc::new(FilesystemTurnStateStore::new(scoped_filesystem));
+        let store = Arc::new(FilesystemTurnStateRowStore::new(scoped_filesystem));
         self.with_turn_state_and_transition_port(store)
     }
 

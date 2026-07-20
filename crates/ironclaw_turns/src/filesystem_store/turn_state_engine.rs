@@ -3,10 +3,9 @@
 //!
 //! This is the single, private execution core of turn-state semantics —
 //! admission, lifecycle, spawn-tree, run-transition, checkpoint and event
-//! projection logic — materialized transiently inside every
+//! projection logic — materialized transiently inside the
 //! [`FilesystemTurnStateRowStore`](super::row_store::FilesystemTurnStateRowStore)
-//! and [`FilesystemTurnStateStore`](super::FilesystemTurnStateStore) `apply`
-//! closure from the durable snapshot/rows. It is NOT a store: it has no
+//! `apply` closure from the durable rows. It is NOT a store: it has no
 //! durability, no persistence backend, and is not exported from the crate.
 //! The one public turn-state store is `FilesystemTurnStateRowStore`.
 //!

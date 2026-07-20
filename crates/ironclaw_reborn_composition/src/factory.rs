@@ -181,7 +181,7 @@ use ironclaw_triggers::{
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 #[cfg(feature = "test-support")]
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
-use ironclaw_turns::FilesystemTurnStateStoreKind;
+use ironclaw_turns::FilesystemTurnStateRowStore;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::InMemoryRunProfileResolver;
 use ironclaw_turns::{
@@ -250,15 +250,15 @@ impl ironclaw_network::NetworkHttpEgress for TestNetworkHttpEgress {
 }
 
 // One turn-state store, backend-injected — the production
-// `FilesystemTurnStateStoreKind<F>` (row layout) every deployment uses
+// `FilesystemTurnStateRowStore<F>` (row layout) every deployment uses
 // unconditionally, at its single write-behind durability mode (arch-simplification
 // §4.3 / #6263 Step 5b — there is no longer a durability-mode or store-type
 // choice). The no-durable-features build backs it with `InMemoryBackend` directly
 // (volatile, `LocalOnly`), matching the sibling run-state/approval/lease stores.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-pub(crate) type ComposedTurnStateStore = FilesystemTurnStateStoreKind<CompositeRootFilesystem>;
+pub(crate) type ComposedTurnStateStore = FilesystemTurnStateRowStore<CompositeRootFilesystem>;
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-pub(crate) type ComposedTurnStateStore = FilesystemTurnStateStoreKind<InMemoryBackend>;
+pub(crate) type ComposedTurnStateStore = FilesystemTurnStateRowStore<InMemoryBackend>;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 type ComposedResourceGovernor = FilesystemResourceGovernor<CompositeRootFilesystem>;
@@ -1156,7 +1156,7 @@ where
     /// Registry used by the production host runtime for extension descriptors.
     #[allow(dead_code)]
     pub(crate) extension_registry: Arc<ExtensionRegistry>,
-    pub(crate) turn_state: Arc<FilesystemTurnStateStoreKind<F>>,
+    pub(crate) turn_state: Arc<FilesystemTurnStateRowStore<F>>,
     pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStore>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
@@ -2399,11 +2399,11 @@ where
 fn production_turn_state_store<F>(
     filesystem: Arc<ScopedFilesystem<F>>,
     limits: ironclaw_turns::TurnStateStoreLimits,
-) -> FilesystemTurnStateStoreKind<F>
+) -> FilesystemTurnStateRowStore<F>
 where
     F: RootFilesystem + 'static,
 {
-    FilesystemTurnStateStoreKind::row(filesystem).with_limits(limits)
+    FilesystemTurnStateRowStore::new(filesystem).with_limits(limits)
 }
 
 fn local_dev_extension_installation_state_path(
@@ -2684,14 +2684,14 @@ async fn build_local_runtime_store_graph(
     let persistent_approval_policies = Arc::new(FilesystemPersistentApprovalPolicyStore::new(
         Arc::clone(&approvals_filesystem),
     ));
-    // Turn state runs the production `FilesystemTurnStateStoreKind` row store over
-    // a dedicated volatile `InMemoryBackend` (§4.3) at the `WriteThrough` default —
-    // no bespoke private turn-state engine standalone authority. Matches the sibling
+    // Turn state runs the production `FilesystemTurnStateRowStore` over a
+    // dedicated volatile `InMemoryBackend` (§4.3) — no bespoke private
+    // turn-state engine standalone authority. Matches the sibling
     // run-state/approval stores in this build (volatile, `LocalOnly`); the row
     // store persists every transition synchronously, so this build needs no
     // shutdown drain.
     let turn_state = Arc::new(
-        FilesystemTurnStateStoreKind::row(crate::wrap_scoped(Arc::new(InMemoryBackend::new())))
+        FilesystemTurnStateRowStore::new(crate::wrap_scoped(Arc::new(InMemoryBackend::new())))
             .with_limits(turn_state_store_limits),
     );
     // §4.3: checkpoint payloads run the production `FilesystemCheckpointStateStore`
@@ -5666,12 +5666,17 @@ mod tests {
             view,
         ));
 
+        // `production_turn_state_store` returns the concrete
+        // `FilesystemTurnStateRowStore` by type, so "production uses the row
+        // layout" is now a compile-time guarantee. This exercises the factory
+        // end-to-end and confirms the constructed store answers reads.
         let store = production_turn_state_store(
             filesystem,
             ironclaw_turns::TurnStateStoreLimits::default(),
         );
 
-        assert!(matches!(store, FilesystemTurnStateStoreKind::Row(_)));
+        let snapshot = store.persistence_snapshot().await.expect("read snapshot");
+        assert!(snapshot.runs.is_empty());
     }
 
     #[cfg(any(feature = "libsql", feature = "postgres"))]

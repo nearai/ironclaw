@@ -61,7 +61,7 @@ use ironclaw_secrets::{
 };
 use ironclaw_triggers::InMemoryTriggerRepository;
 #[cfg(feature = "libsql")]
-use ironclaw_turns::FilesystemTurnStateStore;
+use ironclaw_turns::FilesystemTurnStateRowStore;
 use ironclaw_turns::NoopTurnRunWakeNotifier;
 #[cfg(feature = "libsql")]
 use ironclaw_turns::{
@@ -711,14 +711,14 @@ async fn production_turn_state_selection_accepts_filesystem_turn_state_store() {
             ProductionWiringComponent::TurnState,
             ProductionWiringIssueKind::Missing
         ),
-        "FilesystemTurnStateStore must satisfy production turn-state presence: {report:?}"
+        "FilesystemTurnStateRowStore must satisfy production turn-state presence: {report:?}"
     );
     assert!(
         !report.contains(
             ProductionWiringComponent::TurnState,
             ProductionWiringIssueKind::LocalOnlyImplementation
         ),
-        "FilesystemTurnStateStore over LibSqlRootFilesystem must not be classified local-only: {report:?}"
+        "FilesystemTurnStateRowStore over LibSqlRootFilesystem must not be classified local-only: {report:?}"
     );
 }
 
@@ -750,7 +750,7 @@ async fn production_turn_coordinator_uses_configured_store_and_notifier() {
     let response = coordinator.submit_turn(request.clone()).await.unwrap();
     let SubmitTurnResponse::Accepted { run_id, .. } = response;
 
-    let reopened = FilesystemTurnStateStore::new(scoped);
+    let reopened = FilesystemTurnStateRowStore::new(scoped);
     let state = reopened
         .get_run_state(ironclaw_turns::GetRunStateRequest {
             scope: request.scope,

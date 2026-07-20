@@ -10,7 +10,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_turns::test_support::in_memory_turns_filesystem;
 use ironclaw_turns::{
-    CheckpointSchemaId, FilesystemTurnStateRowStore, FilesystemTurnStateStore,
+    CheckpointSchemaId, FilesystemTurnStateRowStore,
     GetLoopCheckpointRequest, LoopCheckpointStateRef, LoopCheckpointStore,
     PutLoopCheckpointRequest, RunProfileVersion, TurnId, TurnRunId, TurnScope,
     run_profile::LoopCheckpointKind,
@@ -168,7 +168,7 @@ fn snapshot_virtual_path() -> VirtualPath {
 async fn filesystem_turn_state_loop_checkpoint_roundtrip_and_snapshot() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(backend);
-    let store = FilesystemTurnStateStore::new(Arc::clone(&scoped));
+    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
     assert_loop_checkpoint_store_roundtrip(&store).await;
     assert_loop_checkpoint_store_cross_scope_and_run_miss(&store).await;
 
@@ -185,7 +185,7 @@ async fn filesystem_turn_state_loop_checkpoint_roundtrip_and_snapshot() {
     // Reopen against the same scoped filesystem; the persistence snapshot must
     // rehydrate the same loop-checkpoint set without any backend-specific
     // migration step.
-    let reopened = FilesystemTurnStateStore::new(scoped);
+    let reopened = FilesystemTurnStateRowStore::new(scoped);
     let reopened_snapshot = reopened.persistence_snapshot().await.unwrap();
     assert_eq!(reopened_snapshot.loop_checkpoints.len(), 2);
 }
