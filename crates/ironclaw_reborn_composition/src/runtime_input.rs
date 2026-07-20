@@ -663,6 +663,26 @@ impl RebornRuntimeInput {
         self
     }
 
+    /// Forward the build-time Slack host-beta wiring signal onto the
+    /// substrate build input. No-op when the services input is absent,
+    /// mirroring `with_owner_id` above.
+    pub fn with_slack_host_beta_enabled(mut self, enabled: bool) -> Self {
+        self.services = self
+            .services
+            .map(|services| services.with_slack_host_beta_enabled(enabled));
+        self
+    }
+
+    /// Forward the build-time Slack personal-OAuth redirect-URI signal onto
+    /// the substrate build input. No-op when the services input is absent,
+    /// mirroring `with_slack_host_beta_enabled` above.
+    pub fn with_slack_personal_oauth_redirect_uri_configured(mut self, configured: bool) -> Self {
+        self.services = self
+            .services
+            .map(|services| services.with_slack_personal_oauth_redirect_uri_configured(configured));
+        self
+    }
+
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
         self.skill_context_source = Some(source);
         self

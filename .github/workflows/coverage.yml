@@ -11,10 +11,9 @@
 # Viewing coverage reports:
 # - PRs automatically get coverage comments showing changes in coverage
 # - Visit https://codecov.io/gh/nearai/ironclaw for detailed coverage reports
-# - Coverage reports are generated for three configurations:
+# - Coverage reports are generated for two configurations:
 #   1. all-features: Full feature set
 #   2. default: Default features
-#   3. libsql-only: Minimal libSQL-only configuration
 # - E2E coverage tracks end-to-end test coverage separately
 #
 # Coverage files:
@@ -61,9 +60,6 @@ jobs:
           - name: default
             flags: ""
             has_postgres: true
-          - name: libsql-only
-            flags: "--no-default-features --features libsql"
-            has_postgres: false
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -226,7 +222,7 @@ jobs:
       # surfaces are both unconditional, so one binary covers every scenario
       # selected below.
       - name: Build instrumented ironclaw-reborn
-        run: cargo build -p ironclaw_reborn_cli --bin ironclaw
+        run: cargo build -p ironclaw --bin ironclaw
 
       - name: Mark OpenAI-compatible binary build
         run: touch target/debug/.ironclaw-reborn-openai-compat.stamp

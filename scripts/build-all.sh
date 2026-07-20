@@ -15,7 +15,7 @@ fi
 
 echo ""
 echo "Building IronClaw..."
-cargo build --release -p ironclaw --bin ironclaw-legacy
+cargo build --release -p ironclaw_legacy --bin ironclaw-legacy
 
 echo ""
 echo "Done. Binary: target/release/ironclaw-legacy"

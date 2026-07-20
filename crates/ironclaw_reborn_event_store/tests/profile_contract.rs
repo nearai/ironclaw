@@ -1,4 +1,3 @@
-#[cfg(feature = "postgres")]
 use ironclaw_reborn_event_store::PostgresPoolTlsOptions;
 use ironclaw_reborn_event_store::{
     RebornEventStoreConfig, RebornEventStoreError, RebornProfile, build_reborn_event_stores,
@@ -75,42 +74,6 @@ async fn production_jsonl_accepts_explicit_single_node_durable_config() {
     assert_eq!(std::sync::Arc::strong_count(&stores.audit), 1);
 }
 
-#[cfg(not(feature = "postgres"))]
-#[tokio::test]
-async fn unavailable_postgres_backend_error_does_not_leak_secret_config() {
-    let result = build_reborn_event_stores(
-        RebornProfile::Production,
-        RebornEventStoreConfig::Postgres {
-            url: SecretString::new(
-                "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@example.invalid/db"
-                    .to_string()
-                    .into_boxed_str(),
-            ),
-            tls_options: Default::default(),
-        },
-    )
-    .await;
-
-    let error = result
-        .err()
-        .expect("postgres adapter is unavailable when the feature is disabled");
-    assert!(matches!(
-        error,
-        RebornEventStoreError::BackendUnavailable {
-            backend: "postgres"
-        }
-    ));
-    let displayed = error.to_string();
-    assert!(!displayed.contains("RAW_PASSWORD_SENTINEL_3162"));
-    assert!(!displayed.contains("example.invalid"));
-    assert!(!displayed.contains("postgres://"));
-    let debug = format!("{error:?}");
-    assert!(!debug.contains("RAW_PASSWORD_SENTINEL_3162"));
-    assert!(!debug.contains("example.invalid"));
-    assert!(!debug.contains("postgres://"));
-}
-
-#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn production_postgres_rejects_remote_sslmode_disable_before_connecting() {
     let result = build_reborn_event_stores(
@@ -138,8 +101,6 @@ async fn production_postgres_rejects_remote_sslmode_disable_before_connecting() 
     assert!(!displayed.contains("db.example.com"));
     assert!(!displayed.contains("postgres://"));
 }
-
-#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn production_postgres_event_store_honors_explicit_remote_cleartext_opt_in() {
     let result = build_reborn_event_stores(
@@ -173,8 +134,6 @@ async fn production_postgres_event_store_honors_explicit_remote_cleartext_opt_in
     assert!(!displayed.contains("example.invalid"));
     assert!(!displayed.contains("postgres://"));
 }
-
-#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_connection_failure_does_not_fall_back_or_leak_secret_config() {
     let result = build_reborn_event_stores(
@@ -212,36 +171,6 @@ async fn postgres_connection_failure_does_not_fall_back_or_leak_secret_config() 
     assert!(!debug.contains("postgres://"));
 }
 
-#[cfg(not(feature = "libsql"))]
-#[tokio::test]
-async fn unavailable_libsql_backend_error_does_not_leak_secret_config() {
-    let result = build_reborn_event_stores(
-        RebornProfile::Production,
-        RebornEventStoreConfig::Libsql {
-            path_or_url: "libsql://RAW_HOST_SENTINEL_3162.example.invalid".to_string(),
-            auth_token: Some(SecretString::new(
-                "RAW_LIBSQL_TOKEN_SENTINEL_3162"
-                    .to_string()
-                    .into_boxed_str(),
-            )),
-        },
-    )
-    .await;
-
-    let error = result
-        .err()
-        .expect("libsql adapter is unavailable when the feature is disabled");
-    assert!(matches!(
-        error,
-        RebornEventStoreError::BackendUnavailable { backend: "libsql" }
-    ));
-    let displayed = error.to_string();
-    assert!(!displayed.contains("RAW_LIBSQL_TOKEN_SENTINEL_3162"));
-    assert!(!displayed.contains("RAW_HOST_SENTINEL_3162"));
-    assert!(!displayed.contains("libsql://"));
-}
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_libsql_builds_local_store_without_leaking_path_or_token() {
     let temp = tempfile::tempdir().expect("tempdir");

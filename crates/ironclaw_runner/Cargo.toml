@@ -14,20 +14,11 @@ publish = false
 layer = "kernel"
 
 [features]
-default = []
-# Bare libSQL dependency toggle, mirroring the root `ironclaw` crate's `libsql`
-# feature. CI's `libsql-only` leg builds the whole workspace with
-# `--all --no-default-features --features libsql`; without this, feature
-# resolution fails because `ironclaw_runner` is the lone workspace member that
-# enables libSQL only through the more specific features below. Dies with the
-# `libsql-only` leg when the storage-backend split is removed.
-libsql = ["dep:libsql"]
 libsql-secrets = [
     "dep:ironclaw_secrets",
     "dep:libsql",
     "dep:secrecy",
     "dep:ironclaw_filesystem",
-    "ironclaw_filesystem/libsql",
     "filesystem-goal-store",
 ]
 filesystem-goal-store = ["dep:ironclaw_filesystem"]
@@ -43,7 +34,6 @@ filesystem-local-trigger-access = ["dep:ironclaw_filesystem"]
 libsql-restart-tests = [
     "dep:libsql",
     "dep:ironclaw_filesystem",
-    "ironclaw_filesystem/libsql",
     "filesystem-goal-store",
 ]
 
@@ -97,6 +87,7 @@ ironclaw_resources = { path = "../ironclaw_resources", version = "0.1.0" }
 ironclaw_scripts = { path = "../ironclaw_scripts", version = "0.1.0" }
 ironclaw_skills = { path = "../ironclaw_skills", version = "0.3.0", default-features = false }
 ironclaw_trust = { path = "../ironclaw_trust", version = "0.1.0" }
+ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0", features = ["test-support"] }
 rust_decimal = "1"
 serde = "1"
 serde_json = "1"

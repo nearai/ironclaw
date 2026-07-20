@@ -18,7 +18,7 @@ use ironclaw_host_runtime::TenantSandboxProcessPort;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_trust::HostTrustPolicy;
-use ironclaw_turns::{InMemoryTurnStateStoreLimits, TurnRunWakeNotifier};
+use ironclaw_turns::{TurnRunWakeNotifier, TurnStateStoreLimits};
 use secrecy::SecretString;
 
 #[cfg(feature = "postgres")]
@@ -205,11 +205,38 @@ pub struct RebornBuildInput {
     pub(crate) oauth_provider_configs: Vec<OAuthProviderBackendConfig>,
     pub(crate) oauth_dcr_provider_configs: Vec<OAuthDcrProviderBackendConfig>,
     pub(crate) slack_personal_oauth_lazy_slot: Option<SlackPersonalSetupServiceSlot>,
+    /// Build-time Slack host-beta wiring signal: whether the CLI `serve`
+    /// path resolved a Slack
+    /// host-beta config for this instance BEFORE the composition build ran.
+    /// Mirrors how `google_oauth_configured` arrives via
+    /// `oauth_provider_configs` — one signal, read by
+    /// `provider_instance_readiness_map` to decide whether the
+    /// `slack_personal` provider needs a readiness-map entry. Defaults
+    /// `false`; unrelated to whether the Slack host-beta mounts are composed
+    /// post-build (a separate, later step — see `serve.rs`).
+    pub(crate) slack_host_beta_enabled: bool,
+    /// Build-time signal that this instance resolved
+    /// `IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI`. Slack personal
+    /// OAuth needs this IN ADDITION to `slack_host_beta_enabled`: with the
+    /// route mounted but no redirect URI, the WebUI Connect button reaches
+    /// `product_auth::serve::slack_personal_oauth_credentials` and gets a
+    /// message-less 503.
+    ///
+    /// Deliberately NOT derived from `slack_personal_oauth_lazy_slot`, even
+    /// though the CLI resolves both from that one env var: the slot is a
+    /// composition input that switches the Slack provider client to
+    /// lazy setup-service credential resolution, so deriving readiness from it
+    /// would force every fixture that merely wants "this instance is
+    /// configured" to also opt into lazy credentials it never fills (proved by
+    /// `factory::auth_tests::slack_oauth_callback_activates_and_publishes_all_personal_tools`,
+    /// which fails `BackendUnavailable` that way). This field records the
+    /// operator FACT; the slot performs the WIRING. Defaults `false`.
+    pub(crate) slack_personal_oauth_redirect_uri_configured: bool,
     pub(crate) nearai_mcp_bootstrap_config:
         Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
     /// Concurrency limits applied to the in-memory turn-state store.
     /// Defaults to no limits (all caps `None` / unlimited).
-    pub(crate) turn_state_store_limits: InMemoryTurnStateStoreLimits,
+    pub(crate) turn_state_store_limits: TurnStateStoreLimits,
 }
 
 #[derive(Clone, Debug)]
@@ -764,6 +791,26 @@ impl RebornBuildInput {
         self
     }
 
+    /// Record the build-time Slack host-beta wiring signal. The CLI `serve`
+    /// path calls this before the composition build with whether it
+    /// resolved a Slack host-beta
+    /// config for this instance, so `provider_instance_readiness_map` can
+    /// decide whether `slack_personal` needs a readiness-map entry.
+    pub fn with_slack_host_beta_enabled(mut self, enabled: bool) -> Self {
+        self.slack_host_beta_enabled = enabled;
+        self
+    }
+
+    /// Record whether this instance resolved
+    /// `IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI`. The CLI `serve`
+    /// path passes the already-resolved slot's presence; it does not re-read
+    /// the environment. See the field doc for why this is a separate signal
+    /// from `with_slack_personal_oauth_lazy`.
+    pub fn with_slack_personal_oauth_redirect_uri_configured(mut self, configured: bool) -> Self {
+        self.slack_personal_oauth_redirect_uri_configured = configured;
+        self
+    }
+
     /// Enable Dynamic Client Registration for the bundled Notion MCP OAuth provider.
     ///
     /// Callers provide the public origin that serves the Reborn product-auth
@@ -789,10 +836,7 @@ impl RebornBuildInput {
     /// Called by `build_reborn_runtime` after mapping from `TurnRunnerSettings` so the
     /// factory can apply them when constructing the store. Callers should use
     /// `RebornRuntimeInput::with_runner_settings` rather than calling this directly.
-    pub(crate) fn with_turn_state_store_limits(
-        mut self,
-        limits: InMemoryTurnStateStoreLimits,
-    ) -> Self {
+    pub(crate) fn with_turn_state_store_limits(mut self, limits: TurnStateStoreLimits) -> Self {
         self.turn_state_store_limits = limits;
         self
     }
@@ -853,8 +897,10 @@ impl RebornBuildInput {
             oauth_provider_configs: Vec::new(),
             oauth_dcr_provider_configs: Vec::new(),
             slack_personal_oauth_lazy_slot: None,
+            slack_host_beta_enabled: false,
+            slack_personal_oauth_redirect_uri_configured: false,
             nearai_mcp_bootstrap_config: None,
-            turn_state_store_limits: InMemoryTurnStateStoreLimits::default(),
+            turn_state_store_limits: TurnStateStoreLimits::default(),
         }
     }
 }

@@ -189,7 +189,6 @@ pub(crate) async fn run(args: &Args, suite_run_id: &str) -> Result<(), String> {
             "active_thread_count": case.active_thread_count,
             "threads_per_owner": case_args.threads_per_owner,
             "turn_state_backend": case_args.turn_state_backend,
-            "turn_state_durability": case_args.turn_state_durability,
             "gate_blocked_every": case_args.gate_blocked_every,
             "tenants": case_args.tenants,
             "operations_per_thread": case_args.operations,

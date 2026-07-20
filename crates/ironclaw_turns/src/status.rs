@@ -57,7 +57,7 @@ impl TurnStatus {
     }
 }
 
-/// The recoverability-critical transition boundary (#6263 Step 3 / #6284).
+/// The recoverability-critical transition boundary (#6263 Step 3 / #6284 / Step 5b).
 ///
 /// A run status is **recoverability-critical** when it is a gate-park
 /// ([`TurnStatus::is_blocked`]), a terminal ([`TurnStatus::is_terminal`]), or a
@@ -73,10 +73,12 @@ impl TurnStatus {
 ///   The caller is waiting on this transition exactly as on a gate-park.
 ///
 /// These transitions MUST stay synchronously durable even under async
-/// write-behind ([`crate::TurnStateDurabilityPolicy::WriteBehind`]): the async
-/// path may move only NON-critical transitions off the synchronous ack. The
-/// row store keys its write-through-vs-write-behind decision on this predicate,
-/// and the crash-consistency suite references THIS function (not a copy) as the
+/// write-behind: the async path may move only NON-critical transitions off the
+/// synchronous ack. The row store's `delta_is_recoverability_critical` also
+/// treats a brand-new run (one `baseline` has never seen — `submit_turn`,
+/// `submit_child_turn`, and the runs `resume_turn`/`retry_turn` spawn) as
+/// critical: it has no durable fallback to recover from if lost. The
+/// crash-consistency suite references THIS function (not a copy) as the
 /// single boundary write-behind flips.
 pub fn is_recoverability_critical(status: TurnStatus) -> bool {
     status.is_blocked() || status.is_terminal() || matches!(status, TurnStatus::CancelRequested)

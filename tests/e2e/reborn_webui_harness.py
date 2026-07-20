@@ -2,7 +2,7 @@
 
 The legacy Playwright suite has mature shared fixtures in ``conftest.py`` for
 the ``ironclaw`` gateway. Reborn WebUI v2 is a different product surface: it
-boots ``ironclaw-reborn serve``, serves the React SPA at the root path, and uses
+boots ``ironclaw serve``, serves the React SPA at the root path, and uses
 ``/api/webchat/v2/*`` endpoints. Keep that setup here so browser and served API
 scenarios exercise the real Reborn binary without duplicating process plumbing.
 """
@@ -115,7 +115,7 @@ async def start_reborn_webui_v2_server(
     log_prefix: str = "reborn-v2",
     extra_env: dict[str, str] | None = None,
 ) -> tuple[object, str]:
-    """Start ``ironclaw-reborn serve`` and return ``(process, base_url)``."""
+    """Start ``ironclaw serve`` and return ``(process, base_url)``."""
     reborn_home = home_dir / "reborn-home"
     reborn_home.mkdir(parents=True, exist_ok=True)
     write_config_toml(
@@ -219,7 +219,7 @@ async def enable_reborn_global_auto_approve(base_url: str) -> None:
 
 @pytest.fixture(scope="module")
 async def reborn_v2_server(ironclaw_reborn_binary, mock_llm_server, tmp_path_factory):
-    """Start ``ironclaw-reborn serve`` with the default local-dev profile."""
+    """Start ``ironclaw serve`` with the default local-dev profile."""
     home_dir = tmp_path_factory.mktemp("ironclaw-reborn-v2-home")
     proc, base_url = await start_reborn_webui_v2_server(
         ironclaw_reborn_binary=ironclaw_reborn_binary,
@@ -235,7 +235,7 @@ async def reborn_v2_server(ironclaw_reborn_binary, mock_llm_server, tmp_path_fac
 
 @pytest.fixture(scope="module")
 async def reborn_v2_yolo_server(ironclaw_reborn_binary, mock_llm_server, tmp_path_factory):
-    """Start ``ironclaw-reborn serve`` with auto-approval local-dev-yolo profile."""
+    """Start ``ironclaw serve`` with auto-approval local-dev-yolo profile."""
     home_dir = tmp_path_factory.mktemp("ironclaw-reborn-v2-yolo-home")
     proc, base_url = await start_reborn_webui_v2_server(
         ironclaw_reborn_binary=ironclaw_reborn_binary,

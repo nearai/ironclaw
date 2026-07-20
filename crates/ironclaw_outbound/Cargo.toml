@@ -10,7 +10,6 @@ publish = false
 layer = "substrates"
 
 [features]
-default = []
 # Exposes `test_support` in-memory-backed store constructors for downstream
 # crates' tests. Ships zero bytes in production binaries.
 test-support = []

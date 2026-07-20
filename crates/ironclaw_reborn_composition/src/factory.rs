@@ -138,6 +138,9 @@ use crate::extension_host::{
     gsuite::{
         ProductAuthRuntimeGsuiteCredentialStager, register_bundled_gsuite_first_party_handlers,
     },
+    provider_instance_readiness::{
+        ProviderInstanceReadinessInputs, provider_instance_readiness_map,
+    },
 };
 use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle_auth_continuation::{
@@ -247,11 +250,10 @@ impl ironclaw_network::NetworkHttpEgress for TestNetworkHttpEgress {
 }
 
 // One turn-state store, backend-injected — the production
-// `FilesystemTurnStateStoreKind<F>` (row layout) every deployment uses, never a
-// bespoke `InMemoryTurnStateStore` standalone authority (arch-simplification
-// §4.3). The `inmemory-turn-state` feature no longer selects the store TYPE, only
-// the durability POLICY: it flips this store to `WriteBehind` at the build arm.
-// The no-durable-features build backs it with `InMemoryBackend` directly
+// `FilesystemTurnStateStoreKind<F>` (row layout) every deployment uses
+// unconditionally, at its single write-behind durability mode (arch-simplification
+// §4.3 / #6263 Step 5b — there is no longer a durability-mode or store-type
+// choice). The no-durable-features build backs it with `InMemoryBackend` directly
 // (volatile, `LocalOnly`), matching the sibling run-state/approval/lease stores.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) type ComposedTurnStateStore = FilesystemTurnStateStoreKind<CompositeRootFilesystem>;
@@ -1238,7 +1240,7 @@ struct RebornStoreGraphInput {
     trigger_repository: Arc<dyn TriggerRepository>,
     project_repository: Arc<dyn ProjectRepository>,
     /// Concurrency limits for the in-memory (or filesystem-backed) turn-state store.
-    turn_state_store_limits: ironclaw_turns::InMemoryTurnStateStoreLimits,
+    turn_state_store_limits: ironclaw_turns::TurnStateStoreLimits,
     #[cfg(feature = "postgres")]
     postgres_resource_governor_singleton: Option<bool>,
     /// Raw libSQL substrate handle, carried so the canonical Reborn identity
@@ -1436,6 +1438,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         oauth_provider_configs,
         oauth_dcr_provider_configs,
         slack_personal_oauth_lazy_slot,
+        slack_host_beta_enabled,
+        slack_personal_oauth_redirect_uri_configured,
         nearai_mcp_bootstrap_config,
         owner_id,
         local_runtime_identity,
@@ -1447,6 +1451,21 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     // Computed before `oauth_provider_configs` is consumed by
     // `compose_provider_client` below — see `google_oauth_configured`.
     let google_oauth_configured = google_oauth_configured(&oauth_provider_configs);
+    // Do NOT "simplify" this to `slack_personal_oauth_lazy_slot.is_some()`.
+    // The CLI resolves both from the same env var, but the slot also switches
+    // the Slack provider client to lazy setup-service credential resolution —
+    // so deriving readiness from it makes every fixture that just wants
+    // "configured" opt into lazy credentials it never fills. See the field doc
+    // on `RebornBuildInput::slack_personal_oauth_redirect_uri_configured`.
+    let provider_instance_readiness =
+        provider_instance_readiness_map(ProviderInstanceReadinessInputs {
+            google_oauth_configured,
+            slack_host_beta_enabled,
+            slack_personal_oauth_redirect_uri_configured,
+        })
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("provider instance readiness map could not be built: {error}"),
+        })?;
     let local_runtime_identity_for_nearai_mcp = local_runtime_identity.clone();
     let (
         root,
@@ -2002,7 +2021,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             nearai_mcp_owner_scope.user_id.clone(),
         )
         .with_account_setup_registry(account_setups)
-        .with_removal_cleanup_registry(removal_cleanup),
+        .with_removal_cleanup_registry(removal_cleanup)
+        .with_provider_instance_readiness(provider_instance_readiness),
     );
     let lifecycle_facade =
         RebornLocalLifecycleFacade::new(store_graph.local_runtime.skill_management.clone())
@@ -2378,7 +2398,7 @@ where
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn production_turn_state_store<F>(
     filesystem: Arc<ScopedFilesystem<F>>,
-    limits: ironclaw_turns::InMemoryTurnStateStoreLimits,
+    limits: ironclaw_turns::TurnStateStoreLimits,
 ) -> FilesystemTurnStateStoreKind<F>
 where
     F: RootFilesystem + 'static,
@@ -2461,47 +2481,23 @@ async fn build_local_runtime_store_graph(
     let persistent_approval_policies = Arc::new(FilesystemPersistentApprovalPolicyStore::new(
         Arc::clone(&scoped_filesystem),
     ));
-    // #6263 Step 4 — the `inmemory-turn-state` profile no longer stands up the raw
-    // in-memory authority + block-persistence snapshot. EVERY deployment now
-    // composes the durable filesystem ROW store (typed journal/delta rows + a hot
-    // in-process snapshot cache). `ComposedTurnStateStore` is
-    // `FilesystemTurnStateStoreKind<F>` unconditionally, so the feature no longer
-    // selects the store TYPE. The row store is crash-recoverable (rehydrates from
-    // its own rows on boot) and, unlike the old blob store, has NO per-user
-    // `state.json` CAS livelock (journal/row model, not whole-snapshot CAS) — so it
-    // is strictly more durable than the former in-memory authority (which lost
-    // in-flight turns on crash and persisted only the gate-blocked set + a graceful
-    // shutdown snapshot). Existing deployments migrate automatically: their on-disk
+    // #6263 Step 5b — every deployment composes the durable filesystem ROW store
+    // (typed journal/delta rows + a hot in-process snapshot cache), unconditionally
+    // and with no durability-mode choice: `FilesystemTurnStateRowStore` has exactly
+    // one behavior (write-behind, with gate-park/terminal/new-run transitions on a
+    // synchronous durability barrier — see `filesystem_store/row_store.rs`). The
+    // read-after-submit gap that used to justify pinning to a stricter mode
+    // (`get_run_state` et al. returning `ScopeNotFound` for an async-materializing
+    // run) was closed in #6263 Step 3.5/read-your-writes: those query paths now
+    // serve from the hot cache, so write-behind's query paths are cache-aware. The
+    // row store is crash-recoverable (rehydrates from its own rows on boot) and has
+    // no per-user `state.json` CAS livelock (journal/row model, not whole-snapshot
+    // CAS). Existing deployments migrate automatically: their on-disk
     // block-persistence snapshot at `/turns/state.json` is imported as the row
     // store's first delta on an empty-rows boot
     // (`FilesystemTurnStateRowStore::migrate_legacy_blob_if_needed` reads the SAME
     // path/format the block-persistence sink wrote), so no gate-parked/approval turn
     // is lost on first boot after the flip.
-    //
-    // POLICY: ships at the `WriteThrough` default (every transition synchronously
-    // durable). The async `WriteBehind` policy that this flip was intended to select
-    // under `inmemory-turn-state` is DELIBERATELY NOT wired here yet: its durable
-    // query paths (`FilesystemTurnStateRowStore::get_run_state` et al. read
-    // materialized rows, not the hot cache — see
-    // `filesystem_store/row_store/traits.rs`), so a just-submitted run whose row is
-    // still async-materializing reads back `ScopeNotFound`. That breaks the
-    // runtime's read-after-submit (`send_user_message` → `wait_for_terminal` →
-    // `get_run_state`) on EVERY turn (proven: `budget_approval_e2e` fails under
-    // `WriteBehind`, passes under `WriteThrough`; store-tier submit→get_run_state
-    // returns `ScopeNotFound` single-threaded). `WriteBehind` must make its query
-    // paths cache-aware — validated by the §11.4 reference-model suite — before it
-    // can be selected here. The feature arm below is the seam that flip lands on.
-    #[cfg(feature = "inmemory-turn-state")]
-    let turn_state = Arc::new(
-        production_turn_state_store(Arc::clone(&turn_state_filesystem), turn_state_store_limits)
-            // TODO(#6263 Step 4): `TurnStateDurabilityPolicy::WriteBehind` here once
-            // the row store's durable-read query paths are cache-aware (they
-            // currently return `ScopeNotFound` for an async-materializing run,
-            // breaking runtime read-after-submit). Pinned to `WriteThrough` so the
-            // profile is on the durable row store safely, with no regression.
-            .with_durability_policy(ironclaw_turns::TurnStateDurabilityPolicy::WriteThrough),
-    );
-    #[cfg(not(feature = "inmemory-turn-state"))]
     let turn_state = Arc::new(production_turn_state_store(
         Arc::clone(&turn_state_filesystem),
         turn_state_store_limits,
@@ -2690,7 +2686,7 @@ async fn build_local_runtime_store_graph(
     ));
     // Turn state runs the production `FilesystemTurnStateStoreKind` row store over
     // a dedicated volatile `InMemoryBackend` (§4.3) at the `WriteThrough` default —
-    // no bespoke `InMemoryTurnStateStore` standalone authority. Matches the sibling
+    // no bespoke private turn-state engine standalone authority. Matches the sibling
     // run-state/approval stores in this build (volatile, `LocalOnly`); the row
     // store persists every transition synchronously, so this build needs no
     // shutdown drain.
@@ -4493,6 +4489,13 @@ async fn build_production_shaped(
         oauth_provider_configs,
         oauth_dcr_provider_configs,
         slack_personal_oauth_lazy_slot,
+        // Build-time Slack host-beta signal only feeds
+        // `provider_instance_readiness_map`, consumed exclusively by
+        // `build_local_runtime`'s `RebornLocalExtensionManagementPort`
+        // wiring — production composition has no extension lifecycle port
+        // yet (#4091), so this build path has no consumer for it.
+        slack_host_beta_enabled: _,
+        slack_personal_oauth_redirect_uri_configured: _,
         nearai_mcp_bootstrap_config: _,
         turn_state_store_limits,
     } = input;
@@ -4663,7 +4666,7 @@ struct RebornProductionBuildContext {
         Option<crate::slack::slack_setup::SlackPersonalSetupServiceSlot>,
     owner_id: String,
     local_runtime_identity: Option<RebornLocalRuntimeIdentity>,
-    turn_state_store_limits: ironclaw_turns::InMemoryTurnStateStoreLimits,
+    turn_state_store_limits: ironclaw_turns::TurnStateStoreLimits,
     /// The pre-minted scheduler wake wiring to carry to `RebornServices` so
     /// `build_reborn_runtime` can hand it to `build_default_planned_runtime` via
     /// `DefaultPlannedRuntimeParts.scheduler_wake_wiring`.
@@ -4941,7 +4944,7 @@ where
         .map_err(crate::RebornCompositionError::Mount)?;
     let turn_state = Arc::new(production_turn_state_store(
         Arc::clone(&turn_state_filesystem),
-        ironclaw_turns::InMemoryTurnStateStoreLimits::default(),
+        ironclaw_turns::TurnStateStoreLimits::default(),
     ));
     let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
     let secret_credentials = build_filesystem_secret_credential_stores(
@@ -5665,7 +5668,7 @@ mod tests {
 
         let store = production_turn_state_store(
             filesystem,
-            ironclaw_turns::InMemoryTurnStateStoreLimits::default(),
+            ironclaw_turns::TurnStateStoreLimits::default(),
         );
 
         assert!(matches!(store, FilesystemTurnStateStoreKind::Row(_)));
