@@ -32,7 +32,8 @@ use ironclaw_triggers::{
     TriggerId, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord,
     TriggerSchedule, TriggerSourceKind, TriggerState,
 };
-use ironclaw_turns::{DefaultTurnCoordinator, InMemoryTurnStateStore, TurnRunId};
+use ironclaw_turns::test_support::in_memory_turn_state_store;
+use ironclaw_turns::{DefaultTurnCoordinator, TurnRunId};
 
 use super::RebornAutomationProductFacade;
 
@@ -737,7 +738,7 @@ async fn notification_thread_list_discovers_pending_approval_from_real_run_histo
         .await
         .expect("trigger thread stored");
 
-    let turn_state = Arc::new(InMemoryTurnStateStore::default());
+    let turn_state = Arc::new(in_memory_turn_state_store());
     let services = RebornServices::new(
         thread_service,
         Arc::new(DefaultTurnCoordinator::new(turn_state)),

@@ -17,10 +17,9 @@ use tracing::{Instrument, field};
 
 use crate::{
     AllowAllTurnAdmissionLimitProvider, CancelRunRequest, EventCursor, GetLoopCheckpointRequest,
-    GetRunStateRequest, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, LoopCheckpointRecord,
-    TurnActiveLockRecord, TurnAdmissionLimitProvider, TurnError, TurnEventPage,
-    TurnPersistenceSnapshot, TurnRecord, TurnRunId, TurnRunRecord, TurnRunState, TurnScope,
-    TurnStatus,
+    GetRunStateRequest, LoopCheckpointRecord, TurnActiveLockRecord, TurnAdmissionLimitProvider,
+    TurnError, TurnEventPage, TurnPersistenceSnapshot, TurnRecord, TurnRunId, TurnRunRecord,
+    TurnRunState, TurnScope, TurnStateStoreLimits, TurnStatus,
     events::project_turn_events,
     runner::{ClaimedTurnRun, HeartbeatRequest, RelinquishRunRequest, TurnRunTransitionPort},
 };
@@ -28,6 +27,7 @@ use crate::{
 use super::{
     io as legacy_blob_io, projection,
     runner_lease::{RunnerLeaseMemory, RunnerLeaseOverlay, RunnerLeaseRecord, RunnerLeaseStore},
+    turn_state_engine::TurnStateEngine,
 };
 
 mod delta;
@@ -89,7 +89,7 @@ pub enum TurnStateDurabilityPolicy {
 /// `/turns/state.json` blob by appending a full-snapshot row delta and then
 /// replaying the normal delta journal. Once any row data exists, rows are
 /// authoritative and the legacy blob is left untouched as rollback evidence.
-/// Transitions still delegate to [`InMemoryTurnStateStore`]; only the durable
+/// Transitions still delegate to [`TurnStateEngine`]; only the durable
 /// representation changes from whole-snapshot CAS to a typed append log plus a
 /// process-local hot snapshot cache.
 // arch-exempt: large_file, long-lived embedded-authority refactor adds a shared
@@ -100,7 +100,7 @@ where
     F: RootFilesystem,
 {
     filesystem: Arc<ScopedFilesystem<F>>,
-    limits: InMemoryTurnStateStoreLimits,
+    limits: TurnStateStoreLimits,
     admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
     snapshot_state: AsyncMutex<Option<RowSnapshotState>>,
     legacy_migration_gate: Arc<AsyncMutex<()>>,
@@ -112,7 +112,7 @@ where
     durability_policy: TurnStateDurabilityPolicy,
     /// WriteBehind backpressure window: the enqueued-but-un-acked non-critical
     /// delta acks, oldest first. Bounded by
-    /// [`InMemoryTurnStateStoreLimits::max_pending_write_behind_deltas`]; at the
+    /// [`TurnStateStoreLimits::max_pending_write_behind_deltas`]; at the
     /// cap the next non-critical op awaits the oldest before enqueuing. Empty and
     /// unused under `WriteThrough`.
     pending_write_behind: AsyncMutex<VecDeque<DeltaAck>>,
@@ -187,7 +187,7 @@ where
         let materialize_gate = Arc::new(AsyncMutex::new(()));
         Self {
             filesystem: Arc::clone(&filesystem),
-            limits: InMemoryTurnStateStoreLimits::default(),
+            limits: TurnStateStoreLimits::default(),
             admission_limit_provider: Arc::new(AllowAllTurnAdmissionLimitProvider),
             snapshot_state: AsyncMutex::new(None),
             legacy_migration_gate: Arc::new(AsyncMutex::new(())),
@@ -201,7 +201,7 @@ where
         }
     }
 
-    pub fn with_limits(mut self, limits: InMemoryTurnStateStoreLimits) -> Self {
+    pub fn with_limits(mut self, limits: TurnStateStoreLimits) -> Self {
         self.limits = limits;
         self
     }
@@ -249,6 +249,89 @@ where
             .read_snapshot_with_runner_lease_overlay(RunnerLeaseOverlay::All)
             .await?;
         Ok(snapshot)
+    }
+
+    /// Materialize the embedded engine over the current durable state (runner
+    /// leases overlaid) for a read-only inspection. Shared by the observability
+    /// accessors below, which mirror the engine's own inherent accessors.
+    ///
+    /// Uses a non-blocking snapshot read: a `TurnAdmissionPolicy` may call these
+    /// observability accessors reentrantly from inside `submit_turn`'s
+    /// `check_submit`, which runs while the mutation holds `snapshot_state`.
+    /// Blocking on that lock from the reentrant read would deadlock (the reenter
+    /// waits for a lock the same logical operation holds), so when the hot cache
+    /// is busy this reads the committed durable rows directly — the pre-mutation
+    /// state a concurrent reader must observe anyway (#6263).
+    async fn read_engine(&self) -> Result<TurnStateEngine, TurnError> {
+        let snapshot = self.read_snapshot_for_observability().await?;
+        let (snapshot, _) = self
+            .runner_lease_store()
+            .overlay((snapshot, None), RunnerLeaseOverlay::All)
+            .await?;
+        self.build_in_memory_store(snapshot)
+    }
+
+    /// Read the persistence snapshot without blocking on an in-flight mutation.
+    /// If `snapshot_state` is held (a mutation is in progress), read the committed
+    /// durable rows directly instead of waiting — see [`Self::read_engine`].
+    async fn read_snapshot_for_observability(&self) -> Result<TurnPersistenceSnapshot, TurnError> {
+        match self.snapshot_state.try_lock() {
+            Ok(mut guard) => {
+                self.drop_cache_if_degraded(&mut guard);
+                if guard.is_none() {
+                    *guard = Some(self.load_snapshot_from_rows().await?);
+                }
+                Ok(guard
+                    .as_ref()
+                    .map(|state| state.snapshot.clone())
+                    .unwrap_or_default())
+            }
+            Err(_) => {
+                materialize_delta_log(self.filesystem.as_ref(), &self.materialize_gate, None)
+                    .await?;
+                self.read_materialized_row_snapshot().await
+            }
+        }
+    }
+
+    /// Admission reservations currently outstanding. Testing/observability read.
+    pub async fn active_admission_reservations(
+        &self,
+    ) -> Result<Vec<crate::TurnAdmissionReservationRecord>, TurnError> {
+        Ok(self.read_engine().await?.active_admission_reservations())
+    }
+
+    /// The full redacted lifecycle-event log. Testing/observability read.
+    pub async fn events(&self) -> Result<Vec<crate::TurnLifecycleEvent>, TurnError> {
+        Ok(self.read_engine().await?.events())
+    }
+
+    /// Count of running-slot-holding runs for a user. Testing/observability read.
+    pub async fn running_count_for_user(
+        &self,
+        tenant: &ironclaw_host_api::TenantId,
+        user: &UserId,
+    ) -> Result<u32, TurnError> {
+        Ok(self
+            .read_engine()
+            .await?
+            .running_count_for_user(tenant, user))
+    }
+
+    /// Count of running trigger-origin runs for a tenant. Testing/observability read.
+    pub async fn running_trigger_count(
+        &self,
+        tenant: &ironclaw_host_api::TenantId,
+    ) -> Result<u32, TurnError> {
+        Ok(self.read_engine().await?.running_trigger_count(tenant))
+    }
+
+    /// Count of running conversation-origin runs for a tenant. Testing/observability read.
+    pub async fn running_conversation_count(
+        &self,
+        tenant: &ironclaw_host_api::TenantId,
+    ) -> Result<u32, TurnError> {
+        Ok(self.read_engine().await?.running_conversation_count(tenant))
     }
 
     /// Flush the `WriteBehind` tail: await every enqueued-but-un-acked
@@ -507,7 +590,7 @@ where
     /// failing every runtime `submit_turn` → `get_run_state`.
     ///
     /// Draining the enqueued-but-un-acked non-critical window here — bounded by
-    /// [`InMemoryTurnStateStoreLimits::max_pending_write_behind_deltas`], typically
+    /// [`TurnStateStoreLimits::max_pending_write_behind_deltas`], typically
     /// just the caller's own trailing submit — awaits those durable appends, so
     /// the subsequent durable read (which force-materializes the journal tail)
     /// observes them. This is a read-side barrier symmetric to a critical
@@ -1057,8 +1140,8 @@ where
     fn build_in_memory_store(
         &self,
         snapshot: TurnPersistenceSnapshot,
-    ) -> Result<InMemoryTurnStateStore, TurnError> {
-        InMemoryTurnStateStore::from_persistence_snapshot_with_admission_limit_provider(
+    ) -> Result<TurnStateEngine, TurnError> {
+        TurnStateEngine::from_persistence_snapshot_with_admission_limit_provider(
             snapshot,
             self.limits,
             self.admission_limit_provider.clone(),
@@ -1076,11 +1159,11 @@ where
     /// an overlaid snapshot clone, because it must overlay every run's lease.
     async fn acquire_overlaid_store(
         &self,
-        cached_store: Arc<InMemoryTurnStateStore>,
+        cached_store: Arc<TurnStateEngine>,
         overlay_baseline: Option<TurnPersistenceSnapshot>,
         overlay_run: Option<TurnRunRecord>,
         overlay: RunnerLeaseOverlay,
-    ) -> Result<Arc<InMemoryTurnStateStore>, TurnError> {
+    ) -> Result<Arc<TurnStateEngine>, TurnError> {
         if let Some(baseline) = overlay_baseline {
             let (overlaid_snapshot, _) = self
                 .runner_lease_store()
@@ -1102,7 +1185,7 @@ where
         mut apply: A,
     ) -> Result<T, TurnError>
     where
-        A: FnMut(Arc<InMemoryTurnStateStore>) -> Fut + Send,
+        A: FnMut(Arc<TurnStateEngine>) -> Fut + Send,
         Fut: std::future::Future<Output = Result<T, TurnError>> + Send,
         T: Send,
     {
@@ -1975,12 +2058,12 @@ where
         build_delta: D,
     ) -> Result<T, TurnError>
     where
-        A: FnMut(Arc<InMemoryTurnStateStore>) -> Fut + Send,
+        A: FnMut(Arc<TurnStateEngine>) -> Fut + Send,
         Fut: std::future::Future<Output = Result<T, TurnError>> + Send,
         D: FnOnce(
                 &TurnPersistenceSnapshot,
                 EventCursor,
-                &InMemoryTurnStateStore,
+                &TurnStateEngine,
                 &T,
             ) -> Result<SnapshotDelta, TurnError>
             + Send,
@@ -2182,7 +2265,7 @@ where
         apply: A,
     ) -> Result<TurnRunState, TurnError>
     where
-        A: FnMut(Arc<InMemoryTurnStateStore>) -> Fut + Send,
+        A: FnMut(Arc<TurnStateEngine>) -> Fut + Send,
         Fut: std::future::Future<Output = Result<TurnRunState, TurnError>> + Send,
     {
         let span = turn_state_write_span(operation, None, Some(&run_id));
@@ -2210,12 +2293,12 @@ where
         build_delta: D,
     ) -> Result<TurnRunState, TurnError>
     where
-        A: FnMut(Arc<InMemoryTurnStateStore>) -> Fut + Send,
+        A: FnMut(Arc<TurnStateEngine>) -> Fut + Send,
         Fut: std::future::Future<Output = Result<TurnRunState, TurnError>> + Send,
         D: FnOnce(
                 &TurnPersistenceSnapshot,
                 EventCursor,
-                &InMemoryTurnStateStore,
+                &TurnStateEngine,
                 &TurnRunState,
             ) -> Result<SnapshotDelta, TurnError>
             + Send,

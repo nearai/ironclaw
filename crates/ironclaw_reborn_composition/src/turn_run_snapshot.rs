@@ -40,7 +40,8 @@ pub(crate) trait TurnRunSnapshotSource: Send + Sync {
 // happens to alias to in this build, nor on this crate's `libsql`/`postgres`
 // features): `FilesystemTurnStateStore` is defined unconditionally in
 // `ironclaw_turns`, and this impl targets a different concrete type per `F`
-// than the `InMemoryTurnStateStore` impl below, so the two never conflict.
+// than the bare `FilesystemTurnStateRowStore<F>` impl below, so they never
+// conflict.
 #[async_trait]
 impl<F> TurnRunSnapshotSource for ironclaw_turns::FilesystemTurnStateStore<F>
 where
@@ -61,11 +62,16 @@ where
     }
 }
 
-// In-memory authority: sync infallible snapshot. Also unconditional, for the
-// same reason as the impl above.
+// Bare row store (the in-memory turn-state test double is a
+// `FilesystemTurnStateRowStore<InMemoryBackend>`): async fallible snapshot,
+// targeting a different concrete type per `F` than the impls above, so none of
+// the three conflict.
 #[async_trait]
-impl TurnRunSnapshotSource for ironclaw_turns::InMemoryTurnStateStore {
+impl<F> TurnRunSnapshotSource for ironclaw_turns::FilesystemTurnStateRowStore<F>
+where
+    F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
+{
     async fn turn_run_snapshot(&self) -> Result<TurnPersistenceSnapshot, TurnError> {
-        Ok(self.persistence_snapshot())
+        self.persistence_snapshot().await
     }
 }

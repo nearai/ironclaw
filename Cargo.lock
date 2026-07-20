@@ -5453,6 +5453,7 @@ dependencies = [
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_observability",
+ "ironclaw_turns",
  "rand 0.10.1",
  "serde",
  "serde_jcs",

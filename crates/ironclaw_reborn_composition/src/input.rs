@@ -16,7 +16,7 @@ use ironclaw_host_runtime::TenantSandboxProcessPort;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_trust::HostTrustPolicy;
-use ironclaw_turns::{InMemoryTurnStateStoreLimits, TurnRunWakeNotifier};
+use ironclaw_turns::{TurnRunWakeNotifier, TurnStateStoreLimits};
 use secrecy::SecretString;
 
 #[cfg(feature = "postgres")]
@@ -224,7 +224,7 @@ pub struct RebornBuildInput {
     pub(crate) channel_extension_bindings: Vec<ChannelExtensionBinding>,
     /// Concurrency limits applied to the in-memory turn-state store.
     /// Defaults to no limits (all caps `None` / unlimited).
-    pub(crate) turn_state_store_limits: InMemoryTurnStateStoreLimits,
+    pub(crate) turn_state_store_limits: TurnStateStoreLimits,
     /// Binary-assembled account-setup declarations (extension-runtime §5.5):
     /// per-extension activation gates and connect-strategy presentation.
     /// `WebGeneratedCode` declarations additionally get a generic pairing
@@ -843,10 +843,7 @@ impl RebornBuildInput {
     /// Called by `build_reborn_runtime` after mapping from `TurnRunnerSettings` so the
     /// factory can apply them when constructing the store. Callers should use
     /// `RebornRuntimeInput::with_runner_settings` rather than calling this directly.
-    pub(crate) fn with_turn_state_store_limits(
-        mut self,
-        limits: InMemoryTurnStateStoreLimits,
-    ) -> Self {
+    pub(crate) fn with_turn_state_store_limits(mut self, limits: TurnStateStoreLimits) -> Self {
         self.turn_state_store_limits = limits;
         self
     }
@@ -891,7 +888,7 @@ impl RebornBuildInput {
             nearai_mcp_bootstrap_config: None,
             native_extension_factories: Vec::new(),
             channel_extension_bindings: Vec::new(),
-            turn_state_store_limits: InMemoryTurnStateStoreLimits::default(),
+            turn_state_store_limits: TurnStateStoreLimits::default(),
             account_setup_descriptors: Vec::new(),
         }
     }

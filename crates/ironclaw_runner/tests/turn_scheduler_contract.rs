@@ -12,6 +12,7 @@ use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::DiskFilesystem;
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntimeServices, ProductionWiringComponent,
@@ -23,14 +24,15 @@ use ironclaw_runner::turn_scheduler::{
     SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
     TurnRunSchedulerConfig,
 };
+use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator,
-    GetRunStateRequest, IdempotencyKey, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits,
-    NoopTurnRunWakeNotifier, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
-    RunProfileRequest, SanitizedCancelReason, SourceBindingRef, SpawnTreeReservation,
-    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator,
-    TurnError, TurnRunId, TurnRunRecord, TurnRunState, TurnRunWake, TurnRunWakeNotifier,
-    TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnSpawnTreeStateStore, TurnStateStore,
+    FilesystemTurnStateRowStore, GetRunStateRequest, IdempotencyKey, NoopTurnRunWakeNotifier,
+    ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileRequest,
+    SanitizedCancelReason, SourceBindingRef, SpawnTreeReservation, SubmitChildRunRequest,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId,
+    TurnRunRecord, TurnRunState, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
+    TurnRunnerId, TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStateStoreLimits,
     TurnStatus,
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
@@ -119,9 +121,16 @@ struct FailingClaimTransitions {
     notify_claim: Notify,
 }
 
-#[derive(Default)]
 struct DurableLikeTurnStore {
-    inner: InMemoryTurnStateStore,
+    inner: FilesystemTurnStateRowStore<InMemoryBackend>,
+}
+
+impl Default for DurableLikeTurnStore {
+    fn default() -> Self {
+        Self {
+            inner: in_memory_turn_state_store(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -574,7 +583,7 @@ impl HangingExecutor {
 }
 
 struct HeartbeatTrackingTransitions {
-    store: Arc<InMemoryTurnStateStore>,
+    store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
     heartbeat_attempts: AtomicUsize,
     heartbeats: AtomicUsize,
     notify_heartbeat_attempt: Notify,
@@ -584,7 +593,7 @@ struct HeartbeatTrackingTransitions {
 }
 
 struct ClaimRecordingTransitions {
-    store: Arc<InMemoryTurnStateStore>,
+    store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
     claim_runner_ids: Mutex<Vec<TurnRunnerId>>,
 }
 
@@ -609,14 +618,14 @@ struct ChaosRule {
 }
 
 struct ChaosTransitionPort {
-    store: Arc<InMemoryTurnStateStore>,
+    store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
     rules: Mutex<Vec<ChaosRule>>,
     calls: Mutex<Vec<ChaosOperation>>,
     hold_after_relinquish: Mutex<Option<Arc<Notify>>>,
 }
 
 impl HeartbeatTrackingTransitions {
-    fn new(store: Arc<InMemoryTurnStateStore>) -> Self {
+    fn new(store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>) -> Self {
         Self {
             store,
             heartbeat_attempts: AtomicUsize::new(0),
@@ -664,7 +673,7 @@ impl HeartbeatTrackingTransitions {
 }
 
 impl ClaimRecordingTransitions {
-    fn new(store: Arc<InMemoryTurnStateStore>) -> Self {
+    fn new(store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>) -> Self {
         Self {
             store,
             claim_runner_ids: Mutex::new(Vec::new()),
@@ -677,7 +686,7 @@ impl ClaimRecordingTransitions {
 }
 
 impl ChaosTransitionPort {
-    fn new(store: Arc<InMemoryTurnStateStore>) -> Self {
+    fn new(store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>) -> Self {
         Self {
             store,
             rules: Mutex::new(Vec::new()),
@@ -1037,7 +1046,7 @@ fn production_services_reject_unverified_scheduler_transition_port() {
 
 #[tokio::test]
 async fn scheduler_uses_stable_runner_id_across_claims() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let transitions = Arc::new(ClaimRecordingTransitions::new(Arc::clone(&store)));
     let transition_port: Arc<dyn TurnRunTransitionPort> = transitions.clone();
     let executor = Arc::new(CompletingExecutor::default());
@@ -1123,7 +1132,7 @@ async fn production_services_scheduler_and_coordinator_execute_turn_end_to_end()
 #[tokio::test]
 #[tracing_test::traced_test]
 async fn scheduler_executor_emits_thread_run_correlated_operator_log() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
     let executor = Arc::new(CompletingExecutor::default());
     let scheduler = TurnRunScheduler::new(
@@ -1171,7 +1180,7 @@ async fn scheduler_executor_emits_thread_run_correlated_operator_log() {
 
 #[tokio::test]
 async fn scheduler_completes_multiple_submitted_threads_end_to_end() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
     let executor = Arc::new(CompletingExecutor::default());
     let scheduler = TurnRunScheduler::new(
@@ -1200,7 +1209,7 @@ async fn scheduler_completes_multiple_submitted_threads_end_to_end() {
 
 #[tokio::test]
 async fn fake_wake_without_queued_run_does_not_execute() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
     let executor = Arc::new(CompletingExecutor::default());
     let scheduler = TurnRunScheduler::new(
@@ -1226,7 +1235,7 @@ async fn fake_wake_without_queued_run_does_not_execute() {
 
 #[tokio::test]
 async fn stale_wake_after_completion_does_not_reexecute_run() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
     let executor = Arc::new(CompletingExecutor::default());
     let scheduler = TurnRunScheduler::new(
@@ -1262,7 +1271,7 @@ async fn stale_wake_after_completion_does_not_reexecute_run() {
 
 #[tokio::test]
 async fn wake_notifier_reports_delivery_unavailable_after_scheduler_shutdown() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
     let executor = Arc::new(CompletingExecutor::default());
     let scheduler = TurnRunScheduler::new(Arc::clone(&transitions), executor, fast_config());
@@ -1323,7 +1332,7 @@ async fn claim_errors_coalesce_wakes_during_backoff() {
 
 #[tokio::test]
 async fn wake_notifier_drains_submitted_run() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
     let executor = Arc::new(CompletingExecutor::default());
     let scheduler = TurnRunScheduler::new(
@@ -1340,20 +1349,18 @@ async fn wake_notifier_drains_submitted_run() {
     let run_id = accepted_run_id(coordinator.submit_turn(request).await.unwrap());
 
     executor.wait_for_started(1).await;
-    assert_eq!(
-        store
-            .get_run_state(ironclaw_turns::GetRunStateRequest { scope, run_id })
-            .await
-            .unwrap()
-            .status,
-        TurnStatus::Completed
-    );
+    // Row-store timing: `wait_for_started` only proves the executor began; the
+    // durable `Completed` write lands a few ms later, so the run is still
+    // `Running` at this instant under the row store. Poll for the terminal
+    // status instead of asserting it synchronously (the in-memory engine
+    // completed instantly, which is why the old immediate `assert_eq!` passed).
+    wait_for_status(&*store, scope, run_id, TurnStatus::Completed).await;
     handle.shutdown().await;
 }
 
 #[tokio::test]
 async fn duplicate_wakes_claim_run_once() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
     let gate = Arc::new(Notify::new());
     let executor = Arc::new(CompletingExecutor::with_gate(Arc::clone(&gate)));
@@ -1379,7 +1386,7 @@ async fn duplicate_wakes_claim_run_once() {
 
 #[tokio::test]
 async fn shutdown_aborts_in_flight_executor_tasks() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
     let executor = Arc::new(HangingExecutor::default());
     let scheduler = TurnRunScheduler::new(
@@ -1407,7 +1414,7 @@ async fn shutdown_aborts_in_flight_executor_tasks() {
 /// them.
 #[tokio::test]
 async fn shutdown_relinquishes_in_flight_runs_to_queued() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
     // HangingExecutor blocks indefinitely so the run stays Running through shutdown.
     let executor = Arc::new(HangingExecutor::default());
@@ -1458,7 +1465,7 @@ async fn shutdown_relinquishes_in_flight_runs_to_queued() {
 /// an implicit, synchronous drop.
 #[tokio::test]
 async fn drop_without_shutdown_relinquishes_in_flight_run_to_queued() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
     // HangingExecutor parks in `pending::<()>()` so the run stays Running
     // until the task is aborted, giving the shutdown drain a live in-flight
@@ -1518,7 +1525,7 @@ async fn drop_without_shutdown_relinquishes_in_flight_run_to_queued() {
 /// mpsc channel. A mismatch would leave the notified run unclaimed.
 #[tokio::test]
 async fn start_with_channel_shares_notifier_with_scheduler_loop() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
     let executor = Arc::new(CompletingExecutor::default());
 
@@ -1559,7 +1566,7 @@ async fn start_with_channel_shares_notifier_with_scheduler_loop() {
 
 #[tokio::test]
 async fn poller_recovers_queued_run_after_missed_wake() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
     let executor = Arc::new(CompletingExecutor::default());
     let scheduler =
@@ -1579,7 +1586,7 @@ async fn poller_recovers_queued_run_after_missed_wake() {
 
 #[tokio::test]
 async fn executor_completion_rearms_drain_without_waiting_for_poll() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
     let gate = Arc::new(Notify::new());
     let executor = Arc::new(CompletingExecutor::with_gate(Arc::clone(&gate)));
@@ -1617,7 +1624,7 @@ async fn executor_completion_rearms_drain_without_waiting_for_poll() {
 
 #[tokio::test]
 async fn executor_error_fails_run_instead_of_retrying() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
     let executor = Arc::new(FailingExecutor::default());
     let scheduler =
@@ -1657,7 +1664,7 @@ async fn executor_error_fails_run_instead_of_retrying() {
 
 #[tokio::test]
 async fn executor_panic_fails_run() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
     let executor = Arc::new(PanickingExecutor::default());
     let scheduler =
@@ -1697,12 +1704,12 @@ async fn executor_panic_fails_run() {
 
 #[tokio::test]
 async fn scheduler_heartbeats_long_running_executor_until_completion() {
-    let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
+    let store = Arc::new(
+        in_memory_turn_state_store().with_limits(TurnStateStoreLimits {
             runner_lease_ttl: ChronoDuration::milliseconds(40),
-            ..InMemoryTurnStateStoreLimits::default()
-        },
-    ));
+            ..TurnStateStoreLimits::default()
+        }),
+    );
     let transitions = Arc::new(HeartbeatTrackingTransitions::new(Arc::clone(&store)));
     let transition_port: Arc<dyn TurnRunTransitionPort> = transitions.clone();
     let gate = Arc::new(Notify::new());
@@ -1731,12 +1738,12 @@ async fn scheduler_heartbeats_long_running_executor_until_completion() {
 
 #[tokio::test]
 async fn chaos_scheduler_recovers_after_transient_claim_and_heartbeat_drops() {
-    let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
+    let store = Arc::new(
+        in_memory_turn_state_store().with_limits(TurnStateStoreLimits {
             runner_lease_ttl: ChronoDuration::milliseconds(500),
-            ..InMemoryTurnStateStoreLimits::default()
-        },
-    ));
+            ..TurnStateStoreLimits::default()
+        }),
+    );
     let chaos = Arc::new(
         ChaosTransitionPort::new(Arc::clone(&store))
             .drop_next(ChaosOperation::ClaimNextRun)
@@ -1779,12 +1786,12 @@ async fn chaos_scheduler_recovers_after_transient_claim_and_heartbeat_drops() {
 
 #[tokio::test]
 async fn scheduler_tolerates_transient_heartbeat_timeout_until_executor_completes() {
-    let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
+    let store = Arc::new(
+        in_memory_turn_state_store().with_limits(TurnStateStoreLimits {
             runner_lease_ttl: ChronoDuration::milliseconds(500),
-            ..InMemoryTurnStateStoreLimits::default()
-        },
-    ));
+            ..TurnStateStoreLimits::default()
+        }),
+    );
     let transitions = Arc::new(
         HeartbeatTrackingTransitions::new(Arc::clone(&store))
             .with_one_shot_heartbeat_delay(Duration::from_secs(60)),
@@ -1820,7 +1827,7 @@ async fn scheduler_tolerates_transient_heartbeat_timeout_until_executor_complete
 
 #[tokio::test]
 async fn chaos_scheduler_retries_terminal_failure_recording_after_transient_store_drop() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let chaos = Arc::new(
         ChaosTransitionPort::new(Arc::clone(&store)).drop_next(ChaosOperation::RecordRunnerFailure),
     );
@@ -1874,7 +1881,7 @@ async fn chaos_scheduler_retries_terminal_failure_recording_after_transient_stor
 
 #[tokio::test]
 async fn chaos_scheduler_relinquishes_run_when_terminal_failure_recording_is_exhausted() {
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let relinquish_gate = Arc::new(Notify::new());
     let chaos = Arc::new(
         ChaosTransitionPort::new(Arc::clone(&store))
@@ -1913,12 +1920,12 @@ async fn chaos_scheduler_relinquishes_run_when_terminal_failure_recording_is_exh
 
 #[tokio::test]
 async fn scheduler_keeps_executor_alive_during_sustained_heartbeat_timeouts() {
-    let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
+    let store = Arc::new(
+        in_memory_turn_state_store().with_limits(TurnStateStoreLimits {
             runner_lease_ttl: ChronoDuration::milliseconds(500),
-            ..InMemoryTurnStateStoreLimits::default()
-        },
-    ));
+            ..TurnStateStoreLimits::default()
+        }),
+    );
     let transitions = Arc::new(
         HeartbeatTrackingTransitions::new(Arc::clone(&store))
             .with_heartbeat_delay(Duration::from_secs(60)),
@@ -1959,12 +1966,12 @@ async fn scheduler_keeps_executor_alive_during_sustained_heartbeat_timeouts() {
 
 #[tokio::test]
 async fn scheduler_records_failure_after_repeated_heartbeat_errors() {
-    let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
+    let store = Arc::new(
+        in_memory_turn_state_store().with_limits(TurnStateStoreLimits {
             runner_lease_ttl: ChronoDuration::milliseconds(500),
-            ..InMemoryTurnStateStoreLimits::default()
-        },
-    ));
+            ..TurnStateStoreLimits::default()
+        }),
+    );
     let chaos = Arc::new(
         ChaosTransitionPort::new(Arc::clone(&store)).drop_next_n(ChaosOperation::Heartbeat, 2),
     );
@@ -2013,12 +2020,12 @@ async fn scheduler_records_failure_after_repeated_heartbeat_errors() {
 
 #[tokio::test]
 async fn canceled_hanging_executor_lease_expires_to_cancelled() {
-    let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
+    let store = Arc::new(
+        in_memory_turn_state_store().with_limits(TurnStateStoreLimits {
             runner_lease_ttl: ChronoDuration::milliseconds(40),
-            ..InMemoryTurnStateStoreLimits::default()
-        },
-    ));
+            ..TurnStateStoreLimits::default()
+        }),
+    );
     let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
     let executor = Arc::new(HangingExecutor::default());
     let scheduler = TurnRunScheduler::new(
@@ -2062,13 +2069,13 @@ async fn canceled_hanging_executor_lease_expires_to_cancelled() {
 #[tokio::test]
 #[tracing_test::traced_test]
 async fn expired_lease_reconciler_fails_running_run_at_crash_retry_bound() {
-    let store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits {
+    let store = Arc::new(
+        in_memory_turn_state_store().with_limits(TurnStateStoreLimits {
             runner_lease_ttl: ChronoDuration::milliseconds(-1),
             max_crash_recovery_reclaims: 1,
-            ..InMemoryTurnStateStoreLimits::default()
-        },
-    ));
+            ..TurnStateStoreLimits::default()
+        }),
+    );
     let transitions: Arc<dyn TurnRunTransitionPort> = store.clone();
     let executor = Arc::new(CompletingExecutor::default());
     let scheduler = TurnRunScheduler::new(
@@ -2076,7 +2083,6 @@ async fn expired_lease_reconciler_fails_running_run_at_crash_retry_bound() {
         executor,
         fast_config().with_poll_interval(Duration::from_secs(60)),
     );
-    let handle = scheduler.start();
     let coordinator = DefaultTurnCoordinator::new(store.clone())
         .with_wake_notifier(Arc::new(NoopTurnRunWakeNotifier));
 
@@ -2084,6 +2090,14 @@ async fn expired_lease_reconciler_fails_running_run_at_crash_retry_bound() {
     let thread_id = request.scope.thread_id.to_string();
     let scope = request.scope.clone();
     let run_id = accepted_run_id(coordinator.submit_turn(request).await.unwrap());
+    // Row-store timing: the manual claim must own the run so it stays `Running`
+    // with an already-expired lease for the reconciler to terminal-fail. If the
+    // scheduler were already started, its claim loop would race the manual claim
+    // (the row store's durable claim takes real ms where the in-memory engine was
+    // instant) and its `CompletingExecutor` would complete the run first,
+    // defeating the scenario. So do the manual claim BEFORE starting the
+    // scheduler; once the run is Running+leased it is no longer claimable, and
+    // the scheduler's reconciler still recovers the expired lease.
     store
         .claim_next_run(ClaimRunRequest {
             runner_id: ironclaw_turns::TurnRunnerId::new(),
@@ -2093,6 +2107,7 @@ async fn expired_lease_reconciler_fails_running_run_at_crash_retry_bound() {
         .await
         .unwrap()
         .unwrap();
+    let handle = scheduler.start();
 
     let failed_state = wait_for_status(&*store, scope, run_id, TurnStatus::Failed).await;
     assert_eq!(

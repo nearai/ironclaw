@@ -29,12 +29,12 @@ use ironclaw_threads::{
     UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, BlockedReason, DefaultTurnCoordinator, FilesystemTurnStateBlockPersistence,
-    FilesystemTurnStateRowStore, FilesystemTurnStateStore, GateRef, IdempotencyKey,
-    InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, LoopCheckpointStateRef,
+    AcceptedMessageRef, BlockedReason, DefaultTurnCoordinator, FilesystemTurnStateRowStore,
+    FilesystemTurnStateStore, GateRef, IdempotencyKey, LoopCheckpointStateRef,
     ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest, SourceBindingRef,
     SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnCoordinator, TurnError,
     TurnErrorCategory, TurnLeaseToken, TurnRunnerId, TurnStateDurabilityPolicy, TurnStateStore,
+    TurnStateStoreLimits,
     runner::{
         BlockRunRequest, ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, TurnRunTransitionPort,
     },
@@ -54,14 +54,13 @@ use crate::{
 };
 
 /// Backend-agnostic turn store for the stress workload. Both the durable
-/// `FilesystemTurnStateStore` and the shared `InMemoryTurnStateStore` already
-/// implement the supertraits, so the impls are empty — this lets
+/// `FilesystemTurnStateStore` and the row-store `FilesystemTurnStateRowStore`
+/// already implement the supertraits, so the impls are empty — this lets
 /// `turn_store_for_context` return one `Arc<dyn StressTurnStore>` and the
 /// workload submit/claim/complete against either without per-method dispatch.
 pub(crate) trait StressTurnStore: TurnStateStore + TurnRunTransitionPort {}
 impl<F: RootFilesystem + 'static> StressTurnStore for FilesystemTurnStateStore<F> {}
 impl<F: RootFilesystem + 'static> StressTurnStore for FilesystemTurnStateRowStore<F> {}
-impl StressTurnStore for InMemoryTurnStateStore {}
 
 pub(crate) struct UserTurnServices<F>
 where
@@ -74,14 +73,10 @@ where
     run_id: String,
     target: String,
     turn_state_backend: TurnStateBackend,
-    turn_state_limits: InMemoryTurnStateStoreLimits,
+    turn_state_limits: TurnStateStoreLimits,
     /// Durable-commit policy applied to the row-store backends (`filesystem-row`,
-    /// `row-memory`). Ignored by the blob/memory backends.
+    /// `row-memory`). Ignored by the blob filesystem backend.
     turn_state_durability: TurnStateDurabilityPolicy,
-    /// Single shared in-process turn-state authority, used when
-    /// `turn_state_backend == Memory`. Shared across all workers (one process)
-    /// to faithfully model the production single-process design.
-    memory_turn_store: Arc<InMemoryTurnStateStore>,
     /// Shared row-store authorities keyed by tenant/user mount. This preserves
     /// durable filesystem writes while avoiding a full row-set reload for every
     /// measured operation in the same process.
@@ -1672,14 +1667,6 @@ where
         context: &crate::synthetic::UserTurnContext,
     ) -> Result<Arc<dyn StressTurnStore>, OperationFailure> {
         match self.turn_state_backend {
-            // One shared authority for the whole process — concurrent same-user
-            // writers coordinate in memory (fast lock), never on a per-user
-            // `state.json` CAS, so they don't livelock. `MemoryPersistOnBlock`
-            // shares the same authority; it differs only by the durable block
-            // sink attached at construction.
-            TurnStateBackend::Memory | TurnStateBackend::MemoryPersistOnBlock => {
-                Ok(Arc::clone(&self.memory_turn_store) as Arc<dyn StressTurnStore>)
-            }
             TurnStateBackend::FilesystemRow => {
                 let resource_scope = context.turn_scope.to_resource_scope();
                 self.cached_row_store(&resource_scope, |view| {
@@ -1782,7 +1769,7 @@ fn user_turn_services_from_root<F>(
     target: String,
     model_latency: Arc<ModelLatencyDriver>,
     turn_state_backend: TurnStateBackend,
-    turn_state_limits: InMemoryTurnStateStoreLimits,
+    turn_state_limits: TurnStateStoreLimits,
     turn_state_durability: TurnStateDurabilityPolicy,
 ) -> Result<UserTurnServices<F>, String>
 where
@@ -1803,24 +1790,6 @@ where
         turn_state_backend,
         turn_state_limits,
         turn_state_durability,
-        // Constructed once and shared across every worker (the workload is held
-        // behind one Arc), so the Memory backend exercises a single shared
-        // authority exactly as the single-process runtime would. When the
-        // backend persists on block, attach the same durable filesystem sink the
-        // hosted-single-tenant-volume runtime wires so the retest measures the
-        // shipped config (the sink stays idle on this never-blocking workload,
-        // so what it measures is the extra probe cost per terminal transition).
-        memory_turn_store: Arc::new({
-            let store = InMemoryTurnStateStore::with_limits(turn_state_limits);
-            if turn_state_backend.persists_on_block() {
-                let sink = Arc::new(FilesystemTurnStateBlockPersistence::new(Arc::clone(
-                    &scoped,
-                )));
-                store.with_block_persistence(sink)
-            } else {
-                store
-            }
-        }),
         row_turn_stores: Mutex::new(HashMap::new()),
         memory_root: Arc::new(InMemoryBackend::new()),
     })

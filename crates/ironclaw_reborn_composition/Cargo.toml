@@ -170,7 +170,7 @@ ironclaw_loop_host = { path = "../ironclaw_loop_host", features = ["test-support
 ironclaw_conversations = { path = "../ironclaw_conversations" }
 ironclaw_reborn_composition = { path = ".", features = ["test-support"] }
 ironclaw_threads = { path = "../ironclaw_threads" }
-ironclaw_turns = { path = "../ironclaw_turns" }
+ironclaw_turns = { path = "../ironclaw_turns", features = ["test-support"] }
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = ["test-support"] }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
 # The ported channel-host e2e suite drives the generic assembly with slack

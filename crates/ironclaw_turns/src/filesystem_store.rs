@@ -5,7 +5,7 @@
 //! High-churn runner lease heartbeats are memory-backed per
 //! [`FilesystemTurnStateStore`] instance and are overlaid onto the durable
 //! snapshot while the process is alive. Snapshot mutations read the snapshot,
-//! overlay current runner leases, delegate to an [`InMemoryTurnStateStore`] in
+//! overlay current runner leases, delegate to a `TurnStateEngine` in
 //! a transient `apply` closure, and write the resulting snapshot back with
 //! optimistic CAS + bounded retry. Reads load the snapshot, overlay current
 //! runner leases, and project through the in-memory store without writing
@@ -49,8 +49,7 @@ use tracing::{Instrument, field};
 
 use crate::{
     AllowAllTurnAdmissionLimitProvider, CancelRunRequest, CancelRunResponse, EventCursor,
-    GetLoopCheckpointRequest, GetRunStateRequest, InMemoryTurnStateStore,
-    InMemoryTurnStateStoreLimits, LoopCheckpointRecord, LoopCheckpointStore,
+    GetLoopCheckpointRequest, GetRunStateRequest, LoopCheckpointRecord, LoopCheckpointStore,
     PutLoopCheckpointRequest, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest,
     RetryTurnResponse, RunProfileResolver, SpawnTreeReservation, SubmitChildRunRequest,
     SubmitTurnRequest, SubmitTurnResponse, TurnAdmissionLimitProvider, TurnAdmissionPolicy,
@@ -71,12 +70,15 @@ mod profile_resolver;
 mod projection;
 mod row_store;
 mod runner_lease;
+pub(crate) mod turn_state_engine;
 
 use io::{deserialize_snapshot, fs_error, snapshot_entry, snapshot_path};
 use profile_resolver::PreResolvedRunProfileResolver;
 use runner_lease::{RunnerLeaseMemory, RunnerLeaseOverlay, RunnerLeaseRecord, RunnerLeaseStore};
+use turn_state_engine::TurnStateEngine;
 
 pub use row_store::{FilesystemTurnStateRowStore, TurnStateDurabilityPolicy};
+pub use turn_state_engine::TurnStateStoreLimits;
 
 #[cfg(test)]
 mod tests;
@@ -156,7 +158,7 @@ where
     F: RootFilesystem,
 {
     filesystem: Arc<ScopedFilesystem<F>>,
-    limits: InMemoryTurnStateStoreLimits,
+    limits: TurnStateStoreLimits,
     admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
     snapshot_cache: Mutex<Option<CachedSnapshot>>,
     runner_leases: RunnerLeaseMemory,
@@ -170,7 +172,7 @@ where
     pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self {
             filesystem,
-            limits: InMemoryTurnStateStoreLimits::default(),
+            limits: TurnStateStoreLimits::default(),
             admission_limit_provider: Arc::new(AllowAllTurnAdmissionLimitProvider),
             snapshot_cache: Mutex::new(None),
             runner_leases: Arc::new(RwLock::new(HashMap::new())),
@@ -178,7 +180,7 @@ where
         }
     }
 
-    pub fn with_limits(mut self, limits: InMemoryTurnStateStoreLimits) -> Self {
+    pub fn with_limits(mut self, limits: TurnStateStoreLimits) -> Self {
         self.limits = limits;
         self
     }
@@ -397,8 +399,8 @@ where
     fn build_in_memory_store(
         &self,
         snapshot: TurnPersistenceSnapshot,
-    ) -> Result<InMemoryTurnStateStore, TurnError> {
-        InMemoryTurnStateStore::from_persistence_snapshot_with_admission_limit_provider(
+    ) -> Result<TurnStateEngine, TurnError> {
+        TurnStateEngine::from_persistence_snapshot_with_admission_limit_provider(
             snapshot,
             self.limits,
             self.admission_limit_provider.clone(),
@@ -407,7 +409,7 @@ where
 
     /// Read-modify-write the snapshot with optimistic CAS and bounded retry.
     ///
-    /// `apply` materializes a transient [`InMemoryTurnStateStore`] from the
+    /// `apply` materializes a transient `TurnStateEngine` from the
     /// loaded snapshot, runs the supplied async closure against it, and the
     /// resulting snapshot is written back. On `VersionMismatch` the loop
     /// re-reads and reapplies the closure against the latest snapshot. The
@@ -416,8 +418,8 @@ where
     /// returns `TurnError::Unavailable`.
     async fn apply<T, A, Fut>(&self, overlay: RunnerLeaseOverlay, apply: A) -> Result<T, TurnError>
     where
-        A: FnMut(InMemoryTurnStateStore) -> Fut + Send,
-        Fut: std::future::Future<Output = (Result<T, TurnError>, InMemoryTurnStateStore)> + Send,
+        A: FnMut(TurnStateEngine) -> Fut + Send,
+        Fut: std::future::Future<Output = (Result<T, TurnError>, TurnStateEngine)> + Send,
         T: Send,
     {
         let path = snapshot_path()?;
@@ -450,13 +452,13 @@ where
             // encode: next snapshot → versioned Entry.
             |snapshot: &TurnPersistenceSnapshot| snapshot_entry(snapshot),
             // apply: per CAS-retry callback.
-            //   1. Apply runner-lease overlay so the InMemoryTurnStateStore sees
+            //   1. Apply runner-lease overlay so the TurnStateEngine sees
             //      up-to-date `last_heartbeat_at` / `lease_expires_at` from the
             //      in-memory runner-lease map. The overlaid snapshot is both the
             //      no-op baseline and (on a real transition) what cas_update
             //      writes back — mirroring the pre-merge `apply_with_retry`,
             //      which built and persisted from the overlaid `old_snapshot`.
-            //   2. Build the transient InMemoryTurnStateStore.
+            //   2. Build the transient TurnStateEngine.
             //   3. Call the caller's closure (FnMut) via the mutex, then await
             //      the returned Future without holding the lock.
             move |current: Option<TurnPersistenceSnapshot>| {
@@ -488,7 +490,7 @@ where
                     let baseline = overlaid_snapshot.clone();
 
                     let store =
-                        InMemoryTurnStateStore::from_persistence_snapshot_with_admission_limit_provider(
+                        TurnStateEngine::from_persistence_snapshot_with_admission_limit_provider(
                             overlaid_snapshot,
                             limits,
                             admission_limit_provider,
@@ -580,9 +582,9 @@ where
         apply: A,
     ) -> Result<TurnRunState, TurnError>
     where
-        A: FnMut(InMemoryTurnStateStore) -> Fut + Send,
-        Fut: std::future::Future<Output = (Result<TurnRunState, TurnError>, InMemoryTurnStateStore)>
-            + Send,
+        A: FnMut(TurnStateEngine) -> Fut + Send,
+        Fut:
+            std::future::Future<Output = (Result<TurnRunState, TurnError>, TurnStateEngine)> + Send,
     {
         let span = turn_state_write_span(operation, None, Some(&run_id));
         async move {
@@ -661,7 +663,7 @@ where
         Self::Row(Box::new(FilesystemTurnStateRowStore::new(filesystem)))
     }
 
-    pub fn with_limits(self, limits: InMemoryTurnStateStoreLimits) -> Self {
+    pub fn with_limits(self, limits: TurnStateStoreLimits) -> Self {
         match self {
             Self::Blob(store) => Self::Blob(Box::new((*store).with_limits(limits))),
             Self::Row(store) => Self::Row(Box::new((*store).with_limits(limits))),
@@ -1648,8 +1650,8 @@ where
 /// leaving the normal claim/complete hot path untouched.
 ///
 /// On process start, composition calls [`load`](Self::load) once and rehydrates
-/// the in-memory store via
-/// [`InMemoryTurnStateStore::from_persistence_snapshot`](crate::InMemoryTurnStateStore::from_persistence_snapshot).
+/// the in-memory engine via
+/// `TurnStateEngine::from_persistence_snapshot`.
 pub struct FilesystemTurnStateBlockPersistence<F>
 where
     F: RootFilesystem,
