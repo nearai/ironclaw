@@ -93,9 +93,7 @@ where
 }
 
 pub(crate) enum UserTurnWorkload {
-    #[cfg(feature = "libsql")]
     Libsql(UserTurnServices<ironclaw_filesystem::LibSqlRootFilesystem>),
-    #[cfg(feature = "postgres")]
     Postgres(UserTurnServices<ironclaw_filesystem::PostgresRootFilesystem>),
 }
 
@@ -210,7 +208,6 @@ pub(crate) async fn build_user_turn_workload(
     }
 }
 
-#[cfg(feature = "libsql")]
 async fn build_libsql_user_turn_workload(
     args: &Args,
     run_id: &str,
@@ -230,15 +227,6 @@ async fn build_libsql_user_turn_workload(
     )?))
 }
 
-#[cfg(not(feature = "libsql"))]
-async fn build_libsql_user_turn_workload(
-    _args: &Args,
-    _run_id: &str,
-) -> Result<UserTurnWorkload, String> {
-    Err("binary was built without the libsql feature".to_string())
-}
-
-#[cfg(feature = "postgres")]
 async fn build_postgres_user_turn_workload(
     args: &Args,
     run_id: &str,
@@ -256,14 +244,6 @@ async fn build_postgres_user_turn_workload(
         args.turn_state_store_limits(),
         args.turn_state_durability.to_policy(),
     )?))
-}
-
-#[cfg(not(feature = "postgres"))]
-async fn build_postgres_user_turn_workload(
-    _args: &Args,
-    _run_id: &str,
-) -> Result<UserTurnWorkload, String> {
-    Err("binary was built without the postgres feature".to_string())
 }
 
 pub(crate) async fn run_user_turn_tasks(
@@ -601,9 +581,7 @@ fn format_prefill_errors(errors: &BTreeMap<String, u64>) -> String {
 impl UserTurnWorkload {
     pub(crate) fn target(&self) -> &str {
         match self {
-            #[cfg(feature = "libsql")]
             Self::Libsql(services) => &services.target,
-            #[cfg(feature = "postgres")]
             Self::Postgres(services) => &services.target,
         }
     }
@@ -617,13 +595,11 @@ impl UserTurnWorkload {
         span_budget: &AtomicUsize,
     ) -> Sample {
         match self {
-            #[cfg(feature = "libsql")]
             Self::Libsql(services) => {
                 services
                     .run_operation(args, identities, worker_index, operation_index, span_budget)
                     .await
             }
-            #[cfg(feature = "postgres")]
             Self::Postgres(services) => {
                 services
                     .run_operation(args, identities, worker_index, operation_index, span_budget)
@@ -640,13 +616,11 @@ impl UserTurnWorkload {
         turn_index: usize,
     ) -> Sample {
         match self {
-            #[cfg(feature = "libsql")]
             Self::Libsql(services) => {
                 services
                     .prefill_turn(args, identities, thread_index, turn_index)
                     .await
             }
-            #[cfg(feature = "postgres")]
             Self::Postgres(services) => {
                 services
                     .prefill_turn(args, identities, thread_index, turn_index)
@@ -662,13 +636,11 @@ impl UserTurnWorkload {
         thread_index: usize,
     ) -> Sample {
         match self {
-            #[cfg(feature = "libsql")]
             Self::Libsql(services) => {
                 services
                     .prefill_thread_list_thread(args, identities, thread_index)
                     .await
             }
-            #[cfg(feature = "postgres")]
             Self::Postgres(services) => {
                 services
                     .prefill_thread_list_thread(args, identities, thread_index)

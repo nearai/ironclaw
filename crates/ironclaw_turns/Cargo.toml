@@ -14,9 +14,6 @@ publish = false
 [package.metadata.ironclaw]
 layer = "kernel"
 
-[features]
-default = []
-
 [dependencies]
 async-trait = "0.1"
 blake3 = "1"

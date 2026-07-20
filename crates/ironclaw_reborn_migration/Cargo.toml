@@ -36,15 +36,11 @@ full-migration = ["dep:ironclaw"]
 libsql = [
     "dep:libsql",
     "ironclaw?/libsql",
-    "ironclaw_filesystem/libsql",
-    "ironclaw_triggers/libsql",
     "ironclaw_reborn_composition/libsql",
 ]
 postgres = [
     "dep:deadpool-postgres",
     "ironclaw?/postgres",
-    "ironclaw_filesystem/postgres",
-    "ironclaw_triggers/postgres",
     "ironclaw_reborn_composition/postgres",
 ]
 

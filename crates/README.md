@@ -116,7 +116,7 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 - **Durable event history**: use `ironclaw_events` for contracts and `ironclaw_reborn_event_store` for backend adapters.
 - **Current invocation state**: use `ironclaw_run_state`, not event logs.
 - **User-visible read models and live projection streams**: prefer `ironclaw_event_projections`, `ironclaw_event_streams`, or `ironclaw_product_adapters` over parsing storage rows in UI code.
-- **Product workflow persistence**: keep orchestration and durable ledger adapters in `ironclaw_product_workflow`; concrete adapters stay behind the `storage`/`libsql`/`postgres` features and the `IdempotencyLedger` port.
+- **Product workflow persistence**: keep orchestration and durable ledger adapters in `ironclaw_product_workflow`; concrete adapters implement the `IdempotencyLedger` port without adding backend compile features.
 - **Agent loop/product orchestration**: use `ironclaw_agent_loop`, `ironclaw_loop_host`, `ironclaw_turns`, `ironclaw_engine`, or `ironclaw_runner` depending on layer.
 - **Web or terminal UI**: use `ironclaw_gateway`, `ironclaw_webui`, `ironclaw_webui`, or `ironclaw_tui`; keep authority and persistence in lower crates.
 
@@ -142,7 +142,7 @@ cargo test
 For targeted crate work, prefer the narrowest command first:
 
 ```bash
-cargo test -p ironclaw_secrets --features libsql
+cargo test -p ironclaw_secrets
 cargo clippy -p ironclaw_network --tests -- -D warnings
 ```
 
