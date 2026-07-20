@@ -767,6 +767,17 @@ pub struct ProductLivePlannedRuntimeAdapters {
     pub model_budget_accountant: Arc<dyn LoopModelBudgetAccountant>,
     /// Instruction-safety context passed into the planned runtime.
     pub safety_context: InstructionSafetyContext,
+    /// Host-private gate-record store (§5.2.9) — the SAME store the capability
+    /// factory persists `GateRecord::Auth` into. Retained on the bundle so a
+    /// consumer building the runner (`DefaultPlannedRuntimeParts`) from this
+    /// bundle wires it via `with_gate_record_store`; without it the turn
+    /// executor reloads an empty requirement set on an `AuthRequired` resume and
+    /// applies an unactionable auth block (#6299 / #6287 IronLoop).
+    pub gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore>,
+    /// Host-private replay-payload store, retained alongside the gate-record
+    /// store for the same reason — the resume reconstitutes `{input, estimate}`
+    /// from it, keyed by `InvocationId`.
+    pub replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
 }
 
 impl ProductLivePlannedRuntimeAdapters {
@@ -782,6 +793,12 @@ impl ProductLivePlannedRuntimeAdapters {
             .clone()
             .ok_or(ProductLivePlannedRuntimeAdapterError::MissingHostRuntime)?;
 
+        // Retain the host-private stores on the bundle (cheap Arc clones) so a
+        // consumer building the runner from this bundle wires the SAME stores
+        // the capability factory persists into (#6299). The factory takes owned
+        // copies of the originals below.
+        let gate_record_store = Arc::clone(&config.gate_record_store);
+        let replay_payload_store = Arc::clone(&config.replay_payload_store);
         let capability_factory = ProductLiveLoopCapabilityPortFactory::new(
             host_runtime,
             config.capability_authority_resolver,
@@ -808,6 +825,8 @@ impl ProductLivePlannedRuntimeAdapters {
             model_policy_guard: config.model_policy_guard,
             model_budget_accountant: config.model_budget_accountant,
             safety_context: config.safety_context,
+            gate_record_store,
+            replay_payload_store,
         })
     }
 }
