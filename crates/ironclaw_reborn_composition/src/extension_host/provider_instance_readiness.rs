@@ -32,6 +32,14 @@ pub(crate) struct ProviderInstanceReadinessInputs {
     /// `RebornBuildInput::slack_host_beta_enabled`, resolved by the CLI
     /// serve path before the composition build.
     pub(crate) slack_host_beta_enabled: bool,
+    /// Whether `IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI` resolved
+    /// for this build. Slack personal OAuth needs this IN ADDITION to the
+    /// host-beta signal above: with the route mounted but the redirect URI
+    /// unset, the Connect button reaches
+    /// `product_auth::serve::slack_personal_oauth_credentials` and gets a
+    /// message-less 503 — the dead end this readiness map exists to replace
+    /// with actionable text.
+    pub(crate) slack_personal_oauth_redirect_uri_configured: bool,
 }
 
 /// Build the readiness map: an entry is present only for a provider whose
@@ -54,14 +62,19 @@ pub(crate) fn provider_instance_readiness_map(
             ),
         );
     }
-    if !inputs.slack_host_beta_enabled {
+    let slack_gaps = ironclaw_reborn_config::SlackSetupGaps {
+        enable: !inputs.slack_host_beta_enabled,
+        redirect_uri: !inputs.slack_personal_oauth_redirect_uri_configured,
+    };
+    if slack_gaps.enable || slack_gaps.redirect_uri {
         map.insert(
             RuntimeCredentialAccountProviderId::new(ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID)?,
-            format!(
-                "{}\n\n{}",
-                ironclaw_reborn_config::slack_remediation_text(),
-                ironclaw_reborn_config::apply_step_text()
-            ),
+            // No `apply_step_text()` here, unlike google above: the Slack
+            // variant embeds its own restart because Slack's apply step is
+            // mid-sequence (the route must mount before the WebUI can run
+            // workspace OAuth). Appending would double-print the restart and
+            // misorder it after the connect step.
+            ironclaw_reborn_config::slack_remediation_text(slack_gaps),
         );
     }
     Ok(map)
@@ -76,52 +89,95 @@ mod tests {
             .expect("GOOGLE_PROVIDER_ID is a valid provider id")
     }
 
+    fn slack_provider() -> RuntimeCredentialAccountProviderId {
+        RuntimeCredentialAccountProviderId::new(ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID)
+            .expect("SLACK_PERSONAL_PROVIDER_ID is a valid provider id")
+    }
+
+    /// Fully-configured baseline; each test negates only the signal it covers.
+    fn all_configured() -> ProviderInstanceReadinessInputs {
+        ProviderInstanceReadinessInputs {
+            google_oauth_configured: true,
+            slack_host_beta_enabled: true,
+            slack_personal_oauth_redirect_uri_configured: true,
+        }
+    }
+
     #[test]
     fn google_entry_present_when_not_configured() {
         let map = provider_instance_readiness_map(ProviderInstanceReadinessInputs {
             google_oauth_configured: false,
-            slack_host_beta_enabled: true,
+            ..all_configured()
         })
         .expect("map builds");
         let text = map.get(&google_provider()).expect("google entry present");
         assert!(text.contains("config set google.client_id"));
+        // Google's apply step IS a trailing append (unlike slack's embedded,
+        // mid-sequence one) — this pins that the append survived the slack change.
         assert!(text.contains("ironclaw service restart"));
     }
 
     #[test]
     fn google_entry_absent_when_configured() {
-        let map = provider_instance_readiness_map(ProviderInstanceReadinessInputs {
-            google_oauth_configured: true,
-            slack_host_beta_enabled: true,
-        })
-        .expect("map builds");
+        let map = provider_instance_readiness_map(all_configured()).expect("map builds");
         assert!(!map.contains_key(&google_provider()));
     }
 
     #[test]
     fn slack_entry_present_when_host_beta_not_enabled() {
         let map = provider_instance_readiness_map(ProviderInstanceReadinessInputs {
-            google_oauth_configured: true,
             slack_host_beta_enabled: false,
+            ..all_configured()
         })
         .expect("map builds");
-        let provider =
-            RuntimeCredentialAccountProviderId::new(ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID)
-                .expect("SLACK_PERSONAL_PROVIDER_ID is a valid provider id");
-        let text = map.get(&provider).expect("slack entry present");
+        let text = map.get(&slack_provider()).expect("slack entry present");
         assert!(text.contains("config set slack.enabled"));
     }
 
+    /// The gap Task A closes: host-beta enabled but the redirect URI unset
+    /// still leaves the personal-OAuth slot empty, so activation must fail
+    /// closed here instead of sending the user to a Connect button that 503s.
     #[test]
-    fn slack_entry_absent_when_host_beta_enabled() {
+    fn slack_entry_present_when_redirect_uri_not_configured() {
         let map = provider_instance_readiness_map(ProviderInstanceReadinessInputs {
-            google_oauth_configured: true,
-            slack_host_beta_enabled: true,
+            slack_personal_oauth_redirect_uri_configured: false,
+            ..all_configured()
         })
         .expect("map builds");
-        let provider =
-            RuntimeCredentialAccountProviderId::new(ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID)
-                .expect("SLACK_PERSONAL_PROVIDER_ID is a valid provider id");
-        assert!(!map.contains_key(&provider));
+        let text = map.get(&slack_provider()).expect("slack entry present");
+        assert!(
+            text.contains("IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI"),
+            "the entry must name the missing redirect URI: {text}"
+        );
+        assert!(
+            !text.contains("config set slack.enabled"),
+            "slack.enabled is already applied; re-listing it is the confusion \
+             the gap struct prevents: {text}"
+        );
+    }
+
+    /// Regression guard for the double-restart this change removed: the slack
+    /// entry embeds exactly one restart and the map appends none.
+    #[test]
+    fn slack_entry_states_the_restart_exactly_once() {
+        let map = provider_instance_readiness_map(ProviderInstanceReadinessInputs {
+            slack_host_beta_enabled: false,
+            slack_personal_oauth_redirect_uri_configured: false,
+            ..all_configured()
+        })
+        .expect("map builds");
+        let text = map.get(&slack_provider()).expect("slack entry present");
+        assert_eq!(
+            text.matches("service restart").count(),
+            1,
+            "the readiness map must not append apply_step_text() on top of the \
+             slack variant's own embedded restart: {text}"
+        );
+    }
+
+    #[test]
+    fn slack_entry_absent_when_fully_configured() {
+        let map = provider_instance_readiness_map(all_configured()).expect("map builds");
+        assert!(!map.contains_key(&slack_provider()));
     }
 }

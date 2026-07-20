@@ -39,8 +39,8 @@ pub use budget::{
     ROUTINE_LIGHTWEIGHT_USD_ENV, ROUTINE_STANDARD_USD_ENV, USER_DAILY_USD_ENV,
 };
 pub use capability_remediation::{
-    apply_step_text, google_remediation_text, slack_remediation_text,
-    slack_remediation_text_with_base_url,
+    SlackSetupGaps, account_setup_host_enable_text, apply_step_text, google_remediation_text,
+    slack_remediation_text, slack_remediation_text_with_base_url,
 };
 pub use config_file::{
     BootSection, BudgetSection, DefaultLlmSlotUpdate, DefaultLlmSlotUpdateSession, DriversSection,

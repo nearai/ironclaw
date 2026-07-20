@@ -14,8 +14,15 @@
 //! base-url-free variant below to build the `slack_personal`
 //! readiness-map entry; `ironclaw_reborn_cli`'s `capability_config` module
 //! wraps `slack_remediation_text_with_base_url` to keep printing a concrete
-//! serve base URL. `slack_setup_sentence` is the single source of truth both
+//! serve base URL. `slack_connect_clause` is the single source of truth both
 //! call through, so the wording cannot drift between the two surfaces.
+//!
+//! `account_setup_host_enable_text` serves a third surface: the fail-closed
+//! reason `extension_lifecycle::map_account_setup_error` builds when a
+//! declared account-setup host is not mounted. That reason became
+//! user-visible when `InvalidBindingRequest` reasons started riding the
+//! model-visible diagnostic-detail channel, so it needs the same "name the
+//! operator step" treatment as the two above.
 //!
 //! `ironclaw_reborn_cli` depends on `ironclaw_reborn_composition`, never the
 //! reverse, so this text cannot live in the CLI crate (composition could not
@@ -50,25 +57,59 @@ fn slack_connect_clause(webui_extensions_location: &str) -> String {
     )
 }
 
+/// Which Slack instance-configuration steps a build found missing. Slack
+/// personal OAuth needs BOTH: the extension route must be enabled (so the
+/// WebUI can serve the connect card) and the redirect URI must be set (so the
+/// personal-OAuth slot is filled). Setting only the first leaves
+/// `slack_personal_oauth_credentials` returning a message-less 503 — the exact
+/// dead end this remediation exists to prevent — so the two travel together as
+/// one named struct rather than as a single "slack configured" bool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlackSetupGaps {
+    /// `ironclaw config set slack.enabled true` has not been applied.
+    pub enable: bool,
+    /// `IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI` is not set.
+    pub redirect_uri: bool,
+}
+
+/// The service-environment step that fills the personal-OAuth slot. Named
+/// once so the composition and CLI variants cannot drift on the variable name.
+const SLACK_REDIRECT_URI_STEP: &str = "set IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI=<your Slack app's redirect URL> \
+     in the service environment";
+
 /// BYO console-steps remediation text for Slack, base-url-free: the
 /// composition-time build cannot know the serve base URL (it is a
 /// per-invocation `serve` flag, resolved later), so this variant names the
 /// route relatively. Consumed by
 /// `ironclaw_reborn_composition::extension_host::provider_instance_readiness`.
+///
+/// Only the steps `gaps` reports missing are listed, so a user who already ran
+/// `config set slack.enabled true` and is stuck on the redirect URI is not
+/// told to re-run a command they have already applied.
+///
 /// Unlike `google_remediation_text`, this variant embeds its own restart step:
 /// Slack's apply step sits in the MIDDLE of the sequence (the route must mount
 /// before the WebUI can run workspace OAuth), so a trailing
 /// `apply_step_text()` would both misorder the instructions and imply "then
 /// ask again" when the user still has a connect step left. Callers of this
 /// variant must therefore NOT append `apply_step_text()`.
-pub fn slack_remediation_text() -> String {
-    format!(
-        "Slack setup (one-time, per instance):\n  \
-         1. ironclaw config set slack.enabled true\n  \
-         2. ironclaw service restart   (mounts the Slack extension route)\n  \
-         3. {}",
-        slack_connect_clause("/extensions in the WebUI")
-    )
+pub fn slack_remediation_text(gaps: SlackSetupGaps) -> String {
+    let mut steps: Vec<String> = Vec::new();
+    if gaps.enable {
+        steps.push("ironclaw config set slack.enabled true".to_string());
+    }
+    if gaps.redirect_uri {
+        steps.push(SLACK_REDIRECT_URI_STEP.to_string());
+    }
+    steps.push("ironclaw service restart   (mounts the Slack extension route)".to_string());
+    steps.push(slack_connect_clause("/extensions in the WebUI"));
+    let body = steps
+        .iter()
+        .enumerate()
+        .map(|(index, step)| format!("  {}. {step}", index + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("Slack setup (one-time, per instance):\n{body}")
 }
 
 /// Same sentence, with the concrete serve base URL the CLI resolves at
@@ -77,12 +118,38 @@ pub fn slack_remediation_text() -> String {
 /// The CLI prints this immediately after the user ran `config set
 /// slack.enabled`, so it neither repeats that command nor embeds the restart
 /// (`set.rs::print_apply_step` appends the canonical restart sentence right
-/// after it) — it only names the remaining connect step.
+/// after it) — it names only the steps that remain. The redirect URI is one of
+/// them unconditionally: `config set slack.enabled` alone provably leaves the
+/// personal-OAuth slot empty, and at `config set` time the CLI has not
+/// resolved the service environment the runtime will actually boot with, so it
+/// states the requirement rather than guessing it is already met.
 pub fn slack_remediation_text_with_base_url(base_url: &str) -> String {
     format!(
-        "After restarting, {}",
+        "Also {SLACK_REDIRECT_URI_STEP}. After restarting, {}",
         slack_connect_clause(&format!("{base_url}/extensions"))
     )
+}
+
+/// Operator enable step for an account-setup host that is compiled in but not
+/// enabled on this instance, keyed by extension id because "how do I turn this
+/// on" is per-extension operator configuration. Returns `None` for hosts with
+/// no config-driven enable step, so the caller keeps the bare fail-closed
+/// reason rather than inventing guidance.
+///
+/// Telegram deliberately names env/config.toml only: there is no
+/// `ironclaw config set telegram.enabled` alias today (`config set` grew only
+/// `slack.enabled`), and naming one that does not exist would send the user
+/// into a second dead end. Telegram's bot token and webhook secret remain user
+/// credentials behind the manual-token gate and are NOT part of this step.
+pub fn account_setup_host_enable_text(extension_id: &str) -> Option<&'static str> {
+    match extension_id {
+        "telegram" => Some(
+            "Enable the Telegram host on this instance: set \
+             IRONCLAW_REBORN_TELEGRAM_ENABLED=true in the service environment, or add \
+             `enabled = true` under the `[telegram]` section of config.toml.",
+        ),
+        _ => None,
+    }
 }
 
 /// Canonical "apply the change" follow-up sentence: `config set` never
@@ -114,17 +181,66 @@ mod tests {
         assert!(google.contains("config set google.redirect_uri"));
     }
 
+    fn both_gaps() -> SlackSetupGaps {
+        SlackSetupGaps {
+            enable: true,
+            redirect_uri: true,
+        }
+    }
+
     #[test]
     fn slack_remediation_text_names_the_relative_extensions_route() {
-        let slack = slack_remediation_text();
+        let slack = slack_remediation_text(both_gaps());
         assert!(slack.contains("/extensions"));
         assert!(slack.contains("config set slack.enabled"));
+        assert!(slack.contains("IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI"));
         assert!(!slack.contains("config set slack.bot_token"));
+        // The user asked for `config set` to lead: an operator reading top-down
+        // must enable the route before being sent to the WebUI to connect.
+        let config_set = slack
+            .find("config set slack.enabled")
+            .expect("config set step present");
+        let connect = slack.find("/extensions").expect("connect step present");
+        assert!(
+            config_set < connect,
+            "`config set` must precede the WebUI connect instruction: {slack}"
+        );
+        // This variant OWNS its restart (Slack's apply step is mid-sequence),
+        // so it embeds exactly one and its callers append none.
         assert_eq!(
             slack.matches("service restart").count(),
-            0,
-            "slack_remediation_text must not embed the restart step itself \
-             (callers append it exactly once): {slack}"
+            1,
+            "the composition variant embeds its own mid-sequence restart exactly once: {slack}"
+        );
+    }
+
+    /// The dead-end case Task A closes: `slack.enabled` is already applied and
+    /// only the redirect URI is missing. Re-printing the `config set` the user
+    /// has already run is the specific confusion the gap struct prevents.
+    #[test]
+    fn slack_remediation_text_names_only_the_missing_step() {
+        let redirect_only = slack_remediation_text(SlackSetupGaps {
+            enable: false,
+            redirect_uri: true,
+        });
+        assert!(redirect_only.contains("IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI"));
+        assert!(
+            !redirect_only.contains("config set slack.enabled"),
+            "an already-enabled instance must not be told to re-run config set: {redirect_only}"
+        );
+        assert!(
+            redirect_only.contains("1. set IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI"),
+            "the surviving steps must renumber from 1: {redirect_only}"
+        );
+
+        let enable_only = slack_remediation_text(SlackSetupGaps {
+            enable: true,
+            redirect_uri: false,
+        });
+        assert!(enable_only.contains("config set slack.enabled"));
+        assert!(
+            !enable_only.contains("IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI"),
+            "a configured redirect URI must not be listed as missing: {enable_only}"
         );
     }
 
@@ -132,11 +248,39 @@ mod tests {
     fn slack_remediation_text_with_base_url_embeds_the_concrete_url() {
         let slack = slack_remediation_text_with_base_url("http://127.0.0.1:3000");
         assert!(slack.contains("http://127.0.0.1:3000/extensions"));
-        assert!(slack.contains("config set slack.enabled"));
+        assert!(slack.contains("IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI"));
+        // The CLI prints this right after `config set slack.enabled` succeeded,
+        // so repeating that command would be noise.
+        assert!(
+            !slack.contains("config set slack.enabled"),
+            "the CLI variant must not repeat the command the user just ran: {slack}"
+        );
         assert_eq!(
             slack.matches("service restart").count(),
             0,
-            "slack_remediation_text_with_base_url must not embed the restart step itself: {slack}"
+            "slack_remediation_text_with_base_url must not embed the restart step itself \
+             (`set.rs::print_apply_step` appends it exactly once): {slack}"
         );
+    }
+
+    #[test]
+    fn telegram_enable_text_names_both_operator_knobs_and_no_config_set_alias() {
+        let telegram =
+            account_setup_host_enable_text("telegram").expect("telegram enable step present");
+        assert!(telegram.contains("IRONCLAW_REBORN_TELEGRAM_ENABLED=true"));
+        assert!(telegram.contains("[telegram]"));
+        assert!(telegram.contains("enabled = true"));
+        // `config set` grew only `slack.enabled` (PR #6246); naming a telegram
+        // alias that does not exist would send the user into a second dead end.
+        assert!(
+            !telegram.contains("config set telegram"),
+            "there is no `config set telegram.enabled` alias to advertise: {telegram}"
+        );
+    }
+
+    #[test]
+    fn account_setup_host_enable_text_is_absent_for_hosts_without_an_enable_step() {
+        assert!(account_setup_host_enable_text("github").is_none());
+        assert!(account_setup_host_enable_text("gmail").is_none());
     }
 }

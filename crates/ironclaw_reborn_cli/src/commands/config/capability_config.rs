@@ -410,6 +410,13 @@ mod tests {
         let slack = slack_remediation_text("http://127.0.0.1:3000");
         assert!(slack.contains("http://127.0.0.1:3000/extensions"));
         assert!(!slack.contains("config set slack.bot_token"));
+        // `config set slack.enabled` alone leaves the personal-OAuth slot
+        // empty, so the CLI must also name the redirect URI or the user walks
+        // straight into the 503 this remediation exists to prevent.
+        assert!(
+            slack.contains("IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI"),
+            "the CLI variant must name the remaining redirect-URI step: {slack}"
+        );
         assert_eq!(
             slack.matches("service restart").count(),
             0,

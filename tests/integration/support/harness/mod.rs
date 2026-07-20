@@ -666,6 +666,19 @@ impl HostRuntimeCapabilityHarness {
         // readiness-map chokepoint; the map's own unit coverage
         // (`provider_instance_readiness.rs`) pins the `false` arm directly.
         input = input.with_slack_host_beta_enabled(true);
+        // Slack readiness has a SECOND axis: personal OAuth also needs
+        // `IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI`. Same rationale
+        // as the host-beta default directly above — this tier never represents
+        // a Slack-unconfigured instance — so satisfy both axes rather than let
+        // the readiness map gate `slack_personal` activation for every
+        // pre-existing harness. The map's own unit coverage pins the
+        // missing-redirect-URI arm directly.
+        //
+        // Declared as a fact rather than wired via
+        // `with_slack_personal_oauth_lazy`, which would also switch the
+        // provider client to lazy setup-service credentials this tier does not
+        // fill.
+        input = input.with_slack_personal_oauth_redirect_uri_configured(true);
         if google_oauth_backend_for_test {
             // Dummy but well-formed: only presence on `oauth_provider_configs`
             // feeds `google_oauth_configured` (factory.rs) — the readiness-map

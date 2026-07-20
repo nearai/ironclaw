@@ -2453,13 +2453,24 @@ fn map_search_credential_stage_error(
 
 fn map_account_setup_error(error: ExtensionAccountSetupError) -> ProductWorkflowError {
     match error {
+        // This reason is user-visible: `lifecycle_error` routes
+        // `InvalidBindingRequest` onto the model-visible diagnostic-detail
+        // channel, so it is read by a person, not just a log. Name the
+        // operator step where one exists instead of stating the fault.
         ExtensionAccountSetupError::HostUnavailable { extension_id } => {
-            ProductWorkflowError::InvalidBindingRequest {
-                reason: format!(
-                    "the account setup host for extension {} is not enabled on this deployment",
-                    extension_id.as_str()
-                ),
+            let mut reason = format!(
+                "The {} extension is not enabled on this instance, so it cannot be connected yet.",
+                extension_id.as_str()
+            );
+            if let Some(enable_step) =
+                ironclaw_reborn_config::account_setup_host_enable_text(extension_id.as_str())
+            {
+                reason.push_str("\n\n");
+                reason.push_str(enable_step);
+                reason.push_str("\n\n");
+                reason.push_str(ironclaw_reborn_config::apply_step_text());
             }
+            ProductWorkflowError::InvalidBindingRequest { reason }
         }
         ExtensionAccountSetupError::StatusUnavailable {
             extension_id,
@@ -4239,9 +4250,29 @@ output_schema_ref = "schemas/run.output.json"
             .await
             .expect_err("a declared setup without its mounted host must fail closed");
 
+        let ProductWorkflowError::InvalidBindingRequest { reason } = &error else {
+            panic!("an unmounted host is a non-retryable composition fault, got {error:?}");
+        };
+        // This reason now reaches the user through the model-visible
+        // diagnostic-detail channel, so it must name the enable step rather
+        // than only stating that the host is unavailable.
         assert!(
-            matches!(error, ProductWorkflowError::InvalidBindingRequest { .. }),
-            "an unmounted host is a non-retryable composition fault, got {error:?}"
+            reason.contains("IRONCLAW_REBORN_TELEGRAM_ENABLED=true"),
+            "the reason must name the env enable step: {reason}"
+        );
+        assert!(
+            reason.contains("[telegram]") && reason.contains("enabled = true"),
+            "the reason must name the config.toml enable step: {reason}"
+        );
+        assert!(
+            reason.contains("ironclaw service restart"),
+            "the reason must name how to apply the change: {reason}"
+        );
+        // `config set` grew only `slack.enabled` (PR #6246) — advertising a
+        // telegram alias that does not exist would be a second dead end.
+        assert!(
+            !reason.contains("config set telegram"),
+            "there is no `config set telegram.enabled` alias to advertise: {reason}"
         );
     }
 
@@ -7502,9 +7533,14 @@ output_schema_ref = "schemas/run.output.json"
         readiness.insert(
             RuntimeCredentialAccountProviderId::new(ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID)
                 .expect("valid provider id"),
-            "Slack setup is WebUI-only: config set slack.enabled true|false only toggles \
-             whether the route mounts."
-                .to_string(),
+            // Built from the real helper, not a hand-copied string: a literal
+            // here drifts silently from the text production actually emits.
+            ironclaw_reborn_config::slack_remediation_text(
+                ironclaw_reborn_config::SlackSetupGaps {
+                    enable: true,
+                    redirect_uri: true,
+                },
+            ),
         );
         let (_dir, _storage_root, port, _active_registry, _installation_store) =
             extension_management_port_fixture_with_readiness_map(
