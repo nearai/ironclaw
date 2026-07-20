@@ -152,16 +152,16 @@ impl ScopedPackageOverlay {
         }
         let mut merged = global.as_ref().clone();
         for package in packages {
+            // Replace the static package with the discovered one. Use the
+            // trusted (non-revalidating) insert: the discovered package was
+            // already validated at discovery time against the real host-port
+            // catalog, whereas `insert` re-validates against a default catalog
+            // that does not know the provider's declared host ports (e.g.
+            // `host.runtime.http_egress`) and would spuriously reject it. The
+            // preceding `remove` clears the static capability ids so there is
+            // no id collision to check.
             merged.remove(&package.id);
-            let id = package.id.clone();
-            if merged.insert(package.as_ref().clone()).is_err() {
-                // A discovered package is a re-projection of an already-validated
-                // manifest, so this branch is not expected; on the theoretical
-                // failure restore the global entry rather than drop the extension.
-                if let Some(original) = global.get_extension(&id) {
-                    let _ = merged.insert(original.clone());
-                }
-            }
+            merged.insert_validated(package.as_ref().clone());
         }
         Arc::new(merged)
     }
