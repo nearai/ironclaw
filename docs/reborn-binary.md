@@ -640,32 +640,33 @@ Do not port the current `src/cli/*` command tree wholesale. Port commands one at
 
 ## Release packaging decision
 
-The tag-driven `.github/workflows/release.yml` is Reborn-only and temporarily
-accepts only `ironclaw-v1.0.0-rc.*` tags. It calls
-`.github/workflows/reborn-release-compile.yml`, which links and smokes the
-canonical `ironclaw` binary on two GNU Linux, two musl Linux, two macOS, and one
-Windows target. The musl jobs additionally reject `PT_INTERP` and `DT_NEEDED`
-entries so their outputs remain portable to systems without a musl loader.
+The canonical Reborn `ironclaw` binary from `ironclaw_reborn_cli` is **not yet
+included in cargo-dist release artifacts**.
 
-After all seven targets pass, the publisher restores executable modes, creates
-target-qualified `ironclaw-<target>.tar.gz` archives, writes per-archive and
-aggregate SHA-256 files, and creates the tag's GitHub Release. The Release body
-uses the existing changelog-backed `Release Notes` and platform download-table
-shape. Packaging and note rendering share the ordered target/platform mapping
-in `.github/reborn-release-targets.tsv`; an RC without a dedicated changelog
-section uses `Unreleased`.
+The tag-driven release pipeline builds the shipping binary through
+`.github/workflows/reborn-release-compile.yml`. That matrix performs a final
+link on the two GNU Linux, two musl Linux, two macOS, and one Windows target,
+then runs each native output through config-free CLI startup checks. The musl
+jobs additionally reject `PT_INTERP` and `DT_NEEDED` entries so their outputs
+remain portable to systems without a musl loader.
 
-The release workflow does not build or publish legacy binaries, independently
-distributed legacy registry extension bundles, registry updates,
-announcements, Docker images, or installers. Reborn's first-party extension
-manifests and checked-in WASM components remain host-bundled into each native
-binary; this release workflow neither rebuilds their sources nor publishes
-them as separate assets. WASM/WIT compatibility remains covered by the normal
-compatibility CI lane. A direct manual run of the reusable compile workflow
-only uploads short-lived compile artifacts and does not create a Release. This
-path does not claim `serve` or external-service runtime coverage. Stable tag
-ownership and its installer/latest-download contract must be resolved before
-widening the tag filter. The publisher rejects an RC tag until its version
-matches the Reborn package version. Because that package is currently `0.1.0`,
-the first official `1.0.0-rc.*` tag must follow a separate version-alignment
-change; this workflow does not mask the mismatch.
+For `ironclaw-v1.0.0-rc.*` tags, the release workflow packages those seven
+outputs as target-qualified `.tar.gz` archives, generates per-archive and
+aggregate SHA-256 files, and creates the GitHub Release. The legacy cargo-dist,
+WASM, registry-checksum, announcement, and release Docker jobs remain skipped.
+The independent manual and hourly entry points in `docker.yml` remain
+available. This path does not claim installer or external-service runtime
+coverage.
+
+Current `dist plan --output-format=json` with `crates/ironclaw_reborn_cli` marked `dist = false` emits only the root legacy package artifacts (`ironclaw` package, `ironclaw-legacy` executable). The Reborn RC publisher is intentionally independent of cargo-dist; removing `dist = false` would instead opt the package into cargo-dist's installer contract and still require separate WiX metadata/template work.
+
+Follow-up issue: #3483 tracks packaging the canonical Reborn binary in release artifacts.
+
+Until #3483 is resolved, keep:
+
+```toml
+[package.metadata.dist]
+dist = false
+```
+
+in `crates/ironclaw_reborn_cli/Cargo.toml` so releases do not silently claim to ship an unverified Reborn binary package.

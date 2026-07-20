@@ -157,18 +157,16 @@ jobs:
           "$binary_path" --help > /dev/null
           "$binary_path" profile list --json > /dev/null
 
-      # The tag-driven caller packages these target-scoped staging artifacts into
-      # the Reborn GitHub Release. A direct workflow_dispatch leaves them as
-      # short-lived compile evidence.
+      # These are preflight evidence only. The reborn-compile-* prefix keeps the
+      # existing release host's artifacts-* download pattern from publishing them.
       - id: upload
-        name: Upload compiled binary
+        name: Upload compile evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: reborn-compile-${{ matrix.target }}
           path: "target/${{ matrix.target }}/dist/${{ matrix.binary }}"
           if-no-files-found: error
           retention-days: 7
-          overwrite: true
 
       - name: Summarize compile result
         if: always()
@@ -192,5 +190,5 @@ jobs:
             echo "- Build result: \`$BUILD_RESULT\`"
             echo "- musl portability: \`$LINKAGE_RESULT\`"
             echo "- Native CLI smoke: \`$SMOKE_RESULT\`"
-            echo "- Compiled binary upload: \`$UPLOAD_RESULT\`"
+            echo "- Preflight evidence upload: \`$UPLOAD_RESULT\`"
           } >> "$GITHUB_STEP_SUMMARY"

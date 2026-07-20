@@ -1,7 +1,0 @@
-aarch64-apple-darwin	Apple Silicon macOS
-x86_64-apple-darwin	Intel macOS
-x86_64-pc-windows-msvc	x64 Windows
-aarch64-unknown-linux-gnu	ARM64 Linux
-x86_64-unknown-linux-gnu	x64 Linux
-aarch64-unknown-linux-musl	ARM64 MUSL Linux
-x86_64-unknown-linux-musl	x64 MUSL Linux

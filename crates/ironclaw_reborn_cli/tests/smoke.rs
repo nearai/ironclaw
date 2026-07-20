@@ -183,10 +183,10 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
     let release_workflow = std::fs::read_to_string(root.join(".github/workflows/release.yml"))
         .expect("release workflow")
         .replace("\r\n", "\n");
-    let release_target_manifest =
-        std::fs::read_to_string(root.join(".github/reborn-release-targets.tsv"))
-            .expect("Reborn release target manifest")
-            .replace("\r\n", "\n");
+    let cli_manifest = std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/Cargo.toml"))
+        .expect("Reborn CLI manifest")
+        .replace("\r\n", "\n");
+
     let target_runners = [
         ("x86_64-unknown-linux-gnu", "ubuntu-22.04"),
         ("x86_64-unknown-linux-musl", "ubuntu-22.04"),
@@ -197,27 +197,6 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         ("x86_64-pc-windows-msvc", "windows-2022"),
     ];
     let release_features = "libsql,postgres,inmemory-turn-state";
-    let target_platforms = release_target_manifest
-        .lines()
-        .map(|line| {
-            let (target, platform) = line
-                .split_once('\t')
-                .expect("each release target row must be tab-delimited");
-            assert!(!target.is_empty() && !platform.is_empty());
-            (target, platform)
-        })
-        .collect::<Vec<_>>();
-    let manifest_targets = target_platforms
-        .iter()
-        .map(|(target, _)| *target)
-        .collect::<std::collections::BTreeSet<_>>();
-    let matrix_targets = target_runners
-        .iter()
-        .map(|(target, _)| *target)
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(target_platforms.len(), 7);
-    assert_eq!(manifest_targets.len(), target_platforms.len());
-    assert_eq!(manifest_targets, matrix_targets);
 
     assert_eq!(
         compile_workflow.matches("          - target: ").count(),
@@ -315,35 +294,39 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         .find("name: Smoke compiled binary")
         .expect("binary smoke step");
     let upload_position = compile_workflow
-        .find("name: Upload compiled binary")
-        .expect("compiled binary upload step");
+        .find("name: Upload compile evidence")
+        .expect("compile evidence upload step");
     assert!(
         build_position < linkage_position
             && linkage_position < smoke_position
             && smoke_position < upload_position,
-        "linkage and runtime validation must gate compiled binary upload"
+        "linkage and runtime validation must gate artifact upload"
     );
     assert!(
         compile_workflow.contains("name: reborn-compile-${{ matrix.target }}")
             && compile_workflow.contains("if-no-files-found: error")
-            && compile_workflow.contains("overwrite: true")
             && !compile_workflow.contains("name: artifacts-reborn"),
-        "Reborn staging binaries must be rerun-safe and target-scoped"
+        "compile evidence must stay outside cargo-dist's artifacts-* release namespace"
     );
-    let reborn_publish_job = release_workflow
-        .split_once("\n  publish-reborn-release:\n")
-        .map(|(_, publisher)| publisher)
-        .expect("Reborn release publisher job");
+    let host_job = release_workflow
+        .split_once("\n  host:\n")
+        .and_then(|(_, jobs)| jobs.split_once("\n  docker-image:\n"))
+        .map(|(host, _)| host)
+        .expect("release workflow host job");
+    assert_eq!(
+        host_job.matches("pattern: artifacts-*").count(),
+        2,
+        "release host must download only cargo-dist artifacts for staging and upload"
+    );
     assert!(
-        reborn_publish_job.contains("pattern: reborn-compile-*")
-            && !reborn_publish_job.contains("pattern: artifacts-*"),
-        "the Reborn publisher must consume only target-scoped staging binaries"
+        !host_job.contains("reborn-compile-"),
+        "release host must not publish Reborn compile evidence"
     );
 
     let release_tag_trigger = concat!(
         "  push:\n",
         "    tags:\n",
-        "      - 'ironclaw-v1.0.0-rc.[0-9]+'\n",
+        "      - 'ironclaw-v1.0.0-rc.*'\n",
     );
     assert!(
         release_workflow.contains(release_tag_trigger)
@@ -356,16 +339,14 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         "the tag-only release workflow must wait for the Reborn matrix while keeping an independent manual preflight"
     );
     assert!(
-        compile_workflow.contains("permissions:\n  contents: read")
-            && !release_workflow.contains("\n  plan:\n")
-            && !release_workflow.contains("\n  build-local-artifacts:\n")
-            && !release_workflow.contains("\n  build-global-artifacts:\n")
-            && !release_workflow.contains("\n  build-wasm-extensions:\n")
-            && !release_workflow.contains("\n  host:\n")
-            && !release_workflow.contains("\n  docker-image:\n")
-            && !release_workflow.contains("\n  update-registry-checksums:\n")
-            && !release_workflow.contains("\n  announce:\n"),
-        "the release workflow must contain only the Reborn compile and publish path"
+        release_workflow.contains("needs.plan.outputs.publishing == 'true'")
+            && !release_workflow.contains("if: ${{ github.event_name != 'pull_request' }}")
+            && compile_workflow.contains("permissions:\n  contents: read"),
+        "release compilation must remain read-only without adding PR-only cargo-dist gates"
+    );
+    assert!(
+        cli_manifest.contains("[package.metadata.dist]\ndist = false"),
+        "#6160 must not opt Reborn into cargo-dist before #3483 is resolved"
     );
 }
 
@@ -6800,96 +6781,118 @@ api_key_env = "REBORN_TEST_UNSET_BC8F4D_KEY"
 }
 
 #[test]
-fn release_ci_is_reborn_only_and_publishes_verified_archives() {
+fn release_ci_publishes_reborn_rc_without_enabling_legacy_or_docker_paths() {
     let root = workspace_root();
     let release_workflow = std::fs::read_to_string(root.join(".github/workflows/release.yml"))
         .expect("release workflow")
+        .replace("\r\n", "\n");
+    let docker_workflow = std::fs::read_to_string(root.join(".github/workflows/docker.yml"))
+        .expect("Docker workflow")
         .replace("\r\n", "\n");
     let code_style_workflow =
         std::fs::read_to_string(root.join(".github/workflows/code_style.yml"))
             .expect("code style workflow")
             .replace("\r\n", "\n");
 
-    let jobs = release_workflow
-        .split_once("\njobs:\n")
-        .map(|(_, jobs)| jobs)
-        .expect("release workflow jobs");
-    let job_names = jobs
-        .lines()
-        .filter(|line| line.starts_with("  ") && !line.starts_with("    "))
-        .map(|line| line.trim().trim_end_matches(':'))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        job_names,
-        ["reborn-binary-compile", "publish-reborn-release"],
-        "release workflow must replace the legacy DAG with the Reborn path"
-    );
-    let (reborn_compile_job, reborn_publish_job) = jobs
-        .split_once("\n  publish-reborn-release:\n")
-        .expect("Reborn compile and publish jobs");
+    let release_job = |job_name: &str| {
+        let job_marker = format!("  {job_name}:\n");
+        let job_start = release_workflow
+            .match_indices(&job_marker)
+            .find_map(|(index, _)| {
+                (index == 0 || release_workflow.as_bytes()[index - 1] == b'\n')
+                    .then_some(index + job_marker.len())
+            })
+            .unwrap_or_else(|| panic!("release workflow should retain the {job_name} job"));
+        let jobs_after_marker = &release_workflow[job_start..];
+        let job_body = jobs_after_marker
+            .lines()
+            .take_while(|line| {
+                let trimmed = line.trim_start();
+                trimmed.is_empty() || line.len() - trimmed.len() > 2
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !job_body.is_empty(),
+            "release workflow should retain the {job_name} job body"
+        );
+        job_body
+    };
+
+    let reborn_compile_job = release_job("reborn-binary-compile");
     assert!(
         reborn_compile_job.contains("uses: ./.github/workflows/reborn-release-compile.yml")
-            && reborn_compile_job.contains("ref: ${{ github.sha }}"),
-        "release tags must compile the exact tagged Reborn source"
-    );
-    assert!(
-        reborn_publish_job.contains("needs: reborn-binary-compile")
-            && reborn_publish_job.contains("if: needs.reborn-binary-compile.result == 'success'")
-            && reborn_publish_job.contains("permissions:\n      contents: write")
-            && reborn_publish_job.contains("ref: ${{ github.sha }}")
-            && reborn_publish_job.contains("pattern: reborn-compile-*")
-            && reborn_publish_job.contains("merge-multiple: false")
-            && reborn_publish_job.contains("GH_REPO: ${{ github.repository }}")
-            && reborn_publish_job.contains("RELEASE_COMMIT: ${{ github.sha }}")
-            && reborn_publish_job.contains("RELEASE_TAG: ${{ github.ref_name }}")
-            && reborn_publish_job
-                .matches("repos/$GH_REPO/commits/$RELEASE_TAG")
-                .count()
-                == 2,
-        "publisher must consume only successful target-scoped artifacts bound to the tag SHA"
-    );
-    assert!(
-        reborn_publish_job.contains("targets_file=\".github/reborn-release-targets.tsv\"")
-            && reborn_publish_job.contains(
-                "Release tag version $release_version does not match Reborn package version $cli_version"
-            )
-            && reborn_publish_job.contains("render-reborn-release-notes.sh")
-            && reborn_publish_job.contains("CHANGELOG.md \\\n            \"$targets_file\" \\")
-            && reborn_publish_job.contains("Expected ${#targets[@]} Reborn artifacts")
-            && reborn_publish_job.contains("exactly one non-empty regular file")
-            && reborn_publish_job.contains("install -m 0755")
-            && reborn_publish_job.contains("package_name=\"ironclaw-$target\"")
-            && reborn_publish_job.contains("sha256sum \"$archive\" > \"$archive.sha256\"")
-            && reborn_publish_job.contains("sha256sum ironclaw-*.tar.gz > sha256.sum")
-            && reborn_publish_job.contains("Expected 15 release assets")
-            && reborn_publish_job
-                .contains("release_assets+=(\"$archive\" \"$archive.sha256\")")
-            && reborn_publish_job
-                .contains("release_assets+=(\"$RUNNER_TEMP/release-assets/sha256.sum\")")
-            && reborn_publish_job
-                .contains("gh release create \"${release_args[@]}\" \"${release_assets[@]}\"")
-            && reborn_publish_job.contains("--title \"Version $RELEASE_VERSION\"")
-            && reborn_publish_job.contains("--target \"$RELEASE_COMMIT\"")
-            && reborn_publish_job.contains("--verify-tag")
-            && reborn_publish_job.contains("--draft")
-            && reborn_publish_job.contains("--prerelease")
-            && reborn_publish_job.contains("gh release edit \"$RELEASE_TAG\" --draft=false")
-            && !reborn_publish_job.contains("gh release upload")
-            && !reborn_publish_job.contains("release-assets/*")
-            && !reborn_publish_job.contains("--clobber"),
-        "publisher must package exactly seven archives and publish their checksums draft-first"
+            && reborn_compile_job.contains("ref: ${{ github.sha }}")
+            && !reborn_compile_job
+                .lines()
+                .any(|line| line.starts_with("    if:")),
+        "the Reborn compile matrix must remain the active release path"
     );
 
+    let publish_job = release_job("publish-reborn-binaries");
+    assert!(
+        publish_job.contains("needs: reborn-binary-compile")
+            && publish_job.contains("needs.reborn-binary-compile.result == 'success'")
+            && publish_job.contains("contents: write")
+            && publish_job.contains("GH_REPO: ${{ github.repository }}")
+            && publish_job.contains("pattern: reborn-compile-*")
+            && publish_job.contains("Expected seven Reborn compile artifacts")
+            && publish_job.contains("ironclaw-$target.tar.gz")
+            && publish_job.contains("sha256.sum")
+            && publish_job.contains("Expected 15 release assets")
+            && publish_job.contains("gh release create")
+            && publish_job.contains("--verify-tag")
+            && publish_job.contains("--title \"Version $release_version\"")
+            && publish_job.contains("--notes-file")
+            && publish_job.contains("--prerelease")
+            && publish_job.contains("release-assets/*")
+            && !publish_job.contains("uses: ./.github/workflows/docker.yml"),
+        "release CI must publish the seven Reborn RC binaries without invoking legacy or Docker publication"
+    );
+
+    let plan_job = release_job("plan");
+    assert!(
+        plan_job.contains("if: github.repository == ''")
+            && plan_job.contains("dist host --steps=create")
+            && plan_job.contains("dist plan --output-format=json"),
+        "release CI must retain but skip the legacy cargo-dist plan root"
+    );
+    for legacy_job_name in [
+        "build-local-artifacts",
+        "build-global-artifacts",
+        "build-wasm-extensions",
+        "host",
+        "update-registry-checksums",
+        "announce",
+    ] {
+        let legacy_job = release_job(legacy_job_name);
+        assert!(
+            legacy_job.contains("\n      - plan\n"),
+            "legacy release job {legacy_job_name} must remain downstream of the disabled plan root"
+        );
+    }
+
+    let docker_job = release_job("docker-image");
+    assert!(
+        docker_job.contains("needs: host")
+            && docker_job.contains("if: github.repository == ''")
+            && docker_job.contains("uses: ./.github/workflows/docker.yml")
+            && docker_job.contains("release: true")
+            && docker_job.contains("secrets: inherit"),
+        "release CI must retain but skip its Docker build/publish caller"
+    );
+    assert!(
+        docker_workflow.contains("workflow_dispatch:") && docker_workflow.contains("schedule:"),
+        "the independent Docker workflow must remain manually and periodically runnable"
+    );
     let reborn_cli_selector = code_style_workflow
         .lines()
         .find(|line| line.contains("grep -Eq") && line.contains("crates/ironclaw_reborn_cli/"))
         .expect("code style workflow should classify Reborn CLI changes");
     assert!(
-        reborn_cli_selector.contains(r"\.github/reborn-release-targets\.tsv$")
-            && reborn_cli_selector.contains(r"\.github/scripts/render-reborn-release-notes\.sh$")
-            && reborn_cli_selector.contains(
-                r"\.github/workflows/(code_style|release|docker|reborn-release-compile)\.yml$"
-            ),
+        reborn_cli_selector.contains(
+            r"\.github/workflows/(code_style|release|docker|reborn-release-compile)\.yml$"
+        ),
         "release workflow-only PRs must run the Reborn CLI smoke contract"
     );
     assert!(
@@ -6898,70 +6901,6 @@ fn release_ci_is_reborn_only_and_publishes_verified_archives() {
         ),
         "the required Code Style roll-up must propagate workflow-only Reborn CLI smoke failures"
     );
-}
-
-#[cfg(unix)]
-#[test]
-fn reborn_release_notes_preserve_the_legacy_notes_and_download_shape() {
-    let root = workspace_root();
-    let targets = root.join(".github/reborn-release-targets.tsv");
-    let temp = tempfile::tempdir().expect("tempdir");
-    let changelog = temp.path().join("CHANGELOG.md");
-    std::fs::write(
-        &changelog,
-        concat!(
-            "# Changelog\n\n",
-            "## [Unreleased]\n\n",
-            "### Added\n\n",
-            "- New Reborn behavior.\n\n",
-            "### Fixed\n\n",
-            "- A release regression.\n\n\n",
-            "## [1.2.2] - 2026-07-01\n\n",
-            "- Older notes must not leak into this release.\n",
-        ),
-    )
-    .expect("write changelog fixture");
-
-    let output = Command::new("/bin/bash")
-        .arg(root.join(".github/scripts/render-reborn-release-notes.sh"))
-        .arg(&changelog)
-        .arg(&targets)
-        .args([
-            std::ffi::OsStr::new("example/ironclaw"),
-            std::ffi::OsStr::new("ironclaw-v1.2.3-rc.1"),
-            std::ffi::OsStr::new("1.2.3-rc.1"),
-        ])
-        .output()
-        .expect("render release notes");
-    assert!(
-        output.status.success(),
-        "release-note rendering should succeed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let body = String::from_utf8(output.stdout).expect("UTF-8 release notes");
-    let expected = concat!(
-        "## Release Notes\n\n",
-        "### Added\n\n",
-        "- New Reborn behavior.\n\n",
-        "### Fixed\n\n",
-        "- A release regression.\n\n",
-        "## Download ironclaw 1.2.3-rc.1\n\n",
-        "|  File  | Platform | Checksum |\n",
-        "|--------|----------|----------|\n",
-        "| [ironclaw-aarch64-apple-darwin.tar.gz](https://github.com/example/ironclaw/releases/download/ironclaw-v1.2.3-rc.1/ironclaw-aarch64-apple-darwin.tar.gz) | Apple Silicon macOS | [checksum](https://github.com/example/ironclaw/releases/download/ironclaw-v1.2.3-rc.1/ironclaw-aarch64-apple-darwin.tar.gz.sha256) |\n",
-        "| [ironclaw-x86_64-apple-darwin.tar.gz](https://github.com/example/ironclaw/releases/download/ironclaw-v1.2.3-rc.1/ironclaw-x86_64-apple-darwin.tar.gz) | Intel macOS | [checksum](https://github.com/example/ironclaw/releases/download/ironclaw-v1.2.3-rc.1/ironclaw-x86_64-apple-darwin.tar.gz.sha256) |\n",
-        "| [ironclaw-x86_64-pc-windows-msvc.tar.gz](https://github.com/example/ironclaw/releases/download/ironclaw-v1.2.3-rc.1/ironclaw-x86_64-pc-windows-msvc.tar.gz) | x64 Windows | [checksum](https://github.com/example/ironclaw/releases/download/ironclaw-v1.2.3-rc.1/ironclaw-x86_64-pc-windows-msvc.tar.gz.sha256) |\n",
-        "| [ironclaw-aarch64-unknown-linux-gnu.tar.gz](https://github.com/example/ironclaw/releases/download/ironclaw-v1.2.3-rc.1/ironclaw-aarch64-unknown-linux-gnu.tar.gz) | ARM64 Linux | [checksum](https://github.com/example/ironclaw/releases/download/ironclaw-v1.2.3-rc.1/ironclaw-aarch64-unknown-linux-gnu.tar.gz.sha256) |\n",
-        "| [ironclaw-x86_64-unknown-linux-gnu.tar.gz](https://github.com/example/ironclaw/releases/download/ironclaw-v1.2.3-rc.1/ironclaw-x86_64-unknown-linux-gnu.tar.gz) | x64 Linux | [checksum](https://github.com/example/ironclaw/releases/download/ironclaw-v1.2.3-rc.1/ironclaw-x86_64-unknown-linux-gnu.tar.gz.sha256) |\n",
-        "| [ironclaw-aarch64-unknown-linux-musl.tar.gz](https://github.com/example/ironclaw/releases/download/ironclaw-v1.2.3-rc.1/ironclaw-aarch64-unknown-linux-musl.tar.gz) | ARM64 MUSL Linux | [checksum](https://github.com/example/ironclaw/releases/download/ironclaw-v1.2.3-rc.1/ironclaw-aarch64-unknown-linux-musl.tar.gz.sha256) |\n",
-        "| [ironclaw-x86_64-unknown-linux-musl.tar.gz](https://github.com/example/ironclaw/releases/download/ironclaw-v1.2.3-rc.1/ironclaw-x86_64-unknown-linux-musl.tar.gz) | x64 MUSL Linux | [checksum](https://github.com/example/ironclaw/releases/download/ironclaw-v1.2.3-rc.1/ironclaw-x86_64-unknown-linux-musl.tar.gz.sha256) |\n",
-    );
-    assert_eq!(body, expected);
-    assert!(!body.contains("## Install ironclaw"));
-    assert!(!body.contains("ironclaw-installer"));
-    assert!(!body.contains("npm install"));
-    assert!(!body.contains(".msi"));
 }
 
 fn local_yolo_command(temp: &tempfile::TempDir, args: &[&str]) -> Command {
