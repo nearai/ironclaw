@@ -16,14 +16,14 @@ use crate::{
     OpenAiCompatResourceBinding, OpenAiCompatResourceMapping, OpenAiCompatRouteSurface,
 };
 use async_trait::async_trait;
+use ironclaw_filesystem::LibSqlRootFilesystem;
+use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{
     CasExpectation, Entry, FilesystemError, RecordKind, RecordVersion, RootFilesystem,
 };
 use ironclaw_host_api::VirtualPath;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use ironclaw_filesystem::LibSqlRootFilesystem;
-use ironclaw_filesystem::PostgresRootFilesystem;
 
 const DEFAULT_REF_ROOT: &str = "/engine/openai_compat/refs";
 const MAPPING_RECORD_KIND: &str = "openai_compat_ref_mapping";

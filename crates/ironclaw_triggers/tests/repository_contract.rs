@@ -1,6 +1,7 @@
 use chrono::{SecondsFormat, TimeZone, Utc};
 use ironclaw_common::AutomationName;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
+use ironclaw_triggers::PostgresTriggerRepository;
 use ironclaw_triggers::{
     ActiveTriggerScanCursor, ClearActiveFireRequest, InMemoryTriggerRepository,
     TriggerDeliveryTargetId, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
@@ -16,7 +17,6 @@ use {
     },
     tempfile::tempdir,
 };
-use ironclaw_triggers::PostgresTriggerRepository;
 
 fn ts(seconds: i64) -> Timestamp {
     Utc.timestamp_opt(seconds, 0).single().expect("valid ts")
