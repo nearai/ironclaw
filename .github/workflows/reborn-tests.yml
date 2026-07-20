@@ -116,7 +116,8 @@ jobs:
                   [
                     .packages[]
                     | select(
-                        (.name == "ironclaw_runner")
+                        (.name == "ironclaw")
+                        or (.name == "ironclaw_runner")
                         or (.name | startswith("ironclaw_reborn"))
                         or (.name | startswith("ironclaw_product"))
                         or (.name == "ironclaw_architecture")
@@ -133,7 +134,7 @@ jobs:
                 '
           )"
 
-          # The full ironclaw_reborn_cli dependency closure: every workspace
+          # The full canonical ironclaw dependency closure: every workspace
           # crate the shipped Reborn binary links (normal + build deps). Running
           # each crate's own suite on every PR is the "run everything on every
           # PR" gate -- a green reborn-tests run means the whole closure is
@@ -141,7 +142,7 @@ jobs:
           # extensions, ...) can no longer regress unnoticed.
           closure_packages="$(
             comm -12 \
-              <(cargo tree -p ironclaw_reborn_cli -e normal,build --prefix none \
+              <(cargo tree -p ironclaw -e normal,build --prefix none \
                 | grep -oE 'ironclaw_[a-z0-9_]+' \
                 | sort -u) \
               <(cargo metadata --no-deps --format-version 1 \
@@ -226,13 +227,13 @@ jobs:
             # These packages link `ironclaw_webui`, whose build script compiles
             # the Vite frontend and therefore needs a Node/pnpm toolchain.
             case "${package}" in
-              ironclaw_reborn_cli|ironclaw_reborn_composition)
+              ironclaw|ironclaw_reborn_composition)
                 needs_webui_node=true
                 ;;
             esac
 
             case "${package}" in
-              ironclaw_first_party_extension_ports|ironclaw_host_runtime|ironclaw_loop_host|ironclaw_product_workflow|ironclaw_runner|ironclaw_reborn_cli|ironclaw_reborn_composition|ironclaw_webui|ironclaw_wasm|ironclaw_wasm_product_adapters|ironclaw_wasm_sandbox_core)
+              ironclaw|ironclaw_first_party_extension_ports|ironclaw_host_runtime|ironclaw_loop_host|ironclaw_product_workflow|ironclaw_runner|ironclaw_reborn_composition|ironclaw_webui|ironclaw_wasm|ironclaw_wasm_product_adapters|ironclaw_wasm_sandbox_core)
                 sccache_dist_enabled=false
                 ;;
             esac

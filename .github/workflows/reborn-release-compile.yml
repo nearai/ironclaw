@@ -111,7 +111,7 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           cargo build --locked --profile dist \
-            --package ironclaw_reborn_cli \
+            --package ironclaw \
             --bin ironclaw \
             --target "$TARGET" \
             --features "$REBORN_RELEASE_FEATURES"

@@ -1,6 +1,6 @@
 # Set Up Slack for the Reborn Binary
 
-This guide is for the standalone `ironclaw-reborn serve` Slack host path,
+This guide is for the standalone `ironclaw serve` Slack host path,
 not the legacy v1 Slack WASM channel.
 
 Slack support ships in the binary. It has one gate: runtime config must set
@@ -17,8 +17,8 @@ For local source runs:
 
 ```bash
 cargo run -q \
-  -p ironclaw_reborn_cli \
-  --bin ironclaw-reborn \
+  -p ironclaw \
+  --bin ironclaw \
   -- serve
 ```
 
@@ -26,8 +26,8 @@ For a local source build:
 
 ```bash
 cargo build \
-  -p ironclaw_reborn_cli \
-  --bin ironclaw-reborn
+  -p ironclaw \
+  --bin ironclaw
 ```
 
 Slack is disabled unless the mounted or seeded Reborn config enables it.
@@ -63,7 +63,7 @@ Minimum local env shape:
 export IRONCLAW_REBORN_HOME="$PWD/.reborn-home"
 export IRONCLAW_REBORN_PROFILE="local-dev"
 
-# WebUI env-bearer auth; required by `ironclaw-reborn serve`.
+# WebUI env-bearer auth; required by `ironclaw serve`.
 export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"
 export IRONCLAW_REBORN_WEBUI_USER_ID="reborn-cli"
 
@@ -92,7 +92,7 @@ OPENAI_API_KEY=sk-...
 ## Reborn Config
 
 Edit `$IRONCLAW_REBORN_HOME/config.toml`. If the file does not exist yet, run
-`ironclaw-reborn config init` or start the Docker image once to seed it.
+`ironclaw config init` or start the Docker image once to seed it.
 
 Minimal Slack config:
 
@@ -235,8 +235,8 @@ Start the service:
 
 ```bash
 cargo run -q \
-  -p ironclaw_reborn_cli \
-  --bin ironclaw-reborn \
+  -p ironclaw \
+  --bin ironclaw \
   -- serve --host 127.0.0.1 --port 3000
 ```
 
@@ -264,7 +264,7 @@ Verification checklist:
 
 ### Slack routes are not mounted
 
-Confirm the Reborn config sets [slack].enabled = true, or that the deployment env sets IRONCLAW_REBORN_SLACK_ENABLED=true, then restart ironclaw-reborn.
+Confirm the Reborn config sets [slack].enabled = true, or that the deployment env sets IRONCLAW_REBORN_SLACK_ENABLED=true, then restart `ironclaw`.
 
 ### Slack route never receives events
 

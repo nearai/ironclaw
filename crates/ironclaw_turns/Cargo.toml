@@ -15,7 +15,6 @@ publish = false
 layer = "kernel"
 
 [features]
-default = []
 # In-memory turn-state store double (`test_support::in_memory_turn_state_store`)
 # for cross-crate tests. Enabled via dev-dependencies; never in production.
 test-support = []

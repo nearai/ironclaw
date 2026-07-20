@@ -713,6 +713,31 @@ async def test_reborn_legacy_extensions_offline_attempts_catalog_requests(
     page = await context.new_page()
     catalog_requests: list[str] = []
 
+    async def handle_llm_providers(route):
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "providers": [
+                        {
+                            "id": "openai",
+                            "description": "OpenAI API",
+                            "adapter": "open_ai_completions",
+                            "base_url": "https://api.openai.test/v1",
+                            "default_model": "mock-model",
+                            "builtin": True,
+                            "api_key_set": True,
+                            "api_key_required": True,
+                            "base_url_required": False,
+                            "accepts_api_key": True,
+                        }
+                    ],
+                    "active": {"provider_id": "openai", "model": "mock-model"},
+                }
+            ),
+        )
+
     def record_catalog_request(request):
         path = urlparse(request.url).path
         if path in {
@@ -722,9 +747,21 @@ async def test_reborn_legacy_extensions_offline_attempts_catalog_requests(
             catalog_requests.append(path)
 
     page.on("request", record_catalog_request)
+    await page.route(
+        "**/api/webchat/v2/llm/providers",
+        handle_llm_providers,
+    )
 
     try:
-        await page.goto(f"{reborn_v2_server}/settings?token={REBORN_V2_AUTH_TOKEN}")
+        async with page.expect_response("**/api/webchat/v2/llm/providers"):
+            await page.goto(
+                f"{reborn_v2_server}/settings?token={REBORN_V2_AUTH_TOKEN}"
+            )
+        await expect(
+            page.locator(
+                SEL_V2["llm_provider_card_for"].format(provider_id="openai")
+            )
+        ).to_be_visible(timeout=15000)
         await expect(page.get_by_role("link", name="Extensions").first).to_be_visible(
             timeout=15000
         )

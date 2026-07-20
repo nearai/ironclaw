@@ -220,7 +220,7 @@ jobs:
       - name: Build hosted-single-tenant server and stress runner
         run: |
           cargo build --release \
-            --package ironclaw_reborn_cli \
+            --package ironclaw \
             --features postgres,inmemory-turn-state \
             --bin ironclaw
           cargo build --release --package ironclaw_stress

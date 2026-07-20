@@ -26,9 +26,12 @@ pub(crate) mod extension_lifecycle_command;
 pub(crate) mod extension_removal_cleanup;
 pub(crate) mod gsuite;
 pub(crate) mod host_api_contracts;
+#[cfg(test)]
+mod host_remediation_contract;
 pub(crate) mod lifecycle;
 pub(crate) mod mcp;
 pub(crate) mod mcp_discovery;
+pub(crate) mod provider_instance_readiness;
 pub(crate) mod skill_learning;
 pub(crate) mod skill_listing;
 pub(crate) mod webui_extension_credentials;

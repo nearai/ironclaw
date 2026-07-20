@@ -1,4 +1,4 @@
-// arch-exempt: large_file, shared extension removal convergence and compatibility tests, plan #5905
+// arch-exempt: large_file, shared extension removal convergence and compatibility tests, plan #6329
 use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
@@ -15,8 +15,9 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, NetworkTargetPattern,
-    PermissionMode, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement,
-    RuntimeHttpEgress, UserId, VirtualPath, sha256_digest_token,
+    PermissionMode, ResourceScope, RuntimeCredentialAccountProviderId,
+    RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement, RuntimeHttpEgress, UserId,
+    VirtualPath, sha256_digest_token,
 };
 use ironclaw_product_adapter_registry::PRODUCT_ADAPTER_HOST_API_ID;
 use ironclaw_product_workflow::{
@@ -137,6 +138,16 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     /// sources. Descriptors are declared during composition; sources connect
     /// only when their host surface is mounted.
     account_setups: ExtensionAccountSetupRegistry,
+    /// Static per-provider instance-config readiness map. Opt-in, defaults
+    /// empty via `new` — a third readiness axis alongside `account_setups`
+    /// (per-user) and the package-level
+    /// requirements `activation_credential_requirements` computes below; see
+    /// `provider_instance_readiness.rs` module doc for the full distinction.
+    /// Defaulting empty keeps every direct `::new(...)` construction outside
+    /// the factory (e.g. test fixtures) unaffected until they opt in via
+    /// `with_provider_instance_readiness`.
+    provider_instance_readiness:
+        std::collections::BTreeMap<RuntimeCredentialAccountProviderId, String>,
 }
 
 /// Concurrent `import_bundle` decodes allowed before further uploads wait.
@@ -330,6 +341,7 @@ impl RebornLocalExtensionManagementPort {
             tenant_operator_user_id,
             removal_cleanup: Arc::new(ExtensionRemovalCleanupRegistry::empty()),
             account_setups: ExtensionAccountSetupRegistry::default(),
+            provider_instance_readiness: std::collections::BTreeMap::new(),
         }
     }
 
@@ -338,6 +350,21 @@ impl RebornLocalExtensionManagementPort {
         account_setups: ExtensionAccountSetupRegistry,
     ) -> Self {
         self.account_setups = account_setups;
+        self
+    }
+
+    /// Install the static per-provider instance-config readiness map.
+    /// Defaults empty from `new`, so callers that never opt in (test
+    /// fixtures, any composition without the build-time signal) see no
+    /// behavior change.
+    pub(crate) fn with_provider_instance_readiness(
+        mut self,
+        provider_instance_readiness: std::collections::BTreeMap<
+            RuntimeCredentialAccountProviderId,
+            String,
+        >,
+    ) -> Self {
+        self.provider_instance_readiness = provider_instance_readiness;
         self
     }
 
@@ -565,6 +592,26 @@ impl RebornLocalExtensionManagementPort {
             .map_err(map_account_setup_error)?
         {
             requirements.push(requirement);
+        }
+        // Third readiness axis: a provider whose OPERATOR-level instance
+        // config is missing entirely (no OAuth backend registered on this
+        // build at all) fails here, before the per-user credential gate below
+        // ever runs — distinct from `account_setups` (per-user account state)
+        // and the package-level `requirements` just computed (per-package
+        // static declarations). Mirrors the same three-axis distinction drawn
+        // in `gsuite.rs:69-73` for the dispatch-time backstop that shares
+        // this build-time signal. Both callers of this function share this
+        // one chokepoint: the LLM tool handler's own `missing_requirements`
+        // short-circuit (`extension_lifecycle_capabilities.rs`) and the
+        // WebUI card's `activate_inner` credential gate never see a
+        // requirement shape for an unconfigured provider — they see this
+        // `Err` instead.
+        if let Some(reason) = requirements.iter().find_map(|requirement| {
+            self.provider_instance_readiness
+                .get(&requirement.provider)
+                .cloned()
+        }) {
+            return Err(ProductWorkflowError::ProviderInstanceNotConfigured { reason });
         }
         Ok(requirements)
     }
@@ -7322,6 +7369,169 @@ output_schema_ref = "schemas/run.output.json"
             active_registry,
             installation_store,
         )
+    }
+
+    /// Same assembly as [`extension_management_port_fixture_with_catalog_service_and_trust_policy`],
+    /// plus an opted-in provider-instance readiness map — the port variants
+    /// `google_family_activation_fails_closed_when_provider_instance_not_configured`
+    /// and `slack_family_activation_fails_closed_when_provider_instance_not_configured`
+    /// below need to exercise the readiness-map chokepoint in
+    /// `activation_credential_requirements` directly, since the OTHER port
+    /// fixtures in this module deliberately build with
+    /// `RebornLocalExtensionManagementPort::new` alone (proving the opt-in
+    /// default stays empty for them).
+    fn extension_management_port_fixture_with_readiness_map(
+        catalog: AvailableExtensionCatalog,
+        lifecycle_service: ExtensionLifecycleService,
+        provider_instance_readiness: std::collections::BTreeMap<
+            RuntimeCredentialAccountProviderId,
+            String,
+        >,
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        Arc<RebornLocalExtensionManagementPort>,
+        Arc<SharedExtensionRegistry>,
+        Arc<InMemoryExtensionInstallationStore>,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
+
+        let mut filesystem = DiskFilesystem::new();
+        filesystem
+            .mount_local(
+                VirtualPath::new("/projects").expect("valid virtual path"),
+                HostPath::from_path_buf(storage_root.clone()),
+            )
+            .expect("mount storage root");
+        filesystem
+            .mount_local(
+                VirtualPath::new("/system/extensions").expect("valid virtual path"),
+                HostPath::from_path_buf(storage_root.join("system/extensions")),
+            )
+            .expect("mount system extensions");
+        let filesystem = Arc::new(filesystem);
+        let root_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
+        let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
+        let extension_management = Arc::new(
+            RebornLocalExtensionManagementPort::new(
+                root_filesystem,
+                catalog,
+                installation_store.clone(),
+                Arc::new(Mutex::new(lifecycle_service)),
+                test_active_extension_publisher(
+                    Arc::clone(&active_registry),
+                    test_extension_trust_policy(),
+                ),
+                None,
+                lifecycle_owner(),
+            )
+            .with_provider_instance_readiness(provider_instance_readiness),
+        );
+        (
+            dir,
+            storage_root,
+            extension_management,
+            active_registry,
+            installation_store,
+        )
+    }
+
+    /// A provider-instance readiness-map entry (the operator never
+    /// configured this provider's OAuth backend on this instance at all)
+    /// must fail `activation_credential_requirements`
+    /// BEFORE the per-account credential gate, naming the exact `config set`
+    /// remediation in the error — the one chokepoint both the LLM tool
+    /// handler and the WebUI card path call through. The integration-tier
+    /// regression for this exact user-visible behavior lives in
+    /// `tests/integration/group_extensions/scenario_extension_activation_instance_not_configured.rs`;
+    /// this crate-tier test pins the underlying port contract directly.
+    #[tokio::test]
+    async fn google_family_activation_fails_closed_when_provider_instance_not_configured() {
+        let mut readiness = std::collections::BTreeMap::new();
+        readiness.insert(
+            RuntimeCredentialAccountProviderId::new(ironclaw_auth::GOOGLE_PROVIDER_ID)
+                .expect("valid provider id"),
+            "ironclaw config set google.client_id <id>.apps.googleusercontent.com".to_string(),
+        );
+        let (_dir, _storage_root, port, _active_registry, _installation_store) =
+            extension_management_port_fixture_with_readiness_map(
+                AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+                readiness,
+            );
+        let gcal_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "google-calendar")
+            .expect("google-calendar ref");
+        port.install(gcal_ref.clone(), &lifecycle_owner())
+            .await
+            .expect("install google-calendar");
+
+        let error = port
+            .activation_credential_requirements(&gcal_ref, &lifecycle_owner())
+            .await
+            .expect_err("an unconfigured provider instance must fail closed");
+
+        let ProductWorkflowError::ProviderInstanceNotConfigured { reason } = error else {
+            panic!("expected ProviderInstanceNotConfigured, got {error:?}");
+        };
+        assert!(reason.contains("config set google.client_id"));
+    }
+
+    // Default-empty-map regression: every OTHER
+    // `activation_credential_requirements` test in this module (e.g.
+    // `slack_tools_extension_activation_requires_personal_oauth` above, the
+    // telegram tests below) builds its port via
+    // `RebornLocalExtensionManagementPort::new` with no
+    // `.with_provider_instance_readiness` call and keeps passing unchanged —
+    // proving the opt-in default-empty map is a true no-op for every port
+    // that never opts in. No new test is added for this: it is exactly what
+    // those pre-existing tests already demonstrate.
+
+    /// Slack mirror of `google_family_activation_fails_closed_when_provider_instance_not_configured`:
+    /// a readiness-map entry for `slack_personal` must fail
+    /// `activation_credential_requirements` for the Slack extension BEFORE
+    /// the per-account credential gate, naming the `config set slack.enabled`
+    /// remediation. See
+    /// `slack_tools_extension_activation_requires_personal_oauth` above for
+    /// the ungated-readiness-map counterpart.
+    #[tokio::test]
+    async fn slack_family_activation_fails_closed_when_provider_instance_not_configured() {
+        let mut readiness = std::collections::BTreeMap::new();
+        readiness.insert(
+            RuntimeCredentialAccountProviderId::new(ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID)
+                .expect("valid provider id"),
+            // Built from the real helper, not a hand-copied string: a literal
+            // here drifts silently from the text production actually emits.
+            ironclaw_reborn_config::slack_remediation_text(
+                ironclaw_reborn_config::SlackSetupGaps {
+                    enable: true,
+                    redirect_uri: true,
+                },
+            ),
+        );
+        let (_dir, _storage_root, port, _active_registry, _installation_store) =
+            extension_management_port_fixture_with_readiness_map(
+                AvailableExtensionCatalog::from_first_party_assets().expect("first-party catalog"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+                readiness,
+            );
+        let slack_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").expect("slack ref");
+        port.install(slack_ref.clone(), &lifecycle_owner())
+            .await
+            .expect("install public Slack extension");
+
+        let error = port
+            .activation_credential_requirements(&slack_ref, &lifecycle_owner())
+            .await
+            .expect_err("an unconfigured Slack instance must fail closed");
+
+        let ProductWorkflowError::ProviderInstanceNotConfigured { reason } = error else {
+            panic!("expected ProviderInstanceNotConfigured, got {error:?}");
+        };
+        assert!(reason.contains("config set slack.enabled"));
     }
 
     fn extension_lifecycle_fixture_with_catalog_and_service(

@@ -279,6 +279,7 @@ registerPack("ar", {
   "settings.exportSuccess": "تم تصدير الإعدادات",
   "settings.importSuccess": "تم استيراد الإعدادات",
   "settings.importInvalid": "يجب أن يحتوي الملف المحدد على كائن إعدادات",
+  "settings.importNoSupported": "لا يحتوي الملف المحدد على إعدادات مدعومة",
   "settings.importFailed": "فشل الاستيراد: {message}",
 
   // Settings — restart banner
@@ -744,6 +745,7 @@ registerPack("ar", {
   "automations.filter.completed": "مكتمل",
   "automations.refresh": "تحديث عمليات الأتمتة",
   "automations.error.loadFailed": "غير قادر على تحميل عمليات الأتمتة",
+  "automations.error.actionFailed": "تعذّر تحديث الأتمتة. يُرجى المحاولة مرة أخرى.",
   "automations.rename.action": "إعادة تسمية الأتمتة",
   "automations.rename.nameLabel": "اسم الأتمتة",
   "automations.rename.nameRequired": "اسم الأتمتة مطلوب.",

@@ -223,8 +223,6 @@ jobs:
             flags: "--no-default-features --features postgres,libsql,html-to-markdown,bedrock,import"
           - name: default
             flags: ""
-          - name: libsql-only
-            flags: "--no-default-features --features libsql"
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6

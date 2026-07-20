@@ -35,7 +35,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(feature = "postgres")]
 use crate::redaction::redact_postgres_url;
 use crate::{
     api_capacity::ApiCapacitySummary,
@@ -2316,7 +2315,6 @@ async fn build_backend(args: &Args, run_id: &str) -> Result<BackendHandle, Strin
     }
 }
 
-#[cfg(feature = "libsql")]
 async fn build_libsql_backend(args: &Args, run_id: &str) -> Result<BackendHandle, String> {
     let (filesystem, target) = build_libsql_root(args).await?;
     Ok(BackendHandle {
@@ -2325,7 +2323,6 @@ async fn build_libsql_backend(args: &Args, run_id: &str) -> Result<BackendHandle
     })
 }
 
-#[cfg(feature = "libsql")]
 pub(crate) async fn build_libsql_root(
     args: &Args,
 ) -> Result<(Arc<ironclaw_filesystem::LibSqlRootFilesystem>, String), String> {
@@ -2348,12 +2345,6 @@ pub(crate) async fn build_libsql_root(
     Ok((filesystem, redact_libsql_path(&path)))
 }
 
-#[cfg(not(feature = "libsql"))]
-async fn build_libsql_backend(_args: &Args, _run_id: &str) -> Result<BackendHandle, String> {
-    Err("binary was built without the libsql feature".to_string())
-}
-
-#[cfg(feature = "postgres")]
 async fn build_postgres_backend(args: &Args, run_id: &str) -> Result<BackendHandle, String> {
     let (filesystem, _pool, target) = build_postgres_root_and_pool(args).await?;
     Ok(BackendHandle {
@@ -2362,7 +2353,6 @@ async fn build_postgres_backend(args: &Args, run_id: &str) -> Result<BackendHand
     })
 }
 
-#[cfg(feature = "postgres")]
 pub(crate) async fn build_postgres_root_and_pool(
     args: &Args,
 ) -> Result<
@@ -2387,11 +2377,6 @@ pub(crate) async fn build_postgres_root_and_pool(
     let filesystem = Arc::new(PostgresRootFilesystem::new(pool.clone()));
     filesystem.run_migrations().await.map_err(display_err)?;
     Ok((filesystem, pool, redact_postgres_url(&url)))
-}
-
-#[cfg(not(feature = "postgres"))]
-async fn build_postgres_backend(_args: &Args, _run_id: &str) -> Result<BackendHandle, String> {
-    Err("binary was built without the postgres feature".to_string())
 }
 
 pub(crate) fn governor_from_root<F>(
@@ -2474,7 +2459,6 @@ fn panic_payload_to_string(payload: &Box<dyn Any + Send + 'static>) -> String {
     "non-string panic payload".to_string()
 }
 
-#[cfg(feature = "postgres")]
 pub(crate) fn resolve_postgres_url(args: &Args) -> Result<String, String> {
     if let Some(url) = args.postgres_url.clone() {
         return Ok(url);
@@ -2492,7 +2476,6 @@ pub(crate) fn resolve_postgres_url(args: &Args) -> Result<String, String> {
     )
 }
 
-#[cfg(feature = "postgres")]
 fn optional_env_var(name: &str) -> Result<Option<String>, String> {
     match std::env::var(name) {
         Ok(value) => Ok(Some(value)),

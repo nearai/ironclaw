@@ -138,6 +138,9 @@ use crate::extension_host::{
     gsuite::{
         ProductAuthRuntimeGsuiteCredentialStager, register_bundled_gsuite_first_party_handlers,
     },
+    provider_instance_readiness::{
+        ProviderInstanceReadinessInputs, provider_instance_readiness_map,
+    },
 };
 use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle_auth_continuation::{
@@ -1436,6 +1439,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         oauth_provider_configs,
         oauth_dcr_provider_configs,
         slack_personal_oauth_lazy_slot,
+        slack_host_beta_enabled,
+        slack_personal_oauth_redirect_uri_configured,
         nearai_mcp_bootstrap_config,
         owner_id,
         local_runtime_identity,
@@ -1447,6 +1452,21 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     // Computed before `oauth_provider_configs` is consumed by
     // `compose_provider_client` below — see `google_oauth_configured`.
     let google_oauth_configured = google_oauth_configured(&oauth_provider_configs);
+    // Do NOT "simplify" this to `slack_personal_oauth_lazy_slot.is_some()`.
+    // The CLI resolves both from the same env var, but the slot also switches
+    // the Slack provider client to lazy setup-service credential resolution —
+    // so deriving readiness from it makes every fixture that just wants
+    // "configured" opt into lazy credentials it never fills. See the field doc
+    // on `RebornBuildInput::slack_personal_oauth_redirect_uri_configured`.
+    let provider_instance_readiness =
+        provider_instance_readiness_map(ProviderInstanceReadinessInputs {
+            google_oauth_configured,
+            slack_host_beta_enabled,
+            slack_personal_oauth_redirect_uri_configured,
+        })
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("provider instance readiness map could not be built: {error}"),
+        })?;
     let local_runtime_identity_for_nearai_mcp = local_runtime_identity.clone();
     let (
         root,
@@ -2002,7 +2022,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             nearai_mcp_owner_scope.user_id.clone(),
         )
         .with_account_setup_registry(account_setups)
-        .with_removal_cleanup_registry(removal_cleanup),
+        .with_removal_cleanup_registry(removal_cleanup)
+        .with_provider_instance_readiness(provider_instance_readiness),
     );
     let lifecycle_facade =
         RebornLocalLifecycleFacade::new(store_graph.local_runtime.skill_management.clone())
@@ -4493,6 +4514,13 @@ async fn build_production_shaped(
         oauth_provider_configs,
         oauth_dcr_provider_configs,
         slack_personal_oauth_lazy_slot,
+        // Build-time Slack host-beta signal only feeds
+        // `provider_instance_readiness_map`, consumed exclusively by
+        // `build_local_runtime`'s `RebornLocalExtensionManagementPort`
+        // wiring — production composition has no extension lifecycle port
+        // yet (#4091), so this build path has no consumer for it.
+        slack_host_beta_enabled: _,
+        slack_personal_oauth_redirect_uri_configured: _,
         nearai_mcp_bootstrap_config: _,
         turn_state_store_limits,
     } = input;

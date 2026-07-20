@@ -1159,6 +1159,46 @@ impl RebornIntegrationHarness {
             .await
     }
 
+    /// Assert NO persisted thread-history message's `content` contains
+    /// `needle`, across the FULL history and ANY role.
+    ///
+    /// The counterpart to [`assert_conversation_history_contains`], and the one
+    /// that catches DEGRADATION rather than error: a host-authored remediation
+    /// that collapsed to the safe-summary placeholder still produces a
+    /// completed run and a plausible-looking error message, so a test that only
+    /// asserts "something was surfaced" stays green while the UX is dead. Pair
+    /// the two — assert the expected step is present AND the placeholder is
+    /// absent.
+    pub async fn assert_conversation_history_lacks(&self, needle: &str) -> HarnessResult<()> {
+        let history = self.persisted_history().await?;
+        let slice = Self::history_slice(&history, 0)?;
+        let offending: Vec<String> = slice
+            .iter()
+            .filter(|message| {
+                message
+                    .content
+                    .as_deref()
+                    .is_some_and(|content| content.contains(needle))
+            })
+            .map(|message| {
+                let body = message.content.as_deref().unwrap_or("<no-content>");
+                let body = match body.char_indices().nth(160) {
+                    Some((cutoff, _)) => format!("{}...", &body[..cutoff]), // safety: `cutoff` from `char_indices`, always a valid UTF-8 boundary.
+                    None => body.to_string(),
+                };
+                format!("{:?}:{body:?}", message.kind)
+            })
+            .collect();
+        if offending.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "conversation history must NOT contain {needle:?}, but {} message(s) did: {offending:?}",
+            offending.len()
+        )
+        .into())
+    }
+
     /// [`assert_conversation_history_contains`], scoped to the `[baseline..]`
     /// slice (a [`history_len`] value from the start of the turn under test) —
     /// the multi-turn variant.

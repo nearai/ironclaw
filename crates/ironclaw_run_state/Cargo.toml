@@ -8,7 +8,6 @@ publish = false
 layer = "kernel"
 
 [features]
-default = []
 # In-memory-backed run-state / approval-request store constructors for this
 # crate's own tests and downstream tiers. The stores are the production
 # `Filesystem*Store<InMemoryBackend>`; the helpers just wire the in-memory backend
