@@ -66,6 +66,7 @@ export function useChatEvents({
   connectionContextForRunFailure = emptyConnectionContext,
   onStreamError = noop,
   onRunSettled,
+  provisionalStreamFailureIdForAdmission = noop,
 }) {
   // Track which runIds we've already settled so that SSE replays
   // (reconnect with `last-event-id`, repeated snapshots) don't trigger
@@ -241,6 +242,9 @@ export function useChatEvents({
           // the run's more actionable failure summary instead of adding a second
           // error bubble.
           const runId = activeRunRef?.current?.runId || null;
+          const provisionalMessageId = runId
+            ? null
+            : provisionalStreamFailureIdForAdmission();
           setPendingGate(null);
           setIsProcessing(false);
           setActiveRun?.(null);
@@ -251,6 +255,7 @@ export function useChatEvents({
           });
           appendStreamFailureMessage(setMessages, {
             runId,
+            provisionalMessageId,
             error: frame.error,
             kind: frame.kind,
             retryable: frame.retryable === true,
@@ -298,6 +303,7 @@ export function useChatEvents({
       noteConnectionInterruptedRunId,
       connectionContextForRunFailure,
       onRunSettled,
+      provisionalStreamFailureIdForAdmission,
     ],
   );
 }
@@ -910,7 +916,7 @@ function promotedRunFailureMessage(message, messageId) {
 
 function appendStreamFailureMessage(
   setMessages,
-  { runId, error, kind, retryable },
+  { runId, provisionalMessageId, error, kind, retryable },
 ) {
   const baseMessageId = streamFailureMessageId({ error, kind, retryable });
   if (runId) {
@@ -949,7 +955,10 @@ function appendStreamFailureMessage(
   setMessages((prev) => {
     const lastMessage = prev[prev.length - 1];
     if (isSameStreamFailureMessage(lastMessage, baseMessageId)) return prev;
-    const messageId = uniqueStreamFailureMessageId(baseMessageId, prev);
+    const messageId =
+      typeof provisionalMessageId === "string" && provisionalMessageId
+        ? provisionalMessageId
+        : uniqueStreamFailureMessageId(baseMessageId, prev);
     return [
       ...prev,
       createErrorChatMessage({

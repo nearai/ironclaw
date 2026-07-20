@@ -39,7 +39,9 @@ import {
   createErrorChatMessage,
   createRequestFailureChatMessage,
   isRequestFailureForMessage,
+  promoteProvisionalStreamFailureMessage,
   requestFailureIdForMessage,
+  STREAM_FAILURE_ID_PREFIX,
 } from "../lib/message-types";
 import {
   CONNECTION_STATUS,
@@ -227,7 +229,7 @@ export function useChat(threadId) {
   });
   const submitBusyRef = React.useRef(false);
   const localRunAdmissionRef = React.useRef(null);
-  const streamErrorClosedAdmissionThreadIdsRef = React.useRef(new Set());
+  const streamErrorClosedAdmissionsRef = React.useRef(new Map());
 
   // Per-thread transient state must not leak across thread switches.
   // Without this reset, clicking "+ New" while the previous thread is
@@ -274,7 +276,7 @@ export function useChat(threadId) {
         localRunAdmissionRef.current = null;
       }
       if (threadId) {
-        streamErrorClosedAdmissionThreadIdsRef.current.delete(threadId);
+        streamErrorClosedAdmissionsRef.current.delete(threadId);
       }
     },
     [threadId],
@@ -392,9 +394,24 @@ export function useChat(threadId) {
     const localRunAdmission = localRunAdmissionRef.current;
     if (localRunAdmission?.threadId !== currentThreadId) return;
     if (!localRunAdmission.runId) {
-      streamErrorClosedAdmissionThreadIdsRef.current.add(currentThreadId);
+      streamErrorClosedAdmissionsRef.current.set(currentThreadId, {
+        provisionalMessageId: localRunAdmission.provisionalMessageId,
+      });
     }
     localRunAdmissionRef.current = null;
+  }, []);
+
+  const provisionalStreamFailureIdForAdmission = React.useCallback(() => {
+    const currentThreadId = threadIdRef.current;
+    const localRunAdmission = localRunAdmissionRef.current;
+    if (
+      !currentThreadId ||
+      localRunAdmission?.threadId !== currentThreadId ||
+      localRunAdmission.runId
+    ) {
+      return null;
+    }
+    return localRunAdmission.provisionalMessageId || null;
   }, []);
 
   const handleEvent = useChatEvents({
@@ -409,6 +426,7 @@ export function useChat(threadId) {
     noteConnectionInterruptedRunId,
     connectionContextForRunFailure,
     onStreamError: handleStreamError,
+    provisionalStreamFailureIdForAdmission,
     // Reborn's projection bridge does not yet emit `Text` items for
     // assistant replies, and never emits `capability_display_preview`
     // items in the projection state — the assistant reply and the rich
@@ -421,6 +439,14 @@ export function useChat(threadId) {
     // user message from the server doesn't render alongside its
     // pre-submit optimistic twin.
     onRunSettled: (_runId, { success }) => {
+      const closedAdmission = streamErrorClosedAdmissionsRef.current.get(threadId);
+      if (closedAdmission) {
+        streamErrorClosedAdmissionsRef.current.set(threadId, {
+          ...closedAdmission,
+          settledRunId: _runId,
+          settledSuccessfully: success,
+        });
+      }
       const localRunAdmission = localRunAdmissionRef.current;
       if (localRunAdmission?.runId === _runId) {
         localRunAdmissionRef.current = null;
@@ -609,11 +635,12 @@ export function useChat(threadId) {
       // target sends are left to the server's rejected_busy response instead.
       const shouldTrackLocalRun = shouldRenderInCurrentThread;
       if (shouldTrackLocalRun) {
-        streamErrorClosedAdmissionThreadIdsRef.current.delete(sendThreadId);
+        streamErrorClosedAdmissionsRef.current.delete(sendThreadId);
         localRunAdmissionRef.current = {
           threadId: sendThreadId,
           runId: null,
           settledBeforeResponse: false,
+          provisionalMessageId: `${STREAM_FAILURE_ID_PREFIX}admission-${optimisticId}`,
         };
       }
       submitBusyRef.current = true;
@@ -649,8 +676,11 @@ export function useChat(threadId) {
         let runSettledBeforeResponse = false;
         let streamErrorClosedAdmission = false;
         if (response?.run_id && shouldTrackLocalRun) {
-          streamErrorClosedAdmission =
-            streamErrorClosedAdmissionThreadIdsRef.current.delete(sendThreadId);
+          const closedAdmission = streamErrorClosedAdmissionsRef.current.get(
+            sendThreadId,
+          );
+          streamErrorClosedAdmission = Boolean(closedAdmission);
+          streamErrorClosedAdmissionsRef.current.delete(sendThreadId);
           if (connectionInterruptedUnknownRef.current) {
             noteConnectionInterruptedRunId(response.run_id);
             setMessages((prev) =>
@@ -658,6 +688,18 @@ export function useChat(threadId) {
             );
           }
           if (streamErrorClosedAdmission) {
+            setMessages((prev) => {
+              const promoted = promoteProvisionalStreamFailureMessage(prev, {
+                provisionalMessageId: closedAdmission.provisionalMessageId,
+                runId: response.run_id,
+              });
+              return closedAdmission.settledRunId === response.run_id &&
+                closedAdmission.settledSuccessfully
+                ? promoted.filter(
+                    (message) => message.id !== `err-${response.run_id}`,
+                  )
+                : promoted;
+            });
             localRunAdmissionRef.current = null;
           } else {
             const localRunAdmission = localRunAdmissionRef.current;
@@ -678,7 +720,7 @@ export function useChat(threadId) {
             }
           }
         } else if (shouldTrackLocalRun) {
-          streamErrorClosedAdmissionThreadIdsRef.current.delete(sendThreadId);
+          streamErrorClosedAdmissionsRef.current.delete(sendThreadId);
           localRunAdmissionRef.current = null;
         }
         if (
@@ -770,7 +812,7 @@ export function useChat(threadId) {
         return response;
       } catch (err) {
         if (shouldTrackLocalRun) {
-          streamErrorClosedAdmissionThreadIdsRef.current.delete(sendThreadId);
+          streamErrorClosedAdmissionsRef.current.delete(sendThreadId);
           localRunAdmissionRef.current = null;
         }
         if (err.status === 429) {

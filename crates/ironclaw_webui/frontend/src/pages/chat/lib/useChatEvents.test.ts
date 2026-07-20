@@ -67,6 +67,7 @@ function createUseChatEventsHarness({
   noteConnectionInterruptedRunId = () => {},
   connectionContextForRunFailure = () => ({}),
   onStreamError = () => {},
+  provisionalStreamFailureIdForAdmission = () => null,
 } = {}) {
   let messages = [];
   let pendingGate = null;
@@ -96,6 +97,7 @@ function createUseChatEventsHarness({
     isFinalAssistantForRun,
     replaceAssistantReplyForRun,
     RUN_FAILURE_ID_PREFIX,
+    provisionalStreamFailureIdForAdmission,
     STREAM_FAILURE_ID_PREFIX,
     toolCardFromActivity,
     toolCardFromPreview,
@@ -129,6 +131,7 @@ function createUseChatEventsHarness({
     connectionContextForRunFailure,
     onStreamError,
     onRunSettled: (runId, { success }) => settledRuns.push({ runId, success }),
+    provisionalStreamFailureIdForAdmission,
   });
 
   return {
@@ -2610,6 +2613,25 @@ test("useChatEvents: terminal run failure replaces its provisional stream error"
     failureSummary:
       "The request exceeded the model's context limit. Start a new chat or shorten the request.",
   });
+});
+
+test("useChatEvents: admission-window stream error keeps its provisional identity", () => {
+  const provisionalMessageId = "err-stream-admission-pending-1";
+  const harness = createUseChatEventsHarness({
+    provisionalStreamFailureIdForAdmission: () => provisionalMessageId,
+  });
+
+  harness.handleEvent({
+    type: "error",
+    frame: {
+      error: "unavailable",
+      kind: "service_unavailable",
+      retryable: true,
+    },
+  });
+
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].id, provisionalMessageId);
 });
 
 test("useChatEvents: terminal success clears its provisional stream error", () => {
