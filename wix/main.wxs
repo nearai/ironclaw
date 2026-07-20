@@ -150,6 +150,7 @@
             <!--<ComponentRef Id='License'/>-->
 
             <ComponentRef Id='binary0'/>
+
             <Feature
                 Id='Environment'
                 Title='PATH Environment Variable'
