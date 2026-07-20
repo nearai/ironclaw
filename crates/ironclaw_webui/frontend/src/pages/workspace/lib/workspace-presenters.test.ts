@@ -61,6 +61,12 @@ test("workspace selection expansion reuses state when all parents are already op
   );
 });
 
+test("workspace selection expansion tolerates an undefined selection", () => {
+  const expanded = new Set(["memory"]);
+
+  assert.equal(expandWorkspaceSelection(expanded, undefined), expanded);
+});
+
 test("workspace entry sorting tolerates missing display names", () => {
   const entries = [
     { name: "report.txt", path: "report.txt", is_dir: false },
