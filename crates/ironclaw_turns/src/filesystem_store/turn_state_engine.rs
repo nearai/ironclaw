@@ -1056,8 +1056,6 @@ impl TurnStateStore for TurnStateEngine {
         {
             let mut inner = self.lock_inner()?;
             if let Some(result) = inner.submit_idempotency.get(&idempotency_key).cloned() {
-                inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                self.submit_idempotency_ready.notify_waiters();
                 return result;
             }
             let response = Err(TurnError::InvalidRequest {
@@ -1068,8 +1066,6 @@ impl TurnStateStore for TurnStateEngine {
                 response.clone(),
                 request.received_at,
             );
-            inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_waiters();
             return response;
         }
 
@@ -1078,8 +1074,6 @@ impl TurnStateStore for TurnStateEngine {
         {
             let mut inner = self.lock_inner()?;
             if let Some(result) = inner.submit_idempotency.get(&idempotency_key).cloned() {
-                inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                self.submit_idempotency_ready.notify_waiters();
                 return result;
             }
 
@@ -1090,8 +1084,6 @@ impl TurnStateStore for TurnStateEngine {
                     response.clone(),
                     request.received_at,
                 );
-                inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                self.submit_idempotency_ready.notify_waiters();
                 return response;
             }
         }
@@ -1105,8 +1097,6 @@ impl TurnStateStore for TurnStateEngine {
 
         let mut inner = self.lock_inner()?;
         if let Some(result) = inner.submit_idempotency.get(&idempotency_key).cloned() {
-            inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_waiters();
             return result;
         }
         let profile = match profile_resolution {
@@ -1118,16 +1108,12 @@ impl TurnStateStore for TurnStateEngine {
                     response.clone(),
                     request.received_at,
                 );
-                inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                self.submit_idempotency_ready.notify_waiters();
                 return response;
             }
         };
 
         let lock_key = TurnActiveLockKey::from(&request.scope);
         if let Some(response) = inner.thread_busy(&lock_key) {
-            inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_waiters();
             return Err(TurnError::ThreadBusy(response));
         }
 
@@ -1142,8 +1128,6 @@ impl TurnStateStore for TurnStateEngine {
                 response.clone(),
                 request.received_at,
             );
-            inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_waiters();
             return response;
         }
         let admission_class = profile.admission_class.clone();
@@ -1160,8 +1144,6 @@ impl TurnStateStore for TurnStateEngine {
                 response.clone(),
                 request.received_at,
             );
-            inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_waiters();
             return response;
         }
         let cursor = inner.next_cursor();
@@ -1174,39 +1156,23 @@ impl TurnStateStore for TurnStateEngine {
             reply_target_binding_ref: request.reply_target_binding_ref.clone(),
             created_at: request.received_at,
         };
-        let record = RunRecord {
+        let mut record = RunRecord::queued(QueuedRunFields {
             scope: request.scope.clone(),
             actor: request.actor,
             turn_id,
             run_id,
-            status: RunStatusCell::new(TurnStatus::Queued),
             profile: profile.clone(),
-            resolved_model_route: request
-                .requested_model
-                .as_deref()
-                .and_then(crate::run_profile::LoopModelRouteSnapshot::advisory),
-            model_usage: None,
             accepted_message_ref: request.accepted_message_ref.clone(),
             source_binding_ref: request.source_binding_ref.clone(),
             reply_target_binding_ref: request.reply_target_binding_ref.clone(),
-            checkpoint_id: None,
-            gate_ref: None,
-            blocked_activity_id: None,
-            credential_requirements: Vec::new(),
-            failure: None,
             event_cursor: cursor,
-            runner_id: None,
-            lease_token: None,
-            lease_expires_at: None,
-            last_heartbeat_at: None,
-            claim_count: 0,
             received_at: request.received_at,
-            parent_run_id: None,
-            subagent_depth: 0,
-            spawn_tree_root_run_id: None,
-            product_context: request.product_context,
-            resume_disposition: None,
-        };
+        });
+        record.resolved_model_route = request
+            .requested_model
+            .as_deref()
+            .and_then(crate::run_profile::LoopModelRouteSnapshot::advisory);
+        record.product_context = request.product_context;
         inner.turns.insert(turn_id, turn_record);
         inner.active_locks.insert(
             lock_key.clone(),
@@ -1238,8 +1204,6 @@ impl TurnStateStore for TurnStateEngine {
             response.clone(),
             record.received_at,
         );
-        inner.submit_idempotency_in_flight.remove(&idempotency_key);
-        self.submit_idempotency_ready.notify_waiters();
         response
     }
 
@@ -1344,8 +1308,6 @@ impl TurnSpawnTreeStateStore for TurnStateEngine {
         let submit_template = {
             let mut inner = self.lock_inner()?;
             if let Some(result) = inner.submit_idempotency.get(&idempotency_key).cloned() {
-                inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                self.submit_idempotency_ready.notify_waiters();
                 return result;
             }
             let Some(parent) = inner
@@ -1359,8 +1321,6 @@ impl TurnSpawnTreeStateStore for TurnStateEngine {
                     response.clone(),
                     request.received_at,
                 );
-                inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                self.submit_idempotency_ready.notify_waiters();
                 return response;
             };
             if !same_scope_envelope(&parent.scope, &request.child_scope) {
@@ -1370,8 +1330,6 @@ impl TurnSpawnTreeStateStore for TurnStateEngine {
                     response.clone(),
                     request.received_at,
                 );
-                inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                self.submit_idempotency_ready.notify_waiters();
                 return response;
             }
             if parent.subagent_depth == u32::MAX {
@@ -1381,8 +1339,6 @@ impl TurnSpawnTreeStateStore for TurnStateEngine {
                     response.clone(),
                     request.received_at,
                 );
-                inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                self.submit_idempotency_ready.notify_waiters();
                 return response;
             }
             SubmitTurnRequest {
@@ -1409,8 +1365,6 @@ impl TurnSpawnTreeStateStore for TurnStateEngine {
         {
             let mut inner = self.lock_inner()?;
             if let Some(result) = inner.submit_idempotency.get(&idempotency_key).cloned() {
-                inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                self.submit_idempotency_ready.notify_waiters();
                 return result;
             }
             if let Err(rejection) = admission_result {
@@ -1420,8 +1374,6 @@ impl TurnSpawnTreeStateStore for TurnStateEngine {
                     response.clone(),
                     request.received_at,
                 );
-                inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                self.submit_idempotency_ready.notify_waiters();
                 return response;
             }
         }
@@ -1435,8 +1387,6 @@ impl TurnSpawnTreeStateStore for TurnStateEngine {
 
         let mut inner = self.lock_inner()?;
         if let Some(result) = inner.submit_idempotency.get(&idempotency_key).cloned() {
-            inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_waiters();
             return result;
         }
         let profile = match profile_resolution {
@@ -1448,8 +1398,6 @@ impl TurnSpawnTreeStateStore for TurnStateEngine {
                     response.clone(),
                     request.received_at,
                 );
-                inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                self.submit_idempotency_ready.notify_waiters();
                 return response;
             }
         };
@@ -1465,8 +1413,6 @@ impl TurnSpawnTreeStateStore for TurnStateEngine {
                 response.clone(),
                 request.received_at,
             );
-            inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_waiters();
             return response;
         };
         if !same_scope_envelope(&parent.scope, &request.child_scope) {
@@ -1476,8 +1422,6 @@ impl TurnSpawnTreeStateStore for TurnStateEngine {
                 response.clone(),
                 request.received_at,
             );
-            inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_waiters();
             return response;
         }
         if parent.subagent_depth == u32::MAX {
@@ -1487,8 +1431,6 @@ impl TurnSpawnTreeStateStore for TurnStateEngine {
                 response.clone(),
                 request.received_at,
             );
-            inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_waiters();
             return response;
         }
         let parent_run_id = parent.run_id;
@@ -1502,8 +1444,6 @@ impl TurnSpawnTreeStateStore for TurnStateEngine {
                 response.clone(),
                 request.received_at,
             );
-            inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_waiters();
             return response;
         };
         if !same_scope_envelope(&root.scope, &request.child_scope) {
@@ -1513,8 +1453,6 @@ impl TurnSpawnTreeStateStore for TurnStateEngine {
                 response.clone(),
                 request.received_at,
             );
-            inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_waiters();
             return response;
         }
         if root.spawn_tree_root_run_id.unwrap_or(root.run_id) != root.run_id {
@@ -1526,15 +1464,11 @@ impl TurnSpawnTreeStateStore for TurnStateEngine {
                 response.clone(),
                 request.received_at,
             );
-            inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_waiters();
             return response;
         }
 
         let lock_key = TurnActiveLockKey::from(&request.child_scope);
         if let Some(response) = inner.thread_busy(&lock_key) {
-            inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_waiters();
             return Err(TurnError::ThreadBusy(response));
         }
         let run_id = request.requested_run_id.unwrap_or_else(fresh_turn_run_id);
@@ -1547,8 +1481,6 @@ impl TurnSpawnTreeStateStore for TurnStateEngine {
                 response.clone(),
                 request.received_at,
             );
-            inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_waiters();
             return response;
         }
 
@@ -1577,8 +1509,6 @@ impl TurnSpawnTreeStateStore for TurnStateEngine {
                     response.clone(),
                     request.received_at,
                 );
-                inner.submit_idempotency_in_flight.remove(&idempotency_key);
-                self.submit_idempotency_ready.notify_waiters();
                 return response;
             }
         };
@@ -1611,8 +1541,6 @@ impl TurnSpawnTreeStateStore for TurnStateEngine {
                 response.clone(),
                 request.received_at,
             );
-            inner.submit_idempotency_in_flight.remove(&idempotency_key);
-            self.submit_idempotency_ready.notify_waiters();
             return response;
         }
 
@@ -1627,36 +1555,22 @@ impl TurnSpawnTreeStateStore for TurnStateEngine {
             reply_target_binding_ref: request.reply_target_binding_ref.clone(),
             created_at: request.received_at,
         };
-        let record = RunRecord {
+        let mut record = RunRecord::queued(QueuedRunFields {
             scope: request.child_scope.clone(),
             actor: request.actor,
             turn_id,
             run_id,
-            status: RunStatusCell::new(TurnStatus::Queued),
             profile: profile.clone(),
-            resolved_model_route: None,
-            model_usage: None,
             accepted_message_ref: request.accepted_message_ref.clone(),
             source_binding_ref: request.source_binding_ref.clone(),
             reply_target_binding_ref: request.reply_target_binding_ref.clone(),
-            checkpoint_id: None,
-            gate_ref: None,
-            blocked_activity_id: None,
-            credential_requirements: Vec::new(),
-            failure: None,
             event_cursor: cursor,
-            runner_id: None,
-            lease_token: None,
-            lease_expires_at: None,
-            last_heartbeat_at: None,
-            claim_count: 0,
             received_at: request.received_at,
-            parent_run_id: Some(parent_run_id),
-            subagent_depth,
-            spawn_tree_root_run_id: Some(root_run_id),
-            product_context: parent_product_context,
-            resume_disposition: None,
-        };
+        });
+        record.parent_run_id = Some(parent_run_id);
+        record.subagent_depth = subagent_depth;
+        record.spawn_tree_root_run_id = Some(root_run_id);
+        record.product_context = parent_product_context;
         inner.turns.insert(turn_id, turn_record);
         inner.active_locks.insert(
             lock_key.clone(),
@@ -1688,8 +1602,6 @@ impl TurnSpawnTreeStateStore for TurnStateEngine {
             response.clone(),
             record.received_at,
         );
-        inner.submit_idempotency_in_flight.remove(&idempotency_key);
-        self.submit_idempotency_ready.notify_waiters();
         response
     }
 
@@ -3004,36 +2916,23 @@ impl Inner {
         let retry_checkpoint_id =
             self.link_loop_checkpoint_for_retry(&source_checkpoint, new_run_id, now);
         let event_cursor = self.next_cursor();
-        let record = RunRecord {
+        let mut record = RunRecord::queued(QueuedRunFields {
             scope,
             actor,
             turn_id,
             run_id: new_run_id,
-            status: RunStatusCell::new(TurnStatus::Queued),
             profile,
-            resolved_model_route: None,
-            model_usage: None,
             accepted_message_ref,
             source_binding_ref: request.source_binding_ref.clone(),
             reply_target_binding_ref: request.reply_target_binding_ref.clone(),
-            checkpoint_id: Some(retry_checkpoint_id),
-            gate_ref: None,
-            blocked_activity_id: None,
-            credential_requirements: Vec::new(),
-            failure: None,
             event_cursor,
-            runner_id: None,
-            lease_token: None,
-            lease_expires_at: None,
-            last_heartbeat_at: None,
-            claim_count: 0,
             received_at: now,
-            parent_run_id,
-            subagent_depth,
-            spawn_tree_root_run_id,
-            product_context,
-            resume_disposition: None,
-        };
+        });
+        record.checkpoint_id = Some(retry_checkpoint_id);
+        record.parent_run_id = parent_run_id;
+        record.subagent_depth = subagent_depth;
+        record.spawn_tree_root_run_id = spawn_tree_root_run_id;
+        record.product_context = product_context;
         self.active_locks.insert(
             lock_key.clone(),
             TurnActiveLockRecord {
@@ -3843,7 +3742,63 @@ impl Inner {
     }
 }
 
+/// The per-call fields of a freshly-submitted [`RunRecord`]. Everything else
+/// on a new run has a fixed initial value ([`RunRecord::queued`] fills it in),
+/// so a new lease/gate/checkpoint field added to `RunRecord` gets its
+/// fresh-run default in exactly one place instead of at every submit site.
+struct QueuedRunFields {
+    scope: TurnScope,
+    actor: TurnActor,
+    turn_id: crate::TurnId,
+    run_id: TurnRunId,
+    profile: TurnRunProfile,
+    accepted_message_ref: AcceptedMessageRef,
+    source_binding_ref: SourceBindingRef,
+    reply_target_binding_ref: ReplyTargetBindingRef,
+    event_cursor: EventCursor,
+    received_at: crate::TurnTimestamp,
+}
+
 impl RunRecord {
+    /// A freshly-submitted run: `Queued`, with no resolved model route, model
+    /// usage, checkpoint, gate, failure, runner lease, lineage, or product
+    /// context yet. Callers set the few fields that differ by submit path
+    /// (`resolved_model_route`, `checkpoint_id`, `parent_run_id`,
+    /// `subagent_depth`, `spawn_tree_root_run_id`, `product_context`) on the
+    /// returned record.
+    fn queued(fields: QueuedRunFields) -> Self {
+        Self {
+            scope: fields.scope,
+            actor: fields.actor,
+            turn_id: fields.turn_id,
+            run_id: fields.run_id,
+            status: RunStatusCell::new(TurnStatus::Queued),
+            profile: fields.profile,
+            resolved_model_route: None,
+            model_usage: None,
+            accepted_message_ref: fields.accepted_message_ref,
+            source_binding_ref: fields.source_binding_ref,
+            reply_target_binding_ref: fields.reply_target_binding_ref,
+            checkpoint_id: None,
+            gate_ref: None,
+            blocked_activity_id: None,
+            credential_requirements: Vec::new(),
+            failure: None,
+            event_cursor: fields.event_cursor,
+            runner_id: None,
+            lease_token: None,
+            lease_expires_at: None,
+            last_heartbeat_at: None,
+            claim_count: 0,
+            received_at: fields.received_at,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
+            product_context: None,
+            resume_disposition: None,
+        }
+    }
+
     fn persistence_record(&self) -> TurnRunRecord {
         TurnRunRecord {
             run_id: self.run_id,
