@@ -210,65 +210,21 @@ fn assert_no_removed_backend_cargo_features(text: &str, label: &str) {
 }
 
 fn package_metadata_dist_features(manifest: &str) -> Vec<String> {
-    let mut in_dist_metadata = false;
-    let mut array = String::new();
-    let mut collecting = false;
-
-    for line in manifest.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            in_dist_metadata = trimmed == "[package.metadata.dist]";
-            collecting = false;
-            array.clear();
-            continue;
-        }
-
-        if !in_dist_metadata {
-            continue;
-        }
-
-        if collecting {
-            array.push('\n');
-            array.push_str(trimmed);
-            if trimmed.contains(']') {
-                break;
-            }
-            continue;
-        }
-
-        if let Some(value) = trimmed.strip_prefix("features")
-            && let Some((_, value)) = value.split_once('=')
-        {
-            array.push_str(value.trim());
-            if !value.contains(']') {
-                collecting = true;
-            }
-        }
-    }
-
-    let mut features = Vec::new();
-    let mut token = String::new();
-    let mut quote = None;
-    let mut escaped = false;
-    for ch in array.chars() {
-        if escaped {
-            token.push(ch);
-            escaped = false;
-            continue;
-        }
-        match (quote, ch) {
-            (Some('"'), '\\') => escaped = true,
-            (Some(active), _) if ch == active => {
-                features.push(std::mem::take(&mut token));
-                quote = None;
-            }
-            (None, '"' | '\'') => quote = Some(ch),
-            (Some(_), _) => token.push(ch),
-            (None, _) => {}
-        }
-    }
-
-    features
+    let manifest: toml::Table = manifest.parse().expect("parse Cargo manifest");
+    manifest
+        .get("package")
+        .and_then(|package| package.get("metadata"))
+        .and_then(|metadata| metadata.get("dist"))
+        .and_then(|dist| dist.get("features"))
+        .and_then(toml::Value::as_array)
+        .map(|features| {
+            features
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[test]
@@ -302,13 +258,18 @@ dist = true
 features = [
     "libsql",
     'postgres',
+    "lib\u0073ql",
 ]
 
 [package.metadata.wix]
 "#;
     assert_eq!(
         package_metadata_dist_features(manifest),
-        vec!["libsql".to_string(), "postgres".to_string()]
+        vec![
+            "libsql".to_string(),
+            "postgres".to_string(),
+            "libsql".to_string()
+        ]
     );
 }
 

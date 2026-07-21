@@ -87,6 +87,7 @@ ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0", feat
 # (`put_plaintext`), so this stays a dev-only dependency — see
 # `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs::reborn_cli_binary_crate_stays_separate_from_v1_root`.
 ironclaw_secrets = { path = "../ironclaw_secrets", version = "0.1.0" }
+toml = "1.1"
 
 [[bin]]
 name = "ironclaw"
