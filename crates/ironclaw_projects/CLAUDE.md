@@ -5,7 +5,7 @@ Reborn stack. Plan: `docs/plans/2026-06-17-reborn-projects.md`.
 
 > Not to be confused with `ironclaw_engine`'s legacy `Project` type. This crate
 > serves the Reborn stack (`ironclaw_product_workflow` → composition →
-> `ironclaw_webui_v2`).
+> `ironclaw_webui`).
 
 ## W2 crate-count decision
 

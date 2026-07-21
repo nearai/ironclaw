@@ -118,6 +118,7 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
   harness (`RecordingTestCapabilityPort`, `RecordingHostRuntime`,
   `RecordingRuntimeHttpEgress`, `RecordingNetworkHttpEgress`,
   `RecordingApprovalRequestStore`, `RecordingCapabilityResultWriter`,
+  `RecordingSecurityAuditSink`, `UnavailableProjectService`,
   `GithubHarnessAuthorizer`, `StaticSecretStore`,
   `StaticCapabilitySurfaceProfileResolver`,
   `FixedRuntimeCredentialAccountResolver`, `EmptyIdentityContextSource`,
@@ -136,7 +137,7 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
   `CommandExecutionRequest.command` and returns exit 0 / empty output without
   spawning any OS process. Injected by default when `with_builtin_http_tools()` is
   used; the `.with_live_shell()` opt-in skips injection so the real
-  `LocalHostProcessPort` executes instead.
+  `HostProcessPort` executes instead.
 - `http_matcher.rs` — `ScriptedHttpResponse`, the URL/method/capability-keyed
   HTTP scripting layer over `RecordingRuntimeHttpEgress` (install via
   `.with_keyed_http_responses([..])`).
@@ -147,13 +148,23 @@ So a two-turn thread where both turns raise and resolve a gate needs 4 entries
   model-prompt assertion `assert_system_prompt_contains` (reads the scripted
   `TraceLlm`'s captured requests via `captured_system_prompts`, not the egress
   log).
-- Tests live as flat `tests/integration/<name>.rs` bins (Cargo requires
-  top-level-per-bin test files), each registered as its own `[[test]]` in the
-  workspace `Cargo.toml` with `name = "reborn_integration_<name>"`.
+- Tests live as bins anywhere under `tests/integration/` — flat
+  (`tests/integration/<name>.rs`) or inside a domain folder — each registered
+  as its own `[[test]]` in the workspace `Cargo.toml` with
+  `name = "reborn_integration_<name>"`. Domain folders group related bins by
+  pointing the `[[test]]` `path` into the folder — `tests/integration/auth/`
+  holds the auth user-journey bins (`oauth_connect`, `oauth_popup_journeys`,
+  `oauth_refresh`, `auth_gate`, `auth_failure`, `reopen_resume_through_gate`;
+  binary names unchanged), with shared fixtures in `auth/common.rs` mounted
+  per-bin via `#[path = "common.rs"] mod common;`. Files one level deeper
+  mount the support trees as `#[path = "../support/mod.rs"]` and
+  `#[path = "../../support/mod.rs"]`. Extension-lifecycle journeys live as
+  scenarios under `group_extensions/` (see Group tests below).
 
-Module paths: each `tests/integration/<name>.rs` declares both
+Module paths: each flat `tests/integration/<name>.rs` declares both
 `#[path = "support/mod.rs"] mod reborn_support;` and
-`#[path = "../support/mod.rs"] mod support;`, then
+`#[path = "../support/mod.rs"] mod support;` (bins one folder deeper prepend
+one more `../` to each, as above), then
 `use reborn_support::builder::RebornIntegrationHarness;` /
 `use reborn_support::reply::RebornScriptedReply;`. Inside the support tree,
 siblings reference each other via `super::` and `trace_llm` via
@@ -256,7 +267,7 @@ spawning any OS process.
 - `assert_shell_ran_through_inert_port()` — at least one shell command was recorded by the inert port (proves no real OS process ran).
 
 **`.with_live_shell()`** — opt-in; skips recording-port injection so the real
-`LocalHostProcessPort` executes instead. Use only for hermetic commands
+`HostProcessPort` executes instead. Use only for hermetic commands
 (no network, no external state, reproducible on any machine).
 Implies `.with_builtin_http_tools()`.
 
@@ -375,7 +386,7 @@ On a harness built from a `live_approvals` group:
 
 `ironclaw_reborn_composition::test_support` exposes:
 
-- `build_local_dev_secret_store_for_test(root, scoped)` — constructs the `LocalDevSecretStore` used by production local-dev composition; for store read-back in secrets tests.
+- `build_secret_store_for_test(root, scoped)` — constructs the `LocalDevSecretStore` used by production local-dev composition; for store read-back in secrets tests.
 
 `RebornServices` (returned by `build_reborn_services`/exposed via `RebornRuntime::services()`, methods defined in `crates/ironclaw_reborn_composition/src/runtime/test_support.rs`) exposes:
 

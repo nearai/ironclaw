@@ -1,26 +1,58 @@
 use async_trait::async_trait;
-use chrono::Utc;
-use ironclaw_filesystem::{CasExpectation, RecordVersion, RootFilesystem};
-use ironclaw_host_api::ResourceScope;
+use chrono::{Duration, Utc};
+use ironclaw_filesystem::{
+    CasApply, CasExpectation, CasUpdateError, ContentType, Entry, RecordVersion, RootFilesystem,
+    cas_update,
+};
+use ironclaw_host_api::{ResourceScope, ScopedPath};
+use serde::{Deserialize, Serialize};
+use std::time::Duration as StdDuration;
 
 use super::domain::{
     PreparedCallbackFlow, prepare_callback_flow, update_account_from_exchange,
     update_account_from_request, validate_bound_update_authority, validate_callback_claim,
     validate_flow_update_binding, validate_manual_token_flow, validate_selection_flow,
 };
+use super::paths::setup_creation_coordination_path;
 use super::{
     FilesystemAuthProductServices, credential_status_for_completed_flow, is_terminal_status,
     scope_matches,
 };
 use ironclaw_auth::{
-    AuthChallenge, AuthErrorCode, AuthFlowId, AuthFlowManager, AuthFlowRecord,
-    AuthFlowRecordSource, AuthFlowStatus, AuthProductError, CredentialAccount, CredentialAccountId,
+    AUTH_CONTINUATION_DISPATCH_LEASE_SECONDS, AuthChallenge, AuthContinuationDispatchClaimInput,
+    AuthContinuationDispatchOutcome, AuthContinuationDispatchSettlementInput, AuthContinuationRef,
+    AuthErrorCode, AuthFlowId, AuthFlowManager, AuthFlowRecord, AuthFlowRecordSource,
+    AuthFlowStatus, AuthProductError, CredentialAccount, CredentialAccountId,
     CredentialAccountStatus, CredentialOwnership, CredentialSelectionInput,
     ManualTokenCompletionInput, NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest,
     OAuthCallbackFailureInput, OAuthCallbackInput, OAuthProviderExchange, ProviderCallbackOutcome,
     TurnGateAuthFlowQuery, binding_scope_owns_account, flow_matches_durable_owner,
-    flow_matches_turn_gate_query,
+    flow_matches_turn_gate_query, is_setup_class_continuation,
 };
+
+const SETUP_CREATION_LEASE_SECONDS: i64 = 30;
+const SETUP_CREATION_ACQUIRE_TIMEOUT: StdDuration = StdDuration::from_secs(15);
+const SETUP_CREATION_OPERATION_TIMEOUT: StdDuration = StdDuration::from_secs(20);
+const SETUP_CREATION_POLL_INTERVAL: StdDuration = StdDuration::from_millis(5);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SetupCreationCoordination {
+    holder: AuthFlowId,
+    expires_at: ironclaw_auth::Timestamp,
+}
+
+fn map_setup_creation_cas_error(error: CasUpdateError<AuthProductError>) -> AuthProductError {
+    match error {
+        CasUpdateError::Apply(error) => error,
+        error => {
+            tracing::debug!(
+                error = %error,
+                "durable setup-flow creation coordination failed"
+            );
+            AuthProductError::BackendUnavailable
+        }
+    }
+}
 
 struct CallbackAccountWrite {
     account: CredentialAccount,
@@ -38,12 +70,113 @@ enum CallbackAccountRollback {
     },
 }
 
-#[async_trait]
-impl<F> AuthFlowManager for FilesystemAuthProductServices<F>
+impl<F> FilesystemAuthProductServices<F>
 where
     F: RootFilesystem + 'static,
 {
-    async fn create_flow(&self, request: NewAuthFlow) -> Result<AuthFlowRecord, AuthProductError> {
+    async fn acquire_setup_creation(
+        &self,
+        scope: &ResourceScope,
+        path: &ScopedPath,
+        holder: AuthFlowId,
+    ) -> Result<(), AuthProductError> {
+        let acquire = async {
+            loop {
+                let acquired = cas_update(
+                    self.filesystem.as_ref(),
+                    scope,
+                    path,
+                    |body| {
+                        serde_json::from_slice(body)
+                            .map_err(|_| AuthProductError::BackendUnavailable)
+                    },
+                    |coordination| {
+                        serde_json::to_vec(coordination)
+                            .map(Entry::bytes)
+                            .map(|entry| entry.with_content_type(ContentType::json()))
+                            .map_err(|_| AuthProductError::BackendUnavailable)
+                    },
+                    |current: Option<SetupCreationCoordination>| async move {
+                        let now = Utc::now();
+                        if let Some(current) = current
+                            && current.holder != holder
+                            && current.expires_at > now
+                        {
+                            return Ok::<_, AuthProductError>(CasApply::no_op(current, false));
+                        }
+                        Ok(CasApply::new(
+                            SetupCreationCoordination {
+                                holder,
+                                expires_at: now + Duration::seconds(SETUP_CREATION_LEASE_SECONDS),
+                            },
+                            true,
+                        ))
+                    },
+                )
+                .await
+                .map_err(map_setup_creation_cas_error)?;
+                if acquired {
+                    return Ok(());
+                }
+                tokio::time::sleep(SETUP_CREATION_POLL_INTERVAL).await;
+            }
+        };
+        tokio::time::timeout(SETUP_CREATION_ACQUIRE_TIMEOUT, acquire)
+            .await
+            .map_err(|_| AuthProductError::BackendUnavailable)?
+    }
+
+    async fn release_setup_creation(
+        &self,
+        scope: &ResourceScope,
+        path: &ScopedPath,
+        holder: AuthFlowId,
+    ) {
+        let result = cas_update(
+            self.filesystem.as_ref(),
+            scope,
+            path,
+            |body| serde_json::from_slice(body).map_err(|_| AuthProductError::BackendUnavailable),
+            |coordination| {
+                serde_json::to_vec(coordination)
+                    .map(Entry::bytes)
+                    .map(|entry| entry.with_content_type(ContentType::json()))
+                    .map_err(|_| AuthProductError::BackendUnavailable)
+            },
+            |current: Option<SetupCreationCoordination>| async move {
+                let Some(mut current) = current else {
+                    return Ok::<_, AuthProductError>(CasApply::no_op(
+                        SetupCreationCoordination {
+                            holder,
+                            expires_at: Utc::now(),
+                        },
+                        (),
+                    ));
+                };
+                if current.holder != holder {
+                    return Ok(CasApply::no_op(current, ()));
+                }
+                current.expires_at = Utc::now();
+                Ok(CasApply::new(current, ()))
+            },
+        )
+        .await;
+        if let Err(error) = result {
+            tracing::debug!(
+                error = %error,
+                "failed to release durable setup-flow creation coordination"
+            );
+        }
+    }
+
+    async fn create_flow_after_coordination(
+        &self,
+        request: NewAuthFlow,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        if is_setup_class_continuation(&request.continuation) {
+            self.supersede_setup_flows(&request.scope, &request.provider)
+                .await?;
+        }
         if let Some(binding) = &request.update_binding {
             let account = self
                 .read_account(&request.scope, binding.account_id)
@@ -62,6 +195,7 @@ where
             challenge: Some(request.challenge),
             continuation: request.continuation,
             credential_account_id: None,
+            credential_secret_fingerprint: None,
             update_binding: request.update_binding,
             opaque_state_hash: request.opaque_state_hash,
             pkce_verifier_hash: request.pkce_verifier_hash,
@@ -75,6 +209,69 @@ where
         self.write_flow(&record.scope, &record, CasExpectation::Absent)
             .await?;
         Ok(record)
+    }
+
+    async fn supersede_setup_flows(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+        provider: &ironclaw_auth::AuthProviderId,
+    ) -> Result<(), AuthProductError> {
+        // Setup flows live under the owner+surface+session flow root, keyed by
+        // flow id only — thread/mission/invocation are not part of the durable
+        // path. Filter to non-terminal setup-class flows so a parked turn-gate
+        // flow is never disturbed.
+        for (flow, _version) in self.flow_records_under_scope_root(scope).await? {
+            if is_terminal_status(flow.status)
+                || flow.provider != *provider
+                || !is_setup_class_continuation(&flow.continuation)
+            {
+                continue;
+            }
+            // Cancel through the flow's own scope: `cancel_flow` re-reads
+            // under full-scope equality, while a new setup start has a fresh
+            // invocation id.
+            match self.cancel_flow(&flow.scope, flow.id).await {
+                Ok(_) => {}
+                Err(
+                    AuthProductError::Canceled
+                    | AuthProductError::FlowAlreadyTerminal
+                    | AuthProductError::UnknownOrExpiredFlow,
+                ) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl<F> AuthFlowManager for FilesystemAuthProductServices<F>
+where
+    F: RootFilesystem + 'static,
+{
+    async fn create_flow(&self, request: NewAuthFlow) -> Result<AuthFlowRecord, AuthProductError> {
+        if !is_setup_class_continuation(&request.continuation) {
+            return self.create_flow_after_coordination(request).await;
+        }
+
+        let coordination_path =
+            setup_creation_coordination_path(&request.scope, &request.provider)?;
+        let coordination_scope = request.scope.resource.clone();
+        let holder = AuthFlowId::new();
+        self.acquire_setup_creation(&coordination_scope, &coordination_path, holder)
+            .await?;
+        let result = match tokio::time::timeout(
+            SETUP_CREATION_OPERATION_TIMEOUT,
+            self.create_flow_after_coordination(request),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(AuthProductError::BackendUnavailable),
+        };
+        self.release_setup_creation(&coordination_scope, &coordination_path, holder)
+            .await;
+        result
     }
 
     async fn get_flow(
@@ -112,7 +309,10 @@ where
             }
             Err(error) => return Err(error),
         }
-        if record.status == AuthFlowStatus::Completed {
+        if matches!(
+            record.status,
+            AuthFlowStatus::Completed | AuthFlowStatus::Completing | AuthFlowStatus::Failed
+        ) {
             return Ok(record);
         }
         record.status = AuthFlowStatus::CallbackReceived;
@@ -171,11 +371,13 @@ where
             .resolve_callback_account(input.flow_id, callback, &exchange)
             .await?;
         let account_id = account_write.account.id;
+        let account_fingerprint = account_write.account.secret_fingerprint();
         record.status = AuthFlowStatus::Completed;
         record.error = None;
         record.authorization_code_hash = Some(exchange.authorization_code_hash);
         record.pkce_verifier_hash = Some(exchange.pkce_verifier_hash);
         record.credential_account_id = Some(account_id);
+        record.credential_secret_fingerprint = Some(account_fingerprint);
         record.updated_at = now;
         match self
             .write_flow(scope, &record, CasExpectation::Version(version))
@@ -428,7 +630,13 @@ where
         if !scope_matches(scope, &record.scope) {
             return Err(AuthProductError::CrossScopeDenied);
         }
-        if !ironclaw_auth::is_terminal_status(record.status) {
+        if !matches!(
+            record.status,
+            AuthFlowStatus::Completed
+                | AuthFlowStatus::Canceled
+                | AuthFlowStatus::Failed
+                | AuthFlowStatus::Expired
+        ) {
             return Err(AuthProductError::FlowAlreadyTerminal);
         }
         // Idempotent: if the continuation was already marked by a concurrent
@@ -438,6 +646,95 @@ where
         }
         record.continuation_emitted_at = Some(emitted_at);
         record.updated_at = emitted_at;
+        self.write_flow(scope, &record, CasExpectation::Version(version))
+            .await?;
+        Ok(record)
+    }
+
+    async fn claim_continuation_dispatch(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+        input: AuthContinuationDispatchClaimInput,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        let lock = self.lock_for(format!("flow:{}", input.flow_id));
+        let _guard = lock.lock().await;
+        let (mut record, version) = self
+            .read_flow(scope, input.flow_id)
+            .await?
+            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        if !scope_matches(scope, &record.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if record.continuation_emitted_at.is_some() {
+            return Ok(record);
+        }
+        if !matches!(
+            record.continuation,
+            AuthContinuationRef::LifecycleActivation { .. }
+        ) {
+            return Err(AuthProductError::FlowAlreadyTerminal);
+        }
+        match record.status {
+            AuthFlowStatus::Completed => {}
+            AuthFlowStatus::Completing
+                if input.claimed_at.signed_duration_since(record.updated_at)
+                    >= Duration::seconds(AUTH_CONTINUATION_DISPATCH_LEASE_SECONDS) => {}
+            AuthFlowStatus::Completing => return Err(AuthProductError::BackendUnavailable),
+            _ => return Err(AuthProductError::FlowAlreadyTerminal),
+        }
+        record.status = AuthFlowStatus::Completing;
+        record.updated_at = input.claimed_at;
+        self.write_flow(scope, &record, CasExpectation::Version(version))
+            .await?;
+        Ok(record)
+    }
+
+    async fn settle_continuation_dispatch(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+        input: AuthContinuationDispatchSettlementInput,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        let lock = self.lock_for(format!("flow:{}", input.flow_id));
+        let _guard = lock.lock().await;
+        let (mut record, version) = self
+            .read_flow(scope, input.flow_id)
+            .await?
+            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        if !scope_matches(scope, &record.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if record.status != AuthFlowStatus::Completing
+            || record.updated_at != input.expected_claimed_at
+            || record.continuation_emitted_at.is_some()
+        {
+            return Err(AuthProductError::FlowAlreadyTerminal);
+        }
+        match input.outcome {
+            AuthContinuationDispatchOutcome::Dispatched { emitted_at } => {
+                record.status = AuthFlowStatus::Completed;
+                record.error = None;
+                record.continuation_emitted_at = Some(emitted_at);
+                record.updated_at = emitted_at;
+            }
+            AuthContinuationDispatchOutcome::RetryableFailure => {
+                record.status = AuthFlowStatus::Completed;
+                record.error = None;
+                record.updated_at = Utc::now();
+            }
+            AuthContinuationDispatchOutcome::TerminalFailure { error } => {
+                if !matches!(
+                    record.continuation,
+                    AuthContinuationRef::LifecycleActivation { .. }
+                ) || record.credential_account_id.is_none()
+                    || record.credential_secret_fingerprint.is_none()
+                {
+                    return Err(AuthProductError::FlowAlreadyTerminal);
+                }
+                record.status = AuthFlowStatus::Failed;
+                record.error = Some(error);
+                record.updated_at = Utc::now();
+            }
+        }
         self.write_flow(scope, &record, CasExpectation::Version(version))
             .await?;
         Ok(record)
@@ -790,7 +1087,7 @@ where
         }
     }
 
-    async fn purge_revoked_callback_account(
+    pub(super) async fn purge_revoked_callback_account(
         &self,
         mut account: CredentialAccount,
         mut version: RecordVersion,

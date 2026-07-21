@@ -44,7 +44,7 @@
 //!    This test exercises the automation-trigger fallback's authorization-denial
 //!    branch end-to-end through the full HTTP stack.
 
-#![cfg(all(feature = "test-support", feature = "webui-v2-beta"))]
+#![cfg(feature = "test-support")]
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -55,21 +55,21 @@ use axum::http::{Method, Request, StatusCode, header};
 use chrono::Utc;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, TenantId, UserId};
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse,
 };
 use ironclaw_reborn_composition::{
-    RebornCompositionProfile, RebornLocalRuntimeProfileOptions, RebornRuntime,
-    RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle, TriggerPollerSettings,
-    WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, build_reborn_runtime,
-    build_webui_services, local_runtime_build_input_with_options, webui_v2_app,
+    RebornCompositionProfile, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornRuntimeProfileOptions, RebornWebuiBundle, TriggerPollerSettings, build_reborn_runtime,
+    build_webui_services, local_runtime_build_input_with_options,
 };
 use ironclaw_triggers::{
     TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerId, TriggerPollerWorkerConfig, TriggerRecord,
     TriggerRepository, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
+use ironclaw_webui::{WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app};
 use tower::ServiceExt;
 
 const TENANT: &str = "timeline-e2e-tenant";
@@ -130,7 +130,7 @@ async fn build_timeline_runtime(root: &tempfile::TempDir) -> RebornRuntime {
         RebornCompositionProfile::LocalDevYolo,
         USER,
         root.path().join("local-dev"),
-        RebornLocalRuntimeProfileOptions {
+        RebornRuntimeProfileOptions {
             confirm_host_access: true,
         },
     )

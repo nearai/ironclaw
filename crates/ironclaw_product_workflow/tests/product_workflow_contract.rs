@@ -1,3 +1,4 @@
+// arch-exempt: large_file, §4.3 delete InMemoryDeliveredGateRouteStore (workflow default -> NoopDeliveredGateRouteStore; test doubles -> FilesystemOutboundStateStore helper), no logic change, plan #6168
 //! Contract tests for the product workflow facade.
 
 use std::collections::HashMap;
@@ -1560,7 +1561,7 @@ async fn scoped_approval_resolution_rejects_ambiguous_gate() {
 #[tokio::test]
 async fn scoped_approval_resolves_via_conversation_route() {
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let (gate_ref, run_id, route_scope) =
         record_scoped_approval_conversation_route(route_store.as_ref(), Utc::now()).await;
     let approval_service = Arc::new(RecordingApprovalInteractionService::with_pending(Vec::new()));
@@ -1600,7 +1601,7 @@ async fn scoped_approval_resolves_via_conversation_route() {
 #[tokio::test]
 async fn scoped_approval_misses_if_route_expired() {
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     record_scoped_approval_conversation_route(
         route_store.as_ref(),
         Utc::now() - ironclaw_outbound::DELIVERED_GATE_ROUTE_TTL - Duration::seconds(1),
@@ -1629,7 +1630,7 @@ async fn scoped_approval_misses_if_route_expired() {
 #[tokio::test]
 async fn scoped_approval_misses_if_no_route() {
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let approval_service = Arc::new(RecordingApprovalInteractionService::with_pending(Vec::new()));
     let workflow = DefaultProductWorkflow::new(
         Arc::new(FakeInboundTurnService::new()),
@@ -1688,7 +1689,7 @@ async fn scoped_approval_missing_gate_fallback_reuses_dispatcher_binding() {
     // the base (topic-stripped) binding belongs to a different actor. Only a
     // fallback that reuses the dispatcher binding can resolve the gate.
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let (gate_ref, run_id, _route_scope) =
         record_scoped_approval_conversation_route(route_store.as_ref(), Utc::now()).await;
     let binding_service = Arc::new(FakeConversationBindingService::new());
@@ -1757,7 +1758,7 @@ async fn scoped_approval_missing_gate_fallback_reuses_dispatcher_binding() {
 #[tokio::test]
 async fn auth_resolution_resolves_via_conversation_route_after_missing_auth() {
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let gate_ref = GateRef::new("gate:auth-conversation-route").expect("auth gate ref");
     let (run_id, route_scope) =
         record_conversation_route_for_gate_ref(route_store.as_ref(), gate_ref.as_str(), Utc::now())
@@ -1798,7 +1799,7 @@ async fn auth_resolution_resolves_via_conversation_route_after_missing_auth() {
 #[tokio::test]
 async fn explicit_approval_delivered_route_requires_gate_ref_match() {
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let route_gate_ref = GateRef::new("gate:approval-route-match").expect("gate ref");
     let payload_gate_ref = GateRef::new("gate:approval-route-mismatch").expect("gate ref");
     record_conversation_route_for_gate_ref(
@@ -1834,7 +1835,7 @@ async fn explicit_approval_delivered_route_requires_gate_ref_match() {
 #[tokio::test]
 async fn explicit_auth_delivered_route_requires_gate_ref_match() {
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let route_gate_ref = GateRef::new("gate:auth-route-match").expect("gate ref");
     let payload_gate_ref = GateRef::new("gate:auth-route-mismatch").expect("gate ref");
     record_conversation_route_for_gate_ref(
@@ -2043,7 +2044,7 @@ async fn scoped_approval_one_stale_one_pending_resolves_and_prunes() {
 #[tokio::test]
 async fn scoped_approval_one_expired_one_live_resolves_live() {
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     // Record an expired route first.
     record_scoped_approval_conversation_route(
         route_store.as_ref(),
@@ -2092,7 +2093,7 @@ async fn scoped_approval_one_expired_one_live_resolves_live() {
 #[tokio::test]
 async fn scoped_approval_actor_mismatch_filtered_out() {
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     // Record a route owned by user:user2 — different actor than the envelope's user1.
     let tenant_id = TenantId::new("tenant:install_alpha").expect("tenant");
     let other_user_id = UserId::new("user:user2").expect("other user");
@@ -2155,7 +2156,7 @@ async fn scoped_approval_actor_mismatch_filtered_out() {
 #[tokio::test]
 async fn explicit_approval_gate_ref_mismatch_leaves_original_rejection() {
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let route_gate_ref = GateRef::new("gate:approval-stored-ref").expect("stored gate ref");
     let payload_gate_ref = GateRef::new("gate:approval-payload-ref").expect("payload gate ref");
     record_conversation_route_for_gate_ref(
@@ -2315,7 +2316,7 @@ async fn auth_two_live_routes_same_conversation_rejects_ambiguous() {
 #[tokio::test]
 async fn bare_auth_deny_with_stale_approval_route_selects_auth_route_not_approval() {
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     // Store a live APPROVAL-prefixed route in the same conversation bucket.
     let stale_approval_gate =
         approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
@@ -2472,7 +2473,7 @@ impl ApprovalInteractionService for StaleGateReturningApprovalService {
 #[tokio::test]
 async fn auth_resolution_stale_auth_does_not_fall_back_to_delivered_route() {
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let gate_ref = GateRef::new("gate:auth-stale-no-fallback").expect("auth gate ref");
     // Record a live delivered route for the same gate so that IF the fallback ran
     // it would resolve successfully — confirming the test would catch a regression.
@@ -2527,7 +2528,7 @@ async fn auth_resolution_stale_auth_does_not_fall_back_to_delivered_route() {
 #[tokio::test]
 async fn explicit_approval_stale_gate_surfaces_without_fallback() {
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
     // Record a live delivered route for the same gate so that IF the bare-skip
     // fallback ran it would find it — confirming the test would catch a regression.
@@ -2612,7 +2613,7 @@ async fn exact_named_generic_approval_gate_is_forwarded_not_dropped_by_kind_filt
     // the old code would have dropped this route; the fixed code must not.
     let generic_gate_ref = "gate:approve-slack";
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let (run_id, route_scope) =
         record_conversation_route_for_gate_ref(route_store.as_ref(), generic_gate_ref, Utc::now())
             .await;
@@ -2687,7 +2688,7 @@ async fn exact_named_generic_approval_gate_is_forwarded_not_dropped_by_kind_filt
 #[tokio::test]
 async fn explicit_auth_gate_ref_mismatch_leaves_original_rejection() {
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let route_gate_ref = GateRef::new("gate:auth-stored-ref").expect("stored gate ref");
     let payload_gate_ref = GateRef::new("gate:auth-payload-ref").expect("payload gate ref");
     record_conversation_route_for_gate_ref(
@@ -2760,7 +2761,7 @@ async fn bare_approve_with_invalid_stored_approval_route_rejects_invalid_gate_re
     );
 
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     record_conversation_route_for_gate_ref(route_store.as_ref(), &invalid_gate_ref_str, Utc::now())
         .await;
 
@@ -2839,7 +2840,7 @@ async fn bare_auth_deny_with_invalid_stored_auth_route_rejects_invalid_gate_ref(
     );
 
     let route_store: Arc<dyn ironclaw_outbound::DeliveredGateRouteStore> =
-        Arc::new(ironclaw_outbound::InMemoryDeliveredGateRouteStore::default());
+        Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     record_conversation_route_for_gate_ref(route_store.as_ref(), &invalid_gate_ref_str, Utc::now())
         .await;
 
@@ -2995,6 +2996,7 @@ async fn before_inbound_policy_path_probes_replay_once() {
 async fn before_inbound_policy_rewrite_revalidates_payload_before_turn_path() {
     let (workflow, inbound, ledger, policy) = build_workflow_with_policy();
     policy.rewrite_user_message(UserMessagePayload {
+        requested_model: None,
         text: "a".repeat(64 * 1024 + 1),
         attachments: vec![],
         trigger: ProductTriggerReason::DirectChat,

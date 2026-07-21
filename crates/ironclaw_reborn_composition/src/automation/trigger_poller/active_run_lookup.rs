@@ -2,8 +2,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_triggers::{
-    TriggerActiveRunLookup, TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerError,
-    TriggerRunHistoryStatus,
+    BlockedActiveRunKind, TriggerActiveRunLookup, TriggerActiveRunState,
+    TriggerActiveRunStateRequest, TriggerError, TriggerRunHistoryStatus,
 };
 use ironclaw_turns::{TurnPersistenceSnapshot, TurnStatus};
 
@@ -72,6 +72,10 @@ fn active_run_index(snapshot: &TurnPersistenceSnapshot) -> ActiveRunIndex {
             TriggerActiveRunState::Terminal {
                 status: terminal_run_history_status(run.status),
             }
+        } else if run.status.is_blocked() {
+            TriggerActiveRunState::Blocked {
+                kind: blocked_active_run_kind(run.status),
+            }
         } else {
             TriggerActiveRunState::Nonterminal
         };
@@ -112,6 +116,17 @@ fn terminal_run_history_status(status: TurnStatus) -> TriggerRunHistoryStatus {
         | TurnStatus::BlockedDependentRun
         | TurnStatus::BlockedExternalTool
         | TurnStatus::CancelRequested => TriggerRunHistoryStatus::Error,
+    }
+}
+
+/// User-facing hold granularity for a gate-parked run (#5886): approval and
+/// auth get specific copy; the remaining blocked states share a generic one.
+fn blocked_active_run_kind(status: TurnStatus) -> BlockedActiveRunKind {
+    debug_assert!(status.is_blocked(), "only blocked statuses map to a kind");
+    match status {
+        TurnStatus::BlockedApproval => BlockedActiveRunKind::Approval,
+        TurnStatus::BlockedAuth => BlockedActiveRunKind::Auth,
+        _ => BlockedActiveRunKind::Other,
     }
 }
 
@@ -328,10 +343,32 @@ mod tests {
             ])
             .await;
 
-        assert!(matches!(results[0], Ok(TriggerActiveRunState::Nonterminal)));
-        assert!(matches!(results[1], Ok(TriggerActiveRunState::Nonterminal)));
-        assert!(matches!(results[2], Ok(TriggerActiveRunState::Nonterminal)));
-        assert!(matches!(results[3], Ok(TriggerActiveRunState::Nonterminal)));
+        // Blocked runs keep the active-fire lock (back-pressure) exactly like
+        // Nonterminal ones — the kind only feeds read-surface copy (#5886).
+        assert!(matches!(
+            results[0],
+            Ok(TriggerActiveRunState::Blocked {
+                kind: BlockedActiveRunKind::Approval
+            })
+        ));
+        assert!(matches!(
+            results[1],
+            Ok(TriggerActiveRunState::Blocked {
+                kind: BlockedActiveRunKind::Auth
+            })
+        ));
+        assert!(matches!(
+            results[2],
+            Ok(TriggerActiveRunState::Blocked {
+                kind: BlockedActiveRunKind::Other
+            })
+        ));
+        assert!(matches!(
+            results[3],
+            Ok(TriggerActiveRunState::Blocked {
+                kind: BlockedActiveRunKind::Other
+            })
+        ));
     }
 
     #[tokio::test]
@@ -403,6 +440,7 @@ mod tests {
             status,
             profile: TurnRunProfile::from_resolved(resolved_run_profile()),
             resolved_model_route: None,
+            model_usage: None,
             checkpoint_id: None,
             gate_ref: None,
             blocked_activity_id: None,

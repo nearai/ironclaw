@@ -13,10 +13,10 @@
 //!    [`OAuthProductAuthTestBundle`], `build_oauth_product_auth_for_test`,
 //!    `build_google_oauth_product_auth_for_test` — real store / real client /
 //!    scripted HTTP egress for OAuth connect, refresh, and error-path tests.
-//! 3. [`local_dev_boot`] — `build_local_dev_approval_gate_evidence_for_test`,
+//! 3. [`local_dev_boot`] — `build_approval_gate_evidence_for_test`,
 //!    `build_default_local_dev_database_roots_for_test`,
 //!    `mount_local_dev_database_roots_for_test`,
-//!    `build_local_dev_secret_store_for_test` — mirror the production
+//!    `build_secret_store_for_test` — mirror the production
 //!    local-dev boot sequence so the integration-test harness
 //!    (`tests/support/reborn/`) drives the real local-dev composition paths
 //!    without duplicating the wiring logic.
@@ -37,31 +37,51 @@
 //!    harness (C-TRACECAP seam).
 //! 10. [`automation`] — `local_dev_automation_product_facade_for_test`, the
 //!     production `RebornAutomationProductFacade` constructor for the
-//!     automations-cold-LIST scenario (W5-WEBUI-API-1 Enabler B.2).
+//!     automations-cold-LIST scenario (W5-WEBUI-API-1 Enabler B.2), plus
+//!     `local_dev_trigger_active_run_lookup_for_test` (the raw
+//!     `TriggerActiveRunLookup`, for wiring the `builtin.trigger_list`
+//!     capability directly rather than through the facade, #5886).
 //! 11. [`projection`] — `build_webui_event_stream_for_test`, a deliberately
 //!     narrowed `ProjectionStream` (turn-lifecycle events only) for the SSE
 //!     activity-stream scenario (W5-WEBUI-API-1 Enabler A).
-//! 12. [`refreshing_capability_port`] — `create_refreshing_local_dev_capability_port_for_test`,
-//!     the production `create_refreshing_local_dev_capability_port` factory
+//! 12. [`refreshing_capability_port`] — `create_refreshing_capability_port_for_test`,
+//!     the production `create_refreshing_capability_port` factory
 //!     (all wrap layers) driven with harness-injectable parts (harness-port-seam
 //!     P1 seam).
+//! 13. [`local_dev_capability_io`] — `staged_capability_io_for_test`, the
+//!     production `StagedCapabilityIo` constructor (`capability_wiring`'s
+//!     `new_with_durable_previews` call), for durable tool-result projection
+//!     coverage (issue #5838).
+//! 14. [`result_read`] — `wrap_result_read_capability_for_test`, the
+//!     production `result_read` synthetic-capability wrap, for the same
+//!     durable tool-result projection coverage (issue #5838).
+//! 15. [`slack_channel_connection`] — `build_slack_channel_connection_for_test`,
+//!     [`SlackChannelConnectionTestBundle`] — the REAL Slack channel-connection
+//!     facade over durable host state, late-bound into the extension-lifecycle
+//!     cleanup slot, plus an OAuth-callback-shaped connect for the channel
+//!     lifecycle state machine (C-SLACK-LIFECYCLE seam, issue #6105).
 
 mod automation;
 mod budget_gateway;
 mod durable;
 mod local_dev_boot;
+mod local_dev_capability_io;
 mod oauth_product_auth;
 mod outbound_delivery;
 mod project_create;
 mod projection;
 mod refreshing_capability_port;
+mod result_read;
 mod skill_activation;
+mod slack_channel_connection;
 mod trace_capture;
 mod trigger_materializer;
 mod user_profile;
 
 #[cfg(feature = "test-support")]
-pub use automation::local_dev_automation_product_facade_for_test;
+pub use automation::{
+    local_dev_automation_product_facade_for_test, local_dev_trigger_active_run_lookup_for_test,
+};
 pub use budget_gateway::{
     BudgetTestGateway, FailingTestGateway, ScriptedReply, assistant_reply_without_text_for_test,
 };
@@ -75,12 +95,14 @@ pub use durable::{
 };
 pub use local_dev_boot::LOCAL_DEV_DB_FILENAME;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-pub use local_dev_boot::build_local_dev_secret_store_for_test;
+pub use local_dev_boot::build_secret_store_for_test;
 #[cfg(feature = "test-support")]
 pub use local_dev_boot::{
-    build_default_local_dev_database_roots_for_test,
-    build_local_dev_approval_gate_evidence_for_test, mount_local_dev_database_roots_for_test,
+    build_approval_gate_evidence_for_test, build_default_local_dev_database_roots_for_test,
+    mount_local_dev_database_roots_for_test,
 };
+#[cfg(feature = "test-support")]
+pub use local_dev_capability_io::staged_capability_io_for_test;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use oauth_product_auth::build_google_oauth_product_auth_for_test;
 pub use oauth_product_auth::{
@@ -89,20 +111,26 @@ pub use oauth_product_auth::{
 #[cfg(feature = "test-support")]
 pub use outbound_delivery::{
     OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
-    OutboundDeliveryCapabilityTestParts, wrap_outbound_delivery_capabilities_for_test,
 };
 #[cfg(feature = "test-support")]
-pub use project_create::{PROJECT_CREATE_CAPABILITY_ID, wrap_project_create_capability_for_test};
+pub use project_create::PROJECT_CREATE_CAPABILITY_ID;
 #[cfg(feature = "test-support")]
 pub use projection::build_webui_event_stream_for_test;
 #[cfg(feature = "test-support")]
 pub use refreshing_capability_port::{
-    RefreshingLocalDevCapabilityPortTestParts, create_refreshing_local_dev_capability_port_for_test,
+    ExtensionManagementTestHandle, RefreshingCapabilityPortTestParts,
+    build_extension_management_for_test, create_refreshing_capability_port_for_test,
 };
 #[cfg(feature = "test-support")]
+pub use result_read::{RESULT_READ_CAPABILITY_ID, wrap_result_read_capability_for_test};
+#[cfg(feature = "test-support")]
 pub use skill_activation::{
-    SKILL_ACTIVATE_CAPABILITY_ID, SkillActivationTestSource,
-    build_local_dev_skill_context_source_for_test, wrap_skill_activation_capability_for_test,
+    SKILL_ACTIVATE_CAPABILITY_ID, SkillActivationTestSource, build_skill_context_source_for_test,
+};
+#[cfg(feature = "test-support")]
+pub use slack_channel_connection::{
+    SlackChannelConnectionTestBundle, SlackChannelConnectionTestConfig,
+    build_slack_channel_connection_for_test,
 };
 #[cfg(feature = "test-support")]
 pub use trace_capture::trace_capture_turn_event_sink_for_test;

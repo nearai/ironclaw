@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use crate::ConversationMessage;
 use crate::contribution::{
-    self as trace, LocalTraceSubmissionRecord, OutcomeMetadata, RawTraceCaptureTurn,
+    self as trace, NodeTraceSubmissionRecord, OutcomeMetadata, RawTraceCaptureTurn,
     TraceContributionEnvelope, TraceFailureMode, TraceQueueFlushReport, TraceQueueWorkerReport,
 };
 use anyhow::Context;
@@ -269,13 +269,11 @@ impl TraceClientHost {
     pub fn read_local_records_for_scope(
         &self,
         scope: &TraceClientScope,
-    ) -> anyhow::Result<Vec<LocalTraceSubmissionRecord>> {
+    ) -> anyhow::Result<Vec<NodeTraceSubmissionRecord>> {
         trace::read_local_trace_records_for_scope(Some(scope.as_str()))
     }
 
-    pub fn read_local_records_for_default(
-        &self,
-    ) -> anyhow::Result<Vec<LocalTraceSubmissionRecord>> {
+    pub fn read_local_records_for_default(&self) -> anyhow::Result<Vec<NodeTraceSubmissionRecord>> {
         trace::read_local_trace_records_for_scope(None)
     }
 }

@@ -1,6 +1,6 @@
 // arch-exempt: large_file, durable auth lifecycle failure-injection coverage, plan #5905
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use chrono::{Duration, Utc};
 use ironclaw_filesystem::{
@@ -14,7 +14,7 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::RuntimeCredentialAccountRequest;
 use ironclaw_host_runtime::RuntimeCredentialAccountResolver;
 use ironclaw_secrets::{
-    InMemorySecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
+    FilesystemSecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
     SecretStoreError,
 };
 use secrecy::SecretString;
@@ -33,10 +33,12 @@ use ironclaw_auth::{
     AuthSurface, AuthorizationCodeHash, CredentialAccountChoiceRequest, CredentialAccountLabel,
     CredentialAccountListRequest, CredentialAccountLookupRequest, CredentialAccountRecordSource,
     CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
-    CredentialOwnership, ManualTokenCompletionInput, ManualTokenSetupRequest, NewAuthFlow,
-    NewCredentialAccount, OAuthAuthorizationUrl, OAuthCallbackClaimRequest,
-    OAuthCallbackFailureInput, OAuthCallbackInput, OAuthProviderExchange, OpaqueStateHash,
-    PkceVerifierHash, ProviderScope, SecretSubmitRequest, TurnRunRef,
+    CredentialAccountUpdateBinding, CredentialOwnership, ManualTokenCompletionInput,
+    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthAuthorizationUrl,
+    OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
+    OAuthCompletionCompensationOutcome, OAuthCompletionCompensationRequest, OAuthProviderExchange,
+    OpaqueStateHash, PkceVerifierHash, ProviderScope, SecretCleanupService, SecretSubmitRequest,
+    TurnRunRef,
 };
 
 fn test_scope() -> AuthProductScope {
@@ -63,6 +65,78 @@ fn test_service(
     secret_store: Arc<dyn SecretStore>,
 ) -> FilesystemAuthProductServices<InMemoryBackend> {
     FilesystemAuthProductServices::new(filesystem, secret_store)
+}
+
+/// Returns the same first two flow-root listings before either caller may
+/// continue. Two independently constructed auth services therefore both
+/// observe an empty setup root, deterministically exercising cross-instance
+/// coordination rather than a shared process-local lock.
+struct BarrierFlowListBackend {
+    inner: InMemoryBackend,
+    flow_lists: AtomicUsize,
+    first_two_flow_lists: tokio::sync::Barrier,
+}
+
+impl BarrierFlowListBackend {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryBackend::new(),
+            flow_lists: AtomicUsize::new(0),
+            first_two_flow_lists: tokio::sync::Barrier::new(2),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl RootFilesystem for BarrierFlowListBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        let entries = self.inner.list_dir(path).await?;
+        if path.as_str().contains("/flows") && self.flow_lists.fetch_add(1, Ordering::SeqCst) < 2 {
+            // Before durable coordination both services reach this barrier
+            // and deterministically receive the same empty listing. After the
+            // fix the first lease holder must be allowed to finish before the
+            // second service may enter the flow root.
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                self.first_two_flow_lists.wait(),
+            )
+            .await;
+        }
+        Ok(entries)
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        self.inner.delete_if_version(path, expected_version).await
+    }
 }
 
 struct PausedAccountPutBackend {
@@ -260,14 +334,14 @@ fn paused_account_put_filesystem() -> (
 }
 
 struct FailFirstDeleteSecretStore {
-    inner: InMemorySecretStore,
+    inner: FilesystemSecretStore<InMemoryBackend>,
     fail_next_delete: AtomicBool,
 }
 
 impl FailFirstDeleteSecretStore {
     fn new() -> Self {
         Self {
-            inner: InMemorySecretStore::new(),
+            inner: FilesystemSecretStore::ephemeral(),
             fail_next_delete: AtomicBool::new(true),
         }
     }
@@ -429,7 +503,7 @@ async fn create_manual_token_flow(
 #[tokio::test]
 async fn filesystem_accounts_survive_service_recreation() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
 
@@ -472,7 +546,7 @@ async fn filesystem_accounts_survive_service_recreation() {
 #[tokio::test]
 async fn filesystem_runtime_account_selection_matches_setup_invocation_account() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let mut setup_scope = test_scope();
     setup_scope.surface = AuthSurface::Callback;
     setup_scope.resource.thread_id = Some(ThreadId::new("thread-auth-1").unwrap());
@@ -515,7 +589,7 @@ async fn filesystem_runtime_account_selection_matches_setup_invocation_account()
 #[tokio::test]
 async fn filesystem_runtime_account_selection_matches_new_thread_reusable_account() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let mut setup_scope = test_scope();
     setup_scope.surface = AuthSurface::Callback;
     setup_scope.resource.thread_id = Some(ThreadId::new("thread-auth-1").unwrap());
@@ -563,7 +637,7 @@ async fn filesystem_runtime_account_selection_matches_new_thread_reusable_accoun
 #[tokio::test]
 async fn filesystem_manual_token_submit_stores_secret_and_dedupes_replay() {
     let filesystem = test_filesystem();
-    let concrete_secret_store = Arc::new(InMemorySecretStore::new());
+    let concrete_secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
@@ -628,7 +702,7 @@ async fn filesystem_manual_token_submit_stores_secret_and_dedupes_replay() {
 #[tokio::test]
 async fn filesystem_manual_token_submit_rotates_existing_reusable_account() {
     let filesystem = test_filesystem();
-    let concrete_secret_store = Arc::new(InMemorySecretStore::new());
+    let concrete_secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
@@ -723,7 +797,7 @@ async fn filesystem_manual_token_submit_rotates_existing_reusable_account() {
 #[tokio::test]
 async fn filesystem_manual_token_completion_persists_auth_flow_account() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
     let expires_at = Utc::now() + Duration::minutes(5);
@@ -800,7 +874,7 @@ async fn filesystem_manual_token_completion_persists_auth_flow_account() {
 #[tokio::test]
 async fn filesystem_manual_token_completion_rejects_invalid_completed_account() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
     let interaction_id =
@@ -878,7 +952,7 @@ async fn filesystem_manual_token_completion_rejects_invalid_completed_account() 
 #[tokio::test]
 async fn filesystem_manual_token_completion_expires_stale_auth_flow() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
     let interaction_id =
@@ -915,7 +989,7 @@ async fn filesystem_manual_token_completion_expires_stale_auth_flow() {
 #[tokio::test]
 async fn filesystem_manual_token_cancel_marks_flow_canceled_and_is_idempotent() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
     let interaction_id =
@@ -973,7 +1047,7 @@ async fn create_pending_setup_flow(
 #[tokio::test]
 async fn cleanup_for_lifecycle_cancels_pending_flows_for_the_disconnected_provider_only() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -1063,6 +1137,7 @@ async fn cleanup_for_lifecycle_cancels_pending_flows_for_the_disconnected_provid
             scope: scope.clone(),
             extension_id: ExtensionId::new("example_ext").unwrap(),
             provider: Some(disconnected.clone()),
+            lifecycle_package: None,
             action: ironclaw_auth::SecretCleanupAction::Uninstall,
         },
     )
@@ -1078,6 +1153,32 @@ async fn cleanup_for_lifecycle_cancels_pending_flows_for_the_disconnected_provid
         cleanup_flow_ids,
         [turn_flow.id, failed_turn_flow.id].into_iter().collect()
     );
+    for event in &report.canceled_turn_gate_continuations {
+        service
+            .mark_continuation_dispatched(&event.scope, event.flow_id, event.emitted_at)
+            .await
+            .expect("cleanup denial acknowledgement supports canceled and failed flows");
+    }
+    let failed_after_ack = service
+        .get_flow(&scope, failed_turn_flow.id)
+        .await
+        .expect("failed flow lookup")
+        .expect("failed flow remains durable");
+    assert_eq!(failed_after_ack.status, AuthFlowStatus::Failed);
+    assert!(failed_after_ack.continuation_emitted_at.is_some());
+    let retry = ironclaw_auth::SecretCleanupService::cleanup_for_lifecycle(
+        &service,
+        ironclaw_auth::SecretCleanupRequest {
+            scope: scope.clone(),
+            extension_id: ExtensionId::new("example_ext").unwrap(),
+            provider: Some(disconnected.clone()),
+            lifecycle_package: None,
+            action: ironclaw_auth::SecretCleanupAction::Uninstall,
+        },
+    )
+    .await
+    .expect("cleanup retry");
+    assert!(retry.canceled_turn_gate_continuations.is_empty());
 
     // LLM data is never deleted: flow records are retained (filterable by their
     // terminal status), not removed.
@@ -1106,6 +1207,401 @@ async fn cleanup_for_lifecycle_cancels_pending_flows_for_the_disconnected_provid
     );
 }
 
+/// Removal skips the provider selector when the provider is still used by
+/// another installed extension — but the removed extension's OWN connect
+/// flows must not survive to complete a late callback and then compensate
+/// away the shared credential. The `lifecycle_package` selector cancels them
+/// regardless of provider sharing.
+#[tokio::test]
+async fn cleanup_for_lifecycle_cancels_the_removed_packages_flows_despite_shared_provider() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let scope = test_scope();
+    let service = test_service(filesystem, secret_store);
+
+    let shared_provider = AuthProviderId::new("google").unwrap();
+    let removed_package = ironclaw_auth::LifecyclePackageRef::new("gmail").unwrap();
+    let surviving_package = ironclaw_auth::LifecyclePackageRef::new("gdrive").unwrap();
+    let lifecycle_flow = |package: &ironclaw_auth::LifecyclePackageRef, state: &str| NewAuthFlow {
+        id: None,
+        scope: scope.clone(),
+        kind: AuthFlowKind::IntegrationCredential,
+        provider: shared_provider.clone(),
+        challenge: AuthChallenge::OAuthUrl {
+            authorization_url: OAuthAuthorizationUrl::new(
+                "https://example.com/oauth/authorize?state=pkg",
+            )
+            .unwrap(),
+            expires_at: Utc::now() + Duration::minutes(10),
+        },
+        continuation: AuthContinuationRef::LifecycleActivation {
+            package_ref: package.clone(),
+        },
+        update_binding: None,
+        opaque_state_hash: Some(state_hash(state)),
+        pkce_verifier_hash: Some(pkce_hash(state)),
+        expires_at: Utc::now() + Duration::minutes(10),
+    };
+    // `create_flow` allows at most one live setup-class flow per
+    // owner+provider (a later creation supersedes the earlier one), so the two
+    // halves of the selector invariant are staged sequentially: first the
+    // removed package's own live flow dies with the uninstall…
+    let removed_flow = service
+        .create_flow(lifecycle_flow(&removed_package, "removed-package"))
+        .await
+        .unwrap();
+
+    let request = ironclaw_auth::SecretCleanupRequest {
+        scope: scope.clone(),
+        extension_id: ExtensionId::new("gmail").unwrap(),
+        provider: None,
+        lifecycle_package: Some(removed_package.clone()),
+        action: ironclaw_auth::SecretCleanupAction::Uninstall,
+    };
+    let report =
+        ironclaw_auth::SecretCleanupService::cleanup_for_lifecycle(&service, request.clone())
+            .await
+            .unwrap();
+
+    assert_eq!(
+        service
+            .get_flow(&scope, removed_flow.id)
+            .await
+            .unwrap()
+            .expect("removed package flow is retained")
+            .status,
+        AuthFlowStatus::Canceled,
+        "the removed package's connect flow must die with the extension"
+    );
+    // The report names the canceled flow so the composition wrapper can drop
+    // its durable setup PKCE verifier eagerly instead of waiting out the TTL.
+    assert_eq!(
+        report
+            .canceled_flows
+            .iter()
+            .map(|flow| flow.flow_id)
+            .collect::<Vec<_>>(),
+        vec![removed_flow.id]
+    );
+
+    // …then, with ANOTHER package's flow live on the very same provider, a
+    // repeat of the removed package's uninstall must not blanket-cancel the
+    // shared provider's flow: the package selector discriminates by package.
+    let surviving_flow = service
+        .create_flow(lifecycle_flow(&surviving_package, "surviving-package"))
+        .await
+        .unwrap();
+    let retry = ironclaw_auth::SecretCleanupService::cleanup_for_lifecycle(&service, request)
+        .await
+        .expect("package-keyed cleanup retry");
+    assert_eq!(
+        service
+            .get_flow(&scope, surviving_flow.id)
+            .await
+            .unwrap()
+            .expect("surviving package flow is retained")
+            .status,
+        AuthFlowStatus::AwaitingUser,
+        "another extension's flow on the shared provider must survive"
+    );
+    assert!(retry.canceled_flows.is_empty(), "cleanup is idempotent");
+}
+
+/// Durable twin of the `create_flow_supersedes_prior_live_setup_class_flows`
+/// contract test: supersede-on-start lives INSIDE `create_flow`, keyed off the
+/// request's continuation class, so a start route that reaches flow creation
+/// through any path (plain setup, DCR registry, a future route) inherits the
+/// "≤1 live setup-class flow per owner+provider" invariant structurally.
+/// Setup flows are thread-less and every popup re-open mints a fresh
+/// invocation, so the two prior flows here deliberately carry different
+/// invocation ids under the same durable owner root.
+#[tokio::test]
+async fn create_flow_supersedes_prior_live_setup_class_flows_in_the_durable_store() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let service = test_service(filesystem, secret_store);
+
+    let provider = AuthProviderId::new("github").unwrap();
+    let other_provider = AuthProviderId::new("gmail").unwrap();
+    let setup_flow = |scope: &AuthProductScope,
+                      flow_provider: &AuthProviderId,
+                      continuation: AuthContinuationRef,
+                      state: &str| NewAuthFlow {
+        id: None,
+        scope: scope.clone(),
+        kind: AuthFlowKind::IntegrationCredential,
+        provider: flow_provider.clone(),
+        challenge: AuthChallenge::OAuthUrl {
+            authorization_url: OAuthAuthorizationUrl::new(
+                "https://example.com/oauth/authorize?state=supersede",
+            )
+            .unwrap(),
+            expires_at: Utc::now() + Duration::minutes(10),
+        },
+        continuation,
+        update_binding: None,
+        opaque_state_hash: Some(state_hash(state)),
+        pkce_verifier_hash: Some(pkce_hash(state)),
+        expires_at: Utc::now() + Duration::minutes(10),
+    };
+
+    // Each start mints a fresh invocation id (`test_scope` does the same), so
+    // supersede must match on the owner root, not full scope equality.
+    let first_open = test_scope();
+    let setup_only = service
+        .create_flow(setup_flow(
+            &first_open,
+            &provider,
+            AuthContinuationRef::SetupOnly,
+            "first-open",
+        ))
+        .await
+        .unwrap();
+    let card_open = test_scope();
+    let lifecycle = service
+        .create_flow(setup_flow(
+            &card_open,
+            &provider,
+            AuthContinuationRef::LifecycleActivation {
+                package_ref: ironclaw_auth::LifecyclePackageRef::new("github-extension").unwrap(),
+            },
+            "card-open",
+        ))
+        .await
+        .unwrap();
+    let gate_scope = test_scope();
+    let turn_gate = service
+        .create_flow(setup_flow(
+            &gate_scope,
+            &provider,
+            AuthContinuationRef::TurnGateResume {
+                turn_run_ref: TurnRunRef::new("run-parked").unwrap(),
+                gate_ref: AuthGateRef::new("gate:parked-turn").unwrap(),
+            },
+            "gate-open",
+        ))
+        .await
+        .unwrap();
+    let other_scope = test_scope();
+    let other_prov = service
+        .create_flow(setup_flow(
+            &other_scope,
+            &other_provider,
+            AuthContinuationRef::SetupOnly,
+            "other-provider",
+        ))
+        .await
+        .unwrap();
+
+    let reopen = test_scope();
+    let reopened = service
+        .create_flow(setup_flow(
+            &reopen,
+            &provider,
+            AuthContinuationRef::SetupOnly,
+            "reopen",
+        ))
+        .await
+        .unwrap();
+
+    let status_of = |flow: &AuthFlowRecord| {
+        let scope = flow.scope.clone();
+        let id = flow.id;
+        let service = &service;
+        async move {
+            service
+                .get_flow(&scope, id)
+                .await
+                .unwrap()
+                .expect("flow record is retained")
+                .status
+        }
+    };
+    assert_eq!(
+        status_of(&reopened).await,
+        AuthFlowStatus::AwaitingUser,
+        "the freshly created flow must not supersede itself"
+    );
+    assert_eq!(
+        status_of(&setup_only).await,
+        AuthFlowStatus::Canceled,
+        "creation must cancel the prior SetupOnly flow across invocation ids"
+    );
+    assert_eq!(
+        status_of(&lifecycle).await,
+        AuthFlowStatus::Canceled,
+        "creation must cancel the prior LifecycleActivation flow"
+    );
+    assert_eq!(
+        status_of(&turn_gate).await,
+        AuthFlowStatus::AwaitingUser,
+        "a parked turn's gate flow must survive a setup start"
+    );
+    assert_eq!(
+        status_of(&other_prov).await,
+        AuthFlowStatus::AwaitingUser,
+        "another provider's setup flow must survive"
+    );
+
+    // And the exclusion cuts both ways: a gate creation supersedes nothing.
+    let second_gate_scope = test_scope();
+    service
+        .create_flow(setup_flow(
+            &second_gate_scope,
+            &provider,
+            AuthContinuationRef::TurnGateResume {
+                turn_run_ref: TurnRunRef::new("run-parked-two").unwrap(),
+                gate_ref: AuthGateRef::new("gate:parked-turn-two").unwrap(),
+            },
+            "second-gate-open",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        status_of(&reopened).await,
+        AuthFlowStatus::AwaitingUser,
+        "a gate flow's creation must never cancel the live setup flow"
+    );
+}
+
+/// Durable twin of the contract-suite concurrency pin: the supersede walk and
+/// the flow insert run inside one per-owner-root critical section, so two
+/// Connect clicks racing on the same durable root cannot both observe "no
+/// live predecessor" and both survive. The InMemoryBackend's real await
+/// points make the interleavings reachable without fault injection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_setup_creates_leave_exactly_one_live_flow_in_the_durable_store() {
+    for round in 0..10 {
+        let filesystem = test_filesystem();
+        let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+        let service = Arc::new(test_service(filesystem, secret_store));
+        let provider = AuthProviderId::new("github").unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(6));
+        let mut racers = Vec::new();
+        for racer_index in 0..6 {
+            let service = Arc::clone(&service);
+            let provider = provider.clone();
+            let barrier = Arc::clone(&barrier);
+            racers.push(tokio::spawn(async move {
+                let scope = test_scope();
+                barrier.wait().await;
+                service
+                    .create_flow(NewAuthFlow {
+                        id: None,
+                        scope,
+                        kind: AuthFlowKind::IntegrationCredential,
+                        provider,
+                        challenge: AuthChallenge::OAuthUrl {
+                            authorization_url: OAuthAuthorizationUrl::new(
+                                "https://example.com/oauth/authorize?race=1",
+                            )
+                            .unwrap(),
+                            expires_at: Utc::now() + Duration::minutes(10),
+                        },
+                        continuation: AuthContinuationRef::SetupOnly,
+                        update_binding: None,
+                        opaque_state_hash: Some(state_hash(&format!("race-{racer_index}"))),
+                        pkce_verifier_hash: Some(pkce_hash(&format!("race-{racer_index}"))),
+                        expires_at: Utc::now() + Duration::minutes(10),
+                    })
+                    .await
+            }));
+        }
+        for racer in racers {
+            racer
+                .await
+                .expect("racer task completes")
+                .expect("each racing create_flow succeeds");
+        }
+        let live = service
+            .flow_records_under_scope_root(&test_scope())
+            .await
+            .expect("list flows under the shared root")
+            .into_iter()
+            .filter(|(flow, _)| flow.status == AuthFlowStatus::AwaitingUser)
+            .count();
+        assert_eq!(
+            live, 1,
+            "round {round}: concurrent durable setup creates must leave exactly one live flow"
+        );
+    }
+}
+
+/// A process-local mutex cannot uphold the create-flow invariant across
+/// replicas. Both services below share only the durable backend; the backend
+/// forces their first flow-root reads to observe the same empty snapshot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn independent_services_share_durable_setup_creation_coordination() {
+    let backend = Arc::new(BarrierFlowListBackend::new());
+    let mounts = ironclaw_host_api::MountView::new(vec![MountGrant::new(
+        MountAlias::new("/secrets").unwrap(),
+        VirtualPath::new("/tenants/test/users/alice/secrets").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    let filesystem_a = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&backend),
+        mounts.clone(),
+    ));
+    let filesystem_b = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&backend),
+        mounts,
+    ));
+    let service_a = Arc::new(FilesystemAuthProductServices::new(
+        filesystem_a,
+        Arc::new(FilesystemSecretStore::ephemeral()),
+    ));
+    let service_b = Arc::new(FilesystemAuthProductServices::new(
+        filesystem_b,
+        Arc::new(FilesystemSecretStore::ephemeral()),
+    ));
+    let provider = AuthProviderId::new("github").unwrap();
+
+    let create = |service: Arc<FilesystemAuthProductServices<BarrierFlowListBackend>>,
+                  state: &'static str,
+                  provider: AuthProviderId| async move {
+        service
+            .create_flow(NewAuthFlow {
+                id: None,
+                scope: test_scope(),
+                kind: AuthFlowKind::IntegrationCredential,
+                provider,
+                challenge: AuthChallenge::OAuthUrl {
+                    authorization_url: OAuthAuthorizationUrl::new(
+                        "https://example.com/oauth/authorize?cross-instance=1",
+                    )
+                    .unwrap(),
+                    expires_at: Utc::now() + Duration::minutes(10),
+                },
+                continuation: AuthContinuationRef::SetupOnly,
+                update_binding: None,
+                opaque_state_hash: Some(state_hash(state)),
+                pkce_verifier_hash: Some(pkce_hash(state)),
+                expires_at: Utc::now() + Duration::minutes(10),
+            })
+            .await
+    };
+
+    let (left, right) = tokio::join!(
+        create(Arc::clone(&service_a), "cross-instance-a", provider.clone()),
+        create(Arc::clone(&service_b), "cross-instance-b", provider),
+    );
+    left.expect("first setup create succeeds");
+    right.expect("second setup create succeeds");
+
+    let live = service_a
+        .flow_records_under_scope_root(&test_scope())
+        .await
+        .expect("list flows under the shared root")
+        .into_iter()
+        .filter(|(flow, _)| flow.status == AuthFlowStatus::AwaitingUser)
+        .count();
+    assert_eq!(
+        live, 1,
+        "independent services sharing one backend must leave one live setup flow"
+    );
+}
+
 /// #4a lifecycle lock — the removal entrypoints cancel a pending flow through
 /// the one shared cleanup, so "disconnect via the bot's `extension_remove` tool"
 /// and "disconnect via the web UI" cannot diverge into duplicated behaviour.
@@ -1118,24 +1614,30 @@ async fn cleanup_for_lifecycle_cancels_pending_flows_for_the_disconnected_provid
 ///   primary door under test here, never a silent skip;
 /// - the WebUI Slack-disconnect facade
 ///   ([`SlackPersonalCredentialCleanup::cleanup_credentials_for_lifecycle`])
-///   only exists under `slack-v2-host-beta`, so when that feature is built we
-///   ALSO drive it and assert identical behaviour, proving the two doors stay in
-///   lockstep.
+///   is likewise always compiled, so we ALSO drive it and assert identical
+///   behaviour, proving the two doors stay in lockstep.
 ///
 /// Each door runs independently against the REAL durable service. Provider-
 /// agnostic ("google", not Slack) so the guarantee cannot silently narrow to a
 /// Slack-only cleanup.
 #[tokio::test]
-async fn removal_doors_cancel_pending_flow_through_the_shared_cleanup() {
+async fn removal_doors_handle_pending_and_expired_flows_through_the_shared_cleanup() {
     use crate::extension_host::extension_lifecycle::ExtensionCredentialCleanup;
 
-    // Cleanup never dispatches a continuation, but the facade constructor
-    // requires one.
+    // Keep dispatch local while exercising the production cleanup facade; the
+    // assertions below verify the durable acknowledgment, not this test double.
     #[derive(Debug, Default)]
     struct NoopDispatcher;
     #[async_trait::async_trait]
     impl crate::RebornAuthContinuationDispatcher for NoopDispatcher {
         async fn dispatch_auth_continuation(
+            &self,
+            _event: ironclaw_auth::AuthContinuationEvent,
+        ) -> Result<(), AuthProductError> {
+            Ok(())
+        }
+
+        async fn dispatch_canceled_auth_continuation(
             &self,
             _event: ironclaw_auth::AuthContinuationEvent,
         ) -> Result<(), AuthProductError> {
@@ -1157,7 +1659,7 @@ async fn removal_doors_cancel_pending_flow_through_the_shared_cleanup() {
     ) {
         let durable = Arc::new(test_service(
             test_filesystem(),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
         ));
         let scope = test_scope();
         assert_eq!(
@@ -1198,6 +1700,7 @@ async fn removal_doors_cancel_pending_flow_through_the_shared_cleanup() {
         scope: scope.clone(),
         extension_id: ExtensionId::new("example_ext").unwrap(),
         provider: Some(provider.clone()),
+        lifecycle_package: None,
         action: ironclaw_auth::SecretCleanupAction::Uninstall,
     };
 
@@ -1209,9 +1712,8 @@ async fn removal_doors_cancel_pending_flow_through_the_shared_cleanup() {
         .expect("extension_remove tool cleanup should succeed");
     assert_pending_flow_canceled(&tool_durable, &tool_scope, &provider).await;
 
-    // Parity door (only compiled under `slack-v2-host-beta`) — the WebUI
-    // channel-disconnect facade must yield the identical cancel.
-    #[cfg(feature = "slack-v2-host-beta")]
+    // Parity door — the WebUI channel-disconnect facade must yield the
+    // identical cancel.
     {
         use crate::slack::slack_channel_connection::SlackPersonalCredentialCleanup;
         let (web, web_scope, web_durable) = seeded_facade(&provider).await;
@@ -1223,12 +1725,88 @@ async fn removal_doors_cancel_pending_flow_through_the_shared_cleanup() {
         .expect("web-UI disconnect cleanup should succeed");
         assert_pending_flow_canceled(&web_durable, &web_scope, &provider).await;
     }
+
+    // Regression: an expired, unacknowledged turn-gate flow is terminal but
+    // still needs one denial dispatch so extension removal cannot leave its
+    // old turn parked forever. The production facade must acknowledge that
+    // dispatch and converge instead of surfacing FlowAlreadyTerminal as a 503.
+    let expired_durable = Arc::new(test_service(
+        test_filesystem(),
+        Arc::new(FilesystemSecretStore::ephemeral()),
+    ));
+    let expired_scope = test_scope();
+    let expired_flow = expired_durable
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: expired_scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: provider.clone(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new(
+                    "https://example.com/oauth/authorize?state=expired-turn",
+                )
+                .unwrap(),
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+            continuation: AuthContinuationRef::TurnGateResume {
+                turn_run_ref: TurnRunRef::new(uuid::Uuid::new_v4().to_string()).unwrap(),
+                gate_ref: AuthGateRef::new("gate:expired-lifecycle-cleanup").unwrap(),
+            },
+            update_binding: None,
+            opaque_state_hash: Some(state_hash("expired-turn-gate")),
+            pkce_verifier_hash: Some(pkce_hash("expired-turn-gate")),
+            expires_at: Utc::now() - Duration::seconds(1),
+        })
+        .await
+        .unwrap();
+    let expiry_error = expired_durable
+        .claim_oauth_callback(
+            &expired_scope,
+            OAuthCallbackClaimRequest {
+                flow_id: expired_flow.id,
+                opaque_state_hash: state_hash("expired-turn-gate"),
+                provider: provider.clone(),
+                pkce_verifier_hash: pkce_hash("expired-turn-gate"),
+            },
+        )
+        .await
+        .expect_err("expired callback must terminalize the flow");
+    assert_eq!(expiry_error, AuthProductError::UnknownOrExpiredFlow);
+
+    let expired_services = crate::RebornProductAuthServices::new(
+        expired_durable.clone(),
+        expired_durable.clone(),
+        expired_durable.clone(),
+        expired_durable.clone(),
+        Arc::new(super::provider::UnavailableAuthProviderClient),
+        expired_durable.clone(),
+        Arc::new(NoopDispatcher),
+    );
+    ExtensionCredentialCleanup::cleanup_for_lifecycle(&expired_services, request(&expired_scope))
+        .await
+        .expect("extension removal must acknowledge an expired turn-gate continuation");
+
+    let acknowledged = expired_durable
+        .get_flow(&expired_scope, expired_flow.id)
+        .await
+        .expect("expired flow lookup")
+        .expect("expired flow remains durable");
+    assert_eq!(acknowledged.status, AuthFlowStatus::Expired);
+    assert!(acknowledged.continuation_emitted_at.is_some());
+
+    let retry = ExtensionCredentialCleanup::cleanup_for_lifecycle(
+        &expired_services,
+        request(&expired_scope),
+    )
+    .await
+    .expect("retry after expired-flow acknowledgement must converge");
+    assert!(retry.canceled_turn_gate_continuations.is_empty());
 }
 
 #[tokio::test]
 async fn filesystem_flow_record_source_projects_session_scoped_manual_flows() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let mut scope = test_scope();
     scope.surface = AuthSurface::Callback;
     scope.resource.thread_id = Some(ThreadId::new("thread-auth-flow").unwrap());
@@ -1343,7 +1921,7 @@ async fn filesystem_flow_record_source_projects_session_scoped_manual_flows() {
 #[tokio::test]
 async fn filesystem_account_record_source_projects_session_scoped_accounts_for_runtime_owner() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let mut setup_scope = test_scope();
     setup_scope.surface = AuthSurface::Callback;
     setup_scope.resource.thread_id = Some(ThreadId::new("thread-auth-account").unwrap());
@@ -1381,7 +1959,7 @@ async fn filesystem_account_record_source_projects_session_scoped_accounts_for_r
 #[tokio::test]
 async fn filesystem_account_record_source_rejects_malformed_scan_records() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), secret_store);
     service
@@ -1435,7 +2013,7 @@ async fn filesystem_account_record_source_rejects_malformed_scan_records() {
 #[tokio::test]
 async fn filesystem_runtime_account_selection_tolerates_many_session_account_roots() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let service = Arc::new(test_service(filesystem, secret_store));
     let mut setup_scope = test_scope();
     setup_scope.surface = AuthSurface::Callback;
@@ -1484,7 +2062,7 @@ async fn filesystem_runtime_account_selection_tolerates_many_session_account_roo
 #[tokio::test]
 async fn filesystem_runtime_account_selection_tolerates_many_account_records_per_root() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let service = Arc::new(test_service(filesystem, secret_store));
     let mut setup_scope = test_scope();
     setup_scope.surface = AuthSurface::Callback;
@@ -1531,7 +2109,7 @@ async fn filesystem_runtime_account_selection_tolerates_many_account_records_per
 #[tokio::test]
 async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
 
@@ -1728,6 +2306,7 @@ async fn filesystem_oauth_callback_canceled_after_flow_read_cannot_leave_configu
         scope: scope.clone(),
         extension_id: ExtensionId::new("slack").unwrap(),
         provider: Some(google_provider()),
+        lifecycle_package: None,
         action: SecretCleanupAction::Uninstall,
     };
     cleanup_service
@@ -1810,7 +2389,7 @@ async fn filesystem_disconnect_cleans_account_when_callback_completes_before_flo
     use ironclaw_auth::{SecretCleanupAction, SecretCleanupRequest, SecretCleanupService as _};
 
     let (filesystem, backend) = paused_account_put_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = test_scope();
     let callback_service = Arc::new(FilesystemAuthProductServices::new(
         Arc::clone(&filesystem),
@@ -1858,6 +2437,7 @@ async fn filesystem_disconnect_cleans_account_when_callback_completes_before_flo
                 scope: cleanup_scope,
                 extension_id: ExtensionId::new("slack").unwrap(),
                 provider: Some(google_provider()),
+                lifecycle_package: None,
                 action: SecretCleanupAction::Uninstall,
             })
             .await
@@ -2230,6 +2810,7 @@ async fn assert_stale_bound_callback_restores_newer_reconnect(failure: StaleBoun
                     scope: scope.clone(),
                     extension_id: ExtensionId::new("slack").unwrap(),
                     provider: Some(google_provider()),
+                    lifecycle_package: None,
                     action: SecretCleanupAction::Uninstall,
                 })
                 .await
@@ -2258,7 +2839,7 @@ async fn assert_stale_bound_callback_restores_newer_reconnect(failure: StaleBoun
 #[tokio::test]
 async fn filesystem_manual_token_submit_allows_only_one_concurrent_consumer() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = test_scope();
     let service = Arc::new(test_service(filesystem, secret_store));
 
@@ -2344,7 +2925,7 @@ fn fs_error_maps_version_mismatch_to_backend_conflict() {
 #[tokio::test]
 async fn filesystem_oauth_continuation_marker_is_idempotent() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
 
@@ -2437,7 +3018,7 @@ async fn filesystem_manual_token_rotation_removes_previous_secret() {
     };
 
     let filesystem = test_filesystem();
-    let concrete_secret_store = Arc::new(InMemorySecretStore::new());
+    let concrete_secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
     let scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
@@ -2572,7 +3153,7 @@ async fn filesystem_manual_token_reconnect_updates_bound_account_across_a_differ
     };
 
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
 
     // Account created in thread-a.
@@ -2663,7 +3244,7 @@ async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_unins
     use ironclaw_host_api::ExtensionId;
 
     let filesystem = test_filesystem();
-    let concrete_secret_store = Arc::new(InMemorySecretStore::new());
+    let concrete_secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
     let scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
@@ -2716,6 +3297,7 @@ async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_unins
             scope: scope.clone(),
             extension_id: ext_id.clone(),
             provider: None,
+            lifecycle_package: None,
             action: SecretCleanupAction::Deactivate,
         })
         .await
@@ -2736,6 +3318,7 @@ async fn filesystem_cleanup_for_lifecycle_deactivates_owner_and_revokes_on_unins
             scope: scope.clone(),
             extension_id: ext_id.clone(),
             provider: None,
+            lifecycle_package: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await
@@ -2809,6 +3392,7 @@ async fn filesystem_cleanup_retries_failed_secret_deletion_without_losing_handle
         scope: scope.clone(),
         extension_id: extension_id.clone(),
         provider: None,
+        lifecycle_package: None,
         action: SecretCleanupAction::Uninstall,
     };
 
@@ -2873,7 +3457,7 @@ async fn filesystem_cleanup_matches_owner_granularity_and_provider_selector() {
     use ironclaw_host_api::ExtensionId;
 
     let filesystem = test_filesystem();
-    let concrete_secret_store = Arc::new(InMemorySecretStore::new());
+    let concrete_secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
     let flow_scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
@@ -2920,6 +3504,7 @@ async fn filesystem_cleanup_matches_owner_granularity_and_provider_selector() {
             scope: cleanup_scope.clone(),
             extension_id: ExtensionId::new("slack").unwrap(),
             provider: None,
+            lifecycle_package: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await
@@ -2932,6 +3517,7 @@ async fn filesystem_cleanup_matches_owner_granularity_and_provider_selector() {
             scope: cleanup_scope,
             extension_id: ExtensionId::new("slack").unwrap(),
             provider: Some(google_provider()),
+            lifecycle_package: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await
@@ -2952,7 +3538,7 @@ async fn filesystem_cleanup_matches_owner_granularity_and_provider_selector() {
 #[tokio::test]
 async fn filesystem_lock_cache_drops_weak_entries_after_release() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let service = test_service(filesystem, secret_store);
 
     {
@@ -2980,7 +3566,7 @@ async fn filesystem_lock_cache_drops_weak_entries_after_release() {
 #[tokio::test]
 async fn filesystem_manual_token_submit_rejects_expired_interaction() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -3074,7 +3660,7 @@ async fn unavailable_auth_provider_client_validates_before_returning_backend_una
 #[tokio::test]
 async fn filesystem_list_accounts_rejects_zero_and_oversized_limit() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -3389,6 +3975,7 @@ async fn filesystem_oauth_reauth_retains_failed_old_secret_deletion_for_lifecycl
             scope: scope.clone(),
             extension_id: ExtensionId::new("slack").unwrap(),
             provider: Some(google_provider()),
+            lifecycle_package: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await
@@ -3421,7 +4008,7 @@ async fn filesystem_oauth_reauth_cleanup_journal_failure_preserves_both_generati
     };
 
     let (filesystem, backend) = paused_account_put_filesystem();
-    let concrete_secret_store = Arc::new(InMemorySecretStore::new());
+    let concrete_secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
     let scope = test_scope();
     let service = FilesystemAuthProductServices::new(filesystem, secret_store);
@@ -3549,6 +4136,7 @@ async fn filesystem_oauth_reauth_cleanup_journal_failure_preserves_both_generati
             scope: scope.clone(),
             extension_id: ExtensionId::new("slack").unwrap(),
             provider: Some(google_provider()),
+            lifecycle_package: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await
@@ -3591,7 +4179,7 @@ async fn filesystem_oauth_reauth_updates_bound_account_across_fresh_invocation()
     use ironclaw_auth::{CredentialAccountUpdateBinding, ProviderCallbackOutcome};
 
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let setup_scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
 
@@ -3778,7 +4366,7 @@ async fn filesystem_manual_token_submit_cleans_up_secret_when_account_write_fail
     use ironclaw_filesystem::CasExpectation;
 
     let filesystem = test_filesystem();
-    let concrete_secret_store = Arc::new(InMemorySecretStore::new());
+    let concrete_secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
     let scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
@@ -3863,7 +4451,7 @@ async fn filesystem_oauth_callback_cas_conflict_reuses_concurrent_account() {
     // This simulates a concurrent callback that already created the account.
     // The CAS-conflict branch should re-read, validate, update, and succeed.
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
 
@@ -3954,6 +4542,629 @@ async fn filesystem_oauth_callback_cas_conflict_reuses_concurrent_account() {
     assert_eq!(completed.status, AuthFlowStatus::Completed);
 }
 
+#[tokio::test]
+async fn filesystem_oauth_compensation_preserves_newer_secret_material() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let scope = test_scope();
+    let service = test_service(filesystem, secret_store);
+    let account = service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("original-access").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    let first = complete_bound_oauth_generation(&service, &scope, &account, "first").await;
+    let first_fingerprint = first
+        .credential_secret_fingerprint
+        .clone()
+        .expect("first secret fingerprint");
+    let first_claim = service
+        .claim_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchClaimInput {
+                flow_id: first.id,
+                claimed_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("first continuation claim");
+    service
+        .settle_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchSettlementInput {
+                flow_id: first.id,
+                expected_claimed_at: first_claim.updated_at,
+                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
+                    error: AuthErrorCode::BackendUnavailable,
+                },
+            },
+        )
+        .await
+        .expect("first continuation failure");
+    let second = complete_bound_oauth_generation(&service, &scope, &account, "second").await;
+    assert_ne!(
+        second.credential_secret_fingerprint,
+        Some(first_fingerprint.clone()),
+        "a reconnect must replace the secret fingerprint"
+    );
+
+    let outcome = service
+        .compensate_oauth_completion(OAuthCompletionCompensationRequest {
+            scope: scope.clone(),
+            flow_id: first.id,
+            provider: google_provider(),
+            credential_account_id: account.id,
+            expected_secret_fingerprint: first_fingerprint,
+        })
+        .await
+        .unwrap();
+    assert_eq!(outcome, OAuthCompletionCompensationOutcome::Superseded);
+    let current = service
+        .get_account(CredentialAccountLookupRequest::new(scope, account.id))
+        .await
+        .unwrap()
+        .expect("newer account remains");
+    assert_eq!(current.status, CredentialAccountStatus::Configured);
+    assert_eq!(
+        current.access_secret,
+        Some(SecretHandle::new("second-access").unwrap())
+    );
+}
+
+#[tokio::test]
+async fn filesystem_oauth_compensation_revokes_only_the_exact_account() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let scope = test_scope();
+    let service = test_service(filesystem, secret_store);
+    let failed_account = service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("failed-old-access").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let unrelated_account = service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: CredentialAccountLabel::new("unrelated google").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("unrelated-access").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let completed =
+        complete_bound_oauth_generation(&service, &scope, &failed_account, "failed").await;
+    let expected_secret_fingerprint = completed
+        .credential_secret_fingerprint
+        .clone()
+        .expect("completed secret fingerprint");
+    let claim = service
+        .claim_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchClaimInput {
+                flow_id: completed.id,
+                claimed_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("continuation claim");
+    service
+        .settle_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchSettlementInput {
+                flow_id: completed.id,
+                expected_claimed_at: claim.updated_at,
+                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
+                    error: AuthErrorCode::BackendUnavailable,
+                },
+            },
+        )
+        .await
+        .expect("continuation failure");
+
+    let outcome = service
+        .compensate_oauth_completion(OAuthCompletionCompensationRequest {
+            scope: scope.clone(),
+            flow_id: completed.id,
+            provider: google_provider(),
+            credential_account_id: failed_account.id,
+            expected_secret_fingerprint,
+        })
+        .await
+        .unwrap();
+    assert_eq!(outcome, OAuthCompletionCompensationOutcome::Compensated);
+    let failed = service
+        .get_account(CredentialAccountLookupRequest::new(
+            scope.clone(),
+            failed_account.id,
+        ))
+        .await
+        .unwrap()
+        .expect("failed account retained as tombstone");
+    assert_eq!(failed.status, CredentialAccountStatus::Revoked);
+    assert!(failed.access_secret.is_none());
+    let unrelated = service
+        .get_account(CredentialAccountLookupRequest::new(
+            scope,
+            unrelated_account.id,
+        ))
+        .await
+        .unwrap()
+        .expect("unrelated account remains");
+    assert_eq!(unrelated.status, CredentialAccountStatus::Configured);
+    assert!(unrelated.access_secret.is_some());
+}
+
+#[tokio::test]
+async fn filesystem_oauth_compensation_retries_after_restart_without_losing_its_journal() {
+    let filesystem = test_filesystem();
+    let concrete_secret_store = Arc::new(FailFirstDeleteSecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
+    let scope = test_scope();
+    let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+    let account = service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("restart-old-access").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let completed =
+        complete_bound_oauth_generation(&service, &scope, &account, "restart-failed").await;
+    let expected_secret_fingerprint = completed
+        .credential_secret_fingerprint
+        .clone()
+        .expect("completed secret fingerprint");
+    let claim = service
+        .claim_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchClaimInput {
+                flow_id: completed.id,
+                claimed_at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+    service
+        .settle_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchSettlementInput {
+                flow_id: completed.id,
+                expected_claimed_at: claim.updated_at,
+                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
+                    error: AuthErrorCode::BackendUnavailable,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    let request = OAuthCompletionCompensationRequest {
+        scope: scope.clone(),
+        flow_id: completed.id,
+        provider: google_provider(),
+        credential_account_id: account.id,
+        expected_secret_fingerprint,
+    };
+
+    // Bound OAuth completion may clean the replaced generation first; inject
+    // the failure specifically at compensation so the failed flow is already
+    // durable when deletion stops.
+    concrete_secret_store.set_delete_failure(true);
+
+    assert_eq!(
+        service.compensate_oauth_completion(request.clone()).await,
+        Err(AuthProductError::BackendUnavailable)
+    );
+    let pending = service
+        .get_flow(&scope, completed.id)
+        .await
+        .unwrap()
+        .expect("failed flow remains durable");
+    assert_eq!(pending.status, AuthFlowStatus::Failed);
+    assert!(
+        pending.credential_secret_fingerprint.is_some(),
+        "the fingerprint is the durable pending-compensation journal"
+    );
+
+    let reopened = test_service(filesystem, secret_store);
+    assert_eq!(
+        reopened.compensate_oauth_completion(request).await.unwrap(),
+        OAuthCompletionCompensationOutcome::Compensated
+    );
+    let converged = reopened
+        .get_flow(&scope, completed.id)
+        .await
+        .unwrap()
+        .expect("flow after retry");
+    assert!(converged.credential_secret_fingerprint.is_none());
+    let revoked = reopened
+        .get_account(CredentialAccountLookupRequest::new(scope, account.id))
+        .await
+        .unwrap()
+        .expect("revoked tombstone");
+    assert_eq!(revoked.status, CredentialAccountStatus::Revoked);
+    assert!(revoked.access_secret.is_none());
+    assert!(revoked.refresh_secret.is_none());
+}
+
+#[tokio::test]
+async fn filesystem_continuation_failure_is_durable_and_fenced() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let scope = test_scope();
+    let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+    let account = service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("before-failure").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let completed =
+        complete_bound_oauth_generation(&service, &scope, &account, "continuation-failure").await;
+    let claim = service
+        .claim_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchClaimInput {
+                flow_id: completed.id,
+                claimed_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("claim continuation");
+    service
+        .settle_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchSettlementInput {
+                flow_id: completed.id,
+                expected_claimed_at: claim.updated_at,
+                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
+                    error: AuthErrorCode::BackendUnavailable,
+                },
+            },
+        )
+        .await
+        .expect("mark continuation failed");
+
+    let reopened = test_service(filesystem, secret_store);
+    let persisted = reopened
+        .get_flow(&scope, completed.id)
+        .await
+        .unwrap()
+        .expect("persisted flow");
+    assert_eq!(persisted.status, AuthFlowStatus::Failed);
+    assert_eq!(persisted.error, Some(AuthErrorCode::BackendUnavailable));
+    let stale = reopened
+        .settle_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchSettlementInput {
+                flow_id: completed.id,
+                expected_claimed_at: claim.updated_at,
+                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
+                    error: AuthErrorCode::BackendUnavailable,
+                },
+            },
+        )
+        .await
+        .expect_err("stale failure is fenced");
+    assert_eq!(stale, AuthProductError::FlowAlreadyTerminal);
+}
+
+#[tokio::test]
+async fn filesystem_continuation_claim_has_one_owner_across_service_instances() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let scope = test_scope();
+    let first_service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+    let second_service = test_service(filesystem, secret_store);
+    let account = first_service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("claim-owner-before").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let completed =
+        complete_bound_oauth_generation(&first_service, &scope, &account, "claim-owner").await;
+    let claimed_at = Utc::now();
+
+    let (first, second) = tokio::join!(
+        first_service.claim_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchClaimInput {
+                flow_id: completed.id,
+                claimed_at,
+            },
+        ),
+        second_service.claim_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchClaimInput {
+                flow_id: completed.id,
+                claimed_at,
+            },
+        )
+    );
+
+    assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+    let loser = first
+        .err()
+        .or_else(|| second.err())
+        .expect("one losing claim");
+    assert!(matches!(
+        loser,
+        AuthProductError::BackendUnavailable | AuthProductError::BackendConflict
+    ));
+}
+
+#[tokio::test]
+async fn filesystem_continuation_recovery_fences_the_stale_lease_owner() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let scope = test_scope();
+    let stale_service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+    let recovery_service = test_service(filesystem, secret_store);
+    let account = stale_service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("stale-owner-before").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let completed =
+        complete_bound_oauth_generation(&stale_service, &scope, &account, "stale-owner").await;
+    let stale_claim = stale_service
+        .claim_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchClaimInput {
+                flow_id: completed.id,
+                claimed_at: Utc::now()
+                    - Duration::seconds(
+                        ironclaw_auth::AUTH_CONTINUATION_DISPATCH_LEASE_SECONDS + 1,
+                    ),
+            },
+        )
+        .await
+        .expect("stale lease claim");
+    let recovered_claim = recovery_service
+        .claim_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchClaimInput {
+                flow_id: completed.id,
+                claimed_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("recover expired lease");
+
+    let stale_settlement = stale_service
+        .settle_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchSettlementInput {
+                flow_id: completed.id,
+                expected_claimed_at: stale_claim.updated_at,
+                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::Dispatched {
+                    emitted_at: Utc::now(),
+                },
+            },
+        )
+        .await
+        .expect_err("stale lease owner must be fenced");
+    assert_eq!(stale_settlement, AuthProductError::FlowAlreadyTerminal);
+
+    recovery_service
+        .settle_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchSettlementInput {
+                flow_id: completed.id,
+                expected_claimed_at: recovered_claim.updated_at,
+                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::Dispatched {
+                    emitted_at: Utc::now(),
+                },
+            },
+        )
+        .await
+        .expect("current lease owner settles");
+}
+
+#[tokio::test]
+async fn filesystem_oauth_compensation_converges_when_account_is_already_absent() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let scope = test_scope();
+    let service = test_service(Arc::clone(&filesystem), secret_store);
+    let account = service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("already-absent-before").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let completed =
+        complete_bound_oauth_generation(&service, &scope, &account, "already-absent").await;
+    let expected_secret_fingerprint = completed
+        .credential_secret_fingerprint
+        .clone()
+        .expect("completed secret fingerprint");
+    let claim = service
+        .claim_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchClaimInput {
+                flow_id: completed.id,
+                claimed_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("continuation claim");
+    service
+        .settle_continuation_dispatch(
+            &scope,
+            ironclaw_auth::AuthContinuationDispatchSettlementInput {
+                flow_id: completed.id,
+                expected_claimed_at: claim.updated_at,
+                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
+                    error: AuthErrorCode::BackendUnavailable,
+                },
+            },
+        )
+        .await
+        .expect("continuation failure");
+    let account_path = super::paths::account_path(&scope, account.id).expect("account path");
+    filesystem
+        .delete(&scope.resource, &account_path)
+        .await
+        .expect("remove account before compensation");
+
+    let outcome = service
+        .compensate_oauth_completion(OAuthCompletionCompensationRequest {
+            scope: scope.clone(),
+            flow_id: completed.id,
+            provider: google_provider(),
+            credential_account_id: account.id,
+            expected_secret_fingerprint,
+        })
+        .await
+        .expect("already-absent compensation converges");
+    assert_eq!(outcome, OAuthCompletionCompensationOutcome::AlreadyAbsent);
+    let converged = service
+        .get_flow(&scope, completed.id)
+        .await
+        .expect("flow read")
+        .expect("failed flow retained");
+    assert!(converged.credential_secret_fingerprint.is_none());
+}
+
+async fn complete_bound_oauth_generation(
+    service: &FilesystemAuthProductServices<InMemoryBackend>,
+    scope: &AuthProductScope,
+    account: &ironclaw_auth::CredentialAccount,
+    suffix: &str,
+) -> ironclaw_auth::AuthFlowRecord {
+    let flow = service
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                    .unwrap(),
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+            continuation: AuthContinuationRef::LifecycleActivation {
+                package_ref: ironclaw_auth::LifecyclePackageRef::new("google-extension").unwrap(),
+            },
+            update_binding: Some(CredentialAccountUpdateBinding::from_projection(
+                &account.projection(),
+            )),
+            opaque_state_hash: Some(state_hash(suffix)),
+            pkce_verifier_hash: Some(pkce_hash(suffix)),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+    service
+        .claim_oauth_callback(
+            scope,
+            OAuthCallbackClaimRequest {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash(suffix),
+                provider: google_provider(),
+                pkce_verifier_hash: pkce_hash(suffix),
+            },
+        )
+        .await
+        .unwrap();
+    service
+        .complete_oauth_callback(
+            scope,
+            OAuthCallbackInput {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash(suffix),
+                outcome: ironclaw_auth::ProviderCallbackOutcome::Authorized {
+                    exchange: Box::new(OAuthProviderExchange {
+                        provider: google_provider(),
+                        account_label: account_label(),
+                        authorization_code_hash: code_hash(suffix),
+                        pkce_verifier_hash: pkce_hash(suffix),
+                        access_secret: SecretHandle::new(format!("{suffix}-access")).unwrap(),
+                        refresh_secret: None,
+                        scopes: Vec::new(),
+                        account_id: Some(account.id),
+                        provider_identity: None,
+                    }),
+                },
+            },
+        )
+        .await
+        .unwrap()
+}
+
 // ─── fix: grant-removal on non-owner account in cleanup_for_lifecycle ─────────
 
 #[tokio::test]
@@ -3962,7 +5173,7 @@ async fn filesystem_cleanup_removes_grant_from_non_owner_account() {
     use ironclaw_host_api::ExtensionId;
 
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -3990,6 +5201,7 @@ async fn filesystem_cleanup_removes_grant_from_non_owner_account() {
             scope: scope.clone(),
             extension_id: ext_id.clone(),
             provider: None,
+            lifecycle_package: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await
@@ -4029,7 +5241,7 @@ async fn filesystem_cleanup_removes_grant_from_non_owner_account() {
 #[tokio::test]
 async fn filesystem_select_unique_configured_account_single_and_multi() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -4099,7 +5311,7 @@ async fn filesystem_select_unique_configured_account_single_and_multi() {
 #[tokio::test]
 async fn filesystem_select_configured_account_validates_provider_and_rejects_missing() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -4159,7 +5371,7 @@ async fn filesystem_select_configured_account_validates_provider_and_rejects_mis
 #[tokio::test]
 async fn filesystem_cancel_flow_and_terminal_state_rejection() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -4198,7 +5410,7 @@ async fn filesystem_cancel_flow_and_terminal_state_rejection() {
 async fn filesystem_fail_oauth_callback_marks_flow_failed() {
     use ironclaw_auth::{AuthErrorCode, OAuthCallbackFailureInput};
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -4254,7 +5466,7 @@ async fn filesystem_fail_oauth_callback_marks_flow_failed() {
 async fn filesystem_complete_credential_selection_completes_flow() {
     use ironclaw_auth::{AuthFlowKind, CredentialSelectionInput};
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -4313,7 +5525,7 @@ async fn filesystem_complete_credential_selection_completes_flow() {
 async fn filesystem_create_flow_rejects_invalid_update_binding() {
     use ironclaw_auth::CredentialAccountUpdateBinding;
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -4350,7 +5562,7 @@ async fn filesystem_create_flow_rejects_invalid_update_binding() {
 #[tokio::test]
 async fn filesystem_update_status_and_cross_scope_rejection() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -4392,7 +5604,7 @@ async fn filesystem_update_status_and_cross_scope_rejection() {
 async fn filesystem_project_credential_recovery_returns_setup_required_when_empty() {
     use ironclaw_auth::CredentialRecoveryRequest;
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -4452,7 +5664,7 @@ async fn filesystem_credential_setup_service_update_path() {
         CredentialAccountMutation, CredentialAccountUpdate, CredentialSetupService,
     };
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -4500,7 +5712,7 @@ async fn filesystem_credential_setup_service_update_path() {
 async fn filesystem_get_account_cross_scope_returns_cross_scope_denied() {
     use ironclaw_auth::AuthSurface;
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
 
@@ -4537,7 +5749,7 @@ async fn filesystem_get_account_cross_scope_returns_cross_scope_denied() {
 #[tokio::test]
 async fn filesystem_validate_secret_rejects_control_characters() {
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -4601,7 +5813,7 @@ async fn filesystem_expired_flow_status_persisted_before_returning_error() {
     };
 
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
@@ -4735,7 +5947,7 @@ async fn filesystem_oauth_cas_conflict_branch_purges_previous_secrets() {
     use ironclaw_secrets::SecretMaterial;
 
     let filesystem = test_filesystem();
-    let concrete_secret_store = Arc::new(InMemorySecretStore::new());
+    let concrete_secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
     let scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
@@ -4920,7 +6132,7 @@ async fn list_refresh_candidates_covers_agent_and_project_scopes() {
         Arc::clone(&backend),
         crate::invocation_mount_view,
     ));
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let service = FilesystemAuthProductServices::new_with_root(
         Arc::clone(&scoped),
         Arc::clone(&backend),
@@ -5136,7 +6348,7 @@ async fn filesystem_manual_token_consume_only_after_successful_account_write() {
     use ironclaw_filesystem::CasExpectation;
 
     let filesystem = test_filesystem();
-    let concrete_secret_store = Arc::new(InMemorySecretStore::new());
+    let concrete_secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
     let scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
@@ -5276,7 +6488,7 @@ async fn filesystem_complete_manual_token_succeeds_across_different_invocation_i
     //
     // This test MUST FAIL before the fix (it will return CrossScopeDenied).
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
 
     // Build an account scope whose invocation_id is A (the "earlier request").
     let mut account_resource = test_scope().resource;
@@ -5356,7 +6568,7 @@ async fn filesystem_complete_manual_token_still_rejects_genuinely_foreign_owner(
     // `binding_scope_owns_account` comparing the scopes — the guard itself is
     // exercised, not a path-partition miss.
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
 
     // Build an account scope for user "bob".
     let mut bob_resource = test_scope().resource;
@@ -5422,7 +6634,7 @@ async fn filesystem_complete_manual_token_rejects_different_session_id() {
     // may pass, but here scope_matches would fail on session_id mismatch too —
     // either way the new binding_scope_owns_account correctly enforces it).
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
 
     // Account created under session S1.
     let account_resource = test_scope().resource;
@@ -5499,7 +6711,7 @@ async fn filesystem_complete_manual_token_rejects_different_auth_surface() {
     // `CredentialMissing` rather than `CrossScopeDenied`. Both are acceptable
     // secure outcomes; this test documents which one actually occurs.
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
 
     // Account created under AuthSurface::Web.
     let web_scope = test_scope(); // uses Web surface by default (see test_scope())
@@ -5566,7 +6778,7 @@ async fn filesystem_complete_credential_selection_succeeds_across_different_invo
     use ironclaw_auth::{AuthFlowKind, CredentialSelectionInput};
 
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
 
     // Account created under invocation A.
     let mut account_resource = test_scope().resource;
@@ -5663,7 +6875,7 @@ async fn filesystem_complete_credential_selection_rejects_genuinely_foreign_owne
     use ironclaw_auth::{AuthFlowKind, CredentialSelectionInput};
 
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
 
     // Account created under user "bob" (foreign owner).
     let mut bob_resource = test_scope().resource;
@@ -5756,7 +6968,7 @@ async fn filesystem_complete_credential_selection_rejects_different_session_id()
     use ironclaw_auth::{AuthFlowKind, CredentialSelectionInput};
 
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
 
     // Account created under session S1.
     let account_resource = test_scope().resource;
@@ -5853,7 +7065,7 @@ async fn filesystem_complete_credential_selection_rejects_different_auth_surface
     use ironclaw_auth::{AuthFlowKind, CredentialSelectionInput};
 
     let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
 
     // Account created under AuthSurface::Web (default from test_scope()).
     let web_scope = test_scope();

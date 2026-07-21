@@ -40,17 +40,16 @@ use ironclaw_host_runtime::{
     ECHO_CAPABILITY_ID, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
     TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelMessageRole,
-    HostManagedModelRequest, HostManagedModelResponse,
+    HostManagedModelRequest, HostManagedModelResponse, HostManagedToolResultContent,
 };
 use ironclaw_reborn_composition::{
-    RebornCompositionProfile, RebornLocalRuntimeProfileOptions, RebornRuntime,
-    RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerSettings, build_reborn_runtime,
+    RebornCompositionProfile, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornRuntimeProfileOptions, TriggerPollerSettings, build_reborn_runtime,
     local_runtime_build_input_with_options,
 };
 use ironclaw_triggers::{TriggerId, TriggerPollerWorkerConfig, TriggerRunStatus, TriggerState};
-use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::TurnStatus;
 use parity_qa_support::binary_e2e::RebornBinaryE2EHarness;
 use parity_qa_support::model_replay::{
@@ -273,7 +272,7 @@ async fn build_qa_fire_runtime(
         RebornCompositionProfile::LocalDevYolo,
         QA_USER,
         root.path().join("local-dev"),
-        RebornLocalRuntimeProfileOptions {
+        RebornRuntimeProfileOptions {
             confirm_host_access: true,
         },
     )
@@ -560,17 +559,42 @@ async fn reborn_qa_fired_routine_executes_action_and_finalizes_reply() {
             .any(|message| message.content.contains(QA_ROUTINE_PROMPT)),
         "first fired-turn request should carry the routine prompt"
     );
+    let tool_result = requests[1]
+        .messages
+        .iter()
+        .find(|message| message.role == HostManagedModelMessageRole::ToolResult)
+        .expect("the fired routine's action must reach the model");
+    // Issue #5838: a result under the inline first-look preview cap
+    // (`LOCAL_DEV_RESULT_PREVIEW_MAX_BYTES`) legitimately appears inline in
+    // `detail.preview` so the model does not need a follow-up `result_read`
+    // call; the marker here is well under the cap. Mirrors
+    // `assert_local_dev_result_reference` in
+    // `crates/ironclaw_reborn_composition/src/runtime.rs`.
     assert!(
-        requests[1].messages.iter().any(|message| {
-            message.role == HostManagedModelMessageRole::ToolResult
-                && message.content.contains(QA_DM_ACTION_MARKER)
-        }),
-        "the fired routine's action must execute and its tool result must reach the model — messages: {:?}",
-        requests[1]
-            .messages
-            .iter()
-            .map(|message| (&message.role, &message.content))
-            .collect::<Vec<_>>()
+        tool_result.content.contains(QA_DM_ACTION_MARKER),
+        "a result under the first-look preview cap should appear inline in model replay: {}",
+        tool_result.content
+    );
+    let Some(HostManagedToolResultContent::Reference { envelope }) =
+        tool_result.tool_result_content.as_ref()
+    else {
+        panic!(
+            "fired routine replay should carry a result-reference envelope, got {:?}",
+            tool_result.tool_result_content
+        );
+    };
+    assert_eq!(envelope.version, 1);
+    assert!(envelope.result_ref.starts_with("result:"));
+    let observation = envelope
+        .model_observation
+        .as_ref()
+        .expect("fired routine replay should include a model observation");
+    assert_eq!(observation["schema_version"], json!(1));
+    assert_eq!(observation["status"], json!("success"));
+    assert_eq!(observation["detail"]["kind"], json!("result_reference"));
+    assert_eq!(
+        observation["detail"]["result_ref"],
+        json!(envelope.result_ref)
     );
     assert_eq!(
         settled.last_status,
@@ -591,7 +615,6 @@ async fn invoke_trigger_create(runtime: &RebornRuntime, input: Value) -> Value {
             CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID).expect("capability id"),
             ResourceEstimate::default(),
             input,
-            trigger_management_trust_decision(),
         ))
         .await
         .expect("trigger create invocation completes");
@@ -641,16 +664,4 @@ fn trigger_management_execution_context() -> ExecutionContext {
     context.resource_scope.agent_id = Some(agent_id);
     context.resource_scope.project_id = None;
     context
-}
-
-fn trigger_management_trust_decision() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::AdminConfig,
-        evaluated_at: Utc::now(),
-    }
 }

@@ -195,7 +195,7 @@ fn args_hash_jcs_stable() {
     assert_eq!(first.args_hash, second.args_hash);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn checkpoint_payload_reload_continues_through_executor() {
     let (host, checkpoints) = MockAgentLoopDriverHost::builder()
         .script(ScenarioScript::reply_only("after reload"))

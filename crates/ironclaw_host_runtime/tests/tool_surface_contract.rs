@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical LocalFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
 mod support;
 
 use support::legacy_capability_fixture_to_v2_with_schema_suffix as legacy_capability_fixture_to_v2;
@@ -18,7 +19,7 @@ use ironclaw_extensions::{
     CapabilityVisibility, ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
 };
 use ironclaw_filesystem::{
-    DirEntry, FileStat, FileType, FilesystemError, FilesystemOperation, LocalFilesystem,
+    DirEntry, DiskFilesystem, FileStat, FileType, FilesystemError, FilesystemOperation,
     RootFilesystem,
 };
 use ironclaw_host_api::*;
@@ -695,6 +696,12 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
             .contains("pass delivery_target_id"),
         "trigger_create description should teach per-trigger delivery routing"
     );
+    assert!(
+        trigger_create.descriptor.description.contains(
+            "If delivery_target_id is set, never put a send, post, or deliver-results step"
+        ),
+        "trigger_create description should front-load the no-duplicate-delivery rule"
+    );
     let trigger_prompt_description = trigger_create
         .descriptor
         .parameters_schema
@@ -723,6 +730,12 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
     assert!(
         trigger_delivery_target_description.contains("builtin__outbound_delivery_targets_list"),
         "delivery_target_id schema should point at the target list capability"
+    );
+    assert!(
+        trigger_delivery_target_description.contains(
+            "Do not also put a send, post, or deliver-results step for that result in prompt"
+        ),
+        "delivery_target_id schema should forbid duplicate prompt delivery"
     );
 
     let http_schema = &surface
@@ -1013,7 +1026,6 @@ async fn visible_surface_marks_askable_capabilities_without_granting_authority()
             capability_id("echo.say"),
             ResourceEstimate::default(),
             json!({"message": "hello"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -1055,7 +1067,6 @@ async fn hidden_capability_direct_invoke_still_fails_closed_through_authorizatio
             capability_id("echo.say"),
             ResourceEstimate::default(),
             json!({"message": "hello"}),
-            trust_decision_with_dispatch_authority(),
         ))
         .await
         .unwrap();
@@ -1554,7 +1565,6 @@ async fn runtime_policy_denied_extension_invoke_does_not_dispatch() {
             capability_id("echo.say"),
             ResourceEstimate::default(),
             json!({"message": "blocked before dispatch"}),
-            trust_decision_for(vec![EffectKind::DispatchCapability, EffectKind::Network]),
         ))
         .await
         .unwrap();
@@ -1564,12 +1574,14 @@ async fn runtime_policy_denied_extension_invoke_does_not_dispatch() {
     };
     assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
     assert_eq!(failure.capability_id, capability_id("echo.say"));
+    // Message is the sanitized `DenyReason::PolicyDenied` form the kernel produces
+    // (see #6386): it conveys a policy denial and must not leak the internal
+    // `NetworkMode::` planner enum token.
+    let message = failure.message.as_deref().unwrap_or_default();
+    assert!(message.contains("denied"), "unexpected message: {message}");
     assert!(
-        failure
-            .message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("NetworkMode::Deny")
+        !message.contains("NetworkMode::"),
+        "message leaked internal planner enum token: {message}"
     );
     assert!(
         !dispatcher.has_request(),
@@ -1599,7 +1611,6 @@ async fn runtime_policy_denied_secret_invoke_does_not_dispatch() {
             capability_id("secret-tool.read"),
             ResourceEstimate::default(),
             json!({}),
-            trust_decision_for(vec![EffectKind::UseSecret]),
         ))
         .await
         .unwrap();
@@ -1609,12 +1620,13 @@ async fn runtime_policy_denied_secret_invoke_does_not_dispatch() {
     };
     assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
     assert_eq!(failure.capability_id, capability_id("secret-tool.read"));
+    // Sanitized `DenyReason::PolicyDenied` message (see #6386): conveys a policy
+    // denial without leaking the internal `SecretMode::` planner enum token.
+    let message = failure.message.as_deref().unwrap_or_default();
+    assert!(message.contains("denied"), "unexpected message: {message}");
     assert!(
-        failure
-            .message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("SecretMode::Deny")
+        !message.contains("SecretMode::"),
+        "message leaked internal planner enum token: {message}"
     );
     assert!(
         !dispatcher.has_request(),
@@ -1647,7 +1659,6 @@ async fn runtime_policy_denied_mcp_http_invoke_does_not_dispatch_when_effect_und
             capability_id("mcp.search"),
             ResourceEstimate::default(),
             json!({"query": "blocked before mcp dispatch"}),
-            trust_decision_for(vec![EffectKind::DispatchCapability]),
         ))
         .await
         .unwrap();
@@ -1657,12 +1668,13 @@ async fn runtime_policy_denied_mcp_http_invoke_does_not_dispatch_when_effect_und
     };
     assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
     assert_eq!(failure.capability_id, capability_id("mcp.search"));
+    // Sanitized `DenyReason::PolicyDenied` message (see #6386): conveys a policy
+    // denial without leaking the internal `NetworkMode::` planner enum token.
+    let message = failure.message.as_deref().unwrap_or_default();
+    assert!(message.contains("denied"), "unexpected message: {message}");
     assert!(
-        failure
-            .message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("NetworkMode::Deny")
+        !message.contains("NetworkMode::"),
+        "message leaked internal planner enum token: {message}"
     );
     assert!(
         !dispatcher.has_request(),
@@ -1854,7 +1866,7 @@ fn hot_catalog_fixture(
     input_schema: Option<&str>,
     output_schema: &str,
     prompt_doc: &str,
-) -> (tempfile::TempDir, LocalFilesystem, ExtensionRegistry) {
+) -> (tempfile::TempDir, DiskFilesystem, ExtensionRegistry) {
     hot_catalog_fixture_with_prompt_bytes(input_schema, output_schema, prompt_doc.as_bytes())
 }
 
@@ -1862,7 +1874,7 @@ fn hot_catalog_fixture_with_prompt_bytes(
     input_schema: Option<&str>,
     output_schema: &str,
     prompt_doc: &[u8],
-) -> (tempfile::TempDir, LocalFilesystem, ExtensionRegistry) {
+) -> (tempfile::TempDir, DiskFilesystem, ExtensionRegistry) {
     let manifest = ExtensionManifest::parse(
         HOT_CAPABILITY_MANIFEST,
         ManifestSource::InstalledLocal,
@@ -1877,7 +1889,7 @@ fn hot_catalog_fixture_with_manifest(
     output_schema: &str,
     prompt_doc: &[u8],
     manifest: ExtensionManifest,
-) -> (tempfile::TempDir, LocalFilesystem, ExtensionRegistry) {
+) -> (tempfile::TempDir, DiskFilesystem, ExtensionRegistry) {
     let storage = tempdir().unwrap();
     let extension_root = storage.path().join("echo");
     std::fs::create_dir_all(extension_root.join("schemas/echo")).unwrap();
@@ -1896,7 +1908,7 @@ fn hot_catalog_fixture_with_manifest(
     .unwrap();
     std::fs::write(extension_root.join("prompts/echo/say.md"), prompt_doc).unwrap();
 
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage.path().to_path_buf()),
@@ -2096,10 +2108,6 @@ fn context_with_secret_grant() -> ExecutionContext {
 
 fn capability_id(value: &str) -> CapabilityId {
     CapabilityId::new(value).unwrap()
-}
-
-fn trust_decision_with_dispatch_authority() -> TrustDecision {
-    trust_decision_for(vec![EffectKind::DispatchCapability])
 }
 
 struct PanicTrustPolicy;

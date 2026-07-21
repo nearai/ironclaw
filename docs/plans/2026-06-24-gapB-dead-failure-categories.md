@@ -26,7 +26,7 @@ Fed by `TurnLifecycleEvent.sanitized_reason`
 `SanitizedFailure::category()` in
 `crates/ironclaw_turns/src/lifecycle.rs:450-458`
 (`sanitized_reason_for_state`) and the mirror in
-`crates/ironclaw_loop_support/src/turn_event_publisher.rs:76-84`.
+`crates/ironclaw_loop_host/src/turn_event_publisher.rs:76-84`.
 
 Exhaustive set of values `sanitized_reason` can take when status is
 `Failed`/`RecoveryRequired`:

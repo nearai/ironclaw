@@ -1,17 +1,21 @@
+// arch-exempt: large_file, mechanical approval-store migration only — InMemory*Store deleted, tests repointed to Filesystem*Store<InMemoryBackend> (arch-simplification §4.3), no new test logic, plan #6168
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_approvals::{
-    CapabilityPermissionOverrideStore, DenyApproval, InMemoryPersistentApprovalPolicyStore,
-    InMemoryToolPermissionOverrideStore, LeaseApproval, PersistentApprovalAction,
+    CapabilityPermissionOverrideStore, DenyApproval, LeaseApproval, PersistentApprovalAction,
     PersistentApprovalPolicy, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
     PersistentApprovalPolicyKey, PersistentApprovalPolicyStore, ToolPermissionOverride,
     ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStore,
+    test_support::{
+        in_memory_backed_capability_permission_override_store,
+        in_memory_backed_persistent_approval_policy_store,
+    },
 };
 use ironclaw_authorization::{
-    CapabilityLeaseStatus, CapabilityLeaseStore, InMemoryCapabilityLeaseStore,
+    CapabilityLeaseStatus, CapabilityLeaseStore, in_memory_backed_capability_lease_store,
 };
 use ironclaw_events::InMemoryAuditSink;
 use ironclaw_host_api::{
@@ -28,7 +32,7 @@ use ironclaw_product_workflow::{
     ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     RunStateApprovalInteractionReadModel, approval_gate_ref,
 };
-use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus, InMemoryApprovalRequestStore};
+use ironclaw_run_state::{ApprovalRequestStore, ApprovalStatus};
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
     GateResumeDisposition, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef,
@@ -593,6 +597,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             resolved_model_route: None,
+            model_usage: None,
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: self.gate_ref.lock().expect("lock").clone(),
@@ -750,10 +755,14 @@ fn approval_request_by(reason: &str, requested_by: Principal) -> ApprovalRequest
 /// Filesystem scope paths are part of the fix, so both must pass. `prefix`
 /// distinguishes the per-backend idempotency keys.
 fn caller_level_store_pair(prefix: &str) -> [(Arc<dyn PersistentApprovalPolicyStore>, String); 2] {
+    // Both entries are the one production `FilesystemPersistentApprovalPolicyStore`
+    // over the in-memory backend; they differ only in mount configuration — the
+    // helper's default `/approvals` mount vs. the tenant/user-scoped mount that
+    // the settings-scope fix exercises.
     [
         (
-            Arc::new(InMemoryPersistentApprovalPolicyStore::new()),
-            format!("{prefix}-in-memory"),
+            Arc::new(in_memory_backed_persistent_approval_policy_store()),
+            format!("{prefix}-default-mount"),
         ),
         (
             Arc::new(
@@ -762,7 +771,7 @@ fn caller_level_store_pair(prefix: &str) -> [(Arc<dyn PersistentApprovalPolicySt
                     "user-alpha",
                 )),
             ),
-            format!("{prefix}-filesystem"),
+            format!("{prefix}-scoped-mount"),
         ),
     ]
 }
@@ -905,7 +914,7 @@ async fn always_allow_resolves_gate_and_persists_reusable_policy() {
         Principal::User(UserId::new("user-alpha").expect("user")),
     );
     let (service, resolver, coordinator, run_id, gate_ref) = service_fixture_for_request(request);
-    let policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    let policies = Arc::new(in_memory_backed_persistent_approval_policy_store());
     let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies.clone();
     let service = service.with_persistent_policy_store(policy_store);
 
@@ -951,8 +960,8 @@ async fn always_allow_clears_existing_ask_each_time_override() {
     let policy_scope = resource_scope(&actor("user-alpha"));
     let override_key = ToolPermissionOverrideKey::new(&settings_scope(&policy_scope), capability);
     let (service, _resolver, _coordinator, run_id, gate_ref) = service_fixture_for_request(request);
-    let policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
-    let overrides = Arc::new(InMemoryToolPermissionOverrideStore::new());
+    let policies = Arc::new(in_memory_backed_persistent_approval_policy_store());
+    let overrides = Arc::new(in_memory_backed_capability_permission_override_store());
     overrides
         .set(ToolPermissionOverrideInput {
             scope: settings_scope(&policy_scope),
@@ -1007,8 +1016,8 @@ async fn always_allow_persists_provider_grantee_when_resolver_supplies_one() {
         Principal::Extension(provider.clone()),
     );
     let (service, _resolver, _coordinator, run_id, gate_ref) = service_fixture_for_request(request);
-    let policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
-    let overrides = Arc::new(InMemoryToolPermissionOverrideStore::new());
+    let policies = Arc::new(in_memory_backed_persistent_approval_policy_store());
+    let overrides = Arc::new(in_memory_backed_capability_permission_override_store());
     overrides
         .set(ToolPermissionOverrideInput {
             scope: settings_scope(&policy_scope),
@@ -1147,8 +1156,8 @@ async fn drive_spawn_always_allow(
 
 /// Acceptance criterion 1: an "always allow" granted while resolving a gate in
 /// thread 1 (no project) is persisted at the same tenant/user scope that the
-/// Settings > Tools surface reads. Covered against both InMemory and Filesystem
-/// stores because the filesystem scope path is part of the fix.
+/// Settings > Tools surface reads. Covered against the store over two mount
+/// configurations because the filesystem scope path is part of the fix.
 #[tokio::test]
 async fn always_allow_grants_reuse_in_new_thread_without_project() {
     for (store, idempotency) in caller_level_store_pair("reuse") {
@@ -1395,7 +1404,7 @@ async fn always_allow_disallowed_by_policy_rejects_without_persisting_or_approvi
         actor.clone(),
         gate_ref.clone(),
     ));
-    let policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    let policies = Arc::new(in_memory_backed_persistent_approval_policy_store());
     let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies.clone();
     let service = DefaultApprovalInteractionService::new(
         Arc::new(FakeReadModel::with_gate(gate)),
@@ -1464,7 +1473,7 @@ async fn always_allow_does_not_persist_policy_when_resolution_fails() {
         actor.clone(),
         gate_ref.clone(),
     ));
-    let policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    let policies = Arc::new(in_memory_backed_persistent_approval_policy_store());
     let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies.clone();
     let service = DefaultApprovalInteractionService::new(
         Arc::new(FakeReadModel::with_gate(gate)),
@@ -1530,7 +1539,7 @@ async fn always_allow_resolution_failure_preserves_existing_policy() {
         actor.clone(),
         gate_ref.clone(),
     ));
-    let policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    let policies = Arc::new(in_memory_backed_persistent_approval_policy_store());
     let existing_source = ApprovalRequestId::new();
     policies
         .allow(PersistentApprovalPolicyInput {
@@ -1733,7 +1742,7 @@ async fn already_approved_always_allow_replay_rejects_without_persisting_policy(
     let (service, resolver, coordinator, run_id, gate_ref) =
         service_fixture_for_request_status(request, ApprovalStatus::Approved);
     coordinator.set_status(TurnStatus::Queued);
-    let policies = Arc::new(InMemoryPersistentApprovalPolicyStore::new());
+    let policies = Arc::new(in_memory_backed_persistent_approval_policy_store());
     let policy_store: Arc<dyn PersistentApprovalPolicyStore> = policies.clone();
     let service = service.with_persistent_policy_store(policy_store);
 
@@ -1775,7 +1784,7 @@ async fn already_approved_product_replay_without_run_hint_recovers_historical_ru
     let request_id = request.id;
     let gate_ref = approval_gate_ref(request_id).expect("approval gate");
     let run_id = TurnRunId::new();
-    let approvals = Arc::new(InMemoryApprovalRequestStore::new());
+    let approvals = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     approvals
         .save_pending(approval_scope.clone(), request)
         .await
@@ -2354,7 +2363,7 @@ async fn resolve_rejects_malformed_approval_gate_ref_without_side_effects() {
     ));
     let service = DefaultApprovalInteractionService::new(
         Arc::new(RunStateApprovalInteractionReadModel::new(
-            Arc::new(InMemoryApprovalRequestStore::new()),
+            Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store()),
             Arc::new(FakeTurnRunLocator::with_run(
                 TurnRunId::new(),
                 bad_gate_ref.clone(),
@@ -2631,12 +2640,12 @@ async fn approval_resolver_port_preserves_audit_sink() {
     let resource_scope = resource_scope(&alpha_actor);
     let request = approval_request("approval required");
     let request_id = request.id;
-    let approvals = Arc::new(InMemoryApprovalRequestStore::new());
+    let approvals = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     approvals
         .save_pending(resource_scope.clone(), request)
         .await
         .expect("save approval");
-    let leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let leases = Arc::new(in_memory_backed_capability_lease_store());
     let audit = Arc::new(InMemoryAuditSink::new());
     let resolver = ApprovalResolverPort::new(approvals, leases).with_audit_sink(audit.clone());
 
@@ -2669,7 +2678,7 @@ async fn approval_resolver_port_retries_missing_lease_for_approved_request() {
         .expect("fingerprint"),
     );
     let request_id = request.id;
-    let approvals = Arc::new(InMemoryApprovalRequestStore::new());
+    let approvals = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     approvals
         .save_pending(resource_scope.clone(), request)
         .await
@@ -2678,7 +2687,7 @@ async fn approval_resolver_port_retries_missing_lease_for_approved_request() {
         .approve(&resource_scope, request_id)
         .await
         .expect("mark approved");
-    let leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let leases = Arc::new(in_memory_backed_capability_lease_store());
     let resolver = ApprovalResolverPort::new(approvals, leases.clone());
 
     resolver
@@ -2712,7 +2721,7 @@ async fn approval_resolver_port_retries_missing_spawn_lease_for_approved_request
         .expect("fingerprint"),
     );
     let request_id = request.id;
-    let approvals = Arc::new(InMemoryApprovalRequestStore::new());
+    let approvals = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     approvals
         .save_pending(resource_scope.clone(), request)
         .await
@@ -2721,7 +2730,7 @@ async fn approval_resolver_port_retries_missing_spawn_lease_for_approved_request
         .approve(&resource_scope, request_id)
         .await
         .expect("mark approved");
-    let leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let leases = Arc::new(in_memory_backed_capability_lease_store());
     let resolver = ApprovalResolverPort::new(approvals, leases.clone());
     let mut approval = dispatch_lease_approval(Principal::User(alpha_actor.user_id));
     approval
@@ -2752,12 +2761,12 @@ async fn approval_resolver_port_does_not_duplicate_existing_lease_for_approved_r
         .expect("fingerprint"),
     );
     let request_id = request.id;
-    let approvals = Arc::new(InMemoryApprovalRequestStore::new());
+    let approvals = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     approvals
         .save_pending(resource_scope.clone(), request)
         .await
         .expect("save approval");
-    let leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let leases = Arc::new(in_memory_backed_capability_lease_store());
     let resolver = ApprovalResolverPort::new(approvals, leases.clone());
     let approval = dispatch_lease_approval(Principal::User(alpha_actor.user_id.clone()));
     resolver
@@ -2789,12 +2798,12 @@ async fn approval_resolver_port_reissues_when_existing_dispatch_lease_is_claimed
     );
     let fingerprint = request.invocation_fingerprint.clone().expect("fingerprint");
     let request_id = request.id;
-    let approvals = Arc::new(InMemoryApprovalRequestStore::new());
+    let approvals = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     approvals
         .save_pending(resource_scope.clone(), request)
         .await
         .expect("save approval");
-    let leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let leases = Arc::new(in_memory_backed_capability_lease_store());
     let resolver = ApprovalResolverPort::new(approvals, leases.clone());
     let approval = dispatch_lease_approval(Principal::User(alpha_actor.user_id.clone()));
     resolver
@@ -2852,12 +2861,12 @@ async fn approval_resolver_port_does_not_duplicate_existing_spawn_lease_for_appr
         .expect("fingerprint"),
     );
     let request_id = request.id;
-    let approvals = Arc::new(InMemoryApprovalRequestStore::new());
+    let approvals = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     approvals
         .save_pending(resource_scope.clone(), request)
         .await
         .expect("save approval");
-    let leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let leases = Arc::new(in_memory_backed_capability_lease_store());
     let resolver = ApprovalResolverPort::new(approvals, leases.clone());
     let mut approval = dispatch_lease_approval(Principal::User(alpha_actor.user_id));
     approval
@@ -2888,7 +2897,7 @@ async fn run_state_read_model_uses_parked_turn_run_id_for_pending_approvals() {
         parked_turn_run_id, invocation_derived_run_id,
         "test must prove capability invocation ids are not turn run ids"
     );
-    let approvals = Arc::new(InMemoryApprovalRequestStore::new());
+    let approvals = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     approvals
         .save_pending(resource_scope.clone(), request.clone())
         .await

@@ -1,35 +1,35 @@
 use std::sync::Arc;
 
-use ironclaw_host_api::{CapabilityId, MountView};
+use ironclaw_host_api::{CapabilityId, MountView, Resolution, ResolutionBatch};
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID,
     READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
 };
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityCallCandidate,
-    CapabilityDescriptorView, CapabilityInvocation, CapabilityOutcome, LoopCapabilityPort,
-    ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolDefinition,
-    RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    AgentLoopHostError, CapabilityBatchInvocation, CapabilityCallCandidate,
+    CapabilityDescriptorView, CapabilityInvocation, LoopCapabilityPort, ProviderToolCall,
+    ProviderToolCallCapabilityIds, ProviderToolDefinition, RegisterProviderToolCallRequest,
+    VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
 
-pub(super) fn wrap_local_dev_surface_disclosure(
+pub(super) fn wrap_surface_disclosure(
     inner: Arc<dyn LoopCapabilityPort>,
     workspace_mounts: &MountView,
 ) -> Arc<dyn LoopCapabilityPort> {
-    let disclosure = LocalDevSurfaceDisclosure::from_workspace_mounts(workspace_mounts);
+    let disclosure = HostSurfaceDisclosure::from_workspace_mounts(workspace_mounts);
     if !disclosure.enabled() {
         return inner;
     }
-    Arc::new(LocalDevSurfaceDisclosurePort { inner, disclosure })
+    Arc::new(HostSurfaceDisclosurePort { inner, disclosure })
 }
 
-struct LocalDevSurfaceDisclosurePort {
+struct HostSurfaceDisclosurePort {
     inner: Arc<dyn LoopCapabilityPort>,
-    disclosure: LocalDevSurfaceDisclosure,
+    disclosure: HostSurfaceDisclosure,
 }
 
 #[async_trait::async_trait]
-impl LoopCapabilityPort for LocalDevSurfaceDisclosurePort {
+impl LoopCapabilityPort for HostSurfaceDisclosurePort {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         let mut definitions = self.inner.tool_definitions()?;
         for definition in &mut definitions {
@@ -73,23 +73,23 @@ impl LoopCapabilityPort for LocalDevSurfaceDisclosurePort {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         self.inner.invoke_capability(request).await
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
         self.inner.invoke_capability_batch(request).await
     }
 }
 
-struct LocalDevSurfaceDisclosure {
+struct HostSurfaceDisclosure {
     scoped_roots_note: Option<String>,
 }
 
-impl LocalDevSurfaceDisclosure {
+impl HostSurfaceDisclosure {
     fn from_workspace_mounts(workspace_mounts: &MountView) -> Self {
         let aliases = model_visible_workspace_aliases(workspace_mounts);
         Self {
@@ -224,7 +224,7 @@ mod tests {
             crate::local_dev_mounts::workspace_mount_view(MountPermissions::read_write(), &[])
                 .expect("workspace mounts build");
 
-        let disclosure = LocalDevSurfaceDisclosure::from_workspace_mounts(&workspace_mounts);
+        let disclosure = HostSurfaceDisclosure::from_workspace_mounts(&workspace_mounts);
 
         assert!(disclosure.scoped_roots_note.is_none());
     }
@@ -237,7 +237,7 @@ mod tests {
         )
         .expect("workspace mounts build");
 
-        let disclosure = LocalDevSurfaceDisclosure::from_workspace_mounts(&workspace_mounts);
+        let disclosure = HostSurfaceDisclosure::from_workspace_mounts(&workspace_mounts);
         let note = disclosure
             .scoped_roots_note
             .expect("confirmed host mount is disclosed");

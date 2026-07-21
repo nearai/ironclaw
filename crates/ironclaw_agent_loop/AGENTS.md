@@ -6,7 +6,7 @@
 - Read `Cargo.toml` for actual dependencies and feature shape.
 - Use these neighboring contracts before changing cross-crate behavior:
   - `crates/ironclaw_turns/AGENTS.md`
-  - `crates/ironclaw_loop_support/CLAUDE.md`
+  - `crates/ironclaw_loop_host/CLAUDE.md`
   - `crates/ironclaw_runner/CLAUDE.md`
 
 ## What This Crate Owns

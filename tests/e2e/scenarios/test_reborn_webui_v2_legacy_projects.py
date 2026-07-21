@@ -218,7 +218,7 @@ async def _open_mocked_projects_page(reborn_v2_server, reborn_v2_browser):
         await page.route("**/api/webchat/v2/projects**", handle_projects)
         await page.route("**/api/webchat/v2/threads**", handle_threads)
         await page.goto(
-            f"{reborn_v2_server}/v2/projects?token={REBORN_V2_AUTH_TOKEN}"
+            f"{reborn_v2_server}/projects?token={REBORN_V2_AUTH_TOKEN}"
         )
 
         try:
@@ -284,7 +284,7 @@ async def test_reborn_legacy_projects_overview_search_and_open_workspace(
         await expect(page.locator(SEL_V2["project_workspace_title"])).to_have_text(
             "AI Research Intelligence"
         )
-        await page.wait_for_url(f"**/v2/projects/{MOCK_PROJECT_ID}**", timeout=5000)
+        await page.wait_for_url(f"**/projects/{MOCK_PROJECT_ID}**", timeout=5000)
         assert "/api/webchat/v2/projects" in project_requests
         assert f"/api/webchat/v2/projects/{MOCK_PROJECT_ID}" in project_requests
     finally:
@@ -327,7 +327,7 @@ async def test_reborn_legacy_project_creation_opens_seeded_chat_thread(
         page = harness["page"]
 
         await page.get_by_role("button", name="New project").click()
-        await page.wait_for_url("**/v2/chat/thread-project-scoped", timeout=10000)
+        await page.wait_for_url("**/chat/thread-project-scoped", timeout=10000)
 
         composer = page.locator(SEL_V2["chat_composer"])
         await expect(composer).to_be_visible(timeout=10000)
@@ -358,7 +358,7 @@ async def test_reborn_legacy_project_workspace_starts_scoped_chat_thread(
         ).to_be_visible(timeout=10000)
 
         await page.get_by_role("button", name="New conversation").click()
-        await page.wait_for_url("**/v2/chat/thread-project-scoped", timeout=10000)
+        await page.wait_for_url("**/chat/thread-project-scoped", timeout=10000)
         await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(timeout=10000)
 
         assert len(harness["thread_create_requests"]) == 1

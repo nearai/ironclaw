@@ -1,7 +1,4 @@
-// arch-exempt: large_file, first-party asset catalog remains 2.9k lines after import/materialization extraction; future asset-registry split, plan #5499
-use std::sync::Arc;
-
-#[cfg(feature = "slack-v2-host-beta")]
+// arch-exempt: large_file, bundled extension catalog and manifest projection, plan #5905
 use ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID;
 use ironclaw_extensions::{
     CapabilityDeclV2, CapabilityVisibility, ExtensionManifestRecord, ExtensionPackage,
@@ -21,11 +18,22 @@ use ironclaw_product_workflow::{
     LifecycleExtensionSummary, LifecycleExtensionSurfaceKind, LifecyclePackageKind,
     LifecyclePackageRef, ProductWorkflowError,
 };
+use std::sync::Arc;
 use toml::Value;
 
 use crate::extension_host::extension_credential_requirements::{
     can_merge_lifecycle_credential_setup, merge_lifecycle_credential_setup,
     product_auth_credential_source,
+};
+use crate::extension_host::extension_removal_cleanup::ExtensionRemovalCleanupRequirement;
+use crate::extension_host::extension_removal_cleanup::{
+    ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapterId,
+};
+use crate::extension_host::extension_removal_cleanup::{
+    SLACK_EXTENSION_REMOVAL_CHANNEL_ID, SLACK_PERSONAL_CONNECTION_CLEANUP_ADAPTER_ID,
+};
+use crate::extension_host::extension_removal_cleanup::{
+    TELEGRAM_EXTENSION_REMOVAL_CHANNEL_ID, TELEGRAM_PAIRING_CONNECTION_CLEANUP_ADAPTER_ID,
 };
 use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 use crate::llm_admin::nearai_mcp::{
@@ -58,10 +66,8 @@ const GOOGLE_SHEETS_MANIFEST: &str =
 const GOOGLE_SHEETS_WASM_MODULE: &[u8] = include_bytes!(
     "../../../ironclaw_first_party_extensions/assets/google-sheets/wasm/google_sheets_tool.wasm"
 );
-#[cfg(feature = "slack-v2-host-beta")]
 const SLACK_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/slack/manifest.toml");
-#[cfg(feature = "slack-v2-host-beta")]
 const SLACK_WASM_MODULE: &[u8] = include_bytes!(
     "../../../ironclaw_first_party_extensions/assets/slack/wasm/slack_user_tool.wasm"
 );
@@ -78,14 +84,13 @@ const WEB_ACCESS_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/web-access/manifest.toml");
 const NEARAI_MCP_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/nearai-mcp/manifest.toml");
-#[cfg(feature = "slack-v2-host-beta")]
 const SLACK_BOT_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/slack_bot/manifest.toml");
+use ironclaw_telegram_extension::telegram_manifest::TELEGRAM_MANIFEST;
 const NEARAI_EXTENSION_ID: &str = HostManagedCredentialExtension::NearAi.id();
-#[cfg(feature = "slack-v2-host-beta")]
 pub(crate) const SLACK_BOT_EXTENSION_ID: &str = "slack_bot";
 pub(crate) const SLACK_EXTENSION_ID: &str = "slack";
-#[cfg(feature = "slack-v2-host-beta")]
+pub(crate) const TELEGRAM_EXTENSION_ID: &str = "telegram";
 const SLACK_PERSONAL_OAUTH_REQUIREMENT_NAME: &str = "slack_personal_oauth";
 // The slack_personal OAuth setup scopes are the union of the Slack tools'
 // per-capability scopes: the read-only tools request only read scopes, and
@@ -95,7 +100,6 @@ const SLACK_PERSONAL_OAUTH_REQUIREMENT_NAME: &str = "slack_personal_oauth";
 // in nearai/ironclaw#5669. `slack_read_only_tools_do_not_request_chat_write`
 // enforces that this list equals the union of the manifest capabilities' scopes
 // and that only write-effect capabilities declare chat:write.
-#[cfg(feature = "slack-v2-host-beta")]
 const SLACK_PERSONAL_OAUTH_SETUP_SCOPES: &[&str] = &[
     "search:read",
     "channels:history",
@@ -110,7 +114,6 @@ const SLACK_PERSONAL_OAUTH_SETUP_SCOPES: &[&str] = &[
     "chat:write",
 ];
 
-#[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn slack_personal_oauth_setup_scopes() -> &'static [&'static str] {
     SLACK_PERSONAL_OAUTH_SETUP_SCOPES
 }
@@ -128,12 +131,6 @@ impl HostManagedCredentialExtension {
     }
 
     fn from_package_ref(package_ref: &LifecyclePackageRef) -> Option<Self> {
-        #[cfg(not(feature = "root-llm-provider"))]
-        {
-            let _ = package_ref;
-            None
-        }
-        #[cfg(feature = "root-llm-provider")]
         {
             if package_ref.kind != LifecyclePackageKind::Extension {
                 return None;
@@ -174,6 +171,9 @@ pub(crate) struct AvailableExtensionPackage {
     /// first-party/system trust and runtime claims.
     pub(crate) source: ManifestSource,
     pub(crate) package: ExtensionPackage,
+    /// Trusted host-catalog declarations for mandatory external cleanup before
+    /// local removal. Never inferred from manifest presentation metadata.
+    pub(crate) cleanup_requirements: Vec<ExtensionRemovalCleanupRequirement>,
     /// Surface kinds projected once from the manifest record at construction and
     /// cached here. Deliberately not re-derived in `summary()`: the projection
     /// (`product_adapter_sections`) needs the full `ExtensionManifestRecord`, and
@@ -234,7 +234,6 @@ fn onboarding(package_ref: &LifecyclePackageRef) -> Option<LifecycleExtensionOnb
             None,
             "After authorization completes, activate Gmail to publish its tools.",
         )),
-        #[cfg(feature = "slack-v2-host-beta")]
         "slack_bot" => Some(onboarding_message(
             "Slack needs OAuth authorization before the Slack bot can recognize your DMs.",
             Some("Authorize the Slack account you will use to DM IronClaw."),
@@ -299,7 +298,6 @@ fn credential_requirements(
     }
     // Model B: the user-installable Slack tools extension (`slack`) surfaces the
     // slack_personal OAuth connect requirement; the bot channel is operator infra.
-    #[cfg(feature = "slack-v2-host-beta")]
     if package.package_ref.kind == LifecyclePackageKind::Extension
         && package.package_ref.id.as_str() == SLACK_EXTENSION_ID
     {
@@ -352,7 +350,6 @@ fn credential_requirements(
         .collect()
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 fn slack_personal_oauth_credential_requirements() -> Vec<LifecycleExtensionCredentialRequirement> {
     vec![LifecycleExtensionCredentialRequirement {
         name: SLACK_PERSONAL_OAUTH_REQUIREMENT_NAME.to_string(),
@@ -405,7 +402,6 @@ impl AvailableExtensionCatalog {
     pub(crate) fn from_first_party_assets_with_nearai_mcp_config(
         nearai_mcp_config: Option<&NearAiMcpBootstrapConfig>,
     ) -> Result<Self, ProductWorkflowError> {
-        #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(unused_mut))]
         let mut packages = vec![
             github_package()?,
             notion_mcp_package()?,
@@ -418,10 +414,9 @@ impl AvailableExtensionCatalog {
             google_slides_package()?,
             gmail_package()?,
         ];
-        #[cfg(feature = "slack-v2-host-beta")]
         packages.push(slack_bot_package()?);
-        #[cfg(feature = "slack-v2-host-beta")]
         packages.push(slack_package()?);
+        packages.push(telegram_package()?);
         Ok(Self::from_packages(packages))
     }
 
@@ -604,14 +599,58 @@ fn gmail_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     bundled_extension_package("gmail", "Gmail", GMAIL_MANIFEST, gmail_assets())
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 fn slack_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package(SLACK_EXTENSION_ID, "Slack", SLACK_MANIFEST, slack_assets())
+    let mut package =
+        bundled_extension_package(SLACK_EXTENSION_ID, "Slack", SLACK_MANIFEST, slack_assets())?;
+    package
+        .cleanup_requirements
+        .push(ExtensionRemovalCleanupRequirement::channel_connection(
+            ExtensionRemovalCleanupAdapterId::new(SLACK_PERSONAL_CONNECTION_CLEANUP_ADAPTER_ID)
+                .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+                    reason: error.to_string(),
+                })?,
+            ExtensionRemovalChannelId::new(SLACK_EXTENSION_REMOVAL_CHANNEL_ID).map_err(
+                |error| ProductWorkflowError::InvalidBindingRequest {
+                    reason: error.to_string(),
+                },
+            )?,
+        ));
+    Ok(package)
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 fn slack_bot_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     bundled_extension_package("slack_bot", "Slack", SLACK_BOT_MANIFEST, slack_bot_assets())
+}
+
+/// The Telegram channel package: one user-visible extension owning the
+/// webhook ingress. Unlike the Slack model-B split there is no hidden
+/// operator companion — admin bot setup and per-user pairing both hang off
+/// this single `telegram` id.
+pub(crate) fn telegram_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    let mut package = bundled_extension_package(
+        TELEGRAM_EXTENSION_ID,
+        "Telegram",
+        TELEGRAM_MANIFEST,
+        Vec::new(),
+    )?;
+    // Removal must unpair the removing user (identity binding, DM delivery
+    // target, pending pairing code) — declared here, executed by
+    // TelegramPairingConnectionCleanupAdapter through the shared
+    // channel-connection facade slot.
+    package
+        .cleanup_requirements
+        .push(ExtensionRemovalCleanupRequirement::channel_connection(
+            ExtensionRemovalCleanupAdapterId::new(TELEGRAM_PAIRING_CONNECTION_CLEANUP_ADAPTER_ID)
+                .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+                reason: error.to_string(),
+            })?,
+            ExtensionRemovalChannelId::new(TELEGRAM_EXTENSION_REMOVAL_CHANNEL_ID).map_err(
+                |error| ProductWorkflowError::InvalidBindingRequest {
+                    reason: error.to_string(),
+                },
+            )?,
+        ));
+    Ok(package)
 }
 
 pub(crate) fn google_calendar_manifest_digest() -> String {
@@ -630,23 +669,16 @@ pub(crate) fn google_sheets_manifest_digest() -> String {
     sha256_digest_token(GOOGLE_SHEETS_MANIFEST.as_bytes())
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn slack_manifest_digest() -> String {
     sha256_digest_token(SLACK_MANIFEST.as_bytes())
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn is_internal_extension_package_ref(package_ref: &LifecyclePackageRef) -> bool {
     // Model B: the Slack bot channel is operator-provisioned infrastructure
     // (mounted from operator config, not the user catalog), so it is hidden.
     // The user-installable Slack extension is the tools package (`slack`).
     package_ref.kind == LifecyclePackageKind::Extension
         && package_ref.id.as_str() == SLACK_BOT_EXTENSION_ID
-}
-
-#[cfg(not(feature = "slack-v2-host-beta"))]
-pub(crate) fn is_internal_extension_package_ref(_package_ref: &LifecyclePackageRef) -> bool {
-    false
 }
 
 pub(crate) fn google_slides_manifest_digest() -> String {
@@ -665,7 +697,6 @@ pub(crate) fn web_access_manifest_digest() -> String {
     sha256_digest_token(WEB_ACCESS_MANIFEST.as_bytes())
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn slack_bot_manifest_digest() -> String {
     sha256_digest_token(SLACK_BOT_MANIFEST.as_bytes())
 }
@@ -674,9 +705,12 @@ pub(crate) fn slack_bot_manifest_digest() -> String {
 /// the Slack Events host-ingress route. `slack_serve` projects the route
 /// descriptor from here; the tools package manifest (`SLACK_MANIFEST`)
 /// carries only WASM tool capabilities, not channel ingress.
-#[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn slack_bot_manifest_toml() -> &'static str {
     SLACK_BOT_MANIFEST
+}
+
+pub(crate) fn telegram_manifest_digest() -> String {
+    sha256_digest_token(TELEGRAM_MANIFEST.as_bytes())
 }
 
 pub(crate) fn nearai_mcp_manifest_toml_for_config(
@@ -788,6 +822,7 @@ fn bundled_extension_package(
         manifest_toml: record.raw_toml().to_string(),
         source: ManifestSource::HostBundled,
         package,
+        cleanup_requirements: Vec::new(),
         surface_kinds,
         assets,
     })
@@ -856,6 +891,7 @@ fn github_assets() -> Vec<AvailableExtensionAsset> {
         github_schema_asset!("get_file_content.input.v1.json"),
         github_schema_asset!("get_issue.input.v1.json"),
         github_schema_asset!("get_issue.output.v1.json"),
+        github_schema_asset!("get_job_logs.input.v1.json"),
         github_schema_asset!("get_pull_request.input.v1.json"),
         github_schema_asset!("get_pull_request_files.input.v1.json"),
         github_schema_asset!("get_pull_request_reviews.input.v1.json"),
@@ -906,6 +942,7 @@ fn github_assets() -> Vec<AvailableExtensionAsset> {
         github_prompt_asset!("get_combined_status.md"),
         github_prompt_asset!("get_file_content.md"),
         github_prompt_asset!("get_issue.md"),
+        github_prompt_asset!("get_job_logs.md"),
         github_prompt_asset!("get_pull_request.md"),
         github_prompt_asset!("get_pull_request_files.md"),
         github_prompt_asset!("get_pull_request_reviews.md"),
@@ -1371,7 +1408,6 @@ fn google_sheets_assets() -> Vec<AvailableExtensionAsset> {
     )
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 fn slack_assets() -> Vec<AvailableExtensionAsset> {
     // The schema/prompt asset dirs now match the extension id (`slack`), but the
     // WASM binary keeps its legacy `slack_user_tool.wasm` filename (and the tool
@@ -1410,6 +1446,9 @@ fn slack_assets() -> Vec<AvailableExtensionAsset> {
         slack_schema_asset!("list_conversations.input.v1.json"),
         slack_schema_asset!("list_conversations.output.v1.json"),
         slack_prompt_asset!("list_conversations"),
+        slack_schema_asset!("get_conversation_info.input.v1.json"),
+        slack_schema_asset!("get_conversation_info.output.v1.json"),
+        slack_prompt_asset!("get_conversation_info"),
         slack_schema_asset!("get_conversation_history.input.v1.json"),
         slack_schema_asset!("get_conversation_history.output.v1.json"),
         slack_prompt_asset!("get_conversation_history"),
@@ -1567,7 +1606,6 @@ fn gmail_assets() -> Vec<AvailableExtensionAsset> {
     ]
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 fn slack_bot_assets() -> Vec<AvailableExtensionAsset> {
     vec![bytes_asset("manifest.toml", SLACK_BOT_MANIFEST.as_bytes())]
 }
@@ -1715,6 +1753,7 @@ where
         // first-party trust (#5459 review: import → restart → install).
         source: ManifestSource::InstalledLocal,
         package,
+        cleanup_requirements: Vec::new(),
         surface_kinds,
         assets,
     }))
@@ -1813,7 +1852,6 @@ mod tests {
     fn bundled_first_party_manifest_asset_refs_are_packaged() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
 
-        #[cfg_attr(not(feature = "slack-v2-host-beta"), allow(unused_mut))]
         let mut extension_ids = vec![
             "github",
             "notion",
@@ -1826,7 +1864,6 @@ mod tests {
             "google-slides",
             "gmail",
         ];
-        #[cfg(feature = "slack-v2-host-beta")]
         extension_ids.push(SLACK_EXTENSION_ID);
 
         for extension_id in extension_ids {
@@ -1999,10 +2036,8 @@ mod tests {
                 "google-calendar",
                 "Google Calendar needs Google OAuth authorization",
             ),
-            #[cfg(feature = "slack-v2-host-beta")]
             ("slack_bot", "Slack needs OAuth authorization"),
             ("notion", "Notion needs OAuth authorization"),
-            #[cfg(feature = "root-llm-provider")]
             (
                 NEARAI_EXTENSION_ID,
                 "NEAR AI MCP uses the NEAR AI credentials",
@@ -2137,10 +2172,7 @@ mod tests {
         let mcp_ref = LifecyclePackageRef::new(LifecyclePackageKind::Mcp, NEARAI_EXTENSION_ID)
             .expect("valid MCP ref");
 
-        #[cfg(feature = "root-llm-provider")]
         assert!(is_host_managed_credential_extension(&nearai_ref));
-        #[cfg(not(feature = "root-llm-provider"))]
-        assert!(!is_host_managed_credential_extension(&nearai_ref));
         assert!(!is_host_managed_credential_extension(&notion_ref));
         assert!(!is_host_managed_credential_extension(&mcp_ref));
     }
@@ -2153,17 +2185,10 @@ mod tests {
         let package = catalog.resolve(&package_ref).unwrap();
         let summary = package.summary();
 
-        #[cfg(feature = "root-llm-provider")]
         assert!(
             summary.credential_requirements.is_empty(),
             "NEAR AI MCP uses assistant-level NEAR AI credentials and must not \
              project an extension credential setup prompt"
-        );
-        #[cfg(not(feature = "root-llm-provider"))]
-        assert!(
-            !summary.credential_requirements.is_empty(),
-            "NEAR AI MCP should only suppress extension credential setup prompts \
-             when the root NEAR AI provider owns the credential"
         );
 
         let search = package
@@ -2196,7 +2221,6 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn bundled_slack_search_exposes_one_public_slack_extension() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
@@ -2212,7 +2236,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn bundled_slack_tools_extension_projects_personal_oauth_setup() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
@@ -2329,7 +2352,6 @@ mod tests {
     /// final reply is delivered automatically so the model never uses this
     /// capability to hand the requesting user their own answer (which arrives
     /// twice: once bot-identity, once user-identity).
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn slack_send_message_description_states_host_owned_final_reply_delivery() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
@@ -2353,6 +2375,13 @@ mod tests {
                 .description
                 .contains("Do not use this to deliver your reply"),
             "send_message description must forbid self-delivery of the run's own answer: {}",
+            send_message.description
+        );
+        assert!(
+            send_message.description.contains(
+                "Never call this — or instruct a trigger to call it — for that run's own final reply"
+            ) && send_message.description.contains("delivery_target_id"),
+            "send_message description must front-load the trigger duplicate-delivery guard: {}",
             send_message.description
         );
         // Honesty: a per-trigger delivery_target_id can route the final reply
@@ -2379,16 +2408,57 @@ mod tests {
             "send_message description must document the <@U…> mention encoding: {}",
             send_message.description
         );
+        assert!(
+            send_message.description.contains("Never guess")
+                && send_message
+                    .description
+                    .contains("slack.get_conversation_info")
+                && send_message
+                    .description
+                    .contains("conversation's user field"),
+            "send_message description must explain how to resolve the real mention target instead of deriving a user id from a conversation id: {}",
+            send_message.description
+        );
+
+        let get_conversation_info = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "slack.get_conversation_info")
+            .expect("slack manifest declares slack.get_conversation_info");
+        assert!(
+            get_conversation_info
+                .description
+                .contains("exact conversation ID")
+                && get_conversation_info
+                    .description
+                    .contains("authoritative mention target"),
+            "get_conversation_info must advertise exact lookup and the authoritative DM mention target: {}",
+            get_conversation_info.description
+        );
+
+        let list_conversations = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "slack.list_conversations")
+            .expect("slack manifest declares slack.list_conversations");
+        assert!(
+            list_conversations
+                .description
+                .contains("raw counterpart user id"),
+            "list_conversations description must advertise the authoritative DM mention target: {}",
+            list_conversations.description
+        );
     }
 
-    /// Raw-entity hygiene pin (live canary qa_10i): the model narrates raw
-    /// Slack ids into replies ("… user id U0BDC16TML3 …") unless the ONLY
-    /// model-visible guidance — capability descriptions — forbids it
-    /// explicitly. Every slack read surface must carry the imperative
-    /// "tool calls only … never include" raw-id rule.
-    #[cfg(feature = "slack-v2-host-beta")]
+    /// Model-visible Slack-read contract: steer the model to the correct read
+    /// capability and keep user-facing answers humanized rather than exposing
+    /// raw Slack ids.
     #[test]
-    fn slack_read_descriptions_forbid_raw_ids_in_replies() {
+    fn slack_read_descriptions_steer_tool_selection_and_humanized_output() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
         let package_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").unwrap();
@@ -2396,6 +2466,7 @@ mod tests {
         for capability_id in [
             "slack.search_messages",
             "slack.list_conversations",
+            "slack.get_conversation_info",
             "slack.get_conversation_history",
             "slack.get_thread_replies",
             "slack.get_user_info",
@@ -2415,12 +2486,40 @@ mod tests {
                 capability.description
             );
         }
+
+        let search = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "slack.search_messages")
+            .expect("slack manifest declares slack.search_messages");
+        let list = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "slack.list_conversations")
+            .expect("slack manifest declares slack.list_conversations");
+        let history = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "slack.get_conversation_history")
+            .expect("slack manifest declares slack.get_conversation_history");
+
+        assert!(search.description.contains("single newest message"));
+        assert!(search.description.contains("get_conversation_history"));
+        assert!(list.description.contains("is_member"));
+        assert!(list.description.contains("not only"));
+        assert!(history.description.contains("user_display_name"));
+        assert!(history.description.contains("is_current_user"));
     }
 
     /// Honesty pin: the slack_personal OAuth grant does not include
     /// users:read.email, so `get_user_info` can never return an email —
     /// the model-visible description must not promise one.
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn slack_get_user_info_description_matches_grantable_scopes() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
@@ -2449,7 +2548,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn slack_read_only_tools_do_not_request_chat_write() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
@@ -2543,7 +2641,6 @@ mod tests {
         assert!(upload_file.effects.contains(&EffectKind::ExternalWrite));
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn bundled_slack_bot_package_declares_product_adapter_channel_surface() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
@@ -2568,6 +2665,38 @@ mod tests {
             vec![LifecycleExtensionSurfaceKind::ExternalChannel]
         );
         assert_eq!(summary.visible_capability_ids, Vec::<String>::new());
+    }
+
+    #[test]
+    fn bundled_extension_removal_cleanup_metadata_is_explicit_and_slack_personal_only() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let slack = catalog
+            .resolve(&LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack").unwrap())
+            .unwrap();
+        let slack_bot = catalog
+            .resolve(
+                &LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack_bot").unwrap(),
+            )
+            .unwrap();
+        let github = catalog
+            .resolve(&LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").unwrap())
+            .unwrap();
+
+        assert_eq!(
+            slack.cleanup_requirements,
+            vec![ExtensionRemovalCleanupRequirement::channel_connection(
+                ExtensionRemovalCleanupAdapterId::new("slack.personal_connection").unwrap(),
+                ExtensionRemovalChannelId::new("slack").unwrap(),
+            )]
+        );
+        assert!(
+            slack_bot.cleanup_requirements.is_empty(),
+            "operator-owned slack_bot must not inherit personal cleanup"
+        );
+        assert!(
+            github.cleanup_requirements.is_empty(),
+            "ordinary bundled packages default to no host-owned cleanup"
+        );
     }
 
     #[test]
@@ -2667,7 +2796,6 @@ handle = "web_token"
         assert!(google_sheets_manifest_digest().starts_with("sha256:"));
         assert!(google_slides_manifest_digest().starts_with("sha256:"));
         assert!(gmail_manifest_digest().starts_with("sha256:"));
-        #[cfg(feature = "slack-v2-host-beta")]
         assert!(slack_bot_manifest_digest().starts_with("sha256:"));
     }
 
@@ -2850,6 +2978,10 @@ credential_handle = "channel_ext_token"
             vec![LifecycleExtensionSurfaceKind::ExternalChannel],
             "filesystem-loaded external_channel manifest must project ExternalChannel surface kind"
         );
+        assert!(
+            package.cleanup_requirements.is_empty(),
+            "ExternalChannel presentation metadata must not infer host-owned cleanup"
+        );
     }
 
     #[derive(Default)]
@@ -3027,6 +3159,7 @@ output_schema_ref = "schemas/write.output.json"
             manifest_toml: MANIFEST.to_string(),
             source: ManifestSource::HostBundled,
             package,
+            cleanup_requirements: Vec::new(),
             surface_kinds: Vec::new(),
             assets: vec![
                 AvailableExtensionAsset {
@@ -3039,5 +3172,58 @@ output_schema_ref = "schemas/write.output.json"
                 },
             ],
         }
+    }
+}
+
+#[cfg(test)]
+mod telegram_catalog_tests {
+    use super::*;
+
+    #[test]
+    fn telegram_package_is_visible_channel_with_zero_tools() {
+        let package = telegram_package().expect("telegram manifest parses");
+        assert_eq!(package.package_ref.id.as_str(), TELEGRAM_EXTENSION_ID);
+        assert!(
+            !is_internal_extension_package_ref(&package.package_ref),
+            "telegram must stay user-visible (no hidden companion pattern)"
+        );
+        assert!(
+            package
+                .surface_kinds
+                .contains(&LifecycleExtensionSurfaceKind::ExternalChannel),
+            "telegram must project the external-channel surface"
+        );
+        assert!(
+            package.package.manifest.capabilities.is_empty(),
+            "telegram must expose zero tools in v1"
+        );
+    }
+
+    #[test]
+    fn telegram_package_is_listed_in_first_party_catalog_search() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets()
+            .expect("first-party catalog builds");
+        let found = catalog
+            .search("telegram")
+            .any(|package| package.package_ref.id.as_str() == TELEGRAM_EXTENSION_ID);
+        assert!(found, "telegram must appear in the user-visible catalog");
+    }
+}
+
+#[cfg(test)]
+mod telegram_cleanup_requirement_tests {
+    use super::*;
+
+    #[test]
+    fn telegram_package_declares_the_pairing_removal_cleanup() {
+        let package = telegram_package().expect("telegram package builds");
+        assert_eq!(package.cleanup_requirements.len(), 1);
+        let requirement = &package.cleanup_requirements[0];
+        assert_eq!(
+            requirement.adapter_id.as_str(),
+            TELEGRAM_PAIRING_CONNECTION_CLEANUP_ADAPTER_ID
+        );
+        let crate::extension_host::extension_removal_cleanup::ExtensionRemovalCleanupBinding::ChannelConnection { channel } = &requirement.binding;
+        assert_eq!(channel.as_str(), TELEGRAM_EXTENSION_REMOVAL_CHANNEL_ID);
     }
 }

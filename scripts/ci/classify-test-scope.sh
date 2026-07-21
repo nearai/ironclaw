@@ -27,16 +27,16 @@ is_docs_only_path() {
 is_shared_test_path() {
   local path="$1"
   case "$path" in
-    Cargo.toml|Cargo.lock|build.rs|providers.json|Dockerfile)
+    Cargo.toml|Cargo.lock|providers.json|Dockerfile)
       return 0
       ;;
     scripts/ci/classify-test-scope.sh|scripts/ci/test-classify-test-scope.sh|scripts/ci/package-feature-flags.sh)
       return 0
       ;;
-    .github/workflows/test.yml|.github/workflows/reborn-tests.yml|.github/workflows/reborn-e2e.yml|.github/workflows/nightly-deep-ci.yml)
+    .github/workflows/reborn-tests.yml|.github/workflows/reborn-e2e.yml|.github/workflows/nightly-deep-ci.yml)
       return 0
       ;;
-    crates/ironclaw_common/*|crates/ironclaw_host_api/*|crates/ironclaw_host_runtime/*|crates/ironclaw_loop_support/*)
+    crates/ironclaw_common/*|crates/ironclaw_host_api/*|crates/ironclaw_host_runtime/*|crates/ironclaw_loop_host/*)
       return 0
       ;;
     crates/ironclaw_filesystem/*|crates/ironclaw_memory/*|crates/ironclaw_events/*|crates/ironclaw_event_projections/*|crates/ironclaw_event_streams/*)
@@ -78,7 +78,10 @@ is_reborn_test_path() {
     crates/ironclaw_product_*/*|crates/ironclaw_slack_v2_adapter/*|crates/ironclaw_telegram_v2_adapter/*)
       return 0
       ;;
-    crates/ironclaw_wasm_product_adapters/*|crates/ironclaw_webui_v2/*)
+    crates/ironclaw_channel_host/*|crates/ironclaw_channel_delivery/*|crates/ironclaw_telegram_extension/*)
+      return 0
+      ;;
+    crates/ironclaw_wasm_product_adapters/*|crates/ironclaw_webui/*)
       return 0
       ;;
     crates/ironclaw_conversations/*|crates/ironclaw_outbound/*|crates/ironclaw_triggers/*)
@@ -96,13 +99,13 @@ is_reborn_test_path() {
 is_code_path() {
   local path="$1"
   case "$path" in
-    src/*|crates/*|channels-src/*|tools-src/*|tests/*|migrations/*)
+    crates/*|channels-src/*|tools-src/*|tests/*|migrations/*)
       return 0
       ;;
-    Cargo.toml|Cargo.lock|Dockerfile|build.rs|providers.json)
+    Cargo.toml|Cargo.lock|Dockerfile|providers.json)
       return 0
       ;;
-    scripts/check_no_panics.py|scripts/check_gateway_boundaries.py|scripts/build-wasm-extensions.sh|scripts/check-version-bumps.sh|scripts/reborn-e2e-rust.sh|scripts/ci/*)
+    scripts/check_no_panics.py|scripts/build-wasm-extensions.sh|scripts/check-version-bumps.sh|scripts/reborn-e2e-rust.sh|scripts/ci/*)
       return 0
       ;;
     .github/workflows/*.yml|.github/actions/install-cargo-component/*|.github/dependabot.yml|.github/labeler.yml)

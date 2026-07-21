@@ -12,18 +12,23 @@ use std::sync::Arc;
 
 use ironclaw_extensions::ExtensionInstallationStore;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_host_api::{AgentId, TenantId, UserId};
+use ironclaw_reborn_identity::{FilesystemRebornIdentityStore, RebornUserDirectory};
+
+use ironclaw_host_api::ProjectId;
 use ironclaw_memory::MemoryService;
 use ironclaw_memory_native::NativeMemoryService;
-use ironclaw_reborn_identity::{FilesystemRebornIdentityStore, RebornIdentityResolver};
+use ironclaw_reborn_identity::RebornIdentityResolver;
 use ironclaw_secrets::{FilesystemSecretStore, SecretStore, SecretsCrypto};
 use ironclaw_threads::{FilesystemSessionThreadService, SessionThreadService};
 use ironclaw_triggers::TriggerRepository;
 use secrecy::SecretString;
 
 use crate::error::MigrationError;
+use crate::options::TargetStore;
+
 use crate::mounts;
-use crate::options::{MigrationOptions, TargetStore};
+use crate::options::MigrationOptions;
 
 /// The concrete Reborn backend the migration writes into. Both the KV substrate
 /// and the triggers DB share this one handle.
@@ -59,6 +64,53 @@ pub(crate) struct RebornTarget {
     pub(crate) secret_store: Option<Arc<dyn SecretStore>>,
 }
 
+/// Narrow target used by the one-time extension ownership rewrite. It opens
+/// only the canonical user directory and tenant-qualified installation store.
+pub(crate) struct ExtensionOwnershipTarget {
+    #[allow(dead_code)]
+    backend: Backend,
+    pub(crate) user_directory: Arc<dyn RebornUserDirectory>,
+    pub(crate) extension_store: Arc<dyn ExtensionInstallationStore>,
+}
+
+impl ExtensionOwnershipTarget {
+    pub(crate) async fn open(
+        target: &TargetStore,
+        tenant_id: &TenantId,
+    ) -> Result<Self, MigrationError> {
+        let backend = open_backend(target).await?;
+        let root_dyn: Arc<dyn RootFilesystem> = match &backend {
+            #[cfg(feature = "libsql")]
+            Backend::LibSql { root, .. } => root.clone(),
+            #[cfg(feature = "postgres")]
+            Backend::Postgres { root, .. } => root.clone(),
+        };
+        let extension_store =
+            ironclaw_reborn_composition::extension_installation_store_for_migration(
+                root_dyn,
+                Some(tenant_id),
+            )
+            .await
+            .map_err(|error| {
+                MigrationError::OpenTarget(format!("tenant extension installation store: {error}"))
+            })?;
+        let user_directory = match &backend {
+            #[cfg(feature = "libsql")]
+            Backend::LibSql { root, .. } => build_user_directory(root.clone(), tenant_id.clone())?,
+            #[cfg(feature = "postgres")]
+            Backend::Postgres { root, .. } => {
+                build_user_directory(root.clone(), tenant_id.clone())?
+            }
+        };
+
+        Ok(Self {
+            backend,
+            user_directory,
+            extension_store,
+        })
+    }
+}
+
 impl RebornTarget {
     pub(crate) async fn open(options: &MigrationOptions) -> Result<Self, MigrationError> {
         let crypto = match &options.secret_master_key {
@@ -84,7 +136,7 @@ impl RebornTarget {
             Backend::Postgres { root, .. } => root.clone(),
         };
         let extension_store =
-            ironclaw_reborn_composition::extension_installation_store_for_migration(root_dyn)
+            ironclaw_reborn_composition::extension_installation_store_for_migration(root_dyn, None)
                 .await
                 .map_err(|e| {
                     MigrationError::OpenTarget(format!("extension installation store: {e}"))
@@ -182,6 +234,31 @@ where
     store
 }
 
+fn build_user_directory<F>(
+    root: Arc<F>,
+    tenant_id: TenantId,
+) -> Result<Arc<dyn RebornUserDirectory>, MigrationError>
+where
+    F: RootFilesystem + 'static,
+{
+    let actor_user_id = UserId::new("extension-ownership-migration")
+        .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+    let agent_id = AgentId::new("extension-ownership-migration")
+        .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+    let scoped = Arc::new(ScopedFilesystem::new(
+        root,
+        ironclaw_reborn_composition::invocation_mount_view,
+    ));
+    let store: Arc<dyn RebornUserDirectory> = Arc::new(FilesystemRebornIdentityStore::new(
+        scoped,
+        tenant_id,
+        actor_user_id,
+        agent_id,
+        None,
+    ));
+    Ok(store)
+}
+
 async fn build_trigger_repo(
     backend: &Backend,
 ) -> Result<Arc<dyn TriggerRepository>, MigrationError> {
@@ -248,76 +325,13 @@ async fn open_backend(target: &TargetStore) -> Result<Backend, MigrationError> {
     }
 }
 
-/// Build the Reborn target Postgres pool with the repo's remote-TLS rule:
-/// remote hosts must use TLS (mirrors `ironclaw_reborn_event_store` and
-/// `src/db/tls.rs`). A remote `sslmode=disable` is rejected rather than sending
-/// migration traffic — including decrypted secrets — in cleartext; local
-/// connections keep plain TCP. TLS wiring is reused from `ironclaw::db::tls`.
+/// Build the Reborn target Postgres pool through the production composition
+/// helper so migrations inherit the same fail-closed remote-TLS policy without
+/// linking the legacy root crate.
 #[cfg(feature = "postgres")]
 fn open_postgres_pool(
     url: &secrecy::SecretString,
 ) -> Result<deadpool_postgres::Pool, MigrationError> {
-    use secrecy::ExposeSecret;
-
-    let raw = url.expose_secret();
-    let pg_config = raw
-        .parse::<tokio_postgres::Config>()
-        .map_err(|e| MigrationError::OpenTarget(format!("parse Postgres URL: {e}")))?;
-    let remote = !is_local_postgres_config(&pg_config);
-    let ssl_mode = match pg_config.get_ssl_mode() {
-        tokio_postgres::config::SslMode::Disable => {
-            if remote {
-                return Err(MigrationError::OpenTarget(
-                    "remote Postgres target requires TLS; sslmode=disable is rejected for \
-                     migration traffic (it carries decrypted secrets)"
-                        .into(),
-                ));
-            }
-            ironclaw::config::SslMode::Disable
-        }
-        // `Prefer`/`Require`/future variants: force TLS on remote, allow the
-        // parsed intent on local.
-        _ if remote => ironclaw::config::SslMode::Require,
-        _ => ironclaw::config::SslMode::Prefer,
-    };
-
-    let mut dp_config = deadpool_postgres::Config::new();
-    dp_config.url = Some(raw.to_string());
-    ironclaw::db::tls::create_pool(&dp_config, ssl_mode)
-        .map_err(|e| MigrationError::OpenTarget(e.to_string()))
-}
-
-/// True when the parsed Postgres `Config` targets only loopback hosts / Unix
-/// sockets. Anything else is treated as remote and must use TLS. Mirrors the
-/// event-store's `is_local_postgres_config`.
-#[cfg(feature = "postgres")]
-fn is_local_postgres_config(config: &tokio_postgres::Config) -> bool {
-    use tokio_postgres::config::Host;
-
-    let hosts = config.get_hosts();
-    let hostaddrs = config.get_hostaddrs();
-    if hosts.is_empty() && hostaddrs.is_empty() {
-        // Empty host list means libpq's compiled-in default socket directory.
-        return true;
-    }
-    for host in hosts {
-        match host {
-            #[cfg(unix)]
-            Host::Unix(_) => continue,
-            Host::Tcp(name) => {
-                if !matches!(
-                    name.as_str(),
-                    "localhost" | "127.0.0.1" | "::1" | "[::1]" | "0.0.0.0"
-                ) {
-                    return false;
-                }
-            }
-        }
-    }
-    for addr in hostaddrs {
-        if !addr.is_loopback() && !addr.is_unspecified() {
-            return false;
-        }
-    }
-    true
+    ironclaw_reborn_composition::open_reborn_postgres_pool(url.clone())
+        .map_err(|error| MigrationError::OpenTarget(error.to_string()))
 }

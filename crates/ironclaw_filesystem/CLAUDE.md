@@ -32,7 +32,7 @@ codified in `docs/reborn/2026-05-14-universal-fs-dispatch.md` (the new ADR).
 - `ScopedFilesystem` (`src/scoped.rs`) — the invocation-scoped view that
   higher-level stores accept in their constructor. Performs the permission
   check against `MountView` before any backend dispatch.
-- Backends: `LocalFilesystem`, `PostgresRootFilesystem`,
+- Backends: `DiskFilesystem`, `PostgresRootFilesystem`,
   `LibSqlRootFilesystem`, `InMemoryBackend`. All implement
   `RootFilesystem`.
 - Backend containment checks (symlink traversal, mount escape, raw-host
@@ -81,7 +81,7 @@ codified in `docs/reborn/2026-05-14-universal-fs-dispatch.md` (the new ADR).
    into a store. `cas_update` fails **closed** on a non-CAS backend
    (`CasUpdateError::CasUnsupported`) rather than falling back to a blind
    `CasExpectation::Any` overwrite; all production store mounts resolve to
-   CAS-capable db/in-memory backends (`LocalFilesystem` is byte-only and is
+   CAS-capable db/in-memory backends (`DiskFilesystem` is byte-only and is
    structurally unreachable from those mounts), so fail-closed is correct.
    See `docs/plans/2026-06-25-cas-migration.md`.
 
@@ -110,9 +110,8 @@ codified in `docs/reborn/2026-05-14-universal-fs-dispatch.md` (the new ADR).
      so they are not the convoy hazard `cas_update` was introduced to fix;
      migration to `cas_update`'s fail-closed semantics is a deferred
      follow-up tracked as a sibling to #5274.
-   - `ironclaw_conversations::filesystem_store::save_state`,
-     `ironclaw_runner::local_trigger_access::filesystem::deactivate_stale_record`
-     (via `put_record`), and `ironclaw_product_workflow::filesystem_ledger`
+   - `ironclaw_conversations::filesystem_store::save_state` and
+     `ironclaw_product_workflow::filesystem_ledger`
      (`begin_or_replay` / `settle` / `release` / `try_acquire_prune_lease`)
      are further pre-existing examples of the same lock-free retry-loop
      pattern, pending the same migration.
@@ -154,10 +153,8 @@ consumers of the legacy methods — new code should call `put`/`get`/
 
 ## When you're editing this crate
 
-- Run the full crate tests, both feature combinations:
-  `cargo test -p ironclaw_filesystem --all-features`,
-  `cargo check -p ironclaw_filesystem --no-default-features --features libsql`,
-  `cargo check -p ironclaw_filesystem --no-default-features --features postgres`.
+- Run the full crate tests:
+  `cargo test -p ironclaw_filesystem`.
 - New `Entry` shapes (record kinds, indexed projections) belong in the
   consumer crate, not here. This crate only owns the trait surface and
   shared primitives.

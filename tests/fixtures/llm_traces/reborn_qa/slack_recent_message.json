@@ -1,0 +1,98 @@
+{
+  "model_name": "synthetic-q10g-slack-recent-message",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "What is the exact text of the most recent message I sent in the Slack conversation with ID D0CANARY?"
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_recent_extension_search",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "Slack"
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_recent_extension_install",
+            "name": "builtin__extension_install",
+            "arguments": {
+              "extension_id": "slack"
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_recent_extension_activate",
+            "name": "builtin__extension_activate",
+            "arguments": {
+              "extension_id": "slack"
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_recent_whoami",
+            "name": "slack.whoami",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_recent_get_history",
+            "name": "slack.get_conversation_history",
+            "arguments": {
+              "channel": "D0CANARY",
+              "limit": 100
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "CANARY_LAST_SENT",
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    }
+  ]
+}

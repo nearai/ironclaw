@@ -247,7 +247,7 @@ impl ironclaw_capabilities::CapabilityObligationHandler for TestNoopObligationHa
 struct TestNoopContinuationDispatcher;
 
 #[async_trait]
-impl crate::product_auth::api::auth::RebornAuthContinuationDispatcher
+impl ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher
     for TestNoopContinuationDispatcher
 {
     async fn dispatch_auth_continuation(
@@ -293,7 +293,7 @@ struct OAuthProductAuthInfra {
 fn build_oauth_product_auth_infra() -> OAuthProductAuthInfra {
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
-    use ironclaw_secrets::InMemorySecretStore;
+    use ironclaw_secrets::FilesystemSecretStore;
 
     // Fixed-view scoped filesystem: the product-auth durable layer writes
     // flow/account JSON under /secrets/agents/…/product-auth/… so we only
@@ -307,7 +307,8 @@ fn build_oauth_product_auth_infra() -> OAuthProductAuthInfra {
     let backend = Arc::new(InMemoryBackend::new());
     let scoped_fs: Arc<ScopedFilesystem<InMemoryBackend>> =
         Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts));
-    let secret_store: Arc<dyn ironclaw_secrets::SecretStore> = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn ironclaw_secrets::SecretStore> =
+        Arc::new(FilesystemSecretStore::ephemeral());
     // Real durable product-auth services over the in-memory scoped filesystem.
     let durable = Arc::new(
         crate::product_auth::durable::FilesystemAuthProductServices::new(
@@ -330,7 +331,7 @@ fn build_oauth_product_auth_infra() -> OAuthProductAuthInfra {
 /// - `InMemoryBackend` with a fixed `MountView` scoped to
 ///   `/tenants/test-tenant/users/test-user/secrets` (no `libsql`/`postgres`
 ///   feature dependency).
-/// - `InMemorySecretStore` for access/refresh token handles.
+/// - `FilesystemSecretStore::ephemeral()` for access/refresh token handles.
 /// - `ScriptedOAuthTokenEgress` intercepting the provider token endpoint.
 /// - Real `FilesystemAuthProductServices<InMemoryBackend>` for flow + account
 ///   persistence — zero mocks on the storage layer.

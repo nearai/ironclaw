@@ -79,18 +79,6 @@ impl RunnerLeaseStore {
         .await
     }
 
-    pub(super) async fn seed_from_snapshot(
-        &self,
-        snapshot: &TurnPersistenceSnapshot,
-        run_id: TurnRunId,
-    ) -> Result<(), TurnError> {
-        self.with_timeout(
-            self.seed_from_snapshot_inner(snapshot, run_id),
-            "seed runner lease",
-        )
-        .await
-    }
-
     pub(super) async fn seed_from_run_record(&self, run: TurnRunRecord) -> Result<(), TurnError> {
         self.with_timeout(
             self.seed_from_run_record_inner(run),
@@ -127,26 +115,6 @@ impl RunnerLeaseStore {
         self.with_timeout(
             self.write_status_from_snapshot(snapshot, run_id, None, TurnStatus::CancelRequested),
             "mark runner lease cancel requested",
-        )
-        .await
-    }
-
-    pub(super) async fn retire_runner_lease_from_snapshot(
-        &self,
-        snapshot: &TurnPersistenceSnapshot,
-        run_id: TurnRunId,
-        runner_id: crate::TurnRunnerId,
-        lease_token: crate::TurnLeaseToken,
-        retired_status: TurnStatus,
-    ) -> Result<Option<RunnerLeaseRecord>, TurnError> {
-        self.with_timeout(
-            self.write_status_from_snapshot(
-                snapshot,
-                run_id,
-                Some((runner_id, lease_token)),
-                retired_status,
-            ),
-            "retire runner lease",
         )
         .await
     }
@@ -296,23 +264,6 @@ impl RunnerLeaseStore {
         Ok(run)
     }
 
-    async fn seed_from_snapshot_inner(
-        &self,
-        snapshot: &TurnPersistenceSnapshot,
-        run_id: TurnRunId,
-    ) -> Result<(), TurnError> {
-        let Some(run) = snapshot.runs.iter().find(|record| record.run_id == run_id) else {
-            return Err(TurnError::ScopeNotFound);
-        };
-        let Some(record) = runner_lease_from_run(run) else {
-            return Err(TurnError::InvalidTransition {
-                from: run.status,
-                to: TurnStatus::Running,
-            });
-        };
-        self.upsert(record).await
-    }
-
     async fn seed_from_run_record_inner(&self, run: TurnRunRecord) -> Result<(), TurnError> {
         let Some(record) = runner_lease_from_run(&run) else {
             return Err(TurnError::InvalidTransition {
@@ -400,7 +351,7 @@ impl RunnerLeaseStore {
         status: TurnStatus,
     ) -> Result<Option<RunnerLeaseRecord>, TurnError> {
         let fallback = runner_lease_from_snapshot(snapshot, run_id)?;
-        self.write_status_from_fallback(fallback, run_id, expected_runner, status)
+        self.write_status_from_fallback(Some(fallback), run_id, expected_runner, status)
             .await
     }
 
@@ -411,24 +362,32 @@ impl RunnerLeaseStore {
         status: TurnStatus,
     ) -> Result<Option<RunnerLeaseRecord>, TurnError> {
         let run_id = run.run_id;
-        let from = run.status;
-        let fallback = runner_lease_from_run(&run).ok_or(TurnError::InvalidTransition {
-            from,
-            to: TurnStatus::Running,
-        })?;
-        self.write_status_from_fallback(fallback, run_id, expected_runner, status)
-            .await
+        // A terminal / lease-cleared run yields no fallback lease. If no live
+        // in-memory lease survives either, there is nothing to retire here —
+        // return `None` and let the engine's own transition surface the
+        // authoritative error (e.g. LeaseMismatch on a stale lease against an
+        // already-terminal run), instead of masking it with a synthesized
+        // InvalidTransition{.., Running} that never reaches the engine (#6263).
+        self.write_status_from_fallback(
+            runner_lease_from_run(&run),
+            run_id,
+            expected_runner,
+            status,
+        )
+        .await
     }
 
     async fn write_status_from_fallback(
         &self,
-        fallback: RunnerLeaseRecord,
+        fallback: Option<RunnerLeaseRecord>,
         run_id: TurnRunId,
         expected_runner: Option<(crate::TurnRunnerId, crate::TurnLeaseToken)>,
         status: TurnStatus,
     ) -> Result<Option<RunnerLeaseRecord>, TurnError> {
         let mut leases = self.leases.write().await;
-        let existing = leases.get(&run_id).cloned().unwrap_or(fallback);
+        let Some(existing) = leases.get(&run_id).cloned().or(fallback) else {
+            return Ok(None);
+        };
         if let Some((runner_id, lease_token)) = expected_runner {
             ensure_active_runner_lease(&existing, runner_id, lease_token, chrono::Utc::now())?;
         }
@@ -663,6 +622,7 @@ mod tests {
             status,
             profile,
             resolved_model_route: None,
+            model_usage: None,
             checkpoint_id: None,
             gate_ref: None,
             blocked_activity_id: None,

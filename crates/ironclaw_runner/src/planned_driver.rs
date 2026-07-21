@@ -1,3 +1,4 @@
+// arch-exempt: large_file, caller-level failure mapping regression stays with the driver, plan #4088
 //! Planned Reborn loop driver.
 //!
 //! This module is the bridge from the runner-facing `AgentLoopDriver` trait to
@@ -426,18 +427,17 @@ mod tests {
         LoopMessageRef, RedactedCheckpointPayload, TurnCheckpointId,
         run_profile::{
             AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef,
-            BeginAssistantDraft, CapabilityBatchInvocation, CapabilityBatchOutcome,
-            CapabilityInvocation, CapabilityOutcome, CheckpointSchemaId, FinalizeAssistantMessage,
-            LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCancellationPort,
-            LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest,
-            LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
-            LoopCompactionRequest, LoopContextBundle, LoopContextPort, LoopContextRequest,
-            LoopDriverId, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort,
-            LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent,
-            LoopProgressPort, LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort,
-            LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
-            StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
-            VisibleCapabilitySurface,
+            BeginAssistantDraft, CapabilityBatchInvocation, CapabilityInvocation,
+            CheckpointSchemaId, FinalizeAssistantMessage, LoadCheckpointPayloadRequest,
+            LoadedCheckpointPayload, LoopCancellationPort, LoopCancellationSignal,
+            LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef,
+            LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort, LoopCompactionRequest,
+            LoopContextBundle, LoopContextPort, LoopContextRequest, LoopDriverId,
+            LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort, LoopModelPort,
+            LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort,
+            LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+            LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, StageCheckpointPayloadRequest,
+            UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
         },
     };
     use std::sync::Mutex;
@@ -581,6 +581,27 @@ mod tests {
                 reason_kind: MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY.to_string(),
                 // No upstream detail: the bounded safe summary is the fallback.
                 detail: Some("model credentials are unavailable".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn executor_budget_accounting_diagnostics_preserve_distinct_failure_category() {
+        let mapped = map_executor_error(AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Model,
+            kind: AgentLoopHostErrorKind::BudgetAccountingFailed,
+            safe_summary: LoopSafeSummary::new("resource accounting storage is unavailable")
+                .expect("safe"),
+            reason_kind: None,
+            diagnostic_ref: None,
+            detail: None,
+        });
+
+        assert_eq!(
+            mapped,
+            AgentLoopDriverError::Failed {
+                reason_kind: "budget_accounting_failed".to_string(),
+                detail: Some("resource accounting storage is unavailable".to_string()),
             }
         );
     }
@@ -1058,14 +1079,14 @@ mod tests {
         async fn invoke_capability(
             &self,
             request: CapabilityInvocation,
-        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
             self.inner.invoke_capability(request).await
         }
 
         async fn invoke_capability_batch(
             &self,
             request: CapabilityBatchInvocation,
-        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
             self.inner.invoke_capability_batch(request).await
         }
     }
@@ -1186,7 +1207,6 @@ mod tests {
             resume_token: None,
             activity_id,
             prior_approval: None,
-            replay: None,
             disposition: None,
         });
         state
@@ -1339,7 +1359,7 @@ mod tests {
         context: &LoopRunContext,
     ) -> ironclaw_agent_loop::state::LoopExecutionState {
         use ironclaw_agent_loop::state::PendingApprovalResume;
-        use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId, ResourceEstimate};
+        use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId};
         use ironclaw_turns::LoopGateRef;
         use ironclaw_turns::run_profile::{
             CapabilityInputRef, CapabilityResumeToken, CapabilitySurfaceVersion,
@@ -1363,8 +1383,6 @@ mod tests {
                 .expect("valid input ref"),
             effective_capability_ids: Vec::new(),
             provider_replay: None,
-            input: serde_json::Value::Null,
-            estimate: ResourceEstimate::default(),
             disposition: None,
         });
         state
@@ -1529,7 +1547,7 @@ mod tests {
         context: &LoopRunContext,
     ) -> ironclaw_agent_loop::state::LoopExecutionState {
         use ironclaw_agent_loop::state::{PendingApprovalResume, PendingAuthResume};
-        use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId, ResourceEstimate};
+        use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId};
         use ironclaw_turns::LoopGateRef;
         use ironclaw_turns::run_profile::{
             CapabilityInputRef, CapabilityResumeToken, CapabilitySurfaceVersion,
@@ -1554,7 +1572,6 @@ mod tests {
             resume_token: None,
             activity_id: auth_activity_id,
             prior_approval: None,
-            replay: None,
             disposition: None,
         });
         state.pending_approval_resume = Some(PendingApprovalResume {
@@ -1571,8 +1588,6 @@ mod tests {
             input_ref: CapabilityInputRef::new("input:dual-approval").expect("valid input ref"),
             effective_capability_ids: Vec::new(),
             provider_replay: None,
-            input: serde_json::Value::Null,
-            estimate: ResourceEstimate::default(),
             disposition: None,
         });
         state
@@ -1719,7 +1734,7 @@ mod tests {
         context: &LoopRunContext,
     ) -> ironclaw_agent_loop::state::LoopExecutionState {
         use ironclaw_agent_loop::state::{PendingApprovalResume, PendingAuthResume};
-        use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId, ResourceEstimate};
+        use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId};
         use ironclaw_turns::LoopGateRef;
         use ironclaw_turns::run_profile::{
             CapabilityInputRef, CapabilityResumeToken, CapabilitySurfaceVersion,
@@ -1741,7 +1756,6 @@ mod tests {
             resume_token: None,
             activity_id: auth_activity_id,
             prior_approval: None,
-            replay: None,
             disposition: None,
         });
         state.pending_approval_resume = Some(PendingApprovalResume {
@@ -1759,8 +1773,6 @@ mod tests {
                 .expect("valid input ref"),
             effective_capability_ids: Vec::new(),
             provider_replay: None,
-            input: serde_json::Value::Null,
-            estimate: ResourceEstimate::default(),
             disposition: None,
         });
         state

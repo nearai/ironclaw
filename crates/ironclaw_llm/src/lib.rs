@@ -18,7 +18,6 @@ pub mod circuit_breaker;
 pub(crate) mod codex_auth;
 mod codex_chatgpt;
 pub mod config;
-pub mod costs;
 pub mod error;
 pub mod failover;
 pub(crate) mod gemini_oauth;
@@ -50,7 +49,7 @@ pub mod tool_schema;
 pub mod transcription;
 mod url_check;
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 
 #[cfg(test)]
@@ -66,7 +65,7 @@ pub use config::{
     BedrockConfig, CacheRetention, GeminiOauthConfig, LlmBackendKind, LlmConfig, NearAiConfig,
     OAUTH_PLACEHOLDER, OpenAiCodexConfig, RegistryProviderConfig,
 };
-pub use error::{LlmConfigError, LlmError};
+pub use error::{LlmConfigError, LlmError, UNCONFIGURED_PROVIDER_ID};
 pub use failover::{CooldownConfig, FailoverProvider};
 pub(crate) use gemini_oauth::GeminiOauthProvider;
 pub use host::{

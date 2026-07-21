@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical §4.3 store swap only — InMemory{CheckpointState,LoopCheckpoint}Store deleted; test helper added over FilesystemCheckpointStateStore<InMemoryBackend> (arch-simplification §4.3), plan #6168
 //! End-to-end integration tests proving that `RebornLoopDriverHostFactory`
 //! wires the `HookDispatcher` into the capability port seam correctly.
 //!
@@ -40,6 +41,7 @@ use ironclaw_events::{
     EventStreamKey, InMemoryDurableEventLog, InMemorySecurityAuditSink, ReadScope, RuntimeEvent,
     RuntimeEventKind, SecurityAuditSink, SecurityBoundary, SecurityDecision,
 };
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_hooks::HookRegistrar;
 use ironclaw_hooks::dispatch::{HookDispatcher, HookDispatcherBuilder};
 use ironclaw_hooks::error::HookError;
@@ -68,12 +70,12 @@ use ironclaw_hooks::wasm::{
     WasmHookModuleRequest, WasmHookModuleResolver, WasmHookRuntime, WasmHookRuntimeError,
 };
 use ironclaw_host_api::{
-    AgentId, CapabilityId, InvocationId, ProjectId, ResourceScope, RuntimeKind, TenantId, ThreadId,
-    UserId,
+    AgentId, Blocked, CapabilityId, DenyReason, InvocationId, ProjectId, Resolution,
+    ResolutionBatch, ResourceScope, RuntimeKind, SafeSummary, TenantId, ThreadId, UserId,
 };
-use ironclaw_loop_support::{
-    HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
-    HostManagedModelResponse, LoopCapabilityInputResolver,
+use ironclaw_loop_host::{
+    FilesystemCheckpointStateStore, HostManagedModelError, HostManagedModelGateway,
+    HostManagedModelRequest, HostManagedModelResponse, LoopCapabilityInputResolver,
 };
 use ironclaw_runner::hook_gate_refs::{
     HookGateActorBinding, HookGateReservationContext, HookGateResolutionRequest, HookGateRouter,
@@ -87,22 +89,22 @@ use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
     SessionThreadService, ThreadScope,
 };
+use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, CheckpointStateStore, EventCursor,
-    GetRunStateRequest, InMemoryCheckpointStateStore, InMemoryRunProfileResolver,
-    InMemoryTurnStateStore, LoopResultRef, PutCheckpointStateRequest, ReplyTargetBindingRef,
-    ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileResolutionRequest,
-    RunProfileResolver, RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
-    TurnActor, TurnAdmissionPolicy, TurnError, TurnLeaseToken, TurnRunId, TurnRunState,
-    TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
+    FilesystemTurnStateRowStore, GetRunStateRequest, InMemoryRunProfileResolver, LoopResultRef,
+    PutCheckpointStateRequest, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
+    RunProfileId, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy,
+    TurnError, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope, TurnStateStore,
+    TurnStatus,
     run_profile::{
-        AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome,
-        CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
-        CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilitySurfaceVersion,
+        AgentLoopHostError, CapabilityBatchInvocation, CapabilityDescriptorView,
+        CapabilityInputRef, CapabilityInvocation, CapabilitySurfaceVersion,
         InMemoryLoopHostMilestoneSink, InstructionSafetyContext, LoopCapabilityPort,
         LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest, LoopHostMilestoneKind,
         LoopModelPort, LoopModelRequest, LoopPromptPort, LoopRunContext, LoopTranscriptPort,
-        RunScopedHookMilestoneSink, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        RunScopedHookMilestoneSink, VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
     },
     runner::ClaimedTurnRun,
 };
@@ -110,7 +112,7 @@ use ironclaw_turns::{
 // ─── Static turn state store ──────────────────────────────────────────────
 //
 // The factory's cancellation handle builder looks up the run by id from
-// the supplied `TurnStateStore`. `InMemoryTurnStateStore::default()` is
+// the supplied `TurnStateStore`. `in_memory_turn_state_store()` is
 // empty, so we wrap the claimed state directly. This mirrors the
 // `StaticTurnStateStore` pattern used by `tests/loop_driver_host.rs`.
 
@@ -217,32 +219,34 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         self.invocations
             .lock()
             .expect("invocations mutex not poisoned")
             .push(request.capability_id.clone());
-        Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
-            result_ref: LoopResultRef::new(format!("result:{}", request.capability_id))
+        let outcome = resolution::completed(
+            LoopResultRef::new(format!("result:{}", request.capability_id))
                 .expect("result ref literal is valid"),
-            safe_summary: "stub capability completed".to_string(),
-            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-            terminate_hint: false,
-            byte_len: 0,
-            output_digest: None,
-        }))
+            "stub capability completed".to_string(),
+            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            false,
+            0,
+            None,
+            None,
+        );
+        Ok(outcome)
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-        let mut outcomes = Vec::with_capacity(request.invocations.len());
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
+        let mut resolutions = Vec::with_capacity(request.invocations.len());
         for invocation in request.invocations {
-            outcomes.push(self.invoke_capability(invocation).await?);
+            resolutions.push(self.invoke_capability(invocation).await?);
         }
-        Ok(CapabilityBatchOutcome {
-            outcomes,
+        Ok(ResolutionBatch {
+            resolutions,
             stopped_on_suspension: false,
         })
     }
@@ -291,32 +295,34 @@ impl LoopCapabilityPort for ProviderAwareCapabilityPort {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         self.invocations
             .lock()
             .expect("invocations mutex not poisoned")
             .push(request.capability_id.clone());
-        Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
-            result_ref: LoopResultRef::new(format!("result:{}", request.capability_id))
+        let outcome = resolution::completed(
+            LoopResultRef::new(format!("result:{}", request.capability_id))
                 .expect("result ref literal is valid"),
-            safe_summary: "stub capability completed".to_string(),
-            progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-            terminate_hint: false,
-            byte_len: 0,
-            output_digest: None,
-        }))
+            "stub capability completed".to_string(),
+            ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+            false,
+            0,
+            None,
+            None,
+        );
+        Ok(outcome)
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-        let mut outcomes = Vec::with_capacity(request.invocations.len());
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
+        let mut resolutions = Vec::with_capacity(request.invocations.len());
         for invocation in request.invocations {
-            outcomes.push(self.invoke_capability(invocation).await?);
+            resolutions.push(self.invoke_capability(invocation).await?);
         }
-        Ok(CapabilityBatchOutcome {
-            outcomes,
+        Ok(ResolutionBatch {
+            resolutions,
             stopped_on_suspension: false,
         })
     }
@@ -408,10 +414,28 @@ fn panicking_dispatcher() -> Arc<HookDispatcher> {
         .build_arc()
 }
 
+/// Extract the loop gate ref from an approval-blocked capability resolution,
+/// centralizing the repeated
+/// `Resolution::Blocked(Blocked::Approval) → origin() → LoopGateRef` shape
+/// (and its panic/expect messages) across these hook-gate tests (CodeRabbit #6299).
+fn approval_gate_ref(outcome: &Resolution) -> ironclaw_turns::LoopGateRef {
+    let Resolution::Blocked(blocked @ Blocked::Approval(_)) = outcome else {
+        panic!("expected ApprovalRequired, got {outcome:?}");
+    };
+    ironclaw_turns::LoopGateRef::new(
+        blocked
+            .origin()
+            .expect("preserved loop gate ref on the approval waypoint")
+            .as_str(),
+    )
+    .expect("loop gate ref")
+}
+
 /// Installed-tier hook that always pause-approves. Used to prove the
 /// hook-middleware seam surfaces `PauseApproval` as
-/// `CapabilityOutcome::ApprovalRequired` with a real `LoopGateRef`, rather
-/// than the previous degraded `Denied` mapping.
+/// `Resolution::Blocked(Blocked::Approval(..))` (carrying the originating
+/// `LoopGateRef` on the waypoint origin), rather than the previous degraded
+/// `Denied` mapping.
 struct PauseApprovalHook;
 
 #[async_trait]
@@ -999,10 +1023,12 @@ const WASM_CTX_READ_THEN_DENY: &str = r#"
 
 // ─── Fixture for building hosts with the factory ───────────────────────────
 
+use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
+
 struct Fixture {
     thread_service: Arc<InMemorySessionThreadService>,
-    checkpoint_state_store: Arc<InMemoryCheckpointStateStore>,
-    loop_checkpoint_store: Arc<InMemoryTurnStateStore>,
+    checkpoint_state_store: Arc<FilesystemCheckpointStateStore<InMemoryBackend>>,
+    loop_checkpoint_store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
     milestone_sink: Arc<InMemoryLoopHostMilestoneSink>,
     gateway: Arc<UnusedGateway>,
     thread_scope: ThreadScope,
@@ -1015,8 +1041,8 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         let thread_service = Arc::new(InMemorySessionThreadService::default());
-        let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
-        let loop_checkpoint_store = Arc::new(InMemoryTurnStateStore::default());
+        let checkpoint_state_store = in_memory_checkpoint_state_store();
+        let loop_checkpoint_store = Arc::new(in_memory_turn_state_store());
         let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
         let gateway = Arc::new(UnusedGateway);
 
@@ -1085,6 +1111,7 @@ impl Fixture {
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             resolved_model_route: None,
+            model_usage: None,
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
@@ -1203,36 +1230,57 @@ fn invocation(
     }
 }
 
-fn expect_denied_with(outcome: CapabilityOutcome, expected_kind: &str) {
-    match outcome {
-        CapabilityOutcome::Denied(denied) => {
-            assert_eq!(
-                denied.reason_kind,
-                CapabilityDeniedReasonKind::unknown(expected_kind)
-                    .expect("expected reason kind literal is valid"),
-                "denied reason_kind did not match"
-            );
-        }
-        other => panic!("expected CapabilityOutcome::Denied, got {other:?}"),
+/// Map a loop-side `CapabilityDeniedReasonKind` string to the host_api
+/// `DenyReason` it collapses onto after the `CapabilityOutcome -> Resolution`
+/// flip. A string that already spells a real `DenyReason` snake_case tag maps
+/// faithfully; every loop-originated kind (e.g. `hook_denied`) buckets into
+/// the catch-all `PolicyDenied`.
+fn expected_deny_reason(expected_kind: &str) -> Option<DenyReason> {
+    match expected_kind {
+        "missing_grant" => Some(DenyReason::MissingGrant),
+        "invalid_path" => Some(DenyReason::InvalidPath),
+        "path_outside_mount" => Some(DenyReason::PathOutsideMount),
+        "unknown_capability" => Some(DenyReason::UnknownCapability),
+        "unknown_secret" => Some(DenyReason::UnknownSecret),
+        "network_denied" => Some(DenyReason::NetworkDenied),
+        "budget_denied" => Some(DenyReason::BudgetDenied),
+        "approval_denied" => Some(DenyReason::ApprovalDenied),
+        "policy_denied" => Some(DenyReason::PolicyDenied),
+        "resource_limit_exceeded" => Some(DenyReason::ResourceLimitExceeded),
+        "internal_invariant_violation" => Some(DenyReason::InternalInvariantViolation),
+        // Flip consequence (§5.2.9, confirmed): reason collapsed to PolicyDenied (was loop kind hook_denied,
+        // and any other non-DenyReason CapabilityDeniedReasonKind string)
+        _ => Some(DenyReason::PolicyDenied),
     }
 }
 
-fn expect_denied_with_summary(
-    outcome: CapabilityOutcome,
-    expected_kind: &str,
-    expected_summary: &str,
-) {
+fn expect_denied_with(outcome: Resolution, expected_kind: &str) {
     match outcome {
-        CapabilityOutcome::Denied(denied) => {
+        Resolution::Denied(denial) => {
             assert_eq!(
-                denied.reason_kind,
-                CapabilityDeniedReasonKind::unknown(expected_kind)
-                    .expect("expected reason kind literal is valid"),
+                denial.reason_kind,
+                expected_deny_reason(expected_kind),
                 "denied reason_kind did not match"
             );
-            assert_eq!(denied.safe_summary, expected_summary);
         }
-        other => panic!("expected CapabilityOutcome::Denied, got {other:?}"),
+        other => panic!("expected Resolution::Denied, got {other:?}"),
+    }
+}
+
+fn expect_denied_with_summary(outcome: Resolution, expected_kind: &str, expected_summary: &str) {
+    match outcome {
+        Resolution::Denied(denial) => {
+            assert_eq!(
+                denial.reason_kind,
+                expected_deny_reason(expected_kind),
+                "denied reason_kind did not match"
+            );
+            assert_eq!(
+                denial.summary.as_ref().map(SafeSummary::as_str),
+                Some(expected_summary)
+            );
+        }
+        other => panic!("expected Resolution::Denied, got {other:?}"),
     }
 }
 
@@ -2490,7 +2538,7 @@ async fn wasm_fuel_exhaustion_fails_isolated_for_observer() {
         .expect("invoke_capability returns completed outcome");
 
     assert!(
-        matches!(outcome, CapabilityOutcome::Completed(_)),
+        matches!(outcome, Resolution::Done(ref o) if o.verdict.is_success()),
         "observer failure must be isolated; got {outcome:?}"
     );
     assert_eq!(
@@ -2611,7 +2659,7 @@ async fn wasm_wall_clock_timeout_fires_for_observer() {
         .expect("invoke_capability returns completed outcome");
 
     assert!(
-        matches!(outcome, CapabilityOutcome::Completed(_)),
+        matches!(outcome, Resolution::Done(ref o) if o.verdict.is_success()),
         "observer wall-clock timeout must be isolated; got {outcome:?}"
     );
     assert_eq!(
@@ -2656,7 +2704,7 @@ async fn wasm_memory_exhaustion_fails_isolated_for_observer() {
         .expect("invoke_capability returns completed outcome");
 
     assert!(
-        matches!(outcome, CapabilityOutcome::Completed(_)),
+        matches!(outcome, Resolution::Done(ref o) if o.verdict.is_success()),
         "observer memory exhaustion must be isolated; got {outcome:?}"
     );
     assert_eq!(
@@ -2908,7 +2956,7 @@ async fn non_matching_invocation_passes_through_to_inner_port() {
         .expect("invoke_capability succeeds for the allowed capability");
 
     assert!(
-        matches!(outcome, CapabilityOutcome::Completed(_)),
+        matches!(outcome, Resolution::Done(ref o) if o.verdict.is_success()),
         "non-matching hook decision must let the inner port complete the call; got {outcome:?}"
     );
     let invocations = inner.invocations();
@@ -3015,7 +3063,7 @@ async fn factory_without_hook_dispatcher_reaches_inner_port_for_blocked_capabili
         .expect("invoke_capability succeeds without hooks");
 
     assert!(
-        matches!(outcome, CapabilityOutcome::Completed(_)),
+        matches!(outcome, Resolution::Done(ref o) if o.verdict.is_success()),
         "without a dispatcher, the inner port must complete the call; got {outcome:?}"
     );
     let invocations = inner.invocations();
@@ -3215,22 +3263,15 @@ async fn pause_approval_hook_surfaces_as_approval_required_with_real_gate_ref() 
         .await
         .expect("invoke_capability returns a (suspended) outcome, not an error");
 
-    let gate_ref = match outcome {
-        CapabilityOutcome::ApprovalRequired {
-            gate_ref,
-            safe_summary,
-            ..
-        } => {
-            assert!(
-                gate_ref.as_str().starts_with("gate:hook-approval-"),
-                "gate ref does not match expected prefix: {}",
-                gate_ref.as_str()
-            );
-            assert_eq!(safe_summary, "integration-test pause approval");
-            gate_ref
-        }
-        other => panic!("expected ApprovalRequired, got {other:?}"),
-    };
+    let gate_ref = approval_gate_ref(&outcome);
+    assert!(
+        gate_ref.as_str().starts_with("gate:hook-approval-"),
+        "gate ref does not match expected prefix: {}",
+        gate_ref.as_str()
+    );
+    // Flip consequence (§5.2.9, confirmed): approval safe_summary now lives on the side GateRecord,
+    // not the returned Resolution::Blocked channel — dropped the
+    // `assert_eq!(safe_summary, "integration-test pause approval")`.
     assert!(
         inner.invocations().is_empty(),
         "inner port must NOT be invoked when a hook pauses; got {:?}",
@@ -3291,9 +3332,7 @@ async fn router_backed_pause_approval_gate_ref_rejects_cross_actor_resolution() 
         .await
         .expect("invoke_capability returns a (suspended) outcome, not an error");
 
-    let CapabilityOutcome::ApprovalRequired { gate_ref, .. } = outcome else {
-        panic!("expected ApprovalRequired, got {outcome:?}");
-    };
+    let gate_ref = approval_gate_ref(&outcome);
 
     let wrong_actor = UserId::new("other-hooks-user").expect("user id literal is valid");
     let cross_actor = HookGateResolutionRequest::for_invocation(
@@ -3375,13 +3414,7 @@ async fn router_backed_gate_ref_factory_sources_context_per_mint_when_reused() {
         .invoke_capability(invocation_a.clone())
         .await
         .expect("first invoke returns outcome");
-    let CapabilityOutcome::ApprovalRequired {
-        gate_ref: gate_ref_a,
-        ..
-    } = outcome_a
-    else {
-        panic!("expected first build ApprovalRequired, got {outcome_a:?}");
-    };
+    let gate_ref_a = approval_gate_ref(&outcome_a);
     router
         .resolve(
             HookGateResolutionRequest::for_invocation(
@@ -3422,13 +3455,7 @@ async fn router_backed_gate_ref_factory_sources_context_per_mint_when_reused() {
         .invoke_capability(invocation_b.clone())
         .await
         .expect("second invoke returns outcome");
-    let CapabilityOutcome::ApprovalRequired {
-        gate_ref: gate_ref_b,
-        ..
-    } = outcome_b
-    else {
-        panic!("expected second build ApprovalRequired, got {outcome_b:?}");
-    };
+    let gate_ref_b = approval_gate_ref(&outcome_b);
 
     router
         .resolve(
@@ -3489,25 +3516,21 @@ async fn router_backed_pause_approval_gate_ref_expires_after_ttl() {
         .await
         .expect("invoke_capability returns a (suspended) outcome, not an error");
 
-    match outcome {
-        CapabilityOutcome::ApprovalRequired { gate_ref, .. } => {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-            let err = router
-                .resolve(
-                    HookGateResolutionRequest::for_invocation(
-                        gate_ref,
-                        HookGateActorBinding::new(fixture.actor_id.clone()),
-                        fixture.context.clone(),
-                        &request,
-                    )
-                    .expect("resolution request can be derived from invocation"),
-                )
-                .await
-                .expect_err("expired gate ref must be rejected");
-            assert!(err.is_expired(), "expected expired error, got {err:?}");
-        }
-        other => panic!("expected ApprovalRequired, got {other:?}"),
-    }
+    let gate_ref = approval_gate_ref(&outcome);
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let err = router
+        .resolve(
+            HookGateResolutionRequest::for_invocation(
+                gate_ref,
+                HookGateActorBinding::new(fixture.actor_id.clone()),
+                fixture.context.clone(),
+                &request,
+            )
+            .expect("resolution request can be derived from invocation"),
+        )
+        .await
+        .expect_err("expired gate ref must be rejected");
+    assert!(err.is_expired(), "expected expired error, got {err:?}");
     assert!(
         inner.invocations().is_empty(),
         "inner port must NOT be invoked when a hook pauses; got {:?}",
@@ -3548,9 +3571,7 @@ async fn router_backed_pause_approval_gate_ref_rejects_backdated_resolution_afte
         .await
         .expect("invoke_capability returns a (suspended) outcome, not an error");
 
-    let CapabilityOutcome::ApprovalRequired { gate_ref, .. } = outcome else {
-        panic!("expected ApprovalRequired, got {outcome:?}");
-    };
+    let gate_ref = approval_gate_ref(&outcome);
     // serrrfirat HIGH regression: `HookGateResolutionRequest` no longer
     // exposes a caller-controllable `resolved_at`. Time authority lives on
     // the router's own wall clock — see `InMemoryHookGateRouter::resolve_gate`
@@ -3604,7 +3625,7 @@ async fn pause_approval_with_default_factory_fails_closed_as_denied() {
         .expect("invoke_capability returns a (denied) outcome, not an error");
 
     match outcome {
-        CapabilityOutcome::Denied(_) => {} // expected
+        Resolution::Denied(_) => {} // expected
         other => {
             panic!("expected Denied (fail-closed) without a gate-ref factory wired; got {other:?}")
         }
@@ -3766,7 +3787,7 @@ async fn observer_hook_fires_after_capability_through_factory() {
         .expect("invoke_capability returns a (completed) outcome");
 
     assert!(
-        matches!(outcome, CapabilityOutcome::Completed(_)),
+        matches!(outcome, Resolution::Done(ref o) if o.verdict.is_success()),
         "capability must complete normally, got {outcome:?}"
     );
     assert_eq!(
@@ -3987,7 +4008,7 @@ async fn numeric_sum_predicate_caps_total_value_against_real_inputs() {
         .await
         .expect("first invocation completes successfully");
     assert!(
-        matches!(first, CapabilityOutcome::Completed(_)),
+        matches!(first, Resolution::Done(ref o) if o.verdict.is_success()),
         "first invocation must pass through to inner port; got {first:?}"
     );
 
@@ -4066,7 +4087,7 @@ async fn installed_hook_with_own_scope_does_not_fire_on_other_provider_capabilit
         .expect("invoke_capability returns an outcome");
 
     assert!(
-        matches!(outcome, CapabilityOutcome::Completed(_)),
+        matches!(outcome, Resolution::Done(ref o) if o.verdict.is_success()),
         "OwnCapabilities-scoped ext-A hook must not fire when the provider \
          is unknown; the inner port must complete the call. Got {outcome:?}"
     );
@@ -4139,7 +4160,7 @@ async fn own_capabilities_hook_fires_when_provider_matches() {
         .expect("invoke returns an outcome");
 
     match outcome {
-        CapabilityOutcome::Denied(_) => {} // expected: hook fired
+        Resolution::Denied(_) => {} // expected: hook fired
         other => panic!(
             "OwnCapabilities hook must fire when provider matches the binding's owning_extension; got {other:?}"
         ),
@@ -4176,7 +4197,7 @@ async fn own_capabilities_hook_does_not_fire_when_provider_differs() {
         .expect("invoke returns an outcome");
 
     assert!(
-        matches!(outcome, CapabilityOutcome::Completed(_)),
+        matches!(outcome, Resolution::Done(ref o) if o.verdict.is_success()),
         "ext-A's OwnCapabilities hook must NOT fire against ext-B's capability; got {outcome:?}"
     );
     assert_eq!(inner.invocations().len(), 1, "inner port should be invoked");
@@ -4209,7 +4230,7 @@ async fn own_capabilities_hook_does_not_fire_when_provider_unknown() {
         .expect("invoke returns an outcome");
 
     assert!(
-        matches!(outcome, CapabilityOutcome::Completed(_)),
+        matches!(outcome, Resolution::Done(ref o) if o.verdict.is_success()),
         "OwnCapabilities must NOT fire when provider is unknown; got {outcome:?}"
     );
 }

@@ -28,7 +28,7 @@ use crate::LlmReloadTrigger;
 use crate::llm_admin::llm_config_service::{
     NEARAI_LOGIN_CALLBACK_PATH, NearAiLoginStateStore, apply_nearai_login,
 };
-use crate::webui::webui_serve::PublicRouteMount;
+use crate::webui::route_mounts::PublicRouteMount;
 
 const NEARAI_CALLBACK_RATE_WINDOW_SECONDS: NonZeroU32 = match NonZeroU32::new(60) {
     Some(value) => value,
@@ -40,6 +40,8 @@ const NEARAI_CALLBACK_RATE_MAX: NonZeroU32 = match NonZeroU32::new(60) {
     // SAFETY: 60 is a non-zero literal rate limit.
     None => unreachable!(),
 };
+const NEARAI_LOGIN_SUCCESS_REDIRECT: &str = "/chat";
+const NEARAI_LOGIN_ERROR_REDIRECT: &str = "/settings/inference?nearai_login=error";
 
 #[derive(Clone)]
 struct NearAiCallbackState {
@@ -61,22 +63,22 @@ async fn nearai_callback(
     Query(query): Query<CallbackQuery>,
 ) -> Redirect {
     if !state.states.consume(&login_state).await {
-        return Redirect::to("/v2/settings/inference?nearai_login=error");
+        return Redirect::to(NEARAI_LOGIN_ERROR_REDIRECT);
     }
     let Some(token) = query.token.filter(|token| !token.trim().is_empty()) else {
-        return Redirect::to("/v2/settings/inference?nearai_login=error");
+        return Redirect::to(NEARAI_LOGIN_ERROR_REDIRECT);
     };
     match apply_nearai_login(&state.session, &state.boot, state.reload.as_ref(), &token).await {
-        Ok(()) => Redirect::to("/v2/chat"),
+        Ok(()) => Redirect::to(NEARAI_LOGIN_SUCCESS_REDIRECT),
         Err(error) => {
             tracing::warn!(%error, "NEAR AI login callback failed");
-            Redirect::to("/v2/settings/inference?nearai_login=error")
+            Redirect::to(NEARAI_LOGIN_ERROR_REDIRECT)
         }
     }
 }
 
 /// Build the public NEAR AI login callback mount for composition to merge via
-/// [`crate::webui::webui_serve::WebuiServeConfig::with_public_route_mount`].
+/// `ironclaw_webui::WebuiServeConfig::with_public_route_mount`.
 pub(crate) fn nearai_login_callback_mount(
     session: Arc<ironclaw_llm::SessionManager>,
     reload: Arc<dyn LlmReloadTrigger>,
@@ -125,7 +127,49 @@ fn nearai_callback_descriptor() -> IngressRouteDescriptor {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode, header};
+    use ironclaw_llm::{SessionConfig, SessionManager};
+    use ironclaw_reborn_config::{RebornHome, RebornProfile};
+    use tower::ServiceExt;
+
     use super::*;
+
+    #[derive(Default)]
+    struct RecordingReload {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmReloadTrigger for RecordingReload {
+        async fn reload(&self) -> Result<(), String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn callback_mount(
+        root: &std::path::Path,
+        states: Arc<NearAiLoginStateStore>,
+        reload: Arc<RecordingReload>,
+    ) -> PublicRouteMount {
+        let home =
+            RebornHome::resolve_from_env_parts(Some(root.as_os_str().to_os_string()), None, None)
+                .expect("temporary Reborn home is valid");
+        let session = Arc::new(SessionManager::new(SessionConfig {
+            auth_base_url: "https://private.near.ai".to_string(),
+            session_path: root.join("nearai-session.json"),
+        }));
+        nearai_login_callback_mount(
+            session,
+            reload,
+            RebornBootConfig::new(home, RebornProfile::LocalDev),
+            states,
+        )
+    }
 
     #[test]
     fn nearai_callback_descriptor_records_state_guarded_effectful_workflow() {
@@ -140,5 +184,73 @@ mod tests {
         ));
         assert_eq!(policy.scope_source(), IngressScopeSource::HostResolved);
         assert_eq!(policy.effect_path(), &AllowedEffectPath::ProductWorkflow);
+    }
+
+    #[tokio::test]
+    async fn nearai_callback_redirects_success_to_root_chat() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let states = Arc::new(NearAiLoginStateStore::new());
+        let login_state = states.issue().await;
+        let reload = Arc::new(RecordingReload::default());
+        let mount = callback_mount(temp.path(), states, Arc::clone(&reload));
+
+        let response = mount
+            .router
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/webchat/v2/llm/nearai/{login_state}/auth/callback?token=session-token"
+                    ))
+                    .body(Body::empty())
+                    .expect("callback request"),
+            )
+            .await
+            .expect("callback response");
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("/chat"),
+        );
+        assert_eq!(reload.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn nearai_callback_redirects_invalid_or_incomplete_login_to_root_settings() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let states = Arc::new(NearAiLoginStateStore::new());
+        let valid_state = states.issue().await;
+        let reload = Arc::new(RecordingReload::default());
+        let mount = callback_mount(temp.path(), states, Arc::clone(&reload));
+
+        for uri in [
+            "/api/webchat/v2/llm/nearai/unknown/auth/callback?token=session-token".to_string(),
+            format!("/api/webchat/v2/llm/nearai/{valid_state}/auth/callback"),
+        ] {
+            let response = mount
+                .router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("callback request"),
+                )
+                .await
+                .expect("callback response");
+
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::LOCATION)
+                    .and_then(|value| value.to_str().ok()),
+                Some("/settings/inference?nearai_login=error"),
+            );
+        }
+        assert_eq!(reload.calls.load(Ordering::SeqCst), 0);
     }
 }

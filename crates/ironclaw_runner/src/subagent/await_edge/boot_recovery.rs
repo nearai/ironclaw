@@ -27,7 +27,7 @@ use std::{
 };
 
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     AwaitEdgeWriter, AwaitedChildSetRecord, ResolveReport, ScopeRecoveryInProgress,
 };
 use ironclaw_threads::SessionThreadService;
@@ -92,7 +92,7 @@ where
                     Ok(outcome) => outcome,
                     Err(error) => {
                         tracing::debug!(error = %error, %parent_run_id, %child_run_id, "await-edge recovery drain failed");
-                        ironclaw_loop_support::ResolveOutcome::AlreadyClosed
+                        ironclaw_loop_host::ResolveOutcome::AlreadyClosed
                     }
                 }
             }
@@ -101,8 +101,8 @@ where
                     .close_edge(scope, parent_run_id, edge.tree_root_run_id, child_run_id)
                     .await
                 {
-                    Ok(()) => ironclaw_loop_support::ResolveOutcome::Drained,
-                    Err(_) => ironclaw_loop_support::ResolveOutcome::AlreadyClosed,
+                    Ok(()) => ironclaw_loop_host::ResolveOutcome::Drained,
+                    Err(_) => ironclaw_loop_host::ResolveOutcome::AlreadyClosed,
                 }
             }
         };
@@ -390,11 +390,11 @@ mod tests {
     struct NoopResultWriter;
 
     #[async_trait::async_trait]
-    impl ironclaw_loop_support::LoopCapabilityResultWriter for NoopResultWriter {
+    impl ironclaw_loop_host::LoopCapabilityResultWriter for NoopResultWriter {
         async fn write_capability_result(
             &self,
-            _write: ironclaw_loop_support::CapabilityResultWrite<'_>,
-        ) -> Result<ironclaw_loop_support::CapabilityWriteResult, AgentLoopHostError> {
+            _write: ironclaw_loop_host::CapabilityResultWrite<'_>,
+        ) -> Result<ironclaw_loop_host::CapabilityWriteResult, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 ironclaw_turns::run_profile::AgentLoopHostErrorKind::Unavailable,
                 "not exercised by shared-semaphore tests",
@@ -544,11 +544,11 @@ mod tests {
             mounts,
         ));
         let store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::clone(&fs)));
-        let goal_store: Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore> =
+        let goal_store: Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore> =
             Arc::new(crate::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
         let turn_state_store: Arc<dyn TurnSpawnTreeStateStore> =
-            Arc::new(ironclaw_turns::InMemoryTurnStateStore::default());
-        let result_writer: Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter> =
+            Arc::new(ironclaw_turns::test_support::in_memory_turn_state_store());
+        let result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter> =
             Arc::new(NoopResultWriter);
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let resolver = Arc::new(AwaitEdgeResolver::new_unbound(
@@ -620,11 +620,11 @@ mod tests {
         fs: Arc<ScopedFilesystem<InMemoryBackend>>,
     ) -> Arc<AwaitEdgeResolver<InMemorySessionThreadService, InMemoryBackend>> {
         let store = Arc::new(FilesystemAwaitEdgeStore::new(fs));
-        let goal_store: Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore> =
+        let goal_store: Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore> =
             Arc::new(crate::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
         let turn_state_store: Arc<dyn TurnSpawnTreeStateStore> =
-            Arc::new(ironclaw_turns::InMemoryTurnStateStore::default());
-        let result_writer: Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter> =
+            Arc::new(ironclaw_turns::test_support::in_memory_turn_state_store());
+        let result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter> =
             Arc::new(NoopResultWriter);
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         Arc::new(AwaitEdgeResolver::new_unbound(
@@ -707,7 +707,7 @@ mod tests {
 
         let fs = boot_sem_scoped_fs();
         let store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::clone(&fs)));
-        let state_store = Arc::new(ironclaw_turns::InMemoryTurnStateStore::default());
+        let state_store = Arc::new(ironclaw_turns::test_support::in_memory_turn_state_store());
         let coordinator = DefaultTurnCoordinator::new(Arc::clone(&state_store));
         let thread_service = Arc::new(InMemorySessionThreadService::default());
 
@@ -731,6 +731,7 @@ mod tests {
             ..
         } = coordinator
             .submit_turn(SubmitTurnRequest {
+                requested_model: None,
                 scope: parent_scope.clone(),
                 actor: actor.clone(),
                 accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new(
@@ -909,13 +910,13 @@ mod tests {
                 "subagent-reply:recover-settled",
             )
             .unwrap(),
-            subagent_kind: ironclaw_loop_support::SubagentKindId::new("general").unwrap(),
+            subagent_kind: ironclaw_loop_host::SubagentKindId::new("general").unwrap(),
             spawn_capability_id: ironclaw_host_api::CapabilityId::new(
-                ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
+                ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
             )
             .unwrap(),
             result_ref,
-            mode: ironclaw_loop_support::SpawnSubagentMode::Blocking,
+            mode: ironclaw_loop_host::SpawnSubagentMode::Blocking,
             state: super::super::AwaitEdgeState::Settled,
             terminal_kind: Some(super::super::EdgeTerminalKind::Completed),
             terminal_byte_len: None,
@@ -931,7 +932,7 @@ mod tests {
 
         // 5. Build the resolver, bind the real coordinator, and re-drive
         // recovery over this exact scope.
-        let goal_store: Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore> =
+        let goal_store: Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore> =
             Arc::new(crate::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
         let turn_state_store: Arc<dyn TurnSpawnTreeStateStore> = state_store.clone();
         let resolver = Arc::new(AwaitEdgeResolver::new_unbound(

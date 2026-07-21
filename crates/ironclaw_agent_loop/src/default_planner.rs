@@ -326,7 +326,10 @@ mod tests {
         let planner = DefaultPlanner::compose_default();
         let state = LoopExecutionState::initial_for_run(&test_run_context());
 
-        assert_eq!(planner.budget().iteration_limit(&state), 256);
+        assert_eq!(
+            planner.budget().iteration_limit(&state),
+            crate::strategies::DEFAULT_ITERATION_BACKSTOP
+        );
         assert_eq!(planner.batch().policy(&state, &[]), BatchPolicy::Parallel);
 
         let filter = planner.capability().filter(&state).await;
@@ -394,6 +397,10 @@ mod tests {
                 drop_through_seq: 5,
                 preserve_tail_tokens: 1,
                 deadline_ms: 7,
+                effectiveness_baseline:
+                    crate::state::CompactionEffectivenessBaseline::PreCompactionPromptTokens {
+                        tokens: 80,
+                    },
             }
         );
     }

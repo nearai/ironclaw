@@ -7,14 +7,15 @@
 pub const SKILL_ACTIVATE_CAPABILITY_ID: &str = crate::runtime::SKILL_ACTIVATE_CAPABILITY_ID;
 
 /// Opaque handle (E-SKILL seam) carrying the built local-dev skill context
-/// source. Hides the crate-private `LocalDevSelectableSkillContextSource` from
+/// source. Hides the crate-private `ComposedSelectableSkillContextSource` from
 /// the integration-test crate, which cannot name it. Exposes the
 /// `HostSkillContextSource` for runtime wiring; the activation source travels
-/// inside for [`wrap_skill_activation_capability_for_test`]. Tests only.
+/// inside for the harness's `RefreshingCapabilityPortTestParts`. Tests
+/// only.
 #[cfg(feature = "test-support")]
 pub struct SkillActivationTestSource {
-    source: std::sync::Arc<dyn ironclaw_loop_support::HostSkillContextSource>,
-    activation_source: std::sync::Arc<crate::runtime::LocalDevSelectableSkillContextSource>,
+    source: std::sync::Arc<dyn ironclaw_loop_host::HostSkillContextSource>,
+    activation_source: std::sync::Arc<crate::runtime::ComposedSelectableSkillContextSource>,
 }
 
 #[cfg(feature = "test-support")]
@@ -22,20 +23,18 @@ impl SkillActivationTestSource {
     /// The `HostSkillContextSource` to wire as the runtime's
     /// `skill_context_source` (`into_group`, E-SKILL) so activated-skill
     /// instructions inject into the model request.
-    pub fn context_source(
-        &self,
-    ) -> std::sync::Arc<dyn ironclaw_loop_support::HostSkillContextSource> {
+    pub fn context_source(&self) -> std::sync::Arc<dyn ironclaw_loop_host::HostSkillContextSource> {
         self.source.clone()
     }
 
     /// Crate-internal accessor for the wrapped activation source. Kept
     /// `pub(crate)` (never `pub`) so the crate-private
-    /// `LocalDevSelectableSkillContextSource` type never appears in this
+    /// `ComposedSelectableSkillContextSource` type never appears in this
     /// crate's public API; only `runtime::local_dev`'s test-support
     /// constructor (which already names the type) may call this.
     pub(crate) fn activation_source(
         &self,
-    ) -> std::sync::Arc<crate::runtime::LocalDevSelectableSkillContextSource> {
+    ) -> std::sync::Arc<crate::runtime::ComposedSelectableSkillContextSource> {
         self.activation_source.clone()
     }
 }
@@ -47,7 +46,7 @@ impl SkillActivationTestSource {
 /// composed. Mirrors `build_user_profile_source_for_test` (E-SKILL seam).
 /// Tests only.
 #[cfg(feature = "test-support")]
-pub fn build_local_dev_skill_context_source_for_test(
+pub fn build_skill_context_source_for_test(
     services: &crate::RebornServices,
     tenant_id: &ironclaw_host_api::TenantId,
     regex_skill_activation_enabled: bool,
@@ -70,29 +69,4 @@ pub fn build_local_dev_skill_context_source_for_test(
         source,
         activation_source,
     })
-}
-
-/// Test-support entry point (E-SKILL seam): inject the `skill_activate`
-/// synthetic capability onto `inner`, using the source built by
-/// [`build_local_dev_skill_context_source_for_test`]. Mirrors
-/// `wrap_project_create_capability_for_test`; the dispatch path never drifts
-/// from production. Tests only.
-#[cfg(feature = "test-support")]
-pub fn wrap_skill_activation_capability_for_test(
-    inner: std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    source: &SkillActivationTestSource,
-    run_context: ironclaw_turns::run_profile::LoopRunContext,
-    input_resolver: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
-    result_writer: std::sync::Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
-) -> Result<
-    std::sync::Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
-    ironclaw_turns::run_profile::AgentLoopHostError,
-> {
-    crate::runtime::wrap_skill_activation_capability_for_test(
-        inner,
-        source.activation_source.clone(),
-        run_context,
-        input_resolver,
-        result_writer,
-    )
 }

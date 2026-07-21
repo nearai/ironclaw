@@ -491,6 +491,7 @@ where
             received_at: envelope.received_at(),
             adapter_id: prepared.adapter_id,
             surface_type: prepared.surface_type,
+            requested_model: payload.requested_model.clone(),
         }))
         .submit_or_replay(&self.thread_service, &self.turn_coordinator)
         .await
@@ -654,6 +655,10 @@ impl ProductInboundTurnHandoff {
                 received_at,
                 adapter_id,
                 surface_type,
+                // The requested model is not persisted in the message store, so an
+                // idempotent resubmission of an accepted message falls back to the
+                // deployment's active model rather than recovering the original hint.
+                requested_model: None,
             },
         )))
     }
@@ -703,6 +708,7 @@ struct AcceptedProductInboundTurn {
     received_at: DateTime<Utc>,
     adapter_id: ProductAdapterId,
     surface_type: TurnSurfaceType,
+    requested_model: Option<String>,
 }
 
 impl AcceptedProductInboundTurn {
@@ -725,6 +731,7 @@ impl AcceptedProductInboundTurn {
             received_at,
             adapter_id,
             surface_type,
+            requested_model,
         } = self;
         let turn_scope = TurnScope::new_with_owner(
             binding.tenant_id.clone(),
@@ -779,6 +786,7 @@ impl AcceptedProductInboundTurn {
             source_binding_ref,
             reply_target_binding_ref,
             requested_run_profile: None,
+            requested_model,
             idempotency_key,
             received_at,
             requested_run_id: None,

@@ -114,7 +114,6 @@ fn build_driver_checks() -> Vec<DoctorCheck> {
     ]
 }
 
-#[cfg(feature = "root-llm-provider")]
 fn check_llm_readiness(
     context: &RebornCliContext,
     loaded_config: &LoadedDoctorConfig,
@@ -145,8 +144,7 @@ fn check_llm_readiness(
         Ok(None) => dependency_check(
             "llm_provider",
             CheckOutcome::Fail,
-            "no default provider is configured; run `ironclaw-reborn models set-provider`"
-                .to_string(),
+            "no default provider is configured; run `ironclaw models set-provider`".to_string(),
         ),
         Err(error) => dependency_check(
             "llm_provider",
@@ -154,18 +152,6 @@ fn check_llm_readiness(
             format!("provider or credentials are not ready: {error}"),
         ),
     }
-}
-
-#[cfg(not(feature = "root-llm-provider"))]
-fn check_llm_readiness(
-    _context: &RebornCliContext,
-    _loaded_config: &LoadedDoctorConfig,
-) -> DoctorCheck {
-    dependency_check(
-        "llm_provider",
-        CheckOutcome::Skip,
-        "root LLM provider support not compiled".to_string(),
-    )
 }
 
 fn skipped_live_dependency_checks() -> Vec<DoctorCheck> {
@@ -370,7 +356,6 @@ fn check_config_file(loaded_config: &LoadedDoctorConfig) -> DoctorCheck {
     }
 }
 
-#[cfg(feature = "root-llm-provider")]
 fn check_providers_file(path: &std::path::Path) -> DoctorCheck {
     match std::fs::read_to_string(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => DoctorCheck {
@@ -402,16 +387,6 @@ fn check_providers_file(path: &std::path::Path) -> DoctorCheck {
                 },
             }
         }
-    }
-}
-
-#[cfg(not(feature = "root-llm-provider"))]
-fn check_providers_file(_path: &std::path::Path) -> DoctorCheck {
-    DoctorCheck {
-        name: "providers_file".to_string(),
-        category: CheckCategory::Core,
-        outcome: CheckOutcome::Skip,
-        detail: "root LLM provider support not compiled".to_string(),
     }
 }
 
@@ -583,7 +558,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "root-llm-provider")]
     fn doctor_valid_providers_file_is_pass() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("providers.json");
@@ -593,7 +567,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "root-llm-provider")]
     fn doctor_invalid_providers_file_is_fail() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("providers.json");
@@ -603,7 +576,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "root-llm-provider")]
     fn doctor_well_formed_but_invalid_providers_catalog_is_fail() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("providers.json");
@@ -613,7 +585,6 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[cfg(feature = "root-llm-provider")]
     #[test]
     fn doctor_unreadable_providers_file_is_fail() {
         let dir = tempfile::tempdir().expect("tempdir");

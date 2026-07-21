@@ -16,8 +16,8 @@ use ironclaw_hooks::middleware::{
     HookedLoopCapabilityPort, HookedLoopCheckpointPort, HookedLoopModelPort, HookedLoopPromptPort,
     HookedLoopTranscriptPort,
 };
-use ironclaw_host_api::{CapabilityId, ExtensionId};
-use ironclaw_loop_support::{
+use ironclaw_host_api::{CapabilityId, ExtensionId, Resolution, ResolutionBatch};
+use ironclaw_loop_host::{
     ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT, CapabilityResolveError, CapabilitySurfaceProfileFilter,
     CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, EmptyUserProfileSource,
     GuardedSystemInferencePort, HostIdentityContextSource, HostInputQueue, HostManagedModelGateway,
@@ -113,21 +113,20 @@ use ironclaw_turns::{
     TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
-        CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityInvocation, CapabilityOutcome,
-        CommunicationContextProvider, FinalizeAssistantMessage, HookMilestoneSink,
-        HostManagedLoopModelPort, HostManagedLoopPromptPort,
-        InMemoryInstructionMaterializationStore, InstructionBundleMaterializedMessage,
-        InstructionMaterializationStore, InstructionSafetyContext, LoadCheckpointPayloadRequest,
-        LoadedCheckpointPayload, LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort,
-        LoopCheckpointPort, LoopCheckpointRequest, LoopCompactionError, LoopCompactionOutcome,
-        LoopCompactionPort, LoopCompactionRequest, LoopContextBundle, LoopContextPort,
-        LoopContextRequest, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
-        LoopInputCursor, LoopInputPort, LoopModelBudgetAccountant, LoopModelGateway,
-        LoopModelPolicyGuard, LoopModelPort, LoopModelRequest, LoopModelResponse,
-        LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
-        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopRunInfoPort,
-        LoopRuntimeContext, LoopTranscriptPort, NoOpBudgetAccountant, NoOpPolicyGuard,
-        ProviderToolCall, ProviderToolDefinition, RegisterProviderToolCallRequest,
+        CapabilityBatchInvocation, CapabilityInvocation, CommunicationContextProvider,
+        FinalizeAssistantMessage, HookMilestoneSink, HostManagedLoopModelPort,
+        HostManagedLoopPromptPort, InMemoryInstructionMaterializationStore,
+        InstructionBundleMaterializedMessage, InstructionMaterializationStore,
+        InstructionSafetyContext, LoadCheckpointPayloadRequest, LoadedCheckpointPayload,
+        LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort,
+        LoopCheckpointRequest, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
+        LoopCompactionRequest, LoopContextBundle, LoopContextPort, LoopContextRequest,
+        LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort,
+        LoopModelBudgetAccountant, LoopModelGateway, LoopModelPolicyGuard, LoopModelPort,
+        LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
+        LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+        LoopRunInfoPort, LoopRuntimeContext, LoopTranscriptPort, NoOpBudgetAccountant,
+        NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition, RegisterProviderToolCallRequest,
         RunScopedHookMilestoneSink, StageCheckpointPayloadRequest, SystemInferencePort,
         UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
@@ -302,32 +301,32 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         let may_change_surface = capability_may_change_visible_surface(&request.capability_id);
-        let outcome = self.inner.invoke_capability(request).await?;
+        let resolution = self.inner.invoke_capability(request).await?;
         if may_change_surface {
             self.surface_state.clear_current()?;
         }
-        Ok(outcome)
+        Ok(resolution)
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
         let may_change_surface = request
             .invocations
             .iter()
             .any(|invocation| capability_may_change_visible_surface(&invocation.capability_id));
-        let outcome = self.inner.invoke_capability_batch(request).await?;
+        let resolution = self.inner.invoke_capability_batch(request).await?;
         if may_change_surface {
             self.surface_state.clear_current()?;
         }
-        Ok(outcome)
+        Ok(resolution)
     }
 }
 
-// `LoopCapabilityInputResolver` is now defined in `ironclaw_loop_support`
+// `LoopCapabilityInputResolver` is now defined in `ironclaw_loop_host`
 // (workspace-10 refactor); imported above.
 
 /// Default upper bound (in bytes of UTF-8 JSON-serialized form) above which
@@ -440,7 +439,7 @@ impl HookCapabilityInputResolver for HookCapabilityInputResolverAdapter {
     }
 }
 
-// `LoopCapabilityResultWriter` is now defined in `ironclaw_loop_support`
+// `LoopCapabilityResultWriter` is now defined in `ironclaw_loop_host`
 // (workspace-10 refactor); imported above.
 
 pub type HookDispatcherFactory = Arc<dyn Fn() -> Arc<HookDispatcher> + Send + Sync + 'static>;
@@ -1968,14 +1967,26 @@ where
                 .validate()
                 .map_err(|reason| RebornLoopDriverHostError::InvalidRequest { reason })?;
             let Some(resolver) = &self.model_route_resolver else {
+                // No route resolver is wired (the default product runtime). An
+                // *advisory* snapshot is a caller-requested model hint, not an
+                // operator-approved route: pass it through unvalidated so the
+                // non-routed gateway can honor the model id when its provider
+                // supports per-request overrides and otherwise fall back to the
+                // active model. A non-advisory (operator) route persisted on a
+                // resolver-less host is a misconfiguration we cannot validate,
+                // so fail closed. Routed hosts (resolver present) validate every
+                // route below.
+                if snapshot.is_advisory() {
+                    return Ok(run_context);
+                }
                 return Err(RebornLoopDriverHostError::InvalidRequest {
                     reason: "model route resolver is required for this host".to_string(),
                 });
             };
             let slot = slot_for_model_profile(&run_context)?;
             let route = crate::model_routes::ModelRoute::new(
-                snapshot.provider_id.clone(),
-                snapshot.model_id.clone(),
+                snapshot.provider_id().to_string(),
+                snapshot.model_id().to_string(),
             )
             .map_err(model_route_error_to_host_error)?;
             resolver
@@ -1995,7 +2006,10 @@ where
         let snapshot = resolver
             .resolve_model_route(slot)
             .map_err(model_route_error_to_host_error)?;
-        Ok(run_context.with_resolved_model_route(snapshot.to_loop_model_route_snapshot()))
+        let route_snapshot = snapshot
+            .to_loop_model_route_snapshot()
+            .map_err(|reason| RebornLoopDriverHostError::InvalidRequest { reason })?;
+        Ok(run_context.with_resolved_model_route(route_snapshot))
     }
 }
 
@@ -2136,14 +2150,14 @@ impl LoopCapabilityPort for RebornLoopDriverHost {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         self.capabilities.invoke_capability(request).await
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
         self.capabilities.invoke_capability_batch(request).await
     }
 }
@@ -2532,28 +2546,28 @@ fn validate_thread_scope(
 
 fn turn_error_to_host_error(error: TurnError) -> AgentLoopHostError {
     match &error {
-        TurnError::Unauthorized => ironclaw_loop_support::raw_agent_loop_host_error(
+        TurnError::Unauthorized => ironclaw_loop_host::raw_agent_loop_host_error(
             "checkpoint_state",
             "access",
             AgentLoopHostErrorKind::Unauthorized,
             "checkpoint state access was unauthorized",
             &error,
         ),
-        TurnError::InvalidRequest { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
+        TurnError::InvalidRequest { .. } => ironclaw_loop_host::raw_agent_loop_host_error(
             "checkpoint_state",
             "request",
             AgentLoopHostErrorKind::InvalidInvocation,
             "checkpoint state request is invalid",
             &error,
         ),
-        TurnError::Unavailable { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
+        TurnError::Unavailable { .. } => ironclaw_loop_host::raw_agent_loop_host_error(
             "checkpoint_state",
             "store",
             AgentLoopHostErrorKind::Unavailable,
             "checkpoint state store is unavailable",
             &error,
         ),
-        TurnError::ScopeNotFound => ironclaw_loop_support::raw_agent_loop_host_error(
+        TurnError::ScopeNotFound => ironclaw_loop_host::raw_agent_loop_host_error(
             "checkpoint_state",
             "scope_lookup",
             AgentLoopHostErrorKind::CheckpointRejected,
@@ -2561,7 +2575,7 @@ fn turn_error_to_host_error(error: TurnError) -> AgentLoopHostError {
             &error,
         ),
         TurnError::Conflict { .. } | TurnError::RunNotRetryable { .. } => {
-            ironclaw_loop_support::raw_agent_loop_host_error(
+            ironclaw_loop_host::raw_agent_loop_host_error(
                 "checkpoint_state",
                 "write",
                 AgentLoopHostErrorKind::CheckpointRejected,
@@ -2569,21 +2583,21 @@ fn turn_error_to_host_error(error: TurnError) -> AgentLoopHostError {
                 &error,
             )
         }
-        TurnError::CapacityExceeded { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
+        TurnError::CapacityExceeded { .. } => ironclaw_loop_host::raw_agent_loop_host_error(
             "checkpoint_state",
             "write",
             AgentLoopHostErrorKind::Unavailable,
             "checkpoint state store capacity was exceeded",
             &error,
         ),
-        TurnError::InvalidTransition { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
+        TurnError::InvalidTransition { .. } => ironclaw_loop_host::raw_agent_loop_host_error(
             "checkpoint_state",
             "write",
             AgentLoopHostErrorKind::CheckpointRejected,
             "checkpoint state write was invalid for current turn state",
             &error,
         ),
-        TurnError::LeaseMismatch => ironclaw_loop_support::raw_agent_loop_host_error(
+        TurnError::LeaseMismatch => ironclaw_loop_host::raw_agent_loop_host_error(
             "checkpoint_state",
             "write",
             AgentLoopHostErrorKind::CheckpointRejected,
@@ -2591,7 +2605,7 @@ fn turn_error_to_host_error(error: TurnError) -> AgentLoopHostError {
             &error,
         ),
         TurnError::ThreadBusy(_) | TurnError::AdmissionRejected(_) => {
-            ironclaw_loop_support::raw_agent_loop_host_error(
+            ironclaw_loop_host::raw_agent_loop_host_error(
                 "checkpoint_state",
                 "admission",
                 AgentLoopHostErrorKind::Unavailable,
@@ -2599,7 +2613,7 @@ fn turn_error_to_host_error(error: TurnError) -> AgentLoopHostError {
                 &error,
             )
         }
-        TurnError::InvalidRunOriginAdapter => ironclaw_loop_support::raw_agent_loop_host_error(
+        TurnError::InvalidRunOriginAdapter => ironclaw_loop_host::raw_agent_loop_host_error(
             "checkpoint_state",
             "request",
             AgentLoopHostErrorKind::InvalidInvocation,
@@ -2769,11 +2783,13 @@ mod compaction_tests;
 mod tests {
     use super::*;
 
+    use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_loop_host::FilesystemCheckpointStateStore;
+    use ironclaw_turns::test_support::in_memory_turn_state_store;
     use ironclaw_turns::{
-        InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryRunProfileResolver,
-        PutLoopCheckpointRequest, RunProfileResolver, TurnActor, TurnCheckpointId, TurnId,
-        TurnRunId, TurnScope,
+        FilesystemTurnStateRowStore, InMemoryRunProfileResolver, PutLoopCheckpointRequest,
+        RunProfileResolver, TurnActor, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
         run_profile::{
             AgentLoopHostErrorKind, CheckpointSchemaId, InMemoryLoopHostMilestoneSink,
             LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopCheckpointRequest,
@@ -2845,15 +2861,17 @@ mod tests {
         );
     }
 
+    use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
+
     fn test_checkpoint_port(
         context: LoopRunContext,
     ) -> (
         HostManagedLoopCheckpointPort,
-        Arc<InMemoryCheckpointStateStore>,
-        Arc<InMemoryLoopCheckpointStore>,
+        Arc<FilesystemCheckpointStateStore<InMemoryBackend>>,
+        Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
     ) {
-        let state_store = Arc::new(InMemoryCheckpointStateStore::default());
-        let checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
+        let state_store = in_memory_checkpoint_state_store();
+        let checkpoint_store = Arc::new(in_memory_turn_state_store());
         let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
         let port = HostManagedLoopCheckpointPort::new(
             context,
@@ -2875,7 +2893,7 @@ mod tests {
         let state_ref = port
             .stage_checkpoint_payload(StageCheckpointPayloadRequest {
                 kind: LoopCheckpointKind::BeforeSideEffect,
-                schema_id: expected_schema_id.as_str().to_string(),
+                schema_id: expected_schema_id.clone(),
                 payload: payload.clone(),
             })
             .await
@@ -2913,7 +2931,7 @@ mod tests {
         let state_ref = port
             .stage_checkpoint_payload(StageCheckpointPayloadRequest {
                 kind: LoopCheckpointKind::BeforeModel,
-                schema_id: expected_schema_id.as_str().to_string(),
+                schema_id: expected_schema_id.clone(),
                 payload: b"{}".to_vec(),
             })
             .await
@@ -2949,7 +2967,7 @@ mod tests {
         let state_ref = port
             .stage_checkpoint_payload(StageCheckpointPayloadRequest {
                 kind: LoopCheckpointKind::BeforeModel,
-                schema_id: expected_schema_id.as_str().to_string(),
+                schema_id: expected_schema_id.clone(),
                 payload: b"{}".to_vec(),
             })
             .await

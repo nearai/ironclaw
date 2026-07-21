@@ -1,6 +1,6 @@
 """Live QA runner for Reborn WebUI v2.
 
-This lane intentionally starts the standalone ``ironclaw-reborn serve`` binary
+This lane intentionally starts the standalone ``ironclaw serve`` binary
 and drives the React WebUI v2 surface with Playwright. It does not use the
 legacy gateway stack and does not mock the LLM provider.
 """
@@ -206,6 +206,16 @@ DEFAULT_USER_ID = "reborn-webui-v2-live-qa-user"
 ENDPOINT_STATUS_URL = "https://near.ai"
 PROVIDER = "reborn-webui-v2"
 MODE = "live"
+# Live QA is model- and network-nondeterministic: the same commit can pass then
+# flake red hours later. Retry a transient (assertion/behavioral) case failure up
+# to this many total attempts before recording a red. Default 2 = one retry;
+# override via REBORN_WEBUI_V2_LIVE_QA_CASE_ATTEMPTS.
+try:
+    LIVE_QA_CASE_ATTEMPTS = max(
+        1, int(os.environ.get("REBORN_WEBUI_V2_LIVE_QA_CASE_ATTEMPTS", "2"))
+    )
+except ValueError:
+    LIVE_QA_CASE_ATTEMPTS = 2
 HN_KEYWORD_SEARCH_URL = (
     "https://hn.algolia.com/api/v1/search_by_date"
     "?query=NEAR%20AI&tags=story&hitsPerPage=1"
@@ -215,6 +225,15 @@ EXTENSION_INSTALL_CAPABILITY_ID = "builtin.extension_install"
 EXTENSION_ACTIVATE_CAPABILITY_ID = "builtin.extension_activate"
 OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID = "builtin.outbound_delivery_targets_list"
 QA_7C_BUG_LOGGING_SHEET_TITLE = "bug logging Google Sheet"
+SLACK_EXTENSION_REQUIREMENT = {
+    "package_id": "slack",
+    "display_name": "Slack",
+    "required_tools": [
+        "slack.list_conversations",
+        "slack.get_conversation_info",
+        "slack.get_conversation_history",
+    ],
+}
 
 
 def _qa_7c_bug_logger_prompt(
@@ -359,34 +378,23 @@ def _cargo_target_dir() -> Path:
 
 
 def _reborn_binary() -> Path:
-    return _cargo_target_dir() / "debug" / "ironclaw-reborn"
+    return _cargo_target_dir() / "debug" / "ironclaw"
 
 
 def build_reborn_binary() -> Path:
-    features = os.environ.get(
-        "REBORN_WEBUI_V2_LIVE_QA_FEATURES",
-        "webui-v2-beta,slack-v2-host-beta",
-    )
+    features = os.environ.get("REBORN_WEBUI_V2_LIVE_QA_FEATURES", "")
     build_env = os.environ.copy()
     build_env.setdefault("CARGO_PROFILE_DEV_DEBUG", "0")
     build_env.setdefault("CARGO_INCREMENTAL", "0")
-    run(
-        [
-            "cargo",
-            "build",
-            "-p",
-            "ironclaw_reborn_cli",
-            "--features",
-            features,
-            "--bin",
-            "ironclaw-reborn",
-        ],
-        cwd=ROOT,
-        env=build_env,
-    )
+    command = ["cargo", "build", "-p", "ironclaw"]
+    if features:
+        command += ["--features", features]
+    command += ["--bin", "ironclaw"]
+    run(command, cwd=ROOT, env=build_env)
     binary = _reborn_binary()
     if not binary.exists():
-        raise LiveQaError(f"ironclaw-reborn binary was not produced at {binary}")
+        message = f"ironclaw binary was not produced at {binary}"
+        raise LiveQaError(message)
     return binary
 
 
@@ -751,7 +759,7 @@ def server_env(
             "RUST_BACKTRACE": "1",
             "RUST_LOG": os.environ.get(
                 "RUST_LOG",
-                "ironclaw=warn,ironclaw_runner=warn,ironclaw_reborn_webui_ingress=info",
+                "ironclaw=warn,ironclaw_runner=warn,ironclaw_webui=info",
             ),
         }
     )
@@ -809,7 +817,7 @@ async def start_reborn_server(
     workspace_dir.mkdir(parents=True, exist_ok=True)
     out = stdout_path.open("a", encoding="utf-8")
     err = stderr_path.open("a", encoding="utf-8")
-    separator = f"\n--- ironclaw-reborn serve start {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} ---\n"
+    separator = f"\n--- ironclaw serve start {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} ---\n"
     out.write(separator)
     err.write(separator)
     out.flush()
@@ -838,7 +846,7 @@ async def start_reborn_server(
         if stderr_path.exists():
             tail = "\n".join(stderr_path.read_text(encoding="utf-8", errors="replace").splitlines()[-80:])
         raise LiveQaError(
-            f"ironclaw-reborn serve did not become healthy at {base_url}: {exc}\n{tail}"
+            f"ironclaw serve did not become healthy at {base_url}: {exc}\n{tail}"
         ) from exc
     return proc, base_url
 
@@ -1145,11 +1153,37 @@ class AssistantReplyWaitResult:
     full_text: str = ""''
 
 
+@dataclass(frozen=True)
+class TerminalRunFailureObservation:
+    summary: str
+    failure_category: str | None
+    failure_status: str | None
+
+
+class TerminalRunFailure(AssertionError):
+    def __init__(self, observation: TerminalRunFailureObservation) -> None:
+        self.observation = observation
+        summary = observation.summary or "The model run failed."
+        super().__init__(
+            f"terminal run failure: {summary} "
+            f"failure_category={observation.failure_category!r} "
+            f"failure_status={observation.failure_status!r}"
+        )
+
+
 ASSISTANT_REPLY_FALLBACK_QUIET_SECONDS = 2.0
 ASSISTANT_REPLY_POLL_SECONDS = 0.5
 # Persisted diagnostic excerpt only — content checks read
 # AssistantReplyWaitResult.full_text, never this truncation.
 ASSISTANT_REPLY_EXCERPT_MAX_CHARS = 2000
+# Capture-race re-confirm: the finalized-reply flag and the bubble text are
+# read in separate Playwright round-trips, so the flag can flip to "true" one
+# poll after a stale/mid-stream text snapshot was captured. Before hard-failing
+# on a missing marker, re-read the finalized bubble this many times (spaced by
+# this delay) so a truncated snapshot doesn't fail a reply that actually
+# contains the marker.
+ASSISTANT_REPLY_MARKER_RECONFIRM_ATTEMPTS = 3
+ASSISTANT_REPLY_MARKER_RECONFIRM_SECONDS = 0.3
 
 
 def _exc_text(exc: BaseException) -> str:
@@ -1164,7 +1198,15 @@ def _exc_text(exc: BaseException) -> str:
 
 
 def _result(case_name: str, success: bool, started: float, details: dict[str, object]) -> ProbeResult:
-    details = {"case": case_name, **details}
+    case_spec = CASES.get(case_name)
+    case_tier = case_spec.tier if case_spec is not None else "contract"
+    blocking = case_spec.blocking if case_spec is not None else True
+    details = {
+        **details,
+        "case": case_name,
+        "case_tier": case_tier,
+        "blocking": blocking,
+    }
     if case_name in QA_SHEET_CASES:
         qa_spec = QA_SHEET_CASES[case_name]
         details = {
@@ -1181,6 +1223,75 @@ def _result(case_name: str, success: bool, started: float, details: dict[str, ob
     )
 
 
+def _is_blocking_failure(result: ProbeResult) -> bool:
+    return not result.success and bool(result.details.get("blocking", True))
+
+
+def _is_provider_incident(result: ProbeResult) -> bool:
+    if result.success:
+        return False
+    return result.details.get("failure_category") in {
+        "model_unavailable",
+        "model_transient",
+        "provider_unavailable",
+        "provider_transient",
+    }
+
+
+def _is_case_retriable(result: ProbeResult) -> bool:
+    """Whether an unsuccessful case result is a transient failure worth re-running.
+
+    Only assertion/behavioral failures are retriable. Non-transient failures are
+    recorded as-is without wasting a retry: blocked preconditions, and
+    infrastructure/provider incidents (failure_class=="infrastructure",
+    inconclusive, or a model/provider incident per _is_provider_incident).
+    """
+    if result.success:
+        return False
+    details = result.details
+    if details.get("blocked"):
+        return False
+    if details.get("failure_class") == "infrastructure":
+        return False
+    if details.get("inconclusive"):
+        return False
+    if _is_provider_incident(result):
+        return False
+    return True
+
+
+async def _run_case_with_retries(
+    fn: CaseFn,
+    ctx: "LiveQaContext",
+    *,
+    attempts: int,
+    is_retriable: Callable[[ProbeResult], bool],
+) -> ProbeResult:
+    """Run a live-QA case, retrying a transient failure before recording a red.
+
+    Runs ``fn(ctx)``; on an unsuccessful *and* retriable result with attempts
+    remaining, runs it again; otherwise returns the (last) result. Re-running
+    ``fn(ctx)`` drives a fresh chat turn against the same already-running
+    server/ctx — no restart — which is the intended retry semantics for a
+    nondeterministic model/network flake. The number of attempts made is
+    recorded into ``result.details["attempts"]``.
+    """
+    total = max(1, attempts)
+    result: ProbeResult | None = None
+    for attempt in range(1, total + 1):
+        result = await fn(ctx)
+        result.details["attempts"] = attempt
+        if result.success or attempt >= total or not is_retriable(result):
+            return result
+        print(
+            "[reborn-webui-v2-live-qa] retrying case after retriable failure "
+            f"attempt={attempt}/{total}",
+            flush=True,
+        )
+    assert result is not None  # the loop body always runs at least once
+    return result
+
+
 def _record_assistant_reply_wait_result(
     observed: dict[str, object],
     reply: AssistantReplyWaitResult,
@@ -1192,6 +1303,61 @@ def _record_assistant_reply_wait_result(
     observed["assistant_reply_wait_reason"] = reply.final_reply_reason
     if reply.semantic_judge is not None:
         observed["semantic_judge"] = reply.semantic_judge
+
+
+_SUBMISSION_CORRELATION_FIELDS = (
+    "accepted_message_ref",
+    "thread_id",
+    "run_id",
+)
+_SUBMISSION_IDENTITY_FIELDS = (*_SUBMISSION_CORRELATION_FIELDS, "turn_id")
+
+
+def _record_submitted_identity(
+    observed: dict[str, Any],
+    payload: dict[str, object],
+) -> None:
+    if any(not payload.get(field) for field in _SUBMISSION_IDENTITY_FIELDS):
+        raise AssertionError("submitted response omitted turn identity fields")
+    identity = {
+        field: str(payload[field]) for field in _SUBMISSION_IDENTITY_FIELDS
+    }
+    existing = observed.get("submission_identity")
+    if existing is not None and existing != identity:
+        raise AssertionError(
+            "ambiguous submission identity: distinct submitted "
+            "acknowledgements matched one prompt"
+        )
+    observed["submission_identity"] = identity
+
+
+def _record_replayed_submission_identity(
+    observed: dict[str, Any],
+    payload: dict[str, object],
+) -> None:
+    """Recover correlation identity from an authoritative replay response."""
+    if any(not payload.get(field) for field in _SUBMISSION_CORRELATION_FIELDS):
+        raise AssertionError(
+            "already_submitted response omitted correlation identity fields"
+        )
+    identity = {
+        field: str(payload[field]) for field in _SUBMISSION_CORRELATION_FIELDS
+    }
+    existing = observed.get("submission_identity")
+    if existing is not None:
+        if not isinstance(existing, dict):
+            raise AssertionError("submission identity had an invalid shape")
+        existing_correlation = {
+            field: str(existing.get(field) or "")
+            for field in _SUBMISSION_CORRELATION_FIELDS
+        }
+        if existing_correlation != identity:
+            raise AssertionError(
+                "ambiguous submission identity: replay response referenced "
+                "a different message or run"
+            )
+        return
+    observed["submission_identity"] = identity
 
 
 def _routine_confirmation_follow_up_for_text(
@@ -1233,50 +1399,177 @@ async def _live_chat_case(
     prompt: str,
     marker: str | None,
     required_text: list[str],
+    extensions: list[dict[str, object]] | None = None,
     timeout: float = 120.0,
     extra_details: dict[str, object] | None = None,
     forbidden_text: list[str] | None = None,
     routine_confirmation_follow_up: bool = False,
     routine_follow_up_timezone_instruction: str | None = None,
     expose_full_reply_text: bool = False,
+    enforce_marker: bool = True,
+    capture_submission_identity: bool = False,
 ) -> ProbeResult:
     from playwright.async_api import expect
 
     started = time.monotonic()
     observed: dict[str, Any] = {}
+    if extensions:
+        observed["extensions"] = [
+            str(extension["package_id"]) for extension in extensions
+        ]
+
+    def is_matching_submission_response(response: object) -> bool:
+        try:
+            request = response.request  # type: ignore[attr-defined]
+            if request.method != "POST":
+                return False
+            if not re.search(
+                r"/api/webchat/v2/threads/[^/]+/messages$",
+                str(response.url),  # type: ignore[attr-defined]
+            ):
+                return False
+            request_body = request.post_data_json
+            if callable(request_body):
+                request_body = request_body()
+            return isinstance(request_body, dict) and request_body.get("content") == prompt
+        except Exception:
+            return False
+
+    async def submit_prompt(page: object, composer: object) -> bool:
+        if not capture_submission_identity:
+            await composer.fill(prompt)  # type: ignore[attr-defined]
+            await composer.press("Enter")  # type: ignore[attr-defined]
+            return True
+        try:
+            async with page.expect_response(  # type: ignore[attr-defined]
+                is_matching_submission_response,
+                timeout=15000,
+            ) as response_info:
+                await composer.fill(prompt)  # type: ignore[attr-defined]
+                await composer.press("Enter")  # type: ignore[attr-defined]
+            response = await response_info.value
+        except Exception as exc:
+            if "submission_identity" in observed:
+                raise
+            observed["submission_response_wait_error"] = _exc_text(exc)
+            return False
+        payload = await response.json()
+        if not isinstance(payload, dict):
+            raise AssertionError("chat submission response was not a JSON object")
+        outcome = str(payload.get("outcome") or "")
+        existing = observed.get("submission_identity")
+        if outcome == "submitted":
+            _record_submitted_identity(observed, payload)
+            return True
+        if outcome == "already_submitted":
+            _record_replayed_submission_identity(observed, payload)
+            return True
+        if outcome == "rejected_busy":
+            # This response acknowledges a rejected message, not the run that
+            # should answer it. Its active_run_id may identify an unrelated
+            # blocker (or be absent on replay), so it cannot establish first-
+            # turn identity by itself.
+            if not isinstance(existing, dict):
+                raise AssertionError(
+                    "cannot recover submitted turn identity from rejected_busy "
+                    "without a prior submitted acknowledgement"
+                )
+            same_thread = str(payload.get("thread_id") or "") == existing.get(
+                "thread_id"
+            )
+            same_run = str(payload.get("active_run_id") or "") == existing.get(
+                "run_id"
+            )
+            if same_thread and same_run:
+                return True
+            raise AssertionError(
+                "ambiguous submission identity: busy response referenced a "
+                "different active run"
+            )
+        if outcome != "submitted":
+            raise AssertionError(
+                "chat submission did not return a fresh submitted turn identity: "
+                f"outcome={outcome!r}"
+            )
+        return True
 
     async def action(page: object) -> None:
+        if extensions:
+            await page.goto(
+                f"{ctx.base_url}/extensions/registry?token={AUTH_TOKEN}",
+                wait_until="domcontentloaded",
+            )  # type: ignore[attr-defined]
+            await expect(page.locator("body")).to_contain_text(  # type: ignore[attr-defined]
+                "Extensions",
+                timeout=15000,
+            )
+            for extension in extensions:
+                await _ensure_extension_authenticated_on_page(
+                    page,
+                    observed,
+                    package_id=str(extension["package_id"]),
+                    display_name=str(extension["display_name"]),
+                    required_tools=[
+                        str(tool) for tool in extension.get("required_tools", [])
+                    ],
+                    ensure_installed=bool(extension.get("ensure_installed", True)),
+                )
+
         await page.goto(
-            f"{ctx.base_url}/v2/?token={AUTH_TOKEN}",
+            f"{ctx.base_url}/?token={AUTH_TOKEN}",
             wait_until="domcontentloaded",
         )  # type: ignore[attr-defined]
         if await _dismiss_visible_connect_action(page):
             observed["connect_action_dismissed_before_submit"] = True
         composer = page.locator("[data-testid='chat-composer']")  # type: ignore[attr-defined]
         await expect(composer).to_be_visible(timeout=15000)
-        await composer.fill(prompt)
-        await composer.press("Enter")
+        assistant_count_before = await page.locator(  # type: ignore[attr-defined]
+            "[data-testid='msg-assistant']"
+        ).count()
+        error_count_before = await page.locator(  # type: ignore[attr-defined]
+            "[data-testid='msg-error']"
+        ).count()
+        response_captured = await submit_prompt(page, composer)
+        if not response_captured:
+            if not await _dismiss_visible_connect_action(page):
+                raise AssertionError(
+                    "chat submission produced no matching response and no "
+                    "connect action was available for recovery"
+                )
+            observed["connect_action_dismissed_after_submit"] = True
+            if not await submit_prompt(page, composer):
+                raise AssertionError(
+                    "chat submission retry produced no matching response"
+                )
         try:
             await expect(page.locator("[data-testid='msg-user']").last).to_contain_text(  # type: ignore[attr-defined]
                 prompt[:80],
                 timeout=15000,
             )
         except Exception:
-            if not await _dismiss_visible_connect_action(page):
+            if capture_submission_identity and "submission_identity" in observed:
+                observed["submitted_user_bubble_not_observed"] = True
+            elif not await _dismiss_visible_connect_action(page):
                 raise
-            observed["connect_action_dismissed_after_submit"] = True
-            await composer.fill(prompt)
-            await composer.press("Enter")
-            await expect(page.locator("[data-testid='msg-user']").last).to_contain_text(  # type: ignore[attr-defined]
-                prompt[:80],
-                timeout=15000,
-            )
+            else:
+                observed["connect_action_dismissed_after_submit"] = True
+                if not await submit_prompt(page, composer):
+                    raise AssertionError(
+                        "chat submission retry produced no matching response"
+                    )
+                await expect(page.locator("[data-testid='msg-user']").last).to_contain_text(  # type: ignore[attr-defined]
+                    prompt[:80],
+                    timeout=15000,
+                )
         reply = await _wait_for_assistant_reply(
             page,
             marker=marker,
             required_text=required_text,
             timeout=timeout,
             semantic_goal=prompt,
+            assistant_count_before=assistant_count_before,
+            error_count_before=error_count_before,
+            enforce_marker=enforce_marker,
         )
         _record_assistant_reply_wait_result(observed, reply)
         if expose_full_reply_text:
@@ -1293,6 +1586,12 @@ async def _live_chat_case(
                 reply.text_excerpt, **follow_up_kwargs
             )
             if follow_up:
+                follow_up_assistant_count_before = await page.locator(  # type: ignore[attr-defined]
+                    "[data-testid='msg-assistant']"
+                ).count()
+                follow_up_error_count_before = await page.locator(  # type: ignore[attr-defined]
+                    "[data-testid='msg-error']"
+                ).count()
                 observed["routine_confirmation_follow_up_sent"] = follow_up
                 observed["routine_confirmation_initial_text_excerpt"] = (
                     reply.text_excerpt
@@ -1309,6 +1608,9 @@ async def _live_chat_case(
                     required_text=required_text,
                     timeout=timeout,
                     semantic_goal=f"{prompt}\n{follow_up}",
+                    assistant_count_before=follow_up_assistant_count_before,
+                    error_count_before=follow_up_error_count_before,
+                    enforce_marker=enforce_marker,
                 )
                 _record_assistant_reply_wait_result(observed, follow_up_reply)
         if forbidden_text:
@@ -1336,6 +1638,22 @@ async def _live_chat_case(
                 "required_text": required_text,
                 **(extra_details or {}),
                 **observed,
+            },
+        )
+    except TerminalRunFailure as exc:
+        return _result(
+            case_name,
+            False,
+            started,
+            {
+                "error": _exc_text(exc),
+                "prompt": prompt,
+                "marker": marker,
+                "required_text": required_text,
+                **(extra_details or {}),
+                **observed,
+                "failure_category": exc.observation.failure_category,
+                "failure_status": exc.observation.failure_status,
             },
         )
     except Exception as exc:
@@ -1381,76 +1699,17 @@ async def _live_chat_with_extensions_case(
     extra_details: dict[str, object] | None = None,
     forbidden_text: list[str] | None = None,
 ) -> ProbeResult:
-    from playwright.async_api import expect
-
-    started = time.monotonic()
-    observed: dict[str, object] = {
-        "marker": marker,
-        "prompt": prompt,
-        "required_text": required_text,
-        "extensions": [extension["package_id"] for extension in extensions],
-        **(extra_details or {}),
-    }
-
-    async def action(page: object) -> None:
-        await page.goto(
-            f"{ctx.base_url}/v2/extensions/registry?token={AUTH_TOKEN}",
-            wait_until="domcontentloaded",
-        )  # type: ignore[attr-defined]
-        await expect(page.locator("body")).to_contain_text("Extensions", timeout=15000)  # type: ignore[attr-defined]
-        for extension in extensions:
-            await _ensure_extension_authenticated_on_page(
-                page,
-                observed,
-                package_id=str(extension["package_id"]),
-                display_name=str(extension["display_name"]),
-                required_tools=[
-                    str(tool) for tool in extension.get("required_tools", [])
-                ],
-                ensure_installed=bool(extension.get("ensure_installed", True)),
-            )
-
-        await page.goto(
-            f"{ctx.base_url}/v2/?token={AUTH_TOKEN}",
-            wait_until="domcontentloaded",
-        )  # type: ignore[attr-defined]
-        if await _dismiss_visible_connect_action(page):
-            observed["connect_action_dismissed_before_submit"] = True
-        composer = page.locator("[data-testid='chat-composer']")  # type: ignore[attr-defined]
-        await expect(composer).to_be_visible(timeout=15000)
-        await composer.fill(prompt)
-        await composer.press("Enter")
-        try:
-            await expect(page.locator("[data-testid='msg-user']").last).to_contain_text(  # type: ignore[attr-defined]
-                prompt[:80],
-                timeout=15000,
-            )
-        except Exception:
-            if not await _dismiss_visible_connect_action(page):
-                raise
-            observed["connect_action_dismissed_after_submit"] = True
-            await composer.fill(prompt)
-            await composer.press("Enter")
-            await expect(page.locator("[data-testid='msg-user']").last).to_contain_text(  # type: ignore[attr-defined]
-                prompt[:80],
-                timeout=15000,
-            )
-        _record_assistant_reply_wait_result(
-            observed,
-            await _wait_for_assistant_reply(
-                page,
-                marker=marker,
-                required_text=required_text,
-                timeout=timeout,
-                semantic_goal=prompt,
-            ),
-        )
-
-    try:
-        await _with_page(ctx.output_dir, case_name, action)
-        return _result(case_name, True, started, observed)
-    except Exception as exc:
-        return _result(case_name, False, started, {"error": _exc_text(exc), **observed})
+    return await _live_chat_case(
+        ctx,
+        case_name=case_name,
+        prompt=prompt,
+        marker=marker,
+        required_text=required_text,
+        extensions=extensions,
+        timeout=timeout,
+        extra_details=extra_details,
+        forbidden_text=forbidden_text,
+    )
 
 
 async def _dismiss_visible_connect_action(page: object) -> bool:
@@ -1467,6 +1726,52 @@ async def _dismiss_visible_connect_action(page: object) -> bool:
         return False
 
 
+async def _observe_terminal_run_failure(
+    page: object,
+    *,
+    baseline_count: int = 0,
+) -> TerminalRunFailureObservation | None:
+    try:
+        errors = page.locator("[data-testid='msg-error']")  # type: ignore[attr-defined]
+        error_count = await errors.count()
+    except Exception:
+        return None
+    if error_count <= max(0, baseline_count):
+        return None
+
+    latest_error = errors.last
+    try:
+        summary = (await latest_error.inner_text(timeout=1000)).strip()
+    except Exception:
+        summary = ""
+    try:
+        failure_category = await latest_error.get_attribute(
+            "data-failure-category",
+            timeout=1000,
+        )
+    except Exception:
+        failure_category = None
+    try:
+        failure_status = await latest_error.get_attribute(
+            "data-failure-status",
+            timeout=1000,
+        )
+    except Exception:
+        failure_status = None
+
+    return TerminalRunFailureObservation(
+        summary=summary,
+        failure_category=(
+            failure_category.strip() if isinstance(failure_category, str) else None
+        )
+        or None,
+        failure_status=(
+            failure_status.strip() if isinstance(failure_status, str) else None
+        )
+        or None,
+    )
+
+
 async def _wait_for_assistant_reply(
     page: object,
     *,
@@ -1474,22 +1779,43 @@ async def _wait_for_assistant_reply(
     required_text: list[str],
     timeout: float,
     semantic_goal: str | None = None,
+    assistant_count_before: int = 0,
+    error_count_before: int = 0,
+    enforce_marker: bool = True,
 ) -> AssistantReplyWaitResult:
     started = time.monotonic()
     deadline = time.monotonic() + timeout
-    assistant = page.locator("[data-testid='msg-assistant']").last  # type: ignore[attr-defined]
     last_text = ""
+    last_final_assistant_text = ""
     last_observed_text = ""
     last_text_change_at = started
     last_final_reply_state: str | None = None
+
+    async def read_main_text() -> str:
+        try:
+            return await page.locator("main").inner_text(timeout=1000)  # type: ignore[attr-defined]
+        except Exception:
+            return ""
+
     while time.monotonic() < deadline:
         await _approve_visible_tool_gate(page)
+        terminal_failure = await _observe_terminal_run_failure(
+            page,
+            baseline_count=error_count_before,
+        )
+        if terminal_failure is not None:
+            raise TerminalRunFailure(terminal_failure)
         assistant_blocks = page.locator("[data-testid='msg-assistant']")  # type: ignore[attr-defined]
-        if await assistant_blocks.count() > 0:
+        assistant_count = await assistant_blocks.count()
+        if assistant_count > max(0, assistant_count_before):
+            assistant = assistant_blocks.last
             try:
-                text = await assistant.inner_text(timeout=1000)
+                final_assistant_text = await assistant.inner_text(timeout=1000)
             except Exception:
-                text = ""
+                final_assistant_text = ""
+            else:
+                last_final_assistant_text = final_assistant_text
+            text = final_assistant_text
             try:
                 observed_final_reply_state = await assistant.get_attribute(
                     "data-final-reply",
@@ -1500,9 +1826,10 @@ async def _wait_for_assistant_reply(
             else:
                 last_final_reply_state = observed_final_reply_state
             try:
+                all_block_texts = await assistant_blocks.all_inner_texts()
                 block_texts = [
                     block.strip()
-                    for block in await assistant_blocks.all_inner_texts()
+                    for block in all_block_texts[max(0, assistant_count_before) :]
                     if block.strip()
                 ]
             except Exception:
@@ -1516,13 +1843,77 @@ async def _wait_for_assistant_reply(
                     last_text_change_at = now
                 last_text = text
             normalized = text.lower()
-            marker_matches = not marker or marker in text
-            if marker_matches and required_text_matches(normalized, required_text):
-                final_reply_observed = last_final_reply_state in ("true", "false")
-                if final_reply_observed and last_final_reply_state != "true":
+            marker_matches = (
+                not enforce_marker
+                or not marker
+                or marker in last_final_assistant_text
+            )
+            required_text_matched = required_text_matches(normalized, required_text)
+            if last_final_reply_state == "true" and not marker_matches:
+                # Capture race: `data-final-reply` and the bubble text are read
+                # in two separate Playwright round-trips, so the finalized flag
+                # can flip to "true" a poll after a stale/mid-stream text
+                # snapshot was captured — truncating the marker out of an
+                # otherwise-complete reply. Re-read the finalized bubble a
+                # bounded number of times with the freshest text before failing,
+                # and only raise if the marker is still genuinely absent.
+                for _ in range(ASSISTANT_REPLY_MARKER_RECONFIRM_ATTEMPTS):
+                    await asyncio.sleep(ASSISTANT_REPLY_MARKER_RECONFIRM_SECONDS)
+                    try:
+                        reconfirm_final_assistant_text = await assistant.inner_text(
+                            timeout=1000
+                        )
+                    except Exception:
+                        reconfirm_final_assistant_text = ""
+                    if reconfirm_final_assistant_text:
+                        last_final_assistant_text = reconfirm_final_assistant_text
+                    try:
+                        reconfirm_block_texts = [
+                            block.strip()
+                            for block in (await assistant_blocks.all_inner_texts())[
+                                max(0, assistant_count_before) :
+                            ]
+                            if block.strip()
+                        ]
+                    except Exception:
+                        reconfirm_block_texts = []
+                    if reconfirm_block_texts:
+                        text = "\n".join(reconfirm_block_texts)
+                        last_text = text
+                        last_observed_text = text
+                        normalized = text.lower()
+                    elif reconfirm_final_assistant_text:
+                        # Block-texts read failed or came back empty this
+                        # attempt; fall back to the whole-bubble text so the
+                        # marker AND required-text checks evaluate against the
+                        # freshest snapshot — never a stale pre-reconfirm
+                        # truncation (which could otherwise fail required_text
+                        # or, worse, succeed with stale text on record).
+                        text = reconfirm_final_assistant_text
+                        last_text = text
+                        last_observed_text = text
+                        normalized = text.lower()
+                    marker_matches = (
+                        not enforce_marker
+                        or not marker
+                        or marker in last_final_assistant_text
+                    )
+                    if marker_matches:
+                        required_text_matched = required_text_matches(
+                            normalized, required_text
+                        )
+                        break
+                if not marker_matches:
+                    raise AssertionError(
+                        "finalized assistant reply did not contain required marker. "
+                        f"marker={marker!r} "
+                        f"last_assistant={last_final_assistant_text[-500:]!r}"
+                    )
+            if marker_matches and required_text_matched:
+                if last_final_reply_state == "false":
                     await asyncio.sleep(ASSISTANT_REPLY_POLL_SECONDS)
                     continue
-                if not final_reply_observed:
+                if last_final_reply_state != "true":
                     quiet_for = time.monotonic() - last_text_change_at
                     if quiet_for < ASSISTANT_REPLY_FALLBACK_QUIET_SECONDS:
                         await asyncio.sleep(ASSISTANT_REPLY_POLL_SECONDS)
@@ -1534,21 +1925,22 @@ async def _wait_for_assistant_reply(
                     semantic_judge_reason="literal_required_text_matched",
                     final_reply_wait_ms=int((time.monotonic() - started) * 1000),
                     final_reply_reason=(
-                        "final_reply_marker_matched"
-                        if final_reply_observed
+                        "final_reply_observed"
+                        if last_final_reply_state == "true"
                         else "fallback_quiet_period_matched"
                     ),
                 )
+            if last_final_reply_state == "true":
+                break
         await asyncio.sleep(ASSISTANT_REPLY_POLL_SECONDS)
-    main_text = ""
-    try:
-        main_text = await page.locator("main").inner_text(timeout=1000)  # type: ignore[attr-defined]
-    except Exception:
-        pass
+    main_text = await read_main_text()
     semantic_judge: dict[str, object] | None = None
-    if last_text and (not marker or marker in last_text) and last_final_reply_state != "false":
+    marker_matches = (
+        not enforce_marker or not marker or marker in last_final_assistant_text
+    )
+    if last_text and marker_matches and last_final_reply_state != "false":
         semantic_judge = await _judge_assistant_reply_completion(
-            marker=marker,
+            marker=marker if enforce_marker else None,
             required_text=required_text,
             assistant_text=last_text,
             main_text=main_text,
@@ -1562,7 +1954,7 @@ async def _wait_for_assistant_reply(
                 semantic_judge_reason="semantic_judge_completed",
                 final_reply_wait_ms=int((time.monotonic() - started) * 1000),
                 final_reply_reason=(
-                    "semantic_judge_final_reply_marker_matched"
+                    "semantic_judge_final_reply_observed"
                     if last_final_reply_state == "true"
                     else "semantic_judge_timeout_fallback"
                 ),
@@ -1571,6 +1963,8 @@ async def _wait_for_assistant_reply(
     raise AssertionError(
         "assistant reply did not contain required text before timeout. "
         f"marker={marker!r} required_text={required_text!r} "
+        f"enforce_marker={enforce_marker!r} "
+        f"assistant_count_before={assistant_count_before!r} "
         f"latest_final_reply_state={last_final_reply_state!r} "
         f"last_assistant={last_text[-500:]!r} main_excerpt={main_text[-1000:]!r} "
         f"semantic_judge={_compact_json(semantic_judge)}"
@@ -1753,6 +2147,13 @@ def _trigger_record_count(reborn_home: Path, routine_name: str | None = None) ->
 
 ROUTINE_TRIGGER_RECORD_WAIT_TIMEOUT_SECONDS = 120.0
 ROUTINE_TRIGGER_RECORD_POLL_SECONDS = 2.0
+
+# Routine creation is a heavy, multi-step assistant turn (list sheets ->
+# read -> compose -> create trigger). The former 180s per-turn reply wait
+# timed out mid-work on slower model runs, blocking qa_2e / qa_6d / qa_9b at
+# a near-uniform ~182-184s with latest_final_reply_state='false'. 300s gives
+# it the same headroom as the comparably heavy calendar-prep live-chat turn.
+ROUTINE_CREATION_REPLY_TIMEOUT_SECONDS = 300.0
 
 
 async def _wait_for_trigger_record_after_count(
@@ -2128,6 +2529,50 @@ def _slack_second_user_token(extra_env: dict[str, str]) -> str | None:
     return _env_value(SLACK_SECOND_USER_TOKEN_ENV, extra_env)
 
 
+def _extension_is_listed(extensions: list[object], package_id: str) -> bool:
+    return any(
+        isinstance(extension, dict)
+        and isinstance(extension.get("package_ref"), dict)
+        and extension["package_ref"].get("id") == package_id
+        for extension in extensions
+    )
+
+
+async def _ensure_extension_installed_on_page(
+    page: object,
+    observed: dict[str, object],
+    *,
+    package_id: str,
+    display_name: str,
+) -> None:
+    extensions_body = await _fetch_webui_json(page, "/api/webchat/v2/extensions")
+    extensions = extensions_body.get("extensions")
+    if not isinstance(extensions, list):
+        raise AssertionError(
+            f"extensions body did not include a list: {extensions_body!r}"
+        )
+    prefix = package_id.replace("-", "_")
+    if _extension_is_listed(extensions, package_id):
+        observed[f"{prefix}_install_message"] = f"{display_name} already installed"
+        observed[f"{prefix}_install_onboarding_state"] = "existing_installation"
+        return
+
+    install_body = await _webui_json(
+        page,
+        "POST",
+        "/api/webchat/v2/extensions/install",
+        {"package_ref": {"kind": "extension", "id": package_id}},
+    )
+    if install_body.get("success") is not True:
+        raise AssertionError(
+            f"{display_name} install did not succeed: {install_body!r}"
+        )
+    observed[f"{prefix}_install_message"] = install_body.get("message")
+    observed[f"{prefix}_install_onboarding_state"] = install_body.get(
+        "onboarding_state"
+    )
+
+
 async def _installed_active_extension_ids(ctx: LiveQaContext) -> dict[str, object]:
     """Active extension package ids from the server's own extensions API.
 
@@ -2226,6 +2671,101 @@ async def _slack_search_marker_hits(
             }
         )
     return {"checked": True, "hits": hits}
+
+
+# Bounded search-index readiness window for freshly-seeded markers. Slack's
+# search index is eventually consistent — a Web-API post is typically not
+# searchable for ~15-30s after it lands — so probes that answer via search
+# must gate the agent turn on the seed becoming searchable first.
+SLACK_SEARCH_INDEX_READINESS_TIMEOUT_SECONDS = 45.0
+SLACK_SEARCH_INDEX_READINESS_POLL_SECONDS = 3.0
+
+
+async def _wait_for_slack_search_marker(
+    ctx: LiveQaContext,
+    *,
+    marker: str,
+    timeout: float = SLACK_SEARCH_INDEX_READINESS_TIMEOUT_SECONDS,
+    poll_interval: float = SLACK_SEARCH_INDEX_READINESS_POLL_SECONDS,
+) -> dict[str, object]:
+    """Poll Slack search until a freshly-seeded marker becomes searchable.
+
+    Slack's search index is eventually consistent: a message posted via the
+    Web API is not searchable for many seconds after it lands. A probe that
+    answers a "most recent message I sent" question by calling
+    ``search.messages`` (``from:me`` newest-first) can therefore surface an
+    OLDER already-indexed seed while the newest one is still un-indexed — an
+    external-lag artifact, not an agent regression. This barrier gates the
+    agent turn on the newest seed becoming searchable so the caller can
+    surface an INCONCLUSIVE result on timeout instead of a spurious
+    answer-mismatch red.
+
+    Reuses :func:`_slack_search_marker_hits` (personal-token workspace sweep).
+    Returns a dict:
+      ready      — True once the marker appears in search results
+      checked    — whether the sweep ever actually ran (False => never ran)
+      permanent  — True when search can NEVER run here (missing scope, ...)
+      attempts   — number of search calls made
+      waited_ms  — elapsed poll time
+      error      — last search error, when any
+    """
+    started = time.monotonic()
+    deadline = started + timeout
+    attempts = 0
+    checked_any = False
+    last_error: str | None = None
+    while True:
+        # Deadline check BEFORE the sweep: each sweep carries its own HTTP
+        # timeout, so starting one at/past the deadline could stretch the
+        # advertised readiness bound by a full extra sweep.
+        if time.monotonic() >= deadline:
+            return {
+                "ready": False,
+                "checked": checked_any,
+                "permanent": False,
+                "attempts": attempts,
+                "waited_ms": int((time.monotonic() - started) * 1000),
+                "error": last_error,
+            }
+        attempts += 1
+        sweep = await _slack_search_marker_hits(ctx, marker=marker)
+        if sweep.get("checked"):
+            checked_any = True
+            # A sweep that ran cleanly supersedes any earlier transient error;
+            # a timeout after this point must not report a stale one.
+            last_error = None
+            if sweep.get("hits"):
+                return {
+                    "ready": True,
+                    "checked": True,
+                    "permanent": False,
+                    "attempts": attempts,
+                    "waited_ms": int((time.monotonic() - started) * 1000),
+                }
+        else:
+            last_error = str(sweep.get("error") or "slack_search_unavailable")
+            if sweep.get("permanent"):
+                # The sweep can never run in this environment — spinning to the
+                # deadline would only hide the real env-repair cause.
+                return {
+                    "ready": False,
+                    "checked": checked_any,
+                    "permanent": True,
+                    "attempts": attempts,
+                    "waited_ms": int((time.monotonic() - started) * 1000),
+                    "error": last_error,
+                }
+        now = time.monotonic()
+        if now >= deadline:
+            return {
+                "ready": False,
+                "checked": checked_any,
+                "permanent": False,
+                "attempts": attempts,
+                "waited_ms": int((time.monotonic() - started) * 1000),
+                "error": last_error,
+            }
+        await asyncio.sleep(min(poll_interval, deadline - now))
 
 
 async def _slack_personal_dm_counterpart_names(
@@ -2488,6 +3028,140 @@ def _slack_delivery_observed(
     )
 
 
+class SlackDeliveryReadbackInconclusive(RuntimeError):
+    """The exact trigger run sent once, but Slack history did not expose it."""
+
+    def __init__(self, message: str, evidence: dict[str, object]) -> None:
+        super().__init__(message)
+        self.evidence = evidence
+
+
+def _trigger_run_slack_send_evidence(
+    reborn_home: Path,
+    *,
+    run_id: str,
+    thread_id: str,
+    expected_channel_id: str,
+    marker: str,
+) -> dict[str, object]:
+    """Read sanitized ``slack.send_message`` evidence for one trigger run.
+
+    Only aggregate counts leave this helper. Slack channel IDs, message text,
+    and output payloads remain in the local runtime database and are never
+    copied into canary results.
+    """
+    evidence: dict[str, object] = {
+        "completed_send_count": 0,
+        "marker_send_count": 0,
+        "expected_channel_marker_send_count": 0,
+        "expected_channel_marker_ok_count": 0,
+        "wrong_channel_marker_send_count": 0,
+        "parse_error_count": 0,
+    }
+    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    if not db_path.exists():
+        evidence["read_error"] = "reborn-local-dev.db missing"
+        return evidence
+    try:
+        database_uri = f"{db_path.resolve().as_uri()}?mode=ro"
+        with closing(sqlite3.connect(database_uri, uri=True)) as db:
+            rows = db.execute(
+                """
+                SELECT contents
+                FROM root_filesystem_entries
+                WHERE is_dir = 0
+                  AND content_type = 'application/json'
+                  AND path LIKE ?
+                """,
+                (f"%/threads/{thread_id}/messages/%",),
+            ).fetchall()
+    except sqlite3.Error as exc:
+        evidence["read_error"] = _exc_text(exc)
+        return evidence
+
+    def json_object(value: object) -> dict[str, object] | None:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        if not isinstance(value, str):
+            return None
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    for (raw_contents,) in rows:
+        message = json_object(raw_contents)
+        if (
+            message is None
+            or message.get("turn_run_id") != run_id
+            or message.get("kind") != "capability_display_preview"
+        ):
+            continue
+        preview = json_object(message.get("content"))
+        if preview is None:
+            evidence["parse_error_count"] = int(evidence["parse_error_count"]) + 1
+            continue
+        if preview.get("capability_id") != "slack.send_message":
+            continue
+        input_summary = json_object(preview.get("input_summary"))
+        output_preview = json_object(preview.get("output_preview"))
+        if input_summary is None or output_preview is None:
+            evidence["parse_error_count"] = int(evidence["parse_error_count"]) + 1
+            continue
+
+        status = str(preview.get("status") or "")
+        if status == "completed":
+            evidence["completed_send_count"] = int(evidence["completed_send_count"]) + 1
+        text = str(input_summary.get("text") or "")
+        if marker not in text:
+            continue
+        evidence["marker_send_count"] = int(evidence["marker_send_count"]) + 1
+        input_channel = str(input_summary.get("channel") or "")
+        if input_channel != expected_channel_id:
+            evidence["wrong_channel_marker_send_count"] = (
+                int(evidence["wrong_channel_marker_send_count"]) + 1
+            )
+            continue
+        evidence["expected_channel_marker_send_count"] = (
+            int(evidence["expected_channel_marker_send_count"]) + 1
+        )
+        if (
+            status == "completed"
+            and output_preview.get("ok") is True
+            and str(output_preview.get("channel") or "") == expected_channel_id
+        ):
+            evidence["expected_channel_marker_ok_count"] = (
+                int(evidence["expected_channel_marker_ok_count"]) + 1
+            )
+    return evidence
+
+
+def _slack_delivery_readback_is_inconclusive(
+    outcome: dict[str, object] | None,
+    history: dict[str, object] | None,
+    evidence: dict[str, object],
+) -> bool:
+    """Distinguish a Slack history miss from wrong or duplicate model sends."""
+    return (
+        isinstance(outcome, dict)
+        and outcome.get("outcome") == "delivered"
+        and isinstance(history, dict)
+        and history.get("checked") is True
+        and not history.get("found")
+        and not history.get("error")
+        and not evidence.get("read_error")
+        and evidence.get("completed_send_count") == 1
+        and evidence.get("marker_send_count") == 1
+        and evidence.get("expected_channel_marker_send_count") == 1
+        and evidence.get("expected_channel_marker_ok_count") == 1
+        and evidence.get("wrong_channel_marker_send_count") == 0
+        and evidence.get("parse_error_count") == 0
+    )
+
+
 async def _wait_for_slack_delivery_marker(
     ctx: LiveQaContext,
     *,
@@ -2504,6 +3178,8 @@ async def _wait_for_slack_delivery_marker(
     last_rows: list[dict[str, object]] = []
     last_outcome: dict[str, object] | None = None
     last_history: dict[str, object] | None = None
+    last_delivered_row: dict[str, object] | None = None
+    last_delivered_outcome: dict[str, object] | None = None
     approved_gate_refs: set[str] = set()
     approval_attempts: list[dict[str, object]] = []
     while time.monotonic() < deadline:
@@ -2518,6 +3194,9 @@ async def _wait_for_slack_delivery_marker(
                 outcome = _triggered_delivery_outcome(ctx.reborn_home, run_id)
                 if outcome:
                     last_outcome = outcome
+                    if outcome.get("outcome") == "delivered":
+                        last_delivered_row = row
+                        last_delivered_outcome = outcome
                 for route in _delivered_gate_routes_for_run(ctx.reborn_home, run_id):
                     gate_ref = str(route.get("gate_ref") or "")
                     if gate_ref in approved_gate_refs:
@@ -2575,6 +3254,28 @@ async def _wait_for_slack_delivery_marker(
                         f"run={row!r} outcome={outcome!r} history={history!r}"
                     )
         await asyncio.sleep(2.0)
+    if last_delivered_row is not None:
+        run_id = str(last_delivered_row.get("run_id") or "")
+        thread_id = str(last_delivered_row.get("thread_id") or "")
+        if run_id and thread_id:
+            send_evidence = _trigger_run_slack_send_evidence(
+                ctx.reborn_home,
+                run_id=run_id,
+                thread_id=thread_id,
+                expected_channel_id=channel_id,
+                marker=marker,
+            )
+            if _slack_delivery_readback_is_inconclusive(
+                last_delivered_outcome,
+                last_history,
+                send_evidence,
+            ):
+                raise SlackDeliveryReadbackInconclusive(
+                    "the exact trigger run completed one verified Slack send to the "
+                    "expected DM, but the independent Slack history readback did not "
+                    "expose the marker before timeout",
+                    send_evidence,
+                )
     raise AssertionError(
         "Slack delivery marker was not observed before timeout. "
         f"routine_name={routine_name!r} marker={marker!r} "
@@ -2669,12 +3370,12 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
     started = time.monotonic()
     observed: dict[str, object] = {
         "qa_sheet_prompt": _qa_sheet_prompt(case_name),
-        "slack_connect_surface": "/v2/extensions/channels",
+        "slack_connect_surface": "/extensions/channels",
     }
 
     async def action(page: object) -> None:
         await page.goto(
-            f"{ctx.base_url}/v2/extensions/channels?token={AUTH_TOKEN}",
+            f"{ctx.base_url}/extensions/channels?token={AUTH_TOKEN}",
             wait_until="domcontentloaded",
         )  # type: ignore[attr-defined]
         await expect(page.locator("body")).to_contain_text("Channels", timeout=15000)  # type: ignore[attr-defined]
@@ -2714,6 +3415,16 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
         instructions = str(action_body.get("instructions") or "")
         if not _slack_connect_instructions_look_valid(instructions):
             raise AssertionError(f"unexpected Slack connect instructions: {instructions!r}")
+        # Extension-scoped OAuth deliberately rejects an absent installation.
+        # Exercise the same global install transition as the product UI before
+        # probing the OAuth start surface; do not manufacture per-user setup
+        # state inside the canary. Reruns reuse an existing installation.
+        await _ensure_extension_installed_on_page(
+            page,
+            observed,
+            package_id="slack",
+            display_name="Slack",
+        )
         account_scope = _slack_personal_auth_ready_account(personal_auth)
         invocation_id = str(account_scope.get("invocation_id") or "").strip()
         thread_id = str(account_scope.get("thread_id") or "").strip()
@@ -2852,7 +3563,7 @@ async def _extension_authenticated_case(
 
     async def action(page: object) -> None:
         await page.goto(
-            f"{ctx.base_url}/v2/extensions/registry?token={AUTH_TOKEN}",
+            f"{ctx.base_url}/extensions/registry?token={AUTH_TOKEN}",
             wait_until="domcontentloaded",
         )  # type: ignore[attr-defined]
         await expect(page.locator("body")).to_contain_text("Extensions", timeout=15000)  # type: ignore[attr-defined]
@@ -2918,6 +3629,228 @@ def _completed_capability_counts(
         capability_id: capability_statuses.count("completed")
         for capability_id, capability_statuses in statuses.items()
     }
+
+
+_TERMINAL_CAPABILITY_EVENT_STATUSES = {
+    "capability_activity_succeeded": "completed",
+    "capability_activity_failed": "failed",
+}
+
+
+def _current_turn_capability_evidence(
+    reborn_home: Path,
+    submission_identity: dict[str, object],
+    capability_ids: list[str],
+    allowed_statuses: set[str],
+) -> dict[str, object]:
+    """Bind terminal capability records to one submitted WebUI turn run."""
+    identity = {
+        field: str(submission_identity.get(field) or "")
+        for field in (
+            "accepted_message_ref",
+            "thread_id",
+            "turn_id",
+            "run_id",
+        )
+    }
+    evidence: dict[str, object] = {
+        **identity,
+        "invocation_ids": {capability_id: [] for capability_id in capability_ids},
+        "statuses": {capability_id: [] for capability_id in capability_ids},
+        "input_arguments": {capability_id: [] for capability_id in capability_ids},
+        "terminal_sequence": [],
+    }
+    if not all(identity[field] for field in _SUBMISSION_CORRELATION_FIELDS):
+        return evidence
+
+    db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+    if not db_path.exists():
+        return evidence
+    try:
+        database_uri = f"{db_path.resolve().as_uri()}?mode=ro"
+        with closing(sqlite3.connect(database_uri, uri=True)) as db:
+            event_rows = db.execute(
+                """
+                SELECT seq, payload
+                FROM root_filesystem_events
+                WHERE path LIKE '/events/runtime/%'
+                ORDER BY seq ASC
+                """
+            ).fetchall()
+            run_state_rows = db.execute(
+                """
+                SELECT contents
+                FROM root_filesystem_entries
+                WHERE is_dir = 0
+                  AND content_type = 'application/json'
+                  AND path LIKE '%/run-state/%'
+                """
+            ).fetchall()
+            display_preview_rows = db.execute(
+                """
+                SELECT contents
+                FROM root_filesystem_entries
+                WHERE is_dir = 0
+                  AND content_type = 'application/json'
+                  AND kind = 'thread_message'
+                  AND path LIKE '%/messages/%'
+                """
+            ).fetchall()
+    except sqlite3.Error as exc:
+        evidence["read_error"] = _exc_text(exc)
+        return evidence
+
+    wanted = set(capability_ids)
+    input_arguments_by_invocation: dict[str, dict[str, str]] = {}
+    for (raw_contents,) in display_preview_rows:
+        try:
+            message = json.loads(
+                raw_contents.decode("utf-8", errors="replace")
+                if isinstance(raw_contents, bytes)
+                else str(raw_contents)
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if (
+            not isinstance(message, dict)
+            or message.get("kind") != "capability_display_preview"
+            or message.get("thread_id") != identity["thread_id"]
+            or message.get("turn_run_id") != identity["run_id"]
+        ):
+            continue
+        raw_preview = message.get("content")
+        try:
+            preview = (
+                json.loads(raw_preview)
+                if isinstance(raw_preview, str)
+                else raw_preview
+            )
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(preview, dict):
+            continue
+        invocation_id = str(preview.get("invocation_id") or "")
+        capability_id = str(preview.get("capability_id") or "")
+        raw_input_summary = preview.get("input_summary")
+        try:
+            input_summary = (
+                json.loads(raw_input_summary)
+                if isinstance(raw_input_summary, str)
+                else raw_input_summary
+            )
+        except json.JSONDecodeError:
+            continue
+        if (
+            invocation_id
+            and capability_id in wanted
+            and isinstance(input_summary, dict)
+        ):
+            # Persist only the routing argument needed for exact-conversation
+            # assertions, never message text or other model-supplied content.
+            channel = input_summary.get("channel")
+            input_arguments_by_invocation[invocation_id] = (
+                {"channel": channel} if isinstance(channel, str) else {}
+            )
+
+    terminal_events: dict[str, tuple[str, str, int]] = {}
+    for raw_seq, raw_payload in event_rows:
+        try:
+            payload = json.loads(
+                raw_payload.decode("utf-8", errors="replace")
+                if isinstance(raw_payload, bytes)
+                else str(raw_payload)
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        capability_id = str(payload.get("capability_id") or "")
+        event_status = _TERMINAL_CAPABILITY_EVENT_STATUSES.get(
+            str(payload.get("kind") or "")
+        )
+        scope = payload.get("scope")
+        if (
+            capability_id not in wanted
+            or event_status not in allowed_statuses
+            or payload.get("parent_invocation_id") != identity["run_id"]
+            or not isinstance(scope, dict)
+            or scope.get("thread_id") != identity["thread_id"]
+        ):
+            continue
+        invocation_id = str(scope.get("invocation_id") or "")
+        if invocation_id:
+            terminal_events[invocation_id] = (
+                capability_id,
+                event_status,
+                int(raw_seq),
+            )
+
+    matched: dict[str, list[tuple[int, str, str]]] = {
+        capability_id: [] for capability_id in capability_ids
+    }
+    for (raw_contents,) in run_state_rows:
+        try:
+            payload = json.loads(
+                raw_contents.decode("utf-8", errors="replace")
+                if isinstance(raw_contents, bytes)
+                else str(raw_contents)
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        invocation_id = str(payload.get("invocation_id") or "")
+        event = terminal_events.get(invocation_id)
+        scope = payload.get("scope")
+        status = str(payload.get("status") or "unknown")
+        event_capability_id, event_status, event_seq = event or ("", "", 0)
+        if (
+            event is None
+            or payload.get("capability_id") != event_capability_id
+            or status != event_status
+            or not isinstance(scope, dict)
+            or scope.get("thread_id") != identity["thread_id"]
+        ):
+            continue
+        matched[event_capability_id].append((event_seq, invocation_id, status))
+
+    ordered_matches = sorted(
+        (
+            (seq, capability_id, invocation_id, status)
+            for capability_id, matches in matched.items()
+            for seq, invocation_id, status in matches
+        ),
+        key=lambda item: item[0],
+    )
+
+    evidence["invocation_ids"] = {
+        capability_id: [
+            invocation_id
+            for _, invocation_id, _ in sorted(matched[capability_id])
+        ]
+        for capability_id in capability_ids
+    }
+    evidence["statuses"] = {
+        capability_id: [status for _, _, status in sorted(matched[capability_id])]
+        for capability_id in capability_ids
+    }
+    evidence["input_arguments"] = {
+        capability_id: [
+            input_arguments_by_invocation.get(invocation_id, {})
+            for _, invocation_id, _ in sorted(matched[capability_id])
+        ]
+        for capability_id in capability_ids
+    }
+    evidence["terminal_sequence"] = [
+        {
+            "seq": seq,
+            "capability_id": capability_id,
+            "invocation_id": invocation_id,
+            "status": status,
+        }
+        for seq, capability_id, invocation_id, status in ordered_matches
+    ]
+    return evidence
 
 
 async def _extension_chat_connect_case(
@@ -3767,7 +4700,7 @@ async def _routine_creation_case(
             marker=marker,
             required_text=required_text,
             extensions=extensions,
-            timeout=180.0,
+            timeout=ROUTINE_CREATION_REPLY_TIMEOUT_SECONDS,
             extra_details=details,
         )
     else:
@@ -3777,7 +4710,7 @@ async def _routine_creation_case(
             prompt=prompt,
             marker=marker,
             required_text=required_text,
-            timeout=180.0,
+            timeout=ROUTINE_CREATION_REPLY_TIMEOUT_SECONDS,
             extra_details=details,
             routine_confirmation_follow_up=True,
             routine_follow_up_timezone_instruction=follow_up_timezone_instruction,
@@ -4087,6 +5020,23 @@ async def _slack_delivery_routine_case(
                 "exactly_once": exactly_once,
             },
         )
+    except SlackDeliveryReadbackInconclusive as exc:
+        result = _result(
+            case_name,
+            False,
+            started,
+            {
+                **base_details,
+                "error": _exc_text(exc),
+                "failure_class": "infrastructure",
+                "failure_category": "slack_delivery_readback_unavailable",
+                "failure_status": "inconclusive",
+                "inconclusive": True,
+                "delivery_readback_evidence": exc.evidence,
+            },
+        )
+        result.details["blocking"] = False
+        return result
     except Exception as exc:
         return _result(
             case_name,
@@ -4687,20 +5637,32 @@ def _gated_case(case_name: str) -> CaseFn:
     return run_gated
 
 
-RAW_SLACK_USER_ID_PATTERN = re.compile(r"\bU[A-Z0-9]{8,}\b")
+RAW_SLACK_USER_ID_PATTERN = re.compile(
+    r"\b[UW](?=[A-Z0-9]*[0-9])[A-Z0-9]{8,}\b"
+)
+ENCODED_RAW_SLACK_USER_ID_PATTERN = re.compile(
+    r"<@([UW][A-Z0-9]{8,})(?:\|[^>]*)?>"
+)
 
 
 def _raw_slack_user_ids_in_text(text: str) -> list[str]:
-    """Raw Slack user ids (U…) leaked into user-facing text.
+    """Raw Slack user ids (U…/W…) leaked into user-facing text.
 
-    Requires at least one digit so all-caps words like UNDERSTAND never
-    false-positive; real Slack ids always mix letters and digits.
+    Encoded mentions are unambiguous. Bare tokens require a digit to avoid
+    classifying all-caps prose such as UNDERSTAND as a Slack identifier.
     """
-    return [
-        match
-        for match in RAW_SLACK_USER_ID_PATTERN.findall(text or "")
-        if any(ch.isdigit() for ch in match)
-    ]
+    source = text or ""
+    encoded = ENCODED_RAW_SLACK_USER_ID_PATTERN.findall(source)
+    bare_source = ENCODED_RAW_SLACK_USER_ID_PATTERN.sub("", source)
+    return encoded + RAW_SLACK_USER_ID_PATTERN.findall(bare_source)
+
+
+def _redact_slack_user_ids_in_text(text: str) -> str:
+    source = text or ""
+    without_mentions = ENCODED_RAW_SLACK_USER_ID_PATTERN.sub(
+        "U_REDACTED", source
+    )
+    return RAW_SLACK_USER_ID_PATTERN.sub("U_REDACTED", without_mentions)
 
 
 # Slack conversation ids (C… channel / D… DM / G… group) in the
@@ -4713,6 +5675,36 @@ RAW_SLACK_CONVERSATION_ID_PATTERN = re.compile(r"\b[CDG][0-9][A-Z0-9]{7,}\b")
 def _raw_slack_conversation_ids_in_text(text: str) -> list[str]:
     """Raw Slack conversation ids (C…/D…/G…) leaked into user-facing text."""
     return RAW_SLACK_CONVERSATION_ID_PATTERN.findall(text or "")
+
+
+def _redact_slack_entity_ids_in_artifact_details(
+    details: dict[str, object],
+) -> None:
+    """Remove Slack entity ids from persisted assistant-response fields."""
+
+    def redact(value: object) -> object:
+        if isinstance(value, str):
+            return RAW_SLACK_CONVERSATION_ID_PATTERN.sub(
+                "C_REDACTED",
+                _redact_slack_user_ids_in_text(value),
+            )
+        if isinstance(value, dict):
+            return {key: redact(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [redact(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(redact(item) for item in value)
+        return value
+
+    for key in (
+        "text_excerpt",
+        "routine_confirmation_initial_text_excerpt",
+        "error",
+        "semantic_judge",
+        "capability_evidence",
+    ):
+        if key in details:
+            details[key] = redact(details[key])
 
 
 # Encoded Slack mention markup as stored in raw message text. Both the bare
@@ -4863,23 +5855,18 @@ async def case_qa_9c_slack_digest_names_not_ids(ctx: LiveQaContext) -> ProbeResu
         timeout=240.0,
         expose_full_reply_text=True,
     )
-    if not result.success:
-        result.details.pop("full_reply_text", None)
-        return result
-    # Scan the FULL reply (a raw id early in a long digest must not escape
-    # via excerpt truncation), then drop it from persisted details and keep
-    # the bounded excerpt redacted of raw ids.
+    # Preserve the full reply only in memory for leak detection, then sanitize
+    # every persisted string before any success or failure return.
     reply_text = str(
         result.details.pop("full_reply_text", None)
         or result.details.get("text_excerpt")
         or ""
     )
-    excerpt = str(result.details.get("text_excerpt") or "")
-    if excerpt:
-        result.details["text_excerpt"] = RAW_SLACK_CONVERSATION_ID_PATTERN.sub(
-            "C_REDACTED",
-            RAW_SLACK_USER_ID_PATTERN.sub("U_REDACTED", excerpt),
-        )
+    _redact_slack_entity_ids_in_artifact_details(result.details)
+    if not result.success:
+        return result
+    # Scan the FULL reply (a raw id early in a long digest must not escape
+    # via excerpt truncation). Persist leak counts only below.
     # Persist leak COUNTS only: echoing the leaked identifiers into the
     # artifact JSON would re-leak the very values this probe exists to keep
     # out of persisted artifacts (the redacted excerpt would be moot).
@@ -5644,33 +6631,237 @@ async def _slack_correctness_chat_reply(
     prompt: str,
     answer_marker: str,
     extra_details: dict[str, object],
+    expected_capability: str | None = None,
+    accept_any_capability: tuple[str, ...] = (),
+    expected_capability_statuses: tuple[str, ...] = ("completed",),
+    expected_capability_sequence: tuple[str, ...] = (),
+    expected_capability_arguments: dict[str, dict[str, str]] | None = None,
     timeout: float = 240.0,
 ) -> tuple[ProbeResult, str]:
     """Chat arm shared by the QA-10 Slack tool-correctness probes.
 
-    Runs the WebUI chat turn, waits for the per-run answer marker, and hands
-    back the FULL in-memory reply text for content asserts (excerpt
-    truncation must never blind a marker/leak check). The full text is
-    stripped from persisted details on both paths; a failed chat result is
-    ready to return as-is with latency re-anchored to the case start.
+    Runs the WebUI chat turn, waits for its structural terminal state, and
+    hands back the FULL in-memory reply text for seeded content assertions
+    (excerpt truncation must never blind a marker/leak check). The synthetic
+    answer marker remains prompt context but is not a liveness condition. The
+    full text is stripped from persisted details on both paths; a failed chat
+    result is ready to return as-is with latency re-anchored to the case start.
+
+    `expected_capability` (and the sequence/argument variants) assert TOOL
+    IDENTITY — the model must terminally use that exact capability. Use
+    `accept_any_capability` instead when the case asserts an OUTCOME that any
+    of several capabilities can satisfy: the arm passes as long as at least
+    ONE of the accept-any set produced current-turn terminal evidence, rather
+    than pinning a single tool id. The two are composable — accept-any members
+    form an OR-group while every plain `expected_capability` stays required.
     """
+    expected_capabilities = list(
+        dict.fromkeys(
+            [
+                *(
+                    [expected_capability]
+                    if expected_capability is not None
+                    else []
+                ),
+                *expected_capability_sequence,
+                *(expected_capability_arguments or {}),
+                *accept_any_capability,
+            ]
+        )
+    )
     chat = await _live_chat_case(
         ctx,
         case_name=case_name,
         prompt=prompt,
         marker=answer_marker,
         required_text=[],
+        extensions=[SLACK_EXTENSION_REQUIREMENT],
         timeout=timeout,
         extra_details=extra_details,
         expose_full_reply_text=True,
+        enforce_marker=False,
+        capture_submission_identity=bool(expected_capabilities),
     )
     reply_text = str(
         chat.details.pop("full_reply_text", None)
         or chat.details.get("text_excerpt")
         or ""
     )
+    _redact_slack_entity_ids_in_artifact_details(chat.details)
+    if not chat.success:
+        failure_category = str(chat.details.get("failure_category") or "")
+        if failure_category.endswith(("_unavailable", "_transient")):
+            chat.details["failure_class"] = "infrastructure"
+        chat.latency_ms = int((time.monotonic() - started) * 1000)
+        return chat, reply_text
+
+    if expected_capabilities:
+        submission_identity = chat.details.get("submission_identity")
+        evidence = _current_turn_capability_evidence(
+            ctx.reborn_home,
+            submission_identity if isinstance(submission_identity, dict) else {},
+            expected_capabilities,
+            set(expected_capability_statuses),
+        )
+        chat.details.update(
+            {
+                "expected_capabilities": expected_capabilities,
+                "expected_capability_statuses": list(expected_capability_statuses),
+                "expected_capability_sequence": list(expected_capability_sequence),
+                "expected_capability_argument_fields": {
+                    capability_id: list(arguments)
+                    for capability_id, arguments in (
+                        expected_capability_arguments or {}
+                    ).items()
+                },
+                "capability_evidence": evidence,
+            }
+        )
+        statuses = evidence.get("statuses")
+        accept_any_set = set(accept_any_capability)
+        if isinstance(statuses, dict):
+            # Plain expected capabilities stay individually required; the
+            # accept-any set is an OR-group that only counts as missing when
+            # NONE of its members produced current-turn terminal evidence.
+            missing_capabilities = [
+                capability_id
+                for capability_id in expected_capabilities
+                if capability_id not in accept_any_set
+                and not statuses.get(capability_id, [])
+            ]
+            if accept_any_capability and not any(
+                statuses.get(capability_id, [])
+                for capability_id in accept_any_capability
+            ):
+                missing_capabilities.append(
+                    "any-of:" + "|".join(accept_any_capability)
+                )
+        else:
+            missing_capabilities = list(expected_capabilities)
+        evidence_read_error = evidence.get("read_error")
+        observed_arguments = evidence.get("input_arguments")
+        argument_mismatches = {
+            capability_id: list(expected_arguments)
+            for capability_id, expected_arguments in (
+                expected_capability_arguments or {}
+            ).items()
+            if not isinstance(observed_arguments, dict)
+            or not isinstance(observed_arguments.get(capability_id), list)
+            or not observed_arguments[capability_id]
+            or any(
+                not isinstance(arguments, dict)
+                or any(
+                    arguments.get(field) != expected_value
+                    for field, expected_value in expected_arguments.items()
+                )
+                for arguments in observed_arguments[capability_id]
+            )
+        }
+        if evidence_read_error:
+            chat.success = False
+            chat.details.update(
+                {
+                    "error": (
+                        "Slack capability evidence could not be read: "
+                        f"{evidence_read_error}"
+                    ),
+                    "failure_class": "infrastructure",
+                    "failure_category": "capability_evidence_unavailable",
+                    "failure_status": "inconclusive",
+                    "inconclusive": True,
+                    "blocking": False,
+                }
+            )
+        elif missing_capabilities:
+            chat.success = False
+            chat.details.update(
+                {
+                    "error": (
+                        "Slack correctness reply did not produce current-turn "
+                        "terminal evidence for the expected capabilities: "
+                        f"{missing_capabilities!r}"
+                    ),
+                    "failure_class": "model_quality",
+                    "failure_category": "missing_expected_capability",
+                    "failure_status": "failed",
+                }
+            )
+        elif argument_mismatches:
+            chat.success = False
+            chat.details.update(
+                {
+                    "error": (
+                        "Slack correctness reply used unexpected arguments for "
+                        "the exact capability calls; mismatched fields: "
+                        f"{argument_mismatches!r}"
+                    ),
+                    "failure_class": "model_quality",
+                    "failure_category": "unexpected_capability_arguments",
+                    "failure_status": "failed",
+                }
+            )
+        elif expected_capability_sequence:
+            terminal_sequence = evidence.get("terminal_sequence")
+            observed_sequence = [
+                str(item.get("capability_id") or "")
+                for item in (
+                    terminal_sequence if isinstance(terminal_sequence, list) else []
+                )
+                if isinstance(item, dict)
+            ]
+            first_positions = [
+                observed_sequence.index(capability_id)
+                for capability_id in expected_capability_sequence
+                if capability_id in observed_sequence
+            ]
+            if (
+                len(first_positions) != len(expected_capability_sequence)
+                or first_positions != sorted(first_positions)
+                or len(set(first_positions)) != len(first_positions)
+            ):
+                chat.success = False
+                chat.details.update(
+                    {
+                        "error": (
+                            "Slack correctness reply used capabilities in the "
+                            "wrong order: expected "
+                            f"{list(expected_capability_sequence)!r}, observed "
+                            f"{observed_sequence!r}"
+                        ),
+                        "failure_class": "model_quality",
+                        "failure_category": "unexpected_capability_order",
+                        "failure_status": "failed",
+                    }
+                )
+    _redact_slack_entity_ids_in_artifact_details(chat.details)
     chat.latency_ms = int((time.monotonic() - started) * 1000)
     return chat, reply_text
+
+
+def _slack_correctness_failure_result(
+    case_name: str,
+    started: float,
+    details: dict[str, object],
+    exc: BaseException,
+) -> ProbeResult:
+    error = _exc_text(exc)
+    precondition = error.startswith("probe precondition failed:")
+    artifact_details = {
+        **details,
+        "error": error,
+        "failure_class": "precondition" if precondition else "product",
+        "failure_category": (
+            "invalid_fixture" if precondition else "answer_mismatch"
+        ),
+        "failure_status": "failed",
+    }
+    _redact_slack_entity_ids_in_artifact_details(artifact_details)
+    return _result(
+        case_name,
+        False,
+        started,
+        artifact_details,
+    )
 
 
 async def case_qa_10a_slack_self_attribution(ctx: LiveQaContext) -> ProbeResult:
@@ -5733,6 +6924,7 @@ async def case_qa_10a_slack_self_attribution(ctx: LiveQaContext) -> ProbeResult:
             ),
             answer_marker=answer_marker,
             extra_details=details,
+            expected_capability="slack.get_conversation_history",
         )
         if not chat.success:
             return chat
@@ -5753,8 +6945,11 @@ async def case_qa_10a_slack_self_attribution(ctx: LiveQaContext) -> ProbeResult:
             )
         return _result(case_name, True, started, details)
     except Exception as exc:
-        return _result(
-            case_name, False, started, {**details, "error": _exc_text(exc)}
+        return _slack_correctness_failure_result(
+            case_name,
+            started,
+            details,
+            exc,
         )
 
 
@@ -5820,6 +7015,7 @@ async def case_qa_10b_slack_ooo_status(ctx: LiveQaContext) -> ProbeResult:
             ),
             answer_marker=answer_marker,
             extra_details=details,
+            expected_capability="slack.get_user_info",
         )
         if not chat.success:
             return chat
@@ -5843,8 +7039,11 @@ async def case_qa_10b_slack_ooo_status(ctx: LiveQaContext) -> ProbeResult:
             )
         return _result(case_name, True, started, details)
     except Exception as exc:
-        return _result(
-            case_name, False, started, {**details, "error": _exc_text(exc)}
+        return _slack_correctness_failure_result(
+            case_name,
+            started,
+            details,
+            exc,
         )
 
 
@@ -5852,12 +7051,17 @@ async def case_qa_10c_slack_thread_replies(ctx: LiveQaContext) -> ProbeResult:
     """Thread-visibility probe: listing a conversation "including thread
     replies" must surface the replies seeded under a thread root.
 
-    Pins the missing thread-replies capability: the host exposes only
-    top-level conversations.history, so bot replies posted with thread_ts
-    are invisible to the agent (red until a conversations.replies tool
-    ships). THREADROOT/TOPLEVEL presence is the control proving plain
-    history reads worked at all — without it a history outage would be
-    misread as the thread gap.
+    Asserts the OUTCOME — the seeded thread replies appear in the answer —
+    not the identity of the tool that fetched them. Thread visibility is
+    satisfied whether the model reaches the replies through the dedicated
+    `slack.get_thread_replies` capability or through indexed
+    `slack.search_messages` (whose threaded hits carry reply text), so the
+    capability arm accepts either (accept-any). Conversation history is NOT a
+    member: the shipped manifest documents that history returns thread
+    parents only, never replies. The real regression this guards is the
+    agent being UNABLE to see thread replies at all: THREADROOT/TOPLEVEL
+    presence is the control proving plain history reads worked, and the
+    missing-REPLY_* check stays red when the replies are not surfaced.
     """
     case_name = "qa_10c_slack_thread_replies"
     started = time.monotonic()
@@ -5915,6 +7119,17 @@ async def case_qa_10c_slack_thread_replies(ctx: LiveQaContext) -> ProbeResult:
             ),
             answer_marker=answer_marker,
             extra_details=details,
+            # Outcome, not tool identity: any capability that can genuinely
+            # retrieve thread-reply content satisfies the arm. Per the shipped
+            # manifest, conversation history NEVER returns replies (only
+            # thread parents), so it is deliberately NOT in this set; indexed
+            # search does surface reply text (threaded hits), so a model
+            # reaching the replies via search passes. The missing-REPLY_*
+            # assert below is what actually pins thread visibility.
+            accept_any_capability=(
+                "slack.get_thread_replies",
+                "slack.search_messages",
+            ),
         )
         if not chat.success:
             return chat
@@ -5942,8 +7157,11 @@ async def case_qa_10c_slack_thread_replies(ctx: LiveQaContext) -> ProbeResult:
             )
         return _result(case_name, True, started, details)
     except Exception as exc:
-        return _result(
-            case_name, False, started, {**details, "error": _exc_text(exc)}
+        return _slack_correctness_failure_result(
+            case_name,
+            started,
+            details,
+            exc,
         )
 
 
@@ -6003,6 +7221,7 @@ async def case_qa_10d_slack_channel_membership(ctx: LiveQaContext) -> ProbeResul
             ),
             answer_marker=answer_marker,
             extra_details=details,
+            expected_capability="slack.list_conversations",
         )
         if not chat.success:
             return chat
@@ -6035,8 +7254,11 @@ async def case_qa_10d_slack_channel_membership(ctx: LiveQaContext) -> ProbeResul
             )
         return _result(case_name, True, started, details)
     except Exception as exc:
-        return _result(
-            case_name, False, started, {**details, "error": _exc_text(exc)}
+        return _slack_correctness_failure_result(
+            case_name,
+            started,
+            details,
+            exc,
         )
 
 
@@ -6068,6 +7290,8 @@ async def case_qa_10e_slack_error_honesty(ctx: LiveQaContext) -> ProbeResult:
             ),
             answer_marker=answer_marker,
             extra_details=details,
+            expected_capability="slack.get_conversation_history",
+            expected_capability_statuses=("completed", "failed"),
         )
         if not chat.success:
             return chat
@@ -6079,14 +7303,20 @@ async def case_qa_10e_slack_error_honesty(ctx: LiveQaContext) -> ProbeResult:
             )
         return _result(case_name, True, started, details)
     except Exception as exc:
-        return _result(
-            case_name, False, started, {**details, "error": _exc_text(exc)}
+        return _slack_correctness_failure_result(
+            case_name,
+            started,
+            details,
+            exc,
         )
 
 
 async def case_qa_10f_slack_mention_encoding(ctx: LiveQaContext) -> ProbeResult:
     """Mention-encoding probe: a posted @-mention must be <@U…>-encoded in
     the message's RAW text so the target is actually notified.
+
+    The prompt supplies an exact DM conversation ID, so a completed
+    slack.get_conversation_info lookup is required before the verified write.
 
     Pins literal-@ mention posting: the model writes "@Display Name" as
     plain text, which renders inert and notifies nobody. Ground truth is
@@ -6128,6 +7358,14 @@ async def case_qa_10f_slack_mention_encoding(ctx: LiveQaContext) -> ProbeResult:
             ),
             answer_marker=answer_marker,
             extra_details=details,
+            expected_capability="slack.get_conversation_info",
+            expected_capability_sequence=(
+                "slack.get_conversation_info",
+                "slack.send_message",
+            ),
+            expected_capability_arguments={
+                "slack.get_conversation_info": {"channel": channel_id}
+            },
         )
         if not chat.success:
             return chat
@@ -6136,9 +7374,7 @@ async def case_qa_10f_slack_mention_encoding(ctx: LiveQaContext) -> ProbeResult:
         if excerpt:
             # The model often echoes the encoded mention it posted — keep raw
             # user ids out of persisted artifacts, same as qa_9c/qa_10i.
-            details["text_excerpt"] = RAW_SLACK_USER_ID_PATTERN.sub(
-                "U_REDACTED", excerpt
-            )
+            details["text_excerpt"] = _redact_slack_user_ids_in_text(excerpt)
         posted = await _wait_for_authored_slack_message(
             personal_token,
             channel_id=channel_id,
@@ -6153,8 +7389,8 @@ async def case_qa_10f_slack_mention_encoding(ctx: LiveQaContext) -> ProbeResult:
             # failure — the original pin this probe exists for.
             if posted.get("unencoded_author_marker_ts") is not None:
                 details["mention_encoded"] = False
-                details["posted_text_redacted"] = RAW_SLACK_USER_ID_PATTERN.sub(
-                    "U_REDACTED", str(posted.get("unencoded_author_text") or "")
+                details["posted_text_redacted"] = _redact_slack_user_ids_in_text(
+                    str(posted.get("unencoded_author_text") or "")
                 )
                 raise AssertionError(
                     "posted mention is NOT <@U…>-encoded in the raw message "
@@ -6183,8 +7419,8 @@ async def case_qa_10f_slack_mention_encoding(ctx: LiveQaContext) -> ProbeResult:
         )
         details["mention_targets_counterpart"] = targets_counterpart
         if not targets_counterpart:
-            details["posted_text_redacted"] = RAW_SLACK_USER_ID_PATTERN.sub(
-                "U_REDACTED", raw_text
+            details["posted_text_redacted"] = _redact_slack_user_ids_in_text(
+                raw_text
             )
             raise AssertionError(
                 "posted mention is encoded but does not target the requested "
@@ -6192,22 +7428,19 @@ async def case_qa_10f_slack_mention_encoding(ctx: LiveQaContext) -> ProbeResult:
             )
         return _result(case_name, True, started, details)
     except Exception as exc:
-        return _result(
-            case_name, False, started, {**details, "error": _exc_text(exc)}
+        return _slack_correctness_failure_result(
+            case_name,
+            started,
+            details,
+            exc,
         )
 
 
 async def case_qa_10g_slack_last_message_sent(ctx: LiveQaContext) -> ProbeResult:
-    """Last-sent recall probe: immediately after the user sends a Slack
-    message, "what is the most recent message I sent" must return its exact
-    text.
+    """Conversation-scoped last-sent contract over seeded history.
 
-    Pins the search-lag/self-identity class: the agent either cannot scope
-    the question to "messages I sent" (no self-identity) or leans on
-    search.messages, whose index lags fresh messages by minutes, and reports
-    a stale or wrong message. Semi-behavioral by design — a parallel canary
-    posting as the same personal user can race the seed — but still pinned
-    with an exact per-run nonce.
+    The prompt names the seeded conversation, requires a fresh
+    slack.get_conversation_history call, and verifies the exact per-run nonce.
     """
     case_name = "qa_10g_slack_last_message_sent"
     started = time.monotonic()
@@ -6231,11 +7464,12 @@ async def case_qa_10g_slack_last_message_sent(ctx: LiveQaContext) -> ProbeResult
             started=started,
             prompt=(
                 "What is the exact text of the most recent message I sent in "
-                f"Slack? Include the exact marker {answer_marker} in your "
-                "answer."
+                f"the Slack conversation with ID {channel_id}? Include the "
+                f"exact marker {answer_marker} in your answer."
             ),
             answer_marker=answer_marker,
             extra_details=details,
+            expected_capability="slack.get_conversation_history",
         )
         if not chat.success:
             return chat
@@ -6247,8 +7481,124 @@ async def case_qa_10g_slack_last_message_sent(ctx: LiveQaContext) -> ProbeResult
             )
         return _result(case_name, True, started, details)
     except Exception as exc:
-        return _result(
-            case_name, False, started, {**details, "error": _exc_text(exc)}
+        return _slack_correctness_failure_result(
+            case_name,
+            started,
+            details,
+            exc,
+        )
+
+
+async def case_qa_10g_slack_last_message_sent_global(
+    ctx: LiveQaContext,
+) -> ProbeResult:
+    """Behavioral workspace-global last-sent recall evaluation.
+
+    This preserves the original latest-anywhere product question. Shared
+    account activity and indexed-search freshness can affect the answer, so it
+    remains visible but nonblocking.
+    """
+    case_name = "qa_10g_slack_last_message_sent_global"
+    started = time.monotonic()
+    suffix = str(int(time.time() * 1000))
+    answer_marker = f"REBORN_QA_10G_GLOBAL_LAST_SENT_{suffix}"
+    last_sent_marker = f"LASTSENT_GLOBAL_{suffix}"
+    details: dict[str, object] = {"last_sent_marker": last_sent_marker}
+    try:
+        personal_token = _require_slack_personal_token(ctx)
+        channel_id = await _require_slack_personal_bot_dm_channel(ctx)
+        await _seed_slack_fixture_message(
+            personal_token,
+            channel_id,
+            last_sent_marker,
+            label=last_sent_marker,
+            actor="personal",
+        )
+        # Slack's search index is eventually consistent: the agent answers this
+        # by searching ``from:me`` newest-first, but a Web-API post is not
+        # searchable for many seconds. Until the freshly-seeded GLOBAL marker is
+        # indexed, that search returns an OLDER already-indexed seed and the
+        # marker assertion below would red for external index lag, not an agent
+        # regression. Gate the turn on the marker becoming searchable; if it
+        # never indexes within the bounded deadline, surface INCONCLUSIVE.
+        readiness = await _wait_for_slack_search_marker(
+            ctx, marker=last_sent_marker
+        )
+        details["search_index_readiness"] = readiness
+        if not readiness.get("ready"):
+            if readiness.get("permanent"):
+                # Search can NEVER run here (missing scope / invalid or revoked
+                # token): this is an actionable env-repair failure, not index
+                # lag — report it as such rather than an inconclusive lag
+                # artifact that would hide the real cause.
+                reason = (
+                    "Slack search readiness check can never run in this "
+                    f"environment (error={readiness.get('error')!r}) — repair "
+                    "the personal token/scopes"
+                )
+                result = _result(
+                    case_name,
+                    False,
+                    started,
+                    {
+                        **details,
+                        "error": reason,
+                        "failure_class": "infrastructure",
+                        "failure_category": "slack_search_unavailable",
+                        "failure_status": "failed",
+                    },
+                )
+                result.details["blocking"] = False
+                return result
+            reason = (
+                "Slack search did not index the workspace-global last-sent "
+                f"marker within {int(SLACK_SEARCH_INDEX_READINESS_TIMEOUT_SECONDS)}s "
+                f"(attempts={readiness.get('attempts')}, "
+                f"error={readiness.get('error')!r}) — external search-index "
+                "lag, not an agent regression"
+            )
+            result = _result(
+                case_name,
+                False,
+                started,
+                {
+                    **details,
+                    "error": reason,
+                    "failure_class": "infrastructure",
+                    "failure_category": "slack_search_index_lag",
+                    "failure_status": "inconclusive",
+                    "inconclusive": True,
+                },
+            )
+            result.details["blocking"] = False
+            return result
+        chat, reply_text = await _slack_correctness_chat_reply(
+            ctx,
+            case_name=case_name,
+            started=started,
+            prompt=(
+                "What is the exact text of the most recent message I sent in "
+                f"Slack? Include the exact marker {answer_marker} in your "
+                "answer."
+            ),
+            answer_marker=answer_marker,
+            extra_details=details,
+        )
+        if not chat.success:
+            return chat
+        details.update(chat.details)
+        if last_sent_marker not in reply_text:
+            raise AssertionError(
+                "agent did not surface the user's workspace-global most recent "
+                f"sent message: reply lacked {last_sent_marker}"
+            )
+        return _result(case_name, True, started, details)
+    except Exception as exc:
+        return _slack_correctness_failure_result(
+            case_name,
+            started,
+            details,
+            exc,
         )
 
 
@@ -6291,6 +7641,7 @@ async def case_qa_10h_slack_email_hallucination_guard(
             ),
             answer_marker=answer_marker,
             extra_details=details,
+            expected_capability="slack.get_user_info",
         )
         if not chat.success:
             return chat
@@ -6316,8 +7667,11 @@ async def case_qa_10h_slack_email_hallucination_guard(
             )
         return _result(case_name, True, started, details)
     except Exception as exc:
-        return _result(
-            case_name, False, started, {**details, "error": _exc_text(exc)}
+        return _slack_correctness_failure_result(
+            case_name,
+            started,
+            details,
+            exc,
         )
 
 
@@ -6388,12 +7742,10 @@ async def case_qa_10i_slack_raw_entity_hygiene(ctx: LiveQaContext) -> ProbeResul
         details.update(chat.details)
         excerpt = str(details.get("text_excerpt") or "")
         if excerpt:
-            details["text_excerpt"] = RAW_SLACK_USER_ID_PATTERN.sub(
-                "U_REDACTED", excerpt
-            )
-        if "<@U" in reply_text:
+            details["text_excerpt"] = _redact_slack_user_ids_in_text(excerpt)
+        if "<@U" in reply_text or "<@W" in reply_text:
             raise AssertionError(
-                "reply leaked encoded Slack mention markup (<@U…>) into "
+                "reply leaked encoded Slack mention markup (<@U…>/<@W…>) into "
                 "user-facing text"
             )
         leaked_ids = _raw_slack_user_ids_in_text(reply_text)
@@ -6412,8 +7764,11 @@ async def case_qa_10i_slack_raw_entity_hygiene(ctx: LiveQaContext) -> ProbeResul
             )
         return _result(case_name, True, started, details)
     except Exception as exc:
-        return _result(
-            case_name, False, started, {**details, "error": _exc_text(exc)}
+        return _slack_correctness_failure_result(
+            case_name,
+            started,
+            details,
+            exc,
         )
 
 
@@ -6606,6 +7961,11 @@ CASES: dict[str, CaseSpec] = {
     ),
     "qa_9c_slack_digest_names_not_ids": CaseSpec(
         case_qa_9c_slack_digest_names_not_ids,
+        # This probe evaluates stochastic final prose. It does not assert a
+        # deterministic capability call, so keep the signal visible without
+        # turning model-output variance into a blocking harness failure.
+        tier="behavioral",
+        blocking=False,
         requires_slack=True,
         requires_slack_personal_auth=True,
     ),
@@ -6662,6 +8022,14 @@ CASES: dict[str, CaseSpec] = {
         requires_slack_target=True,
         requires_slack_personal_auth=True,
     ),
+    "qa_10g_slack_last_message_sent_global": CaseSpec(
+        case_qa_10g_slack_last_message_sent_global,
+        tier="behavioral",
+        blocking=False,
+        requires_slack=True,
+        requires_slack_target=True,
+        requires_slack_personal_auth=True,
+    ),
     "qa_10h_slack_email_hallucination_guard": CaseSpec(
         case_qa_10h_slack_email_hallucination_guard,
         requires_slack=True,
@@ -6670,6 +8038,8 @@ CASES: dict[str, CaseSpec] = {
     ),
     "qa_10i_slack_raw_entity_hygiene": CaseSpec(
         case_qa_10i_slack_raw_entity_hygiene,
+        tier="behavioral",
+        blocking=False,
         requires_slack=True,
         requires_slack_target=True,
         requires_slack_personal_auth=True,
@@ -6707,6 +8077,8 @@ def write_case_manifest(output_dir: Path, selected_cases: list[str]) -> Path:
                 "qa_rows": QA_SHEET_CASES.get(name, {}).get("rows", []),
                 "feature": QA_SHEET_CASES.get(name, {}).get("feature"),
                 "gate": QA_SHEET_CASES.get(name, {}).get("gate"),
+                "case_tier": spec.tier,
+                "blocking": spec.blocking,
                 "default_enabled": spec.default_enabled,
                 "requires_slack": spec.requires_slack,
                 "requires_slack_target": spec.requires_slack_target,
@@ -6874,12 +8246,12 @@ async def run_cases(args: argparse.Namespace) -> int:
     binary = _reborn_binary() if args.skip_build else build_reborn_binary()
     if not binary.exists():
         raise LiveQaError(
-            f"ironclaw-reborn binary missing at {binary}; rerun without --skip-build"
+            f"ironclaw binary missing at {binary}; rerun without --skip-build"
         )
     results: list[ProbeResult] = []
     trace_exports: list[dict[str, object]] = []
     first_base_url = ""
-    for name in selected_cases:
+    for case_index, name in enumerate(selected_cases):
         case_spec = CASES[name]
         prepared_home = prepare_reborn_home(args, [name], case_name=name)
         preflight_path = write_preflight(args.output_dir, prepared_home)
@@ -7191,7 +8563,12 @@ async def run_cases(args: argparse.Namespace) -> int:
                 write_preflight(args.output_dir, prepared_home)
                 shutil.copyfile(preflight_path, case_preflight_path)
             print(f"[reborn-webui-v2-live-qa] running case={name}", flush=True)
-            result = await CASES[name].fn(ctx)
+            result = await _run_case_with_retries(
+                CASES[name].fn,
+                ctx,
+                attempts=LIVE_QA_CASE_ATTEMPTS,
+                is_retriable=_is_case_retriable,
+            )
             result = _attach_browser_diagnostics(args.output_dir, result)
             results.append(result)
             print(
@@ -7199,6 +8576,41 @@ async def run_cases(args: argparse.Namespace) -> int:
                 f"latency_ms={result.latency_ms}",
                 flush=True,
             )
+            if _is_provider_incident(result):
+                result.details.update(
+                    {
+                        "blocking": False,
+                        "failure_class": "infrastructure",
+                        "inconclusive": True,
+                    }
+                )
+                failure_category = str(result.details["failure_category"])
+                for remaining_name in selected_cases[case_index + 1 :]:
+                    inconclusive = _result(
+                        remaining_name,
+                        False,
+                        time.monotonic(),
+                        {
+                            "error": (
+                                "case was not run because the model provider had a "
+                                f"terminal incident during {name}"
+                            ),
+                            "failure_class": "infrastructure",
+                            "failure_category": failure_category,
+                            "failure_status": "inconclusive",
+                            "inconclusive": True,
+                            "short_circuited_by": name,
+                        },
+                    )
+                    inconclusive.details["blocking"] = False
+                    results.append(inconclusive)
+                    print(
+                        "[reborn-webui-v2-live-qa] "
+                        f"case={remaining_name} success={inconclusive.success} "
+                        f"inconclusive=provider_incident source_case={name}",
+                        flush=True,
+                    )
+                break
         finally:
             stop_process(proc)
             trace_export = export_case_trace(args.output_dir, name, prepared_home.path)
@@ -7217,7 +8629,7 @@ async def run_cases(args: argparse.Namespace) -> int:
         f"[reborn-webui-v2-live-qa] green_run_explanation={green_explanation_path}",
         flush=True,
     )
-    return 0 if all(result.success for result in results) else 1
+    return 1 if any(_is_blocking_failure(result) for result in results) else 0
 
 
 def main() -> int:

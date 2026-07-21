@@ -23,7 +23,7 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `retry.rs` | Exponential backoff retry wrapper; `is_retryable()` classification |
 | `failover.rs` | `FailoverProvider` — tries providers in order with per-provider cooldown |
 | `response_cache.rs` | In-memory LLM response cache with TTL and LRU eviction (keyed by SHA-256) |
-| `costs.rs` | Static per-model cost table (OpenAI, Anthropic, local/Ollama heuristics) |
+| (cost table moved) | The per-model cost table + usage pricing now lives in `ironclaw_common::llm_costs` (shared by every surface that reports cost). Providers import it as `use ironclaw_common::llm_costs as costs;`. |
 | `rig_adapter.rs` | Adapter bridging rig-core `CompletionModel` → `LlmProvider`; used by OpenAI, Anthropic, Ollama, Tinfoil |
 | `smart_routing.rs` | `SmartRoutingProvider` — 13-dimension complexity scorer routes cheap vs primary model |
 | `recording.rs` | `RecordingLlm` — trace capture for E2E replay testing (`IRONCLAW_RECORD_TRACE`) |
@@ -114,9 +114,11 @@ ID, migrate to it immediately. Advanced users can override headers via
 
 **Pricing auto-fetch:** On startup, `NearAiChatProvider` fires a background task to fetch per-model pricing from `/v1/model/list`. If the fetch fails, it silently falls back to `costs::model_cost()` / `costs::default_cost()`. Pricing is stored in-memory only.
 
-**HTTP request timeout:** The NEAR AI HTTP client has a 60-second timeout per request (`DEFAULT_REQUEST_TIMEOUT_SECS` in `config.rs`). This is kept below the Reborn runner lease (90 s) so the HTTP layer fails a hung request before the lease reclaims the runner. The 10 s connect timeout and 30 s TCP keepalive from the shared hardened client also apply (see "Shared client timeout hygiene" below). Rate limit `Retry-After` headers are parsed (both delay-seconds and HTTP-date formats) and forwarded as `LlmError::RateLimited { retry_after }` for the `RetryProvider` to honor.
+**HTTP request timeout:** Non-streaming NEAR AI requests have a 60-second total timeout (`DEFAULT_REQUEST_TIMEOUT_SECS` in `config.rs`). Streaming requests use the same value for time-to-response-headers and each inter-event idle gap, but have no total wall-clock timeout; active long answers must not be cancelled merely because they exceed 60 seconds. The 10 s connect timeout and 30 s TCP keepalive from the shared hardened client also apply (see "Shared client timeout hygiene" below). Rate limit `Retry-After` headers are parsed (both delay-seconds and HTTP-date formats) and forwarded as `LlmError::RateLimited { retry_after }` for the `RetryProvider` to honor.
 
-**Shared client timeout hygiene:** Every production reqwest client in this crate is built via `config::hardened_client_builder(request_timeout_secs)`, the single source of truth for connect-timeout (`CONNECT_TIMEOUT_SECS` = 10 s), TCP keepalive (`TCP_KEEPALIVE_SECS` = 30 s), and idle-pool bound (`POOL_IDLE_TIMEOUT_SECS` = 90 s). The total request timeout stays a per-call argument so turn-model calls use `DEFAULT_REQUEST_TIMEOUT_SECS` (< lease) while auxiliary calls (OAuth/token exchange, transcription) keep their own budgets. Callers chain site-specific options (`.redirect`, `.resolve_to_addrs`, `.default_headers`) onto the returned builder. Do not re-apply these four settings inline — change them only in `config.rs`. Exception: the few infallible constructors that cannot return an error (`SessionManager::new_async`, the transcription providers in `transcription/openai.rs` and `transcription/chat_completions.rs`) build via the hardened builder but log a `tracing::error!` and degrade to a bare `Client::new()` on the rare `.build()` failure (e.g. TLS-backend init) rather than failing construction; making the hardened client the only constructable path in these sites is tracked as durable enforcement in issue #5214.
+**Interrupted streams:** A streamed response is complete only after an SSE `[DONE]` marker or an explicit provider finish reason. EOF, transport failure, or an idle timeout before either terminal signal remains an error even when partial text was received. Never reinterpret a partial response as success or issue a semantic continuation request: the runtime must receive the real failure, and only the original provider stream can preserve exact output and tool-call semantics.
+
+**Shared client timeout hygiene:** Every production reqwest client in this crate starts from the shared hardened builders in `config.rs`, the single source of truth for connect-timeout (`CONNECT_TIMEOUT_SECS` = 10 s), TCP keepalive (`TCP_KEEPALIVE_SECS` = 30 s), and idle-pool bound (`POOL_IDLE_TIMEOUT_SECS` = 90 s). One-shot requests additionally use `hardened_client_builder(request_timeout_secs)` for a total timeout; streaming responses use `hardened_streaming_client_builder()` and apply header/idle bounds while consuming the stream. Callers chain site-specific options (`.redirect`, `.resolve_to_addrs`, `.default_headers`) onto the returned builder. Do not re-apply these settings inline — change them only in `config.rs`. Exception: the few infallible constructors that cannot return an error (`SessionManager::new_async`, the transcription providers in `transcription/openai.rs` and `transcription/chat_completions.rs`) build via the hardened builder but log a `tracing::error!` and degrade to a bare `Client::new()` on the rare `.build()` failure (e.g. TLS-backend init) rather than failing construction; making the hardened client the only constructable path in these sites is tracked as durable enforcement in issue #5214.
 
 ## Circuit Breaker
 
@@ -254,9 +256,18 @@ Raw provider
 - `SILENT_REPLY_TOKEN` (`"NO_REPLY"`) and `is_silent_reply()` — used by the dispatcher to suppress empty responses in group chats
 - Thinking-tag stripping — regex-based removal of `<thinking>`, `<reflection>`, `<scratchpad>`, `<|think|>`, `<final>`, etc. from model responses before returning to the user
 
-## costs.rs Details
+## Cost table (moved to `ironclaw_common::llm_costs`)
 
-`costs.rs` provides a static lookup table (`model_cost(model_id)`) returning `(input_cost, output_cost)` per token as `rust_decimal::Decimal`. Provider prefixes like `"openai/gpt-4o"` are stripped before lookup. Returns `None` for unknown models — callers should fall back to `default_cost()` (roughly GPT-4o pricing). Local model heuristic (`is_local_model()`) returns zero cost for Ollama-style identifiers (llama*, mistral*, `:latest`, `:instruct`, etc.).
+The static per-model cost table moved to `crates/ironclaw_common/src/llm_costs.rs`
+so surfaces above `ironclaw_llm` (product workflow, WebChat v2) can price a run's
+usage without depending on this whole crate. It provides `model_cost(model_id)`
+→ `(input_cost, output_cost)` per token as `rust_decimal::Decimal` (provider
+prefixes like `"openai/gpt-4o"` stripped; `None` for unknowns → `default_cost()`
+≈ GPT-4o; Ollama-style ids price at zero), plus `price_usage(...)` /
+`RunCost::from_usage(...)` — the single shared source for per-run USD pricing.
+Providers in this crate import it as `use ironclaw_common::llm_costs as costs;`
+(a plain import alias, **not** a re-export — see the relocation note in
+`.claude/rules/type-placement.md`).
 
 ## rig_adapter.rs Details
 

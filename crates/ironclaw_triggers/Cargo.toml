@@ -10,9 +10,6 @@ publish = false
 layer = "substrates"
 
 [features]
-default = []
-libsql = ["dep:libsql"]
-postgres = ["dep:deadpool-postgres", "dep:tokio-postgres"]
 test-support = []
 
 [dependencies]
@@ -21,16 +18,16 @@ chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 cron = "0.17"
 hex = "0.4"
-deadpool-postgres = { version = "0.14", optional = true }
+deadpool-postgres = "0.14"
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_turns = { path = "../ironclaw_turns" }
-libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
-tokio-postgres = { version = "0.7", optional = true }
+libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
+tokio-postgres = "0.7"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.11"
 thiserror = "2"
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "time"] }
 tracing = "0.1"
 ulid = { version = "1", features = ["serde"] }
 

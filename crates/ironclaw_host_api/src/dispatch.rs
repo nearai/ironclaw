@@ -12,9 +12,9 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
-    CapabilityId, ExtensionId, MountView, ResourceEstimate, ResourceReceipt, ResourceReservation,
-    ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle,
-    UserId,
+    CapabilityId, ExtensionId, HostRemediation, MountView, ResourceEstimate, ResourceReceipt,
+    ResourceReservation, ResourceScope, ResourceUsage, RunId, RuntimeCredentialAuthRequirement,
+    RuntimeKind, SecretHandle, UserId,
 };
 
 /// Request for one already-authorized declared capability dispatch.
@@ -23,6 +23,9 @@ pub struct CapabilityDispatchRequest {
     pub capability_id: CapabilityId,
     pub scope: ResourceScope,
     pub authenticated_actor_user_id: Option<UserId>,
+    /// Loop turn-run identity forwarded from `ExecutionContext::run_id`.
+    /// `None` for non-loop callers.
+    pub run_id: Option<RunId>,
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
     pub resource_reservation: Option<ResourceReservation>,
@@ -136,7 +139,31 @@ impl DispatchInputIssue {
 /// Stable structured dispatch failure details for dispatch validation failures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchFailureDetail {
-    InvalidInput { issues: Vec<DispatchInputIssue> },
+    InvalidInput {
+        issues: Vec<DispatchInputIssue>,
+    },
+    /// Free-text raw failure cause preserved when the host-authored
+    /// `safe_summary` cannot pass the strict loop safe-summary validator
+    /// (e.g. it names a concrete path such as `/testbed/replacer.go`, or
+    /// carries newlines from a shell error). The summary shown to the model
+    /// degrades to the fixed category sentence; this text rides the
+    /// model-visible diagnostic detail channel, where secret VALUES are
+    /// scrubbed and disallowed control characters are normalized at the loop
+    /// boundary before the model observes it.
+    Diagnostic {
+        text: String,
+    },
+    /// Host-authored operator remediation — the TRUSTED text channel.
+    ///
+    /// Distinct from [`Self::Diagnostic`] by PROVENANCE, not content shape:
+    /// `Diagnostic` carries an untrusted raw cause (capability output, a
+    /// backend error string) that is redacted hard downstream and collapses to
+    /// the safe-summary placeholder when it names a path or a URL;
+    /// this variant carries a host-authored instruction that must survive
+    /// intact. See [`HostRemediation`] for the invariant and the value guard.
+    HostRemediation {
+        text: HostRemediation,
+    },
 }
 
 /// Stable, redacted runtime failure categories surfaced through the dispatch port.

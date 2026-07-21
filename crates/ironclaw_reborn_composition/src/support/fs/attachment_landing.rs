@@ -16,7 +16,7 @@ use ironclaw_attachments::{
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{ResourceScope, ScopedPath};
-use ironclaw_loop_support::{LoopAttachmentReadError, LoopAttachmentReadPort};
+use ironclaw_loop_host::{LoopAttachmentReadError, LoopAttachmentReadPort};
 use ironclaw_product_workflow::{
     InboundAttachmentLander, InboundAttachmentReader, RebornServicesError, RebornServicesErrorCode,
     RebornServicesErrorKind,

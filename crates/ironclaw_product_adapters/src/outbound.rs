@@ -975,6 +975,12 @@ pub enum AuthPromptChallengeKind {
     /// the resolve route, which rides in `connection` context (present for
     /// channel pairing, absent for a stored-credential secret).
     ManualToken,
+    /// Host-issued channel pairing (WebGeneratedCode direction): the UI shows
+    /// a code/deep-link panel and completion happens on the EXTERNAL side
+    /// (e.g. Telegram `/start <code>`), then the run resumes server-side.
+    /// Nothing is pasted into IronClaw — the inverse of `ManualToken`'s
+    /// paste-a-code modality. Wire value is `pairing`.
+    Pairing,
     /// Other challenge kind (account selection, setup required, reauthorize).
     /// The UI should fall back to a generic "authentication required" card.
     Other,

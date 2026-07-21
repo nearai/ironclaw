@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use ironclaw::error::LlmError;
+use ironclaw_llm::LlmError;
 use ironclaw_llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
     ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
@@ -464,6 +464,16 @@ impl TraceLlm {
     /// Empty for `complete()`-only calls (text-only paths).
     pub fn captured_tool_definitions(&self) -> Vec<Vec<ToolDefinition>> {
         self.captured_tool_definitions.lock().unwrap().clone()
+    }
+
+    /// Enqueue one more step at the back of the FIFO. For scenarios where a
+    /// later scripted call needs a server-minted value (e.g. a durable
+    /// `result_ref`) only discoverable after an earlier turn completes —
+    /// the caller reads that value back from persisted state, then pushes
+    /// the dependent step before the next `submit_turn`. The template
+    /// substitution in `next_step` still applies to pushed steps.
+    pub fn push_step(&self, step: TraceStep) {
+        self.steps.lock().unwrap().push_back(step);
     }
 
     // -- internal helpers ---------------------------------------------------

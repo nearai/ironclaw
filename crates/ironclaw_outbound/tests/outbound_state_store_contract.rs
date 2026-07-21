@@ -46,26 +46,6 @@ fn build_outbound_store_for_backend(
 }
 
 #[tokio::test]
-async fn in_memory_defaults_policy_progress_opt_in_and_subscription_scope() {
-    let store = InMemoryOutboundStateStore::default();
-    communication_preferences_are_tenant_user_scoped(&store).await;
-    communication_preferences_are_shared_agent_scoped(&store).await;
-    communication_preferences_reject_empty_updated_by(&store).await;
-    communication_preferences_reject_empty_shared_agent_scope(&store).await;
-    communication_preference_put_existing_conflicts_without_writing(&store).await;
-    communication_preference_atomic_update_preserves_existing_slots(&store).await;
-    communication_preference_update_inserts_absent_record(&store).await;
-    communication_preference_stale_version_conflicts_without_writing(&store).await;
-    communication_preference_update_rejects_invalid_or_mismatched_record(&store).await;
-    durable_policy_subscription_delivery_flow(&store).await;
-    subscription_cursor_rejects_mismatched_scope(&store).await;
-    subscription_ids_are_scoped_not_global(&store).await;
-    subscription_cursor_rejects_backward_advancement(&store).await;
-    delivery_status_rejects_inconsistent_failure_kind(&store).await;
-    notification_policy_rejects_excessive_targets(&store).await;
-}
-
-#[tokio::test]
 async fn filesystem_store_satisfies_outbound_contract_on_in_memory_backend() {
     // The new FilesystemOutboundStateStore runs the same contract suite as
     // the in-memory and SQL backends, demonstrating that it satisfies the

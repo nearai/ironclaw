@@ -1,6 +1,7 @@
+// arch-exempt: large_file, targeted model error mapping stays with the gateway adapter, plan #4088
 //! LLM provider-backed Reborn model gateway wiring.
 //!
-//! The loop-support crate owns the host-facing model gateway contract. This
+//! The loop-host crate owns the host-facing model gateway contract. This
 //! adapter lives in the standalone Reborn composition crate because it bridges
 //! that contract to the shared `ironclaw_llm` provider abstraction.
 
@@ -8,22 +9,21 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Instant,
 };
 
 use async_trait::async_trait;
+use ironclaw_common::llm_costs::{default_cost, model_cost};
 use ironclaw_host_api::{CapabilityId, ProviderToolName, sha256_digest_token};
 use ironclaw_llm::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
     FinishReason, ImageUrl, LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest,
     ToolCompletionResponse, ToolDefinition, clean_response, contains_codex_text_tool_call_syntax,
-    costs::{default_cost, model_cost},
-    recover_codex_text_tool_calls_from_tool_names,
-    vision_models::is_vision_model,
+    recover_codex_text_tool_calls_from_tool_names, vision_models::is_vision_model,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
     HostManagedModelResponse, HostManagedModelRouteSnapshot, HostManagedModelStreamSink,
@@ -37,7 +37,7 @@ use ironclaw_safety::{
 use ironclaw_threads::{ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadScope};
 use ironclaw_turns::run_profile::LoopModelUsage;
 use ironclaw_turns::{
-    TurnId, TurnRunId,
+    ModelInvalidOutputDetailReason as InvalidOutputReason, TurnId, TurnRunId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
@@ -50,6 +50,13 @@ use ironclaw_turns::{
 };
 use tracing::debug;
 
+mod prompt_cache_activity;
+
+use prompt_cache_activity::{
+    ModelCallCacheUsage, PromptCacheActivityLog, PromptCacheCallScope,
+    system_prompt_cache_signature, tool_definitions_cache_signature,
+};
+
 use crate::{
     failure_categories::MODEL_CREDITS_EXHAUSTED_REASON_KIND,
     model_routes::{
@@ -61,9 +68,6 @@ use crate::{
 const MODEL_CREDITS_EXHAUSTED_SUMMARY: &str = "model provider account is out of credits";
 const PROVIDER_TOOL_ARGUMENTS_OMITTED_MARKER: &str =
     "arguments omitted because they exceeded the host provider-tool limit";
-const PROVIDER_TOOL_ARGUMENTS_PARSE_ERROR_PREFIX: &str =
-    "failed to parse tool-call arguments JSON:";
-const PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY: &str = "model returned invalid tool-call arguments";
 const PROVIDER_TOOL_ARGUMENTS_INVALID_MARKER: &str =
     "arguments omitted because the provider emitted malformed tool-call JSON";
 const CONTEXT_SHADOW_TARGET: &str = "ironclaw::reborn::context_shadow";
@@ -132,9 +136,9 @@ impl LlmModelProfilePolicy {
     }
 
     /// Build a [`StaticModelCostTable`] mapping every allowed `ModelProfileId`
-    /// to its per-token price via [`ironclaw_llm::costs::model_cost`].
+    /// to its per-token price via [`ironclaw_common::llm_costs::model_cost`].
     /// Profiles whose `model_override` is unknown to the LLM cost table
-    /// fall back to [`ironclaw_llm::costs::default_cost`] (roughly GPT-4o
+    /// fall back to [`ironclaw_common::llm_costs::default_cost`] (roughly GPT-4o
     /// pricing) so the accountant always reconciles to a non-zero spend
     /// for an unknown provider — fail-safe, not silent.
     pub fn build_cost_table(&self) -> StaticModelCostTable {
@@ -348,6 +352,7 @@ where
     provider: Arc<P>,
     policy: LlmModelProfilePolicy,
     provider_turn_sequence: Arc<AtomicU64>,
+    prompt_cache_activity: Arc<PromptCacheActivityLog>,
 }
 
 impl<P> LlmProviderModelGateway<P>
@@ -369,7 +374,12 @@ where
             provider,
             policy,
             provider_turn_sequence: Arc::new(AtomicU64::new(1)),
+            prompt_cache_activity: Arc::new(PromptCacheActivityLog::default()),
         }
+    }
+
+    fn prompt_cache_scope(&self, run_id: TurnRunId) -> PromptCacheCallScope {
+        PromptCacheCallScope::new(Arc::clone(&self.prompt_cache_activity), run_id)
     }
 }
 
@@ -391,7 +401,14 @@ where
                     "model profile is not permitted",
                 )
             })?;
-        let model_override = request_model_override(route, self.provider.as_ref())?;
+        let model_override = request_model_override(
+            route,
+            self.provider.as_ref(),
+            request
+                .resolved_model_route
+                .as_ref()
+                .map(|snapshot| snapshot.model_id()),
+        )?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
@@ -408,6 +425,7 @@ where
             None,
             None,
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -426,7 +444,14 @@ where
                     "model profile is not permitted",
                 )
             })?;
-        let model_override = request_model_override(route, self.provider.as_ref())?;
+        let model_override = request_model_override(
+            route,
+            self.provider.as_ref(),
+            request
+                .resolved_model_route
+                .as_ref()
+                .map(|snapshot| snapshot.model_id()),
+        )?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
@@ -443,6 +468,7 @@ where
             None,
             Some(sink),
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -461,7 +487,14 @@ where
                     "model profile is not permitted",
                 )
             })?;
-        let model_override = request_model_override(route, self.provider.as_ref())?;
+        let model_override = request_model_override(
+            route,
+            self.provider.as_ref(),
+            request
+                .resolved_model_route
+                .as_ref()
+                .map(|snapshot| snapshot.model_id()),
+        )?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
@@ -482,6 +515,7 @@ where
             Some(provider_turn_scope),
             None,
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -501,7 +535,14 @@ where
                     "model profile is not permitted",
                 )
             })?;
-        let model_override = request_model_override(route, self.provider.as_ref())?;
+        let model_override = request_model_override(
+            route,
+            self.provider.as_ref(),
+            request
+                .resolved_model_route
+                .as_ref()
+                .map(|snapshot| snapshot.model_id()),
+        )?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
         let turn_id = request.turn_id;
@@ -522,6 +563,7 @@ where
             Some(provider_turn_scope),
             Some(sink),
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -635,6 +677,7 @@ where
     provider_pool: Arc<P>,
     route_resolver: Arc<dyn ModelRouteResolver>,
     provider_turn_sequence: Arc<AtomicU64>,
+    prompt_cache_activity: Arc<PromptCacheActivityLog>,
 }
 
 impl<P> RoutedLlmProviderModelGateway<P>
@@ -646,7 +689,12 @@ where
             provider_pool,
             route_resolver,
             provider_turn_sequence: Arc::new(AtomicU64::new(1)),
+            prompt_cache_activity: Arc::new(PromptCacheActivityLog::default()),
         }
+    }
+
+    fn prompt_cache_scope(&self, run_id: TurnRunId) -> PromptCacheCallScope {
+        PromptCacheCallScope::new(Arc::clone(&self.prompt_cache_activity), run_id)
     }
 }
 
@@ -688,6 +736,7 @@ where
             None,
             None,
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -726,6 +775,7 @@ where
             None,
             Some(sink),
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -768,6 +818,7 @@ where
             Some(provider_turn_scope),
             None,
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -811,6 +862,7 @@ where
             Some(provider_turn_scope),
             Some(sink),
             replay_identity,
+            Some(self.prompt_cache_scope(run_id)),
         )
         .await
     }
@@ -825,8 +877,11 @@ where
         slot: ModelSlot,
         snapshot: &HostManagedModelRouteSnapshot,
     ) -> Result<ModelSelectionMode, HostManagedModelError> {
-        let route = ModelRoute::new(snapshot.provider_id.clone(), snapshot.model_id.clone())
-            .map_err(map_model_route_error)?;
+        let route = ModelRoute::new(
+            snapshot.provider_id().to_string(),
+            snapshot.model_id().to_string(),
+        )
+        .map_err(map_model_route_error)?;
         self.route_resolver
             .validate_model_route(slot, &route)
             .map_err(map_model_route_error)
@@ -878,12 +933,15 @@ fn snapshot_from_host_request(
     snapshot: &HostManagedModelRouteSnapshot,
     policy_mode: ModelSelectionMode,
 ) -> Result<ResolvedModelRouteSnapshot, HostManagedModelError> {
-    let route = ModelRoute::new(snapshot.provider_id.clone(), snapshot.model_id.clone())
-        .map_err(map_model_route_error)?;
+    let route = ModelRoute::new(
+        snapshot.provider_id().to_string(),
+        snapshot.model_id().to_string(),
+    )
+    .map_err(map_model_route_error)?;
     let key = ModelRouteProviderKey::new(
         route,
-        snapshot.config_version.clone(),
-        snapshot.auth_version.clone(),
+        snapshot.config_version().to_string(),
+        snapshot.auth_version().to_string(),
     )
     .map_err(map_model_route_error)?;
     Ok(ResolvedModelRouteSnapshot::with_provider_key(
@@ -979,14 +1037,22 @@ fn host_error_to_model_gateway_error(error: AgentLoopHostError) -> LoopModelGate
 fn request_model_override<P>(
     route: &LlmModelProfileRoute,
     provider: &P,
+    requested_model: Option<&str>,
 ) -> Result<String, HostManagedModelError>
 where
     P: LlmProvider + ?Sized,
 {
-    let model_override = route
-        .model_override
-        .as_deref()
+    // A per-run caller-requested model (an advisory route hint set at submit)
+    // takes precedence over the profile default. Providers that honor
+    // per-request overrides (e.g. NEAR AI) serve the requested model; providers
+    // that bake the model at construction ignore it and fall back to their
+    // active model — the "route if the provider can serve it, else fall back"
+    // behavior, decided at the provider boundary rather than a route allowlist.
+    let model_override = requested_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
         .map(str::to_string)
+        .or_else(|| route.model_override.as_deref().map(str::to_string))
         .unwrap_or_else(|| provider.active_model_name());
     let trimmed = model_override.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default") {
@@ -1050,6 +1116,7 @@ fn validate_replay_identity_text(
 struct ProviderStreamSink {
     inner: Arc<dyn HostManagedModelStreamSink>,
     accumulated_text: Mutex<String>,
+    replace_on_next_delta: AtomicBool,
 }
 
 impl ProviderStreamSink {
@@ -1057,6 +1124,7 @@ impl ProviderStreamSink {
         Self {
             inner,
             accumulated_text: Mutex::new(String::new()),
+            replace_on_next_delta: AtomicBool::new(false),
         }
     }
 }
@@ -1072,16 +1140,41 @@ impl CompletionStreamSink for ProviderStreamSink {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
+            if self.replace_on_next_delta.swap(false, Ordering::SeqCst) {
+                guard.clear();
+            }
             guard.push_str(&delta);
             sanitize_model_visible_text(guard.clone())
         };
         self.inner.safe_text_update(safe_text).await;
     }
+
+    fn supports_text_replacement(&self) -> bool {
+        true
+    }
+
+    async fn replace_on_next_text_delta(&self) {
+        self.replace_on_next_delta.store(true, Ordering::SeqCst);
+    }
+
+    async fn finish_text_replacement(&self) {
+        if !self.replace_on_next_delta.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        {
+            let mut guard = match self.accumulated_text.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.clear();
+        }
+        self.inner.safe_text_update(String::new()).await;
+    }
 }
 
 #[tracing::instrument(
     level = "debug",
-    skip(provider, completion, capabilities, stream_sink, replay_identity),
+    skip(provider, completion, capabilities, stream_sink, replay_identity, cache_scope),
     fields(
         provider_id = %replay_identity.provider_id,
         provider_model_id = %replay_identity.provider_model_id,
@@ -1095,10 +1188,12 @@ async fn complete_model_request<P>(
     provider_turn_scope: Option<String>,
     stream_sink: Option<Arc<dyn HostManagedModelStreamSink>>,
     replay_identity: ProviderReplayIdentity,
+    cache_scope: Option<PromptCacheCallScope>,
 ) -> Result<HostManagedModelResponse, HostManagedModelError>
 where
     P: LlmProvider + ?Sized,
 {
+    let system_prompt_hash = system_prompt_cache_signature(&completion.messages);
     if let Some(capabilities) = capabilities {
         let tool_definitions = capabilities
             .tool_definitions()
@@ -1135,6 +1230,7 @@ where
                     provider_tool_definition_to_llm(definition)
                 })
                 .collect::<Vec<_>>();
+            let tool_definitions_hash = tool_definitions_cache_signature(&recovery_tool_names);
             let tool_request =
                 ToolCompletionRequest::from_completion_request(completion, llm_tool_definitions);
             debug!("reborn model gateway dispatching tool-capable provider request");
@@ -1169,6 +1265,13 @@ where
                     return Err(map_provider_error(error));
                 }
             };
+            if let Some(scope) = cache_scope.as_ref() {
+                scope.record(
+                    ModelCallCacheUsage::from_tool_response(&response),
+                    tool_definitions_hash,
+                    system_prompt_hash,
+                );
+            }
             let response =
                 recover_textual_tool_calls_from_tool_response(response, &recovery_tool_names)?;
             let host_response_started_at = live_latency_started_at();
@@ -1234,6 +1337,13 @@ where
                             return Err(map_provider_error(error));
                         }
                     };
+                    if let Some(scope) = cache_scope.as_ref() {
+                        scope.record(
+                            ModelCallCacheUsage::from_tool_response(&response),
+                            tool_definitions_hash,
+                            system_prompt_hash,
+                        );
+                    }
                     let mut response = recover_textual_tool_calls_from_tool_response(
                         response,
                         &recovery_tool_names,
@@ -1319,6 +1429,13 @@ where
             return Err(map_provider_error(error));
         }
     };
+    if let Some(scope) = cache_scope.as_ref() {
+        scope.record(
+            ModelCallCacheUsage::from_completion_response(&response),
+            tool_definitions_cache_signature(&[]),
+            system_prompt_hash,
+        );
+    }
     debug!(
         finish_reason = ?response.finish_reason,
         content_bytes = response.content.len(),
@@ -1361,7 +1478,7 @@ fn recover_textual_tool_calls_from_tool_response(
             debug!("reborn model gateway rejected unrecovered textual provider tool-call syntax");
             return Err(HostManagedModelError::safe(
                 HostManagedModelErrorKind::InvalidOutput,
-                "model returned textual tool-call syntax instead of structured tool calls",
+                InvalidOutputReason::TextualToolCallSyntax.safe_summary(),
             ));
         }
         return Ok(response);
@@ -1453,6 +1570,8 @@ async fn tool_response_to_host(
             .with_usage(LoopModelUsage {
                 input_tokens: response.input_tokens,
                 output_tokens: response.output_tokens,
+                cache_read_input_tokens: response.cache_read_input_tokens,
+                cache_creation_input_tokens: response.cache_creation_input_tokens,
             }));
         }
         let advertised_tool_names = capabilities
@@ -1482,7 +1601,7 @@ async fn tool_response_to_host(
         ) {
             return Err(HostManagedModelError::safe(
                 HostManagedModelErrorKind::InvalidOutput,
-                "model returned a tool call outside the advertised capability surface",
+                InvalidOutputReason::OutsideCapabilitySurface.safe_summary(),
             ));
         }
         for provider_call in &provider_calls {
@@ -1536,6 +1655,8 @@ async fn tool_response_to_host(
         .with_usage(LoopModelUsage {
             input_tokens: response.input_tokens,
             output_tokens: response.output_tokens,
+            cache_read_input_tokens: response.cache_read_input_tokens,
+            cache_creation_input_tokens: response.cache_creation_input_tokens,
         }));
     }
 
@@ -1545,7 +1666,7 @@ async fn tool_response_to_host(
             if content.trim().is_empty() {
                 return Err(HostManagedModelError::safe(
                     HostManagedModelErrorKind::InvalidOutput,
-                    "model returned an empty assistant response",
+                    InvalidOutputReason::EmptyAssistantResponse.safe_summary(),
                 ));
             }
             debug!(
@@ -1559,6 +1680,8 @@ async fn tool_response_to_host(
             .with_usage(LoopModelUsage {
                 input_tokens: response.input_tokens,
                 output_tokens: response.output_tokens,
+                cache_read_input_tokens: response.cache_read_input_tokens,
+                cache_creation_input_tokens: response.cache_creation_input_tokens,
             }))
         }
         FinishReason::Length => Err(HostManagedModelError::safe(
@@ -1571,7 +1694,7 @@ async fn tool_response_to_host(
         )),
         FinishReason::ToolUse => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::InvalidOutput,
-            "model returned tool-use finish without tool calls",
+            InvalidOutputReason::ToolUseFinishWithoutToolCalls.safe_summary(),
         )),
         FinishReason::Unknown => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::Unavailable,
@@ -1817,7 +1940,7 @@ fn provider_tool_call_from_llm(
         debug!(%error, "reborn model gateway rejected invalid provider tool name");
         HostManagedModelError::safe(
             HostManagedModelErrorKind::InvalidOutput,
-            "model returned an invalid provider tool name",
+            InvalidOutputReason::InvalidReturnedToolName.safe_summary(),
         )
     })?;
     Ok(ProviderToolCall {
@@ -1837,12 +1960,14 @@ fn provider_tool_arguments_parse_error_summary(parse_error: &str) -> String {
     let summary_line = parse_error.lines().next().unwrap_or(parse_error);
     let sanitized = sanitize_model_visible_text(summary_line.to_string());
     let sanitized = sanitized.trim();
-    if sanitized.starts_with(PROVIDER_TOOL_ARGUMENTS_PARSE_ERROR_PREFIX)
+    if sanitized.starts_with(InvalidOutputReason::TOOL_CALL_ARGUMENTS_PARSE_ERROR_PREFIX)
         && LoopSafeSummary::new(sanitized).is_ok()
     {
         sanitized.to_string()
     } else {
-        PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY.to_string()
+        InvalidOutputReason::InvalidToolCallArguments
+            .safe_summary()
+            .to_string()
     }
 }
 
@@ -1875,6 +2000,8 @@ fn response_to_host_reply(
     let usage = LoopModelUsage {
         input_tokens: response.input_tokens,
         output_tokens: response.output_tokens,
+        cache_read_input_tokens: response.cache_read_input_tokens,
+        cache_creation_input_tokens: response.cache_creation_input_tokens,
     };
     match response.finish_reason {
         FinishReason::Stop => {
@@ -1895,7 +2022,7 @@ fn response_to_host_reply(
         )),
         FinishReason::ToolUse => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::InvalidOutput,
-            "model returned unsupported tool calls for a text-only loop",
+            InvalidOutputReason::UnsupportedToolCallsForTextOnlyLoop.safe_summary(),
         )),
         FinishReason::Unknown => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::Unavailable,
@@ -1912,11 +2039,12 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
         AgentLoopHostErrorKind::Unauthorized | AgentLoopHostErrorKind::PolicyDenied => {
             HostManagedModelErrorKind::PolicyDenied
         }
-        AgentLoopHostErrorKind::BudgetExceeded | AgentLoopHostErrorKind::BudgetAccountingFailed => {
-            HostManagedModelErrorKind::BudgetExceeded
-        }
+        AgentLoopHostErrorKind::BudgetExceeded => HostManagedModelErrorKind::BudgetExceeded,
         AgentLoopHostErrorKind::BudgetApprovalRequired => {
             HostManagedModelErrorKind::BudgetApprovalRequired
+        }
+        AgentLoopHostErrorKind::BudgetAccountingFailed => {
+            HostManagedModelErrorKind::BudgetAccountingFailed
         }
         AgentLoopHostErrorKind::Cancelled => HostManagedModelErrorKind::Cancelled,
         AgentLoopHostErrorKind::Invalid
@@ -1955,8 +2083,8 @@ fn is_repairable_provider_tool_output_error(error: &HostManagedModelError) -> bo
 }
 
 fn is_provider_tool_arguments_parse_error_summary(safe_summary: &str) -> bool {
-    safe_summary.starts_with(PROVIDER_TOOL_ARGUMENTS_PARSE_ERROR_PREFIX)
-        || safe_summary == PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY
+    safe_summary.starts_with(InvalidOutputReason::TOOL_CALL_ARGUMENTS_PARSE_ERROR_PREFIX)
+        || safe_summary == InvalidOutputReason::InvalidToolCallArguments.safe_summary()
 }
 
 fn provider_tool_repair_messages(
@@ -2241,7 +2369,7 @@ fn validate_provider_replay_identity(
     expected: &ProviderReplayIdentity,
 ) -> Result<(), HostManagedModelError> {
     provider_call.validate().map_err(|error| {
-        ironclaw_loop_support::raw_host_managed_model_error(
+        ironclaw_loop_host::raw_host_managed_model_error(
             "provider_tool_replay",
             "validate_provider_call",
             HostManagedModelErrorKind::InvalidRequest,
@@ -2363,6 +2491,18 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
     // (api_key=…, sk-…, access_token=…) before the text is stored; the safe
     // summary stays a fixed host-authored category string.
     let provider_detail = error.to_string();
+    if is_unconfigured_provider_error(&error) {
+        // No provider is configured at all: a configuration fault, not an
+        // availability fault. CredentialUnavailable is unclassified in the
+        // loop's recovery mapping, so the run fails fast with the setup hint
+        // on the detail channel instead of riding the multi-minute
+        // availability backoff that exists for real provider outages.
+        return HostManagedModelError::safe(
+            HostManagedModelErrorKind::CredentialUnavailable,
+            "no model provider is configured",
+        )
+        .safe_with_detail(provider_detail);
+    }
     if is_credit_exhaustion_error(&error) {
         return HostManagedModelError::safe(
             HostManagedModelErrorKind::CredentialUnavailable,
@@ -2394,6 +2534,14 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
     .safe_with_detail(provider_detail)
 }
 
+fn is_unconfigured_provider_error(error: &LlmError) -> bool {
+    matches!(
+        error,
+        LlmError::RequestFailed { provider, .. }
+            if provider == ironclaw_llm::UNCONFIGURED_PROVIDER_ID
+    )
+}
+
 fn is_credit_exhaustion_error(error: &LlmError) -> bool {
     let LlmError::RequestFailed { reason, .. } = error else {
         return false;
@@ -2413,6 +2561,72 @@ fn is_credit_exhaustion_error(error: &LlmError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct RecordingSafeTextSink {
+        updates: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl HostManagedModelStreamSink for RecordingSafeTextSink {
+        async fn safe_text_update(&self, safe_text: String) {
+            self.updates
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(safe_text);
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_stream_sink_replaces_partial_attempt_on_first_new_delta() {
+        let inner = Arc::new(RecordingSafeTextSink::default());
+        let sink = ProviderStreamSink::new(inner.clone());
+
+        sink.text_delta("partial".to_string()).await;
+        sink.replace_on_next_text_delta().await;
+
+        // Replacement is deferred so the UI keeps showing the old draft while
+        // the provider retry is waiting for its first byte.
+        assert_eq!(
+            inner
+                .updates
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_slice(),
+            ["partial"]
+        );
+
+        sink.text_delta("Hel".to_string()).await;
+        sink.text_delta("lo".to_string()).await;
+
+        assert_eq!(
+            inner
+                .updates
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_slice(),
+            ["partial", "Hel", "Hello"]
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_stream_sink_clears_partial_for_textless_replacement() {
+        let inner = Arc::new(RecordingSafeTextSink::default());
+        let sink = ProviderStreamSink::new(inner.clone());
+
+        sink.text_delta("partial".to_string()).await;
+        sink.replace_on_next_text_delta().await;
+        sink.finish_text_replacement().await;
+
+        assert_eq!(
+            inner
+                .updates
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_slice(),
+            ["partial", ""]
+        );
+    }
 
     fn request_failed(reason: &str) -> LlmError {
         LlmError::RequestFailed {
@@ -2496,6 +2710,55 @@ mod tests {
             "backticked known-namespace capability must still fire"
         );
         assert_eq!(guard.unwrap().capability_id.as_str(), "builtin.echo");
+    }
+
+    #[test]
+    fn unconfigured_provider_error_maps_to_credential_unavailable_not_availability() {
+        // A placeholder "no LLM configured" failure must not be classified as
+        // an availability-class error: availability errors ride a deep retry
+        // backoff (~minutes), while an unconfigured provider can never
+        // recover by retrying. CredentialUnavailable fails the run fast.
+        let error = LlmError::RequestFailed {
+            provider: ironclaw_llm::UNCONFIGURED_PROVIDER_ID.to_string(),
+            reason: "no LLM provider is configured yet; choose one in Settings → Inference"
+                .to_string(),
+        };
+        assert!(is_unconfigured_provider_error(&error));
+
+        let mapped = map_provider_error(error);
+        assert_eq!(
+            mapped.kind,
+            HostManagedModelErrorKind::CredentialUnavailable
+        );
+        let detail = mapped.detail.expect("setup hint travels on detail");
+        assert!(detail.contains("no LLM provider is configured"));
+    }
+
+    #[test]
+    fn capability_budget_accounting_error_is_not_collapsed_to_budget_exceeded() {
+        let mapped = map_capability_host_error(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::BudgetAccountingFailed,
+            "resource accounting storage is unavailable",
+        ));
+
+        assert_eq!(
+            mapped.kind,
+            HostManagedModelErrorKind::BudgetAccountingFailed,
+            "accounting infrastructure failure must cross the model gateway unchanged"
+        );
+    }
+
+    #[test]
+    fn unconfigured_provider_detection_requires_the_placeholder_provider_id() {
+        // A real provider whose *message* mentions configuration must keep
+        // availability-class mapping; only the placeholder provider id
+        // signals the config fault.
+        let err = request_failed("backend not configured correctly");
+        assert!(!is_unconfigured_provider_error(&err));
+        assert_eq!(
+            map_provider_error(err).kind,
+            HostManagedModelErrorKind::Unavailable
+        );
     }
 
     #[test]
@@ -2715,7 +2978,7 @@ mod tests {
 
     fn user_message_with_images(
         content: &str,
-        image_parts: Vec<ironclaw_loop_support::HostManagedModelImagePart>,
+        image_parts: Vec<ironclaw_loop_host::HostManagedModelImagePart>,
     ) -> HostManagedModelMessage {
         HostManagedModelMessage {
             role: HostManagedModelMessageRole::User,
@@ -2734,7 +2997,7 @@ mod tests {
     fn convert_messages_emits_image_url_parts_for_user_image_attachments() {
         let message = user_message_with_images(
             "what is in this image?",
-            vec![ironclaw_loop_support::HostManagedModelImagePart {
+            vec![ironclaw_loop_host::HostManagedModelImagePart {
                 mime_type: "image/png".to_string(),
                 bytes: vec![1, 2, 3, 4],
             }],
@@ -2776,7 +3039,7 @@ mod tests {
         // relies on the transcript's `<attachments>` pointer.
         let message = user_message_with_images(
             "what is in this image?",
-            vec![ironclaw_loop_support::HostManagedModelImagePart {
+            vec![ironclaw_loop_host::HostManagedModelImagePart {
                 mime_type: "image/png".to_string(),
                 bytes: vec![1, 2, 3, 4],
             }],
@@ -2842,7 +3105,10 @@ mod tests {
             "raw_provider_secret api_key=sk-live-secret malformed payload",
         );
 
-        assert_eq!(summary, PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY);
+        assert_eq!(
+            summary,
+            InvalidOutputReason::InvalidToolCallArguments.safe_summary()
+        );
     }
 
     #[test]
@@ -2863,7 +3129,10 @@ mod tests {
             "failed to parse tool-call arguments JSON: expected `,` or `}` at line 1 column 2",
         );
 
-        assert_eq!(summary, PROVIDER_TOOL_ARGUMENTS_INVALID_SUMMARY);
+        assert_eq!(
+            summary,
+            InvalidOutputReason::InvalidToolCallArguments.safe_summary()
+        );
     }
 
     #[test]

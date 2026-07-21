@@ -1,0 +1,84 @@
+{
+  "model_name": "synthetic-q10d-slack-channel-membership",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "Using my connected Slack account, list the names of the Slack channels I am a member of — channel names only."
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_membership_extension_search",
+            "name": "builtin__extension_search",
+            "arguments": {
+              "query": "Slack"
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_membership_extension_install",
+            "name": "builtin__extension_install",
+            "arguments": {
+              "extension_id": "slack"
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_membership_extension_activate",
+            "name": "builtin__extension_activate",
+            "arguments": {
+              "extension_id": "slack"
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_membership_list_conversations",
+            "name": "slack.list_conversations",
+            "arguments": {
+              "limit": 200,
+              "types": "public_channel,private_channel"
+            }
+          }
+        ],
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "canary-general",
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    }
+  ]
+}

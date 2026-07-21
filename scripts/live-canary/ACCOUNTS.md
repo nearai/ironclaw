@@ -105,6 +105,18 @@ existing auth-live Google token secrets:
 - `AUTH_LIVE_GOOGLE_ACCESS_TOKEN`
 - `AUTH_LIVE_GOOGLE_REFRESH_TOKEN`
 
+GitHub Actions validates the refresh token once before the Reborn shard fan-out.
+Each shard containing Google-dependent cases then exchanges that refresh token
+again and writes the newly minted access token to its private runner temporary
+directory. The stored `AUTH_LIVE_GOOGLE_ACCESS_TOKEN` is therefore only a local
+fallback; CI does not rely on it remaining current. Access tokens are never
+passed through job outputs or uploaded artifacts.
+
+If the shared refresh preflight fails, Google-dependent cases are suppressed and
+the preflight job reports the single infrastructure failure. Non-Google cases in
+mixed shards continue running. A revoked refresh token still requires interactive
+re-authorization; it cannot be repaired by another refresh attempt.
+
 For copied Reborn homes whose stored Google access tokens have expired, the
 runtime/side-effect rows also require a Google OAuth client secret that matches
 the client ID used by the stored Google consent flow. Set one of these to that

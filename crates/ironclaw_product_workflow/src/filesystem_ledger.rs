@@ -11,17 +11,13 @@ use crate::{
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use futures::StreamExt;
-#[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
-#[cfg(feature = "postgres")]
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{
     CasExpectation, Entry, FilesystemError, Filter, IndexKey, IndexValue, Page, RecordKind,
     RecordVersion, RootFilesystem, ScopedFilesystem,
 };
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{AgentId, InvocationId, ProjectId, TenantId, UserId};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 use ironclaw_host_api::{ResourceScope, ScopedPath};
 
@@ -37,7 +33,7 @@ const PRUNE_LEASE_RECORD_KIND: &str = "product_workflow_prune_lease";
 const PRUNE_LEASE_SECONDS: i64 = 30;
 const PRUNE_DELETE_CONCURRENCY: usize = 16;
 
-struct FilesystemIdempotencyLedger<F>
+struct FilesystemIdempotencyLedger<F: ?Sized>
 where
     F: RootFilesystem,
 {
@@ -52,14 +48,11 @@ where
 
 impl<F> FilesystemIdempotencyLedger<F>
 where
-    F: RootFilesystem + 'static,
+    F: RootFilesystem + ?Sized + 'static,
 {
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     fn new_root(filesystem: Arc<F>) -> Self {
         Self::with_root_lease(filesystem, DEFAULT_IN_FLIGHT_LEASE)
     }
-
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     fn with_root_lease(filesystem: Arc<F>, in_flight_lease: Duration) -> Self {
         let root = default_scoped_ledger_root();
         Self {
@@ -72,8 +65,6 @@ where
             settled_since_prune: AtomicUsize::new(0),
         }
     }
-
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     fn with_root(filesystem: Arc<F>, root: VirtualPath, in_flight_lease: Duration) -> Self {
         let root = ScopedPath::new(root.as_str()).expect("virtual root is a valid scoped path"); // safety: both path types use the same absolute path grammar.
         Self {
@@ -451,7 +442,7 @@ where
 /// Construct with the same [`ScopedFilesystem`] handle used by the Reborn host
 /// stores. The supplied [`ResourceScope`] is passed to the filesystem for every
 /// operation so the filesystem's mount resolver owns any tenant/user rewriting.
-pub struct RebornFilesystemIdempotencyLedger<F>
+pub struct RebornFilesystemIdempotencyLedger<F: ?Sized>
 where
     F: RootFilesystem,
 {
@@ -460,7 +451,7 @@ where
 
 impl<F> RebornFilesystemIdempotencyLedger<F>
 where
-    F: RootFilesystem + 'static,
+    F: RootFilesystem + ?Sized + 'static,
 {
     pub fn new(filesystem: Arc<ScopedFilesystem<F>>, scope: ResourceScope) -> Self {
         Self::with_in_flight_lease(filesystem, scope, DEFAULT_IN_FLIGHT_LEASE)
@@ -506,7 +497,7 @@ where
 #[async_trait]
 impl<F> IdempotencyLedger for RebornFilesystemIdempotencyLedger<F>
 where
-    F: RootFilesystem + 'static,
+    F: RootFilesystem + ?Sized + 'static,
 {
     async fn begin_or_replay(
         &self,
@@ -527,12 +518,9 @@ where
 
 /// libSQL-backed product workflow idempotency ledger using the shared
 /// SQL filesystem backend for persistence.
-#[cfg(feature = "libsql")]
 pub struct RebornLibSqlIdempotencyLedger {
     inner: FilesystemIdempotencyLedger<LibSqlRootFilesystem>,
 }
-
-#[cfg(feature = "libsql")]
 impl RebornLibSqlIdempotencyLedger {
     pub fn new(filesystem: Arc<LibSqlRootFilesystem>) -> Self {
         Self {
@@ -569,8 +557,6 @@ impl RebornLibSqlIdempotencyLedger {
         self
     }
 }
-
-#[cfg(feature = "libsql")]
 #[async_trait]
 impl IdempotencyLedger for RebornLibSqlIdempotencyLedger {
     async fn begin_or_replay(
@@ -592,12 +578,9 @@ impl IdempotencyLedger for RebornLibSqlIdempotencyLedger {
 
 /// PostgreSQL-backed product workflow idempotency ledger using the shared
 /// SQL filesystem backend for persistence.
-#[cfg(feature = "postgres")]
 pub struct RebornPostgresIdempotencyLedger {
     inner: FilesystemIdempotencyLedger<PostgresRootFilesystem>,
 }
-
-#[cfg(feature = "postgres")]
 impl RebornPostgresIdempotencyLedger {
     pub fn new(filesystem: Arc<PostgresRootFilesystem>) -> Self {
         Self {
@@ -634,8 +617,6 @@ impl RebornPostgresIdempotencyLedger {
         self
     }
 }
-
-#[cfg(feature = "postgres")]
 #[async_trait]
 impl IdempotencyLedger for RebornPostgresIdempotencyLedger {
     async fn begin_or_replay(
@@ -658,11 +639,9 @@ impl IdempotencyLedger for RebornPostgresIdempotencyLedger {
 fn settled_prune_interval_for(limit: NonZeroUsize) -> NonZeroUsize {
     NonZeroUsize::new((limit.get() / 10).max(1)).expect("non-zero derived interval") // safety: max(1) guarantees a non-zero value.
 }
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn root_scoped_filesystem<F>(filesystem: Arc<F>, root: &ScopedPath) -> Arc<ScopedFilesystem<F>>
 where
-    F: RootFilesystem + 'static,
+    F: RootFilesystem + ?Sized + 'static,
 {
     let alias = root_mount_alias(root);
     let mounts = MountView::new(vec![MountGrant::new(
@@ -673,8 +652,6 @@ where
     .expect("root ledger mount view is valid"); // safety: the mount view contains one read-write grant with validated alias and target.
     Arc::new(ScopedFilesystem::with_fixed_view(filesystem, mounts))
 }
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn root_mount_alias(root: &ScopedPath) -> String {
     let mut parts = root.as_str().split('/').filter(|part| !part.is_empty());
     let Some(first) = parts.next() else {
@@ -682,8 +659,6 @@ fn root_mount_alias(root: &ScopedPath) -> String {
     };
     format!("/{first}")
 }
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn root_scope() -> ResourceScope {
     ResourceScope {
         tenant_id: TenantId::new("tenant:product-workflow-storage-root")
@@ -745,7 +720,7 @@ async fn load_action<F>(
     path: &ScopedPath,
 ) -> Result<Option<(ProductInboundAction, RecordVersion)>, ProductWorkflowError>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + ?Sized,
 {
     let Some(entry) = filesystem
         .get(scope, path)

@@ -133,6 +133,10 @@ pub struct AuthFlowRecord {
     pub continuation: AuthContinuationRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_account_id: Option<CredentialAccountId>,
+    /// Redacted fingerprint of the secret handles committed by this OAuth
+    /// flow. It fences exact compensation without storing credential material.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_secret_fingerprint: Option<crate::CredentialSecretFingerprint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_binding: Option<CredentialAccountUpdateBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -226,6 +230,41 @@ pub struct OAuthCallbackFailureInput {
     pub error: AuthErrorCode,
 }
 
+/// Exclusive, restart-recoverable claim taken before a continuation side
+/// effect. `claimed_at` doubles as the CAS fence returned to settlement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthContinuationDispatchClaimInput {
+    pub flow_id: AuthFlowId,
+    pub claimed_at: Timestamp,
+}
+
+/// Authoritative result of a claimed continuation side effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthContinuationDispatchOutcome {
+    Dispatched {
+        emitted_at: Timestamp,
+    },
+    /// Release a claim after its durable settlement could not be persisted.
+    /// The side effect may be retried; lifecycle activation is idempotent.
+    RetryableFailure,
+    TerminalFailure {
+        error: AuthErrorCode,
+    },
+}
+
+/// Fenced settlement for one continuation dispatch claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthContinuationDispatchSettlementInput {
+    pub flow_id: AuthFlowId,
+    pub expected_claimed_at: Timestamp,
+    pub outcome: AuthContinuationDispatchOutcome,
+}
+
+/// A callback may reclaim a continuation left in `Completing` after this
+/// interval. Settlement is fenced by the claim timestamp, so the stale worker
+/// cannot overwrite the new owner's result.
+pub const AUTH_CONTINUATION_DISPATCH_LEASE_SECONDS: i64 = 60;
+
 /// User-selected configured credential that completes an account-selection
 /// auth flow without exposing credential internals to product surfaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -253,6 +292,16 @@ pub struct OAuthCallbackClaimRequest {
 
 #[async_trait]
 pub trait AuthFlowManager: Send + Sync {
+    /// Mint a new durable auth flow.
+    ///
+    /// Contract: when the request's continuation is setup-class
+    /// ([`is_setup_class_continuation`]), creation itself supersedes — it
+    /// cancels every prior non-terminal setup-class flow for the same owner
+    /// root + provider before the new flow becomes visible,
+    /// so "≤1 live setup-class flow per owner+provider" holds structurally and
+    /// no start route can forget it. `TurnGateResume`/`ProductActionResume`
+    /// creations supersede nothing and are never superseded: a parked
+    /// turn/action must outlive an unrelated setup start.
     async fn create_flow(&self, request: NewAuthFlow) -> Result<AuthFlowRecord, AuthProductError>;
 
     async fn get_flow(
@@ -297,6 +346,18 @@ pub trait AuthFlowManager: Send + Sync {
         input: OAuthCallbackFailureInput,
     ) -> Result<AuthFlowRecord, AuthProductError>;
 
+    async fn claim_continuation_dispatch(
+        &self,
+        scope: &AuthProductScope,
+        input: AuthContinuationDispatchClaimInput,
+    ) -> Result<AuthFlowRecord, AuthProductError>;
+
+    async fn settle_continuation_dispatch(
+        &self,
+        scope: &AuthProductScope,
+        input: AuthContinuationDispatchSettlementInput,
+    ) -> Result<AuthFlowRecord, AuthProductError>;
+
     async fn mark_continuation_dispatched(
         &self,
         scope: &AuthProductScope,
@@ -309,6 +370,39 @@ pub trait AuthFlowManager: Send + Sync {
         scope: &AuthProductScope,
         flow_id: AuthFlowId,
     ) -> Result<AuthFlowRecord, AuthProductError>;
+}
+
+/// Whether a continuation belongs to the setup surface — the class a new setup
+/// start supersedes. `SetupOnly` is the plain web connect button;
+/// `LifecycleActivation` is the extension card's connect button, which
+/// `start_setup_oauth_flow` receives verbatim. Both mean "the user is
+/// (re-)connecting this provider from a settings surface", so a fresh start
+/// replaces them. `TurnGateResume` and `ProductActionResume` have a parked
+/// turn/action waiting on them and must outlive an unrelated setup start.
+pub fn is_setup_class_continuation(continuation: &AuthContinuationRef) -> bool {
+    matches!(
+        continuation,
+        AuthContinuationRef::SetupOnly | AuthContinuationRef::LifecycleActivation { .. }
+    )
+}
+
+/// Owner-root match for supersede-on-start: two auth scopes share a setup-flow
+/// root iff they carry the same owner (tenant/user/agent/project), surface, and
+/// session — the exact granularity of the durable flow-root path, which omits
+/// the transient thread/mission/invocation axes. Full scope equality would miss
+/// a prior setup flow started under a different per-request invocation.
+pub fn flow_shares_setup_owner_root(
+    flow_scope: &AuthProductScope,
+    scope: &AuthProductScope,
+) -> bool {
+    let flow_resource = &flow_scope.resource;
+    let resource = &scope.resource;
+    flow_resource.tenant_id == resource.tenant_id
+        && flow_resource.user_id == resource.user_id
+        && flow_resource.agent_id == resource.agent_id
+        && flow_resource.project_id == resource.project_id
+        && flow_scope.surface == scope.surface
+        && flow_scope.session_id == scope.session_id
 }
 
 /// Read-only auth-flow projection source for product interaction views.

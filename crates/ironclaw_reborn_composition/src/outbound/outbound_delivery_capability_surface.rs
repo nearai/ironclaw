@@ -14,13 +14,13 @@ pub(crate) const OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID: &str =
     "builtin.outbound_delivery_targets_list";
 pub(crate) const OUTBOUND_DELIVERY_TARGETS_LIST_PROVIDER_TOOL_NAME: &str =
     "builtin__outbound_delivery_targets_list";
-pub(crate) const OUTBOUND_DELIVERY_TARGETS_LIST_DESCRIPTION: &str = "List available outbound delivery targets for final replies and routine/trigger results, such as Slack DMs or Slack channels. When the user asks to send routine or trigger results through Slack or another product/channel, call this before builtin__trigger_create and before saying a delivery product is unavailable or asking the user to reconnect it. Pass a listed id as builtin__trigger_create's delivery_target_id to route that trigger, or to builtin__outbound_delivery_target_set to change the user-wide default.";
+pub(crate) const OUTBOUND_DELIVERY_TARGETS_LIST_DESCRIPTION: &str = "List available outbound delivery targets, such as direct messages or channels exposed by installed integrations. These targets route only final replies and routine/trigger results. This delivery-routing tool cannot read conversations, message content, membership, status, or profiles; use the corresponding integration's read capabilities for those tasks. When the user asks to send routine or trigger results through an external product or channel, call this before builtin__trigger_create and before saying a delivery product is unavailable or asking the user to reconnect it. Pass a listed id as builtin__trigger_create's delivery_target_id to route that trigger, or to builtin__outbound_delivery_target_set to change the user-wide default.";
 
 pub(crate) const OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID: &str =
     "builtin.outbound_delivery_target_set";
 pub(crate) const OUTBOUND_DELIVERY_TARGET_SET_PROVIDER_TOOL_NAME: &str =
     "builtin__outbound_delivery_target_set";
-pub(crate) const OUTBOUND_DELIVERY_TARGET_SET_DESCRIPTION: &str = "Set the current user's DEFAULT final-reply outbound delivery target, such as a Slack DM or Slack channel, to an id returned by builtin__outbound_delivery_targets_list. This default is shared by replies and by every trigger without its own delivery_target_id \u{2014} changing it re-routes all of them, so to route a single trigger's results pass delivery_target_id to builtin__trigger_create instead of changing this. Approval may be required before the preference is changed.";
+pub(crate) const OUTBOUND_DELIVERY_TARGET_SET_DESCRIPTION: &str = "Set the current user's DEFAULT final-reply outbound delivery target, such as a direct message or channel exposed by an installed integration, to an id returned by builtin__outbound_delivery_targets_list. This default is shared by replies and by every trigger without its own delivery_target_id \u{2014} changing it re-routes all of them, so to route a single trigger's results pass delivery_target_id to builtin__trigger_create instead of changing this. Approval may be required before the preference is changed.";
 
 pub(crate) fn outbound_delivery_synthetic_provider() -> Result<ExtensionId, HostApiError> {
     ExtensionId::new(OUTBOUND_DELIVERY_SYNTHETIC_PROVIDER_ID)

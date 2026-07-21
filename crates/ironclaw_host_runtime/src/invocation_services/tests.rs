@@ -1,13 +1,13 @@
 use super::*;
 use async_trait::async_trait;
 use ironclaw_filesystem::{
-    FilesystemError, FilesystemOperation, InMemoryBackend, LocalFilesystem, RootFilesystem,
+    DiskFilesystem, FilesystemError, FilesystemOperation, InMemoryBackend, RootFilesystem,
 };
 use ironclaw_host_api::{
     CapabilityId, MountAlias, MountGrant, MountPermissions, ResourceScope, VirtualPath,
     runtime_policy::{RuntimeProfile, SecretMode},
 };
-use ironclaw_secrets::InMemorySecretStore;
+use ironclaw_secrets::FilesystemSecretStore;
 
 use crate::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, RuntimeProcessPort,
@@ -110,6 +110,103 @@ fn local_resolver_rejects_hosted_local_host_process_backend() {
             backend: ProcessBackendKind::LocalHost
         }
     ));
+}
+
+#[tokio::test]
+async fn local_resolver_routes_post_edit_check_to_the_deployment_isolated_process_port() {
+    // The post-edit check rides filesystem-only edit plans, so it must NOT run
+    // through the deployment-blind local `process` port. The resolver bundles it
+    // with the port matching the plan's process backend: the local host port
+    // under LocalSingleUser+LocalHost, the tenant-sandbox port under a hosted
+    // tenant-sandbox deployment (so a tenant's command runs isolated in that
+    // tenant's sandbox, never on the provider host), and nothing when no backend
+    // can run it in isolation.
+    let resolver = LocalInvocationServicesResolver::new(
+        Arc::new(DiskFilesystem::new()),
+        None,
+        Arc::new(NamedProcessPort("local-host")),
+        None,
+    )
+    .with_post_edit_check(PostEditCheckConfig::new(
+        "cargo check",
+        std::time::Duration::from_secs(30),
+    ))
+    .with_tenant_sandbox_process_port(Arc::new(NamedProcessPort("tenant-sandbox")));
+
+    let resolve = |process_backend, deployment, resolved_profile| {
+        let mut plan = plan(process_backend, false, false, NetworkMode::Deny, false);
+        plan.deployment = deployment;
+        plan.resolved_profile = resolved_profile;
+        resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: None,
+            })
+            .expect("non-process plans must still resolve")
+    };
+
+    // Run the bundled check port and return the port's identifying output, so we
+    // can prove WHICH backend the check would spawn on.
+    async fn bundled_port_name(services: &InvocationServices) -> Option<String> {
+        let service = services.post_edit_check.as_ref()?;
+        let output = service
+            .process
+            .run_command(CommandExecutionRequest {
+                scope: ResourceScope::system(),
+                mounts: None,
+                command: "cargo check".to_string(),
+                workdir: None,
+                timeout_secs: Some(30),
+                extra_env: std::collections::HashMap::new(),
+            })
+            .await
+            .expect("named test port runs");
+        Some(output.output)
+    }
+
+    let local = resolve(
+        ProcessBackendKind::LocalHost,
+        DeploymentMode::LocalSingleUser,
+        RuntimeProfile::LocalDev,
+    );
+    assert_eq!(
+        bundled_port_name(&local).await.as_deref(),
+        Some("local-host"),
+        "local single-user runs the check on the local host port"
+    );
+
+    let tenant_sandbox = resolve(
+        ProcessBackendKind::TenantSandbox,
+        DeploymentMode::HostedMultiTenant,
+        RuntimeProfile::HostedDev,
+    );
+    assert_eq!(
+        bundled_port_name(&tenant_sandbox).await.as_deref(),
+        Some("tenant-sandbox"),
+        "hosted multi-tenant runs the check ISOLATED in the tenant sandbox, \
+         never on the provider host"
+    );
+
+    let no_process = resolve(
+        ProcessBackendKind::None,
+        DeploymentMode::LocalSingleUser,
+        RuntimeProfile::SecureDefault,
+    );
+    assert!(
+        no_process.post_edit_check.is_none(),
+        "ProcessBackendKind::None must withhold the post-edit check"
+    );
+
+    let hosted_local_host = resolve(
+        ProcessBackendKind::LocalHost,
+        DeploymentMode::HostedMultiTenant,
+        RuntimeProfile::HostedDev,
+    );
+    assert!(
+        hosted_local_host.post_edit_check.is_none(),
+        "hosted deployments must never run the check on the provider host"
+    );
 }
 
 #[test]
@@ -699,7 +796,7 @@ fn local_resolver_rejects_required_network_when_egress_service_is_absent() {
 #[test]
 fn local_resolver_accepts_brokered_required_network_with_egress_service() {
     let resolver = LocalInvocationServicesResolver::new(
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Some(Arc::new(NoopRuntimeHttpEgress)),
         Arc::new(NoopProcessPort),
         None,
@@ -726,7 +823,7 @@ fn local_resolver_accepts_brokered_required_network_with_egress_service() {
 #[test]
 fn local_resolver_accepts_hosted_brokered_required_network() {
     let resolver = LocalInvocationServicesResolver::new(
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Some(Arc::new(NoopRuntimeHttpEgress)),
         Arc::new(NoopProcessPort),
         None,
@@ -755,7 +852,7 @@ fn local_resolver_accepts_hosted_brokered_required_network() {
 #[test]
 fn local_resolver_accepts_hosted_and_enterprise_allowlist_required_network() {
     let resolver = LocalInvocationServicesResolver::new(
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Some(Arc::new(NoopRuntimeHttpEgress)),
         Arc::new(NoopProcessPort),
         None,
@@ -792,7 +889,7 @@ fn local_resolver_accepts_hosted_and_enterprise_allowlist_required_network() {
 #[test]
 fn local_resolver_rejects_hosted_direct_required_network() {
     let resolver = LocalInvocationServicesResolver::new(
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Some(Arc::new(NoopRuntimeHttpEgress)),
         Arc::new(NoopProcessPort),
         None,
@@ -827,7 +924,7 @@ fn local_resolver_rejects_hosted_direct_required_network() {
 #[test]
 fn local_resolver_accepts_direct_required_network_with_egress_service() {
     let resolver = LocalInvocationServicesResolver::new(
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Some(Arc::new(NoopRuntimeHttpEgress)),
         Arc::new(NoopProcessPort),
         None,
@@ -854,7 +951,7 @@ fn local_resolver_accepts_direct_required_network_with_egress_service() {
 #[test]
 fn local_resolver_allows_raw_diagnostics_only_for_local_dev_and_yolo() {
     let resolver = LocalInvocationServicesResolver::new(
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Some(Arc::new(NoopRuntimeHttpEgress)),
         Arc::new(NoopProcessPort),
         None,
@@ -901,7 +998,7 @@ fn local_resolver_allows_raw_diagnostics_only_for_local_dev_and_yolo() {
 #[test]
 fn local_resolver_hides_runtime_http_egress_when_network_is_not_required() {
     let resolver = LocalInvocationServicesResolver::new(
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Some(Arc::new(NoopRuntimeHttpEgress)),
         Arc::new(NoopProcessPort),
         None,
@@ -928,10 +1025,10 @@ fn local_resolver_hides_runtime_http_egress_when_network_is_not_required() {
 #[test]
 fn local_resolver_hides_secret_store_when_secret_is_not_required() {
     let resolver = LocalInvocationServicesResolver::new(
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         None,
         Arc::new(NoopProcessPort),
-        Some(Arc::new(InMemorySecretStore::new())),
+        Some(Arc::new(FilesystemSecretStore::ephemeral())),
     );
     let plan = plan(
         ProcessBackendKind::None,
@@ -981,10 +1078,10 @@ fn local_resolver_rejects_required_secret_when_secret_store_is_absent() {
 #[test]
 fn local_resolver_accepts_brokered_required_secret_with_secret_store() {
     let resolver = LocalInvocationServicesResolver::new(
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         None,
         Arc::new(NoopProcessPort),
-        Some(Arc::new(InMemorySecretStore::new())),
+        Some(Arc::new(FilesystemSecretStore::ephemeral())),
     );
     let mut plan = plan(
         ProcessBackendKind::None,
@@ -1009,10 +1106,10 @@ fn local_resolver_accepts_brokered_required_secret_with_secret_store() {
 #[test]
 fn local_resolver_accepts_tenant_and_org_broker_required_secrets() {
     let resolver = LocalInvocationServicesResolver::new(
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         None,
         Arc::new(NoopProcessPort),
-        Some(Arc::new(InMemorySecretStore::new())),
+        Some(Arc::new(FilesystemSecretStore::ephemeral())),
     );
     for (deployment, profile, secret_mode) in [
         (
@@ -1052,10 +1149,10 @@ fn local_resolver_accepts_tenant_and_org_broker_required_secrets() {
 #[test]
 fn local_resolver_rejects_hosted_inherited_env_secret() {
     let resolver = LocalInvocationServicesResolver::new(
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         None,
         Arc::new(NoopProcessPort),
-        Some(Arc::new(InMemorySecretStore::new())),
+        Some(Arc::new(FilesystemSecretStore::ephemeral())),
     );
     let mut plan = plan(
         ProcessBackendKind::None,
@@ -1088,10 +1185,10 @@ fn local_resolver_rejects_hosted_inherited_env_secret() {
 #[test]
 fn local_resolver_accepts_required_secret_when_secret_store_is_available() {
     let resolver = LocalInvocationServicesResolver::new(
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         None,
         Arc::new(NoopProcessPort),
-        Some(Arc::new(InMemorySecretStore::new())),
+        Some(Arc::new(FilesystemSecretStore::ephemeral())),
     );
     let plan = plan(
         ProcessBackendKind::None,
@@ -1128,7 +1225,7 @@ fn first_party_tools_do_not_select_process_backends() {
 
 fn resolver_without_http() -> LocalInvocationServicesResolver {
     LocalInvocationServicesResolver::new(
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         None,
         Arc::new(NoopProcessPort),
         None,

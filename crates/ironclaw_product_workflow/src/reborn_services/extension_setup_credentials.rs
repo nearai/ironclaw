@@ -179,6 +179,7 @@ fn setup_projection(
                 invocation_id: scope.resource.invocation_id.to_string(),
             }
         }
+        LifecycleExtensionCredentialSetup::Pairing => RebornExtensionCredentialSetup::Pairing,
     }
 }
 

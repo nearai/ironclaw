@@ -17,13 +17,13 @@ use ironclaw_first_party_extensions::{
 use ironclaw_product_workflow::ProductWorkflowError;
 
 #[derive(Clone, Default)]
-pub(in crate::runtime) struct LocalDevExtensionSurfaceSource {
+pub(in crate::runtime) struct ExtensionCapabilitySurfaceSource {
     extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
     #[cfg(test)]
-    static_surface: Option<LocalDevExtensionSurface>,
+    static_surface: Option<ExtensionCapabilitySurface>,
 }
 
-impl LocalDevExtensionSurfaceSource {
+impl ExtensionCapabilitySurfaceSource {
     pub(in crate::runtime) fn new(
         extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
     ) -> Self {
@@ -35,7 +35,7 @@ impl LocalDevExtensionSurfaceSource {
     }
 
     #[cfg(test)]
-    pub(in crate::runtime) fn from_surface(surface: LocalDevExtensionSurface) -> Self {
+    pub(in crate::runtime) fn from_surface(surface: ExtensionCapabilitySurface) -> Self {
         Self {
             extension_management: None,
             static_surface: Some(surface),
@@ -44,24 +44,24 @@ impl LocalDevExtensionSurfaceSource {
 
     pub(in crate::runtime) async fn snapshot(
         &self,
-    ) -> Result<LocalDevExtensionSurface, ProductWorkflowError> {
+    ) -> Result<ExtensionCapabilitySurface, ProductWorkflowError> {
         #[cfg(test)]
         if let Some(surface) = &self.static_surface {
             return Ok(surface.clone());
         }
         let Some(extension_management) = self.extension_management.as_deref() else {
-            return Ok(LocalDevExtensionSurface::default());
+            return Ok(ExtensionCapabilitySurface::default());
         };
-        LocalDevExtensionSurface::from_extension_management(extension_management).await
+        ExtensionCapabilitySurface::from_extension_management(extension_management).await
     }
 }
 
 #[derive(Debug, Clone, Default)]
-pub(in crate::runtime) struct LocalDevExtensionSurface {
+pub(in crate::runtime) struct ExtensionCapabilitySurface {
     active_capabilities: Vec<ActiveExtensionCapability>,
 }
 
-impl LocalDevExtensionSurface {
+impl ExtensionCapabilitySurface {
     #[cfg(test)]
     pub(in crate::runtime) fn from_active_capabilities(
         active_capabilities: Vec<ActiveExtensionCapability>,
@@ -258,7 +258,7 @@ mod tests {
             network_targets: Vec::new(),
             owner,
         };
-        let surface = LocalDevExtensionSurface::from_active_capabilities(vec![
+        let surface = ExtensionCapabilitySurface::from_active_capabilities(vec![
             capability(
                 "market-data.snp500",
                 "market-data",

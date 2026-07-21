@@ -1,69 +1,139 @@
 ---
 paths:
-  - "src/**/*.rs"
+  - "crates/**/*.rs"
+  - "tests/**"
+  - "scripts/**"
+  - ".github/**"
 ---
-# Review & Fix Discipline
+# Review and fix discipline
 
-Hard-won lessons from code review -- follow these when fixing bugs or addressing review feedback.
+## Review the whole contract
 
-**Fix the pattern, not just the instance:** When a reviewer flags a bug (e.g., TOCTOU race in INSERT + SELECT-back), search the entire codebase for all instances of that same pattern. A fix in `SecretsStore::create()` that doesn't also fix `WasmToolStore::store()` is half a fix.
+Inspect implementation, callers, persistence, wire types, frontend consumers,
+tests, and relevant Reborn contracts. Search for the bug pattern across
+`crates/`, not only the reported instance. Verify negative claims with both
+symbol and concept searches.
 
-**Propagate architectural fixes to satellite types:** If a core type changes its concurrency model (e.g., `LibSqlBackend` switches to connection-per-operation), every type that was handed a resource from the old model must also be updated. Grep for the old type across the codebase.
+Every bug fix needs a regression test that would fail before the fix. Add a
+`#[test]`, `#[tokio::test]`, contract test, or integration scenario that
+reproduces the original failure. Prefer a caller-level or integration test when
+wrappers, computed inputs, or side effects separate the helper from the
+behavior. Documentation-only changes are exempt. If a regression test is
+genuinely infeasible, document why in the PR and use the repository's explicit
+regression-check exemption rather than silently omitting coverage.
 
-**Schema translation is more than DDL:** When translating a database schema between backends (PostgreSQL to libSQL, etc.), check for:
-- **Indexes** -- diff `CREATE INDEX` statements between the two schemas
-- **Seed data** -- check for `INSERT INTO` in migrations (e.g., `leak_detection_patterns`)
-- **Semantic differences** -- document where SQL functions behave differently (e.g., `json_patch` vs `jsonb_set`)
+## Mechanical review traps
 
-**Feature flag testing:** When adding feature-gated code, test compilation with each feature in isolation:
+- **Zero warnings:** changed Reborn crates must pass clippy with
+  `--all-targets --all-features -- -D warnings`. Before committing, run the
+  Reborn workspace-wide command below and fix every warning it surfaces,
+  including pre-existing warnings outside the immediate files.
+- **Feature matrix, not just `--all-features`:** `--all-features` cannot catch
+  feature-gated dead code — a `#[cfg(feature = "x")]`-only caller makes its
+  helper *live* under `--all-features` and *dead* (a `-D warnings` error)
+  everywhere the feature is off. **PR CI runs only the slim `all-features` lane;
+  the broader `default` lane runs post-merge**, so this class can break `main`
+  after a green PR. If you add or move a `#[cfg(feature = ...)]` gate, or touch
+  a helper only reachable through one, run the relevant feature lanes locally
+  before merging (see "Required checks"). When you gate the only caller(s) of a
+  helper behind a feature, gate the helper's definition with the same `#[cfg]`.
+- **UTF-8:** never byte-slice user or external strings with `&value[..n]`.
+  Use `char_indices()`, `chars()`, or an `is_char_boundary()`-checked boundary.
+  Search changed Rust files for suspicious `[..` slicing.
+- **Case-insensitive external values:** normalize case-insensitive identifiers,
+  media types, extensions, and platform-sensitive path comparisons at the
+  boundary with `to_ascii_lowercase()` or `eq_ignore_ascii_case()`. Do not
+  lowercase case-sensitive opaque values.
+- **Decorator delegation:** when a trait method is added, enumerate every
+  production implementation, decorator, adapter, and test double. For
+  `LlmProvider`, start with `rg -n "impl LlmProvider for" crates` and test
+  through the full wrapper chain.
+- **Production panics:** search changed production files for `.unwrap()` and
+  `.expect()`; they are prohibited outside tests. Propagate an explicit error
+  instead.
+- **Imports:** prefer `crate::` for cross-module imports. `super::` is acceptable
+  inside tightly coupled submodules and tests.
+- **Pattern fixes:** search all of `crates/` for sibling instances of the bug.
+
+## Required checks
+
+Run the narrowest crate tests and clippy first. Add:
+
 ```bash
-cargo check                                          # default features
-cargo check --no-default-features --features libsql  # libsql only
-cargo check --all-features                           # all features
+cargo test -p ironclaw_architecture
+cargo clippy -p OWNING_CRATE --all-targets --all-features -- -D warnings
+scripts/pre-commit-safety.sh
 ```
 
-**Regression test with every fix:** Every bug fix must include a test that would have caught the bug. Add a `#[test]` or `#[tokio::test]` that reproduces the original failure. Exempt: changes limited to `src/channels/web/static/` or `.md` files. Use `[skip-regression-check]` in commit message or PR label if genuinely not feasible. The `commit-msg` hook and CI workflow enforce this automatically.
+Workspace-wide zero-warning clippy:
 
-**Zero clippy warnings policy:** Fix ALL clippy warnings before committing, including pre-existing ones in files you didn't change. Never leave warnings behind.
+```bash
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+```
 
-**Transaction safety:** Multi-step database operations (INSERT+INSERT, UPDATE+DELETE, read-then-write) MUST be wrapped in a transaction. Never assume sequential calls are atomic. This applies to both postgres and libsql backends.
+Feature matrix — reproduces the post-merge `Code Style` gate that PR CI skips
+(it only runs the `all-features` lane). Run both whenever a change adds, moves,
+or relies on a `#[cfg(feature = ...)]` gate:
 
-**UTF-8 string safety:** Never use byte-index slicing (`&s[..n]`) on user-supplied or external strings -- it panics on multi-byte characters. Use `is_char_boundary()` or `char_indices()`. Grep for `[..` in changed files.
+```bash
+cargo clippy --all --tests --examples -- -D warnings                              # default
+cargo clippy --all --tests --examples --all-features -- -D warnings               # all-features
+```
 
-**Case-insensitive comparisons:** When comparing user-supplied strings (file paths, media types, extension names), normalize to lowercase with `.to_ascii_lowercase()`. Path comparisons must be case-insensitive on macOS/Windows.
+Run the Reborn integration or E2E harness when the change crosses turns,
+capabilities, authorization, approvals, persistence, runtime lanes, networking,
+secrets, product workflow, or user-visible transport.
 
-**Decorator/wrapper trait delegation:** When adding a new method to `LlmProvider` (or any trait with decorator wrappers), update ALL wrapper types to delegate. Grep for `impl LlmProvider for` to find all implementations. Test through the full provider chain.
+## Scope discipline
 
-**Sensitive data in logs & events:** Tool parameters and outputs MUST be redacted before logging or broadcasting via SSE/WebSocket. Use `redact_params()` before any `tracing::info!`, `JobEvent`, or SSE emission that includes tool call data.
+The PR title and body must describe the full diff. If a change crosses several
+layers, name that scope or split the PR. Move-only changes state that behavior
+is unchanged, keep behavioral fixes separate, and record follow-up issues for
+problems discovered during the move. After moving or renaming code, search
+`.claude/`, `AGENTS.md`, `CLAUDE.md`, `crates/AGENTS.md`,
+`docs/reborn/contracts/`, and other Markdown references for stale paths.
 
-**Test temporary files:** Use the `tempfile` crate. Never hardcode `/tmp/...` paths.
+## Removing a "redundant" layer un-masks behavior
 
-**Trust boundaries in multi-process architecture:** Data from worker containers is untrusted. The orchestrator MUST validate: tool domain, nesting depth (server-side tracking), and parameter sensitivity.
+A layer you delete as redundant is often silently *backstopping* behavior the
+downstream code does not reproduce. Deleting it does not remove the behavior —
+it exposes the gap, as a test failure if you are lucky and a silent regression
+if you are not. This is the dominant hazard of consolidation/dedup refactors.
+Motivating case: PRs #6386/#6392 (the `authorize()` policy consolidation) —
+removing `ironclaw_host_runtime`'s "redundant" pre-authorization surfaced five
+behaviors it had been masking (a stale import, model-message sanitization,
+run-record ordering for unknown capabilities, dropped runtime-policy enforcement
+on the resume paths, and a mismatch-vs-unknown precedence flip).
 
-**Mechanical verification before committing:**
-- `cargo clippy --all --benches --tests --examples --all-features` -- zero warnings
-- `grep -rnE '\.unwrap\(|\.expect\(' <files>` -- no panics in production
-- `grep -rn 'super::' <files>` -- prefer `crate::` for cross-module imports (`super::` OK in tests/intra-module)
-- If you fixed a pattern bug, `grep` for other instances across `src/`
-- Run `scripts/pre-commit-safety.sh` to catch UTF-8, case-sensitivity, hardcoded /tmp, and logging issues
+Discipline when deleting a layer you believe is redundant:
 
-## PR Scope Discipline
+- **Run the full, unfiltered suite for every touched crate** — `cargo test -p
+  <crate> --no-fail-fast` — and do **not** pipe test output through `head`/`tail`.
+  A partial view under-counts failures (this hid three real failures twice
+  during #6392). Filtered green is not green.
+- **Every surfaced failure is a candidate real behavior, not a test to edit.**
+  For each, determine whether the deleted layer was providing it and whether the
+  surviving code reproduces it. **Preserve the behavior; do not weaken the
+  assertion to go green** unless you have proven the old behavior was itself
+  wrong (and say why in the PR). Silently updating a test to match the new output
+  is how a consolidation ships a regression.
+- **The load-bearing observable is the failure *kind* and durable state**
+  (`RuntimeFailureKind`, run-state transitions, audit `error_kind`) — not the
+  message text. Preserve the kind exactly; the sanitized model-visible message is
+  a separate, weaker contract (`error-handling.md`).
+- **"Redundant" is per-path.** A check redundant on one entry path (e.g.
+  invoke/spawn) can be the *only* copy on another (e.g. resume/auth-resume).
+  Confirm the survivor covers **every** path before deleting, not just the one
+  you inspected.
 
-A PR's title and body must match its diff.
+When the work is sliced across subagents, give each the standing instruction to
+**stop and report a surfaced behavior rather than commit green or weaken a
+test** — the reviewer, not the slice author, decides whether a delta is
+acceptable.
 
-- If the title describes one change ("fix auth cancel") but the diff spans multiple layers (provider → bridge → orchestrator → Python), retitle, split, or explicitly call out the scope expansion in the body. Reference: zmanian's review on #2668 (+590/-72 under a title advertising ~10 lines).
-- **Move-only refactors** must state "no behavior change" in the body and file a follow-up issue for every pre-existing correctness/perf concern surfaced during the move. Don't silently fix things mid-move — it's unreviewable. Pattern across #2628, #2680, #2687.
-- After a refactor that relocates or renames code, grep for `.md` and `CLAUDE.md` references to the moved paths and update them in the same PR. `web/CLAUDE.md` pointing at `server.rs` after its contents moved (#2687) is a review fail.
+## Guardrails are code
 
-## Guardrail Scripts Are Code
-
-Lint/boundary/safety scripts under `scripts/` are enforcement infrastructure. They must:
-
-- **Have regression tests** exercising every documented exemption (e.g. `dispatch-exempt`, `silent-ok`, `#[cfg(test)]` skip).
-- **Be included in the CI `has_code` / diff-filter** that gates required checks — a guardrail that isn't run on changes to itself can be weakened without anyone noticing. Reference: PR #2647.
-- **Parse grouped / multiline Rust syntax** when inspecting imports. Line-based regex misses `use crate::channels::web::{handlers::auth::...}` and shim re-exports.
-- **Actually enforce their documented skips** — if the exemption says "skips `#[cfg(test)]` blocks", the scanner must track brace nesting, not match a regex on the first line.
-
-## Stale Comments After Refactors
-
-Doc strings and inline comments are part of the contract. A comment that says "strips trailing punctuation + whitespace" while the code only strips periods (#2701 `src/bridge/router.rs`) is a bug report waiting to happen. When you change behavior in a function, re-read its docstring and adjacent comments — update or delete them in the same change.
+Checks and hooks need regression tests, must handle multiline syntax, and must
+run when their own files change. Never claim enforcement without executing the
+enforcing command. Comments and docs that promise guarantees must match the
+code and tests.

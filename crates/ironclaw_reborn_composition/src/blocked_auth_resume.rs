@@ -33,8 +33,8 @@ use ironclaw_turns::{
 };
 use uuid::Uuid;
 
-use crate::product_auth::api::auth::RebornAuthContinuationDispatcher;
 use crate::turn_run_snapshot::TurnRunSnapshotSource;
+use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
 
 /// Source of the durable turn-state snapshot the fan-out scans. Split out so
 /// tests can hand-build snapshots without a filesystem-backed store.
@@ -385,6 +385,7 @@ mod tests {
             status: TurnStatus::BlockedAuth,
             profile: TurnRunProfile::from_resolved(resolved_run_profile()),
             resolved_model_route: None,
+            model_usage: None,
             checkpoint_id: None,
             gate_ref: Some(GateRef::new(format!("gate-{run_id}")).expect("gate ref")),
             blocked_activity_id: None,

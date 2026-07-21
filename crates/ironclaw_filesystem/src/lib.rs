@@ -18,17 +18,13 @@
 mod backend;
 mod cas;
 mod catalog;
-#[cfg(any(feature = "postgres", feature = "libsql"))]
 mod db;
 mod hsm;
 mod in_memory;
 mod index;
-#[cfg(feature = "libsql")]
 mod libsql;
-#[cfg(feature = "libsql")]
 mod libsql_pool;
 mod local;
-#[cfg(feature = "postgres")]
 mod postgres;
 mod record;
 mod root;
@@ -45,10 +41,8 @@ pub use catalog::{CompositeRootFilesystem, MountDescriptor, PathPlacement};
 pub use hsm::HsmBackend;
 pub use in_memory::InMemoryBackend;
 pub use index::{Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page};
-#[cfg(feature = "libsql")]
 pub use libsql::LibSqlRootFilesystem;
-pub use local::LocalFilesystem;
-#[cfg(feature = "postgres")]
+pub use local::DiskFilesystem;
 pub use postgres::PostgresRootFilesystem;
 pub use record::{
     CasExpectation, ContentType, Entry, RecordKind, RecordVersion, SeqNo, VersionedEntry,

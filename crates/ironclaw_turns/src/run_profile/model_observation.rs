@@ -1,4 +1,4 @@
-use ironclaw_host_api::DispatchInputIssueCode;
+use ironclaw_host_api::{DispatchInputIssueCode, HostRemediation};
 use serde::{Deserialize, Serialize};
 
 use super::host::CapabilityFailureKind;
@@ -26,6 +26,17 @@ pub enum CapabilityFailureDetail {
     /// validator rejects — the producer redacts secret VALUES instead.
     Diagnostic {
         text: String,
+    },
+    /// Host-authored operator remediation — the TRUSTED text channel.
+    ///
+    /// Carries the validated [`HostRemediation`] newtype rather than a bare
+    /// `String` (unlike its siblings) precisely so PROVENANCE travels with the
+    /// value: a producer cannot land text on this arm without going through the
+    /// host-only constructor and its credential-value guard. Untrusted
+    /// capability output stays on [`Self::Diagnostic`] and keeps collapsing to
+    /// the safe-summary placeholder.
+    HostRemediation {
+        text: HostRemediation,
     },
 }
 
@@ -100,6 +111,21 @@ pub enum ToolObservationDetail {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
+    ResultReference {
+        result_ref: String,
+        byte_len: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preview: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total_bytes: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_offset: Option<u64>,
+        /// Element count when the full result is a top-level JSON array.
+        /// Attached only to truncated previews, so the model cannot misread
+        /// a byte-sliced array as the complete result.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item_count: Option<u64>,
+    },
 }
 
 impl ToolObservationDetail {
@@ -119,6 +145,33 @@ impl ToolObservationDetail {
             Self::GenericFailure { detail, .. } => {
                 if let Some(detail) = detail {
                     validate_model_observation_detail(detail)?;
+                }
+                Ok(())
+            }
+            Self::ResultReference {
+                result_ref,
+                preview,
+                next_offset,
+                item_count,
+                ..
+            } => {
+                // `preview` is intentionally NOT content-checked here: this
+                // neutral gate has no graceful-degrade path, so an unsafe
+                // preview would drop the whole observation (losing
+                // `result_ref` too) instead of falling back to ref-only.
+                // `ironclaw_threads::ToolResultReferenceEnvelope::new` owns
+                // that canonical secret/control-char scan and degrades
+                // correctly; this arm only bounds shape (issue #5838).
+                validate_non_empty_text(result_ref, "model observation result ref")?;
+                validate_text_len(
+                    result_ref,
+                    "model observation result ref",
+                    MODEL_OBSERVATION_TEXT_MAX_BYTES,
+                )?;
+                if item_count.is_some() && (preview.is_none() || next_offset.is_none()) {
+                    return Err(
+                        "model observation item_count requires preview and next_offset".to_string(),
+                    );
                 }
                 Ok(())
             }
@@ -257,7 +310,24 @@ pub enum CapabilityRecoveryHint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObservationTrust {
+    /// The observation carries capability output — a WASM tool's result, an MCP
+    /// server's error body, a provider response. Every downstream text guard
+    /// applies in full.
     UntrustedToolOutput,
+    /// The observation was authored entirely by the host: a fixed remediation
+    /// template plus a fixed failure summary, with no capability output mixed
+    /// in. Set ONLY by the renderer for a
+    /// [`CapabilityFailureDetail::HostRemediation`] failure, whose payload
+    /// already passed [`HostRemediation`]'s credential-VALUE guard at
+    /// construction.
+    ///
+    /// This is what lets the persistence validator in `ironclaw_threads` know
+    /// the text's PROVENANCE instead of re-deriving it by sniffing content. It
+    /// exempts host-authored text from the credential-VOCABULARY scan (a
+    /// host-authored instruction must be able to say `client_secret`), and
+    /// nothing else — the control-character and credential-VALUE guards still
+    /// apply.
+    HostAuthored,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -372,6 +442,33 @@ mod tests {
             serde_json::json!("provide_required_field")
         );
         assert_eq!(value["trust"], "untrusted_tool_output");
+    }
+
+    /// `item_count` is only meaningful alongside a truncated preview; a
+    /// `ResultReference` carrying `item_count` without both `preview` and
+    /// `next_offset` must fail validation.
+    #[test]
+    fn result_reference_rejects_item_count_without_preview_and_next_offset() {
+        let observation = ModelVisibleToolObservation {
+            schema_version: MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+            status: ToolObservationStatus::Success,
+            summary: "Tool completed.".to_string(),
+            detail: ToolObservationDetail::ResultReference {
+                result_ref: "result:item-count-without-preview".to_string(),
+                byte_len: 4096,
+                preview: None,
+                total_bytes: None,
+                next_offset: None,
+                item_count: Some(600),
+            },
+            artifacts: Vec::new(),
+            recovery: None,
+            trust: ObservationTrust::UntrustedToolOutput,
+        };
+
+        observation
+            .validate()
+            .expect_err("item_count without preview/next_offset must be rejected");
     }
 
     #[test]

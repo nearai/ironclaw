@@ -438,7 +438,9 @@ pub use installations::{
     ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationPersistedParts,
     ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
-    InMemoryExtensionInstallationStore, InstallationOwner, ManifestHash,
+    ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapterId, ExtensionRemovalCleanupBinding,
+    ExtensionRemovalCleanupRequirement, InMemoryExtensionInstallationStore, InstallationOwner,
+    ManifestHash,
 };
 pub use lifecycle::{
     ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,

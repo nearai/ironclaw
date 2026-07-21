@@ -12,15 +12,15 @@ pub use signature::{
     ArgsHash, CapabilityCallSignature, CapabilityCallSignatureError, CapabilityOutputObservation,
 };
 pub use slots::{
-    CapabilityStrategyState, CompactionPromptSnapshot, CompactionStrategyState,
-    ContextStrategyState, DeferredCompactionWatermark, GateStrategyState, GoalRefreshStrategyState,
-    IndexedMessageKind, MessageIndexEntry, ModelStrategyState, PostCapabilityStageState,
-    RecoveryAttemptClass, RecoveryStrategyState, RepeatedCallWarningPhase,
-    RepeatedCallWarningState, ReplyAdmissionRejection, ReplyAdmissionRejectionReason,
-    ReplyAdmissionStrategyState, StopStrategyState,
+    CapabilityStrategyState, CompactionEffectivenessBaseline, CompactionPromptSnapshot,
+    CompactionStrategyState, ContextStrategyState, DeferredCompactionWatermark, GateStrategyState,
+    GoalRefreshStrategyState, IndexedMessageKind, MessageIndexEntry, ModelStrategyState,
+    PostCapabilityStageState, RecoveryAttemptClass, RecoveryStrategyState,
+    RepeatedCallWarningPhase, RepeatedCallWarningState, ReplyAdmissionRejection,
+    ReplyAdmissionRejectionReason, ReplyAdmissionStrategyState, StopStrategyState,
 };
 
-use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId, ResourceEstimate};
+use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId};
 use ironclaw_turns::{
     LoopGateRef, LoopMessageRef, LoopResultRef,
     run_profile::{
@@ -70,12 +70,45 @@ pub struct LoopExecutionState {
     /// (#3841 follow-up F1).
     pub recent_output_token_counts: BoundedRing<u32, 8>,
 
+    /// Cumulative provider-reported token usage across this run's model calls,
+    /// summed from `LoopModelResponse::usage`. Carried into the terminal
+    /// `LoopExit` so the run record persists per-run usage for the
+    /// OpenAI-compatible surfaces. `None` until the first call that reports
+    /// usage (replay stubs and usage-less providers leave it `None`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cumulative_model_usage: Option<ironclaw_turns::run_profile::LoopModelUsage>,
+
     /// Count of final-answer nudges issued this run (driver-specific nudge,
     /// gated by `SteeringPolicy.allow_driver_specific_nudges`). Capped so the
     /// loop can't issue unbounded extra model calls. `#[serde(default)]` keeps
     /// older checkpoints decodable.
     #[serde(default)]
     pub final_answer_nudges_used: u32,
+
+    /// Count of tools-capable completion nudges issued this run (driver-specific
+    /// nudge, gated by `SteeringPolicy.allow_driver_specific_nudges`). Unlike the
+    /// tool-free `final_answer_nudges_used` rescue, this one re-enters the loop
+    /// with the full tool surface so the model can finish the task (e.g. write a
+    /// required output file) before answering. Capped so the loop can't issue
+    /// unbounded extra iterations. `#[serde(default)]` keeps older checkpoints
+    /// decodable.
+    #[serde(default)]
+    pub completion_nudges_used: u32,
+
+    /// Set when the executor decided to issue a tools-capable completion nudge
+    /// on the previous turn; consumed by the next prompt build, which injects the
+    /// completion-nudge control message and clears this flag. `#[serde(default)]`
+    /// keeps older checkpoints decodable.
+    #[serde(default)]
+    pub completion_nudge_pending: bool,
+
+    /// Whether the most recent admitted assistant reply "trailed off" without a
+    /// real closing answer (empty after trim, or ends with a colon — a narrated
+    /// next step with no follow-through). Populated by `AssistantReplyStage`; read
+    /// by the stop handling to decide whether a graceful stop warrants a
+    /// completion nudge. `#[serde(default)]` keeps older checkpoints decodable.
+    #[serde(default)]
+    pub last_reply_trailed_off: bool,
 
     // strategy slots — one per strategy that mutates state.
     pub context_state: ContextStrategyState,
@@ -118,8 +151,6 @@ pub struct PendingApprovalResume {
     pub effective_capability_ids: Vec<CapabilityId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_replay: Option<ProviderToolCallReplay>,
-    pub input: serde_json::Value,
-    pub estimate: ResourceEstimate,
     /// Set when the user denied this approval gate. The loop surfaces a
     /// model-visible failure for the parked call instead of re-dispatching.
     /// See the field-name note on `PendingAuthResume::disposition`.
@@ -142,8 +173,6 @@ impl PendingApprovalResume {
             resume_token: self.resume_token.clone(),
             correlation_id: self.correlation_id,
             input_ref: self.input_ref.clone(),
-            input: self.input.clone(),
-            estimate: self.estimate.clone(),
         }
     }
 }
@@ -152,9 +181,12 @@ impl PendingApprovalResume {
 ///
 /// Auth re-dispatch reuses the original invocation identifier when a
 /// `resume_token` is available, so any fingerprinted approval lease whose scope
-/// embeds that identifier can still be matched and claimed. Auth gates also
-/// checkpoint the runtime input replay when available because staged input refs
-/// may be consumed by the first dispatch or scoped to a prior loop run.
+/// embeds that identifier can still be matched and claimed. The runtime input a
+/// re-dispatch needs (staged input refs may be consumed by the first dispatch or
+/// scoped to a prior loop run) is no longer checkpointed here: the host persists
+/// it in the host-private replay-payload store at the fresh gate raise and
+/// reconstitutes it on resume, keyed by the invocation id in `resume_token`
+/// (arch-simplification §5.3 Stage 2a-i).
 ///
 /// The `prior_approval` field collapses the two formerly-independent
 /// `approval_request_id`/`correlation_id` options into a typed all-or-none
@@ -162,7 +194,7 @@ impl PendingApprovalResume {
 ///
 /// When `disposition` is `Some(Denied)`, the executor surfaces a model-visible
 /// gate-declined failure for the parked call and SKIPS re-dispatch; in that
-/// case `resume_token` and `replay` are unused.
+/// case `resume_token` is unused.
 ///
 /// Field-name note: each pending-resume type scopes `disposition` to ONE
 /// parked gate (auth or approval), so the short name is unambiguous within
@@ -192,12 +224,14 @@ pub struct PendingAuthResume {
     /// invocation had previously passed a one-shot approval gate.
     /// `approval_request_id` and `correlation_id` are always set as a pair;
     /// see [`AuthResumeApprovalIdentity`].
+    ///
+    /// Raw runtime input no longer rides the checkpoint: the host persists it in
+    /// the host-private replay-payload store at the fresh gate raise and
+    /// reconstitutes it on resume, keyed by the invocation id in `resume_token`
+    /// (arch-simplification §5.3 Stage 2a-i). This removes the charter-violating
+    /// raw-tool-args-in-state exposure (see this crate's `CLAUDE.md`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prior_approval: Option<AuthResumeApprovalIdentity>,
-    /// Runtime input captured when the auth gate blocked. This avoids resolving
-    /// a consumed or cross-run input ref after the user completes auth.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replay: Option<ironclaw_turns::run_profile::CapabilityAuthResumeReplay>,
     /// Set when the user denied this auth gate. The loop surfaces a
     /// model-visible failure for the parked call instead of re-dispatching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -243,6 +277,20 @@ impl PendingExternalToolResume {
 }
 
 impl LoopExecutionState {
+    /// Accumulate one model call's reported usage into the run's cumulative
+    /// total. No-op when the call reported no usage (replay stubs, usage-less
+    /// providers), leaving any prior total intact.
+    pub(crate) fn accumulate_model_usage(
+        &mut self,
+        usage: Option<ironclaw_turns::run_profile::LoopModelUsage>,
+    ) {
+        if let Some(usage) = usage {
+            self.cumulative_model_usage
+                .get_or_insert_with(Default::default)
+                .add_assign(&usage);
+        }
+    }
+
     /// Builds the initial state at the start of a fresh run.
     ///
     /// The `input_cursor` field is populated via
@@ -263,7 +311,11 @@ impl LoopExecutionState {
             seen_capability_output_digests: BoundedRing::new(),
             recent_failure_kinds: BoundedRing::new(),
             recent_output_token_counts: BoundedRing::new(),
+            cumulative_model_usage: None,
             final_answer_nudges_used: 0,
+            completion_nudges_used: 0,
+            completion_nudge_pending: false,
+            last_reply_trailed_off: false,
             context_state: ContextStrategyState::default(),
             capability_state: CapabilityStrategyState::default(),
             model_state: ModelStrategyState::default(),
@@ -328,6 +380,10 @@ impl LoopExecutionState {
         self.input_cursor = LoopInputCursor::origin_for_run(context);
         self.assistant_refs.clear();
         self.result_refs.clear();
+        // A retry rebases onto a different run id; the failed run's token total
+        // belongs to that run and must not be re-reported under the new one.
+        // (Same-run gate resumes return early above, preserving the total.)
+        self.cumulative_model_usage = None;
         self
     }
 }
@@ -786,6 +842,12 @@ mod tests {
             .result_refs
             .push(ironclaw_turns::LoopResultRef::new("result:source-run").unwrap());
         state.iteration = 4;
+        state.cumulative_model_usage = Some(ironclaw_turns::run_profile::LoopModelUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        });
         // Gate-bound resume state must survive the rebase: this path also
         // resumes a run after an approval/auth gate, where the pending-resume
         // record drives re-dispatch of the gated capability.
@@ -802,8 +864,6 @@ mod tests {
             input_ref: CapabilityInputRef::new("input:source-approval").unwrap(),
             effective_capability_ids: vec![],
             provider_replay: None,
-            input: json!({ "k": "v" }),
-            estimate: ResourceEstimate::default(),
             disposition: None,
         });
         state.pending_auth_resume = Some(PendingAuthResume {
@@ -816,7 +876,6 @@ mod tests {
             resume_token: None,
             activity_id: CapabilityActivityId::new(),
             prior_approval: None,
-            replay: None,
             disposition: None,
         });
 
@@ -830,6 +889,9 @@ mod tests {
         );
         assert!(rebased.assistant_refs.is_empty());
         assert!(rebased.result_refs.is_empty());
+        // A retry rebases onto a different run id, so the failed run's token
+        // total must be dropped rather than re-reported under the new run.
+        assert!(rebased.cumulative_model_usage.is_none());
         // Gate-bound resume state is preserved so an approval/auth resume can
         // re-dispatch the gated capability.
         assert_eq!(rebased.last_gate, state.last_gate);
@@ -856,6 +918,14 @@ mod tests {
             .result_refs
             .push(ironclaw_turns::LoopResultRef::new("result:same-run").unwrap());
         state.iteration = 3;
+        // A same-run gate resume must preserve the run's accumulated token
+        // total; the full-equality assertion below locks that in.
+        state.cumulative_model_usage = Some(ironclaw_turns::run_profile::LoopModelUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        });
 
         let rebased = state.clone().rebase_for_run(&context);
 
@@ -977,7 +1047,6 @@ mod tests {
             resume_token: None,
             activity_id: CapabilityActivityId::new(),
             prior_approval: None,
-            replay: None,
             disposition: None,
         });
         let payload = encode_payload(&state);
@@ -1008,7 +1077,6 @@ mod tests {
             resume_token: None,
             activity_id: CapabilityActivityId::new(),
             prior_approval: None,
-            replay: None,
             disposition: Some(GateResumeDisposition::Denied),
         });
         let payload = encode_payload(&state);
@@ -1109,10 +1177,6 @@ mod tests {
                 approval_request_id,
                 correlation_id,
             }),
-            replay: Some(ironclaw_turns::run_profile::CapabilityAuthResumeReplay {
-                input: serde_json::json!({"query": "is:unread"}),
-                estimate: ResourceEstimate::default(),
-            }),
             disposition: None,
         });
 
@@ -1144,11 +1208,6 @@ mod tests {
             pa.correlation_id, correlation_id,
             "prior_approval.correlation_id must survive checkpoint encode/decode"
         );
-        assert_eq!(
-            pending.replay.as_ref().map(|replay| &replay.input),
-            Some(&serde_json::json!({"query": "is:unread"})),
-            "replay input must survive checkpoint encode/decode"
-        );
     }
 
     #[test]
@@ -1157,7 +1216,7 @@ mod tests {
         // The `Some(Denied)` disposition stamped on `pending_approval_resume` before the
         // capability stage must survive the checkpoint encode/decode cycle so that a
         // resumed run still sees the approval denial.
-        use ironclaw_host_api::{ApprovalRequestId, CorrelationId, ResourceEstimate};
+        use ironclaw_host_api::{ApprovalRequestId, CorrelationId};
         use ironclaw_turns::run_profile::CapabilityResumeToken;
 
         let context = test_run_context();
@@ -1178,8 +1237,6 @@ mod tests {
             input_ref: CapabilityInputRef::new("input:approval-denied").expect("valid input ref"),
             effective_capability_ids: vec![],
             provider_replay: None,
-            input: serde_json::json!({"extension_id": "slack"}),
-            estimate: ResourceEstimate::default(),
             disposition: Some(GateResumeDisposition::Denied),
         });
         let payload = encode_payload(&state);

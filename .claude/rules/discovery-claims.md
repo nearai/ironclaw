@@ -1,6 +1,5 @@
 ---
 paths:
-  - "src/**"
   - "crates/**"
   - "openwiki/**"
   - "**/*.md"

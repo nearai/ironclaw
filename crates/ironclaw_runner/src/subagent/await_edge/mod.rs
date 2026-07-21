@@ -15,25 +15,17 @@
 //! boot pass, the bounded-concurrency admission scheduler, and the lazy
 //! backstop (§4.3, §5.3).
 
-// The concrete CAS mechanism needs `ironclaw_filesystem`, gated the same way
-// `goal_store.rs`'s `FilesystemSubagentGoalStore` is (`filesystem-goal-store`
-// — reused, not a new feature, per §12's "no new feature flag" non-goal).
-// `SubagentSpawnDeps.await_edge_writer`/observer registration hold these as
-// `Arc<dyn AwaitEdgeWriter>`/`Arc<dyn TurnCommittedEventObserver>` trait
-// objects (loop_support/ironclaw_turns types, no filesystem dependency), so
-// gating the concrete impl here does not ripple into always-compiled code.
-#[cfg(feature = "filesystem-goal-store")]
+// The concrete CAS mechanism needs `ironclaw_filesystem`. `SubagentSpawnDeps`
+// holds these as `Arc<dyn AwaitEdgeWriter>` / `Arc<dyn
+// TurnCommittedEventObserver>` trait objects (loop_host/ironclaw_turns types).
 pub mod boot_recovery;
-#[cfg(feature = "filesystem-goal-store")]
 pub mod resolver;
-#[cfg(feature = "filesystem-goal-store")]
 pub mod roster;
-#[cfg(feature = "filesystem-goal-store")]
 pub mod store;
 
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{CapabilityId, ThreadId};
-use ironclaw_loop_support::{SpawnSubagentMode, SubagentKindId};
+use ironclaw_loop_host::{SpawnSubagentMode, SubagentKindId};
 use ironclaw_turns::{
     GateRef, LoopResultRef, ReplyTargetBindingRef, SourceBindingRef, TurnRunId, TurnScope,
 };
@@ -111,7 +103,7 @@ impl EdgeTerminalKind {
 ///   ≤4-spawns/turn, ≤16-descendants caps this ever sees.
 /// - `source_binding_ref`/`reply_target_binding_ref`: these are pure
 ///   deterministic functions of `(parent_run_id, child_run_id)` at spawn time
-///   (`ironclaw_loop_support::subagent_spawn_port`'s private `source_binding_ref`/
+///   (`ironclaw_loop_host::subagent_spawn_port`'s private `source_binding_ref`/
 ///   `reply_target_binding_ref` helpers) — stored here rather than
 ///   recomputed, to avoid duplicating that private format-string logic
 ///   across the crate boundary and the drift risk of two copies going stale
@@ -204,14 +196,9 @@ pub(crate) fn map_await_edge_error(
 }
 
 /// `{some/<v>|none}` optional-axis path encoding (§4.2), matching the
-/// existing precedent at
-/// `local_trigger_access::filesystem::optional_axis_path`. Duplicated here
-/// (4 lines) rather than reused — that helper lives behind
-/// `local_trigger_access`'s own `mod filesystem;`, which is both private and
-/// feature-gated behind `filesystem-local-trigger-access`, a feature
-/// unrelated to await-edge's own filesystem gate (`filesystem-goal-store`);
-/// threading a cross-feature dependency for a 4-line pure function is worse
-/// than the duplication.
+/// `agents/<id>/projects/<id>` scope-path convention `goal_store.rs` uses.
+/// A local 4-line pure helper rather than a shared dependency — the encoding
+/// is trivial and each store owns its own path layout.
 fn optional_axis_path(value: Option<&str>) -> String {
     match value {
         Some(value) => format!("some/{value}"),

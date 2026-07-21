@@ -366,7 +366,7 @@ fn capability_id(value: &'static str) -> Result<CapabilityId, AgentLoopHostError
 }
 
 fn durable_event_error(error: EventError) -> AgentLoopHostError {
-    ironclaw_loop_support::raw_agent_loop_host_error(
+    ironclaw_loop_host::raw_agent_loop_host_error(
         "loop_milestone_events",
         "append_event",
         AgentLoopHostErrorKind::Unavailable,

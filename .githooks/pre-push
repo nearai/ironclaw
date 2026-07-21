@@ -9,10 +9,27 @@ SCRIPT_DIR="$REPO_ROOT/scripts/ci"
 # Default: baseline quality gate
 "$SCRIPT_DIR/quality_gate.sh"
 
+# Fast static checks (no compile) — catch deterministic breakers that a
+# host-only build misses. See issue #6018.
+#   - include_str! targets exist AND are in every Dockerfile build context
+#     (the #5603 Docker outage class).
+#   - newly-added raw std::env::set_var/remove_var is guarded (the #6015
+#     coverage-flake / Rust 1.82 UB class).
+echo "==> static: include_str! paths + Docker COPY coverage"
+"$SCRIPT_DIR/check-include-str-paths.sh"
+echo "==> static: hermetic env mutation"
+"$SCRIPT_DIR/check-hermetic-env.sh"
+
 # Optional strict delta lint (env-gated)
 if [ "${IRONCLAW_STRICT_DELTA_LINT:-0}" = "1" ]; then
     "$SCRIPT_DIR/delta_lint.sh" "$1"
 elif [ "${IRONCLAW_STRICT_LINT:-0}" = "1" ]; then
-    echo "==> clippy (strict: all warnings)"
+    echo "==> clippy (strict: all warnings, default features)"
     cargo clippy --locked --all-targets -- -D warnings
+    # Feature-matrix leg: the libsql-only build gates a distinct set of
+    # `cfg`/`dead_code` lints that default-feature clippy never sees — the
+    # class that reds `Clippy (libsql-only)` on main (e.g. the `Prebuilt`
+    # dead_code break, #5840). Cheap relative to a full test run.
+    echo "==> clippy (strict: libsql-only feature leg)"
+    cargo clippy --locked --no-default-features --features libsql --all-targets -- -D warnings
 fi

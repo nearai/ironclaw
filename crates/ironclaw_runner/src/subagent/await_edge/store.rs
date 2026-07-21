@@ -35,9 +35,8 @@ pub struct CloseCrashHooks<'a> {
 
 /// Thin CAS wrapper around one shared `Arc<ScopedFilesystem<F>>`. Generic
 /// over the backend, matching every other filesystem-backed reborn store
-/// (`goal_store.rs`'s `FilesystemSubagentGoalStore<F>`,
-/// `local_trigger_access::filesystem::RebornFilesystemLocalTriggerAccessStore<F>`)
-/// — never `Arc<dyn RootFilesystem>`.
+/// (`goal_store.rs`'s `FilesystemSubagentGoalStore<F>`) — never
+/// `Arc<dyn RootFilesystem>`.
 pub struct FilesystemAwaitEdgeStore<F: RootFilesystem + ?Sized> {
     fs: Arc<ScopedFilesystem<F>>,
 }
@@ -647,7 +646,7 @@ where
 }
 
 #[async_trait::async_trait]
-impl<F> ironclaw_loop_support::AwaitEdgeWriter for FilesystemAwaitEdgeStore<F>
+impl<F> ironclaw_loop_host::AwaitEdgeWriter for FilesystemAwaitEdgeStore<F>
 where
     F: RootFilesystem + ?Sized,
 {
@@ -658,7 +657,7 @@ where
 
     async fn record_awaited_child(
         &self,
-        record: ironclaw_loop_support::AwaitedChildSetRecord,
+        record: ironclaw_loop_host::AwaitedChildSetRecord,
     ) -> Result<(), ironclaw_turns::run_profile::AgentLoopHostError> {
         let parent_run_id = record.parent_run_context.run_id;
         let child_run_id = record.child_run_id;
@@ -735,7 +734,7 @@ where
         // fail-closed behavior for when it lands).
         Ok(group
             .iter()
-            .any(|(_, edge)| edge.mode == ironclaw_loop_support::SpawnSubagentMode::Blocking))
+            .any(|(_, edge)| edge.mode == ironclaw_loop_host::SpawnSubagentMode::Blocking))
     }
 }
 
@@ -754,7 +753,7 @@ mod tests {
         AgentId, CapabilityId, MountAlias, MountGrant, MountPermissions, MountView, TenantId,
         ThreadId, VirtualPath,
     };
-    use ironclaw_loop_support::{SpawnSubagentMode, SubagentKindId};
+    use ironclaw_loop_host::{SpawnSubagentMode, SubagentKindId};
     use ironclaw_turns::{GateRef, LoopResultRef, ReplyTargetBindingRef, SourceBindingRef};
 
     use super::*;

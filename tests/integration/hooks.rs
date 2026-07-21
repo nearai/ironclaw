@@ -15,6 +15,8 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
+use ironclaw_events::{SecurityBoundary, SecurityDecision};
+use ironclaw_hooks::dispatch::HOOK_DENY_PREDICATE_CODE;
 use reborn_support::assertions::ToolErrorClass;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::hooks::{
@@ -97,4 +99,11 @@ async fn hook_deny_blocks_capability_without_wedging_run() {
     h.assert_tool_error(ToolErrorClass::Denied, HOOK_TEST_DENY_REASON)
         .await
         .expect("hook deny reason must be reported in the persisted tool-error summary");
+    h.assert_security_audit_event_recorded(
+        SecurityBoundary::HookDeny,
+        SecurityDecision::Blocked,
+        HOOK_DENY_PREDICATE_CODE,
+    )
+    .await
+    .expect("hook deny must record a security-audit event through the harness recorder");
 }

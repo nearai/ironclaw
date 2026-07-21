@@ -42,19 +42,39 @@ impl TurnStatus {
     /// run/external tool). Used to decide when a transition changed the set of
     /// gate-blocked runs and therefore needs durable persistence.
     pub fn is_blocked(self) -> bool {
-        matches!(
-            self,
-            Self::BlockedApproval
-                | Self::BlockedAuth
-                | Self::BlockedResource
-                | Self::BlockedDependentRun
-                | Self::BlockedExternalTool
-        )
+        GateKind::from_status(self).is_some()
     }
 
     pub fn keeps_active_lock(self) -> bool {
         !self.is_terminal()
     }
+}
+
+/// The recoverability-critical transition boundary (#6263 Step 3 / #6284 / Step 5b).
+///
+/// A run status is **recoverability-critical** when it is a gate-park
+/// ([`TurnStatus::is_blocked`]), a terminal ([`TurnStatus::is_terminal`]), or a
+/// [`TurnStatus::CancelRequested`]:
+///
+/// * losing a gate-park strands a run away from the human who must act on it;
+/// * losing a terminal re-runs an already-performed side effect, or loses the
+///   sanitized, model-visible failure cause the model must see;
+/// * losing a `CancelRequested` re-runs work the caller was told was cancelled:
+///   `request_cancel` reports success once the transition is committed, so a
+///   write-behind crash that reverts it to `Running`/`Queued` would execute a
+///   run the caller successfully cancelled (and drop its idempotency record).
+///   The caller is waiting on this transition exactly as on a gate-park.
+///
+/// These transitions MUST stay synchronously durable even under async
+/// write-behind: the async path may move only NON-critical transitions off the
+/// synchronous ack. The row store's `delta_is_recoverability_critical` also
+/// treats a brand-new run (one `baseline` has never seen — `submit_turn`,
+/// `submit_child_turn`, and the runs `resume_turn`/`retry_turn` spawn) as
+/// critical: it has no durable fallback to recover from if lost. The
+/// crash-consistency suite references THIS function (not a copy) as the
+/// single boundary write-behind flips.
+pub fn is_recoverability_critical(status: TurnStatus) -> bool {
+    status.is_blocked() || status.is_terminal() || matches!(status, TurnStatus::CancelRequested)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,15 +174,89 @@ pub enum BlockedReason {
     },
 }
 
-impl BlockedReason {
-    pub fn status(&self) -> TurnStatus {
+/// The canonical kind of gate a run can park on. One value per blocked
+/// `TurnStatus`; every other blocked-gate representation in the crate
+/// (`BlockedReason`, `TurnBlockedGateKind`, `LoopBlockedKind`,
+/// `ResumeTurnPrecondition`) maps to and from this so the correspondence lives
+/// in one place and adding a gate kind is a compiler-forced edit here rather
+/// than across ~6 scattered match tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateKind {
+    Approval,
+    Auth,
+    Resource,
+    AwaitDependentRun,
+    ExternalTool,
+}
+
+impl GateKind {
+    /// The blocked `TurnStatus` a run in this gate holds. The single
+    /// authoritative `GateKind -> TurnStatus` correspondence.
+    pub fn blocked_status(self) -> TurnStatus {
         match self {
-            Self::Approval { .. } => TurnStatus::BlockedApproval,
-            Self::Auth { .. } => TurnStatus::BlockedAuth,
-            Self::Resource { .. } => TurnStatus::BlockedResource,
-            Self::AwaitDependentRun { .. } => TurnStatus::BlockedDependentRun,
-            Self::ExternalTool { .. } => TurnStatus::BlockedExternalTool,
+            Self::Approval => TurnStatus::BlockedApproval,
+            Self::Auth => TurnStatus::BlockedAuth,
+            Self::Resource => TurnStatus::BlockedResource,
+            Self::AwaitDependentRun => TurnStatus::BlockedDependentRun,
+            Self::ExternalTool => TurnStatus::BlockedExternalTool,
         }
+    }
+
+    /// The gate kind a `TurnStatus` represents, or `None` when the status is not
+    /// a blocked-gate status. Exhaustive over `TurnStatus`, so a new blocked
+    /// variant fails to compile until it is classified here.
+    pub fn from_status(status: TurnStatus) -> Option<Self> {
+        match status {
+            TurnStatus::BlockedApproval => Some(Self::Approval),
+            TurnStatus::BlockedAuth => Some(Self::Auth),
+            TurnStatus::BlockedResource => Some(Self::Resource),
+            TurnStatus::BlockedDependentRun => Some(Self::AwaitDependentRun),
+            TurnStatus::BlockedExternalTool => Some(Self::ExternalTool),
+            TurnStatus::Queued
+            | TurnStatus::Running
+            | TurnStatus::CancelRequested
+            | TurnStatus::Cancelled
+            | TurnStatus::Completed
+            | TurnStatus::Failed
+            | TurnStatus::RecoveryRequired => None,
+        }
+    }
+
+    /// Build the data-carrying [`BlockedReason`] for this gate kind. Only `Auth`
+    /// carries credential requirements; the rest ignore them.
+    pub fn into_blocked_reason(
+        self,
+        gate_ref: GateRef,
+        credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+    ) -> BlockedReason {
+        match self {
+            Self::Approval => BlockedReason::Approval { gate_ref },
+            Self::Auth => BlockedReason::Auth {
+                gate_ref,
+                credential_requirements,
+            },
+            Self::Resource => BlockedReason::Resource { gate_ref },
+            Self::AwaitDependentRun => BlockedReason::AwaitDependentRun { gate_ref },
+            Self::ExternalTool => BlockedReason::ExternalTool { gate_ref },
+        }
+    }
+}
+
+impl BlockedReason {
+    /// The gate kind this reason represents.
+    pub fn gate_kind(&self) -> GateKind {
+        match self {
+            Self::Approval { .. } => GateKind::Approval,
+            Self::Auth { .. } => GateKind::Auth,
+            Self::Resource { .. } => GateKind::Resource,
+            Self::AwaitDependentRun { .. } => GateKind::AwaitDependentRun,
+            Self::ExternalTool { .. } => GateKind::ExternalTool,
+        }
+    }
+
+    pub fn status(&self) -> TurnStatus {
+        self.gate_kind().blocked_status()
     }
 
     pub fn gate_ref(&self) -> &GateRef {
@@ -197,6 +291,96 @@ pub struct SanitizedFailure {
     /// without migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
+}
+
+const MODEL_INVALID_OUTPUT_DETAIL_MAX_BYTES: usize = 512;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ModelInvalidOutputDetailReason {
+    EmptyAssistantResponse,
+    TextualToolCallSyntax,
+    OutsideCapabilitySurface,
+    ToolUseFinishWithoutToolCalls,
+    UnsupportedToolCallsForTextOnlyLoop,
+    InvalidReturnedToolName,
+    InvalidToolCallArguments,
+    MalformedToolCallArguments,
+}
+
+impl ModelInvalidOutputDetailReason {
+    pub const TOOL_CALL_ARGUMENTS_PARSE_ERROR_PREFIX: &'static str =
+        "failed to parse tool-call arguments JSON:";
+
+    pub fn safe_summary(self) -> &'static str {
+        match self {
+            Self::EmptyAssistantResponse => "model returned an empty assistant response",
+            Self::TextualToolCallSyntax => {
+                "model returned textual tool-call syntax instead of structured tool calls"
+            }
+            Self::OutsideCapabilitySurface => {
+                "model returned a tool call outside the advertised capability surface"
+            }
+            Self::ToolUseFinishWithoutToolCalls => {
+                "model returned tool-use finish without tool calls"
+            }
+            Self::UnsupportedToolCallsForTextOnlyLoop => {
+                "model returned unsupported tool calls for a text-only loop"
+            }
+            Self::InvalidReturnedToolName => "model returned an invalid provider tool name",
+            Self::InvalidToolCallArguments => "model returned invalid tool-call arguments",
+            Self::MalformedToolCallArguments => Self::TOOL_CALL_ARGUMENTS_PARSE_ERROR_PREFIX,
+        }
+    }
+
+    pub fn from_failure_category_and_safe_summary(
+        category: &str,
+        safe_summary: Option<&str>,
+    ) -> Option<Self> {
+        if !matches!(category, "model_invalid_output" | "invalid_model_output") {
+            return None;
+        }
+        Self::from_safe_summary(safe_summary?)
+    }
+
+    pub fn from_safe_summary(safe_summary: &str) -> Option<Self> {
+        if !is_model_invalid_output_detail_shape(safe_summary) {
+            return None;
+        }
+        match safe_summary {
+            "model returned an empty assistant response" => Some(Self::EmptyAssistantResponse),
+            "model returned textual tool-call syntax instead of structured tool calls" => {
+                Some(Self::TextualToolCallSyntax)
+            }
+            "model returned a tool call outside the advertised capability surface" => {
+                Some(Self::OutsideCapabilitySurface)
+            }
+            "model returned tool-use finish without tool calls" => {
+                Some(Self::ToolUseFinishWithoutToolCalls)
+            }
+            "model returned unsupported tool calls for a text-only loop" => {
+                Some(Self::UnsupportedToolCallsForTextOnlyLoop)
+            }
+            "model returned an invalid provider tool name" => Some(Self::InvalidReturnedToolName),
+            "model returned invalid tool-call arguments" => Some(Self::InvalidToolCallArguments),
+            _ if safe_summary.starts_with(Self::TOOL_CALL_ARGUMENTS_PARSE_ERROR_PREFIX) => {
+                Some(Self::MalformedToolCallArguments)
+            }
+            _ => None,
+        }
+    }
+}
+
+fn is_model_invalid_output_detail_shape(detail: &str) -> bool {
+    if detail.is_empty() || detail.len() > MODEL_INVALID_OUTPUT_DETAIL_MAX_BYTES {
+        return false;
+    }
+    if !detail.is_ascii() {
+        return false;
+    }
+    let bytes = detail.as_bytes();
+    !bytes[0].is_ascii_whitespace()
+        && !bytes[bytes.len() - 1].is_ascii_whitespace()
+        && !bytes.iter().any(u8::is_ascii_control)
 }
 
 impl SanitizedFailure {
@@ -397,6 +581,12 @@ pub struct TurnRunState {
     pub resolved_run_profile_version: RunProfileVersion,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_model_route: Option<LoopModelRouteSnapshot>,
+    /// Cumulative provider-reported token usage for this run's model calls,
+    /// captured at loop exit. `None` for runs that reported no usage (replay
+    /// stubs) or that pre-date usage capture. Read by the OpenAI-compatible
+    /// Responses/Chat surfaces to report `usage` and cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_usage: Option<crate::run_profile::LoopModelUsage>,
     pub received_at: TurnTimestamp,
     pub checkpoint_id: Option<TurnCheckpointId>,
     pub gate_ref: Option<GateRef>,
@@ -564,6 +754,76 @@ mod tests {
         let json = serde_json::to_string(&reason).expect("serialize");
         let decoded: BlockedReason = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded, reason);
+    }
+
+    #[test]
+    fn model_invalid_output_detail_reason_round_trips_fixed_safe_summaries() {
+        use ModelInvalidOutputDetailReason as Reason;
+
+        for reason in [
+            Reason::EmptyAssistantResponse,
+            Reason::TextualToolCallSyntax,
+            Reason::OutsideCapabilitySurface,
+            Reason::ToolUseFinishWithoutToolCalls,
+            Reason::UnsupportedToolCallsForTextOnlyLoop,
+            Reason::InvalidReturnedToolName,
+            Reason::InvalidToolCallArguments,
+        ] {
+            assert_eq!(
+                Reason::from_failure_category_and_safe_summary(
+                    "model_invalid_output",
+                    Some(reason.safe_summary()),
+                ),
+                Some(reason),
+                "{reason:?} safe summary should parse back to the same reason"
+            );
+        }
+    }
+
+    #[test]
+    fn model_invalid_output_detail_reason_accepts_safe_parse_error_prefix() {
+        assert_eq!(
+            ModelInvalidOutputDetailReason::from_failure_category_and_safe_summary(
+                "model_invalid_output",
+                Some("failed to parse tool-call arguments JSON: expected value at line 1 column 1"),
+            ),
+            Some(ModelInvalidOutputDetailReason::MalformedToolCallArguments)
+        );
+    }
+
+    #[test]
+    fn model_invalid_output_detail_reason_is_category_gated() {
+        assert_eq!(
+            ModelInvalidOutputDetailReason::from_failure_category_and_safe_summary(
+                "model_unavailable",
+                Some(ModelInvalidOutputDetailReason::EmptyAssistantResponse.safe_summary()),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn model_invalid_output_detail_reason_rejects_unvalidated_detail() {
+        let oversized = format!(
+            "failed to parse tool-call arguments JSON: {}",
+            "x".repeat(512)
+        );
+
+        for detail in [
+            " model returned an empty assistant response",
+            "model returned an empty assistant response\n",
+            "model returned an empty assistant response\0",
+            oversized.as_str(),
+        ] {
+            assert_eq!(
+                ModelInvalidOutputDetailReason::from_failure_category_and_safe_summary(
+                    "model_invalid_output",
+                    Some(detail),
+                ),
+                None,
+                "{detail:?} should not be accepted for projection matching"
+            );
+        }
     }
 
     #[test]

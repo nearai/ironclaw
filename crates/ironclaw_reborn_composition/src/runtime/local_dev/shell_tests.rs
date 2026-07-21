@@ -1,22 +1,22 @@
 use std::sync::Arc;
 
 use ironclaw_host_api::{
-    AgentId, CapabilityId, ProjectId, ProviderToolName, TenantId, ThreadId, UserId,
+    AgentId, CapabilityId, ProjectId, ProviderToolName, Resolution, TenantId, ThreadId, UserId,
 };
 use ironclaw_host_runtime::SHELL_CAPABILITY_ID;
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
 };
 use ironclaw_turns::{
     RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
     run_profile::{
-        CapabilityInvocation, CapabilityOutcome, InMemoryLoopHostMilestoneSink,
-        InMemoryRunProfileResolver, LoopRunContext, ProviderToolCall, VisibleCapabilityRequest,
+        CapabilityInvocation, InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver,
+        LoopRunContext, ProviderToolCall, VisibleCapabilityRequest,
     },
 };
 
 use super::{
-    LocalDevCapabilityIo, LocalDevExtensionSurfaceSource, LocalDevLoopCapabilityPortFactory,
+    ExtensionCapabilitySurfaceSource, RefreshingLoopCapabilityPortFactory, StagedCapabilityIo,
 };
 
 async fn run_context(label: &str) -> LoopRunContext {
@@ -65,7 +65,7 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
             crate::RebornCompositionProfile::LocalDevYolo,
             "local-dev-shell-owner",
             storage_root,
-            crate::RebornLocalRuntimeProfileOptions {
+            crate::RebornRuntimeProfileOptions {
                 confirm_host_access: true,
             },
         )
@@ -83,12 +83,12 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
     let workspace_mounts = local_runtime.workspace_mounts.clone();
     let memory_mounts = local_runtime.memory_mounts.clone();
     let policy = Arc::new(
-        crate::local_dev_capability_policy::local_dev_capability_policy().expect("policy parses"),
+        crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
     );
-    let capability_io = Arc::new(LocalDevCapabilityIo::default());
+    let capability_io = Arc::new(StagedCapabilityIo::default());
     let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
     let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-    let factory = LocalDevLoopCapabilityPortFactory {
+    let factory = RefreshingLoopCapabilityPortFactory {
         runtime,
         fallback_user_id: UserId::new("local-dev-shell-user").expect("user id"),
         policy,
@@ -97,12 +97,13 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         system_extensions_lifecycle_mounts: local_runtime
             .system_extensions_lifecycle_mounts
             .clone(),
-        extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+        extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
         input_resolver,
         result_writer,
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
         skill_activation_source: None,
         project_service: Arc::clone(&local_runtime.project_service),
+        thread_service: Arc::new(ironclaw_threads::InMemorySessionThreadService::default()),
         trajectory_observer: None,
         outbound_preferences_facade: None,
         outbound_delivery_target_set_requires_approval: false,
@@ -111,6 +112,16 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         ),
         approval_requests: local_runtime.approval_requests.clone(),
         capability_leases: local_runtime.capability_leases.clone(),
+        gate_record_store: std::sync::Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+            crate::wrap_scoped(std::sync::Arc::new(
+                ironclaw_filesystem::InMemoryBackend::new(),
+            )),
+        )),
+        replay_payload_store: std::sync::Arc::new(
+            ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
+                std::sync::Arc::new(ironclaw_filesystem::InMemoryBackend::new()),
+            )),
+        ),
         external_tool_catalog: std::sync::Arc::new(
             ironclaw_turns::InMemoryExternalToolCatalog::new(),
         ),
@@ -165,11 +176,18 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         .await
         .expect("shell invocation");
 
-    let CapabilityOutcome::Completed(completed) = outcome else {
+    let Resolution::Done(completed) = outcome else {
         panic!("expected completed shell invocation");
     };
+    // The minted `refs.result` is an opaque uuid; the loop result ref the io
+    // staged the output under is preserved on `refs.origin`.
+    let result_ref = completed
+        .refs
+        .origin
+        .as_ref()
+        .expect("completed shell invocation preserves the originating loop result ref");
     let output = capability_io
-        .result_output(completed.result_ref.as_str())
+        .result_output(result_ref.as_str())
         .expect("result output lookup")
         .expect("result output");
     assert_eq!(output["exit_code"], serde_json::json!(0));

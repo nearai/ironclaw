@@ -10,12 +10,26 @@ use crate::product_auth::credentials::runtime_credentials::{
     RuntimeCredentialAccountSelectionService, missing_runtime_credential_auth_requirements,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExtensionActivationCredentialReadiness {
+    Ready,
+    Missing(Vec<RuntimeCredentialAuthRequirement>),
+}
+
 #[async_trait]
 pub(crate) trait ExtensionActivationCredentialGate: Send + Sync {
     async fn ensure_credentials(
         &self,
         package: &ExtensionPackage,
     ) -> Result<(), ProductWorkflowError>;
+
+    async fn credential_readiness(
+        &self,
+        package: &ExtensionPackage,
+    ) -> Result<ExtensionActivationCredentialReadiness, ProductWorkflowError> {
+        self.ensure_credentials(package).await?;
+        Ok(ExtensionActivationCredentialReadiness::Ready)
+    }
 }
 
 #[derive(Clone)]
@@ -54,14 +68,27 @@ impl ExtensionActivationCredentialGate for RuntimeExtensionActivationCredentialG
         &self,
         package: &ExtensionPackage,
     ) -> Result<(), ProductWorkflowError> {
-        let missing_requirements = self
+        match self.credential_readiness(package).await? {
+            ExtensionActivationCredentialReadiness::Ready => Ok(()),
+            ExtensionActivationCredentialReadiness::Missing(_) => {
+                Err(missing_activation_credentials_error(package))
+            }
+        }
+    }
+
+    async fn credential_readiness(
+        &self,
+        package: &ExtensionPackage,
+    ) -> Result<ExtensionActivationCredentialReadiness, ProductWorkflowError> {
+        let missing = self
             .missing_requirements(package_runtime_credential_auth_requirements(package))
             .await
             .map_err(map_activation_credential_stage_error)?;
-        if missing_requirements.is_empty() {
-            return Ok(());
+        if missing.is_empty() {
+            Ok(ExtensionActivationCredentialReadiness::Ready)
+        } else {
+            Ok(ExtensionActivationCredentialReadiness::Missing(missing))
         }
-        Err(missing_activation_credentials_error(package))
     }
 }
 
@@ -77,6 +104,18 @@ impl ExtensionActivationCredentialGate for UnavailableExtensionActivationCredent
             return Ok(());
         }
         Err(missing_activation_credentials_error(package))
+    }
+
+    async fn credential_readiness(
+        &self,
+        package: &ExtensionPackage,
+    ) -> Result<ExtensionActivationCredentialReadiness, ProductWorkflowError> {
+        let missing = package_runtime_credential_auth_requirements(package);
+        if missing.is_empty() {
+            Ok(ExtensionActivationCredentialReadiness::Ready)
+        } else {
+            Ok(ExtensionActivationCredentialReadiness::Missing(missing))
+        }
     }
 }
 
@@ -108,8 +147,9 @@ fn map_activation_credential_stage_error(error: CredentialStageError) -> Product
         CredentialStageError::AuthRequired => ProductWorkflowError::InvalidBindingRequest {
             reason: "extension requires product auth credentials before activation".to_string(),
         },
-        CredentialStageError::Backend => ProductWorkflowError::InvalidBindingRequest {
-            reason: "extension product auth credential state is invalid".to_string(),
+        CredentialStageError::Backend => ProductWorkflowError::Transient {
+            reason: "extension product auth credential state is temporarily unavailable"
+                .to_string(),
         },
     }
 }

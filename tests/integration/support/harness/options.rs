@@ -54,13 +54,39 @@ pub(crate) struct HostRuntimeHarnessOptions {
     pub(crate) activate_bundled_extensions_for_test: Vec<ExtensionPackage>,
     /// C-SYNTH `project_create` fault-injection seam: wrap the real
     /// `Arc<dyn ProjectService>` (`services.local_dev_project_service_for_test()`)
-    /// in `FaultInjectingProjectService` before it reaches
-    /// `wrap_project_create_capability_for_test`, so a `create_project` call
-    /// naming `FAULT_INJECT_DENIED_PROJECT_NAME` returns
-    /// `ProjectServiceError::Denied` instead of reaching the real store.
-    /// Only `project_tools_with_fault_injection()` sets this; every other
-    /// harness leaves the real service unwrapped.
+    /// in `FaultInjectingProjectService` before it reaches the capability-port
+    /// test parts' `project_service` field, so a `create_project` call naming
+    /// `FAULT_INJECT_DENIED_PROJECT_NAME` returns `ProjectServiceError::Denied`
+    /// instead of reaching the real store. Only
+    /// `project_tools_with_fault_injection()` sets this; every other harness
+    /// leaves the real service unwrapped.
     pub(crate) project_service_fault_injection: bool,
+    /// Durable tool-result projection seam (issue #5838): when `true`, the
+    /// harness backs its capability io with the REAL `StagedCapabilityIo`
+    /// (via `ironclaw_reborn_composition::test_support::staged_capability_io_for_test`,
+    /// wired over this harness's own local-dev `thread_service`) instead of
+    /// the ephemeral `ProductLiveCapabilityIo` test double. Opt-in and
+    /// explicit rather than a profile default, so the ~100 other
+    /// `HostRuntimeCapabilityHarness`-based integration tests stay
+    /// byte-identical.
+    pub(crate) durable_capability_io: bool,
+    /// #5886 harness-wiring seam: when `true`, the harness's `builtin.trigger_list`
+    /// dispatch is later re-routed (post-construction, once the caller's real
+    /// shared turn-state store exists) to a REAL `TriggerActiveRunLookup`
+    /// instead of the harness's own baked-in lookup, which is scoped to a
+    /// turn-state store group-based tests never write real runs into. See
+    /// `HostRuntimeCapabilityHarness::install_trigger_active_run_lookup_for_test`.
+    /// Opt-in; every other harness stays byte-identical.
+    pub(crate) trigger_active_run_lookup_requested: bool,
+    /// Provider-instance readiness map, "config set" + restart arm: when
+    /// `true`, registers a dummy Google OAuth backend on the `RebornBuildInput`
+    /// via the SAME production builder (`RebornBuildInput::with_google_oauth_backend`)
+    /// that `ironclaw config set google.client_id`/`client_secret` feeds in
+    /// production — proving the readiness-map check clears once an operator
+    /// configures the instance, with no test-only bypass. `false` (the
+    /// default) matches every pre-existing harness: no Google OAuth backend,
+    /// i.e. this instance is "unconfigured".
+    pub(crate) google_oauth_backend_for_test: bool,
 }
 
 impl HostRuntimeHarnessOptions {
@@ -77,6 +103,9 @@ impl HostRuntimeHarnessOptions {
             network_http_egress_for_test: None,
             activate_bundled_extensions_for_test: Vec::new(),
             project_service_fault_injection: false,
+            durable_capability_io: false,
+            trigger_active_run_lookup_requested: false,
+            google_oauth_backend_for_test: false,
         }
     }
 
@@ -114,6 +143,28 @@ impl HostRuntimeHarnessOptions {
 
     pub(crate) fn with_project_service_fault_injection(mut self) -> Self {
         self.project_service_fault_injection = true;
+        self
+    }
+
+    /// Opt into the real `StagedCapabilityIo` (durable tool-result
+    /// projection seam, issue #5838) instead of the ephemeral
+    /// `ProductLiveCapabilityIo` test double.
+    pub(crate) fn with_durable_capability_io(mut self) -> Self {
+        self.durable_capability_io = true;
+        self
+    }
+
+    /// Opt into the post-construction `builtin.trigger_list` active-run-lookup
+    /// re-wiring (#5886). See `trigger_active_run_lookup_requested`'s doc.
+    pub(crate) fn with_trigger_active_run_lookup_for_test(mut self) -> Self {
+        self.trigger_active_run_lookup_requested = true;
+        self
+    }
+
+    /// Opt into a composition-time Google OAuth backend. See
+    /// `google_oauth_backend_for_test`'s doc.
+    pub(crate) fn with_google_oauth_backend_for_test(mut self) -> Self {
+        self.google_oauth_backend_for_test = true;
         self
     }
 }

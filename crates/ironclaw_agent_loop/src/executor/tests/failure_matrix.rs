@@ -1,12 +1,12 @@
 use super::{
     AgentLoopExecutor, AgentLoopExecutorError, AgentLoopHostError, AgentLoopHostErrorKind,
-    CanonicalAgentLoopExecutor, CapabilityFailureKind, CapabilityOutcome, CapabilityResultMessage,
-    CheckpointKind, DefaultCompactionStrategy, FixedReplyAdmissionPolicy, GateOutcome, HostStage,
-    LoopCheckpointKind, LoopCompactionError, LoopExecutionState, LoopExit, LoopFailureKind,
-    LoopGateRef, LoopResultRef, LoopSafeSummary, MockHost, active_task_preserving_compaction_index,
-    calls_response, empty_gate_state, family_with_compaction_strategy, family_with_gate_outcome,
-    family_with_iteration_limit, family_with_reply_admission, final_staged_state, reply_response,
-    reply_response_with_text,
+    CanonicalAgentLoopExecutor, CapabilityFailureKind, CheckpointKind, DefaultCompactionStrategy,
+    FixedReplyAdmissionPolicy, GateOutcome, HostStage, LoopCheckpointKind, LoopCompactionError,
+    LoopExecutionState, LoopExit, LoopFailureKind, LoopGateRef, LoopResultRef, LoopSafeSummary,
+    MockHost, active_task_preserving_compaction_index, calls_response, empty_gate_state,
+    family_with_compaction_strategy, family_with_gate_outcome, family_with_iteration_limit,
+    family_with_reply_admission, final_staged_state, reply_response, reply_response_with_text,
+    resolution,
 };
 use ironclaw_turns::run_profile::LoopRunInfoPort;
 
@@ -222,6 +222,7 @@ macro_rules! matrix_row_test {
                 .spawn(|| {
                     tokio::runtime::Builder::new_current_thread()
                         .enable_all()
+                        .start_paused(true)
                         .build()
                         .expect("matrix row runtime")
                         .block_on(run_matrix_row(&ROWS[$row_index]))
@@ -255,11 +256,22 @@ async fn run_matrix_row(row: &MatrixRow) {
 async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
     match setup {
         FailureSetup::ModelError => {
-            let host = MockHost::new(Vec::new()).with_model_errors(vec![
-                AgentLoopHostError::new(AgentLoopHostErrorKind::Unavailable, "model unavailable"),
-                AgentLoopHostError::new(AgentLoopHostErrorKind::Unavailable, "model unavailable"),
-                AgentLoopHostError::new(AgentLoopHostErrorKind::Unavailable, "model unavailable"),
-            ]);
+            // One more error than the availability retry budget so the abort
+            // (and its category) is driven by the Unavailable class rather
+            // than the mock's script-exhausted Internal fallback.
+            let unavailable_error_count = crate::strategies::DefaultRecoveryStrategy::default()
+                .max_model_availability_attempts as usize
+                + 1;
+            let host = MockHost::new(Vec::new()).with_model_errors(
+                (0..unavailable_error_count)
+                    .map(|_| {
+                        AgentLoopHostError::new(
+                            AgentLoopHostErrorKind::Unavailable,
+                            "model unavailable",
+                        )
+                    })
+                    .collect(),
+            );
             run_local(crate::families::default(), host, None).await
         }
         FailureSetup::CapabilityProtocolError => {
@@ -267,12 +279,10 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
                 calls_response(),
                 reply_response_with_text("explanation"),
             ])
-            .with_batch_outcomes(vec![batch_outcome(CapabilityOutcome::Failed(
-                ironclaw_turns::run_profile::CapabilityFailure {
-                    error_kind: CapabilityFailureKind::Permanent,
-                    safe_summary: "permanent protocol failure".to_string(),
-                    detail: None,
-                },
+            .with_batch_outcomes(vec![batch_outcome(resolution::failed(
+                CapabilityFailureKind::Permanent,
+                "permanent protocol failure".to_string(),
+                None,
             ))]);
             run_local(crate::families::default(), host, None).await
         }
@@ -322,11 +332,12 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
                 reply_response_with_text("completed"),
             ])
             .with_batch_outcomes(vec![batch_outcome_stopped(
-                CapabilityOutcome::ApprovalRequired {
-                    gate_ref: LoopGateRef::new("gate:approval-skip").expect("valid"),
-                    safe_summary: "approval required".to_string(),
-                    approval_resume: None,
-                },
+                resolution::approval_required(
+                    LoopGateRef::new("gate:approval-skip").expect("valid"),
+                    "approval required".to_string(),
+                    None,
+                )
+                .resolution,
             )]);
             run_local(
                 family_with_gate_outcome(GateOutcome::SkipAndContinue {
@@ -351,13 +362,13 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
                 calls_response(),
                 reply_response_with_text("completed"),
             ])
-            .with_batch_outcomes(vec![batch_outcome(CapabilityOutcome::Denied(
-                ironclaw_turns::run_profile::CapabilityDenied {
-                    reason_kind:
-                        ironclaw_turns::run_profile::CapabilityDeniedReasonKind::EmptySurface,
-                    safe_summary: "provider call denied".to_string(),
-                },
-            ))]);
+            .with_batch_outcomes(vec![batch_outcome(
+                resolution::denied(
+                    ironclaw_turns::run_profile::CapabilityDeniedReasonKind::EmptySurface,
+                    "provider call denied".to_string(),
+                )
+                .resolution,
+            )]);
             run_local(crate::families::default(), host, None).await
         }
         FailureSetup::CapabilityPolicyDeniedRecoverable => {
@@ -567,39 +578,37 @@ fn assert_explanation_refs(row: &MatrixRow, refs: &[ironclaw_turns::LoopMessageR
     }
 }
 
-fn batch_outcome(
-    outcome: CapabilityOutcome,
-) -> ironclaw_turns::run_profile::CapabilityBatchOutcome {
-    ironclaw_turns::run_profile::CapabilityBatchOutcome {
-        outcomes: vec![outcome],
+fn batch_outcome(outcome: ironclaw_host_api::Resolution) -> ironclaw_host_api::ResolutionBatch {
+    ironclaw_host_api::ResolutionBatch {
+        resolutions: vec![outcome],
         stopped_on_suspension: false,
     }
 }
 
-fn failed_capability(error_kind: CapabilityFailureKind, safe_summary: &str) -> CapabilityOutcome {
-    CapabilityOutcome::Failed(ironclaw_turns::run_profile::CapabilityFailure {
-        error_kind,
-        safe_summary: safe_summary.to_string(),
-        detail: None,
-    })
+fn failed_capability(
+    error_kind: CapabilityFailureKind,
+    safe_summary: &str,
+) -> ironclaw_host_api::Resolution {
+    resolution::failed(error_kind, safe_summary.to_string(), None)
 }
 
 fn batch_outcome_stopped(
-    outcome: CapabilityOutcome,
-) -> ironclaw_turns::run_profile::CapabilityBatchOutcome {
-    ironclaw_turns::run_profile::CapabilityBatchOutcome {
-        outcomes: vec![outcome],
+    outcome: ironclaw_host_api::Resolution,
+) -> ironclaw_host_api::ResolutionBatch {
+    ironclaw_host_api::ResolutionBatch {
+        resolutions: vec![outcome],
         stopped_on_suspension: true,
     }
 }
 
-fn no_change_result(result_ref: &str) -> CapabilityOutcome {
-    CapabilityOutcome::Completed(CapabilityResultMessage {
-        result_ref: LoopResultRef::new(result_ref).expect("valid"),
-        safe_summary: "completed without progress".to_string(),
-        progress: ironclaw_turns::run_profile::CapabilityProgress::NoChange,
-        terminate_hint: false,
-        byte_len: 0,
-        output_digest: None,
-    })
+fn no_change_result(result_ref: &str) -> ironclaw_host_api::Resolution {
+    resolution::completed(
+        LoopResultRef::new(result_ref).expect("valid"),
+        "completed without progress".to_string(),
+        ironclaw_turns::run_profile::CapabilityProgress::NoChange,
+        false,
+        0,
+        None,
+        None,
+    )
 }

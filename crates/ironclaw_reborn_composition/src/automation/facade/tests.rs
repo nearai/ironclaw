@@ -14,29 +14,43 @@ use ironclaw_product_workflow::{
     ApprovalInteractionActionView, ApprovalInteractionScope, ApprovalInteractionService,
     AutomationListRequest, AutomationProductFacade, ListPendingApprovalsRequest,
     ListPendingApprovalsResponse, PendingApprovalInteractionView, ProductAgentBoundCaller,
-    ProductWorkflowError, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornServices, RebornServicesApi,
-    RebornServicesErrorCode, RebornServicesErrorKind, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, WebUiAuthenticatedCaller, WebUiListThreadsRequest,
-    approval_gate_ref, automation_trigger_thread_metadata_json,
+    ProductWorkflowError, RebornAutomationHoldReason, RebornAutomationRecentRunStatus,
+    RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState, RebornServices,
+    RebornServicesApi, RebornServicesErrorCode, RebornServicesErrorKind,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    WebUiAuthenticatedCaller, WebUiListThreadsRequest, approval_gate_ref,
+    automation_trigger_thread_metadata_json,
 };
 use ironclaw_threads::{
     EnsureThreadRequest, InMemorySessionThreadService, SessionThreadService, ThreadScope,
 };
 use ironclaw_triggers::{
-    ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClearActiveFireRequest,
-    FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
-    FireRetryableFailedRequest, FireTerminalFailedRequest, InMemoryTriggerRepository, TriggerError,
+    ActiveTriggerScanCursor, BlockedActiveRunKind, ClaimDueFireOutcome, ClaimDueFireRequest,
+    ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
+    FireRetryableFailedRequest, FireTerminalFailedRequest, InMemoryTriggerRepository,
+    TriggerActiveRunLookup, TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerError,
     TriggerId, TriggerRecord, TriggerRepository, TriggerRunHistoryStatus, TriggerRunRecord,
     TriggerSchedule, TriggerSourceKind, TriggerState,
 };
-use ironclaw_turns::{DefaultTurnCoordinator, InMemoryTurnStateStore, TurnRunId};
+use ironclaw_turns::test_support::in_memory_turn_state_store;
+use ironclaw_turns::{DefaultTurnCoordinator, TurnRunId};
 
 use super::RebornAutomationProductFacade;
 
 // -------------------------------------------------------------------------
 // Helpers
 // -------------------------------------------------------------------------
+
+/// Facade over `repo` with no run-state source (`Missing` lookup): hold
+/// derivation stays inert so pre-#5886 expectations hold. Hold-specific tests
+/// construct the facade with a scripted lookup instead.
+fn facade_over(repo: Arc<dyn TriggerRepository>) -> RebornAutomationProductFacade {
+    RebornAutomationProductFacade::new(repo, missing_lookup())
+}
+
+fn missing_lookup() -> Arc<dyn ironclaw_triggers::TriggerActiveRunLookup> {
+    Arc::new(ironclaw_triggers::MissingTriggerActiveRunLookup)
+}
 
 fn caller() -> ProductAgentBoundCaller {
     ProductAgentBoundCaller {
@@ -97,6 +111,27 @@ fn make_record(
         active_run_ref: None,
         created_at: now(),
     }
+}
+
+/// A record with `active_fire_slot`/`active_run_ref` set, so
+/// `active_holds_for_records` includes it in the active-run-lookup batch
+/// (#5886). Uses a per-minute cron so `elapsed_occurrences_between` has
+/// plenty of slots to count between `fire_slot` and "now".
+fn make_active_fire_record(
+    trigger_id: TriggerId,
+    caller: &ProductAgentBoundCaller,
+    fire_slot: Timestamp,
+) -> TriggerRecord {
+    let mut record = make_record(
+        trigger_id,
+        caller,
+        TriggerState::Scheduled,
+        "Active fire test",
+        "* * * * *",
+    );
+    record.active_fire_slot = Some(fire_slot);
+    record.active_run_ref = Some(TurnRunId::new());
+    record
 }
 
 fn make_run_record(trigger_id: TriggerId, status: TriggerRunHistoryStatus) -> TriggerRunRecord {
@@ -433,6 +468,49 @@ impl TriggerRepository for ScriptedRepository {
 }
 
 // -------------------------------------------------------------------------
+// Scripted active-run lookup for hold-derivation tests (#5886)
+// -------------------------------------------------------------------------
+
+/// What `ScriptedActiveRunLookup::active_run_state` returns for every request.
+enum ScriptedActiveRunOutcome {
+    State(TriggerActiveRunState),
+    FailBackend,
+    /// Proves a request was never issued — used for records with no active
+    /// fire, which `active_holds_for_records` must skip entirely (#5886).
+    Panic,
+    /// Sleeps past the facade's deadline before resolving, for proving the
+    /// required run-history fetch is unaffected by a stalled optional hold
+    /// lookup (#5886 ordering fix).
+    Sleep(std::time::Duration),
+}
+
+struct ScriptedActiveRunLookup {
+    outcome: ScriptedActiveRunOutcome,
+}
+
+#[async_trait]
+impl TriggerActiveRunLookup for ScriptedActiveRunLookup {
+    async fn active_run_state(
+        &self,
+        _request: TriggerActiveRunStateRequest,
+    ) -> Result<TriggerActiveRunState, TriggerError> {
+        match &self.outcome {
+            ScriptedActiveRunOutcome::State(state) => Ok(*state),
+            ScriptedActiveRunOutcome::FailBackend => Err(TriggerError::Backend {
+                reason: "scripted active-run lookup failure".to_string(),
+            }),
+            ScriptedActiveRunOutcome::Panic => {
+                panic!("active_run_state must not be called for a record with no active fire")
+            }
+            ScriptedActiveRunOutcome::Sleep(duration) => {
+                tokio::time::sleep(*duration).await;
+                Ok(TriggerActiveRunState::Nonterminal)
+            }
+        }
+    }
+}
+
+// -------------------------------------------------------------------------
 // Tests
 // -------------------------------------------------------------------------
 
@@ -469,7 +547,7 @@ async fn automation_facade_forwards_caller_scope_to_repository() {
         .await
         .expect("upsert non-matching");
 
-    let facade = RebornAutomationProductFacade::new(repo);
+    let facade = facade_over(repo);
     let result = facade
         .list_automations(c, automation_list_request(25, 0))
         .await
@@ -513,7 +591,7 @@ async fn automation_facade_maps_active_trigger_states() {
         let record = make_record(id, &c, *trigger_state, "Test trigger", "0 9 * * *");
         repo.upsert_trigger(record).await.expect("upsert");
 
-        let facade = RebornAutomationProductFacade::new(repo.clone());
+        let facade = facade_over(repo.clone());
         let result = facade
             .list_automations(c.clone(), automation_list_request(100, 0))
             .await
@@ -563,7 +641,7 @@ async fn automation_facade_excludes_completed_triggers_from_active_list() {
     .await
     .expect("upsert completed");
 
-    let facade = RebornAutomationProductFacade::new(repo);
+    let facade = facade_over(repo);
     let result = facade
         .list_automations(c, automation_list_request(100, 0))
         .await
@@ -591,7 +669,7 @@ async fn automation_facade_maps_run_history_and_skips_batch_when_run_limit_zero(
     repo.upsert_trigger(record).await.expect("upsert");
 
     // run_limit=0 -> empty recent_runs even if runs exist
-    let facade = RebornAutomationProductFacade::new(repo.clone());
+    let facade = facade_over(repo.clone());
     let result_zero = facade
         .list_automations(c.clone(), automation_list_request(10, 0))
         .await
@@ -660,12 +738,12 @@ async fn notification_thread_list_discovers_pending_approval_from_real_run_histo
         .await
         .expect("trigger thread stored");
 
-    let turn_state = Arc::new(InMemoryTurnStateStore::default());
+    let turn_state = Arc::new(in_memory_turn_state_store());
     let services = RebornServices::new(
         thread_service,
         Arc::new(DefaultTurnCoordinator::new(turn_state)),
     )
-    .with_automation_product_facade(Arc::new(RebornAutomationProductFacade::new(repo)))
+    .with_automation_product_facade(Arc::new(facade_over(repo)))
     .with_approval_interactions(Arc::new(ActorFallbackApprovalInteractionService {
         pending_thread_id: thread_id.clone(),
         tenant_id: c.tenant_id.clone(),
@@ -706,7 +784,7 @@ async fn automation_facade_maps_trigger_run_status_and_last_status() {
     record.last_status = Some(ironclaw_triggers::TriggerRunStatus::Ok);
     repo.upsert_trigger(record).await.expect("upsert");
 
-    let facade = RebornAutomationProductFacade::new(repo);
+    let facade = facade_over(repo);
     let result = facade
         .list_automations(c, automation_list_request(10, 0))
         .await
@@ -733,7 +811,7 @@ async fn automation_facade_maps_backend_error_to_unavailable() {
         thread_lookup: None,
         limits: None,
     });
-    let facade = RebornAutomationProductFacade::new(repo);
+    let facade = facade_over(repo);
 
     let error = facade
         .list_automations(caller(), automation_list_request(10, 5))
@@ -762,6 +840,7 @@ async fn automation_facade_times_out_stalled_repository() {
             thread_lookup: None,
             limits: None,
         }),
+        missing_lookup(),
         std::time::Duration::from_millis(10),
     );
 
@@ -789,7 +868,7 @@ async fn automation_facade_maps_backend_error_on_run_history_batch_to_unavailabl
         "Daily task",
         "0 9 * * *",
     );
-    let facade = RebornAutomationProductFacade::new(Arc::new(ScriptedRepository {
+    let facade = facade_over(Arc::new(ScriptedRepository {
         scoped: ScriptedOutcome::Records(vec![record]),
         batch: ScriptedOutcome::FailBackend,
         thread_lookup: None,
@@ -830,6 +909,7 @@ async fn automation_facade_times_out_stalled_run_history_batch() {
             thread_lookup: None,
             limits: None,
         }),
+        missing_lookup(),
         std::time::Duration::from_millis(10),
     );
 
@@ -849,7 +929,7 @@ async fn automation_facade_times_out_stalled_run_history_batch() {
 
 #[tokio::test]
 async fn automation_facade_maps_not_found_trigger_error_to_404() {
-    let facade = RebornAutomationProductFacade::new(Arc::new(ScriptedRepository {
+    let facade = facade_over(Arc::new(ScriptedRepository {
         scoped: ScriptedOutcome::NotFound,
         batch: ScriptedOutcome::NotFound,
         thread_lookup: None,
@@ -956,7 +1036,7 @@ async fn automation_facade_excludes_completed_even_when_filling_limit() {
     .expect("upsert scheduled");
 
     // limit=1 — if Completed consumed the slot, Scheduled would be invisible.
-    let facade = RebornAutomationProductFacade::new(repo);
+    let facade = facade_over(repo);
     let result = facade
         .list_automations(c, automation_list_request(1, 0))
         .await
@@ -1009,7 +1089,7 @@ async fn automation_facade_include_completed_returns_completed_automations() {
     .await
     .expect("upsert completed");
 
-    let facade = RebornAutomationProductFacade::new(repo);
+    let facade = facade_over(repo);
     let result = facade
         .list_automations(c, automation_list_request_with_completed(100, 0))
         .await
@@ -1076,7 +1156,7 @@ async fn automation_facade_default_excludes_completed_automations() {
     .await
     .expect("upsert completed");
 
-    let facade = RebornAutomationProductFacade::new(repo);
+    let facade = facade_over(repo);
     let result = facade
         .list_automations(c, automation_list_request(100, 0))
         .await
@@ -1096,4 +1176,301 @@ async fn automation_facade_default_excludes_completed_automations() {
         !ids.contains(&completed_id.to_string()),
         "completed trigger must be excluded by default; got: {ids:?}"
     );
+}
+
+// -------------------------------------------------------------------------
+// Active-hold derivation tests (#5886)
+// -------------------------------------------------------------------------
+
+#[tokio::test]
+async fn automation_facade_active_hold_nonterminal_reports_in_progress() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let c = caller();
+    let id = TriggerId::new();
+    let record = make_active_fire_record(id, &c, now());
+    repo.upsert_trigger(record).await.expect("upsert");
+
+    let lookup = Arc::new(ScriptedActiveRunLookup {
+        outcome: ScriptedActiveRunOutcome::State(TriggerActiveRunState::Nonterminal),
+    });
+    let facade = RebornAutomationProductFacade::new(repo, lookup);
+    let result = facade
+        .list_automations(c, automation_list_request(10, 0))
+        .await
+        .expect("list automations");
+
+    let found = result
+        .iter()
+        .find(|a| a.automation_id == id.to_string())
+        .expect("record present");
+    let hold = found
+        .active_hold
+        .as_ref()
+        .expect("nonterminal run must surface a hold");
+    assert_eq!(hold.reason, RebornAutomationHoldReason::InProgress);
+    assert!(
+        hold.since.is_some(),
+        "since must carry the active fire slot"
+    );
+}
+
+#[tokio::test]
+async fn automation_facade_active_hold_blocked_auth_reports_auth() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let c = caller();
+    let id = TriggerId::new();
+    let record = make_active_fire_record(id, &c, now());
+    repo.upsert_trigger(record).await.expect("upsert");
+
+    let lookup = Arc::new(ScriptedActiveRunLookup {
+        outcome: ScriptedActiveRunOutcome::State(TriggerActiveRunState::Blocked {
+            kind: BlockedActiveRunKind::Auth,
+        }),
+    });
+    let facade = RebornAutomationProductFacade::new(repo, lookup);
+    let result = facade
+        .list_automations(c, automation_list_request(10, 0))
+        .await
+        .expect("list automations");
+
+    let found = result
+        .iter()
+        .find(|a| a.automation_id == id.to_string())
+        .expect("record present");
+    let hold = found
+        .active_hold
+        .as_ref()
+        .expect("auth-blocked run must surface a hold");
+    assert_eq!(hold.reason, RebornAutomationHoldReason::Auth);
+}
+
+#[tokio::test]
+async fn automation_facade_active_hold_missing_state_omits_hold() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let c = caller();
+    let id = TriggerId::new();
+    let record = make_active_fire_record(id, &c, now());
+    repo.upsert_trigger(record).await.expect("upsert");
+
+    let lookup = Arc::new(ScriptedActiveRunLookup {
+        outcome: ScriptedActiveRunOutcome::State(TriggerActiveRunState::Missing),
+    });
+    let facade = RebornAutomationProductFacade::new(repo, lookup);
+    let result = facade
+        .list_automations(c, automation_list_request(10, 0))
+        .await
+        .expect("list automations");
+
+    let found = result
+        .iter()
+        .find(|a| a.automation_id == id.to_string())
+        .expect("record present");
+    assert!(
+        found.active_hold.is_none(),
+        "a possibly-stale Missing snapshot must not fabricate a hold"
+    );
+}
+
+#[tokio::test]
+async fn automation_facade_active_hold_terminal_state_omits_hold() {
+    // A terminal run whose fire cleanup hasn't landed yet must not display as
+    // held — the run finished, it just hasn't been unlocked (#5886).
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let c = caller();
+    let id = TriggerId::new();
+    let record = make_active_fire_record(id, &c, now());
+    repo.upsert_trigger(record).await.expect("upsert");
+
+    let lookup = Arc::new(ScriptedActiveRunLookup {
+        outcome: ScriptedActiveRunOutcome::State(TriggerActiveRunState::Terminal {
+            status: TriggerRunHistoryStatus::Ok,
+        }),
+    });
+    let facade = RebornAutomationProductFacade::new(repo, lookup);
+    let result = facade
+        .list_automations(c, automation_list_request(10, 0))
+        .await
+        .expect("list automations");
+
+    let found = result
+        .iter()
+        .find(|a| a.automation_id == id.to_string())
+        .expect("record present");
+    assert!(
+        found.active_hold.is_none(),
+        "a terminal run must not surface as held"
+    );
+}
+
+#[tokio::test]
+async fn automation_facade_active_hold_lookup_failure_is_silent_ok() {
+    // silent-ok: lookup failure must degrade to "no hold", not fail the list
+    // (#5886 — display-only projection).
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let c = caller();
+    let id = TriggerId::new();
+    let record = make_active_fire_record(id, &c, now());
+    repo.upsert_trigger(record).await.expect("upsert");
+
+    let lookup = Arc::new(ScriptedActiveRunLookup {
+        outcome: ScriptedActiveRunOutcome::FailBackend,
+    });
+    let facade = RebornAutomationProductFacade::new(repo, lookup);
+    let result = facade
+        .list_automations(c, automation_list_request(10, 0))
+        .await
+        .expect("list_automations must still succeed when the lookup errors");
+
+    let found = result
+        .iter()
+        .find(|a| a.automation_id == id.to_string())
+        .expect("record present");
+    assert!(
+        found.active_hold.is_none(),
+        "a lookup error must omit the hold, not surface one"
+    );
+}
+
+#[tokio::test]
+async fn automation_facade_stalled_hold_lookup_does_not_starve_run_history() {
+    // The required run-history fetch now runs before the optional hold lookup
+    // (#5886 ordering fix), so a hold lookup that stalls past the shared
+    // deadline must degrade to "no hold" without failing the whole list or
+    // dropping `recent_runs`.
+    let c = caller();
+    let id = TriggerId::new();
+    let record = make_active_fire_record(id, &c, now());
+    let run = make_run_record(id, TriggerRunHistoryStatus::Ok);
+    let mut runs_by_trigger = HashMap::new();
+    runs_by_trigger.insert(id, vec![run]);
+
+    let facade = RebornAutomationProductFacade::with_backend_timeout(
+        Arc::new(ScriptedRepository {
+            scoped: ScriptedOutcome::Records(vec![record]),
+            batch: ScriptedOutcome::Runs(runs_by_trigger),
+            thread_lookup: None,
+            limits: None,
+        }),
+        Arc::new(ScriptedActiveRunLookup {
+            outcome: ScriptedActiveRunOutcome::Sleep(std::time::Duration::from_secs(5)),
+        }),
+        std::time::Duration::from_millis(20),
+    );
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        facade.list_automations(c, automation_list_request(10, 5)),
+    )
+    .await
+    .expect("facade must not hang waiting on the stalled hold lookup")
+    .expect("required run history must survive a stalled optional hold lookup");
+
+    let found = result
+        .iter()
+        .find(|a| a.automation_id == id.to_string())
+        .expect("record present");
+    assert_eq!(
+        found.recent_runs.len(),
+        1,
+        "run history must be populated even though the hold lookup exhausted its budget"
+    );
+    assert!(
+        found.active_hold.is_none(),
+        "a stalled hold lookup must degrade to no hold, not fail the list"
+    );
+}
+
+#[tokio::test]
+async fn automation_facade_active_hold_propagates_elapsed_occurrences_capped() {
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let c = caller();
+    let id = TriggerId::new();
+    // Fire slot far enough in the past that a per-minute cron has elapsed
+    // well over the 99-occurrence display cap by "now".
+    let fire_slot = now() - chrono::Duration::minutes(200);
+    let record = make_active_fire_record(id, &c, fire_slot);
+    repo.upsert_trigger(record).await.expect("upsert");
+
+    let lookup = Arc::new(ScriptedActiveRunLookup {
+        outcome: ScriptedActiveRunOutcome::State(TriggerActiveRunState::Nonterminal),
+    });
+    let facade = RebornAutomationProductFacade::new(repo, lookup);
+    let result = facade
+        .list_automations(c, automation_list_request(10, 0))
+        .await
+        .expect("list automations");
+
+    let found = result
+        .iter()
+        .find(|a| a.automation_id == id.to_string())
+        .expect("record present");
+    let hold = found.active_hold.as_ref().expect("hold present");
+    assert!(
+        hold.elapsed_occurrences_capped,
+        "a 200-minute gap on a per-minute cron must hit the display cap"
+    );
+}
+
+#[tokio::test]
+async fn automation_facade_non_active_record_never_calls_the_lookup() {
+    // `active_holds_for_records` must skip requests for records with no
+    // active fire — the panic-lookup proves the batch never even calls it
+    // (#5886).
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let c = caller();
+    let id = TriggerId::new();
+    let record = make_record(id, &c, TriggerState::Scheduled, "Not blocked", "0 9 * * *");
+    repo.upsert_trigger(record).await.expect("upsert");
+
+    let lookup = Arc::new(ScriptedActiveRunLookup {
+        outcome: ScriptedActiveRunOutcome::Panic,
+    });
+    let facade = RebornAutomationProductFacade::new(repo, lookup);
+    let result = facade
+        .list_automations(c, automation_list_request(10, 0))
+        .await
+        .expect("list automations");
+
+    let found = result
+        .iter()
+        .find(|a| a.automation_id == id.to_string())
+        .expect("record present");
+    assert!(
+        found.active_hold.is_none(),
+        "a record with no active fire must never surface a hold"
+    );
+}
+
+#[tokio::test]
+async fn automation_facade_claimed_but_unaccepted_record_reports_other_without_lookup() {
+    // A record with `active_fire_slot` set but `active_run_ref` still `None`
+    // is mid claim-to-accept (worker::due_fire::process_claimed_fire). There
+    // is no run_id to look up yet, so the hold must resolve to `Other`
+    // directly — the panic-lookup proves the lookup is never called (#5886).
+    let repo = Arc::new(InMemoryTriggerRepository::default());
+    let c = caller();
+    let id = TriggerId::new();
+    let mut record = make_record(id, &c, TriggerState::Scheduled, "Claimed", "* * * * *");
+    record.active_fire_slot = Some(now() - chrono::Duration::minutes(5));
+    record.active_run_ref = None;
+    repo.upsert_trigger(record).await.expect("upsert");
+
+    let lookup = Arc::new(ScriptedActiveRunLookup {
+        outcome: ScriptedActiveRunOutcome::Panic,
+    });
+    let facade = RebornAutomationProductFacade::new(repo, lookup);
+    let result = facade
+        .list_automations(c, automation_list_request(10, 0))
+        .await
+        .expect("list automations");
+
+    let found = result
+        .iter()
+        .find(|a| a.automation_id == id.to_string())
+        .expect("record present");
+    let hold = found
+        .active_hold
+        .as_ref()
+        .expect("claimed-but-unaccepted fire must surface a hold");
+    assert_eq!(hold.reason, RebornAutomationHoldReason::Other);
 }

@@ -215,6 +215,11 @@ pub struct TurnRunRecord {
     pub profile: TurnRunProfile,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_model_route: Option<LoopModelRouteSnapshot>,
+    /// Cumulative provider-reported token usage for this run's model calls,
+    /// captured at loop exit. Rides the JSON-blob snapshot like
+    /// `resolved_model_route`; `None` when no usage was reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_usage: Option<crate::run_profile::LoopModelUsage>,
     pub checkpoint_id: Option<TurnCheckpointId>,
     pub gate_ref: Option<GateRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -458,11 +463,9 @@ impl TurnIdempotencyRecord {
             TurnIdempotencyReplay::SubmitAdmissionRejected(rejection) => {
                 Some(Err(TurnError::AdmissionRejected(rejection.clone())))
             }
-            TurnIdempotencyReplay::Error(error)
-                if self.operation == TurnIdempotencyOperationKind::Submit =>
-            {
-                Some(Err(error.to_error()))
-            }
+            // `self.operation == Submit` is already guaranteed by the early
+            // return above, so the Error arm needs no operation guard.
+            TurnIdempotencyReplay::Error(error) => Some(Err(error.to_error())),
             _ => None,
         }
     }
@@ -473,11 +476,7 @@ impl TurnIdempotencyRecord {
         }
         match &self.replay {
             TurnIdempotencyReplay::ResumeSucceeded(response) => Some(Ok(response.clone())),
-            TurnIdempotencyReplay::Error(error)
-                if self.operation == TurnIdempotencyOperationKind::Resume =>
-            {
-                Some(Err(error.to_error()))
-            }
+            TurnIdempotencyReplay::Error(error) => Some(Err(error.to_error())),
             _ => None,
         }
     }
@@ -488,11 +487,7 @@ impl TurnIdempotencyRecord {
         }
         match &self.replay {
             TurnIdempotencyReplay::CancelRecorded(response) => Some(Ok(response.clone())),
-            TurnIdempotencyReplay::Error(error)
-                if self.operation == TurnIdempotencyOperationKind::Cancel =>
-            {
-                Some(Err(error.to_error()))
-            }
+            TurnIdempotencyReplay::Error(error) => Some(Err(error.to_error())),
             _ => None,
         }
     }
@@ -505,11 +500,7 @@ impl TurnIdempotencyRecord {
             TurnIdempotencyReplay::RetrySucceeded(response) => Some(Ok(response.clone())),
             // Same-thread busy is a transient lock state, not an idempotent retry outcome.
             TurnIdempotencyReplay::RetryThreadBusy(_) => None,
-            TurnIdempotencyReplay::Error(error)
-                if self.operation == TurnIdempotencyOperationKind::Retry =>
-            {
-                Some(Err(error.to_error()))
-            }
+            TurnIdempotencyReplay::Error(error) => Some(Err(error.to_error())),
             _ => None,
         }
     }
@@ -587,6 +578,7 @@ mod tests {
             status: TurnStatus::Completed,
             profile,
             resolved_model_route: None,
+            model_usage: None,
             checkpoint_id: None,
             gate_ref: None,
             blocked_activity_id: None,

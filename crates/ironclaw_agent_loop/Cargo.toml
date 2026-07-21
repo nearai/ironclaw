@@ -14,7 +14,6 @@ publish = false
 layer = "loops"
 
 [features]
-default = []
 test-support = []
 
 [dependencies]
@@ -22,7 +21,6 @@ async-trait = "0.1"
 blake3 = "1"
 ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
-ironclaw_observability = { path = "../ironclaw_observability" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -35,4 +33,4 @@ tracing = "0.1"
 chrono = "0.4"
 futures = "0.3"
 ironclaw_agent_loop = { path = ".", features = ["test-support"] }
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt", "test-util", "time"] }

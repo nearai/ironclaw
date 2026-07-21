@@ -25,7 +25,7 @@ Owns driver-side Reborn loop integration.
 - `ironclaw_turns` owns runner and host contracts.
 - `ironclaw_host_runtime` owns host services and production validation of the
   transition port supplied to the scheduler; it does not own runner control.
-- `ironclaw_loop_support` owns reusable host-port adapters.
+- `ironclaw_loop_host` owns reusable host-port adapters.
 - Product workflow owns product-facing binding/idempotency/gate routing; do not
   call around it from here.
 

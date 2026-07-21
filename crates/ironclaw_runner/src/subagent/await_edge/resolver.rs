@@ -1,3 +1,4 @@
+// arch-exempt: large_file, pre-existing size; #6263 only migrated 2 test-double lines to in_memory_turn_state_store(), plan #6263
 //! Per-child/per-settle-group settle path (§2, §5.2, §5.5, §8.1) — the
 //! direct successor to `SubagentCompletionObserver` (deleted with this
 //! module). Owner-recovery/reconstruction/framing helpers below are ported
@@ -10,9 +11,7 @@
 use std::sync::{Arc, OnceLock};
 
 use ironclaw_host_api::{CapabilityId, UserId};
-use ironclaw_loop_support::{
-    AwaitEdgeSettler, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, ResolveOutcome,
-};
+use ironclaw_loop_host::{AwaitEdgeSettler, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, ResolveOutcome};
 use ironclaw_threads::{
     LatestThreadMessageRequest, MessageKind, MessageStatus, SessionThreadService,
     ThreadHistoryRequest, ThreadScope, ToolResultSafeSummary, UpdateToolResultReferenceRequest,
@@ -42,7 +41,7 @@ pub struct AwaitEdgeResolver<
     F: ironclaw_filesystem::RootFilesystem + ?Sized,
 > {
     store: Arc<FilesystemAwaitEdgeStore<F>>,
-    goal_store: Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore>,
+    goal_store: Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
     turn_state_store: Arc<dyn TurnSpawnTreeStateStore>,
     // Deferred-bind, mirroring `coordinator` below: most callers have a
     // result writer in hand immediately (`new_unbound`, the common case),
@@ -55,7 +54,7 @@ pub struct AwaitEdgeResolver<
     // own `Arc` (see `as_turn_committed_event_observer(self: Arc<Self>)`
     // below) — an extra `Arc` around each `OnceLock` was redundant
     // allocation/indirection on top of that outer `Arc`.
-    result_writer: OnceLock<Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>>,
+    result_writer: OnceLock<Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>>,
     coordinator: OnceLock<Arc<dyn TurnCoordinator>>,
     thread_service: Arc<S>,
 }
@@ -67,9 +66,9 @@ where
 {
     pub fn new_unbound(
         store: Arc<FilesystemAwaitEdgeStore<F>>,
-        goal_store: Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore>,
+        goal_store: Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
         turn_state_store: Arc<dyn TurnSpawnTreeStateStore>,
-        result_writer: Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+        result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
         thread_service: Arc<S>,
     ) -> Self {
         let result_writer_cell = OnceLock::new();
@@ -92,7 +91,7 @@ where
     /// `Arc<dyn AwaitEdgeSettler>`.
     pub fn new_unbound_deferred_result_writer(
         store: Arc<FilesystemAwaitEdgeStore<F>>,
-        goal_store: Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore>,
+        goal_store: Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
         turn_state_store: Arc<dyn TurnSpawnTreeStateStore>,
         thread_service: Arc<S>,
     ) -> Self {
@@ -118,7 +117,7 @@ where
 
     pub fn bind_result_writer(
         &self,
-        result_writer: Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+        result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
     ) -> Result<(), TurnError> {
         self.result_writer
             .set(result_writer)
@@ -129,7 +128,7 @@ where
 
     fn result_writer(
         &self,
-    ) -> Result<&Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>, TurnError> {
+    ) -> Result<&Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>, TurnError> {
         self.result_writer
             .get()
             .ok_or_else(|| TurnError::Unavailable {
@@ -250,7 +249,7 @@ where
     /// callback the child's own commit invokes, and deadlocked re-entering
     /// the store for a *different* run id (see `parent_run_context`'s doc
     /// comment above); `SubagentThreadMetadata.parent_run_context`/`gate_ref`
-    /// (spawn-time-cached, `ironclaw_loop_support::subagent_spawn_port`) now
+    /// (spawn-time-cached, `ironclaw_loop_host::subagent_spawn_port`) now
     /// supply everything that lookup used to provide. Same anti-tamper
     /// cross-check as before for the axes that matter: tenant/agent/project
     /// and owner come from the trusted child record + recovered event owner,
@@ -909,11 +908,11 @@ mod tests {
     struct ReconResultWriter;
 
     #[async_trait::async_trait]
-    impl ironclaw_loop_support::LoopCapabilityResultWriter for ReconResultWriter {
+    impl ironclaw_loop_host::LoopCapabilityResultWriter for ReconResultWriter {
         async fn write_capability_result(
             &self,
-            _write: ironclaw_loop_support::CapabilityResultWrite<'_>,
-        ) -> Result<ironclaw_loop_support::CapabilityWriteResult, AgentLoopHostError> {
+            _write: ironclaw_loop_host::CapabilityResultWrite<'_>,
+        ) -> Result<ironclaw_loop_host::CapabilityWriteResult, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 ironclaw_turns::run_profile::AgentLoopHostErrorKind::Unavailable,
                 "not exercised by reconstruct_edge tests",
@@ -944,11 +943,11 @@ mod tests {
         ironclaw_filesystem::InMemoryBackend,
     > {
         let store = Arc::new(FilesystemAwaitEdgeStore::new(recon_scoped_fs()));
-        let goal_store: Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore> =
+        let goal_store: Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore> =
             Arc::new(crate::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
         let turn_state_store: Arc<dyn TurnSpawnTreeStateStore> =
-            Arc::new(ironclaw_turns::InMemoryTurnStateStore::default());
-        let result_writer: Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter> =
+            Arc::new(ironclaw_turns::test_support::in_memory_turn_state_store());
+        let result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter> =
             Arc::new(ReconResultWriter);
         AwaitEdgeResolver::new_unbound(
             store,
@@ -983,6 +982,7 @@ mod tests {
             status: TurnStatus::Completed,
             profile: ironclaw_turns::TurnRunProfile::from_resolved(resolved_run_profile),
             resolved_model_route: None,
+            model_usage: None,
             checkpoint_id: None,
             gate_ref: None,
             blocked_activity_id: None,
@@ -1081,14 +1081,14 @@ mod tests {
         // Distinct from the derived `gate:subagent-<child_run_id>` token so
         // the test can tell "sourced from metadata" apart from "recomputed".
         let metadata_gate_ref = GateRef::new("gate:subagent-shared-batch").unwrap();
-        let metadata = ironclaw_loop_support::SubagentThreadMetadata {
-            kind: ironclaw_loop_support::SubagentThreadKind::Subagent,
+        let metadata = ironclaw_loop_host::SubagentThreadMetadata {
+            kind: ironclaw_loop_host::SubagentThreadKind::Subagent,
             parent_run_id,
             parent_thread_id: parent_thread_id.clone(),
             tree_root_run_id: parent_run_id,
             child_run_id,
-            subagent_kind: ironclaw_loop_support::SubagentKindId::new("general").unwrap(),
-            mode: ironclaw_loop_support::SpawnSubagentMode::Blocking,
+            subagent_kind: ironclaw_loop_host::SubagentKindId::new("general").unwrap(),
+            mode: ironclaw_loop_host::SpawnSubagentMode::Blocking,
             result_ref: ironclaw_turns::LoopResultRef::new("result:subagent.recon-t1").unwrap(),
             handoff: None,
             parent_run_context: parent_context.clone(),
@@ -1127,10 +1127,7 @@ mod tests {
         );
         assert_eq!(edge.parent_thread_id, parent_thread_id);
         assert_eq!(edge.tree_root_run_id, parent_run_id);
-        assert_eq!(
-            edge.mode,
-            ironclaw_loop_support::SpawnSubagentMode::Blocking
-        );
+        assert_eq!(edge.mode, ironclaw_loop_host::SpawnSubagentMode::Blocking);
     }
 
     // (T2) identity mismatch: metadata's own `parent_run_id` disagrees with
@@ -1161,14 +1158,14 @@ mod tests {
             child_record.scope.clone(),
             owner_user_id.clone(),
         );
-        let metadata = ironclaw_loop_support::SubagentThreadMetadata {
-            kind: ironclaw_loop_support::SubagentThreadKind::Subagent,
+        let metadata = ironclaw_loop_host::SubagentThreadMetadata {
+            kind: ironclaw_loop_host::SubagentThreadKind::Subagent,
             parent_run_id: wrong_parent_run_id,
             parent_thread_id: parent_thread_id.clone(),
             tree_root_run_id: wrong_parent_run_id,
             child_run_id,
-            subagent_kind: ironclaw_loop_support::SubagentKindId::new("general").unwrap(),
-            mode: ironclaw_loop_support::SpawnSubagentMode::Blocking,
+            subagent_kind: ironclaw_loop_host::SubagentKindId::new("general").unwrap(),
+            mode: ironclaw_loop_host::SpawnSubagentMode::Blocking,
             result_ref: ironclaw_turns::LoopResultRef::new("result:subagent.recon-t2").unwrap(),
             handoff: None,
             parent_run_context: parent_context,
@@ -1303,14 +1300,14 @@ mod tests {
             child_record.scope.clone(),
             owner_user_id.clone(),
         );
-        let metadata = ironclaw_loop_support::SubagentThreadMetadata {
-            kind: ironclaw_loop_support::SubagentThreadKind::Subagent,
+        let metadata = ironclaw_loop_host::SubagentThreadMetadata {
+            kind: ironclaw_loop_host::SubagentThreadKind::Subagent,
             parent_run_id,
             parent_thread_id: parent_thread_id.clone(),
             tree_root_run_id: parent_run_id,
             child_run_id,
-            subagent_kind: ironclaw_loop_support::SubagentKindId::new("general").unwrap(),
-            mode: ironclaw_loop_support::SpawnSubagentMode::Blocking,
+            subagent_kind: ironclaw_loop_host::SubagentKindId::new("general").unwrap(),
+            mode: ironclaw_loop_host::SpawnSubagentMode::Blocking,
             result_ref: ironclaw_turns::LoopResultRef::new("result:subagent.recon-t4").unwrap(),
             handoff: None,
             parent_run_context: tampered_context,
@@ -1358,7 +1355,7 @@ mod tests {
             DefaultTurnCoordinator, SubmitChildRunRequest, SubmitTurnRequest, TurnSpawnTreePort,
         };
 
-        let state_store = Arc::new(ironclaw_turns::InMemoryTurnStateStore::default());
+        let state_store = Arc::new(ironclaw_turns::test_support::in_memory_turn_state_store());
         let coordinator = DefaultTurnCoordinator::new(Arc::clone(&state_store));
         let tenant_id = ironclaw_host_api::TenantId::new("close-edge-tree-root-tenant").unwrap();
         let agent_id = ironclaw_host_api::AgentId::new("close-edge-tree-root-agent").unwrap();
@@ -1374,6 +1371,7 @@ mod tests {
         );
         let root_run_id = match coordinator
             .submit_turn(SubmitTurnRequest {
+                requested_model: None,
                 scope: root_scope.clone(),
                 actor: actor.clone(),
                 accepted_message_ref: ironclaw_turns::AcceptedMessageRef::new("msg:tr-root")
@@ -1498,10 +1496,10 @@ mod tests {
                 "subagent-reply:tr-leaf",
             )
             .unwrap(),
-            subagent_kind: ironclaw_loop_support::SubagentKindId::new("general").unwrap(),
+            subagent_kind: ironclaw_loop_host::SubagentKindId::new("general").unwrap(),
             spawn_capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
             result_ref: ironclaw_turns::LoopResultRef::new("result:subagent.tr-leaf").unwrap(),
-            mode: ironclaw_loop_support::SpawnSubagentMode::Blocking,
+            mode: ironclaw_loop_host::SpawnSubagentMode::Blocking,
             state: AwaitEdgeState::Open,
             terminal_kind: None,
             terminal_byte_len: None,
@@ -1526,10 +1524,10 @@ mod tests {
             .await
             .unwrap();
 
-        let goal_store: Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore> =
+        let goal_store: Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore> =
             Arc::new(crate::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
         let turn_state_store: Arc<dyn TurnSpawnTreeStateStore> = state_store;
-        let result_writer: Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter> =
+        let result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter> =
             Arc::new(ReconResultWriter);
         let thread_service = Arc::new(ironclaw_threads::InMemorySessionThreadService::default());
         let resolver = AwaitEdgeResolver::new_unbound(
@@ -1572,7 +1570,7 @@ where
 
     fn bind_result_writer(
         &self,
-        result_writer: Arc<dyn ironclaw_loop_support::LoopCapabilityResultWriter>,
+        result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
     ) -> Result<(), TurnError> {
         AwaitEdgeResolver::bind_result_writer(self, result_writer)
     }
@@ -1728,12 +1726,12 @@ fn event_kind_from_terminal_status(
 /// (the old live-status heuristic is gone), so it falls back to the same
 /// derived-token format the spawn path itself uses for that mode.
 fn recovered_gate_ref(
-    metadata: &ironclaw_loop_support::SubagentThreadMetadata,
+    metadata: &ironclaw_loop_host::SubagentThreadMetadata,
     child_record: &TurnRunRecord,
 ) -> Result<GateRef, TurnError> {
     match metadata.mode {
-        ironclaw_loop_support::SpawnSubagentMode::Blocking => Ok(metadata.gate_ref.clone()),
-        ironclaw_loop_support::SpawnSubagentMode::Background => {
+        ironclaw_loop_host::SpawnSubagentMode::Blocking => Ok(metadata.gate_ref.clone()),
+        ironclaw_loop_host::SpawnSubagentMode::Background => {
             // Mirrors the spawn path's `LoopGateRef`-compatible gate token format.
             GateRef::new(format!("gate:subagent-bg-{}", child_record.run_id))
                 .map_err(|reason| TurnError::InvalidRequest { reason })
@@ -1744,8 +1742,8 @@ fn recovered_gate_ref(
 fn parse_optional_subagent_thread_metadata(
     raw: Option<&str>,
     child_run_id: TurnRunId,
-) -> Result<Option<ironclaw_loop_support::SubagentThreadMetadata>, TurnError> {
-    use ironclaw_loop_support::{SubagentThreadKind, SubagentThreadMetadata};
+) -> Result<Option<ironclaw_loop_host::SubagentThreadMetadata>, TurnError> {
+    use ironclaw_loop_host::{SubagentThreadKind, SubagentThreadMetadata};
     let Some(raw) = raw else {
         return Ok(None);
     };
@@ -1798,10 +1796,10 @@ fn thread_scope_from_turn_scope(
     })
 }
 
-fn payload_spawn_mode(mode: ironclaw_loop_support::SpawnSubagentMode) -> PayloadSpawnMode {
+fn payload_spawn_mode(mode: ironclaw_loop_host::SpawnSubagentMode) -> PayloadSpawnMode {
     match mode {
-        ironclaw_loop_support::SpawnSubagentMode::Blocking => PayloadSpawnMode::Blocking,
-        ironclaw_loop_support::SpawnSubagentMode::Background => PayloadSpawnMode::Background,
+        ironclaw_loop_host::SpawnSubagentMode::Blocking => PayloadSpawnMode::Blocking,
+        ironclaw_loop_host::SpawnSubagentMode::Background => PayloadSpawnMode::Background,
     }
 }
 

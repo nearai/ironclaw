@@ -43,6 +43,13 @@ pub struct ProcessRecord {
     pub authenticated_actor_user_id: Option<UserId>,
     pub extension_id: ExtensionId,
     pub capability_id: CapabilityId,
+    // `ProcessRecord` is a durable host-written record the process store re-reads;
+    // its `runtime` may be a host-assigned `System`/`FirstParty` that the derived
+    // `RuntimeKind` deserialize rejects (anti-forgery for untrusted input). Read it
+    // back through the trusted path so the store round-trips privileged kinds
+    // (arch-simplification §4.3 exposed this when the InMemory store — which never
+    // serialized — was replaced by the serde-round-tripping filesystem store).
+    #[serde(deserialize_with = "ironclaw_host_api::deserialize_trusted_runtime_kind")]
     pub runtime: RuntimeKind,
     pub status: ProcessStatus,
     pub grants: CapabilitySet,
