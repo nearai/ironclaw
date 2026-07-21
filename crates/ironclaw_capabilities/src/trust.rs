@@ -111,3 +111,67 @@ fn local_manifest_source(package: &ExtensionPackage) -> PackageSource {
         ),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_extensions::{ExtensionManifest, ManifestSource};
+    use ironclaw_host_api::{HostPortCatalog, VirtualPath, sha256_digest_token};
+
+    // Relocated from `ironclaw_host_runtime::production` alongside the trust
+    // evaluation this crate now owns (§5.3.2/§9): the local-manifest trust
+    // policy input must carry the manifest path as `PackageSource::LocalManifest`
+    // and the manifest digest, so the host trust policy classifies the package
+    // from its on-disk identity.
+    #[test]
+    fn local_manifest_trust_input_includes_manifest_digest() {
+        const MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "test"
+name = "Test"
+version = "0.1.0"
+description = "test extension"
+trust = "third_party"
+
+[runtime]
+kind = "script"
+runner = "sandboxed_process"
+command = "echo"
+
+[[capabilities]]
+id = "test.cap"
+description = "Test capability"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/test.input.json"
+output_schema_ref = "schemas/test.output.json"
+"#;
+        let manifest = ExtensionManifest::parse(
+            MANIFEST,
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+        )
+        .unwrap();
+        let package = ExtensionPackage::from_manifest_toml(
+            manifest,
+            VirtualPath::new("/system/extensions/test").unwrap(),
+            MANIFEST,
+        )
+        .unwrap();
+
+        let input = trust_policy_input_for_local_manifest(&package).unwrap();
+
+        assert_eq!(
+            input.identity.source,
+            PackageSource::LocalManifest {
+                path: "/system/extensions/test/manifest.toml".to_string()
+            }
+        );
+        let expected_digest = sha256_digest_token(MANIFEST.as_bytes());
+        assert_eq!(
+            input.identity.digest.as_deref(),
+            Some(expected_digest.as_str())
+        );
+    }
+}

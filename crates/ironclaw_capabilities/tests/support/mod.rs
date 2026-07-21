@@ -478,6 +478,16 @@ pub fn capability_id() -> CapabilityId {
     CapabilityId::new("echo.say").unwrap()
 }
 
+/// A second, known-and-plannable echo-family capability. Used by the
+/// capability-id-mismatch resume tests to trigger a mismatch with a capability
+/// that EXISTS in the registry (and passes `plan_capability`), so the run-state
+/// mismatch check fires — instead of an unknown id, which now short-circuits to
+/// `UnknownCapability` in `resume_preflight` (existence-first, matching
+/// host_runtime's deleted pre-authorization; see the resume-preflight change).
+pub fn other_capability_id() -> CapabilityId {
+    CapabilityId::new("echo.other").unwrap()
+}
+
 pub fn github_comment_capability_id() -> CapabilityId {
     CapabilityId::new("github.comment_issue").unwrap()
 }
@@ -501,6 +511,15 @@ module = "echo.wasm"
 [[capabilities]]
 id = "echo.say"
 description = "Echoes input"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "host_internal"
+input_schema_ref = "schemas/echo/say.input.v1.json"
+output_schema_ref = "schemas/echo/say.output.v1.json"
+
+[[capabilities]]
+id = "echo.other"
+description = "A second echo capability, distinct from echo.say"
 effects = ["dispatch_capability"]
 default_permission = "allow"
 visibility = "host_internal"
