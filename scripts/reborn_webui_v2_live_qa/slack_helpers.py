@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sqlite3
+import tomllib
 import uuid
 from contextlib import closing
 from pathlib import Path
@@ -43,6 +44,10 @@ SLACK_PERSONAL_ACCESS_TOKEN_ENV_NAMES = [
     "REBORN_WEBUI_V2_LIVE_QA_SLACK_USER_TOKEN",
 ]
 SLACK_EXTENSION_INSTALLATION_ID = "slack"
+SLACK_EXTENSION_MANIFEST = (
+    Path(__file__).resolve().parents[2]
+    / "crates/ironclaw_first_party_extensions/assets/slack/manifest.toml"
+)
 # Optional SECOND human identity (a dedicated canary user, distinct from the
 # connected personal account AND from the bot). Arms that strictly need a
 # second HUMAN actor must assert this env and fail loudly when it is absent —
@@ -77,6 +82,24 @@ LEGACY_SLACK_SETUP_KEYS = {
     "signing_secret_env",
     "bot_token_env",
 }
+
+
+def _slack_auth_provider() -> str:
+    """Return the credential vendor declared by the unified Slack manifest."""
+    try:
+        with SLACK_EXTENSION_MANIFEST.open("rb") as manifest_file:
+            manifest = tomllib.load(manifest_file)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise LiveQaError(
+            f"could not read unified Slack manifest auth surface: {exc}"
+        ) from exc
+    auth = manifest.get("auth")
+    providers = sorted(auth) if isinstance(auth, dict) else []
+    if len(providers) != 1 or not isinstance(providers[0], str):
+        raise LiveQaError(
+            "unified Slack manifest must declare exactly one auth provider"
+        )
+    return providers[0]
 
 
 def _toml_string(value: str) -> str:
@@ -605,7 +628,7 @@ def _seed_slack_personal_identity_binding(
     slack_user_id: str,
     now: str,
 ) -> dict[str, object]:
-    provider = "slack"
+    provider = _slack_auth_provider()
     provider_user_id = f"{SLACK_EXTENSION_INSTALLATION_ID}:{slack_user_id}"
     # The generic channel identity store replaced the Slack-specific
     # `slack-personal-binding` root; record shape is unchanged.
@@ -987,6 +1010,7 @@ def _slack_personal_auth_preflight(
     if master_key_path.exists():
         master_key = master_key_path.read_text(encoding="utf-8").strip()
 
+    auth_provider = _slack_auth_provider()
     accounts: list[dict[str, object]] = []
     for path, raw in rows:
         if not str(path).startswith(account_path_prefix):
@@ -995,9 +1019,12 @@ def _slack_personal_auth_preflight(
             account = json.loads(raw)
         except (TypeError, json.JSONDecodeError):
             continue
-        # Provider id is `slack` — the credential-authority vendor namespace.
-        # (`slack_personal` is retired taxonomy.)
-        if account.get("provider") != "slack" or account.get("status") != "configured":
+        # Provider id comes from the manifest's credential-authority vendor
+        # namespace (`slack_personal` is retired taxonomy).
+        if (
+            account.get("provider") != auth_provider
+            or account.get("status") != "configured"
+        ):
             continue
         scope = account.get("scope")
         resource = scope.get("resource") if isinstance(scope, dict) else None
@@ -1089,6 +1116,7 @@ def _seed_generated_slack_product_auth_if_configured(
     extra_env: dict[str, str] | None = None,
 ) -> dict[str, object]:
     selected = _slack_env_field(SLACK_PERSONAL_ACCESS_TOKEN_ENV_NAMES, extra_env)
+    auth_provider = _slack_auth_provider()
     preflight: dict[str, object] = {
         "checked": True,
         "seeded": False,
@@ -1211,8 +1239,8 @@ def _seed_generated_slack_product_auth_if_configured(
         account_path,
         {
             "id": account_id,
-            "provider": "slack",
-            "label": "slack",
+            "provider": auth_provider,
+            "label": auth_provider,
             "status": "configured",
             "ownership": "user_reusable",
             "owner_extension": None,

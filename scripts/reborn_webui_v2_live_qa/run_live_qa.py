@@ -126,6 +126,7 @@ from scripts.reborn_webui_v2_live_qa.slack_helpers import (  # noqa: E402
     _slack_setup_payload,
     _slack_setup_preflight,
     _slack_auth_test,
+    _slack_auth_provider,
     _slack_config_value,
     _slack_enabled,
 )
@@ -809,7 +810,7 @@ async def start_reborn_server(
         )
     ):
         process_extra_env["IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI"] = (
-            f"{base_url}/api/reborn/product-auth/oauth/slack_personal/callback"
+            f"{base_url}/api/reborn/product-auth/oauth/{_slack_auth_provider()}/callback"
         )
     stdout_path = output_dir / "ironclaw-reborn-serve.stdout.log"
     stderr_path = output_dir / "ironclaw-reborn-serve.stderr.log"
@@ -3646,6 +3647,13 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
         instructions = str(connection.get("instructions") or "")
         if not _slack_connect_instructions_look_valid(instructions):
             raise AssertionError(f"unexpected Slack connect instructions: {instructions!r}")
+        auth_provider = _slack_auth_provider()
+        channel_provider = str(connection.get("channel") or "").strip()
+        if channel_provider and channel_provider != auth_provider:
+            raise AssertionError(
+                "Slack channel and auth surfaces disagree on provider: "
+                f"channel={channel_provider!r} auth={auth_provider!r}"
+            )
         observed["extension_count"] = len(extensions)
         observed["extension_registry_count"] = len(registry_entries)
         observed["slack_catalog_source"] = catalog_source
@@ -3673,7 +3681,7 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
                 "Slack personal product-auth preflight did not include an invocation_id"
             )
         accounts_request: dict[str, object] = {
-            "provider": "slack_personal",
+            "provider": auth_provider,
             "requester_extension": "slack",
             "invocation_id": invocation_id,
             "limit": 10,
@@ -3693,7 +3701,7 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
             account
             for account in accounts
             if isinstance(account, dict)
-            and account.get("provider") == "slack_personal"
+            and account.get("provider") == auth_provider
             and account.get("status") == "configured"
         ]
         if not configured_accounts:
@@ -3705,14 +3713,14 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
             "POST",
             "/api/webchat/v2/extensions/slack/setup/oauth/start",
             {
-                "provider": "slack_personal",
+                "provider": auth_provider,
                 "account_label": "Slack personal OAuth",
                 "scopes": [],
                 "expires_at": _slack_oauth_start_expires_at(),
                 "invocation_id": str(uuid.uuid4()),
             },
         )
-        if oauth_start.get("provider") != "slack_personal":
+        if oauth_start.get("provider") != auth_provider:
             raise AssertionError(f"Slack OAuth start returned unexpected provider: {oauth_start!r}")
         authorization_url = str(oauth_start.get("authorization_url") or "")
         if not authorization_url.startswith("https://slack.com/oauth/"):
