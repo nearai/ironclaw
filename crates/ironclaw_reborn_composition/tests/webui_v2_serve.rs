@@ -212,6 +212,7 @@ async fn health_route_is_public_for_platform_probes() {
 
 mod openai_compat_mount_tests {
     use super::*;
+    use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
     use ironclaw_product_adapters::{
         ProductAdapterError, ProductInboundAck, ProductInboundEnvelope, ProductProjectionReadInput,
         ProductProjectionSubject, ProductWorkflow, ProjectionReadRequest, RedactedString,
@@ -222,7 +223,7 @@ mod openai_compat_mount_tests {
     };
     use ironclaw_reborn_composition::ProtectedRouteMount;
     use ironclaw_reborn_openai_compat::{
-        InMemoryOpenAiCompatRefStore, OpenAiChatCompletionProjection,
+        FilesystemOpenAiCompatRefStore, OpenAiChatCompletionProjection,
         OpenAiChatCompletionProjectionReader, OpenAiChatCompletionProjectionRequest,
         OpenAiChatCompletionsWorkflow, OpenAiCompatRouterState, OpenAiResponseId,
         OpenAiResponseObject, OpenAiResponseOutputItem, OpenAiResponseOutputItemStatus,
@@ -242,12 +243,17 @@ mod openai_compat_mount_tests {
     const PROJECT: &str = "project-alpha";
     const THREAD: &str = "thread-openai-chat";
 
+    fn in_memory_openai_compat_ref_store() -> Arc<FilesystemOpenAiCompatRefStore> {
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+        Arc::new(FilesystemOpenAiCompatRefStore::new(filesystem))
+    }
+
     #[tokio::test]
     async fn openai_chat_completions_mount_uses_webui_auth_and_product_workflow() {
         let workflow = Arc::new(GatewayOpenAiWorkflow::default());
         let chat = Arc::new(OpenAiChatCompletionsWorkflow::new(
             workflow.clone(),
-            Arc::new(InMemoryOpenAiCompatRefStore::new()),
+            in_memory_openai_compat_ref_store(),
             Arc::new(StaticChatProjectionReader::text(
                 "hello through composition",
             )),
@@ -317,7 +323,7 @@ mod openai_compat_mount_tests {
         let chat = Arc::new(
             OpenAiChatCompletionsWorkflow::new(
                 workflow,
-                Arc::new(InMemoryOpenAiCompatRefStore::new()),
+                in_memory_openai_compat_ref_store(),
                 Arc::new(NeverCompletingChatProjectionReader),
             )
             .with_wait_timeout(Duration::from_millis(1)),
@@ -428,7 +434,7 @@ mod openai_compat_mount_tests {
         let workflow = Arc::new(GatewayOpenAiWorkflow::default());
         let responses = Arc::new(OpenAiResponsesWorkflow::new(
             workflow.clone(),
-            Arc::new(InMemoryOpenAiCompatRefStore::new()),
+            in_memory_openai_compat_ref_store(),
             Arc::new(StaticResponsesProjectionReader::text(
                 "hello through responses",
             )),

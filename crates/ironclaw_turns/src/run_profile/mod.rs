@@ -72,7 +72,7 @@ pub use host::{
     validate_model_route_component_value,
 };
 pub use instruction_bundle::{
-    InMemoryInstructionMaterializationStore, InstructionBundle, InstructionBundleBuilder,
+    EphemeralInstructionMaterializationStore, InstructionBundle, InstructionBundleBuilder,
     InstructionBundleFingerprint, InstructionBundleMaterializedMessage, InstructionBundleRequest,
     InstructionMaterializationStore, InstructionSafetyContext,
     sort_instruction_snippets_for_prompt,

@@ -72,11 +72,10 @@ outside bearer auth, and where the Slack / OpenAI-compat route mounts attach.
   and run `axum::serve` with graceful shutdown.
 - **Authenticators** (`WebuiAuthenticator` impls): `EnvBearerAuthenticator`
   (single operator token for the standalone binary / local dev),
-  `SessionAuthenticator` (bearer → `SessionStore` lookup, non-operator),
+  `SessionAuthenticator` (bearer → `SignedTokenSessionStore` lookup),
   `OidcAuthenticator` (JWKS + standard-claim verifier, non-operator).
-- **Sessions:** the `SessionStore` trait (durable impl is the host's;
-  `InMemorySessionStore` behind `test-support` for dev/tests) plus the
-  signed-token login surface (`build_signed_session_login`).
+- **Sessions:** `SignedTokenSessionStore` plus the signed-token login surface
+  (`build_signed_session_login`).
 - **OAuth login surface:** `webui_v2_auth_router` mounts `/auth/*` and mints
   sessions from Google / GitHub logins. Providers plug in through the
   `OAuthProvider` trait. Full security model (PKCE, CSRF state, canonical host,
@@ -99,7 +98,7 @@ outside bearer auth, and where the Slack / OpenAI-compat route mounts attach.
 | Feature | Effect |
 |---|---|
 | `default` | Route surface + SPA + serve loop + auth. |
-| `test-support` | Compile in `InMemorySessionStore` + `EmailUserDirectory` for local dev / tests. |
+| `test-support` | Compile in `EmailUserDirectory` for local dev / tests. |
 
 The Slack personal-OAuth setup + channel-route admin surface and the
 `OpenAiCompatActorScope` stamping for protected OpenAI-compatible mounts are

@@ -48,10 +48,11 @@ use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId};
 use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
 use ironclaw_webui::{
-    EmailUserDirectory, InMemorySessionStore, OAuthError, OAuthProvider, OAuthProviderName,
-    OAuthRouterConfig, OAuthUserProfile, SessionAuthenticator, SessionStore, webui_v2_auth_router,
+    EmailUserDirectory, OAuthError, OAuthProvider, OAuthProviderName, OAuthRouterConfig,
+    OAuthUserProfile, SessionAuthenticator, signed_session_store, webui_v2_auth_router,
 };
 use ironclaw_webui::{WebuiServeConfig, webui_v2_app};
+use secrecy::SecretString;
 use tower::ServiceExt;
 
 #[path = "support/harness.rs"]
@@ -105,12 +106,15 @@ impl OAuthProvider for StubProvider {
 /// SSO mount, parameterized on the CORS allow-list so the fail-closed
 /// case can pass an empty list.
 fn build_app(allowed_origins: Vec<HeaderValue>) -> axum::Router {
-    let session_store: Arc<InMemorySessionStore> = Arc::new(InMemorySessionStore::new());
+    let session_store = signed_session_store(
+        &SecretString::from("operator-secret".to_string()),
+        &TenantId::new(TENANT).expect("tenant"),
+    );
     let authenticator = Arc::new(SessionAuthenticator::new(session_store.clone()));
 
     let oauth_mount = webui_v2_auth_router(OAuthRouterConfig::new(
         TenantId::new(TENANT).expect("tenant"),
-        session_store as Arc<dyn SessionStore>,
+        session_store,
         Arc::new(EmailUserDirectory),
         vec![StubProvider::new() as Arc<dyn OAuthProvider>],
         "https://gateway.example",

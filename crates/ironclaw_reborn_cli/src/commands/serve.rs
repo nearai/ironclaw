@@ -72,7 +72,7 @@ pub(crate) fn present_unicode_env_var(name: &str) -> anyhow::Result<Option<Strin
 /// store is deterministic in its signing key (operator secret + tenant), so a
 /// token minted here validates under the SSO login surface's own store.
 struct SignedSessionTokenMinter {
-    session_store: Arc<dyn ironclaw_webui::SessionStore>,
+    session_store: Arc<ironclaw_webui::SignedTokenSessionStore>,
 }
 
 #[async_trait::async_trait]

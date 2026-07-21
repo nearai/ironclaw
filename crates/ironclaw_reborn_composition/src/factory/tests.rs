@@ -123,10 +123,7 @@ fn extension_installation_state_path_stays_legacy_for_local_dev() {
         local_dev_extension_installation_state_path(RebornCompositionProfile::LocalDev, None)
             .expect("state path");
 
-    assert_eq!(
-        path.as_str(),
-        "/system/extensions/.installations/state.json"
-    );
+    assert_eq!(path.as_str(), "/system/extensions/.installations");
 }
 
 #[test]
@@ -143,7 +140,7 @@ fn extension_installation_state_path_uses_durable_tenant_root_for_hosted() {
 
     assert_eq!(
         path.as_str(),
-        "/tenants/acme/system/extensions/.installations/state.json"
+        "/tenants/acme/system/extensions/.installations"
     );
 }
 
@@ -161,7 +158,7 @@ fn extension_installation_state_path_uses_durable_tenant_root_for_hosted_volume(
 
     assert_eq!(
         path.as_str(),
-        "/tenants/acme/system/extensions/.installations/state.json"
+        "/tenants/acme/system/extensions/.installations"
     );
 }
 

@@ -36,8 +36,8 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
 3. **Serve loop + host authentication** (`src/lib.rs`, `src/auth/`,
    `src/session.rs`, `src/oidc.rs`, `src/signed_session_login.rs`):
    `serve_webui_v2` (listener bind + `axum::serve` + graceful shutdown), the
-   `Env` / `Session` / `Oidc` authenticators, the `SessionStore` trait + stores,
-   and the `/auth/*` OAuth login surface (Google/GitHub via the `OAuthProvider`
+   `Env` / `Session` / `Oidc` authenticators, `SignedTokenSessionStore`, and
+   the `/auth/*` OAuth login surface (Google/GitHub via the `OAuthProvider`
    trait).
 
 ## Do not move in here

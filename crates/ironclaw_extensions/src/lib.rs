@@ -439,7 +439,7 @@ pub use installations::{
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationPersistedParts,
     ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
     ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapterId, ExtensionRemovalCleanupBinding,
-    ExtensionRemovalCleanupRequirement, InMemoryExtensionInstallationStore, InstallationOwner,
+    ExtensionRemovalCleanupRequirement, FilesystemExtensionInstallationStore, InstallationOwner,
     ManifestHash,
 };
 pub use lifecycle::{

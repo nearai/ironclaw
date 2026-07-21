@@ -4,9 +4,9 @@ use ironclaw_extensions::{
     ExtensionActivationState, ExtensionHealthSnapshot, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
     ExtensionManifest, ExtensionManifestRecord, ExtensionPackage, ExtensionRegistry,
-    InMemoryExtensionInstallationStore, ManifestSource,
+    FilesystemExtensionInstallationStore, ManifestSource,
 };
-use ironclaw_filesystem::DiskFilesystem;
+use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::{
     ExtensionId, HostPath, HostPortCatalog, MountAlias, MountGrant, MountPermissions, MountView,
     TenantId, UserId, VirtualPath,
@@ -94,7 +94,7 @@ async fn operator_tool_catalog_hides_foreign_private_tools() {
 
     // Store: alice privately owns `market-data`; `hacker-news` is tenant-shared.
     // Wrapped so the test can inject an owner-read failure (#5525 review).
-    let store = Arc::new(OwnerReadFailingStore::default());
+    let store = Arc::new(OwnerReadFailingStore::new().await);
     for (ext, capability, owner) in [
         (
             "market-data",
@@ -213,10 +213,29 @@ async fn operator_tool_catalog_hides_foreign_private_tools() {
 /// Store wrapper that fails `list_installations` once when armed —
 /// injects the owner-read failure the settings catalog must fail closed
 /// on (#5525 review).
-#[derive(Default)]
 struct OwnerReadFailingStore {
-    inner: InMemoryExtensionInstallationStore,
+    inner: FilesystemExtensionInstallationStore,
     fail_list_installations: std::sync::atomic::AtomicBool,
+}
+
+impl OwnerReadFailingStore {
+    async fn new() -> Self {
+        Self {
+            inner: filesystem_installation_store().await,
+            fail_list_installations: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+async fn filesystem_installation_store() -> FilesystemExtensionInstallationStore {
+    FilesystemExtensionInstallationStore::load_at(
+        Arc::new(InMemoryBackend::new()),
+        VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
+        HostPortCatalog::empty(),
+        ironclaw_extensions::HostApiContractRegistry::new(),
+    )
+    .await
+    .expect("filesystem store")
 }
 
 #[async_trait]

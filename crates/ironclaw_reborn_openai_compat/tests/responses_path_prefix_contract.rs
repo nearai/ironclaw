@@ -9,6 +9,8 @@
 
 use std::sync::Arc;
 
+mod support;
+
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
@@ -17,16 +19,17 @@ use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_product_adapters::{AuthRequirement, FakeProductWorkflow, ProtocolAuthEvidence};
 use ironclaw_reborn_openai_compat::{
-    InMemoryOpenAiCompatRefStore, OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller,
-    OpenAiCompatInternalRefs, OpenAiCompatProductActionRef, OpenAiCompatProjectionRef,
-    OpenAiCompatRouterState, OpenAiCompatTurnRunRef, OpenAiResponseId, OpenAiResponseObject,
-    OpenAiResponseOutputItem, OpenAiResponseOutputItemStatus, OpenAiResponseProjection,
-    OpenAiResponseReadRequest, OpenAiResponseStatus, OpenAiResponseUsage,
-    OpenAiResponseWaitRequest, OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader,
-    OpenAiResponsesWorkflow, openai_compat_router_with_state,
+    OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller, OpenAiCompatInternalRefs,
+    OpenAiCompatProductActionRef, OpenAiCompatProjectionRef, OpenAiCompatRouterState,
+    OpenAiCompatTurnRunRef, OpenAiResponseId, OpenAiResponseObject, OpenAiResponseOutputItem,
+    OpenAiResponseOutputItemStatus, OpenAiResponseProjection, OpenAiResponseReadRequest,
+    OpenAiResponseStatus, OpenAiResponseUsage, OpenAiResponseWaitRequest,
+    OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader, OpenAiResponsesWorkflow,
+    openai_compat_router_with_state,
 };
 use ironclaw_turns::TurnRunId;
 use serde_json::{Value, json};
+use support::in_memory_openai_compat_ref_store;
 use tower::ServiceExt;
 
 const AUTH_TOKEN: &str = "test-responses-api-token";
@@ -275,7 +278,7 @@ fn test_router() -> axum::Router {
     let workflow = Arc::new(FakeProductWorkflow::new());
     let service = OpenAiResponsesWorkflow::new(
         workflow,
-        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        in_memory_openai_compat_ref_store(),
         Arc::new(StaticResponsesReader),
     );
     openai_compat_router_with_state(OpenAiCompatRouterState::with_responses(Arc::new(service)))
