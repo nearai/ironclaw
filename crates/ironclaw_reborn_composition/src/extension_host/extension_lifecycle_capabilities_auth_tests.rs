@@ -305,7 +305,9 @@ fn execution_context_for_scope<'a>(
 ) -> ExecutionContext {
     let caller = ExtensionId::new("extension-tool-test-caller").expect("valid extension id"); // safety: static test extension id is valid.
     let context = ExecutionContext {
-        run_id: None,
+        // Production-faithful loop-run origin (the loop stamps `run_id` →
+        // `LoopRun`); the kernel now fails closed on an origin-less context.
+        run_id: Some(ironclaw_host_api::RunId::new()),
         origin: None,
         invocation_id: resource_scope.invocation_id,
         correlation_id: ironclaw_host_api::CorrelationId::new(),

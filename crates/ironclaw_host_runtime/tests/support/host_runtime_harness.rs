@@ -1652,7 +1652,7 @@ pub(crate) fn parse_manifest_from_source(
 }
 
 pub(crate) fn execution_context_without_grants() -> ExecutionContext {
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::Script,
@@ -1660,12 +1660,18 @@ pub(crate) fn execution_context_without_grants() -> ExecutionContext {
         CapabilitySet::default(),
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    // Production-faithful loop-run origin (the loop stamps `run_id` → `LoopRun`);
+    // the kernel now fails closed on an origin-less context.
+    context.run_id = Some(RunId::new());
+    context
 }
 
 pub(crate) fn execution_context_without_grants_for_scope(scope: ResourceScope) -> ExecutionContext {
     let context = ExecutionContext {
-        run_id: None,
+        // Production-faithful loop-run origin (the loop stamps `run_id` →
+        // `LoopRun`); the kernel now fails closed on an origin-less context.
+        run_id: Some(RunId::new()),
         origin: None,
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),
@@ -1691,7 +1697,7 @@ pub(crate) fn execution_context_without_grants_for_scope(scope: ResourceScope) -
 
 pub(crate) fn execution_context_with_dispatch_grant(capability: CapabilityId) -> ExecutionContext {
     let grants = capability_grants(capability);
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::Wasm,
@@ -1699,7 +1705,11 @@ pub(crate) fn execution_context_with_dispatch_grant(capability: CapabilityId) ->
         grants,
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    // Production-faithful loop-run origin (the loop stamps `run_id` → `LoopRun`);
+    // the kernel now fails closed on an origin-less context.
+    context.run_id = Some(RunId::new());
+    context
 }
 
 pub(crate) fn execution_context_with_dispatch_grant_for_scope(
@@ -1719,7 +1729,9 @@ pub(crate) fn execution_context_with_effect_grants_for_scope(
     allowed_effects: Vec<EffectKind>,
 ) -> ExecutionContext {
     let context = ExecutionContext {
-        run_id: None,
+        // Production-faithful loop-run origin (the loop stamps `run_id` →
+        // `LoopRun`); the kernel now fails closed on an origin-less context.
+        run_id: Some(RunId::new()),
         origin: None,
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),

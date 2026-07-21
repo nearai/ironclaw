@@ -534,6 +534,9 @@ fn trigger_management_execution_context() -> ExecutionContext {
     context.resource_scope.tenant_id = tenant_id;
     context.resource_scope.agent_id = Some(agent_id);
     context.resource_scope.project_id = None;
+    // Production-faithful loop-run origin (the loop stamps `run_id` → `LoopRun`);
+    // the kernel now fails closed on an origin-less context.
+    context.run_id = Some(ironclaw_host_api::RunId::new());
     context
 }
 

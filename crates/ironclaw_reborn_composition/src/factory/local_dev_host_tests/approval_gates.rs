@@ -883,6 +883,9 @@ fn shell_execution_context(user_id: &str, thread_id: &str) -> ExecutionContext {
     let thread_id = ThreadId::new(thread_id).expect("thread id"); // safety: callers pass static valid test ids.
     context.thread_id = Some(thread_id.clone());
     context.resource_scope.thread_id = Some(thread_id);
+    // Production-faithful loop-run origin (the loop stamps `run_id` → `LoopRun`);
+    // the kernel now fails closed on an origin-less context.
+    context.run_id = Some(ironclaw_host_api::RunId::new());
     context.validate().expect("thread-scoped context"); // safety: fixed test context should validate.
     context
 }
@@ -1241,6 +1244,9 @@ fn echo_spawn_execution_context(user_id: &str, thread_id: &str) -> ExecutionCont
     let thread_id = ThreadId::new(thread_id).expect("thread id"); // safety: callers pass static valid test ids.
     context.thread_id = Some(thread_id.clone());
     context.resource_scope.thread_id = Some(thread_id);
+    // Production-faithful loop-run origin (the loop stamps `run_id` → `LoopRun`);
+    // the kernel now fails closed on an origin-less context.
+    context.run_id = Some(ironclaw_host_api::RunId::new());
     context.validate().expect("thread-scoped context"); // safety: fixed test context should validate.
     context
 }

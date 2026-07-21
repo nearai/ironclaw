@@ -347,7 +347,7 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
 }
 
 fn execution_context(grants: CapabilitySet) -> ExecutionContext {
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::Wasm,
@@ -355,7 +355,11 @@ fn execution_context(grants: CapabilitySet) -> ExecutionContext {
         grants,
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    // Production-faithful loop-run origin (the loop stamps `run_id` → `LoopRun`);
+    // the kernel now fails closed on an origin-less context.
+    context.run_id = Some(ironclaw_host_api::RunId::new());
+    context
 }
 
 fn dispatch_grant() -> CapabilityGrant {

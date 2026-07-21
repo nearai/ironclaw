@@ -326,7 +326,7 @@ fn execution_context_with_dispatch_grant() -> ExecutionContext {
             max_invocations: None,
         },
     });
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::Wasm,
@@ -334,7 +334,11 @@ fn execution_context_with_dispatch_grant() -> ExecutionContext {
         grants,
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    // Production-faithful loop-run origin (the loop stamps `run_id` → `LoopRun`);
+    // the kernel now fails closed on an origin-less context.
+    context.run_id = Some(ironclaw_host_api::RunId::new());
+    context
 }
 
 fn capability_id() -> CapabilityId {

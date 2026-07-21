@@ -458,7 +458,7 @@ pub fn registry_with_github_comment_capability() -> ExtensionRegistry {
 }
 
 pub fn execution_context(grants: CapabilitySet) -> ExecutionContext {
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::Wasm,
@@ -466,7 +466,14 @@ pub fn execution_context(grants: CapabilitySet) -> ExecutionContext {
         grants,
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    // Stamp a real loop-run origin so the context resolves to an
+    // `InvocationOrigin` — production ingress always stamps one (the loop stamps
+    // `run_id` → `LoopRun`), and the capability kernel now fails closed on an
+    // origin-less context. This is production-faithful scaffolding, not a
+    // behavior relaxation.
+    context.run_id = Some(RunId::new());
+    context
 }
 
 pub fn dispatch_grant() -> CapabilityGrant {

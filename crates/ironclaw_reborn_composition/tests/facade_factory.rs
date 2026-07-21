@@ -196,7 +196,7 @@ fn local_dev_builtin_visible_request() -> VisibleCapabilityRequest {
             ),
         ],
     };
-    let context = ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::FirstParty,
@@ -205,6 +205,9 @@ fn local_dev_builtin_visible_request() -> VisibleCapabilityRequest {
         MountView::default(),
     )
     .unwrap();
+    // Production-faithful loop-run origin (the loop stamps `run_id` → `LoopRun`);
+    // the kernel now fails closed on an origin-less context.
+    context.run_id = Some(ironclaw_host_api::RunId::new());
 
     let mut provider_trust = BTreeMap::new();
     provider_trust.insert(
@@ -257,7 +260,7 @@ fn production_process_capability_execution_context() -> ExecutionContext {
             ),
         ],
     };
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("production-user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::FirstParty,
@@ -265,7 +268,11 @@ fn production_process_capability_execution_context() -> ExecutionContext {
         grants,
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    // Production-faithful loop-run origin (the loop stamps `run_id` → `LoopRun`);
+    // the kernel now fails closed on an origin-less context.
+    context.run_id = Some(ironclaw_host_api::RunId::new());
+    context
 }
 
 fn production_builtin_provider_trust() -> BTreeMap<ExtensionId, TrustDecision> {
@@ -439,7 +446,7 @@ fn trigger_management_execution_context() -> ExecutionContext {
             ),
         ],
     };
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("trigger-user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::FirstParty,
@@ -447,7 +454,11 @@ fn trigger_management_execution_context() -> ExecutionContext {
         grants,
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    // Production-faithful loop-run origin (the loop stamps `run_id` → `LoopRun`);
+    // the kernel now fails closed on an origin-less context.
+    context.run_id = Some(ironclaw_host_api::RunId::new());
+    context
 }
 
 fn empty_trust_policy() -> Arc<HostTrustPolicy> {

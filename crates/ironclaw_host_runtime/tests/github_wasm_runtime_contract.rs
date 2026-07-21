@@ -2312,7 +2312,9 @@ fn execution_context_with_dispatch_grant_for_scope(
     scope: ResourceScope,
 ) -> ExecutionContext {
     let context = ExecutionContext {
-        run_id: None,
+        // Production-faithful loop-run origin (the loop stamps `run_id` →
+        // `LoopRun`); the kernel now fails closed on an origin-less context.
+        run_id: Some(ironclaw_host_api::RunId::new()),
         origin: None,
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),

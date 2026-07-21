@@ -295,6 +295,10 @@ fn execution_context_with_mounts_and_parent(
     )
     .unwrap();
     context.process_id = parent_process_id;
+    // Stamp a real loop-run origin (production always has one — the loop stamps
+    // `run_id` → `LoopRun`) so the kernel's origin-less fail-close does not deny
+    // this spawn. Production-faithful scaffolding, not a behavior relaxation.
+    context.run_id = Some(RunId::new());
     context.validate().unwrap();
     context
 }

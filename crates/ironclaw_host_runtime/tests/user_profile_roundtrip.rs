@@ -181,6 +181,9 @@ fn agent_scoped_context(
     ctx.resource_scope.user_id = UserId::new(user_id).unwrap();
     ctx.resource_scope.agent_id = Some(AgentId::new(agent_id).unwrap());
     ctx.resource_scope.project_id = Some(ProjectId::new(project_id).unwrap());
+    // Production-faithful loop-run origin (the loop stamps `run_id` → `LoopRun`);
+    // the kernel now fails closed on an origin-less context.
+    ctx.run_id = Some(ironclaw_host_api::RunId::new());
     ctx
 }
 

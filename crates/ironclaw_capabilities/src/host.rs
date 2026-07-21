@@ -8,8 +8,8 @@ use ironclaw_host_api::{
     CapabilityAuthorizer, CapabilityDescriptor, CapabilityDispatchRequest,
     CapabilityDispatchResult, CapabilityDispatcher, CapabilityGrantId, CapabilityId, Decision,
     DenyReason, DenyRef, DispatchError, EffectiveRuntimePolicy, ExecutionContext, GateRef,
-    GateWaypoint, Invocation, InvocationFingerprint, InvocationId, Obligation, PermissionMode,
-    ProcessId, ResourceEstimate, ResourceScope, RuntimeLane, Timestamp,
+    GateWaypoint, Invocation, InvocationFingerprint, InvocationId, InvocationOrigin, Obligation,
+    PermissionMode, ProcessId, ResourceEstimate, ResourceScope, RuntimeLane, Timestamp,
 };
 use ironclaw_processes::{ProcessManager, ProcessStart};
 use ironclaw_run_state::{
@@ -182,18 +182,16 @@ enum AuthorizeFold {
 
 /// Payload of [`AuthorizeFold::Authorized`] — the allowed-dispatch side-band.
 ///
-/// `result` is `Some(AuthorizeResult::Authorized(..))` for every allowed,
-/// dispatchable invocation: the actor is always resolved (`Actor::System` for an
-/// actor-less/host-internal context) and the origin is the real ingress fact, so
-/// the seal no longer skips actor-less invocations. `result` is `None` only when
-/// the descriptor resolves to no untrusted [`RuntimeLane`] (a host-internal
-/// `System` runtime is not dispatched to a lane). A `None` witness does not
-/// regress dispatch: this slice mints the witness as a forward-looking seal
-/// artifact but still builds dispatch from `obligation_outcome`, so a lane-less
-/// invocation dispatches exactly as it does today. The hard witness-routed
-/// dispatch requirement lands in a later slice (§9).
+/// `witness` is the sealed [`Authorized`] minted for **every** allowed,
+/// dispatchable invocation on the Allow path: the actor is always resolved
+/// (`Actor::System` for an actor-less/host-internal context), the origin is the
+/// real ingress fact (an origin-less context fails closed at the fold before it
+/// reaches here — see the `Decision::Allow` arms), and a host-internal `System`
+/// runtime still seals a witness carrying `lane == None`. The witness is
+/// therefore non-optional: the Allow path always has one, and dispatch routes
+/// through it in [`Self::dispatch_inputs_from_witness`].
 struct AuthorizedFold {
-    result: Option<AuthorizeResult>,
+    witness: Box<Authorized>,
     obligations: Vec<Obligation>,
     obligation_outcome: CapabilityObligationOutcome,
 }
@@ -320,16 +318,15 @@ where
         let (witness, obligations, obligation_outcome) = match self.authorize(&request).await? {
             AuthorizeFold::Authorized(fold) => {
                 let AuthorizedFold {
-                    result,
+                    witness,
                     obligations,
                     obligation_outcome,
                 } = *fold;
                 debug!(
-                    authorize_result = ?result.as_ref().map(AuthorizeResult::kind),
                     obligation_count = obligations.len(),
                     "capability authorization allowed dispatch"
                 );
-                (result, obligations, obligation_outcome)
+                (witness, obligations, obligation_outcome)
             }
             AuthorizeFold::Denied { result, reason } => {
                 debug!(
@@ -354,9 +351,8 @@ where
             }
         };
 
-        // S6 (§5.3.2/§9): dispatch routes through the sealed witness (consumed
-        // single-use, failing closed on expiry), or falls back to the fold's
-        // obligation-derived inputs when no witness was sealed. See
+        // S6 (§5.3.2/§9): dispatch routes through the always-present sealed
+        // witness (consumed single-use, failing closed on expiry). See
         // [`Self::dispatch_inputs_from_witness`].
         let (dispatch_mounts, dispatch_reservation, pinned_lane) = self
             .dispatch_inputs_from_witness(
@@ -735,6 +731,28 @@ where
             Decision::Allow {
                 obligations: allowed_obligations,
             } => {
+                // Fail closed on an origin-less context (§5.2.1/§5.3.2): the
+                // sealed witness is now always-present on the Allow path, and
+                // `Invocation` requires an [`InvocationOrigin`]. Every production
+                // ingress stamps one (the loop stamps `run_id` → `LoopRun`), so a
+                // context that resolves to no origin is not a real ingress and an
+                // un-attributable dispatch must not proceed. Deny with the
+                // internal-invariant reason, using the same run-state transition
+                // the `Decision::Deny` arm uses.
+                let Some(origin) = authorize_context.resolved_origin() else {
+                    debug!("capability authorization denied dispatch: origin-less context");
+                    fail_run_if_configured(
+                        self.run_state,
+                        &scope,
+                        invocation_id,
+                        "AuthorizationDenied",
+                    )
+                    .await;
+                    return Ok(AuthorizeFold::Denied {
+                        result: AuthorizeResult::Denied(DenyRef::new()),
+                        reason: DenyReason::InternalInvariantViolation,
+                    });
+                };
                 let allowed_obligations = allowed_obligations.into_vec();
                 debug!(
                     obligation_count = allowed_obligations.len(),
@@ -769,17 +787,18 @@ where
                         return Err(error);
                     }
                 };
-                let result = self.seal_authorization(
+                let witness = self.seal_authorization(
                     &authorize_context,
                     &request.capability_id,
                     &request.estimate,
                     &request.input,
                     descriptor,
                     &obligation_outcome,
+                    origin,
                     frozen_deadline,
                 );
                 Ok(AuthorizeFold::Authorized(Box::new(AuthorizedFold {
-                    result,
+                    witness,
                     obligations: allowed_obligations,
                     obligation_outcome,
                 })))
@@ -989,24 +1008,19 @@ where
     /// Mint the sealed [`Authorized`] witness for an allowed invoke, spawn, or
     /// resume (arch-simplification §5.3.2).
     ///
-    /// `actor` and `origin` are now always resolvable, so the witness is minted
-    /// for **every** dispatchable invocation: an actor-less/host-internal context
-    /// seals [`Actor::System`] (never a stand-in user, never a skipped seal), and
-    /// `origin` is sealed from the ingress-stamped [`ExecutionContext::origin`]
-    /// (authoritative, §5.2.1), falling back to reconstructing
-    /// [`InvocationOrigin::LoopRun`] from `run_id` for the loop path. There is no
-    /// `"provisional"` placeholder — every production ingress stamps its true
-    /// origin (the loop via `run_id`/`LoopRun`).
+    /// `actor` and `origin` are always resolved, so the witness is minted for
+    /// **every** dispatchable invocation on the Allow path: an
+    /// actor-less/host-internal context seals [`Actor::System`] (never a stand-in
+    /// user, never a skipped seal), and `origin` is the authoritative ingress
+    /// fact resolved by the caller (§5.2.1) — the origin-less fail-close lives in
+    /// each fold's `Decision::Allow` arm, so this function receives a resolved
+    /// [`InvocationOrigin`] and never has to skip the seal. A host-internal
+    /// `System` runtime seals a witness carrying `lane == None` (it dispatches on
+    /// the process axis, not a lane); the lane's absence no longer suppresses the
+    /// witness.
     ///
-    /// Returns `None` only when the descriptor's runtime maps to no untrusted
-    /// [`RuntimeLane`] (a host-internal `System` runtime is not dispatched to a
-    /// lane at all), or, defensively, when a context carries neither an `origin`
-    /// nor a `run_id` — a shape no production ingress produces. This slice mints
-    /// the witness as a forward-looking seal artifact (it does not yet gate
-    /// dispatch), so the lane-less `None` must not regress today's path.
-    ///
-    /// Shared by the invoke, spawn, and resume authorize folds so the same six
-    /// frozen facts seal every path (§9 step 2). `scope` is derived from
+    /// Shared by the invoke, spawn, and resume authorize folds so the same frozen
+    /// facts seal every path (§9 step 2). `scope` is derived from
     /// `context.resource_scope` — every caller's `scope` local is exactly that
     /// value (`request.context.resource_scope.clone()`), so passing it separately
     /// would only duplicate it.
@@ -1020,8 +1034,9 @@ where
         input: &serde_json::Value,
         descriptor: &CapabilityDescriptor,
         obligation_outcome: &CapabilityObligationOutcome,
+        origin: InvocationOrigin,
         frozen_deadline: Option<Timestamp>,
-    ) -> Option<AuthorizeResult> {
+    ) -> Box<Authorized> {
         // Actor is sealed at the membrane; NO fallback to `user_id`. An
         // actor-less (system service / one-shot) context seals `Actor::System`
         // as its own class — never a stand-in user, and never a skipped seal.
@@ -1037,12 +1052,9 @@ where
         // longer suppresses the whole witness.
         let lane = RuntimeLane::from_runtime_kind(descriptor.runtime);
         let scope = &context.resource_scope;
-        // Origin is the ingress-stamped authority fact (§5.2.1). The loop path
-        // also carries `run_id`, so a context that stamped only `run_id` still
-        // reconstructs `LoopRun` (transitional compat). No `"provisional"`
-        // fallback: a context that carries neither is not a real production
-        // ingress, so it is not sealed here (Option `?`, not a placeholder).
-        let origin = context.resolved_origin()?;
+        // Origin is the ingress-stamped authority fact (§5.2.1), resolved and
+        // fail-closed by the caller's `Decision::Allow` arm, so it arrives here
+        // as a plain value — never re-derived and never a placeholder.
         let invocation = Invocation {
             activity_id: ActivityId::from_uuid(context.invocation_id.as_uuid()),
             capability: capability_id.clone(),
@@ -1078,14 +1090,14 @@ where
         // candidates into `frozen_deadline`), or a bounded default TTL. See
         // [`witness_deadline`].
         let deadline = witness_deadline([frozen_deadline]);
-        Some(AuthorizeResult::Authorized(Box::new(Authorized::seal(
+        Box::new(Authorized::seal(
             self.authorization_grant(),
             invocation,
             lane,
             mounts,
             reservation,
             deadline,
-        ))))
+        ))
     }
 
     pub async fn resume_json(
@@ -2115,11 +2127,11 @@ where
             match self.authorize_spawn(&request).await? {
                 AuthorizeFold::Authorized(fold) => {
                     let AuthorizedFold {
-                        result,
+                        witness,
                         obligations,
                         obligation_outcome,
                     } = *fold;
-                    (result, obligations, obligation_outcome)
+                    (witness, obligations, obligation_outcome)
                 }
                 AuthorizeFold::Denied { reason, .. } => {
                     return Err(CapabilityInvocationError::AuthorizationDenied {
@@ -2136,15 +2148,14 @@ where
             };
 
         // S6 (§5.3.2/§9): the process start's mounts/reservation come from the
-        // sealed witness (consumed single-use, failing closed on expiry), or the
-        // fold's obligation-derived inputs when no witness was sealed
-        // (`system.process_sandbox` is System-runtime with no lane, so it seals
-        // none yet spawns legitimately). See [`Self::dispatch_inputs_from_witness`].
-        // Spawn starts a process through the `ProcessManager`, not the runtime
+        // always-present sealed witness (consumed single-use, failing closed on
+        // expiry). `system.process_sandbox` is System-runtime with no lane, so it
+        // seals a witness carrying `lane == None` yet spawns legitimately. Spawn
+        // starts a process through the `ProcessManager`, not the runtime
         // dispatcher's `dispatch_json`, so there is no `CapabilityDispatchRequest`
-        // to carry a pinned lane on — the witness's lane binding (finding C) is a
-        // dispatcher-path concern. The witness is still consumed here for its
-        // single-use + expiry semantics; the lane it yields is unused on this path.
+        // to carry a pinned lane — the witness's lane binding (finding C) is a
+        // dispatcher-path concern, so the lane it yields is unused here. See
+        // [`Self::dispatch_inputs_from_witness`].
         let (witness_mounts, witness_reservation, _pinned_lane) = self
             .dispatch_inputs_from_witness(
                 CapabilityObligationPhase::Spawn,
@@ -2374,6 +2385,23 @@ where
             Decision::Allow {
                 obligations: allowed_obligations,
             } => {
+                // Fail closed on an origin-less context (§5.2.1/§5.3.2), mirroring
+                // `authorize()`: the witness is always-present on the Allow path
+                // and `Invocation` requires an origin, so a context resolving to
+                // none is not a real ingress and must not spawn un-attributably.
+                let Some(origin) = authorize_context.resolved_origin() else {
+                    fail_run_if_configured(
+                        self.run_state,
+                        &scope,
+                        invocation_id,
+                        "AuthorizationDenied",
+                    )
+                    .await;
+                    return Ok(AuthorizeFold::Denied {
+                        result: AuthorizeResult::Denied(DenyRef::new()),
+                        reason: DenyReason::InternalInvariantViolation,
+                    });
+                };
                 let allowed_obligations = allowed_obligations.into_vec();
                 let obligation_outcome = match self
                     .prepare_obligations(
@@ -2397,17 +2425,18 @@ where
                         return Err(error);
                     }
                 };
-                let result = self.seal_authorization(
+                let witness = self.seal_authorization(
                     &authorize_context,
                     &request.capability_id,
                     &request.estimate,
                     &request.input,
                     descriptor,
                     &obligation_outcome,
+                    origin,
                     frozen_deadline,
                 );
                 Ok(AuthorizeFold::Authorized(Box::new(AuthorizedFold {
-                    result,
+                    witness,
                     obligations: allowed_obligations,
                     obligation_outcome,
                 })))
@@ -2749,6 +2778,36 @@ where
             Decision::Allow {
                 obligations: allowed_obligations,
             } => {
+                // Fail closed on an origin-less context (§5.2.1/§5.3.2), mirroring
+                // `authorize()`: the witness is always-present on the Allow path
+                // and `Invocation` requires an origin, so a context resolving to
+                // none is not a real ingress and must not re-dispatch
+                // un-attributably. As in the `Deny` arm below, a reused
+                // `AlreadyClaimed` lease was already advanced to `Dispatching` in
+                // the `auth_resume_json` preamble, so revoke it here too rather
+                // than strand it.
+                let Some(origin) = params.authorized_context.resolved_origin() else {
+                    fail_run_if_configured(
+                        Some(params.run_state),
+                        &params.scope,
+                        params.invocation_id,
+                        "AuthorizationDenied",
+                    )
+                    .await;
+                    if let ResumedLeaseState::AlreadyClaimed(store, lease) = &params.lease_state
+                        && let Err(error) = store.revoke(&params.scope, lease.grant.id).await
+                    {
+                        warn!(
+                            lease_id = %lease.grant.id,
+                            revoke_error_kind = capability_lease_error_kind(&error),
+                            "failed to revoke reused approval lease after origin-less auth-resume fail-close; lease may remain Dispatching",
+                        );
+                    }
+                    return Ok(AuthorizeFold::Denied {
+                        result: AuthorizeResult::Denied(DenyRef::new()),
+                        reason: DenyReason::InternalInvariantViolation,
+                    });
+                };
                 let allowed_obligations = allowed_obligations.into_vec();
                 // PROVISIONAL (Slice C): the authoritative obligation outcome is
                 // prepared post-claim in `dispatch_resumed_capability` to keep the
@@ -2758,17 +2817,18 @@ where
                 // the tail), so an empty seal outcome does not regress today's
                 // path.
                 let provisional_outcome = CapabilityObligationOutcome::default();
-                let result = self.seal_authorization(
+                let witness = self.seal_authorization(
                     &params.authorized_context,
                     &params.capability_id,
                     &params.estimate,
                     &params.input,
                     params.descriptor,
                     &provisional_outcome,
+                    origin,
                     frozen_deadline,
                 );
                 Ok(AuthorizeFold::Authorized(Box::new(AuthorizedFold {
-                    result,
+                    witness,
                     obligations: allowed_obligations,
                     obligation_outcome: provisional_outcome,
                 })))
@@ -2871,11 +2931,11 @@ where
         let (witness, obligations) = match fold {
             AuthorizeFold::Authorized(fold) => {
                 let AuthorizedFold {
-                    result,
+                    witness,
                     obligations,
                     ..
                 } = *fold;
-                (result, obligations)
+                (witness, obligations)
             }
             AuthorizeFold::Denied { reason, .. } => {
                 return Err(CapabilityInvocationError::AuthorizationDenied {
@@ -2983,16 +3043,11 @@ where
         // BEFORE the side effect. An approval lease that expired during the async
         // authorization/obligation gap (after `begin_dispatch_claimed` advanced it)
         // is caught here, not after dispatch when the later consume observes it.
-        let witness = match witness {
-            Some(AuthorizeResult::Authorized(authorized)) => Some(AuthorizeResult::Authorized(
-                Box::new(authorized.reseal_with_outcome(
-                    self.authorization_grant(),
-                    obligation_outcome.mounts.clone(),
-                    obligation_outcome.resource_reservation.clone(),
-                )),
-            )),
-            other => other,
-        };
+        let witness = Box::new(witness.reseal_with_outcome(
+            self.authorization_grant(),
+            obligation_outcome.mounts.clone(),
+            obligation_outcome.resource_reservation.clone(),
+        ));
         let (dispatch_mounts, dispatch_reservation, pinned_lane) = match self
             .dispatch_inputs_from_witness(
                 CapabilityObligationPhase::Resume,
@@ -3230,31 +3285,31 @@ where
     /// Resolve the mounts/reservation dispatch inputs from the fold's sealed
     /// witness (S6, §5.3.2/§9), shared by the invoke and spawn paths.
     ///
-    /// When the fold sealed an `Authorized`, dispatch routes through IT: the
-    /// witness is consumed single-use (`into_parts` moves it, so a second
-    /// dispatch is a compile error) and fails closed on expiry — aborting the
-    /// prepared obligations (releasing the reservation through the obligation
-    /// lifecycle), consuming the witness via `abort` (never `Drop`), failing the
-    /// run, and returning a terminal denial. The sealed `mounts`/`reservation`
-    /// are the fold's `obligation_outcome` values verbatim, so dispatch inputs
-    /// are byte-identical to the pre-S6 path; the sealed `lane` is returned as the
-    /// pinned lane so the caller can bind dispatch to it — the dispatcher
-    /// re-resolves the descriptor lane from its hot registry and fails closed if
-    /// it no longer matches this pinned lane (§5.3.2, mutable-registry TOCTOU).
+    /// Dispatch always routes through the always-present witness: it is consumed
+    /// single-use (`into_parts` moves it, so a second dispatch is a compile
+    /// error) and fails closed on expiry — aborting the prepared obligations
+    /// (releasing the reservation through the obligation lifecycle), consuming
+    /// the witness via `abort` (never `Drop`), failing the run, and returning a
+    /// terminal denial. The sealed `mounts`/`reservation` are the fold's
+    /// `obligation_outcome` values verbatim, so dispatch inputs are byte-identical
+    /// to the pre-S6 path; the sealed `lane` is returned as the pinned lane so the
+    /// caller can bind dispatch to it — the dispatcher re-resolves the descriptor
+    /// lane from its hot registry and fails closed if it no longer matches this
+    /// pinned lane (§5.3.2, mutable-registry TOCTOU). `None` for a host-internal
+    /// `System` witness (no lane), which skips the dispatcher's lane check.
     ///
-    /// A `None` witness is NOT an error: the seal mints none for a host-internal
-    /// `System`-runtime descriptor (no untrusted lane — `system.process_sandbox`
-    /// on the spawn path) or, defensively, an origin-less context. Those keep the
-    /// obligation-derived inputs — exactly the values a witness would have
-    /// carried — rather than failing closed, which would break process-sandbox
-    /// dispatch. Expiry cannot occur in a synchronous authorize→dispatch today;
-    /// the fail-closed arm is new-behavior-by-design for a held witness.
+    /// The witness is non-optional: every allowed invoke/spawn seals one
+    /// (including a host-internal `System`-runtime descriptor, whose witness
+    /// carries `lane == None`), and an origin-less context fails closed at the
+    /// authorize fold before dispatch — so there is no obligation-derived
+    /// fallback here. Expiry cannot occur in a synchronous authorize→dispatch
+    /// today; the fail-closed arm is new-behavior-by-design for a held witness.
     // arch-exempt: too_many_args, the witness plus the `abort_obligations` arg set (context/capability_id/estimate/obligations/obligation_outcome) — invoke's `CapabilityInvocationRequest` and spawn's `CapabilitySpawnRequest` are distinct types, so no shared request bundle unifies them (same reason `seal_authorization` is exempt); folds into a prepared-invocation bundle with the capability-path collapse, plan #6175
     #[allow(clippy::too_many_arguments)]
     async fn dispatch_inputs_from_witness(
         &self,
         phase: CapabilityObligationPhase,
-        witness: Option<AuthorizeResult>,
+        witness: Box<Authorized>,
         context: &ExecutionContext,
         capability_id: &ironclaw_host_api::CapabilityId,
         estimate: &ResourceEstimate,
@@ -3268,22 +3323,11 @@ where
         ),
         CapabilityInvocationError,
     > {
-        let Some(AuthorizeResult::Authorized(witness)) = witness else {
-            // No witness (host-internal `System` runtime with no lane, or a
-            // defensively origin-less context): no lane to pin, so dispatch keeps
-            // the obligation-derived inputs and the dispatcher's lane check is
-            // skipped — byte-identical to the pre-pinning path.
-            return Ok((
-                obligation_outcome.mounts.clone(),
-                obligation_outcome.resource_reservation.clone(),
-                None,
-            ));
-        };
         match witness.into_parts(chrono::Utc::now()) {
             // `lane` is the descriptor-resolved lane the authorization pinned:
             // threaded into the dispatch request so the dispatcher fails closed
             // if the hot registry re-resolves a different lane (§5.3.2, finding C).
-            Ok((_invocation, lane, mounts, reservation)) => Ok((mounts, reservation, Some(lane))),
+            Ok((_invocation, lane, mounts, reservation)) => Ok((mounts, reservation, lane)),
             Err(expired) => {
                 self.abort_obligations(
                     phase,
@@ -4104,9 +4148,7 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
         let AuthorizeFold::Authorized(fold) = fold else {
             panic!("expected an allowed authorization");
         };
-        let Some(AuthorizeResult::Authorized(authorized)) = &fold.result else {
-            panic!("allow path with a sealed actor must mint an Authorized witness");
-        };
+        let authorized = &fold.witness;
         assert_eq!(authorized.lane(), Some(RuntimeLane::Wasm));
         let invocation = authorized.invocation();
         assert_eq!(
@@ -4169,9 +4211,7 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
         let AuthorizeFold::Authorized(fold) = fold else {
             panic!("expected an allowed authorization");
         };
-        let Some(AuthorizeResult::Authorized(authorized)) = &fold.result else {
-            panic!("allow path must mint an Authorized witness");
-        };
+        let authorized = &fold.witness;
         assert_eq!(
             authorized.deadline(),
             expiry,
@@ -4270,9 +4310,7 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
             let AuthorizeFold::Authorized(fold) = fold else {
                 panic!("expected an allowed authorization for {expected_origin:?}");
             };
-            let Some(AuthorizeResult::Authorized(authorized)) = &fold.result else {
-                panic!("every allowed invocation must mint a witness ({expected_origin:?})");
-            };
+            let authorized = &fold.witness;
             let invocation = authorized.invocation();
             assert_eq!(
                 invocation.actor, expected_actor,
@@ -4519,9 +4557,7 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
         let AuthorizeFold::Authorized(fold) = fold else {
             panic!("expected an allowed resume authorization");
         };
-        let Some(AuthorizeResult::Authorized(authorized)) = &fold.result else {
-            panic!("a sealable resume must mint an Authorized witness");
-        };
+        let authorized = &fold.witness;
         assert_eq!(
             authorized.deadline(),
             lease_expiry,

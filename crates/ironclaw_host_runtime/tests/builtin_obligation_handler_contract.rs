@@ -1219,7 +1219,9 @@ fn execution_context(grants: CapabilitySet) -> ExecutionContext {
         invocation_id,
     };
     ExecutionContext {
-        run_id: None,
+        // Production-faithful loop-run origin (the loop stamps `run_id` →
+        // `LoopRun`); the kernel now fails closed on an origin-less context.
+        run_id: Some(ironclaw_host_api::RunId::new()),
         origin: None,
         invocation_id,
         correlation_id: CorrelationId::new(),
