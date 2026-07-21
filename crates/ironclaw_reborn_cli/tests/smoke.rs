@@ -120,15 +120,158 @@ fn write_sparse_reborn_config(reborn_home: &Path) {
     .expect("config");
 }
 
+fn shell_words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut chars = text.chars().peekable();
+    let mut quote = None;
+
+    while let Some(ch) = chars.next() {
+        match (quote, ch) {
+            (None, '\\') => {
+                if matches!(chars.peek(), Some('\r' | '\n')) {
+                    if matches!(chars.peek(), Some('\r')) {
+                        chars.next();
+                    }
+                    if matches!(chars.peek(), Some('\n')) {
+                        chars.next();
+                    }
+                } else if let Some(next) = chars.next() {
+                    word.push(next);
+                }
+            }
+            (Some('"'), '\\') => {
+                if let Some(next) = chars.next() {
+                    word.push(next);
+                }
+            }
+            (None, '\'' | '"') => {
+                quote = Some(ch);
+            }
+            (Some(active), _) if ch == active => {
+                quote = None;
+            }
+            (None, ch) if ch.is_whitespace() => {
+                if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+            }
+            _ => word.push(ch),
+        }
+    }
+
+    if !word.is_empty() {
+        words.push(word);
+    }
+
+    words
+}
+
+fn split_cargo_feature_value(value: &str) -> impl Iterator<Item = &str> {
+    value
+        .split(|ch: char| ch == ',' || ch.is_whitespace())
+        .filter(|feature| !feature.is_empty())
+}
+
+fn cargo_command_features(text: &str) -> Vec<String> {
+    let words = shell_words(text);
+    let mut features = Vec::new();
+    let mut index = 0;
+    while index < words.len() {
+        let word = &words[index];
+        if word == "--features" || word == "-F" {
+            if let Some(value) = words.get(index + 1) {
+                features.extend(split_cargo_feature_value(value).map(str::to_owned));
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(value) = word.strip_prefix("--features=") {
+            features.extend(split_cargo_feature_value(value).map(str::to_owned));
+        }
+        index += 1;
+    }
+    features
+}
+
+fn assert_no_removed_backend_cargo_features(text: &str, label: &str) {
+    let features = cargo_command_features(text);
+    assert!(
+        !features
+            .iter()
+            .any(|feature| feature == "libsql" || feature == "postgres"),
+        "{label} must not pass removed backend Cargo features: parsed features={features:?}\n{text}"
+    );
+}
+
+fn package_metadata_dist_features(manifest: &str) -> Vec<String> {
+    let mut in_dist_metadata = false;
+    let mut array = String::new();
+    let mut collecting = false;
+
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_dist_metadata = trimmed == "[package.metadata.dist]";
+            collecting = false;
+            array.clear();
+            continue;
+        }
+
+        if !in_dist_metadata {
+            continue;
+        }
+
+        if collecting {
+            array.push('\n');
+            array.push_str(trimmed);
+            if trimmed.contains(']') {
+                break;
+            }
+            continue;
+        }
+
+        if let Some(value) = trimmed.strip_prefix("features") {
+            if let Some((_, value)) = value.split_once('=') {
+                array.push_str(value.trim());
+                if !value.contains(']') {
+                    collecting = true;
+                }
+            }
+        }
+    }
+
+    let mut features = Vec::new();
+    let mut token = String::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in array.chars() {
+        if escaped {
+            token.push(ch);
+            escaped = false;
+            continue;
+        }
+        match (in_string, ch) {
+            (true, '\\') => escaped = true,
+            (true, '"') => {
+                features.push(std::mem::take(&mut token));
+                in_string = false;
+            }
+            (false, '"') => in_string = true,
+            (true, _) => token.push(ch),
+            (false, _) => {}
+        }
+    }
+
+    features
+}
+
 #[test]
 fn dockerfile_reborn_builds_without_backend_feature_flags() {
     let dockerfile =
         std::fs::read_to_string(workspace_root().join("Dockerfile")).expect("Dockerfile");
 
-    assert!(
-        !dockerfile.contains("libsql,postgres") && !dockerfile.contains("postgres,libsql"),
-        "Dockerfile must not pass removed backend Cargo features: {dockerfile}"
-    );
+    assert_no_removed_backend_cargo_features(&dockerfile, "Dockerfile");
     assert!(
         dockerfile.contains("--bin ironclaw")
             && dockerfile
@@ -221,11 +364,10 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
             && !compile_workflow.contains("--bin ironclaw-reborn")
             && compile_workflow.contains("--target \"$TARGET\"")
             && !compile_workflow.contains("REBORN_RELEASE_FEATURES")
-            && !compile_workflow.contains("--features \"$REBORN_RELEASE_FEATURES\"")
-            && !compile_workflow.contains("--features libsql")
-            && !compile_workflow.contains("--features postgres"),
+            && !compile_workflow.contains("--features \"$REBORN_RELEASE_FEATURES\""),
         "Reborn release CI must fully link the shipping binary without removed backend feature flags and keep all target results"
     );
+    assert_no_removed_backend_cargo_features(&compile_workflow, "Reborn release CI");
     assert!(
         compile_workflow.matches("musl: true").count() == 2
             && compile_workflow.contains("sudo apt-get install --yes musl-tools binutils file")
@@ -369,10 +511,16 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
     assert!(
         cli_manifest.contains("[package]\nname = \"ironclaw\"\nversion = \"")
             && cli_manifest.contains("[package.metadata.dist]\ndist = true")
-            && !cli_manifest.contains("features = [\"libsql\", \"postgres\"]")
             && cli_manifest.contains("[package.metadata.wix]")
             && cli_manifest.contains("[[bin]]\nname = \"ironclaw\""),
         "the canonical Reborn package must be cargo-dist enabled without removed backend feature flags and with WiX metadata"
+    );
+    let dist_features = package_metadata_dist_features(&cli_manifest);
+    assert!(
+        !dist_features
+            .iter()
+            .any(|feature| feature == "libsql" || feature == "postgres"),
+        "the canonical Reborn package must be cargo-dist enabled without removed backend feature flags and with WiX metadata: parsed dist features={dist_features:?}\n{cli_manifest}"
     );
 }
 

@@ -273,6 +273,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core 0.5.6",
+ "base64 0.22.1",
  "bytes",
  "form_urlencoded",
  "futures-util",
@@ -291,8 +292,10 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "serde_urlencoded",
+ "sha1",
  "sync_wrapper 1.0.2",
  "tokio",
+ "tokio-tungstenite 0.29.0",
  "tower 0.5.3",
  "tower-layer",
  "tower-service",
@@ -2175,6 +2178,7 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.26.4",
  "tower-service",
+ "webpki-roots 1.0.8",
 ]
 
 [[package]]
@@ -2504,16 +2508,67 @@ name = "ironclaw_capabilities"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "ironclaw_authorization",
  "ironclaw_extensions",
+ "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_processes",
  "ironclaw_run_state",
+ "ironclaw_runtime_policy",
  "ironclaw_safety",
  "ironclaw_trust",
+ "ironclaw_turns",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
+]
+
+[[package]]
+name = "ironclaw_channel_delivery"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ironclaw_channel_host",
+ "ironclaw_conversations",
+ "ironclaw_host_api",
+ "ironclaw_outbound",
+ "ironclaw_product_adapters",
+ "ironclaw_product_workflow",
+ "ironclaw_run_state",
+ "ironclaw_threads",
+ "ironclaw_triggers",
+ "ironclaw_turns",
+ "ironclaw_wasm_product_adapters",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ironclaw_channel_host"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum 0.8.9",
+ "ironclaw_auth",
+ "ironclaw_conversations",
+ "ironclaw_extensions",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_host_runtime",
+ "ironclaw_outbound",
+ "ironclaw_product_adapter_registry",
+ "ironclaw_product_adapters",
+ "ironclaw_product_workflow",
+ "ironclaw_threads",
+ "ironclaw_turns",
+ "ironclaw_wasm_product_adapters",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -2710,18 +2765,21 @@ dependencies = [
  "async-trait",
  "blake3",
  "chrono",
+ "deadpool-postgres",
  "futures",
  "ironclaw_events",
  "ironclaw_host_api",
  "ironclaw_prompt_envelope",
  "ironclaw_turns",
  "ironclaw_wasm_limiter",
+ "libsql",
  "lru",
  "rust_decimal",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-postgres",
  "tracing",
  "uuid",
  "wasmtime",
@@ -2823,6 +2881,7 @@ dependencies = [
  "ironclaw_triggers",
  "ironclaw_trust",
  "ironclaw_turns",
+ "ironclaw_webui",
  "libsql",
  "secrecy",
  "serde",
@@ -2877,6 +2936,7 @@ dependencies = [
  "dashmap",
  "futures",
  "hex",
+ "ironclaw_capabilities",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
@@ -2884,6 +2944,7 @@ dependencies = [
  "ironclaw_observability",
  "ironclaw_process_sandbox",
  "ironclaw_resources",
+ "ironclaw_run_state",
  "ironclaw_safety",
  "ironclaw_skills",
  "ironclaw_threads",
@@ -3068,6 +3129,7 @@ dependencies = [
  "ironclaw_common",
  "ironclaw_conversations",
  "ironclaw_events",
+ "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_outbound",
  "ironclaw_product_adapters",
@@ -3127,6 +3189,8 @@ dependencies = [
  "ironclaw_auth",
  "ironclaw_authorization",
  "ironclaw_capabilities",
+ "ironclaw_channel_delivery",
+ "ironclaw_channel_host",
  "ironclaw_common",
  "ironclaw_conversations",
  "ironclaw_event_projections",
@@ -3139,6 +3203,7 @@ dependencies = [
  "ironclaw_hooks",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
+ "ironclaw_llm",
  "ironclaw_loop_host",
  "ironclaw_mcp",
  "ironclaw_memory",
@@ -3154,6 +3219,7 @@ dependencies = [
  "ironclaw_reborn_config",
  "ironclaw_reborn_event_store",
  "ironclaw_reborn_identity",
+ "ironclaw_reborn_openai_compat",
  "ironclaw_reborn_traces",
  "ironclaw_resources",
  "ironclaw_run_state",
@@ -3162,10 +3228,13 @@ dependencies = [
  "ironclaw_safety",
  "ironclaw_secrets",
  "ironclaw_skills",
+ "ironclaw_slack_v2_adapter",
+ "ironclaw_telegram_extension",
  "ironclaw_threads",
  "ironclaw_triggers",
  "ironclaw_trust",
  "ironclaw_turns",
+ "ironclaw_wasm_product_adapters",
  "libc",
  "libsql",
  "lru",
@@ -3245,6 +3314,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_reborn_openai_compat"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "axum 0.8.9",
+ "base64 0.22.1",
+ "chrono",
+ "futures-core",
+ "hex",
+ "ironclaw_attachments",
+ "ironclaw_common",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_product_adapters",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ironclaw_reborn_traces"
 version = "0.1.0"
 dependencies = [
@@ -3298,15 +3392,12 @@ name = "ironclaw_run_state"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "deadpool-postgres",
  "ironclaw_filesystem",
  "ironclaw_host_api",
- "libsql",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
- "tokio-postgres",
  "tracing",
 ]
 
@@ -3315,6 +3406,7 @@ name = "ironclaw_runner"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "blake3",
  "chrono",
  "futures-util",
@@ -3325,8 +3417,10 @@ dependencies = [
  "ironclaw_hooks",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
+ "ironclaw_llm",
  "ironclaw_loop_host",
  "ironclaw_observability",
+ "ironclaw_run_state",
  "ironclaw_safety",
  "ironclaw_threads",
  "ironclaw_turns",
@@ -3425,6 +3519,69 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_slack_v2_adapter"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ironclaw_product_adapters",
+ "ironclaw_turns",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "ironclaw_telegram_extension"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum 0.8.9",
+ "chrono",
+ "ironclaw_auth",
+ "ironclaw_channel_delivery",
+ "ironclaw_channel_host",
+ "ironclaw_common",
+ "ironclaw_conversations",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_host_runtime",
+ "ironclaw_outbound",
+ "ironclaw_product_adapters",
+ "ironclaw_product_workflow",
+ "ironclaw_run_state",
+ "ironclaw_safety",
+ "ironclaw_secrets",
+ "ironclaw_telegram_v2_adapter",
+ "ironclaw_threads",
+ "ironclaw_triggers",
+ "ironclaw_turns",
+ "ironclaw_wasm_product_adapters",
+ "rand 0.9.5",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ironclaw_telegram_v2_adapter"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ironclaw_product_adapters",
+ "ironclaw_turns",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ironclaw_threads"
 version = "0.1.0"
 dependencies = [
@@ -3520,6 +3677,62 @@ version = "0.1.0"
 dependencies = [
  "tracing",
  "wasmtime",
+]
+
+[[package]]
+name = "ironclaw_wasm_product_adapters"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "hex",
+ "hmac 0.13.0",
+ "http 1.4.2",
+ "ironclaw_product_adapters",
+ "ironclaw_wasm",
+ "serde_json",
+ "sha2 0.11.0",
+ "subtle",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "wasmtime",
+]
+
+[[package]]
+name = "ironclaw_webui"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "axum 0.8.9",
+ "base64 0.22.1",
+ "chrono",
+ "futures",
+ "hex",
+ "hmac 0.13.0",
+ "ironclaw_host_api",
+ "ironclaw_product_workflow",
+ "ironclaw_reborn_composition",
+ "ironclaw_reborn_openai_compat",
+ "jsonwebtoken",
+ "lru",
+ "parking_lot",
+ "rand 0.10.2",
+ "reqwest 0.12.28",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "subtle",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower 0.5.3",
+ "tower-http 0.6.11",
+ "tracing",
+ "url",
+ "urlencoding",
+ "uuid",
 ]
 
 [[package]]
@@ -4587,6 +4800,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "851ca9db4932932d69f3ea811b1abe63087a0f740a47692619dd40d4899b68be"
 dependencies = [
  "bytes",
+ "chrono",
  "fallible-iterator 0.2.0",
  "postgres-protocol",
  "serde_core",
@@ -5073,6 +5287,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.4.2",
  "web-sys",
+ "webpki-roots 1.0.8",
 ]
 
 [[package]]
@@ -5147,7 +5362,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
- "tokio-tungstenite",
+ "tokio-tungstenite 0.23.1",
  "tracing",
  "tracing-futures",
  "url",
@@ -5206,6 +5421,7 @@ dependencies = [
  "borsh",
  "bytes",
  "num-traits",
+ "postgres-types",
  "rand 0.8.7",
  "rkyv",
  "serde",
@@ -6263,8 +6479,20 @@ dependencies = [
  "rustls-pki-types",
  "tokio",
  "tokio-rustls 0.26.4",
- "tungstenite",
+ "tungstenite 0.23.0",
  "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "tokio-tungstenite"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
+dependencies = [
+ "futures-util",
+ "log",
+ "tokio",
+ "tungstenite 0.29.0",
 ]
 
 [[package]]
@@ -6592,6 +6820,22 @@ dependencies = [
  "sha1",
  "thiserror 1.0.69",
  "utf-8",
+]
+
+[[package]]
+name = "tungstenite"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c01152af293afb9c7c2a57e4b559c5620b421f6d133261c60dd2d0cdb38e6b8"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http 1.4.2",
+ "httparse",
+ "log",
+ "rand 0.9.5",
+ "sha1",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
