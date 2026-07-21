@@ -99,6 +99,9 @@ where
                     operation: FilesystemOperation::Query,
                     ..
                 }) => {
+                    if budget.is_some() {
+                        return Ok(MessageReadResult::LimitExceeded);
+                    }
                     return self
                         .read_thread_messages_by_directory(scope, thread_id, budget)
                         .await;

@@ -15,6 +15,7 @@ use ironclaw_threads::{
     ContextMessage, LoadContextMessagesRequest, MessageKind, MessageStatus, ThreadMessageId,
     ThreadMessageRecord, ThreadScope,
 };
+use ironclaw_turns::TurnRunId;
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -136,7 +137,7 @@ impl RebornServices {
             .artifact_messages_for_records(thread_scope, &thread_id, run_records, &redactor)
             .await?;
         let (logs, log_redaction_applied) = self
-            .artifact_logs(caller, thread_id.to_string(), Some(run_id_text), &redactor)
+            .artifact_logs(caller, &thread_id, Some(&run_id), &redactor)
             .await;
 
         Ok(RebornRunArtifact {
@@ -156,14 +157,14 @@ impl RebornServices {
     pub(super) async fn artifact_logs(
         &self,
         caller: WebUiAuthenticatedCaller,
-        thread_id: String,
-        run_id: Option<String>,
+        thread_id: &ThreadId,
+        run_id: Option<&TurnRunId>,
         redactor: &DeterministicTraceRedactor,
     ) -> (RunArtifactLogs, bool) {
         let query = bounded_log_query(RebornLogQueryRequest {
             limit: Some(OPERATOR_LOGS_MAX_LIMIT),
-            thread_id: Some(thread_id),
-            run_id,
+            thread_id: Some(thread_id.to_string()),
+            run_id: run_id.map(ToString::to_string),
             ..RebornLogQueryRequest::default()
         });
         match self.operator_logs.query_logs(caller, query).await {

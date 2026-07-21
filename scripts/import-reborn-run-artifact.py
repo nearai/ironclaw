@@ -191,6 +191,7 @@ def trace_candidate(artifact: dict[str, Any], model_override: str | None) -> dic
         )
         has_assistant_response = any(
             message.get("kind") == "assistant"
+            and message.get("status") == "finalized"
             and str(message.get("content", "")).strip()
             for message in messages
         )

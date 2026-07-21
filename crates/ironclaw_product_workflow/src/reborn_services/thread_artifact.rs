@@ -2,13 +2,16 @@
 
 use chrono::{DateTime, Utc};
 use ironclaw_reborn_traces::contribution::DeterministicTraceRedactor;
-use ironclaw_threads::{BoundedThreadMessages, BoundedThreadMessagesRequest, ThreadMessageRecord};
+use std::collections::HashMap;
+
+use ironclaw_threads::{BoundedThreadMessages, BoundedThreadMessagesRequest, ThreadMessageId};
 use serde::{Deserialize, Serialize};
 
 use super::{
     RebornServices, RebornServicesError, RebornServicesErrorCode, RebornViewDescriptor,
     RunArtifactLogs, RunArtifactMessage, RunArtifactRedaction, WebUiAuthenticatedCaller,
-    map_timeline_probe_error, parse_thread_id_field, run_artifact::ARTIFACT_REDACTION_PIPELINE,
+    map_timeline_probe_error, parse_thread_id_field,
+    run_artifact::{ARTIFACT_REDACTION_PIPELINE, artifact_messages},
     thread_scope_from_turn_scope,
 };
 
@@ -50,7 +53,7 @@ impl RebornServices {
             .await?;
         let thread_scope =
             thread_scope_from_turn_scope(&access.scope, Some(access.run_actor.user_id.clone()))?;
-        let records: Vec<ThreadMessageRecord> = match self
+        let snapshot = match self
             .thread_service
             .list_thread_messages_bounded(BoundedThreadMessagesRequest {
                 scope: thread_scope.clone(),
@@ -61,16 +64,21 @@ impl RebornServices {
             .await
             .map_err(map_timeline_probe_error)?
         {
-            BoundedThreadMessages::Complete(history) => history.messages,
+            BoundedThreadMessages::Complete(snapshot) => snapshot,
             BoundedThreadMessages::LimitExceeded => return Err(thread_artifact_too_large()),
         };
 
         let redactor = DeterministicTraceRedactor::new(Vec::new());
-        let (messages, message_redaction_applied) = self
-            .artifact_messages_for_records(thread_scope, &thread_id, records, &redactor)
-            .await?;
+        let context_by_id: HashMap<ThreadMessageId, _> = snapshot
+            .context
+            .messages
+            .into_iter()
+            .filter_map(|message| message.message_id.map(|id| (id, message)))
+            .collect();
+        let (messages, message_redaction_applied) =
+            artifact_messages(snapshot.history.messages, &context_by_id, &redactor);
         let (logs, log_redaction_applied) = self
-            .artifact_logs(caller, thread_id.to_string(), None, &redactor)
+            .artifact_logs(caller, &thread_id, None, &redactor)
             .await;
 
         let artifact = RebornThreadArtifact {

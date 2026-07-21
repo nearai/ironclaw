@@ -2,7 +2,7 @@
 
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use async_trait::async_trait;
@@ -106,9 +106,12 @@ async fn filesystem_store_bounded_read_deduplicates_shadowed_append_before_messa
     let BoundedThreadMessages::Complete(messages) = result else {
         panic!("the one logical message must fit despite its stale append event");
     };
-    assert_eq!(messages.messages.len(), 1);
-    assert_eq!(messages.messages[0].message_id, finalized.message_id);
-    assert_eq!(messages.messages[0].status, MessageStatus::Redacted);
+    assert_eq!(messages.history.messages.len(), 1);
+    assert_eq!(
+        messages.history.messages[0].message_id,
+        finalized.message_id
+    );
+    assert_eq!(messages.history.messages[0].status, MessageStatus::Redacted);
 }
 
 #[tokio::test]
@@ -154,7 +157,56 @@ async fn filesystem_store_bounded_read_rejects_before_materializing_the_full_thr
     let BoundedThreadMessages::Complete(messages) = complete else {
         panic!("messages should fit within the export budget");
     };
-    assert_eq!(messages.messages.len(), 3);
+    assert_eq!(messages.history.messages.len(), 3);
+}
+
+#[tokio::test]
+async fn filesystem_store_bounded_read_fails_closed_without_paginated_query() {
+    let backend = Arc::new(TailTrackingBackend::new());
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-no-query", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("no-query");
+    let thread_id = ThreadId::new("thread-no-query").unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: Some("event-no-query".into()),
+            content: MessageContent::text("message"),
+        })
+        .await
+        .unwrap();
+    backend.reject_queries();
+
+    let result = service
+        .list_thread_messages_bounded(BoundedThreadMessagesRequest {
+            scope,
+            thread_id,
+            max_messages: 10,
+            max_bytes: 1024 * 1024,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result, BoundedThreadMessages::LimitExceeded);
+    assert_eq!(
+        backend.list_dir_calls(),
+        0,
+        "bounded reads must not materialize an unpaged directory fallback",
+    );
 }
 
 #[tokio::test]
@@ -355,6 +407,8 @@ struct TailTrackingBackend {
     inner: InMemoryBackend,
     tail_calls: AtomicUsize,
     tail_bounded_limits: Mutex<Vec<usize>>,
+    reject_queries: AtomicBool,
+    list_dir_calls: AtomicUsize,
 }
 
 impl TailTrackingBackend {
@@ -363,6 +417,8 @@ impl TailTrackingBackend {
             inner: InMemoryBackend::new(),
             tail_calls: AtomicUsize::new(0),
             tail_bounded_limits: Mutex::new(Vec::new()),
+            reject_queries: AtomicBool::new(false),
+            list_dir_calls: AtomicUsize::new(0),
         }
     }
 
@@ -377,6 +433,15 @@ impl TailTrackingBackend {
 
     fn tail_bounded_limits(&self) -> Vec<usize> {
         self.tail_bounded_limits.lock().unwrap().clone()
+    }
+
+    fn reject_queries(&self) {
+        self.reject_queries.store(true, Ordering::SeqCst);
+        self.list_dir_calls.store(0, Ordering::SeqCst);
+    }
+
+    fn list_dir_calls(&self) -> usize {
+        self.list_dir_calls.load(Ordering::SeqCst)
     }
 }
 
@@ -400,6 +465,7 @@ impl RootFilesystem for TailTrackingBackend {
     }
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.list_dir_calls.fetch_add(1, Ordering::SeqCst);
         self.inner.list_dir(path).await
     }
 
@@ -409,6 +475,12 @@ impl RootFilesystem for TailTrackingBackend {
         filter: &Filter,
         page: Page,
     ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        if self.reject_queries.load(Ordering::SeqCst) {
+            return Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: ironclaw_filesystem::FilesystemOperation::Query,
+            });
+        }
         self.inner.query(path, filter, page).await
     }
 

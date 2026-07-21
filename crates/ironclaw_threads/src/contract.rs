@@ -586,8 +586,14 @@ pub struct ThreadHistory {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoundedThreadMessages {
-    Complete(Box<ThreadMessageRange>),
+    Complete(Box<BoundedThreadMessageSnapshot>),
     LimitExceeded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedThreadMessageSnapshot {
+    pub history: ThreadMessageRange,
+    pub context: ContextMessages,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

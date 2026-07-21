@@ -20,12 +20,12 @@ use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
     AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest,
-    BoundedThreadMessages, BoundedThreadMessagesRequest, CapabilityDisplayPreviewEnvelope,
-    ContextMessage, ContextMessages, ContextWindow, CreateSummaryArtifactRequest,
-    DeleteToolResultRecordRequest, EnsureThreadRequest, LatestThreadMessageRequest,
-    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
-    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
-    PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
+    BoundedThreadMessageSnapshot, BoundedThreadMessages, BoundedThreadMessagesRequest,
+    CapabilityDisplayPreviewEnvelope, ContextMessage, ContextMessages, ContextWindow,
+    CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
+    LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
+    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
+    MessageStatus, PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
     SessionThreadService, SummaryArtifact, SummaryModelContextPolicy, ThreadHistory,
     ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest,
@@ -840,9 +840,8 @@ impl SessionThreadService for InMemorySessionThreadService {
         if thread.messages.len() > request.max_messages {
             return Ok(BoundedThreadMessages::LimitExceeded);
         }
-        let messages = history_messages(thread);
         let mut bytes = 0_usize;
-        for message in &messages {
+        for message in &thread.messages {
             bytes = bytes.saturating_add(
                 serde_json::to_vec(message)
                     .map_err(|error| SessionThreadError::Serialization(error.to_string()))?
@@ -852,10 +851,21 @@ impl SessionThreadService for InMemorySessionThreadService {
                 return Ok(BoundedThreadMessages::LimitExceeded);
             }
         }
+        let message_ids = thread
+            .messages
+            .iter()
+            .map(|message| message.message_id)
+            .collect::<Vec<_>>();
         Ok(BoundedThreadMessages::Complete(Box::new(
-            ThreadMessageRange {
-                thread: thread.record.clone(),
-                messages,
+            BoundedThreadMessageSnapshot {
+                history: ThreadMessageRange {
+                    thread: thread.record.clone(),
+                    messages: history_messages(thread),
+                },
+                context: ContextMessages {
+                    thread_id: request.thread_id,
+                    messages: context_messages_by_id(thread, &message_ids),
+                },
             },
         )))
     }

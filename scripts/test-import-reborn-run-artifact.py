@@ -123,12 +123,24 @@ class RunArtifactImporterTest(unittest.TestCase):
             "redaction": {"pipeline": "deterministic-trace-redactor-v1"},
             "messages": [
                 {"sequence": 1, "run_id": "run-1", "kind": "user", "content": "first"},
-                {"sequence": 2, "run_id": "run-1", "kind": "assistant", "content": "one"},
+                {
+                    "sequence": 2,
+                    "run_id": "run-1",
+                    "kind": "assistant",
+                    "status": "finalized",
+                    "content": "one",
+                },
                 {"sequence": 3, "run_id": "run-2", "kind": "user", "content": "second"},
                 self.tool_message(
                     4, "turn-b", "call-2", "builtin__two", "two result", run_id="run-2"
                 ),
-                {"sequence": 5, "run_id": "run-2", "kind": "assistant", "content": "two"},
+                {
+                    "sequence": 5,
+                    "run_id": "run-2",
+                    "kind": "assistant",
+                    "status": "finalized",
+                    "content": "two",
+                },
             ],
         }
 
@@ -184,6 +196,41 @@ class RunArtifactImporterTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "no complete run-scoped replayable turns"):
             MODULE.trace_candidate(artifact, None)
+
+    def test_thread_artifact_reports_interrupted_assistant_as_incomplete(self) -> None:
+        artifact = self.thread_artifact(
+            {"sequence": 1, "run_id": "run-1", "kind": "user", "content": "first"},
+            {
+                "sequence": 2,
+                "run_id": "run-1",
+                "kind": "assistant",
+                "status": "finalized",
+                "content": "done",
+            },
+            {"sequence": 3, "run_id": "run-2", "kind": "user", "content": "second"},
+            {
+                "sequence": 4,
+                "run_id": "run-2",
+                "kind": "assistant",
+                "status": "interrupted",
+                "content": "partial",
+            },
+        )
+
+        candidate = MODULE.trace_candidate(artifact, None)
+
+        self.assertEqual([turn["user_input"] for turn in candidate["turns"]], ["first"])
+        self.assertEqual(
+            candidate["_review"]["skipped_incomplete_runs"],
+            [
+                {
+                    "run_id": "run-2",
+                    "sequence": 3,
+                    "reason": "run has no finalized assistant response",
+                }
+            ],
+        )
+        self.assertNotIn("partial", str(candidate))
 
     def test_thread_artifact_reports_accepted_message_without_run_id(self) -> None:
         artifact = self.thread_artifact(
