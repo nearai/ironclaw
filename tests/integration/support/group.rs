@@ -128,7 +128,7 @@ use super::scripted_provider::{
 };
 use super::session_thread::RebornThreadHarness;
 use super::test_adapter::{RebornTestIngress, RebornTestProductAdapter};
-use crate::support::trace_llm::TraceLlm;
+use crate::support::trace_llm::{LlmTrace, TraceLlm};
 
 /// Per-capability preset constructors layered on `build_base`/`into_group`
 /// below. A private child module (not `pub mod` from `mod.rs`) so its only
@@ -466,7 +466,7 @@ impl RebornIntegrationGroup {
         RebornThreadBuilder {
             group: self,
             conversation_id: conversation_id.into(),
-            replies: Vec::new(),
+            reply_source: ReplySource::default(),
             actor_id: None,
             model_mode: ThreadModelMode::Normal,
             model_override: None,
@@ -1100,7 +1100,7 @@ impl TurnEventSink for FanOutTurnEventSink {
 pub struct RebornThreadBuilder<'g> {
     group: &'g RebornIntegrationGroup,
     conversation_id: String,
-    replies: Vec<RebornScriptedReply>,
+    reply_source: ReplySource,
     actor_id: Option<String>,
     model_mode: ThreadModelMode,
     /// C-ATTACH seam: overrides `LlmModelProfileRoute.model_override` (the same
@@ -1109,6 +1109,43 @@ pub struct RebornThreadBuilder<'g> {
     /// are dropped); `Some` routes through a vision-capable id so `convert_messages`
     /// builds `ContentPart::ImageUrl` parts.
     model_override: Option<String>,
+}
+
+/// A thread's source of scripted model replies: hand-written
+/// `RebornScriptedReply`s (the default, via `.script(...)`) or a raw
+/// `LlmTrace` loaded from a recorded fixture (via `.script_from_trace(...)`,
+/// e.g. a tier-5 QA trace under `tests/fixtures/llm_traces/reborn_qa/`). One
+/// enum instead of a `Vec` + `Option<LlmTrace>` pair (mirrors `ThreadModelMode`
+/// below) so the two sources are mutually exclusive BY CONSTRUCTION — a
+/// `.script(...)` call can never be silently shadowed by an earlier
+/// `.script_from_trace(...)` call left over from a copy-pasted test, or vice
+/// versa; whichever was called last simply IS the state.
+pub(crate) enum ReplySource {
+    /// Hand-written replies (the default, empty until `.script(...)` is called).
+    Scripted(Vec<RebornScriptedReply>),
+    /// A raw trace loaded from a fixture, replayed as-is — bypasses
+    /// `RebornScriptedReply` and its tool-call-id canonicalization entirely
+    /// (design §4.2's "no raw `LlmTrace` construction" rule governs
+    /// hand-rolled steps in test bodies, not loading a recorded fixture
+    /// through this sanctioned seam). Boxed: `LlmTrace` is far larger than
+    /// `Vec<RebornScriptedReply>`'s pointer-sized representation, and
+    /// clippy's `large_enum_variant` flags the unboxed size gap.
+    Trace(Box<LlmTrace>),
+}
+
+impl Default for ReplySource {
+    fn default() -> Self {
+        Self::Scripted(Vec::new())
+    }
+}
+
+impl ReplySource {
+    fn into_trace_llm(self) -> TraceLlm {
+        match self {
+            Self::Scripted(replies) => scripted_trace_llm(replies),
+            Self::Trace(trace) => TraceLlm::from_trace(*trace),
+        }
+    }
 }
 
 /// A thread's model-call behavior: exactly one of normal scripted playback,
@@ -1133,9 +1170,35 @@ enum ThreadModelMode {
 
 impl<'g> RebornThreadBuilder<'g> {
     /// Set the scripted model replies for this thread (consumed in order at the
-    /// raw-provider seam, one per model turn).
+    /// raw-provider seam, one per model turn). Mutually exclusive with
+    /// `.script_from_trace(...)`: the last call wins (see `ReplySource`).
     pub fn script(mut self, replies: impl IntoIterator<Item = RebornScriptedReply>) -> Self {
-        self.replies = replies.into_iter().collect();
+        self.reply_source = ReplySource::Scripted(replies.into_iter().collect());
+        self
+    }
+
+    /// Script this thread's model replies from a raw `LlmTrace` (e.g. loaded via
+    /// `LlmTrace::from_file` from a tier-5 QA fixture under
+    /// `tests/fixtures/llm_traces/reborn_qa/`) instead of hand-written
+    /// `RebornScriptedReply`s — same vendor-SDK seam, realistic reply content.
+    /// Mutually exclusive with `.script(...)`: the last call wins (see
+    /// `ReplySource`). Only replays `steps` (reply content) — a caller wanting
+    /// the fixture's `http_exchanges` to also drive realistic tool output must
+    /// separately wire them into `.with_keyed_http_responses(...)`, as
+    /// `tests/integration/tool_call.rs::runs_qa_fixture_trace_through_builtin_http_tools`
+    /// does; see that test's doc comment for why `expected_tool_results` and
+    /// multi-turn `TraceExpects` have no consumer.
+    pub fn script_from_trace(mut self, trace: LlmTrace) -> Self {
+        self.reply_source = ReplySource::Trace(Box::new(trace));
+        self
+    }
+
+    /// Internal: set the reply source directly (used by the flat builder to
+    /// thread its own `.script(...)`/`.script_from_trace(...)` choice through
+    /// the degenerate one-thread group — mirrors `park_model_opt`/
+    /// `fail_model_opt` below).
+    pub(crate) fn with_reply_source(mut self, source: ReplySource) -> Self {
+        self.reply_source = source;
         self
     }
 
@@ -1248,7 +1311,7 @@ impl<'g> RebornThreadBuilder<'g> {
         // wraps it in a parking provider at the SAME vendor-SDK seam (decorator
         // chain still runs on top), so captured requests stay inspectable either
         // way.
-        let scripted_llm: Arc<TraceLlm> = Arc::new(scripted_trace_llm(self.replies));
+        let scripted_llm: Arc<TraceLlm> = Arc::new(self.reply_source.into_trace_llm());
         // C-ERRORS: `Failing` swaps in `ErrLlm` at the same vendor-SDK seam;
         // `Parked` swaps in the parking wrapper. `ThreadModelMode` makes the
         // three modes mutually exclusive by construction — no priority rule

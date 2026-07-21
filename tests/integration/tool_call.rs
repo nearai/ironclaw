@@ -12,8 +12,10 @@ mod support;
 use ironclaw_threads::MessageKind;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::group::RebornIntegrationGroup;
+use reborn_support::http_matcher::ScriptedHttpResponse;
 use reborn_support::reply::RebornScriptedReply;
 use serde_json::json;
+use support::trace_llm::LlmTrace;
 
 const SLACK_PERSONAL_SCOPES: &[&str] = &[
     "search:read",
@@ -110,6 +112,134 @@ async fn runs_http_tool_call_through_recorded_egress() {
 }
 
 const HTTP_TOOL_URL: &str = "https://api.example.test/v1/items";
+
+/// Loads the `web_hn_search` tier-5 QA fixture (two parallel `builtin.http`
+/// tool calls, then a text reply) shared by the `script_from_trace` tests
+/// below, so neither test body carries the path-join/file-load boilerplate.
+fn web_hn_search_trace() -> LlmTrace {
+    let fixture_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/llm_traces/reborn_qa/web_hn_search.json");
+    LlmTrace::from_file(&fixture_path)
+        .unwrap_or_else(|error| panic!("QA fixture {} loads: {error}", fixture_path.display()))
+}
+
+/// The fixture's own recorded user turn — must match its
+/// `request_hint.last_user_message_contains` so the FIFO/hint-scan replay in
+/// `TraceLlm::next_step` plays steps back in the fixture's own recorded order.
+const WEB_HN_SEARCH_USER_TURN: &str =
+    "search Hacker News for any recent posts mentioning 'IronClaw' or 'NEAR AI'";
+
+/// Converts a trace's recorded `http_exchanges` into keyed scripted HTTP
+/// responses (`.with_keyed_http_responses(...)`), so a `builtin.http` tool
+/// call replays the SAME real response the fixture recorded instead of a
+/// generic canned body. Kept alongside `web_hn_search_trace()` so the test
+/// body stays in the `build -> submit_turn -> assert` shape.
+fn keyed_http_responses_from_trace(trace: &LlmTrace) -> Vec<ScriptedHttpResponse> {
+    trace
+        .http_exchanges
+        .iter()
+        .map(|exchange| {
+            ScriptedHttpResponse::for_url(
+                exchange.request.url.clone(),
+                exchange.response.body.clone(),
+            )
+            .with_status(exchange.response.status)
+        })
+        .collect()
+}
+
+/// Proves `RebornIntegrationHarnessBuilder::script_from_trace` — the
+/// fixture-sourced LLM seam. Replays a tier-5 QA fixture directly through the
+/// SAME vendor-SDK `TraceLlm` seam `.script(...)` uses, bypassing
+/// `RebornScriptedReply` entirely. Unlike the hand-written replies elsewhere
+/// in this file, this content came from a real recorded model exchange, so
+/// this is the proof the new entry point actually replays a realistic trace
+/// end to end (real coordinator, real dispatch, real recorded egress) — not
+/// just that it compiles.
+///
+/// `http_exchanges` (this fixture's 2 recorded `builtin.http` request/response
+/// pairs) IS consumed: wired into `.with_keyed_http_responses(...)` so each of
+/// the 2 parallel tool calls replays its OWN real recorded HTTP response
+/// instead of a generic canned body, then asserted via distinctive substrings
+/// unique to each recorded response — proving both per-call URL-keyed routing
+/// and that `builtin.http` handles realistic (20KB+) response bodies correctly.
+///
+/// `expected_tool_results` deliberately has NO consumer here — investigated
+/// and found not composable without a production change. It is captured at
+/// recording time as literally `ChatMessage{role: Role::Tool}.content`
+/// (`crates/ironclaw_llm/src/recording.rs:986-994`), but today's harness
+/// (every capability-IO mode) always renders a compact `ToolResultReference`
+/// observation envelope there, never that fixture's old verbose flattened
+/// content — a real production tool-result-serialization change since these
+/// fixtures were recorded, not a test-harness gap. Tier-5's own more mature
+/// QA harness independently confirms this: `strip_expected_tool_results`
+/// (`tests/support/reborn_parity_qa/qa_trace.rs`) runs before every real
+/// runtime replay in `tests/reborn_qa_recorded_behavior.rs` — even the
+/// gateway-seam harness never exact-matches this field against live-executed
+/// tool output. Reproducing it would mean reverting production's tool-result
+/// serialization to a shape it no longer uses, out of scope for a test-only
+/// change.
+///
+/// Multi-turn `TraceExpects` also has no consumer: every fixture under
+/// `tests/fixtures/llm_traces/reborn_qa/` is single-turn (exactly one
+/// `user_input` step each), so there is no real fixture data to drive a
+/// multi-turn `script_from_trace` test against.
+#[tokio::test]
+async fn runs_qa_fixture_trace_through_builtin_http_tools() {
+    let trace = web_hn_search_trace();
+    let h = RebornIntegrationHarness::test_default()
+        .with_keyed_http_responses(keyed_http_responses_from_trace(&trace))
+        .script_from_trace(trace)
+        .build()
+        .await
+        .expect("harness builds from a fixture-sourced trace");
+
+    h.submit_turn(WEB_HN_SEARCH_USER_TURN)
+        .await
+        .expect("fixture-scripted turn completes");
+    h.assert_tool_invoked("builtin.http")
+        .await
+        .expect("fixture's builtin.http calls ran through the real recorded egress");
+    // Each recorded exchange's real HN result title — presence of BOTH proves
+    // the 2 parallel tool calls each replayed their OWN recorded response
+    // (not both landing on the same exchange or a generic default body).
+    h.assert_tool_result_contains("IronClaw: a Rust-based clawd")
+        .await
+        .expect("first recorded HTTP exchange's real body reached the tool result");
+    h.assert_tool_result_contains("Commercial jet collides with Black Hawk helicopter")
+        .await
+        .expect("second recorded HTTP exchange's real body reached the tool result");
+    h.assert_reply_contains("Hacker News")
+        .await
+        .expect("fixture's final text reply is the turn's finalized output");
+}
+
+/// `ReplySource`'s documented "last call wins" contract: chaining
+/// `.script(...)` then `.script_from_trace(...)` on the same builder must
+/// replay the trace, not merge with or fall back to the earlier hand-written
+/// reply. Proven by asserting the fixture's `builtin.http` call actually ran
+/// — the hand-scripted reply below is text-only, so a tool invocation can
+/// only come from the trace having overridden it.
+#[tokio::test]
+async fn script_from_trace_after_script_overrides_scripted_replies() {
+    let h = RebornIntegrationHarness::test_default()
+        .with_builtin_http_tools()
+        .script([RebornScriptedReply::text(
+            "must not play back: overridden by script_from_trace",
+        )])
+        .script_from_trace(web_hn_search_trace())
+        .build()
+        .await
+        .expect("harness builds");
+
+    h.submit_turn(WEB_HN_SEARCH_USER_TURN)
+        .await
+        .expect("turn completes from the fixture trace, not the earlier .script(...) call");
+    h.assert_tool_invoked("builtin.http").await.expect(
+        "later .script_from_trace(...) call wins: the fixture's tool call ran, proving the \
+         earlier .script(...) reply was overridden, not merged",
+    );
+}
 
 /// A prior assistant refusal is conversation history, not capability truth.
 /// Once Slack is installed and activated, the refreshed tool definitions must
