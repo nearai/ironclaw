@@ -489,7 +489,7 @@ fn invocation_mount_view_for_segments(
     user_id: &str,
 ) -> Result<MountView, ironclaw_host_api::HostApiError> {
     let tenant_user_prefix = format!("/tenants/{tenant_id}/users/{user_id}");
-    let mut grants = Vec::with_capacity(PER_USER_ALIASES.len() + 2);
+    let mut grants = Vec::with_capacity(PER_USER_ALIASES.len() + 3);
     for alias in PER_USER_ALIASES {
         let target = format!("{tenant_user_prefix}{alias}");
         grants.push(MountGrant::new(
@@ -516,6 +516,13 @@ fn invocation_mount_view_for_segments(
         // delete-less grant above.
         MountAlias::new("/tenant-shared/reborn-identity")?,
         VirtualPath::new(format!("/tenants/{tenant_id}/shared/reborn-identity"))?,
+        MountPermissions::read_write_list_delete(),
+    ));
+    grants.push(MountGrant::new(
+        MountAlias::new("/extension-admin-configuration")?,
+        VirtualPath::new(format!(
+            "/tenants/{tenant_id}/shared/extension-admin-configuration"
+        ))?,
         MountPermissions::read_write_list_delete(),
     ));
     for system_subroot in ["/system/settings", "/system/extensions", "/system/skills"] {
@@ -739,6 +746,25 @@ mod mount_view_tests {
         assert_eq!(
             resolved.as_str(),
             &format!("/tenants/{}/shared/foo", scope.tenant_id.as_str())
+        );
+    }
+
+    #[test]
+    fn invocation_mount_view_routes_admin_configuration_to_tenant_shared_storage() {
+        let scope = sample_scope();
+        let view = invocation_mount_view(&scope).unwrap();
+        let resolved = view
+            .resolve(
+                &ScopedPath::new("/extension-admin-configuration/groups/extension.slack.json")
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            resolved.as_str(),
+            &format!(
+                "/tenants/{}/shared/extension-admin-configuration/groups/extension.slack.json",
+                scope.tenant_id.as_str(),
+            ),
         );
     }
 

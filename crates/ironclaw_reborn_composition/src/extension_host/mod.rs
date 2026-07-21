@@ -11,6 +11,7 @@
 //! (`mcp`, `mcp_discovery`) behind one internal module. The crate root re-exports
 //! the same public items from here so the crate's public API is unchanged.
 
+pub(crate) mod admin_configuration;
 pub(crate) mod available_extension_import;
 pub(crate) mod available_extensions;
 pub(crate) mod bundled_skills;

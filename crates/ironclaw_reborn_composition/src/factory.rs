@@ -13,7 +13,8 @@ use crate::extension_host::lifecycle::{
 };
 use crate::extension_host::mcp::hosted_http_mcp_runtime;
 use crate::extension_host::{
-    available_extensions::AvailableExtensionCatalog,
+    admin_configuration::ComposedAdminConfigurationService,
+    available_extensions::{AdminConfigurationCatalogUse, AvailableExtensionCatalog},
     extension_installation_store::FilesystemExtensionInstallationStore,
     extension_lifecycle::{
         ActiveExtensionPublisher, ExtensionCredentialCleanup, RebornLocalExtensionManagementPort,
@@ -62,6 +63,7 @@ use ironclaw_conversations::{
 };
 use ironclaw_conversations::{InboundTurnError, RebornFilesystemConversationServices};
 use ironclaw_events::{DurableAuditLog, DurableEventLog};
+use ironclaw_extension_host::{AdminConfigurationService, FilesystemAdminConfigurationStore};
 use ironclaw_extensions::{
     ExtensionInstallationStore, ExtensionLifecycleService, ExtensionRegistry,
     SharedExtensionRegistry,
@@ -1286,6 +1288,8 @@ pub(crate) struct RebornRuntimeSubstrate {
     /// composition paths without extension management.
     pub(crate) channel_config:
         Option<Arc<crate::extension_host::channel_config::ChannelConfigService>>,
+    pub(crate) admin_configuration: Option<Arc<ComposedAdminConfigurationService>>,
+    pub(crate) admin_configuration_uses: Arc<Vec<AdminConfigurationCatalogUse>>,
     /// The generic durable channel-identity binding store (extension-runtime
     /// §5.5): the channel host assembly resolves verified inbound actors
     /// through it for auth-declaring channel extensions.
@@ -2045,6 +2049,28 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             reason: format!("first-party extension catalog could not be loaded: {error}"),
         })?,
     );
+    let admin_configuration_uses =
+        available_extensions
+            .admin_configuration_uses()
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("admin configuration catalog could not be projected: {error}"),
+            })?;
+    let admin_configuration_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
+    let admin_configuration = Arc::new(
+        AdminConfigurationService::new(
+            FilesystemAdminConfigurationStore::new(Arc::new(ScopedFilesystem::new(
+                admin_configuration_filesystem,
+                crate::invocation_mount_view,
+            ))),
+            Arc::clone(&secret_store),
+            admin_configuration_uses
+                .iter()
+                .map(|usage| usage.descriptor.clone()),
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("admin configuration service could not be built: {error}"),
+        })?,
+    );
     let extension_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
     let extension_installation_store: Arc<dyn ExtensionInstallationStore> = Arc::new(
         FilesystemExtensionInstallationStore::load_at(
@@ -2155,6 +2181,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     if let Some(local_runtime) = Arc::get_mut(&mut store_graph.local_runtime) {
         local_runtime.extension_management = Some(Arc::clone(&extension_management));
         local_runtime.channel_config = Some(channel_config_service);
+        local_runtime.admin_configuration = Some(admin_configuration);
+        local_runtime.admin_configuration_uses = Arc::new(admin_configuration_uses);
         local_runtime.channel_identity_store = Some(channel_identity_store);
         local_runtime.channel_dm_target_store = Some(channel_dm_target_store);
         local_runtime.runtime_http_egress = Some(product_auth_runtime_ports.runtime_http_egress());
@@ -2798,6 +2826,8 @@ async fn build_local_runtime_store_graph(
         skill_management,
         extension_management: None,
         channel_config: None,
+        admin_configuration: None,
+        admin_configuration_uses: Arc::new(Vec::new()),
         channel_identity_store: None,
         channel_dm_target_store: None,
         channel_disconnect_slot: Arc::new(std::sync::OnceLock::new()),

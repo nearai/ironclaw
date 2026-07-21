@@ -235,12 +235,18 @@ where
             .secrets
             .lease_once(&shared_scope, &stored_handle)
             .await
-            .map_err(|_| AdminConfigurationServiceError::Unavailable)?;
+            .map_err(|error| {
+                tracing::warn!(error = ?error, "admin-configuration secret lease failed");
+                AdminConfigurationServiceError::Unavailable
+            })?;
         self.secrets
             .consume(&shared_scope, lease.id)
             .await
             .map(Some)
-            .map_err(|_| AdminConfigurationServiceError::Unavailable)
+            .map_err(|error| {
+                tracing::warn!(error = ?error, "admin-configuration secret consume failed");
+                AdminConfigurationServiceError::Unavailable
+            })
     }
 
     /// Replace one group using client-owned concurrency and retry identities.

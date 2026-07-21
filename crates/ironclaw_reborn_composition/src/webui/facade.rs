@@ -22,6 +22,7 @@ use ironclaw_product_workflow::{
 
 use ironclaw_triggers::TriggerRepository;
 
+use crate::extension_host::admin_configuration::AdminConfigurationViewProvider;
 use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 use crate::webui::product_capability::RuntimeProductCapabilityInvoker;
 use crate::{
@@ -236,10 +237,25 @@ pub(crate) fn build_webui_services_with_channel_connection(
         outbound_delivery_target_providers.push(provider);
     }
 
-    let mut api = ProductRebornServices::new_with_product_capability_invoker(
+    let admin_configuration_view = services
+        .local_runtime
+        .as_ref()
+        .and_then(|local_runtime| {
+            Some(AdminConfigurationViewProvider::new(
+                local_runtime.admin_configuration.clone()?,
+                local_runtime.admin_configuration_uses.as_ref().clone(),
+                local_runtime
+                    .extension_management
+                    .as_ref()?
+                    .installation_store_handle(),
+            ))
+        })
+        .unwrap_or_default();
+    let mut api = ProductRebornServices::new_with_product_ports(
         runtime.webui_thread_service(),
         runtime.webui_turn_coordinator(),
         RuntimeProductCapabilityInvoker::from_services(services),
+        admin_configuration_view,
     )
     .with_approval_interactions(runtime.webui_approval_interaction_service())
     .with_auth_interactions(runtime.webui_auth_interaction_service());

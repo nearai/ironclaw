@@ -3,9 +3,10 @@
 use super::{
     ProductCapabilityInvoker, RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
     RebornOperatorCommandPlaneResponse, RebornOperatorLogsQuery, RebornOperatorSurfaceStatus,
-    RebornServices, RebornServicesError, RebornViewDescriptor, WebUiAuthenticatedCaller,
-    WebUiInboundValidationCode, WebUiInboundValidationError, bounded_log_query,
-    bounded_operator_logs_query, parse_thread_id_field, validate_log_query_modes,
+    RebornServices, RebornServicesError, RebornViewDescriptor, RebornViewProvider,
+    WebUiAuthenticatedCaller, WebUiInboundValidationCode, WebUiInboundValidationError,
+    bounded_log_query, bounded_operator_logs_query, parse_thread_id_field,
+    validate_log_query_modes,
 };
 
 pub const LOGS_VIEW: RebornViewDescriptor = RebornViewDescriptor {
@@ -18,9 +19,10 @@ pub const OPERATOR_LOGS_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     paginated: true,
 };
 
-impl<I> RebornServices<I>
+impl<I, V> RebornServices<I, V>
 where
     I: ProductCapabilityInvoker + Clone + 'static,
+    V: RebornViewProvider + Clone + 'static,
 {
     pub(super) async fn build_logs_view(
         &self,

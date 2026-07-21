@@ -436,6 +436,8 @@ async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornRuntime
         skill_management: Arc::clone(&base_runtime.skill_management),
         extension_management: base_runtime.extension_management.clone(),
         channel_config: base_runtime.channel_config.clone(),
+        admin_configuration: base_runtime.admin_configuration.clone(),
+        admin_configuration_uses: Arc::clone(&base_runtime.admin_configuration_uses),
         channel_identity_store: base_runtime.channel_identity_store.clone(),
         channel_dm_target_store: base_runtime.channel_dm_target_store.clone(),
         channel_disconnect_slot: Arc::clone(&base_runtime.channel_disconnect_slot),

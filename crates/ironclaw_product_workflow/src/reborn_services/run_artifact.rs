@@ -20,8 +20,8 @@ use super::{
     OPERATOR_LOGS_MAX_LIMIT, ProductCapabilityInvoker, RebornGetRunStateRequest,
     RebornGetRunStateResponse, RebornLogEntry, RebornLogQueryRequest, RebornServices,
     RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornViewDescriptor,
-    WebUiAuthenticatedCaller, bounded_log_query, map_thread_error, parse_run_id_field,
-    parse_thread_id_field,
+    RebornViewProvider, WebUiAuthenticatedCaller, bounded_log_query, map_thread_error,
+    parse_run_id_field, parse_thread_id_field,
 };
 
 pub const RUN_ARTIFACT_SCHEMA: &str = "ironclaw.run_artifact.v1";
@@ -88,9 +88,10 @@ pub struct RunArtifactRedaction {
     pub applied: bool,
 }
 
-impl<I> RebornServices<I>
+impl<I, V> RebornServices<I, V>
 where
     I: ProductCapabilityInvoker + Clone + 'static,
+    V: RebornViewProvider + Clone + 'static,
 {
     pub(super) async fn build_run_artifact(
         &self,

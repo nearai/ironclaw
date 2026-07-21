@@ -68,6 +68,7 @@ use crate::{
     is_approval_gate_ref, is_auth_gate_ref, thread_metadata_is_automation_trigger,
 };
 
+mod admin_configuration;
 mod admin_users;
 mod error;
 mod extension_credentials;
@@ -85,6 +86,11 @@ mod trace_credits;
 mod types;
 mod views;
 
+pub use admin_configuration::{
+    ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID, ADMIN_CONFIGURATION_VIEW,
+    RebornAdminConfigurationField, RebornAdminConfigurationGroup,
+    RebornAdminConfigurationListResponse, RebornAdminConfigurationUse,
+};
 use admin_users::{
     ADMIN_USER_LIST_DEFAULT_LIMIT, ADMIN_USER_LIST_MAX_LIMIT, RejectingAdminUserService,
 };
@@ -175,7 +181,10 @@ pub use types::{
     RebornStreamEventsSubscription, RebornSubmitTurnResponse, RebornTimelineRequest,
     RebornTimelineResponse, RebornVendorAuthAccounts,
 };
-pub use views::{RebornViewDescriptor, RebornViewPage, RebornViewQuery};
+pub use views::{
+    RebornViewDescriptor, RebornViewPage, RebornViewProvider, RebornViewQuery,
+    UnavailableRebornViewProvider,
+};
 
 type SkillActivationRecorder =
     dyn Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), RebornServicesError> + Send + Sync;
@@ -2787,8 +2796,12 @@ impl ProductCapabilityInvoker for UnavailableProductCapabilityInvoker {
 
 /// Default facade implementation composed at the WebUI boundary.
 #[derive(Clone)]
-pub struct RebornServices<I = UnavailableProductCapabilityInvoker> {
+pub struct RebornServices<
+    I = UnavailableProductCapabilityInvoker,
+    V = UnavailableRebornViewProvider,
+> {
     product_capability_invoker: I,
+    view_provider: V,
     thread_service: Arc<dyn SessionThreadService>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     inbound_attachments: Option<Arc<dyn InboundAttachmentLander>>,
@@ -2819,20 +2832,21 @@ pub struct RebornServices<I = UnavailableProductCapabilityInvoker> {
     thread_operation_locks: Arc<ThreadOperationLocks>,
 }
 
-impl RebornServices<UnavailableProductCapabilityInvoker> {
+impl RebornServices<UnavailableProductCapabilityInvoker, UnavailableRebornViewProvider> {
     pub fn new(
         thread_service: Arc<dyn SessionThreadService>,
         turn_coordinator: Arc<dyn TurnCoordinator>,
     ) -> Self {
-        Self::new_with_product_capability_invoker(
+        Self::new_with_product_ports(
             thread_service,
             turn_coordinator,
             UnavailableProductCapabilityInvoker,
+            UnavailableRebornViewProvider,
         )
     }
 }
 
-impl<I> RebornServices<I>
+impl<I> RebornServices<I, UnavailableRebornViewProvider>
 where
     I: ProductCapabilityInvoker + Clone + 'static,
 {
@@ -2841,8 +2855,29 @@ where
         turn_coordinator: Arc<dyn TurnCoordinator>,
         product_capability_invoker: I,
     ) -> Self {
+        Self::new_with_product_ports(
+            thread_service,
+            turn_coordinator,
+            product_capability_invoker,
+            UnavailableRebornViewProvider,
+        )
+    }
+}
+
+impl<I, V> RebornServices<I, V>
+where
+    I: ProductCapabilityInvoker + Clone + 'static,
+    V: RebornViewProvider + Clone + 'static,
+{
+    pub fn new_with_product_ports(
+        thread_service: Arc<dyn SessionThreadService>,
+        turn_coordinator: Arc<dyn TurnCoordinator>,
+        product_capability_invoker: I,
+        view_provider: V,
+    ) -> Self {
         Self {
             product_capability_invoker,
+            view_provider,
             thread_service,
             turn_coordinator,
             inbound_attachments: None,
@@ -3235,9 +3270,10 @@ fn last_admin_error() -> RebornServicesError {
 }
 
 #[async_trait]
-impl<I> RebornServicesApi for RebornServices<I>
+impl<I, V> RebornServicesApi for RebornServices<I, V>
 where
     I: ProductCapabilityInvoker + Clone + 'static,
+    V: RebornViewProvider + Clone + 'static,
 {
     async fn invoke(
         &self,
@@ -4046,6 +4082,12 @@ where
         caller: WebUiAuthenticatedCaller,
         query: RebornViewQuery,
     ) -> Result<RebornViewPage, RebornServicesError> {
+        if self.view_provider.descriptor().id == query.view_id {
+            return self
+                .view_provider
+                .query(caller, query.params, query.cursor)
+                .await;
+        }
         match query.view_id.as_str() {
             id if id == LOGS_VIEW.id => {
                 let request = serde_json::from_value(query.params)
@@ -5287,9 +5329,10 @@ where
     }
 }
 
-impl<I> RebornServices<I>
+impl<I, V> RebornServices<I, V>
 where
     I: ProductCapabilityInvoker,
+    V: RebornViewProvider,
 {
     async fn list_visible_threads_for_scope(
         &self,
@@ -5911,9 +5954,10 @@ struct ResolvedThreadAccess {
 //                == Some(fire.creator_user_id) [post-#4754: new first-fire bindings
 //                   persist creator; legacy (pre-#4754) bindings remain owner-None
 //                   and will not match — accepted breakage; recreate trigger to fix].
-impl<I> RebornServices<I>
+impl<I, V> RebornServices<I, V>
 where
     I: ProductCapabilityInvoker + Clone + 'static,
+    V: RebornViewProvider + Clone + 'static,
 {
     /// Shared authorization check for automation-trigger threads.
     ///

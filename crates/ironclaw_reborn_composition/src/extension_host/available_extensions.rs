@@ -1,7 +1,8 @@
 // arch-exempt: large_file, bundled extension catalog and manifest projection, plan #5905
 use ironclaw_extensions::{
-    CapabilityDeclV2, CapabilityVisibility, ExtensionManifestRecord, ExtensionPackage,
-    ExtensionRuntime, HostApiContractRegistry, ManifestSource,
+    CapabilityDeclV2, CapabilityVisibility, ExtensionAdminConfigurationDescriptor,
+    ExtensionManifestRecord, ExtensionPackage, ExtensionRuntime, HostApiContractRegistry,
+    ManifestSource,
 };
 use ironclaw_filesystem::{DirEntry, FileType, FilesystemError, RootFilesystem};
 use ironclaw_first_party_extensions::is_gsuite_extension_id;
@@ -121,6 +122,13 @@ pub(crate) struct AvailableExtensionPackage {
     /// connect flow authorizes a shared account with setup scopes distinct from
     /// its per-tool runtime scopes.
     pub(crate) oauth_setup_override: Option<LifecycleExtensionCredentialRequirement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AdminConfigurationCatalogUse {
+    pub(crate) descriptor: ExtensionAdminConfigurationDescriptor,
+    pub(crate) package_id: String,
+    pub(crate) display_name: String,
 }
 
 impl AvailableExtensionPackage {
@@ -444,6 +452,58 @@ impl AvailableExtensionCatalog {
             .ok_or_else(|| ProductWorkflowError::InvalidBindingRequest {
                 reason: "available extension was not found".to_string(),
             })
+    }
+
+    /// Project deployment-owned configuration directly from every available
+    /// manifest, including packages that have not been installed. The package
+    /// source stamp is preserved during re-resolution, so an uploaded bundle
+    /// cannot gain host-bundled authority through this read-only projection.
+    pub(crate) fn admin_configuration_uses(
+        &self,
+    ) -> Result<Vec<AdminConfigurationCatalogUse>, ProductWorkflowError> {
+        let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "host port catalog rejected admin-configuration projection: {error}"
+                ),
+            }
+        })?;
+        let contracts = product_extension_host_api_contract_registry().map_err(|error| {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "host API contracts rejected admin-configuration projection: {error}"
+                ),
+            }
+        })?;
+        let mut uses = Vec::new();
+        for package in &self.packages {
+            let record = ExtensionManifestRecord::from_toml(
+                &package.manifest_toml,
+                package.source,
+                &host_ports,
+                None,
+                &contracts,
+            )
+            .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
+                reason: format!(
+                    "available extension manifest failed admin-configuration projection ({}): {error}",
+                    package.package_ref.id
+                ),
+            })?;
+            uses.extend(
+                record
+                    .resolved()
+                    .admin_configuration
+                    .iter()
+                    .cloned()
+                    .map(|descriptor| AdminConfigurationCatalogUse {
+                        descriptor,
+                        package_id: package.package_ref.id.to_string(),
+                        display_name: package.package.manifest.name.clone(),
+                    }),
+            );
+        }
+        Ok(uses)
     }
 }
 
@@ -1284,6 +1344,25 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
             assert!(
                 expected.is_subset(&ids),
                 "{query} should discover every GSuite package; got {ids:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn admin_configuration_projection_includes_uninstalled_bundled_packages() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let uses = catalog.admin_configuration_uses().unwrap();
+
+        for (package_id, group_id) in [
+            ("slack", "extension.slack"),
+            ("telegram", "extension.telegram"),
+            ("gmail", "vendor.google"),
+        ] {
+            assert!(
+                uses.iter().any(|usage| {
+                    usage.package_id == package_id && usage.descriptor.group_id.as_str() == group_id
+                }),
+                "manifest-declared admin configuration for {package_id} must be projected from the available catalog",
             );
         }
     }
