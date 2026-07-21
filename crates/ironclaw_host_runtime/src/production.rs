@@ -1081,6 +1081,7 @@ impl DefaultHostRuntime {
         let error = CapabilityInvocationError::AuthorizationDenied {
             capability: capability_id.clone(),
             reason: DenyReason::PolicyDenied,
+            detail: None,
         };
         Ok(Some(RuntimeCapabilityOutcome::Failed(failure_from(
             error,
@@ -1742,6 +1743,13 @@ fn rejected_summary_diagnostic(
 fn sanitized_failure_message(error: &CapabilityInvocationError) -> Option<String> {
     use CapabilityInvocationError::*;
     match error {
+        // Surface the planner's specific fail-closed reason (threaded on
+        // `detail`) behind the collapsed `DenyReason` so the model-visible
+        // message explains the denial instead of a bare `PolicyDenied`.
+        AuthorizationDenied {
+            detail: Some(detail),
+            ..
+        } => Some(format!("{error}: {detail}")),
         UnknownCapability { .. }
         | AuthorizationDenied { .. }
         | UnsupportedObligations { .. }

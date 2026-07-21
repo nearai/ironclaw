@@ -400,14 +400,21 @@ fn assert_failed_capability(
     };
     assert_eq!(failure.capability_id.as_str(), capability_id);
     assert_eq!(failure.kind, expected_kind);
+    let message = failure.message.as_deref().unwrap_or_default();
     assert!(
-        failure
-            .message
-            .as_deref()
-            .is_some_and(|message| message.contains(expected_message)),
+        message.contains(expected_message),
         "expected {capability_id} failure message to contain {expected_message:?}, got {:?}",
         failure.message
     );
+    // Denial messages must explain the reason in plain language and never leak
+    // internal planner enum tokens to the model (see #6386 and the
+    // `builtin_http_runtime_policy_denial_stops_before_egress` sibling check).
+    for token in ["ProcessBackendKind::", "NetworkMode::", "SecretMode::"] {
+        assert!(
+            !message.contains(token),
+            "{capability_id} failure message leaked internal planner enum token {token:?}: {message}"
+        );
+    }
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -467,7 +474,7 @@ async fn assert_process_capabilities_unavailable_for_processless_runtime(
         spawn_outcome,
         SPAWN_SUBAGENT_CAPABILITY_ID,
         RuntimeFailureKind::Authorization,
-        "ProcessBackendKind::None",
+        "process execution is disabled",
     );
 }
 
@@ -730,7 +737,7 @@ async fn hosted_single_tenant_volume_hides_process_capabilities() {
     assert_process_capabilities_unavailable_for_processless_runtime(
         &services,
         RuntimeFailureKind::Authorization,
-        "ProcessBackendKind::None",
+        "process execution is disabled",
     )
     .await;
 }

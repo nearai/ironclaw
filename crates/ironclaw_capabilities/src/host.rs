@@ -339,6 +339,7 @@ where
                 return Err(CapabilityInvocationError::AuthorizationDenied {
                     capability: request.capability_id,
                     reason,
+                    detail: None,
                 });
             }
             AuthorizeFold::Blocked { result } => {
@@ -587,6 +588,7 @@ where
             return Err(CapabilityInvocationError::AuthorizationDenied {
                 capability: request.capability_id.clone(),
                 reason: DenyReason::InternalInvariantViolation,
+                detail: None,
             });
         }
         debug!("capability invocation started");
@@ -1079,6 +1081,7 @@ where
             return Err(CapabilityInvocationError::AuthorizationDenied {
                 capability: request.capability_id,
                 reason: DenyReason::InternalInvariantViolation,
+                detail: None,
             });
         }
 
@@ -1117,6 +1120,7 @@ where
             return Err(CapabilityInvocationError::AuthorizationDenied {
                 capability: request.capability_id,
                 reason: DenyReason::PolicyDenied,
+                detail: None,
             });
         }
         if run_record.status != RunStatus::BlockedApproval {
@@ -1276,6 +1280,7 @@ where
             return Err(CapabilityInvocationError::AuthorizationDenied {
                 capability: request.capability_id,
                 reason: DenyReason::InternalInvariantViolation,
+                detail: None,
             });
         }
 
@@ -1298,6 +1303,7 @@ where
             return Err(CapabilityInvocationError::AuthorizationDenied {
                 capability: request.capability_id,
                 reason: DenyReason::PolicyDenied,
+                detail: None,
             });
         }
         if run_record.status != RunStatus::BlockedAuth {
@@ -1622,6 +1628,7 @@ where
             return Err(CapabilityInvocationError::AuthorizationDenied {
                 capability: request.capability_id,
                 reason: DenyReason::InternalInvariantViolation,
+                detail: None,
             });
         }
 
@@ -1658,6 +1665,7 @@ where
             return Err(CapabilityInvocationError::AuthorizationDenied {
                 capability: request.capability_id,
                 reason: DenyReason::PolicyDenied,
+                detail: None,
             });
         }
         if run_record.status != RunStatus::BlockedApproval {
@@ -1805,6 +1813,7 @@ where
                 return Err(CapabilityInvocationError::AuthorizationDenied {
                     capability: request.capability_id,
                     reason,
+                    detail: None,
                 });
             }
             Decision::RequireApproval { .. } => {
@@ -1989,6 +1998,7 @@ where
                 return Err(CapabilityInvocationError::AuthorizationDenied {
                     capability: request.capability_id,
                     reason,
+                    detail: None,
                 });
             }
             AuthorizeFold::Blocked { .. } => {
@@ -2098,6 +2108,7 @@ where
             return Err(CapabilityInvocationError::AuthorizationDenied {
                 capability: request.capability_id.clone(),
                 reason: DenyReason::InternalInvariantViolation,
+                detail: None,
             });
         }
 
@@ -2716,6 +2727,7 @@ where
                 return Err(CapabilityInvocationError::AuthorizationDenied {
                     capability: capability_id,
                     reason,
+                    detail: None,
                 });
             }
             AuthorizeFold::Blocked { .. } => {
@@ -3095,6 +3107,7 @@ fn trust_error_to_invocation_error(
         CapabilityInvocationError::AuthorizationDenied {
             capability: capability_id.clone(),
             reason: DenyReason::InternalInvariantViolation,
+            detail: None,
         }
     }
 }
@@ -3106,9 +3119,13 @@ fn runtime_policy_error_to_invocation_error(
     capability_id: &CapabilityId,
     error: PlannerError,
 ) -> CapabilityInvocationError {
-    // The model-visible denial collapses to `PolicyDenied`; log the bound
-    // planner refusal so which fail-closed backend rule fired stays recoverable
-    // server-side. `debug!` (never `info!`/`warn!`) to avoid REPL corruption.
+    // The verdict collapses to `PolicyDenied`, but a bare `PolicyDenied` tells the
+    // model nothing about *why*. So the model-visible `detail` carries a
+    // plain-language explanation of the refusal — deliberately NOT the raw
+    // `PlannerError` Display, which leaks internal `ProcessBackendKind::`/
+    // `NetworkMode::`/`SecretMode::` enum tokens the model must never see (see
+    // `planner_error_kind`). The full enum-token message stays server-side via
+    // `debug!` (never `info!`/`warn!`) for operator diagnosis.
     debug!(
         capability_id = %capability_id,
         %error,
@@ -3117,6 +3134,26 @@ fn runtime_policy_error_to_invocation_error(
     CapabilityInvocationError::AuthorizationDenied {
         capability: capability_id.clone(),
         reason: DenyReason::PolicyDenied,
+        detail: Some(planner_error_model_reason(&error).to_string()),
+    }
+}
+
+/// Sanitized, model-visible explanation of a runtime-policy planner refusal:
+/// a plain-language reason the model can surface or explain, deliberately free
+/// of the internal `ProcessBackendKind::`/`NetworkMode::`/`SecretMode::` planner
+/// enum tokens (see [`planner_error_kind`] and #6386). Rides the
+/// `AuthorizationDenied { detail }` field.
+fn planner_error_model_reason(error: &PlannerError) -> &'static str {
+    match error {
+        PlannerError::ProcessEffectsRequiredButProcessBackendIsNone { .. } => {
+            "this capability needs to run a process, but process execution is disabled by policy for this runtime"
+        }
+        PlannerError::NetworkRequiredButNetworkModeIsDeny { .. } => {
+            "this capability needs network access, but network egress is disabled by policy for this runtime"
+        }
+        PlannerError::SecretAccessRequiredButSecretModeIsDeny { .. } => {
+            "this capability needs secret access, but secret access is disabled by policy for this runtime"
+        }
     }
 }
 
