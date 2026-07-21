@@ -6946,6 +6946,57 @@ async fn thread_artifact_includes_all_owned_runs_and_queries_thread_scoped_logs(
 }
 
 #[tokio::test]
+async fn thread_artifact_rejects_oversized_thread_before_context_or_log_reads() {
+    let owner = caller();
+    let thread_scope = thread_scope_for(&owner);
+    let thread_id = ThreadId::new("thread-artifact-over-budget").expect("thread id");
+    let run_id = TurnRunId::new();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: owner.user_id.as_str().to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("thread");
+    for sequence in 0..=1_000 {
+        seed_submitted_message(
+            &thread_service,
+            &thread_scope,
+            &thread_id,
+            &run_id,
+            &format!("message {sequence}"),
+        )
+        .await;
+    }
+    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_operator_logs_service(operator_logs.clone());
+
+    let error = services
+        .query(
+            owner,
+            RebornViewQuery {
+                view_id: THREAD_ARTIFACT_VIEW.id.to_string(),
+                params: serde_json::to_value(RebornThreadArtifactRequest {
+                    thread_id: thread_id.to_string(),
+                })
+                .expect("artifact params"),
+                cursor: None,
+            },
+        )
+        .await
+        .expect_err("oversized thread artifact must fail closed");
+
+    assert_eq!(error.status_code, 413);
+    assert_eq!(error.kind, RebornServicesErrorKind::Validation);
+    assert!(operator_logs.requests().is_empty());
+}
+
+#[tokio::test]
 async fn thread_artifact_rejects_another_user_before_querying_logs() {
     let owner = caller_for_user("user-bob");
     let thread_scope = thread_scope_for(&owner);

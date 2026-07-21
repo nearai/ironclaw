@@ -20,11 +20,12 @@ use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
     AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest,
-    CapabilityDisplayPreviewEnvelope, ContextMessage, ContextMessages, ContextWindow,
-    CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
-    LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
-    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
-    MessageStatus, PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
+    BoundedThreadMessages, BoundedThreadMessagesRequest, CapabilityDisplayPreviewEnvelope,
+    ContextMessage, ContextMessages, ContextWindow, CreateSummaryArtifactRequest,
+    DeleteToolResultRecordRequest, EnsureThreadRequest, LatestThreadMessageRequest,
+    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
+    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
+    PutToolResultRecordRequest, ReadToolResultRecordRequest, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
     SessionThreadService, SummaryArtifact, SummaryModelContextPolicy, ThreadHistory,
     ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest,
@@ -828,6 +829,35 @@ impl SessionThreadService for InMemorySessionThreadService {
             messages: history_messages(thread),
             summary_artifacts: history_summary_artifacts(thread),
         })
+    }
+
+    async fn list_thread_messages_bounded(
+        &self,
+        request: BoundedThreadMessagesRequest,
+    ) -> Result<BoundedThreadMessages, SessionThreadError> {
+        let state = self.state.lock().await;
+        let thread = get_thread(&state, &request.scope, &request.thread_id)?;
+        if thread.messages.len() > request.max_messages {
+            return Ok(BoundedThreadMessages::LimitExceeded);
+        }
+        let messages = history_messages(thread);
+        let mut bytes = 0_usize;
+        for message in &messages {
+            bytes = bytes.saturating_add(
+                serde_json::to_vec(message)
+                    .map_err(|error| SessionThreadError::Serialization(error.to_string()))?
+                    .len(),
+            );
+            if bytes > request.max_bytes {
+                return Ok(BoundedThreadMessages::LimitExceeded);
+            }
+        }
+        Ok(BoundedThreadMessages::Complete(Box::new(
+            ThreadMessageRange {
+                thread: thread.record.clone(),
+                messages,
+            },
+        )))
     }
 
     async fn list_thread_messages_range(

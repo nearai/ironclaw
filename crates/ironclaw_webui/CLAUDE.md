@@ -116,7 +116,10 @@ through this caller route.
 `webui.v2.get_thread_artifact` applies the same caller ownership and redaction
 rules to every replayable message in the thread and queries logs at thread
 scope. Its `ironclaw.thread_artifact.v1` messages retain `run_id`, allowing the
-fixture importer to reconstruct multiple turns without mixing threads.
+fixture importer to reconstruct multiple turns without mixing threads. Export
+is all-or-nothing and returns `413` when the thread exceeds 1,000 persisted
+messages, 16 MiB of stored message data, or 20 MiB after redaction and log
+assembly. The endpoint is limited to six requests per caller per minute.
 
 **Operator-gating.** LLM config, operator setup/config/service-control, and
 extension zip-import routes are operator-wide: `webui_v2_app` mounts them only

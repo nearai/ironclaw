@@ -12,6 +12,11 @@ Logs are diagnostic only: the buffer is bounded and process-local, so
 `logs.complete` is deliberately always `false`. Railway or other node-wide
 logs are not part of the self-service export.
 
+Full-thread export is intentionally all-or-nothing: it returns HTTP `413`
+instead of producing a silently partial fixture when the thread exceeds 1,000
+messages, 16 MiB of stored message data, or 20 MiB after redaction and log
+assembly.
+
 Convert a download into a review-required replay candidate:
 
 ```bash

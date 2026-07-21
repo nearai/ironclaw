@@ -820,7 +820,7 @@ fn get_thread_artifact_descriptor() -> IngressRouteDescriptor {
         NetworkMethod::Get,
         WEBUI_V2_PATTERN_GET_THREAD_ARTIFACT,
         read_policy(
-            read_rate_limit(),
+            thread_artifact_rate_limit(),
             AuditTraceClass::UserAction,
             AllowedEffectPath::ProjectionOnly,
             StreamingMode::None,
@@ -1715,6 +1715,10 @@ fn mutation_rate_limit() -> RateLimitPolicy {
 
 fn read_rate_limit() -> RateLimitPolicy {
     rate_limit_per_caller(120, 60)
+}
+
+fn thread_artifact_rate_limit() -> RateLimitPolicy {
+    rate_limit_per_caller(6, 60)
 }
 
 fn stream_rate_limit() -> RateLimitPolicy {

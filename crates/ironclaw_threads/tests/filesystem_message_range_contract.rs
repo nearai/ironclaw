@@ -10,11 +10,58 @@ use ironclaw_host_api::{
     ThreadId, UserId, VirtualPath,
 };
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, AppendFinalizedAssistantMessageRequest,
-    CreateSummaryArtifactRequest, EnsureThreadRequest, FilesystemSessionThreadService,
-    MessageContent, SessionThreadError, SessionThreadService, SummaryKind,
-    SummaryModelContextPolicy, ThreadMessageId, ThreadMessageRangeRequest, ThreadScope,
+    AcceptInboundMessageRequest, AppendFinalizedAssistantMessageRequest, BoundedThreadMessages,
+    BoundedThreadMessagesRequest, CreateSummaryArtifactRequest, EnsureThreadRequest,
+    FilesystemSessionThreadService, MessageContent, SessionThreadError, SessionThreadService,
+    SummaryKind, SummaryModelContextPolicy, ThreadMessageId, ThreadMessageRangeRequest,
+    ThreadScope,
 };
+
+#[tokio::test]
+async fn filesystem_store_bounded_read_rejects_before_materializing_the_full_thread() {
+    let fixture = RangeFixture::new("fs-bounded", "tenant-bounded").await;
+    fixture.seed_messages("event", 3).await;
+
+    let result = fixture
+        .service
+        .list_thread_messages_bounded(BoundedThreadMessagesRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            max_messages: 2,
+            max_bytes: 1024 * 1024,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result, BoundedThreadMessages::LimitExceeded);
+
+    let byte_limited = fixture
+        .service
+        .list_thread_messages_bounded(BoundedThreadMessagesRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            max_messages: 4,
+            max_bytes: 1,
+        })
+        .await
+        .unwrap();
+    assert_eq!(byte_limited, BoundedThreadMessages::LimitExceeded);
+
+    let complete = fixture
+        .service
+        .list_thread_messages_bounded(BoundedThreadMessagesRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            max_messages: 4,
+            max_bytes: 1024 * 1024,
+        })
+        .await
+        .unwrap();
+    let BoundedThreadMessages::Complete(messages) = complete else {
+        panic!("messages should fit within the export budget");
+    };
+    assert_eq!(messages.messages.len(), 3);
+}
 
 #[tokio::test]
 async fn filesystem_store_range_read_returns_only_requested_sequences() {
