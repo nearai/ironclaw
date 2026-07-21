@@ -9,7 +9,7 @@ use support::*;
 #[tokio::test]
 async fn capability_host_denies_missing_grant_before_dispatch() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let authorizer = GrantAuthorizer::new();
     let host = CapabilityHost::new(&registry, &dispatcher, &authorizer);
     let context = execution_context(CapabilitySet::default());
@@ -32,13 +32,13 @@ async fn capability_host_denies_missing_grant_before_dispatch() {
             ..
         }
     ));
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
 }
 
 #[tokio::test]
 async fn capability_host_denies_dispatch_when_trust_ceiling_omits_capability_effect() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let authorizer = GrantAuthorizer::new();
     let host = CapabilityHost::new(&registry, &dispatcher, &authorizer);
     let context = execution_context(CapabilitySet {
@@ -63,13 +63,13 @@ async fn capability_host_denies_dispatch_when_trust_ceiling_omits_capability_eff
             ..
         }
     ));
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
 }
 
 #[tokio::test]
 async fn capability_host_authorized_dispatch_uses_neutral_dispatch_port() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let authorizer = GrantAuthorizer::new();
     let host = CapabilityHost::new(&registry, &dispatcher, &authorizer);
     let context = execution_context(CapabilitySet {
@@ -89,7 +89,7 @@ async fn capability_host_authorized_dispatch_uses_neutral_dispatch_port() {
         .unwrap();
 
     assert_eq!(result.dispatch.output, json!({"ok": true}));
-    let recorded = dispatcher.take_request();
+    let recorded = dispatcher.last_request().unwrap();
     assert_eq!(recorded.capability_id, capability_id());
     assert_eq!(recorded.scope, scope);
     assert_eq!(recorded.input, json!({"message": "authorized"}));
@@ -100,7 +100,7 @@ async fn capability_host_authorized_dispatch_uses_neutral_dispatch_port() {
 #[tokio::test]
 async fn capability_host_returns_approval_store_missing_when_approval_cannot_be_persisted() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer);
     let context = execution_context(CapabilitySet::default());
 
@@ -119,13 +119,13 @@ async fn capability_host_returns_approval_store_missing_when_approval_cannot_be_
         err,
         CapabilityInvocationError::ApprovalStoreMissing { .. }
     ));
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
 }
 
 #[tokio::test]
 async fn capability_host_fails_closed_on_unsupported_obligations_before_dispatch() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let authorizer = ObligatingAuthorizer;
     let host = CapabilityHost::new(&registry, &dispatcher, &authorizer);
     let context = execution_context(CapabilitySet::default());
@@ -145,5 +145,5 @@ async fn capability_host_fails_closed_on_unsupported_obligations_before_dispatch
         err,
         CapabilityInvocationError::UnsupportedObligations { .. }
     ));
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
 }

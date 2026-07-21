@@ -18,7 +18,7 @@ use support::*;
 #[tokio::test]
 async fn capability_host_uses_obligation_handler_before_dispatch() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let authorizer = ObligatingAuthorizer::new(vec![Obligation::AuditBefore]);
     let handler = RecordingObligationHandler::default();
     let host =
@@ -36,7 +36,7 @@ async fn capability_host_uses_obligation_handler_before_dispatch() {
         .unwrap();
 
     assert_eq!(result.dispatch.output, json!({"ok": true}));
-    assert!(dispatcher.has_request());
+    assert!(dispatcher.call_count() > 0);
     assert_eq!(
         handler.records(),
         vec![ObligationRecord {
@@ -49,7 +49,7 @@ async fn capability_host_uses_obligation_handler_before_dispatch() {
 #[tokio::test]
 async fn capability_host_still_fails_closed_when_handler_rejects_obligations() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let authorizer = ObligatingAuthorizer::new(vec![Obligation::RedactOutput]);
     let handler = RecordingObligationHandler::default();
     let host =
@@ -70,7 +70,7 @@ async fn capability_host_still_fails_closed_when_handler_rejects_obligations() {
         err,
         CapabilityInvocationError::UnsupportedObligations { .. }
     ));
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
     assert_eq!(handler.records().len(), 1);
 }
 
@@ -83,7 +83,7 @@ async fn capability_host_passes_prepared_effects_to_dispatch() {
         "/projects/demo",
         MountPermissions::read_only(),
     );
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let mut context = execution_context(CapabilitySet::default());
     context.mounts = mount_view(
         "/workspace",
@@ -120,7 +120,7 @@ async fn capability_host_passes_prepared_effects_to_dispatch() {
     .await
     .unwrap();
 
-    let request = dispatcher.take_request();
+    let request = dispatcher.last_request().unwrap();
     assert_eq!(request.scope, scope);
     assert_eq!(request.estimate, estimate);
     assert_eq!(request.mounts, Some(narrowed_mounts));
@@ -136,7 +136,12 @@ async fn capability_host_passes_prepared_effects_to_dispatch() {
 #[tokio::test]
 async fn capability_host_completes_post_dispatch_obligations_before_returning() {
     let registry = registry_with_echo_capability();
-    let dispatcher = OutputDispatcher::new(json!({"token": "secret-token"}));
+    let dispatcher = TestDispatcher::responding(|request, _| {
+        Ok(dispatch_result_with_output(
+            request,
+            json!({"token": "secret-token"}),
+        ))
+    });
     let authorizer = ObligatingAuthorizer::new(vec![Obligation::RedactOutput]);
     let handler = RedactingObligationHandler;
     let host =
@@ -159,7 +164,9 @@ async fn capability_host_completes_post_dispatch_obligations_before_returning() 
 #[tokio::test]
 async fn capability_host_aborts_staged_obligations_when_completion_fails() {
     let registry = registry_with_echo_capability();
-    let dispatcher = OutputDispatcher::new(json!({"oversized": true}));
+    let dispatcher = TestDispatcher::responding(|request, _| {
+        Ok(dispatch_result_with_output(request, json!({"oversized": true})))
+    });
     let aborted_outcome = Arc::new(Mutex::new(None));
     let reservation_id = ResourceReservationId::new();
     let context = execution_context(CapabilitySet::default());
@@ -201,7 +208,7 @@ async fn capability_host_aborts_staged_obligations_when_completion_fails() {
 #[tokio::test]
 async fn capability_host_passes_prepared_mounts_to_process_start() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let narrowed_mounts = mount_view(
         "/workspace",
         "/projects/demo",
@@ -242,7 +249,7 @@ async fn capability_host_passes_prepared_mounts_to_process_start() {
 #[tokio::test]
 async fn capability_host_aborts_prepared_obligations_when_process_start_fails() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let context = execution_context(CapabilitySet::default());
     let estimate = ResourceEstimate::default();
     let aborted = Arc::new(AtomicBool::new(false));
@@ -276,13 +283,13 @@ async fn capability_host_aborts_prepared_obligations_when_process_start_fails() 
 
     assert!(matches!(err, CapabilityInvocationError::Process { .. }));
     assert!(aborted.load(Ordering::SeqCst));
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
 }
 
 #[tokio::test]
 async fn capability_host_rejects_post_output_obligations_for_spawn_before_handler_or_process() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let authorizer = ObligatingAuthorizer::new(vec![Obligation::RedactOutput]);
     let observed = Arc::new(AtomicBool::new(false));
     let handler = FlaggingObligationHandler {
@@ -539,40 +546,6 @@ struct PanicProcessManager;
 impl ProcessManager for PanicProcessManager {
     async fn spawn(&self, _start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
         panic!("process manager must not be called for unsupported post-output spawn obligations")
-    }
-}
-
-struct OutputDispatcher {
-    output: serde_json::Value,
-}
-
-impl OutputDispatcher {
-    fn new(output: serde_json::Value) -> Self {
-        Self { output }
-    }
-}
-
-#[async_trait]
-impl CapabilityDispatcher for OutputDispatcher {
-    async fn dispatch_json(
-        &self,
-        request: CapabilityDispatchRequest,
-    ) -> Result<CapabilityDispatchResult, DispatchError> {
-        Ok(CapabilityDispatchResult {
-            capability_id: request.capability_id,
-            provider: extension_id(),
-            runtime: RuntimeKind::Wasm,
-            output: self.output.clone(),
-            display_preview: None,
-            usage: ResourceUsage::default(),
-            receipt: ResourceReceipt {
-                id: ResourceReservationId::new(),
-                scope: request.scope,
-                status: ReservationStatus::Reconciled,
-                estimate: request.estimate,
-                actual: Some(ResourceUsage::default()),
-            },
-        })
     }
 }
 

@@ -678,7 +678,10 @@ mod tests {
         let error = lease_secret_for_injection(&store, &request, &sample_injection(handle))
             .expect_err("absent required credential must error");
 
-        assert_eq!(credential_reason(&error), "required credential is unavailable");
+        assert_eq!(
+            credential_reason(&error),
+            "required credential is unavailable"
+        );
     }
 
     #[test]
