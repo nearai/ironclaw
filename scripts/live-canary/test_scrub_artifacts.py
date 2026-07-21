@@ -52,6 +52,23 @@ class ScrubArtifactsTests(unittest.TestCase):
             self.assertIn('"access_token":"<REDACTED>"', browser_events.read_text(encoding="utf-8"))
             self.assertIn("Strict scrub redacted diagnostic artifacts", result.stdout)
 
+    def test_strict_scrub_redacts_and_preserves_llm_trace_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            trace = root / "llm-traces" / "slack_message.json"
+            trace.parent.mkdir()
+            trace.write_text(
+                '{"steps":[{"response":{"content":"Bearer live-secret-token"}}]}\n',
+                encoding="utf-8",
+            )
+
+            result = self.run_scrub(root, strict=True)
+
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertTrue(trace.exists())
+            self.assertIn("Bearer <REDACTED>", trace.read_text(encoding="utf-8"))
+            self.assertIn("Strict scrub redacted diagnostic artifacts", result.stdout)
+
     def test_strict_scrub_fails_if_redacted_artifact_still_matches_secret_shape(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
