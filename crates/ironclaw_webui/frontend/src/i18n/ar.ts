@@ -1125,6 +1125,8 @@ registerPack("ar", {
   "admin.users.member": "عضو",
   "admin.users.admin": "مسؤول",
   "admin.users.suspend": "إيقاف",
+  "admin.users.actionFailed": "فشل الإجراء: {message}",
+  "admin.users.lastAdminRequired": "يلزم وجود مسؤول نشط واحد على الأقل. أضف مسؤولاً آخر أو فعّله قبل تغيير هذا المستخدم.",
   "admin.users.activate": "تفعيل",
   "admin.users.promote": "ترقية",
   "admin.users.demote": "خفض",

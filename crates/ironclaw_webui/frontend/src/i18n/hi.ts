@@ -1125,6 +1125,8 @@ registerPack("hi", {
   "admin.users.member": "सदस्य",
   "admin.users.admin": "व्यवस्थापक",
   "admin.users.suspend": "निलंबित",
+  "admin.users.actionFailed": "कार्रवाई विफल: {message}",
+  "admin.users.lastAdminRequired": "कम से कम एक सक्रिय व्यवस्थापक आवश्यक है। इस उपयोगकर्ता को बदलने से पहले किसी अन्य व्यवस्थापक को जोड़ें या सक्रिय करें।",
   "admin.users.activate": "सक्रिय करें",
   "admin.users.promote": "प्रचार करें",
   "admin.users.demote": "पदावनत करें",

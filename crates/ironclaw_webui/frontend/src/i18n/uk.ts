@@ -1125,6 +1125,8 @@ registerPack("uk", {
   "admin.users.member": "Учасник",
   "admin.users.admin": "Адмін",
   "admin.users.suspend": "Призупинити",
+  "admin.users.actionFailed": "Не вдалося виконати дію: {message}",
+  "admin.users.lastAdminRequired": "Потрібен щонайменше один активний адміністратор. Додайте або активуйте іншого адміністратора, перш ніж змінювати цього користувача.",
   "admin.users.activate": "Активувати",
   "admin.users.promote": "Підвищити",
   "admin.users.demote": "Понизити",

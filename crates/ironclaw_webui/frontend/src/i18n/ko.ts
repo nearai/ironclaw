@@ -1125,6 +1125,8 @@ registerPack("ko", {
   "admin.users.member": "멤버",
   "admin.users.admin": "관리자",
   "admin.users.suspend": "정지",
+  "admin.users.actionFailed": "작업 실패: {message}",
+  "admin.users.lastAdminRequired": "활성 관리자가 최소 한 명 필요합니다. 이 사용자를 변경하기 전에 다른 관리자를 추가하거나 활성화하세요.",
   "admin.users.activate": "활성화",
   "admin.users.promote": "승격",
   "admin.users.demote": "강등",

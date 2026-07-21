@@ -1125,6 +1125,8 @@ registerPack("zh-CN", {
   "admin.users.member": "成员",
   "admin.users.admin": "管理员",
   "admin.users.suspend": "停用",
+  "admin.users.actionFailed": "操作失败：{message}",
+  "admin.users.lastAdminRequired": "必须至少保留一名已启用的管理员。请先添加或启用另一名管理员，再更改此用户。",
   "admin.users.activate": "启用",
   "admin.users.promote": "提升",
   "admin.users.demote": "降级",

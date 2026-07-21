@@ -1228,6 +1228,8 @@ registerPack("en", {
   "admin.users.member": "Member",
   "admin.users.admin": "Admin",
   "admin.users.suspend": "Suspend",
+  "admin.users.actionFailed": "Action failed: {message}",
+  "admin.users.lastAdminRequired": "At least one active administrator is required. Add or activate another administrator before changing this user.",
   "admin.users.activate": "Activate",
   "admin.users.promote": "Promote",
   "admin.users.demote": "Demote",

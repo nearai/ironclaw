@@ -1125,6 +1125,8 @@ registerPack("ja", {
   "admin.users.member": "メンバー",
   "admin.users.admin": "管理者",
   "admin.users.suspend": "停止",
+  "admin.users.actionFailed": "操作に失敗しました: {message}",
+  "admin.users.lastAdminRequired": "少なくとも1人の有効な管理者が必要です。このユーザーを変更する前に、別の管理者を追加または有効化してください。",
   "admin.users.activate": "有効化",
   "admin.users.promote": "昇格",
   "admin.users.demote": "降格",
