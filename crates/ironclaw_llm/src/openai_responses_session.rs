@@ -24,6 +24,36 @@ impl ResponsesSessionKey {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OpenAiResponseId(String);
+
+impl OpenAiResponseId {
+    pub(crate) fn from_wire(raw: &str) -> Option<Self> {
+        (!raw.is_empty()).then(|| Self(raw.to_string()))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OpenAiResponseStatus {
+    Completed,
+    Incomplete,
+    Other,
+}
+
+impl OpenAiResponseStatus {
+    pub(crate) fn from_wire(raw: &str) -> Self {
+        match raw {
+            "completed" => Self::Completed,
+            "incomplete" => Self::Incomplete,
+            _ => Self::Other,
+        }
+    }
+}
+
 pub(crate) struct ResponsesSessionRegistry {
     inner: Mutex<ResponsesSessionRegistryInner>,
 }
@@ -44,7 +74,16 @@ impl ResponsesSessionRegistry {
         }
     }
 
-    pub(crate) async fn session_for_metadata(
+    #[cfg(test)]
+    pub(crate) const fn capacity() -> usize {
+        MAX_RESPONSES_SESSIONS
+    }
+
+    pub(crate) fn has_valid_session_metadata(metadata: &HashMap<String, String>) -> bool {
+        ResponsesSessionKey::from_metadata(metadata).is_some()
+    }
+
+    pub(crate) async fn resolve_or_create_session_for_metadata(
         &self,
         metadata: &HashMap<String, String>,
     ) -> Option<Arc<Mutex<ResponsesSessionState>>> {
@@ -95,13 +134,13 @@ pub(crate) struct ResponsesSessionState {
 }
 
 struct ResponsesCursor {
-    response_id: String,
+    response_id: OpenAiResponseId,
     acknowledged_items: Vec<[u8; 32]>,
 }
 
 pub(crate) struct ResponsesRequestPlan {
     pub(crate) input: Vec<serde_json::Value>,
-    pub(crate) previous_response_id: Option<String>,
+    pub(crate) previous_response_id: Option<OpenAiResponseId>,
 }
 
 impl ResponsesSessionState {
@@ -127,15 +166,15 @@ impl ResponsesSessionState {
     pub(crate) fn commit(
         &mut self,
         full_input: &[serde_json::Value],
-        response_id: Option<&str>,
-        response_status: Option<&str>,
+        response_id: Option<&OpenAiResponseId>,
+        response_status: Option<OpenAiResponseStatus>,
         output_items: Option<&[serde_json::Value]>,
     ) {
-        let Some(response_id) = response_id.filter(|id| !id.is_empty()) else {
+        let Some(response_id) = response_id else {
             self.reset();
             return;
         };
-        if response_status != Some("completed") {
+        if response_status != Some(OpenAiResponseStatus::Completed) {
             self.reset();
             return;
         }
@@ -155,7 +194,7 @@ impl ResponsesSessionState {
         let mut acknowledged_items = fingerprint_items(full_input);
         acknowledged_items.extend(fingerprint_items(&replayable_output));
         self.cursor = Some(ResponsesCursor {
-            response_id: response_id.to_string(),
+            response_id: response_id.clone(),
             acknowledged_items,
         });
     }
@@ -163,6 +202,33 @@ impl ResponsesSessionState {
     pub(crate) fn reset(&mut self) {
         self.cursor = None;
     }
+}
+
+pub(crate) fn normalized_assistant_message_item(id: &str, text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "message",
+        "role": "assistant",
+        "id": id,
+        "status": "completed",
+        "content": [{
+            "type": "output_text",
+            "text": text,
+            "annotations": [],
+        }],
+    })
+}
+
+pub(crate) fn normalized_function_call_item(
+    call_id: &str,
+    name: &str,
+    arguments: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "function_call",
+        "call_id": call_id,
+        "name": name,
+        "arguments": arguments,
+    })
 }
 
 fn fingerprint_items(items: &[serde_json::Value]) -> Vec<[u8; 32]> {
@@ -254,29 +320,21 @@ fn replayable_output_items(output_items: &[serde_json::Value]) -> Option<Vec<ser
                 {
                     return None;
                 }
-                let expected = serde_json::json!({
-                    "type": "message",
-                    "role": "assistant",
-                    "id": "provider_assigned",
-                    "status": "completed",
-                    "content": [{
-                        "type": "output_text",
-                        "text": content[0].get("text")?.as_str()?,
-                        "annotations": [],
-                    }],
-                });
+                let expected = normalized_assistant_message_item(
+                    "provider_assigned",
+                    content[0].get("text")?.as_str()?,
+                );
                 if !same_normalized_item(output_item, &expected) {
                     return None;
                 }
                 replayable.push(expected);
             }
             "function_call" => {
-                let expected = serde_json::json!({
-                    "type": "function_call",
-                    "call_id": output_item.get("call_id")?.as_str()?,
-                    "name": output_item.get("name")?.as_str()?,
-                    "arguments": output_item.get("arguments")?.as_str()?,
-                });
+                let expected = normalized_function_call_item(
+                    output_item.get("call_id")?.as_str()?,
+                    output_item.get("name")?.as_str()?,
+                    output_item.get("arguments")?.as_str()?,
+                );
                 if !same_normalized_item(output_item, &expected) {
                     return None;
                 }
@@ -305,31 +363,15 @@ mod tests {
     }
 
     fn assistant(text: &str) -> serde_json::Value {
-        serde_json::json!({
-            "type": "message",
-            "role": "assistant",
-            "id": "msg_local",
-            "status": "completed",
-            "content": [{
-                "type": "output_text",
-                "text": text,
-                "annotations": [],
-            }],
-        })
+        normalized_assistant_message_item("msg_local", text)
     }
 
     fn completed_message(text: &str) -> Vec<serde_json::Value> {
-        vec![serde_json::json!({
-            "type": "message",
-            "role": "assistant",
-            "id": "msg_server",
-            "status": "completed",
-            "content": [{
-                "type": "output_text",
-                "text": text,
-                "annotations": [],
-            }],
-        })]
+        vec![normalized_assistant_message_item("msg_server", text)]
+    }
+
+    fn response_id(raw: &str) -> OpenAiResponseId {
+        OpenAiResponseId::from_wire(raw).unwrap()
     }
 
     struct FakeTransport;
@@ -338,14 +380,15 @@ mod tests {
         fn complete(
             state: &mut ResponsesSessionState,
             full_input: &[serde_json::Value],
-            response_id: &str,
+            raw_response_id: &str,
             output: &[serde_json::Value],
         ) -> ResponsesRequestPlan {
             let plan = state.plan(full_input);
+            let response_id = response_id(raw_response_id);
             state.commit(
                 full_input,
-                Some(response_id),
-                Some("completed"),
+                Some(&response_id),
+                Some(OpenAiResponseStatus::Completed),
                 Some(output),
             );
             plan
@@ -368,7 +411,10 @@ mod tests {
         let second = vec![user("first"), assistant("answer"), user("second")];
         let second_plan = state.plan(&second);
         assert_eq!(
-            second_plan.previous_response_id.as_deref(),
+            second_plan
+                .previous_response_id
+                .as_ref()
+                .map(OpenAiResponseId::as_str),
             Some("resp_first")
         );
         assert_eq!(second_plan.input, vec![user("second")]);
@@ -403,10 +449,11 @@ mod tests {
         let second = vec![user("first"), assistant("answer"), user("second")];
         assert!(state.plan(&second).previous_response_id.is_some());
 
+        let incomplete_id = response_id("resp_incomplete");
         state.commit(
             &second,
-            Some("resp_incomplete"),
-            Some("incomplete"),
+            Some(&incomplete_id),
+            Some(OpenAiResponseStatus::Incomplete),
             Some(&completed_message("partial")),
         );
         assert!(state.plan(&second).previous_response_id.is_none());
@@ -467,7 +514,12 @@ mod tests {
         ];
 
         let plan = state.plan(&durable_follow_up);
-        assert_eq!(plan.previous_response_id.as_deref(), Some("resp_tool"));
+        assert_eq!(
+            plan.previous_response_id
+                .as_ref()
+                .map(OpenAiResponseId::as_str),
+            Some("resp_tool")
+        );
         assert_eq!(plan.input, vec![durable_follow_up[2].clone()]);
     }
 
@@ -493,11 +545,39 @@ mod tests {
             ("run_id".to_string(), Uuid::new_v4().to_string()),
             ("turn_id".to_string(), Uuid::new_v4().to_string()),
         ]);
-        assert!(registry.session_for_metadata(&generic).await.is_none());
+        assert!(
+            registry
+                .resolve_or_create_session_for_metadata(&generic)
+                .await
+                .is_none()
+        );
 
         let explicit =
             HashMap::from([(SESSION_METADATA_KEY.to_string(), Uuid::new_v4().to_string())]);
-        assert!(registry.session_for_metadata(&explicit).await.is_some());
+        assert!(
+            registry
+                .resolve_or_create_session_for_metadata(&explicit)
+                .await
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_rejects_malformed_explicit_session_identity() {
+        let registry = ResponsesSessionRegistry::new();
+        let malformed =
+            HashMap::from([(SESSION_METADATA_KEY.to_string(), "not-a-uuid".to_string())]);
+
+        assert!(!ResponsesSessionRegistry::has_valid_session_metadata(
+            &malformed
+        ));
+        assert!(
+            registry
+                .resolve_or_create_session_for_metadata(&malformed)
+                .await
+                .is_none()
+        );
+        assert!(registry.inner.lock().await.sessions.is_empty());
     }
 
     #[tokio::test]
@@ -505,18 +585,25 @@ mod tests {
         let registry = ResponsesSessionRegistry::new();
         let metadata =
             HashMap::from([(SESSION_METADATA_KEY.to_string(), Uuid::new_v4().to_string())]);
-        let session = registry.session_for_metadata(&metadata).await.unwrap();
+        let session = registry
+            .resolve_or_create_session_for_metadata(&metadata)
+            .await
+            .unwrap();
+        let response_id = response_id("resp_first");
         session.lock().await.commit(
             &[user("first")],
-            Some("resp_first"),
-            Some("completed"),
+            Some(&response_id),
+            Some(OpenAiResponseStatus::Completed),
             Some(&completed_message("answer")),
         );
         drop(session);
 
         registry.clear().await;
 
-        let replacement = registry.session_for_metadata(&metadata).await.unwrap();
+        let replacement = registry
+            .resolve_or_create_session_for_metadata(&metadata)
+            .await
+            .unwrap();
         let full = vec![user("first"), assistant("answer"), user("second")];
         let plan = replacement.lock().await.plan(&full);
         assert!(plan.previous_response_id.is_none());
@@ -530,14 +617,29 @@ mod tests {
         for _ in 0..MAX_RESPONSES_SESSIONS {
             let metadata =
                 HashMap::from([(SESSION_METADATA_KEY.to_string(), Uuid::new_v4().to_string())]);
-            active.push(registry.session_for_metadata(&metadata).await.unwrap());
+            active.push(
+                registry
+                    .resolve_or_create_session_for_metadata(&metadata)
+                    .await
+                    .unwrap(),
+            );
         }
 
         let overflow =
             HashMap::from([(SESSION_METADATA_KEY.to_string(), Uuid::new_v4().to_string())]);
-        assert!(registry.session_for_metadata(&overflow).await.is_none());
+        assert!(
+            registry
+                .resolve_or_create_session_for_metadata(&overflow)
+                .await
+                .is_none()
+        );
 
         drop(active.pop());
-        assert!(registry.session_for_metadata(&overflow).await.is_some());
+        assert!(
+            registry
+                .resolve_or_create_session_for_metadata(&overflow)
+                .await
+                .is_some()
+        );
     }
 }

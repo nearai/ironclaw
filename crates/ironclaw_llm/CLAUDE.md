@@ -15,6 +15,7 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `codex_auth.rs` | Reads Codex CLI `auth.json`, extracts tokens, refreshes ChatGPT OAuth access tokens |
 | `codex_chatgpt.rs` | Custom Responses API provider for Codex ChatGPT backend (`/backend-api/codex`) |
 | `openai_codex_provider.rs` | OpenAI Codex Responses API client (SSE streaming, JWT auth, subscription billing) |
+| `openai_responses_session.rs` | Provider-private retained-Responses request planner and bounded cursor registry |
 | `openai_codex_session.rs` | OAuth 2.0 session manager for OpenAI Codex (device code flow, token persistence) |
 | `token_refreshing.rs` | Token-refreshing `LlmProvider` decorator for OpenAI Codex (pre-emptive refresh, zero-cost billing) |
 | `reasoning.rs` | `Reasoning` struct, `ReasoningContext`, `RespondResult`, `ActionPlan`, `ToolSelection`; thinking-tag stripping; `SILENT_REPLY_TOKEN` |
@@ -246,10 +247,10 @@ because system-inference calls can share those IDs. Missing identity, missing
 cursor/output, desynchronization, unsupported response output, incomplete
 responses, failures, account changes, and a fully occupied session bound all
 fall back to full replay (`ResponsesSessionState::commit` / `reset`,
-`ResponsesSessionRegistry::session_for_metadata`, and
+`ResponsesSessionRegistry::resolve_or_create_session_for_metadata`, and
 `OpenAiCodexProvider::send_completion_request`). The bounded registry never
 evicts an active session, so concurrent calls cannot split one identity across
-two cursor states (`ResponsesSessionRegistry::session_for_metadata`). Account
+two cursor states (`ResponsesSessionRegistry::resolve_or_create_session_for_metadata`). Account
 changes are ordered with in-flight session requests and clear all cursor hints
 before new credentials become visible (`OpenAiCodexProvider::update_token`).
 

@@ -15,7 +15,10 @@ use serde::Deserialize;
 use tokio::sync::RwLock;
 
 use crate::error::LlmError;
-use crate::openai_responses_session::ResponsesSessionRegistry;
+use crate::openai_responses_session::{
+    OpenAiResponseId, OpenAiResponseStatus, ResponsesSessionRegistry,
+    normalized_assistant_message_item, normalized_function_call_item,
+};
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmProvider,
     ModelMetadata, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
@@ -205,8 +208,16 @@ impl OpenAiCodexProvider {
             let body = self.build_request_body_with_input(messages, tools, full_input, None);
             return self.send_request(body).await;
         };
-        let _auth_epoch = self.auth_epoch.read().await;
-        let Some(session) = registry.session_for_metadata(metadata).await else {
+        if !ResponsesSessionRegistry::has_valid_session_metadata(metadata) {
+            let body = self.build_request_body_with_input(messages, tools, full_input, None);
+            return self.send_request(body).await;
+        }
+        let auth_epoch = self.auth_epoch.read().await;
+        let session = registry
+            .resolve_or_create_session_for_metadata(metadata)
+            .await;
+        let Some(session) = session else {
+            drop(auth_epoch);
             let body = self.build_request_body_with_input(messages, tools, full_input, None);
             return self.send_request(body).await;
         };
@@ -220,15 +231,17 @@ impl OpenAiCodexProvider {
             messages,
             tools,
             plan.input,
-            plan.previous_response_id.as_deref(),
+            plan.previous_response_id
+                .as_ref()
+                .map(OpenAiResponseId::as_str),
         );
 
         match self.send_request(body).await {
             Ok(response) => {
                 state.commit(
                     &full_input,
-                    response.response_id.as_deref(),
-                    response.response_status.as_deref(),
+                    response.response_id.as_ref(),
+                    response.response_status,
                     response.output_items.as_deref(),
                 );
                 Ok(response)
@@ -554,27 +567,19 @@ fn convert_message(msg: &ChatMessage, index: usize) -> Vec<serde_json::Value> {
                         } else {
                             tc.arguments.to_string()
                         };
-                        serde_json::json!({
-                            "type": "function_call",
-                            "call_id": tc.id,
-                            "name": sanitize_tool_name(&tc.name),
-                            "arguments": args_str,
-                        })
+                        normalized_function_call_item(
+                            &tc.id,
+                            &sanitize_tool_name(&tc.name),
+                            &args_str,
+                        )
                     })
                     .collect()
             } else {
                 // Plain text assistant message
-                vec![serde_json::json!({
-                    "type": "message",
-                    "role": "assistant",
-                    "id": format!("msg_{index}"),
-                    "status": "completed",
-                    "content": [{
-                        "type": "output_text",
-                        "text": msg.content,
-                        "annotations": [],
-                    }],
-                })]
+                vec![normalized_assistant_message_item(
+                    &format!("msg_{index}"),
+                    &msg.content,
+                )]
             }
         }
         Role::Tool => {
@@ -640,8 +645,8 @@ struct ParsedResponse {
     input_tokens: u32,
     output_tokens: u32,
     finish_reason: FinishReason,
-    response_id: Option<String>,
-    response_status: Option<String>,
+    response_id: Option<OpenAiResponseId>,
+    response_status: Option<OpenAiResponseStatus>,
     output_items: Option<Vec<serde_json::Value>>,
 }
 
@@ -672,8 +677,8 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
     let mut finish_reason = FinishReason::Stop;
     let mut active_function_calls: std::collections::HashMap<String, FunctionCallState> =
         std::collections::HashMap::new();
-    let mut response_id: Option<String> = None;
-    let mut response_status: Option<String> = None;
+    let mut response_id: Option<OpenAiResponseId> = None;
+    let mut response_status: Option<OpenAiResponseStatus> = None;
     let mut output_items: Option<Vec<serde_json::Value>> = None;
     // Whether a terminal `response.completed` event was observed. A stream
     // that ends without it (mid-stream disconnect) is truncated and must not
@@ -847,7 +852,7 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                     response_id = response
                         .get("id")
                         .and_then(|value| value.as_str())
-                        .map(str::to_string);
+                        .and_then(OpenAiResponseId::from_wire);
                     output_items = response
                         .get("output")
                         .and_then(|value| value.as_array())
@@ -865,7 +870,7 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
                     }
                     // Extract status
                     if let Some(status) = response.get("status").and_then(|s| s.as_str()) {
-                        response_status = Some(status.to_string());
+                        response_status = Some(OpenAiResponseStatus::from_wire(status));
                     }
                 }
             }
@@ -964,11 +969,10 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
     // Map status to finish reason (matching OpenClaw's mapStopReason)
     if !tool_calls.is_empty() {
         finish_reason = FinishReason::ToolUse;
-    } else if let Some(ref status) = response_status {
-        finish_reason = match status.as_str() {
-            "completed" => FinishReason::Stop,
-            "incomplete" => FinishReason::Length,
-            _ => FinishReason::Stop,
+    } else if let Some(status) = response_status {
+        finish_reason = match status {
+            OpenAiResponseStatus::Completed | OpenAiResponseStatus::Other => FinishReason::Stop,
+            OpenAiResponseStatus::Incomplete => FinishReason::Length,
         };
     }
 
