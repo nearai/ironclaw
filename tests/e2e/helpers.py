@@ -372,6 +372,9 @@ SEL_V2 = {
     "settings_tool_row_for": (
         "[data-testid='settings-tool-row'][data-tool-name='{name}']"
     ),
+    "settings_tool_permission_select": (
+        "[data-testid='settings-tool-permission-select']"
+    ),
     "settings_tool_permission": (
         "[data-testid='settings-tool-permission-select'] button[aria-haspopup='listbox']"
     ),
