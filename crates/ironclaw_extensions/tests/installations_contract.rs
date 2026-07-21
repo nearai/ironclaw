@@ -5,9 +5,9 @@ use ironclaw_extensions::{
     ExtensionActivationState, ExtensionCredentialBinding, ExtensionCredentialHandle,
     ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationPersistedParts,
-    ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
-    InMemoryExtensionInstallationStore, InstallationOwner, MANIFEST_SCHEMA_VERSION, ManifestHash,
-    ManifestSource, ManifestV2Error,
+    ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef, InstallationOwner,
+    MANIFEST_SCHEMA_VERSION, ManifestHash, ManifestSource, ManifestV2Error,
+    VolatileExtensionInstallationStore,
 };
 use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle, UserId};
 
@@ -108,7 +108,7 @@ fn installed_legacy_top_level_capabilities_are_rejected() {
 
 #[tokio::test]
 async fn upsert_installation_rejects_unknown_manifest() {
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = VolatileExtensionInstallationStore::default();
 
     let err = store
         .upsert_installation(
@@ -137,7 +137,7 @@ async fn upsert_installation_rejects_unknown_manifest() {
 
 #[tokio::test]
 async fn upsert_manifest_rejects_manifest_hash_change_for_existing_installation() {
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = VolatileExtensionInstallationStore::default();
     store.upsert_manifest(manifest("sha256:old")).await.unwrap();
     store
         .upsert_installation(installation("sha256:old"))
@@ -157,7 +157,7 @@ async fn upsert_manifest_rejects_manifest_hash_change_for_existing_installation(
 
 #[tokio::test]
 async fn upsert_manifest_and_installation_replaces_coherent_manifest_hash_pair() {
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = VolatileExtensionInstallationStore::default();
     store.upsert_manifest(manifest("sha256:old")).await.unwrap();
     store
         .upsert_installation(installation("sha256:old"))
@@ -188,7 +188,7 @@ async fn upsert_manifest_and_installation_replaces_coherent_manifest_hash_pair()
 
 #[tokio::test]
 async fn upsert_manifest_and_installation_rejects_mismatched_manifest_hash_pair() {
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = VolatileExtensionInstallationStore::default();
 
     let err = store
         .upsert_manifest_and_installation(manifest("sha256:new"), installation("sha256:old"))
@@ -217,7 +217,7 @@ async fn upsert_manifest_and_installation_rejects_mismatched_manifest_hash_pair(
 
 #[tokio::test]
 async fn missing_installation_mutations_return_not_found() {
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = VolatileExtensionInstallationStore::default();
     let missing = installation_id("missing-prod");
 
     let activation_err = store
@@ -241,7 +241,7 @@ async fn missing_installation_mutations_return_not_found() {
 
 #[tokio::test]
 async fn manifest_hash_presence_mismatch_is_rejected() {
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = VolatileExtensionInstallationStore::default();
     store.upsert_manifest(manifest("sha256:abc")).await.unwrap();
 
     let missing_ref_hash = store
@@ -253,7 +253,7 @@ async fn manifest_hash_presence_mismatch_is_rejected() {
         ExtensionInstallationError::ManifestHashMismatch { .. }
     ));
 
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = VolatileExtensionInstallationStore::default();
     let manifest_without_hash = ExtensionManifestRecord::from_toml(
         raw_legacy_capability_manifest(),
         ManifestSource::HostBundled,
@@ -415,7 +415,7 @@ async fn enabled_installations_sort_by_updated_at_desc_then_id() {
     let newer = chrono::DateTime::parse_from_rfc3339("2026-01-02T00:00:00Z")
         .unwrap()
         .with_timezone(&Utc);
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = VolatileExtensionInstallationStore::default();
     store.upsert_manifest(manifest("sha256:abc")).await.unwrap();
 
     for (id, updated_at) in [

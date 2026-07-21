@@ -439,8 +439,8 @@ pub use installations::{
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationPersistedParts,
     ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
     ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapterId, ExtensionRemovalCleanupBinding,
-    ExtensionRemovalCleanupRequirement, InMemoryExtensionInstallationStore, InstallationOwner,
-    ManifestHash,
+    ExtensionRemovalCleanupRequirement, InstallationOwner, ManifestHash,
+    VolatileExtensionInstallationStore,
 };
 pub use lifecycle::{
     ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,

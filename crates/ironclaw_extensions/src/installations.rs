@@ -888,8 +888,14 @@ where
     }
 }
 
+/// Volatile extension installation state engine.
+///
+/// This type owns product-agnostic manifest/install validation and ordering.
+/// Durable adapters can wrap it with snapshot or record persistence in the
+/// persistence owner without moving filesystem concerns into
+/// `ironclaw_extensions`.
 #[derive(Debug, Default, Clone)]
-pub struct InMemoryExtensionInstallationStore {
+pub struct VolatileExtensionInstallationStore {
     inner: Arc<RwLock<InMemoryState>>,
 }
 
@@ -900,7 +906,7 @@ struct InMemoryState {
 }
 
 #[async_trait]
-impl ExtensionInstallationStore for InMemoryExtensionInstallationStore {
+impl ExtensionInstallationStore for VolatileExtensionInstallationStore {
     async fn list_manifests(
         &self,
     ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {
@@ -922,7 +928,7 @@ impl ExtensionInstallationStore for InMemoryExtensionInstallationStore {
         manifest: ExtensionManifestRecord,
     ) -> Result<(), ExtensionInstallationError> {
         let mut inner = self.inner.write().await;
-        // The in-memory store intentionally scans existing installations to
+        // The volatile store intentionally scans existing installations to
         // preserve the manifest hash invariant. Durable stores should use a
         // targeted read path or secondary index before handling large catalogs.
         for installation in inner.installations.values() {
@@ -1136,7 +1142,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_manifest_rejects_active_installations() {
-        let store = InMemoryExtensionInstallationStore::default();
+        let store = VolatileExtensionInstallationStore::default();
         let manifest = manifest_record("fixture", Some("hash-1"));
         let extension_id = manifest.extension_id().clone();
         store

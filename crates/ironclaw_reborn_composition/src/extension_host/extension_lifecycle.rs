@@ -2654,8 +2654,8 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw_extensions::{
         ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,
-        ExtensionManifest, ExtensionRegistry, InMemoryExtensionInstallationStore,
-        SharedExtensionRegistry,
+        ExtensionManifest, ExtensionRegistry, SharedExtensionRegistry,
+        VolatileExtensionInstallationStore,
     };
     use ironclaw_filesystem::{
         DirEntry, DiskFilesystem, FileStat, FilesystemError, FilesystemOperation,
@@ -3442,7 +3442,7 @@ output_schema_ref = "schemas/run.output.json"
     #[derive(Clone)]
     struct RemovalCleanupProbe {
         package_dir: std::path::PathBuf,
-        installation_store: Arc<InMemoryExtensionInstallationStore>,
+        installation_store: Arc<VolatileExtensionInstallationStore>,
         extension_id: ExtensionId,
         installation_id: ExtensionInstallationId,
     }
@@ -3474,7 +3474,7 @@ output_schema_ref = "schemas/run.output.json"
         fn set_probe(
             &self,
             storage_root: &std::path::Path,
-            installation_store: Arc<InMemoryExtensionInstallationStore>,
+            installation_store: Arc<VolatileExtensionInstallationStore>,
             extension_id: &str,
         ) {
             *self.probe.lock().expect("cleanup probe lock") = Some(RemovalCleanupProbe {
@@ -5113,7 +5113,7 @@ output_schema_ref = "schemas/run.output.json"
 
     #[tokio::test]
     async fn restore_removes_retired_slack_user_installation_without_catalog_entry() {
-        let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
+        let installation_store = Arc::new(VolatileExtensionInstallationStore::default());
         let extension_id =
             ExtensionId::new(RETIRED_SLACK_USER_EXTENSION_ID).expect("valid extension id");
         let installation_id =
@@ -5428,7 +5428,7 @@ output_schema_ref = "schemas/run.output.json"
         );
         let package = changed_available.package.clone();
         let catalog = AvailableExtensionCatalog::from_packages(vec![changed_available]);
-        let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
+        let installation_store = Arc::new(VolatileExtensionInstallationStore::default());
         let manifest_record = fixture_manifest_record_with_source(
             fixture_installed_local_manifest(),
             ManifestSource::InstalledLocal,
@@ -6179,7 +6179,7 @@ output_schema_ref = "schemas/run.output.json"
         let port = RebornLocalExtensionManagementPort::new(
             Arc::new(filesystem),
             AvailableExtensionCatalog::from_packages(Vec::new()),
-            Arc::new(InMemoryExtensionInstallationStore::default()),
+            Arc::new(VolatileExtensionInstallationStore::default()),
             Arc::new(Mutex::new(ExtensionLifecycleService::new(
                 lifecycle_registry,
             ))),
@@ -6582,7 +6582,7 @@ output_schema_ref = "schemas/run.output.json"
         std::path::PathBuf,
         crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
         Arc<SharedExtensionRegistry>,
-        Arc<InMemoryExtensionInstallationStore>,
+        Arc<VolatileExtensionInstallationStore>,
     ) {
         extension_lifecycle_fixture_with_catalog_and_service(
             AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
@@ -6597,7 +6597,7 @@ output_schema_ref = "schemas/run.output.json"
         std::path::PathBuf,
         crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
         Arc<SharedExtensionRegistry>,
-        Arc<InMemoryExtensionInstallationStore>,
+        Arc<VolatileExtensionInstallationStore>,
     ) {
         extension_lifecycle_fixture_with_catalog_and_service(
             AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
@@ -6610,7 +6610,7 @@ output_schema_ref = "schemas/run.output.json"
         std::path::PathBuf,
         crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
         Arc<SharedExtensionRegistry>,
-        Arc<InMemoryExtensionInstallationStore>,
+        Arc<VolatileExtensionInstallationStore>,
     ) {
         extension_lifecycle_fixture_with_catalog_and_service(
             AvailableExtensionCatalog::from_first_party_assets()
@@ -7322,7 +7322,7 @@ output_schema_ref = "schemas/run.output.json"
         std::path::PathBuf,
         Arc<RebornLocalExtensionManagementPort>,
         Arc<SharedExtensionRegistry>,
-        Arc<InMemoryExtensionInstallationStore>,
+        Arc<VolatileExtensionInstallationStore>,
     ) {
         let (dir, storage_root, extension_management, active_registry, installation_store, _) =
             extension_management_port_fixture_with_catalog_service_and_trust(
@@ -7347,7 +7347,7 @@ output_schema_ref = "schemas/run.output.json"
         std::path::PathBuf,
         Arc<RebornLocalExtensionManagementPort>,
         Arc<SharedExtensionRegistry>,
-        Arc<InMemoryExtensionInstallationStore>,
+        Arc<VolatileExtensionInstallationStore>,
     ) {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
@@ -7368,7 +7368,7 @@ output_schema_ref = "schemas/run.output.json"
             .expect("mount system extensions");
         let root_filesystem: Arc<dyn RootFilesystem> = Arc::new(filesystem);
         let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
-        let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
+        let installation_store = Arc::new(VolatileExtensionInstallationStore::default());
         let extension_management = Arc::new(
             RebornLocalExtensionManagementPort::new(
                 root_filesystem,
@@ -7415,7 +7415,7 @@ output_schema_ref = "schemas/run.output.json"
             .expect("mount system extensions");
         let root_filesystem: Arc<dyn RootFilesystem> = Arc::new(filesystem);
         let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
-        let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
+        let installation_store = Arc::new(VolatileExtensionInstallationStore::default());
         let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
             root_filesystem,
             catalog,
@@ -7532,7 +7532,7 @@ output_schema_ref = "schemas/run.output.json"
 
     async fn assert_removal_target_preserved(
         storage_root: &std::path::Path,
-        installation_store: &InMemoryExtensionInstallationStore,
+        installation_store: &VolatileExtensionInstallationStore,
         extension_id: &str,
     ) {
         assert!(
@@ -7569,7 +7569,7 @@ output_schema_ref = "schemas/run.output.json"
         std::path::PathBuf,
         Arc<RebornLocalExtensionManagementPort>,
         Arc<SharedExtensionRegistry>,
-        Arc<InMemoryExtensionInstallationStore>,
+        Arc<VolatileExtensionInstallationStore>,
         Arc<HostTrustPolicy>,
     ) {
         let trust_policy = test_extension_trust_policy();
@@ -7598,7 +7598,7 @@ output_schema_ref = "schemas/run.output.json"
         std::path::PathBuf,
         Arc<RebornLocalExtensionManagementPort>,
         Arc<SharedExtensionRegistry>,
-        Arc<InMemoryExtensionInstallationStore>,
+        Arc<VolatileExtensionInstallationStore>,
     ) {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
@@ -7620,7 +7620,7 @@ output_schema_ref = "schemas/run.output.json"
         let filesystem = Arc::new(filesystem);
         let root_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
         let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
-        let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
+        let installation_store = Arc::new(VolatileExtensionInstallationStore::default());
         let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
             root_filesystem,
             catalog,
@@ -7663,7 +7663,7 @@ output_schema_ref = "schemas/run.output.json"
         std::path::PathBuf,
         Arc<RebornLocalExtensionManagementPort>,
         Arc<SharedExtensionRegistry>,
-        Arc<InMemoryExtensionInstallationStore>,
+        Arc<VolatileExtensionInstallationStore>,
     ) {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
@@ -7685,7 +7685,7 @@ output_schema_ref = "schemas/run.output.json"
         let filesystem = Arc::new(filesystem);
         let root_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
         let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
-        let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
+        let installation_store = Arc::new(VolatileExtensionInstallationStore::default());
         let extension_management = Arc::new(
             RebornLocalExtensionManagementPort::new(
                 root_filesystem,
@@ -7813,7 +7813,7 @@ output_schema_ref = "schemas/run.output.json"
         std::path::PathBuf,
         crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
         Arc<SharedExtensionRegistry>,
-        Arc<InMemoryExtensionInstallationStore>,
+        Arc<VolatileExtensionInstallationStore>,
     ) {
         extension_lifecycle_fixture_with_catalog_service_and_cleanup(
             catalog,
@@ -7831,7 +7831,7 @@ output_schema_ref = "schemas/run.output.json"
         std::path::PathBuf,
         crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
         Arc<SharedExtensionRegistry>,
-        Arc<InMemoryExtensionInstallationStore>,
+        Arc<VolatileExtensionInstallationStore>,
     ) {
         extension_lifecycle_fixture_with_all_cleanup(
             catalog,
@@ -7851,7 +7851,7 @@ output_schema_ref = "schemas/run.output.json"
         std::path::PathBuf,
         crate::extension_host::lifecycle::RebornLocalLifecycleFacade,
         Arc<SharedExtensionRegistry>,
-        Arc<InMemoryExtensionInstallationStore>,
+        Arc<VolatileExtensionInstallationStore>,
     ) {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
@@ -7885,7 +7885,7 @@ output_schema_ref = "schemas/run.output.json"
             ),
         );
         let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
-        let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
+        let installation_store = Arc::new(VolatileExtensionInstallationStore::default());
         let extension_management = Arc::new(
             RebornLocalExtensionManagementPort::new(
                 root_filesystem,
@@ -8026,7 +8026,7 @@ output_schema_ref = "schemas/run.output.json"
         tempfile::TempDir,
         RebornLocalExtensionManagementPort,
         Arc<SharedExtensionRegistry>,
-        Arc<InMemoryExtensionInstallationStore>,
+        Arc<VolatileExtensionInstallationStore>,
         Arc<HostTrustPolicy>,
     ) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -8050,7 +8050,7 @@ output_schema_ref = "schemas/run.output.json"
             Arc::new(DeleteFailingRootFilesystem { inner: filesystem });
         let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
         let trust_policy = test_extension_trust_policy();
-        let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
+        let installation_store = Arc::new(VolatileExtensionInstallationStore::default());
         let extension_installation_store: Arc<dyn ExtensionInstallationStore> =
             installation_store.clone();
         let port = RebornLocalExtensionManagementPort::new(
@@ -8118,7 +8118,7 @@ output_schema_ref = "schemas/run.output.json"
 
     #[derive(Default)]
     struct DeleteInstallationFailingStore {
-        inner: InMemoryExtensionInstallationStore,
+        inner: VolatileExtensionInstallationStore,
         fail_manifest_delete: bool,
         fail_set_activation_enabled: bool,
         /// Fail `set_activation_state(Enabled)` with the retryable

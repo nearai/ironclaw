@@ -2,9 +2,8 @@ use async_trait::async_trait;
 use ironclaw_extensions::{
     ExtensionActivationState, ExtensionHealthSnapshot, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
-    ExtensionManifestRecord, ExtensionRemovalCleanupRequirement,
-    InMemoryExtensionInstallationStore, ManifestHash, ManifestSource,
-    canonicalize_installation_rows,
+    ExtensionManifestRecord, ExtensionRemovalCleanupRequirement, ManifestHash, ManifestSource,
+    VolatileExtensionInstallationStore, canonicalize_installation_rows,
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{ExtensionId, VirtualPath};
@@ -19,7 +18,7 @@ const INSTALLATION_STATE_IO_ERROR: &str = "failed to load extension installation
 pub(crate) struct FilesystemExtensionInstallationStore {
     filesystem: std::sync::Arc<dyn RootFilesystem>,
     state_path: VirtualPath,
-    inner: InMemoryExtensionInstallationStore,
+    inner: VolatileExtensionInstallationStore,
     /// The exact snapshot bytes this store last observed on disk (`None`
     /// before the first write). Serializes writers in-process and backs the
     /// stale-writer guard in [`Self::ensure_snapshot_current`].
@@ -31,7 +30,7 @@ impl FilesystemExtensionInstallationStore {
         filesystem: std::sync::Arc<dyn RootFilesystem>,
         state_path: VirtualPath,
     ) -> Result<Self, ExtensionInstallationError> {
-        let inner = InMemoryExtensionInstallationStore::default();
+        let inner = VolatileExtensionInstallationStore::default();
         let persisted = match filesystem.read_file(&state_path).await {
             Ok(bytes) => {
                 let state: WireState =
@@ -402,7 +401,7 @@ struct WireState {
 
 impl WireState {
     async fn from_store(
-        store: &InMemoryExtensionInstallationStore,
+        store: &VolatileExtensionInstallationStore,
     ) -> Result<Self, ExtensionInstallationError> {
         let manifests = store
             .list_manifests()
@@ -419,7 +418,7 @@ impl WireState {
 
     async fn load_into(
         &self,
-        store: &InMemoryExtensionInstallationStore,
+        store: &VolatileExtensionInstallationStore,
     ) -> Result<(), ExtensionInstallationError> {
         for manifest in &self.manifests {
             store

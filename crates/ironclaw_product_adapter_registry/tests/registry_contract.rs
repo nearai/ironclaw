@@ -5,8 +5,8 @@ use ironclaw_extensions::{
     ExtensionActivationState, ExtensionCredentialBinding, ExtensionCredentialHandle,
     ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
-    ExtensionManifestRecord, ExtensionManifestRef, InMemoryExtensionInstallationStore,
-    InstallationOwner, MANIFEST_SCHEMA_VERSION, ManifestSource,
+    ExtensionManifestRecord, ExtensionManifestRef, InstallationOwner, MANIFEST_SCHEMA_VERSION,
+    ManifestSource, VolatileExtensionInstallationStore,
 };
 use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle};
 use ironclaw_product_adapter_registry::{
@@ -89,7 +89,7 @@ fn installation(state: ExtensionActivationState) -> ExtensionInstallation {
 
 #[tokio::test]
 async fn default_store_has_no_enabled_installations() {
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = VolatileExtensionInstallationStore::default();
 
     assert!(store.list_manifests().await.unwrap().is_empty());
     assert!(store.list_enabled_installations().await.unwrap().is_empty());
@@ -97,7 +97,7 @@ async fn default_store_has_no_enabled_installations() {
 
 #[tokio::test]
 async fn explicit_activation_surfaces_in_product_adapter_runtime_entries() {
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = VolatileExtensionInstallationStore::default();
     store
         .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
         .await
@@ -168,7 +168,7 @@ prompt_doc_ref = "prompts/do.md"
     )
     .unwrap();
 
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = VolatileExtensionInstallationStore::default();
     store.upsert_manifest(plain_manifest).await.unwrap();
     store.upsert_installation(plain_install).await.unwrap();
 
@@ -181,7 +181,7 @@ prompt_doc_ref = "prompts/do.md"
 
 #[tokio::test]
 async fn credential_binding_must_reference_declared_manifest_handle() {
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = VolatileExtensionInstallationStore::default();
     store
         .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
         .await
@@ -213,7 +213,7 @@ async fn credential_binding_must_reference_declared_manifest_handle() {
 
 #[tokio::test]
 async fn manifest_hash_mismatch_is_rejected() {
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = VolatileExtensionInstallationStore::default();
     store
         .upsert_manifest(manifest("telegram_bot_token", "sha256:different"))
         .await
@@ -231,7 +231,7 @@ async fn manifest_hash_mismatch_is_rejected() {
 
 #[tokio::test]
 async fn upsert_manifest_rejects_when_existing_installation_binding_revoked() {
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = VolatileExtensionInstallationStore::default();
     store
         .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
         .await
@@ -306,7 +306,7 @@ fn duplicate_credential_bindings_rejected_at_construction() {
 
 #[tokio::test]
 async fn no_op_activation_transition_does_not_update_timestamp() {
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = VolatileExtensionInstallationStore::default();
     store
         .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
         .await
@@ -343,7 +343,7 @@ async fn no_op_activation_transition_does_not_update_timestamp() {
 
 #[tokio::test]
 async fn installed_state_does_not_surface_in_enabled_installations() {
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = VolatileExtensionInstallationStore::default();
     store
         .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
         .await
@@ -449,7 +449,7 @@ handle = "outbound_token"
     )
     .unwrap();
 
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = VolatileExtensionInstallationStore::default();
     store.upsert_manifest(multi_manifest).await.unwrap();
     store.upsert_installation(multi_install).await.unwrap();
 
@@ -466,7 +466,7 @@ handle = "outbound_token"
 
 #[tokio::test]
 async fn arc_store_delegation_works() {
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = VolatileExtensionInstallationStore::default();
     let arc_store: Arc<dyn ExtensionInstallationStore> = Arc::new(store);
     arc_store
         .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
@@ -485,7 +485,7 @@ async fn arc_store_delegation_works() {
 
 #[tokio::test]
 async fn update_health_uses_redacted_string() {
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = VolatileExtensionInstallationStore::default();
     store
         .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
         .await

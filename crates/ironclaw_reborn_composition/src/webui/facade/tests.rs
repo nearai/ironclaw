@@ -4,7 +4,7 @@ use ironclaw_extensions::{
     ExtensionActivationState, ExtensionHealthSnapshot, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
     ExtensionManifest, ExtensionManifestRecord, ExtensionPackage, ExtensionRegistry,
-    InMemoryExtensionInstallationStore, ManifestSource,
+    ManifestSource, VolatileExtensionInstallationStore,
 };
 use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::{
@@ -215,7 +215,7 @@ async fn operator_tool_catalog_hides_foreign_private_tools() {
 /// on (#5525 review).
 #[derive(Default)]
 struct OwnerReadFailingStore {
-    inner: InMemoryExtensionInstallationStore,
+    inner: VolatileExtensionInstallationStore,
     fail_list_installations: std::sync::atomic::AtomicBool,
 }
 

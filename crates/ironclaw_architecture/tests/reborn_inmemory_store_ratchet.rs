@@ -87,15 +87,6 @@ const FROZEN_DEBT_INMEMORY_STORES: &[&str] = &[
 /// §1.4 lock-step store duplicates. Each annotation states the reason; do not
 /// "consolidate" these without first invalidating that reason in review.
 const JUSTIFIED_KEEP_INMEMORY_STORES: &[&str] = &[
-    // --- Embedded ENGINE, not a parallel implementation.
-    //     `FilesystemExtensionInstallationStore` (reborn_composition) wraps
-    //     this store as its in-memory working set and adds snapshot
-    //     persistence — the domain logic exists exactly once, here. Follow-up
-    //     that would let it go crate-private: relocate the filesystem store
-    //     down to `ironclaw_extensions` by inverting its manifest-decoder deps
-    //     (`product_extension_host_api_contract_registry`,
-    //     `default_host_port_catalog`) into a constructor parameter. ---
-    "InMemoryExtensionInstallationStore",
     // --- Dev/test-only by explicit feature gate (`test-support`).
     //     The production counterpart already exists and is restart-safe by
     //     being STATELESS: `SignedTokenSessionStore` (HMAC-signed bearers,

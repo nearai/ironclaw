@@ -155,7 +155,7 @@ mod tests {
     use ironclaw_extensions::{
         ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
         ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
-        InMemoryExtensionInstallationStore, InstallationOwner, ManifestSource,
+        InstallationOwner, ManifestSource, VolatileExtensionInstallationStore,
     };
     #[cfg(feature = "libsql")]
     use ironclaw_filesystem::{LibSqlRootFilesystem, RootFilesystem, ScopedFilesystem};
@@ -244,7 +244,7 @@ output_schema_ref = "schemas/read.output.json"
 
     #[tokio::test]
     async fn dry_run_apply_and_rerun_are_safe_and_idempotent() {
-        let store = InMemoryExtensionInstallationStore::default();
+        let store = VolatileExtensionInstallationStore::default();
         let alice = UserId::new("alice").expect("alice");
         let bob = UserId::new("bob").expect("bob");
         let bootstrap = UserId::new("bootstrap-operator").expect("bootstrap");
