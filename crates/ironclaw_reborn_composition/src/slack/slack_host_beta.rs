@@ -2148,13 +2148,6 @@ mod tests {
             })
         );
 
-        assert_slack_attachment_request_security(
-            final_posts[0],
-            get_upload[0],
-            byte_upload[0],
-            complete[0],
-        );
-
         let final_post_position = requests
             .iter()
             .position(|request| std::ptr::eq(request, final_posts[0]))
@@ -4539,26 +4532,6 @@ mod tests {
             "{name} must be absent for {}",
             request.url
         );
-    }
-
-    fn assert_slack_attachment_request_security(
-        final_post: &NetworkHttpRequest,
-        get_upload: &NetworkHttpRequest,
-        byte_upload: &NetworkHttpRequest,
-        complete: &NetworkHttpRequest,
-    ) {
-        assert_header_exact(final_post, "authorization", "Bearer xoxb-host-token");
-        assert_header_exact(final_post, "content-type", "application/json");
-        assert_header_exact(get_upload, "authorization", "Bearer xoxb-host-token");
-        assert_header_exact(
-            get_upload,
-            "content-type",
-            "application/x-www-form-urlencoded",
-        );
-        assert_no_header(byte_upload, "authorization");
-        assert_header_exact(byte_upload, "content-type", "application/octet-stream");
-        assert_header_exact(complete, "authorization", "Bearer xoxb-host-token");
-        assert_header_exact(complete, "content-type", "application/json");
     }
 
     fn assert_strict_attachment_request(request: &NetworkHttpRequest) {

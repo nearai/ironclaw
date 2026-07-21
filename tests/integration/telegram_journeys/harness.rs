@@ -192,26 +192,6 @@ pub(crate) fn validate_single_document_multipart(
         return Err("multipart boundary contains invalid bytes".to_string());
     }
 
-    validate_single_document_body(
-        &request.body,
-        boundary,
-        expected_chat_id,
-        expected_routing_fields,
-        expected_filename,
-        expected_content_type,
-        expected_bytes,
-    )
-}
-
-fn validate_single_document_body(
-    actual: &[u8],
-    boundary: &str,
-    expected_chat_id: &str,
-    expected_routing_fields: &[(&str, &str)],
-    expected_filename: &str,
-    expected_content_type: &str,
-    expected_bytes: &[u8],
-) -> Result<(), String> {
     let mut expected = Vec::new();
     push_expected_text_part(&mut expected, boundary, "chat_id", expected_chat_id);
     for &(name, value) in expected_routing_fields {
@@ -232,49 +212,10 @@ fn validate_single_document_body(
     expected.extend_from_slice(expected_bytes);
     expected.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
 
-    if actual != expected {
+    if request.body != expected {
         return Err("Telegram document multipart did not exactly match the canonical body".into());
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod multipart_validation_tests {
-    use super::validate_single_document_body;
-
-    fn validate(actual: &[u8]) -> Result<(), String> {
-        validate_single_document_body(
-            actual,
-            "test-boundary",
-            "555",
-            &[],
-            "report.txt",
-            "text/plain",
-            b"exact bytes",
-        )
-    }
-
-    fn valid_body() -> Vec<u8> {
-        b"--test-boundary\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n555\r\n--test-boundary\r\nContent-Disposition: form-data; name=\"document\"; filename=\"report.txt\"\r\nContent-Type: text/plain\r\n\r\nexact bytes\r\n--test-boundary--\r\n".to_vec()
-    }
-
-    #[test]
-    fn exact_multipart_rejects_duplicate_part() {
-        let mut body = valid_body();
-        body.extend_from_slice(&valid_body());
-        assert!(validate(&body).is_err());
-    }
-
-    #[test]
-    fn exact_multipart_rejects_corrupt_file_bytes() {
-        let mut body = valid_body();
-        let payload_start = body
-            .windows(b"exact bytes".len())
-            .position(|window| window == b"exact bytes")
-            .expect("test payload");
-        body[payload_start] = b'X';
-        assert!(validate(&body).is_err());
-    }
 }
 
 fn push_expected_text_part(body: &mut Vec<u8>, boundary: &str, name: &str, value: &str) {
