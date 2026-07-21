@@ -1,0 +1,80 @@
+{
+  "model_name": "reborn-qa-qa_7d_slack_bug_message_trigger",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "bug: reborn QA bug logger smoke 1784642803377"
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "bug: reborn QA bug logger smoke 1784642803377",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_e59a55e4b6fb4f14ac0e740a",
+            "name": "builtin__list_dir",
+            "arguments": {
+              "path": "/workspace"
+            }
+          },
+          {
+            "id": "call_354c044b261a4fe7a15d1cfd",
+            "name": "builtin__memory_search",
+            "arguments": {
+              "query": "reborn QA bug logger smoke"
+            }
+          }
+        ],
+        "input_tokens": 13436,
+        "output_tokens": 102
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "bug: reborn QA bug logger smoke 1784642803377",
+        "min_message_count": 5
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_472386f72aa348dcad9f7f39",
+            "name": "builtin__memory_tree",
+            "arguments": {
+              "depth": 3
+            }
+          },
+          {
+            "id": "call_4e3d4f19627646568597bad2",
+            "name": "builtin__grep",
+            "arguments": {
+              "case_insensitive": true,
+              "output_mode": "files_with_matches",
+              "path": "/workspace",
+              "pattern": "smoke|1784642803377|bug.logger"
+            }
+          }
+        ],
+        "input_tokens": 13821,
+        "output_tokens": 204
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "bug: reborn QA bug logger smoke 1784642803377",
+        "min_message_count": 8
+      },
+      "response": {
+        "type": "text",
+        "content": "Nothing in the workspace or memory matches this smoke test identifier (`1784642803377`). Could you give me a bit more context?\n\n- Is this a GitHub issue/PR number from a specific repo?\n- A Slack message or thread reference?\n- Something from a particular tool (Linear, GitHub, etc.)?\n\nLet me know the repo or product area and I'll dig in.",
+        "input_tokens": 14219,
+        "output_tokens": 79
+      }
+    }
+  ]
+}

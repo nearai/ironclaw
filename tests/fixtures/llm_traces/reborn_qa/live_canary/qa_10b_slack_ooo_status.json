@@ -1,0 +1,61 @@
+{
+  "model_name": "reborn-qa-qa_10b_slack_ooo_status",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "Check Slack and tell me exactly what my current Slack status says, word for word. Include the exact marker REBORN_QA_10B_STATUS_1784642784885 in your answer."
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Check Slack and tell me exactly what my current Slack status says, word for word",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_f0f50d4da5a64b098f229281",
+            "name": "slack__whoami",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 17406,
+        "output_tokens": 42
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Check Slack and tell me exactly what my current Slack status says, word for word",
+        "min_message_count": 4
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_950c66ec52f1496cb0659af4",
+            "name": "slack__get_user_info",
+            "arguments": {
+              "user_id": "SLACK_ID_REDACTED"
+            }
+          }
+        ],
+        "input_tokens": 17601,
+        "output_tokens": 56
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "Check Slack and tell me exactly what my current Slack status says, word for word",
+        "min_message_count": 6
+      },
+      "response": {
+        "type": "text",
+        "content": "Your current Slack status is:\n\n**:palmtree: OOO-CANARY-FIXTURE back July 20**\n\nWord for word from the profile — status text is exactly:\n\n> `OOO-CANARY-FIXTURE back July 20`\n\nWith the palm tree emoji.\n\n**REBORN_QA_10B_STATUS_1784642784885**",
+        "input_tokens": 17882,
+        "output_tokens": 79
+      }
+    }
+  ]
+}
