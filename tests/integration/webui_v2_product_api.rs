@@ -29,12 +29,12 @@ use ironclaw_host_api::{
 use ironclaw_product_adapters::ProductOutboundPayload;
 use ironclaw_product_workflow::{
     RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornServices, RebornServicesApi,
-    RebornStreamEventsRequest,
+    RebornStreamEventsRequest, WebUiAuthenticatedCaller,
 };
 use ironclaw_reborn_composition::test_support::BudgetTestGateway;
 use ironclaw_reborn_composition::{
-    RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
-    build_webui_services, local_dev_runtime_policy,
+    RebornBuildInput, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle,
+    build_reborn_runtime, build_webui_services, local_dev_runtime_policy,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnEventProjectionSource, TurnStatus};
 use ironclaw_webui::webui_v2::{
@@ -46,7 +46,7 @@ use reborn_support::reply::RebornScriptedReply;
 use reborn_support::session_thread::RebornThreadHarness;
 use reborn_support::webui_mount::{get_json, mount_webui_v2_router, post_json, webui_caller_for};
 use serde_json::Value;
-use tempfile::tempdir;
+use tempfile::{TempDir, tempdir};
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -1198,6 +1198,139 @@ async fn operator_saves_admin_configuration_and_reads_back_new_redacted_revision
 
     drop(webui);
     runtime.shutdown().await.expect("runtime shuts down");
+}
+
+/// Operator capability is a transport authorization boundary. An ordinary
+/// authenticated user may neither discover tenant deployment configuration nor
+/// submit a replacement, even when the request body is otherwise valid.
+#[tokio::test]
+async fn non_operator_cannot_read_or_replace_admin_configuration() {
+    let fixture = AdminConfigurationFixture::new("non-operator").await;
+    let (get_status, get_body) = get_json(
+        fixture.member_router(),
+        "/api/webchat/v2/operator/extension-configuration",
+    )
+    .await;
+    let (put_status, put_body) = put_json(
+        fixture.member_router(),
+        "/api/webchat/v2/operator/extension-configuration/extension.slack",
+        serde_json::json!({
+            "values": slack_admin_configuration_values("forbidden-secret", "T-FORBIDDEN"),
+            "expected_revision": 0,
+            "idempotency_key": "webui-admin-forbidden-1",
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        (get_status, put_status),
+        (StatusCode::FORBIDDEN, StatusCode::FORBIDDEN),
+        "non-operator GET body: {get_body}; PUT body: {put_body}"
+    );
+    fixture.shutdown().await;
+}
+
+/// Optimistic concurrency belongs to the generic manifest configuration
+/// service. Two distinct requests cannot both replace revision zero: after the
+/// first commit, a second request carrying the stale revision is a conflict.
+#[tokio::test]
+async fn stale_admin_configuration_revision_is_rejected() {
+    let fixture = AdminConfigurationFixture::new("stale-revision").await;
+    let route = "/api/webchat/v2/operator/extension-configuration/extension.slack";
+    let (first_status, first_body) = put_json(
+        fixture.operator_router(),
+        route,
+        serde_json::json!({
+            "values": slack_admin_configuration_values("first-secret", "T-FIRST"),
+            "expected_revision": 0,
+            "idempotency_key": "webui-admin-first-1",
+        }),
+    )
+    .await;
+    let (stale_status, stale_body) = put_json(
+        fixture.operator_router(),
+        route,
+        serde_json::json!({
+            "values": slack_admin_configuration_values("stale-secret", "T-STALE"),
+            "expected_revision": 0,
+            "idempotency_key": "webui-admin-stale-2",
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        (first_status, stale_status),
+        (StatusCode::OK, StatusCode::CONFLICT),
+        "first response: {first_body}; stale response: {stale_body}"
+    );
+    fixture.shutdown().await;
+}
+
+struct AdminConfigurationFixture {
+    _root: TempDir,
+    runtime: RebornRuntime,
+    webui: RebornWebuiBundle,
+    caller: WebUiAuthenticatedCaller,
+}
+
+impl AdminConfigurationFixture {
+    async fn new(name: &str) -> Self {
+        let root = tempdir().expect("runtime storage tempdir");
+        let tenant_id = TenantId::new(format!("webui-admin-{name}-tenant")).expect("tenant id");
+        let agent_id = AgentId::new(format!("webui-admin-{name}-agent")).expect("agent id");
+        let user_id = UserId::new(format!("webui-admin-{name}-user")).expect("user id");
+        let input = RebornBuildInput::local_dev(user_id.as_str(), root.path().join("local-dev"))
+            .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+            .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+            .with_network_http_egress_for_test(Arc::new(
+                reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+            ));
+        let runtime = build_reborn_runtime(
+            RebornRuntimeInput::from_services(input)
+                .with_identity(RebornRuntimeIdentity {
+                    tenant_id: tenant_id.as_str().to_string(),
+                    agent_id: agent_id.as_str().to_string(),
+                    source_binding_id: format!("webui-admin-{name}-source"),
+                    reply_target_binding_id: format!("webui-admin-{name}-reply"),
+                })
+                .with_model_gateway_override(Arc::new(BudgetTestGateway::with_constant(
+                    "unused", 0, 0,
+                ))),
+        )
+        .await
+        .expect("production Reborn runtime builds");
+        let webui = build_webui_services(&runtime, None).expect("production WebUI facade builds");
+        let caller = WebUiAuthenticatedCaller::new(tenant_id, user_id, Some(agent_id), None);
+        Self {
+            _root: root,
+            runtime,
+            webui,
+            caller,
+        }
+    }
+
+    fn member_router(&self) -> Router {
+        mount_webui_v2_router(Arc::clone(&self.webui.api), self.caller.clone())
+    }
+
+    fn operator_router(&self) -> Router {
+        webui_v2_router(WebUiV2State::new(
+            Arc::clone(&self.webui.api),
+            DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+        ))
+        .layer(axum::Extension(
+            self.caller.clone().with_operator_webui_config(true),
+        ))
+        .layer(axum::Extension(WebUiV2Capabilities {
+            operator_webui_config: true,
+        }))
+    }
+
+    async fn shutdown(self) {
+        let Self { runtime, webui, .. } = self;
+        drop(webui);
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
 }
 
 async fn put_json(router: Router, path: &str, body: Value) -> (StatusCode, Value) {
