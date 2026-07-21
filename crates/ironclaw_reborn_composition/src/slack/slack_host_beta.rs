@@ -1367,8 +1367,8 @@ mod tests {
     use http_body_util::BodyExt;
     use ironclaw_authorization::GrantAuthorizer;
     use ironclaw_extensions::ExtensionRegistry;
-    use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
-    use ironclaw_host_api::NetworkMethod;
+    use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::{NetworkMethod, ScopedPath};
     use ironclaw_host_runtime::{
         CapabilitySurfaceVersion, HostRuntimeHttpEgressPort, HostRuntimeServices,
     };
@@ -1917,11 +1917,29 @@ mod tests {
         assert_eq!(attachment.filename.as_deref(), Some("journey-notes.txt"));
         assert_eq!(attachment.mime_type, "text/plain");
         assert_eq!(attachment.size_bytes, Some(24));
-        assert!(attachment.storage_key.is_some());
+        let storage_key = attachment
+            .storage_key
+            .as_deref()
+            .expect("accepted attachment carries its durable workspace ref");
+        assert!(storage_key.starts_with("/workspace/attachments/"));
         assert_eq!(
             attachment.extracted_text.as_deref(),
             Some("journey attachment bytes")
         );
+        let thread_scope = ThreadScope {
+            tenant_id: TenantId::new(TENANT).expect("tenant"),
+            agent_id: AgentId::new(AGENT).expect("agent"),
+            project_id: Some(ProjectId::new(PROJECT).expect("project")),
+            owner_user_id: Some(UserId::new(USER).expect("user")),
+            mission_id: None,
+        };
+        let landed = runtime
+            .project_filesystem_reader()
+            .read_file(&thread_scope, storage_key)
+            .await
+            .expect("read landed Slack bytes through the canonical project reader");
+        assert_eq!(landed.path.as_str(), storage_key);
+        assert_eq!(landed.bytes, b"journey attachment bytes");
 
         let requests = egress.requests();
         assert!(
@@ -1937,6 +1955,111 @@ mod tests {
         }));
         let final_reply = wait_for_slack_post_message(&egress, "ok").await;
         assert_eq!(final_reply["channel"], "D0HOST");
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn build_slack_host_beta_delivers_workspace_file_through_native_upload_sequence() {
+        let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+        let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
+            host_egress_port_for_test(Arc::clone(&egress)),
+        )))
+        .await;
+        let mounts =
+            build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
+        bind_slack_oauth_user(&mounts).await;
+
+        let thread_scope = ThreadScope {
+            tenant_id: TenantId::new(TENANT).expect("tenant"),
+            agent_id: AgentId::new(AGENT).expect("agent"),
+            project_id: Some(ProjectId::new(PROJECT).expect("project")),
+            owner_user_id: Some(UserId::new(USER).expect("user")),
+            mission_id: None,
+        };
+        let local_runtime = runtime
+            .services()
+            .local_runtime
+            .as_ref()
+            .expect("local runtime");
+        let workspace = ScopedFilesystem::with_fixed_view(
+            Arc::clone(&local_runtime.extension_filesystem),
+            local_runtime.workspace_mounts.clone(),
+        );
+        workspace
+            .write_bytes(
+                &thread_scope.to_resource_scope(),
+                &ScopedPath::new("/workspace/report.txt").expect("scoped report path"),
+                b"slack report bytes".to_vec(),
+            )
+            .await
+            .expect("seed the project-scoped workspace file");
+
+        let body = dm_thread_event_body_with(
+            "Ev-host-beta-workspace-upload",
+            "send workspace report",
+            "1710000000.000050",
+            "1710000000.000040",
+        );
+        post_signed_slack_event(&mounts.events, &body).await;
+        if let Some(drain) = mounts.events.drain.as_ref() {
+            drain.drain().await;
+        }
+
+        let final_reply =
+            wait_for_slack_post_message(&egress, "Here is /workspace/report.txt").await;
+        assert_eq!(final_reply["channel"], "D0HOST");
+        assert_eq!(final_reply["thread_ts"], "1710000000.000040");
+        assert_eq!(final_reply["text"], "Here is /workspace/report.txt");
+        wait_for_slack_upload_completion(&egress).await;
+
+        let requests = egress.requests();
+        let get_upload = requests
+            .iter()
+            .filter(|request| request.url.contains("/api/files.getUploadURLExternal"))
+            .collect::<Vec<_>>();
+        let byte_upload = requests
+            .iter()
+            .filter(|request| request.url.contains("/upload/v1/F-UPLOAD"))
+            .collect::<Vec<_>>();
+        let complete = requests
+            .iter()
+            .filter(|request| request.url.contains("/api/files.completeUploadExternal"))
+            .collect::<Vec<_>>();
+        assert_eq!(get_upload.len(), 1, "one upload URL request");
+        assert_eq!(byte_upload.len(), 1, "one file-byte upload");
+        assert_eq!(complete.len(), 1, "one upload completion");
+        assert_eq!(get_upload[0].method, NetworkMethod::Post);
+        assert_eq!(
+            String::from_utf8_lossy(&get_upload[0].body),
+            "filename=report.txt&length=18"
+        );
+        assert_eq!(byte_upload[0].method, NetworkMethod::Post);
+        assert_eq!(byte_upload[0].body, b"slack report bytes");
+        assert_eq!(complete[0].method, NetworkMethod::Post);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&complete[0].body)
+                .expect("complete upload JSON"),
+            serde_json::json!({
+                "files": [{"id": "F-UPLOAD", "title": "report.txt"}],
+                "channel_id": "D0HOST",
+                "thread_ts": "1710000000.000040"
+            })
+        );
+
+        let get_position = requests
+            .iter()
+            .position(|request| request.url.contains("/api/files.getUploadURLExternal"))
+            .expect("get upload URL position");
+        let byte_position = requests
+            .iter()
+            .position(|request| request.url.contains("/upload/v1/F-UPLOAD"))
+            .expect("byte upload position");
+        let complete_position = requests
+            .iter()
+            .position(|request| request.url.contains("/api/files.completeUploadExternal"))
+            .expect("complete upload position");
+        assert!(get_position < byte_position && byte_position < complete_position);
 
         runtime.shutdown().await.expect("runtime shuts down");
     }
@@ -3916,6 +4039,25 @@ mod tests {
         .to_string()
     }
 
+    fn dm_thread_event_body_with(event_id: &str, text: &str, ts: &str, thread_ts: &str) -> String {
+        serde_json::json!({
+            "type": "event_callback",
+            "team_id": TEAM,
+            "api_app_id": API_APP,
+            "event_id": event_id,
+            "event": {
+                "type": "message",
+                "channel_type": "im",
+                "user": SLACK_USER,
+                "channel": "D0HOST",
+                "text": text,
+                "ts": ts,
+                "thread_ts": thread_ts
+            }
+        })
+        .to_string()
+    }
+
     fn dm_file_share_event_body() -> String {
         serde_json::json!({
             "type": "event_callback",
@@ -4088,6 +4230,28 @@ mod tests {
         );
     }
 
+    async fn wait_for_slack_upload_completion(egress: &RecordingRuntimeHttpEgress) {
+        for _ in 0..80 {
+            if egress
+                .requests()
+                .iter()
+                .any(|request| request.url.contains("/api/files.completeUploadExternal"))
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!(
+            "Slack workspace upload did not complete; recorded URLs: {:?}; JSON bodies: {:?}",
+            egress
+                .requests()
+                .iter()
+                .map(|request| request.url.as_str())
+                .collect::<Vec<_>>(),
+            egress.request_bodies()
+        );
+    }
+
     #[derive(Debug)]
     struct RecordingProductActorUserResolver {
         user_id: UserId,
@@ -4131,9 +4295,18 @@ mod tests {
     impl HostManagedModelGateway for StaticGateway {
         async fn stream_model(
             &self,
-            _request: HostManagedModelRequest,
+            request: HostManagedModelRequest,
         ) -> Result<HostManagedModelResponse, HostManagedModelError> {
-            Ok(HostManagedModelResponse::assistant_reply("ok"))
+            let reply = if request
+                .messages
+                .iter()
+                .any(|message| message.content.contains("send workspace report"))
+            {
+                "Here is /workspace/report.txt"
+            } else {
+                "ok"
+            };
+            Ok(HostManagedModelResponse::assistant_reply(reply))
         }
 
         async fn stream_model_with_capabilities(
@@ -4183,6 +4356,16 @@ mod tests {
                 .ends_with("/files-pri/T0HOST-F-JOURNEY/journey-notes.txt")
             {
                 (200, b"journey attachment bytes".to_vec())
+            } else if request.url.contains("/api/files.getUploadURLExternal") {
+                (
+                    200,
+                    br#"{"ok":true,"upload_url":"https://files.slack.com/upload/v1/F-UPLOAD","file_id":"F-UPLOAD"}"#
+                        .to_vec(),
+                )
+            } else if request.url.contains("/upload/v1/F-UPLOAD") {
+                (200, b"OK".to_vec())
+            } else if request.url.contains("/api/files.completeUploadExternal") {
+                (200, br#"{"ok":true}"#.to_vec())
             } else if request.url.contains("/api/conversations.open") {
                 if let Some(n) = self.conversations_open_fail_after {
                     let count = self

@@ -434,15 +434,18 @@ where
             let materialized = materializer
                 .materialize(envelope_for_turn, &payload_for_turn.attachments)
                 .await
-                .map_err(|error| match error.kind() {
-                    AttachmentMaterializationFailureKind::Retryable => {
-                        ProductWorkflowError::Transient {
-                            reason: error.sanitized_reason().into(),
+                .map_err(|error| {
+                    tracing::debug!(%error, "inbound attachment materialization failed");
+                    match error.kind() {
+                        AttachmentMaterializationFailureKind::Retryable => {
+                            ProductWorkflowError::Transient {
+                                reason: error.sanitized_reason().into(),
+                            }
                         }
-                    }
-                    AttachmentMaterializationFailureKind::Permanent => {
-                        ProductWorkflowError::TurnSubmissionRejected {
-                            reason: error.sanitized_reason().into(),
+                        AttachmentMaterializationFailureKind::Permanent => {
+                            ProductWorkflowError::TurnSubmissionRejected {
+                                reason: error.sanitized_reason().into(),
+                            }
                         }
                     }
                 })?;

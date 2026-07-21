@@ -15,6 +15,7 @@
 
 mod adapter;
 mod delivery;
+mod file_urls;
 mod files;
 mod mrkdwn;
 mod payload;
@@ -26,6 +27,7 @@ pub use adapter::{
     SlackV2Adapter, SlackV2AdapterConfig, slack_declared_egress_hosts, slack_default_capabilities,
     slack_request_signature_auth_requirement,
 };
+pub use file_urls::{SlackFileUrlError, confined_slack_file_path};
 pub use payload::{
     SLACK_API_HOST, SLACK_FILES_HOST, SLACK_USER_ACTOR_KIND, SlackPayloadParseError,
     SlackUrlVerificationChallenge, parse_slack_event, parse_slack_url_verification_challenge,

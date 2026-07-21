@@ -5,8 +5,8 @@ use ironclaw_product_adapters::{
     EgressRequest, ProductAdapterError, ProtocolHttpEgress, RedactedString, WorkspaceFile,
 };
 use serde::{Deserialize, Serialize};
-use url::Url;
 
+use crate::confined_slack_file_path;
 use crate::payload::{SLACK_API_HOST, SLACK_FILES_HOST};
 use crate::render::SlackReplyTarget;
 
@@ -46,10 +46,13 @@ pub(crate) async fn upload_workspace_files(
         let file_id = upload
             .file_id
             .ok_or_else(|| permanent("Slack omitted the uploaded file id"))?;
-        let (host, path) = confined_upload_url(&upload_url)?;
+        let path = confined_slack_file_path(&upload_url).map_err(|error| {
+            tracing::debug!(%error, "Slack returned a disallowed upload URL");
+            permanent("Slack upload URL escaped the allowed file host")
+        })?;
         let response = egress
             .send(slack_request(
-                &host,
+                SLACK_FILES_HOST,
                 "POST",
                 path,
                 Some(("application/octet-stream", attachment.bytes.clone())),
@@ -126,28 +129,6 @@ fn slack_request(
     Ok(request)
 }
 
-fn confined_upload_url(raw: &str) -> Result<(String, String), ProductAdapterError> {
-    let parsed = Url::parse(raw).map_err(|error| {
-        tracing::debug!(%error, "Slack returned an invalid upload URL");
-        permanent("Slack returned an invalid upload URL")
-    })?;
-    if parsed.scheme() != "https"
-        || parsed.host_str() != Some(SLACK_FILES_HOST)
-        || parsed.username() != ""
-        || parsed.password().is_some()
-        || parsed.port().is_some()
-        || parsed.fragment().is_some()
-    {
-        return Err(permanent("Slack upload URL escaped the allowed file host"));
-    }
-    let mut path = parsed.path().to_string();
-    if let Some(query) = parsed.query() {
-        path.push('?');
-        path.push_str(query);
-    }
-    Ok((SLACK_FILES_HOST.to_string(), path))
-}
-
 fn parse_slack_json<T: for<'de> Deserialize<'de>>(
     status: u16,
     body: &[u8],
@@ -204,21 +185,4 @@ struct CompleteUploadRequest {
 struct CompletedFile {
     id: String,
     title: String,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn confined_upload_url_is_exact_host_confined() {
-        assert!(confined_upload_url("https://files.slack.com/upload/v1/abc").is_ok());
-        for url in [
-            "http://files.slack.com/upload/v1/abc",
-            "https://files.slack.com.evil.example/upload/v1/abc",
-            "https://user@files.slack.com/upload/v1/abc",
-        ] {
-            assert!(confined_upload_url(url).is_err(), "{url} must be rejected");
-        }
-    }
 }

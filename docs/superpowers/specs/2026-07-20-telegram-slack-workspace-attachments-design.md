@@ -51,6 +51,13 @@ An attachment-only message is a real user message. Multiple attachments preserve
 provider order. A retry of the same Telegram `update_id` or Slack event id returns
 the accepted outcome without downloading or landing a second copy.
 
+Descriptor-bearing messages are an intentional exception to the channels'
+ordinary immediate-ack path. The runner performs bounded workflow intake through
+provider transfer and workspace landing before returning 2xx. A transient
+lookup/download/landing failure remains visible to the webhook transport so the
+provider can redeliver the same external event; only durable acceptance removes
+that retry source. Final-reply observation remains asynchronous after acceptance.
+
 ### Outbound user journey
 
 1. During a Telegram- or Slack-originated turn, the agent creates or selects a
@@ -63,12 +70,14 @@ the accepted outcome without downloading or landing a second copy.
 4. A project-scoped reader resolves each path through filesystem authority,
    checks the shared count/size/total budgets, and returns transient bytes plus
    filename and MIME type. A host path is never accepted.
-5. The native adapter delivers the text and files as one logical delivery:
-   Telegram uses Bot API multipart upload (`sendPhoto` for supported images,
-   otherwise `sendDocument`); Slack uses `files.getUploadURLExternal`, uploads
-   bytes to the returned `files.slack.com` URL, then calls
-   `files.completeUploadExternal` with the destination channel/thread and the
-   reply text.
+5. The native adapter delivers the text and files as one logical delivery while
+   preserving each provider's existing wire UX. Telegram sends the final text
+   through its ordered `sendMessage` path and then uses one `sendDocument`
+   multipart request per file. Slack posts the final text with
+   `chat.postMessage`, then uses `files.getUploadURLExternal`, uploads bytes to
+   the returned `files.slack.com` URL, and calls
+   `files.completeUploadExternal` with the destination channel/thread. Text is
+   not duplicated into a Telegram caption or Slack `initial_comment`.
 6. The delivery attempt is marked delivered only when every required provider
    operation succeeds. A partial provider send is terminal and reported as a
    partial permanent failure so automatic retry cannot duplicate already-sent
@@ -96,8 +105,9 @@ Add a channel-neutral Rust workspace-reference extractor to
 `ironclaw_attachments`. Its fixtures pin parity with
 `frontend/src/pages/chat/lib/project-file-paths.ts`: paths must start with
 `/workspace/`, must have a supported filename/extension, are ignored inside code
-spans, and are deduplicated without reordering. The browser helper stays a UI
-presentation helper; the Rust helper is authoritative for host delivery.
+spans, must be bare paths or local Markdown hrefs rather than suffixes inside an
+external URL, and are deduplicated without reordering. The browser helper stays
+a UI presentation helper; the Rust helper is authoritative for host delivery.
 
 ### Inbound materialization port
 
@@ -141,14 +151,25 @@ Provider implementations:
   returned id/name/MIME/size agree with the descriptor, accept only an HTTPS
   `files.slack.com` `url_private_download`, and download it with host-injected
   bearer authorization. The incoming event's `url_private` remains discarded.
+  This provider transfer implementation lives in `ironclaw_slack_extension`;
+  composition supplies mediated egress and the shared lander but owns no Slack
+  wire DTOs or transfer policy.
+
+The generic native runner defaults to immediate acknowledgement. Telegram and
+Slack explicitly opt descriptor-bearing messages into a bounded 15-second
+pre-ack intake window so retryable lookup, download, or landing failures remain
+visible to provider redelivery. Text-only products and products that do not opt
+in keep immediate acknowledgement.
 
 ### Transient outbound attachment rendering
 
-Add a non-serializable `ProductOutboundAttachment` host value containing only
-the validated virtual path, filename, MIME type, and bytes. Extend
-`ProductAdapter` with a defaulted `render_outbound_with_attachments` method. The
-default delegates to today's `render_outbound` when the list is empty and rejects
-non-empty lists, preserving all existing adapters and preventing silent drops.
+Use the attachment-owned, non-serializable `MaterializedFile<P>` as the one
+transient byte carrier. Channel delivery specializes it as
+`WorkspaceFile = MaterializedFile<ScopedPath>`; it does not copy those fields
+into a mirror product DTO. Extend `ProductAdapter` with a defaulted
+`render_outbound_with_attachments` method. The default delegates to today's
+`render_outbound` when the list is empty and rejects non-empty lists, preserving
+all existing adapters and preventing silent drops.
 
 `ProductOutboundEnvelope`, `FinalReplyView`, WIT/component payloads, projections,
 and persisted delivery records do not gain raw bytes. The channel delivery layer
@@ -162,7 +183,7 @@ behavior change.
 final assistant text + authoritative ThreadScope
   -> shared /workspace path extractor
   -> project-scoped bounded file reader
-  -> Vec<ProductOutboundAttachment>       transient, host memory only
+  -> Vec<MaterializedFile<ScopedPath>>    transient, host memory only
   -> native adapter aggregate renderer
   -> mediated provider egress
   -> one honest delivery outcome
@@ -170,6 +191,13 @@ final assistant text + authoritative ThreadScope
 
 The same extraction and read step is used for live inbound replies and triggered
 delivery. It is channel-neutral and does not key on Telegram or Slack.
+
+Composition constructs the required `InboundAttachmentLander` and
+`ProjectFilesystemReader` once over the active deployment's scoped root and
+stores them on the runtime. WebUI, OpenAI-compatible ingress, Telegram, and
+Slack clone those same deployment-neutral ports. No channel reconstructs a
+WebUI/local filesystem implementation, and final-reply delivery cannot be built
+without the required reader.
 
 ### Why this approach
 
@@ -192,8 +220,8 @@ Three approaches were evaluated:
 - Inbound metadata: existing photo/document/audio/video/voice/sticker descriptors.
 - Inbound fetch: `getFile`, then the authenticated `/file/bot<token>/<file_path>`
   download route.
-- Outbound image: `sendPhoto` multipart when MIME and provider constraints allow.
-- Other outbound file: `sendDocument` multipart.
+- Outbound file: ordered final `sendMessage` text followed by `sendDocument`
+  multipart for every resolved workspace file.
 - Preserve current chat/topic/reply targeting. Multipart names, filenames, and
   captions are escaped and bounded; no raw token enters a constructed/logged URL.
 - Provider error envelopes use the adapter's current retryable, unauthorized,
@@ -206,7 +234,8 @@ Three approaches were evaluated:
 - Outbound upload: `files.getUploadURLExternal` (`files:write`) for every file;
   POST bounded bytes to each validated upload URL; finalize all returned file ids
   once with `files.completeUploadExternal`, including `channel_id`, `thread_ts`
-  when present, and the final reply as `initial_comment`.
+  when present. The final reply was already delivered through
+  `chat.postMessage`; it is not copied into `initial_comment`.
 - Do not use retired `files.upload`.
 - Setup/install manifests and UI must request and explain both `files:read` and
   `files:write`. Existing installations missing `files:write` fail honestly with
@@ -219,7 +248,10 @@ Three approaches were evaluated:
 - Missing size metadata: perform a response-bounded fetch and reject at the byte
   limit. Never buffer an unbounded body.
 - Provider lookup/download failure: no landing and no turn submission. A retry of
-  the same external event may retry while it is not yet accepted.
+  the same external event may retry while it is not yet accepted. On Telegram and
+  Slack webhook ingress, retryable descriptor transfer failures surface before
+  2xx so provider redelivery owns that retry rather than a best-effort post-ack
+  task.
 - Landing failure after download: no accepted message. Existing landing cleanup
   and idempotency rules apply; no channel-specific file remains.
 - Missing or unauthorized outbound workspace path: do not send a misleading
@@ -258,7 +290,8 @@ Three approaches were evaluated:
 4. Count/per-file/total budgets and supported MIME registry are identical for
    WebUI and channel paths.
 5. Rust workspace-path extraction matches WebUI fixtures for prose, punctuation,
-   duplicates, unsupported extensions, inline code, fenced code, and traversal.
+   duplicates, unsupported extensions, inline code, fenced code, traversal, and
+   rejection of `/workspace/...` suffixes inside external URLs.
 6. Outbound reader resolves only scoped `/workspace/...` paths and rejects
    missing, oversized, aggregate-oversized, and cross-scope files.
 7. An adapter that does not override attachment rendering rejects non-empty
@@ -277,11 +310,13 @@ composition and hermetic Bot API double:
 3. Replayed `update_id` performs one download/landing/turn.
 4. Unsupported, oversized, missing `file_path`, 401, 429/5xx, and truncated
    downloads produce honest failure and no attachment-less turn.
-5. Assistant text referencing a valid workspace image/document performs native
+5. A transient `getFile`/download failure returns a retryable webhook response;
+   redelivery of the same `update_id` lands once and produces one turn/reply.
+6. Assistant text referencing a valid workspace image/document performs native
    multipart upload and text delivery with the correct chat/topic/reply target.
-6. Missing/oversized outbound file performs no misleading text-only success;
+7. Missing/oversized outbound file performs no misleading text-only success;
    partial provider delivery is terminal and redacted.
-7. Restart/reopen proves the landed bytes and transcript ref remain available.
+8. Restart/reopen proves the landed bytes and transcript ref remain available.
 
 ### Slack whole journey
 
@@ -294,11 +329,15 @@ API and file-host double:
 3. Replayed event id performs one lookup/download/landing/turn.
 4. Forged download host, metadata mismatch, missing `files:read`, unsupported or
    oversized files, 401, 429/5xx, and truncated bodies fail without a turn.
-5. Assistant workspace reference performs get-upload-URL -> bounded upload ->
-   complete-upload in the right channel/thread with the reply comment.
-6. Missing `files:write`, missing/oversized outbound paths, and partial uploads
+5. A transient `files.info`/download failure returns a retryable webhook
+   response; redelivery of the same event id lands once and produces one
+   turn/reply.
+6. Assistant workspace reference performs one final-text `chat.postMessage`,
+   then get-upload-URL -> bounded upload -> complete-upload in the right
+   channel/thread without duplicating the text as an upload comment.
+7. Missing `files:write`, missing/oversized outbound paths, and partial uploads
    record honest non-duplicate-safe failures.
-7. Two users/projects cannot read, deliver, or download each other's attachment.
+8. Two users/projects cannot read, deliver, or download each other's attachment.
 
 ### Existing WebUI regression
 

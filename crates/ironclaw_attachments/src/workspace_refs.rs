@@ -4,8 +4,9 @@ const WORKSPACE_PREFIX: &str = "/workspace/";
 
 /// Extract workspace file references using the same recognition rules as the
 /// WebUI file chips: ignore closed Markdown code spans, keep the longest token
-/// ending in an alphanumeric extension, deduplicate, and preserve first-seen
-/// order.
+/// ending in an alphanumeric extension, accept only bare/local Markdown path
+/// boundaries (never a suffix inside an external URL), deduplicate, and
+/// preserve first-seen order.
 pub fn extract_workspace_attachment_paths(content: &str) -> Vec<String> {
     if content.is_empty() {
         return Vec::new();
@@ -20,6 +21,10 @@ pub fn extract_workspace_attachment_paths(content: &str) -> Vec<String> {
         .and_then(|remaining| remaining.find(WORKSPACE_PREFIX))
     {
         let start = search_from + relative_start;
+        if !has_workspace_left_boundary(&visible, start) {
+            search_from = start.saturating_add(WORKSPACE_PREFIX.len());
+            continue;
+        }
         let Some(remaining) = visible.get(start..) else {
             break;
         };
@@ -41,6 +46,22 @@ pub fn extract_workspace_attachment_paths(content: &str) -> Vec<String> {
     }
 
     paths
+}
+
+fn has_workspace_left_boundary(content: &str, start: usize) -> bool {
+    if start == 0 {
+        return true;
+    }
+    content
+        .get(..start)
+        .and_then(|prefix| prefix.chars().next_back())
+        .is_some_and(|character| {
+            !character.is_alphanumeric()
+                && !matches!(
+                    character,
+                    '/' | ':' | '?' | '=' | '&' | '%' | '#' | '_' | '-'
+                )
+        })
 }
 
 fn is_workspace_token_character(character: char) -> bool {
@@ -120,6 +141,22 @@ mod tests {
                 "Not /etc/passwd, /workspace, or /project/report.csv"
             )
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn ignores_workspace_looking_paths_inside_external_urls() {
+        assert!(
+            extract_workspace_attachment_paths(
+                "See https://example.test/workspace/report.pdf and https://example.test/?next=/workspace/secret.csv"
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            extract_workspace_attachment_paths(
+                "The local copy is /workspace/report.pdf, '/workspace/report.pdf', or [download it](/workspace/report.pdf)."
+            ),
+            vec!["/workspace/report.pdf"]
         );
     }
 }

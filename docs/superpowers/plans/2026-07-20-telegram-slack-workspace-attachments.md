@@ -4,7 +4,7 @@
 
 **Goal:** Make Telegram and Slack inbound files land through the existing WebUI workspace attachment pipeline and deliver referenced workspace files back as native channel attachments.
 
-**Architecture:** `DefaultInboundTurnService` gains a provider-neutral descriptor materialization port that feeds the existing `InboundAttachmentLander`. Shared channel delivery resolves assistant `/workspace/...` references through a scoped reader and passes transient bytes to a defaulted `ProductAdapter` attachment-render method; only native Telegram and Slack adapters override the method.
+**Architecture:** `DefaultInboundTurnService` gains a provider-neutral descriptor materialization port that feeds the existing `InboundAttachmentLander`. Shared channel delivery resolves assistant `/workspace/...` references through a required scoped reader and passes the canonical `WorkspaceFile = MaterializedFile<ScopedPath>` values to a defaulted `ProductAdapter` attachment-render method; only native Telegram and Slack adapters override the method. Composition builds deployment-neutral landing/reader ports once, Slack provider transfer lives in `ironclaw_slack_extension`, and Telegram/Slack explicitly select bounded pre-ack attachment intake.
 
 **Tech Stack:** Rust, async-trait, Reborn product workflow, `RootFilesystem`/`ScopedFilesystem`, mediated HTTP egress, Telegram Bot API, Slack Web API, Axum integration harnesses.
 
@@ -19,6 +19,31 @@
 - Keep text-only behavior and all existing adapters backward compatible.
 - Use `files.getUploadURLExternal` plus `files.completeUploadExternal`; do not use retired `files.upload`.
 - Production code contains no `.unwrap()` or `.expect()` and clippy must have zero warnings.
+
+## Final architecture correction
+
+This plan records the test-first path used to discover the feature, but the
+following final decisions supersede obsolete draft type/file sketches below:
+
+- `ironclaw_attachments::MaterializedFile<P>` is the single transient byte
+  carrier. Product adapters receive `WorkspaceFile = MaterializedFile<ScopedPath>`;
+  there is no `ProductOutboundAttachment` mirror DTO.
+- `FinalReplyDeliveryServices.project_filesystem_reader` is required, not an
+  optional builder patch. The runtime constructs its lander and reader once
+  over the active deployment root; WebUI, OpenAI-compatible ingress, Telegram,
+  and Slack clone those ports without calling a WebUI/local filesystem helper.
+- Slack `files.info` and download behavior is owned by
+  `ironclaw_slack_extension`; composition only constructs and wires it.
+- The generic native runner has no attachment ACK timeout by default. Telegram
+  and Slack opt descriptor-bearing messages into 15-second pre-ack intake;
+  text-only updates remain immediate-ack.
+- Native delivery preserves provider UX: Telegram sends final text with
+  `sendMessage` then files with `sendDocument`; Slack sends final text with
+  `chat.postMessage`, then performs get-upload-URL -> byte POST -> completion.
+  File captions/comments do not duplicate the final text.
+
+Any historical red-test statement below that names a removed draft shape is a
+record of the rejected design, not an instruction to reintroduce it.
 
 ---
 
@@ -180,7 +205,8 @@ git commit -m "feat: materialize channel attachments in workflow"
 - Test: `crates/ironclaw_product_workflow/tests/outbound_delivery_contract.rs`
 
 **Interfaces:**
-- Produces: non-serializable `ProductOutboundAttachment`, default
+- Produces: attachment-owned non-serializable `MaterializedFile<P>`,
+  `WorkspaceFile = MaterializedFile<ScopedPath>`, default
   `ProductAdapter::render_outbound_with_attachments`,
   `EgressRequest::with_response_body_limit`, and
   `ProductOutboundDeliveryRequest.attachments`.
@@ -212,12 +238,14 @@ Expected: compile failure on missing contract.
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProductOutboundAttachment {
-    pub workspace_path: String,
-    pub filename: String,
+pub struct MaterializedFile<P> {
+    pub path: P,
+    pub filename: Option<String>,
     pub mime_type: String,
     pub bytes: Vec<u8>,
 }
+
+pub type WorkspaceFile = MaterializedFile<ScopedPath>;
 ```
 
 Do not derive `Serialize`/`Deserialize`. Add the default trait method and pass
@@ -252,11 +280,10 @@ git commit -m "feat: add transient outbound attachment rendering"
 - Modify: `crates/ironclaw_reborn_composition/src/support/fs/project_filesystem_reader.rs`
 
 **Interfaces:**
-- Produces: `OutboundWorkspaceAttachmentReader::read_workspace_attachment`,
-  optional `FinalReplyDeliveryServices.workspace_attachments`, and
+- Produces: required `FinalReplyDeliveryServices.project_filesystem_reader` and
   `resolve_final_reply_attachments`.
-- Consumes: `ThreadScope`, shared path extractor/budgets, and
-  `ProductOutboundAttachment`.
+- Consumes: `ThreadScope`, shared path extractor/budgets, and canonical
+  `WorkspaceFile` values.
 
 - [ ] **Step 1: Write red shared delivery tests**
 
@@ -282,12 +309,12 @@ Expected: compile failure on missing reader/service field.
 
 ```rust
 #[async_trait]
-pub trait OutboundWorkspaceAttachmentReader: Send + Sync {
-    async fn read_workspace_attachment(
+pub trait ProjectFilesystemReader: Send + Sync {
+    async fn read_file(
         &self,
         scope: &ThreadScope,
         workspace_path: &str,
-    ) -> Result<ProductOutboundAttachment, FinalReplyDeliveryError>;
+    ) -> Result<WorkspaceFile, ProjectFsError>;
 }
 ```
 
@@ -375,7 +402,8 @@ git commit -m "feat: land Telegram attachments in workspace"
 
 **Interfaces:**
 - Produces: Telegram override of `render_outbound_with_attachments`.
-- Consumes: `ProductOutboundAttachment`, `sendPhoto`, `sendDocument`, current target parser, and delivery sink.
+- Consumes: canonical `WorkspaceFile`, `sendDocument`, current target parser,
+  and delivery sink.
 
 - [ ] **Step 1: Write red multipart and honesty tests**
 
@@ -401,9 +429,9 @@ Expected: default renderer rejects non-empty attachments.
 
 Create a random multipart boundary without user-controlled bytes; escape quoted
 filenames and reject CR/LF. Send text chunks followed by ordered attachments,
-using `sendPhoto` only for supported image MIME types and `sendDocument`
-otherwise. Reuse existing response classification; after any successful visible
-part, map later failures to `FailedPermanent`.
+using `sendDocument` for each resolved file after the ordered final-text
+`sendMessage` requests. Reuse existing response classification; after any
+successful visible part, map later failures to `FailedPermanent`.
 
 - [ ] **Step 4: Run Telegram adapter/extension tests**
 
@@ -421,14 +449,14 @@ git commit -m "feat: send workspace files through Telegram"
 ### Task 7: Slack inbound materialization
 
 **Files:**
-- Create: `crates/ironclaw_reborn_composition/src/slack/slack_attachments.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/slack/mod.rs`
+- Create: `crates/ironclaw_slack_extension/src/attachment_materializer.rs`
+- Modify: `crates/ironclaw_slack_extension/src/lib.rs`
 - Modify: `crates/ironclaw_reborn_composition/src/slack/slack_egress.rs`
 - Modify: `crates/ironclaw_reborn_composition/src/slack/slack_host_beta.rs`
 - Test: `crates/ironclaw_reborn_composition/src/slack/slack_serve/e2e_tests.rs`
 
 **Interfaces:**
-- Produces: `SlackInboundAttachmentMaterializer` implementing the Task 2 port.
+- Produces: provider-owned `SlackAttachmentMaterializer` implementing the Task 2 port.
 - Consumes: `files.info`, validated `files.slack.com` download URLs, mediated bearer egress, and shared budgets.
 
 - [ ] **Step 1: Write red Slack fetch tests**
@@ -447,7 +475,7 @@ async fn slack_download_url_on_foreign_host_fails_before_download() {
 
 - [ ] **Step 2: Run tests and verify failure**
 
-Run: `cargo test -p ironclaw_reborn_composition --lib slack_attachment -- --nocapture`
+Run: `cargo test -p ironclaw_slack_extension -- --nocapture`
 
 Expected: compile failure because the materializer is absent.
 
@@ -468,7 +496,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/ironclaw_reborn_composition/src/slack
+git add crates/ironclaw_slack_extension crates/ironclaw_reborn_composition/src/slack
 git commit -m "feat: land Slack attachments in workspace"
 ```
 
@@ -512,8 +540,9 @@ Expected: default renderer rejects non-empty attachments.
 For each file call `files.getUploadURLExternal` with filename and exact length,
 validate the returned HTTPS `files.slack.com` URL, and POST raw bytes. Finalize
 the collected ids once with `files.completeUploadExternal`, `channel_id`,
-optional `thread_ts`, and final text as `initial_comment`. Record one aggregate
-status and treat any failure after a successful byte upload as permanent. Add
+optional `thread_ts`. Final text remains the preceding `chat.postMessage` and is
+not duplicated as `initial_comment`. Record one aggregate status and treat any
+failure after a successful visible send as permanent. Add
 `files:write` everywhere setup manifests and copy declare Slack bot scopes.
 
 - [ ] **Step 4: Run Slack adapter/composition tests**
@@ -535,7 +564,7 @@ git commit -m "feat: send workspace files through Slack"
 - Create: `tests/integration/telegram_journeys/scenario_attachments.rs`
 - Modify: `tests/integration/telegram_journeys/main.rs`
 - Modify: `tests/integration/telegram_journeys/harness.rs`
-- Modify: `crates/ironclaw_reborn_composition/src/slack/slack_serve/e2e_tests.rs`
+- Modify: `crates/ironclaw_reborn_composition/src/slack/slack_host_beta.rs`
 - Modify: `tests/integration/attach.rs`
 
 **Interfaces:**
@@ -557,17 +586,18 @@ delivery properties as Telegram.
 
 - [ ] **Step 3: Run the journeys and verify they fail before final wiring**
 
-Run: `cargo test --test reborn_integration_telegram_journey attachments -- --nocapture`
+Run: `cargo test --test reborn_integration_telegram_journey scenario_attachments -- --nocapture`
 
-Run: `cargo test -p ironclaw_reborn_composition --features test-support,libsql slack_attachment -- --nocapture`
+Run: `cargo test -p ironclaw_reborn_composition --features test-support,libsql --lib slack -- --nocapture`
 
 Expected: failures identify any missing production reader/materializer wiring.
 
 - [ ] **Step 4: Complete only the production wiring exposed by failures**
 
-Wire `ProjectScopedAttachmentLander`, the channel materializers, and the
-project-scoped outbound reader into `TelegramRevisionWorkflowBuilder` and Slack
-host assembly. Do not add test-only bypasses.
+Construct `ProjectScopedAttachmentLander` and `ProjectScopedFilesystemReader`
+once on the runtime over the active deployment root, then clone the ports into
+WebUI, OpenAI-compatible ingress, Telegram, and Slack. Wire the provider-owned
+channel materializers into the product workflows. Do not add test-only bypasses.
 
 - [ ] **Step 5: Run shared and channel integration suites**
 
