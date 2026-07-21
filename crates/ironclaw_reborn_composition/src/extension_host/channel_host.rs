@@ -275,16 +275,26 @@ enum ReconciledChannel {
     /// Assembly-built generic graph for exactly this active-set entry.
     Generic {
         active: Arc<ActiveExtension>,
+        #[cfg(feature = "test-support")]
         binding: Arc<dyn ConversationBindingService>,
         /// The post-admission observer registered with the sink (test seam:
         /// gate-resolution acks arriving from non-channel surfaces are
         /// injected through the SAME observer instance the sink drives).
+        #[cfg(feature = "test-support")]
         observer: Option<Arc<dyn PostAdmissionObserver>>,
     },
     /// Nothing registered for this entry (unmanaged registration, no
     /// verification recipe, or a build failure already logged); skipped
     /// until the active-set entry changes.
     Untouched { active: Arc<ActiveExtension> },
+}
+
+struct BuiltGenericChannelGraph {
+    registration: ChannelIngressRegistration,
+    #[cfg(feature = "test-support")]
+    binding: Arc<dyn ConversationBindingService>,
+    #[cfg(feature = "test-support")]
+    observer: Option<Arc<dyn PostAdmissionObserver>>,
 }
 
 /// The generic channel host assembly: one per composed runtime with a
@@ -502,11 +512,11 @@ impl GenericChannelHostAssembly {
             }
             let extras = self.stored_extras(&extension_id);
             match self.build_generic_graph(&active, &extras).await {
-                Ok(Some((registration, binding, observer))) => {
+                Ok(Some(graph)) => {
                     match self
                         .deps
                         .registry
-                        .register_managed(&extension_id, registration)
+                        .register_managed(&extension_id, graph.registration)
                     {
                         ManagedRegistrationOutcome::Registered { replaced } => {
                             if let Some(replaced) = replaced {
@@ -516,8 +526,10 @@ impl GenericChannelHostAssembly {
                                 extension_id.clone(),
                                 ReconciledChannel::Generic {
                                     active,
-                                    binding,
-                                    observer,
+                                    #[cfg(feature = "test-support")]
+                                    binding: graph.binding,
+                                    #[cfg(feature = "test-support")]
+                                    observer: graph.observer,
                                 },
                             );
                         }
@@ -563,14 +575,7 @@ impl GenericChannelHostAssembly {
         &self,
         active: &ActiveExtension,
         extras: &StoredChannelExtras,
-    ) -> Result<
-        Option<(
-            ChannelIngressRegistration,
-            Arc<dyn ConversationBindingService>,
-            Option<Arc<dyn PostAdmissionObserver>>,
-        )>,
-        String,
-    > {
+    ) -> Result<Option<BuiltGenericChannelGraph>, String> {
         let Some(channel) = active.resolved.channel.as_ref() else {
             return Ok(None);
         };
@@ -642,7 +647,13 @@ impl GenericChannelHostAssembly {
             sink: Arc::clone(&sink) as Arc<dyn ironclaw_extension_host::ingress::InboundSink>,
             drain: Some(sink as Arc<dyn ChannelIngressDrain>),
         };
-        Ok(Some((registration, binding, observer)))
+        Ok(Some(BuiltGenericChannelGraph {
+            registration,
+            #[cfg(feature = "test-support")]
+            binding,
+            #[cfg(feature = "test-support")]
+            observer,
+        }))
     }
 
     /// The per-extension conversation-binding service over durable state at
@@ -827,7 +838,7 @@ impl GenericChannelHostAssembly {
     /// The live conversation-binding service the assembly registered for one
     /// extension — the SAME instance the registered sink resolves through,
     /// so a pre-resolved binding is the binding admission finds.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(feature = "test-support")]
     pub fn binding_service_for_extension_for_test(
         &self,
         extension_id: &str,
@@ -843,7 +854,7 @@ impl GenericChannelHostAssembly {
     /// — the SAME instance the registered sink drives, so an ack injected
     /// from a non-channel surface (WebUI gate resolve) exercises the exact
     /// single-flight guard production runs.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(feature = "test-support")]
     pub fn post_admission_observer_for_extension_for_test(
         &self,
         extension_id: &str,

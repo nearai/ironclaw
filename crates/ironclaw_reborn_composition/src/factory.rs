@@ -564,7 +564,17 @@ pub struct RebornServices {
     /// Registry of beta-era channel credential bridges (§11 compatibility):
     /// channel hosts whose secrets predate the extension-config store
     /// register resolution ports here.
+    #[cfg(feature = "test-support")]
     pub(crate) channel_egress_credential_bridges:
+        Option<Arc<crate::extension_host::channel_egress::BridgedChannelEgressCredentials>>,
+}
+
+struct ChannelHostWiring {
+    extension_ingress: Option<crate::extension_host::extension_ingress::ExtensionIngressParts>,
+    delivery_coordinator: Option<Arc<ironclaw_product_workflow::DeliveryCoordinator>>,
+    channel_delivery_resolver: Option<Arc<dyn ironclaw_product_workflow::ChannelDeliveryResolver>>,
+    #[cfg(feature = "test-support")]
+    channel_egress_credential_bridges:
         Option<Arc<crate::extension_host::channel_egress::BridgedChannelEgressCredentials>>,
 }
 
@@ -1610,6 +1620,7 @@ impl RebornServices {
             channel_pairing: None,
             delivery_coordinator: None,
             channel_delivery_resolver: None,
+            #[cfg(feature = "test-support")]
             channel_egress_credential_bridges: None,
         }
     }
@@ -2436,12 +2447,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     // configured runtime lanes, hydrated from the facade's durable state.
     // From here extension dispatch resolves from the host's active snapshot;
     // the registry lane serves built-ins only.
-    let (
-        extension_ingress,
-        delivery_coordinator,
-        channel_delivery_resolver,
-        channel_egress_credential_bridges,
-    ) = {
+    let channel_host_wiring = {
         let reserved_capability_ids: std::collections::BTreeSet<_> = services
             .shared_extension_registry()
             .snapshot()
@@ -2452,13 +2458,18 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             .map(|descriptor| descriptor.id.clone())
             .collect();
         let channel_egress_credentials = Arc::new(
-            crate::extension_host::channel_egress::BridgedChannelEgressCredentials::new(Arc::new(
-                crate::extension_host::channel_egress::SecretStoreChannelEgressCredentials::new(
-                    Arc::clone(&secret_store),
-                    channel_egress_scope.clone(),
-                ),
-            )),
+            crate::extension_host::channel_egress::SecretStoreChannelEgressCredentials::new(
+                Arc::clone(&secret_store),
+                channel_egress_scope.clone(),
+            ),
         );
+        #[cfg(feature = "test-support")]
+        let channel_egress_credentials = Arc::new(
+            crate::extension_host::channel_egress::BridgedChannelEgressCredentials::new(
+                channel_egress_credentials,
+            ),
+        );
+        #[cfg(feature = "test-support")]
         let channel_egress_credential_bridges = Arc::clone(&channel_egress_credentials);
         // Use the SAME effective port the rest of the runtime egresses
         // through (test overrides included) — a transport on a different
@@ -2680,12 +2691,13 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             }
             None => (None, None),
         };
-        (
-            Some(ingress_parts),
+        ChannelHostWiring {
+            extension_ingress: Some(ingress_parts),
             delivery_coordinator,
             channel_delivery_resolver,
-            Some(channel_egress_credential_bridges),
-        )
+            #[cfg(feature = "test-support")]
+            channel_egress_credential_bridges: Some(channel_egress_credential_bridges),
+        }
     };
 
     #[cfg(any(test, feature = "test-support"))]
@@ -2714,11 +2726,12 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         credential_refresh_worker: CredentialRefreshWorkerReady::Absent,
         channel_extension_bindings,
-        extension_ingress,
+        extension_ingress: channel_host_wiring.extension_ingress,
         channel_pairing: channel_pairing_registry,
-        delivery_coordinator,
-        channel_delivery_resolver,
-        channel_egress_credential_bridges,
+        delivery_coordinator: channel_host_wiring.delivery_coordinator,
+        channel_delivery_resolver: channel_host_wiring.channel_delivery_resolver,
+        #[cfg(feature = "test-support")]
+        channel_egress_credential_bridges: channel_host_wiring.channel_egress_credential_bridges,
     })
 }
 
@@ -5903,6 +5916,7 @@ where
         channel_pairing: None,
         delivery_coordinator: None,
         channel_delivery_resolver: None,
+        #[cfg(feature = "test-support")]
         channel_egress_credential_bridges: None,
     })
 }
