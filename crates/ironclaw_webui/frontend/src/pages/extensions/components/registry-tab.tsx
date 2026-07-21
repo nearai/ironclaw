@@ -31,7 +31,7 @@ function ImportButton({ onImport, isImporting, isBusy }) {
         type="button"
         onClick={() => fileInputRef.current?.click()}
         disabled={isBusy || isImporting}
-        className="flex items-center gap-1.5 rounded-md border border-[var(--v2-panel-border)] bg-white/[0.04] px-2.5 py-1 text-xs text-[var(--v2-text-strong)] transition hover:bg-white/[0.08] disabled:opacity-50"
+        className="flex items-center gap-1.5 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-2.5 py-1 text-xs text-[var(--v2-text-strong)] transition hover:bg-[var(--v2-surface-muted)] disabled:opacity-50"
       >
         <Icon name="upload" className="h-3 w-3" />
         {isImporting ? t("ext.registry.importing") : t("ext.registry.import")}
@@ -114,7 +114,7 @@ export function RegistryTab({
           value={filter}
           onChange={(e) => setFilter(e.currentTarget.value)}
           placeholder={t("ext.registry.searchPlaceholder")}
-          className="h-9 flex-1 rounded-md border border-[var(--v2-panel-border)] bg-white/[0.04] px-3 text-sm text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)] focus:border-[var(--v2-accent)]"
+          className="h-9 flex-1 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 text-sm text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)] focus:border-[var(--v2-accent)]"
         />
         <span className="font-mono text-[11px] text-[var(--v2-text-faint)]">
           {filtered.length} / {catalogEntries.length}

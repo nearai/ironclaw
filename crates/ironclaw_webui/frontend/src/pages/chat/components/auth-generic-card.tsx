@@ -19,7 +19,7 @@ export function AuthGenericCard({ gate, onCancel }) {
       challengeKind="other"
     >
       <form onSubmit={(event) => event.preventDefault()}>
-        <div className="mb-3 text-sm text-iron-200">
+        <div className="mb-3 text-sm text-[var(--v2-text)]">
           {t("authGate.unsupportedChallenge")}
         </div>
         <div className="flex flex-wrap gap-2">

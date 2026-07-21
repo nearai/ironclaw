@@ -183,7 +183,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
         onClose={onClose}
         title={t("extensions.configureName").replace("{name}", extensionName)}
       >
-        <p className="mb-4 text-sm leading-6 text-iron-300">
+        <p className="mb-4 text-sm leading-6 text-[var(--v2-text-muted)]">
           {channelPairingInstructions}
         </p>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
@@ -194,7 +194,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
             onKeyDown={(event) => event.key === "Enter" && submitPairing()}
             placeholder={channelPairingPlaceholder}
             aria-label={channelPairingPlaceholder}
-            className="h-9 min-w-0 flex-1 rounded-md border border-white/12 bg-white/[0.04] px-3 font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
+            className="h-9 min-w-0 flex-1 rounded-[var(--v2-radius-sm)] border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 font-mono text-sm text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)] focus:border-[var(--v2-accent)]"
           />
           <Button
             variant="primary"
@@ -206,7 +206,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
           </Button>
         </div>
         {pairingMutation.isError &&
-        (<p role="alert" className="mt-3 text-xs leading-5 text-red-300">
+        (<p role="alert" className="mt-3 text-xs leading-5 text-[var(--v2-danger-text)]">
           {channelPairingError}
         </p>)}
       </ModalShell>
@@ -232,7 +232,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
   if (error) {
     return (
       <ModalShell onClose={onClose} title={t("extensions.configureName").replace("{name}", extensionName)}>
-        <p className="text-sm text-red-200">
+        <p className="text-sm text-[var(--v2-danger-text)]">
           {t("extensions.loadFailed")} {error.message}
         </p>
       </ModalShell>
@@ -242,7 +242,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
   if (secrets.length === 0 && fields.length === 0) {
     return (
       <ModalShell onClose={onClose} title={t("extensions.configureName").replace("{name}", extensionName)}>
-        <p className="text-sm text-iron-300">
+        <p className="text-sm text-[var(--v2-text-muted)]">
           {t("extensions.noConfigRequired")}
         </p>
       </ModalShell>
@@ -253,7 +253,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     <ModalShell onClose={onClose} title={t("extensions.configureName").replace("{name}", extensionName)}>
       {onboarding?.credential_instructions &&
       (
-        <p className="mb-4 text-sm leading-6 text-iron-300">
+        <p className="mb-4 text-sm leading-6 text-[var(--v2-text-muted)]">
           {onboarding.credential_instructions}
         </p>
       )}
@@ -263,7 +263,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
           href={setupUrl}
           target="_blank"
           rel="noopener noreferrer"
-          className="mb-4 inline-flex items-center gap-1.5 text-sm text-signal hover:underline"
+          className="mb-4 inline-flex items-center gap-1.5 text-sm text-[var(--v2-accent-text)] hover:underline"
         >
           {t("extensions.getCredentials")}
           <Icon name="bolt" className="h-3.5 w-3.5" />
@@ -275,26 +275,26 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
           (secret) => (
             <div key={secret.name}>
               <label
-                className="mb-1.5 flex items-center gap-2 text-sm text-iron-200"
+                className="mb-1.5 flex items-center gap-2 text-sm text-[var(--v2-text)]"
               >
                 {secret.prompt || secret.name}
                 {secret.optional &&
                 (
-                  <span className="font-mono text-[10px] text-iron-700"
+                  <span className="font-mono text-[10px] text-[var(--v2-text-faint)]"
                     >{t("common.optional") || "optional"}</span
                   >
                 )}
                 {secret.provided &&
                 (
-                  <span className="font-mono text-[10px] text-mint"
+                  <span className="font-mono text-[10px] text-[var(--v2-positive-text)]"
                     >{t("common.configured") || "configured"}</span
                   >
                 )}
               </label>
               {(secret.setup?.kind || "manual_token") === "oauth"
                 ? (
-                    <div className="flex items-center justify-between gap-3 rounded-md border border-white/12 bg-white/[0.04] px-3 py-2">
-                      <span className="text-xs text-iron-300">
+                    <div className="flex items-center justify-between gap-3 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2">
+                      <span className="text-xs text-[var(--v2-text-muted)]">
                         {secret.provided
                           ? t("extensions.authConfigured")
                           : t("extensions.authPopup")}
@@ -328,12 +328,12 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
                   }));
                 }}
                 onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
-                className="h-10 w-full rounded-md border border-white/12 bg-white/[0.04] px-3 text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
+                className="h-10 w-full rounded-[var(--v2-radius-md)] border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 text-sm text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)] focus:border-[var(--v2-accent)]"
               />
               {secret.auto_generate &&
               !secret.provided &&
               (
-                <p className="mt-1 text-xs text-iron-700">
+                <p className="mt-1 text-xs text-[var(--v2-text-faint)]">
                   {t("extensions.autoGenerated")}
                 </p>
               )}
@@ -346,12 +346,12 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
           (field) => (
             <div key={field.name}>
               <label
-                className="mb-1.5 flex items-center gap-2 text-sm text-iron-200"
+                className="mb-1.5 flex items-center gap-2 text-sm text-[var(--v2-text)]"
               >
                 {field.prompt || field.name}
                 {field.optional &&
                 (
-                  <span className="font-mono text-[10px] text-iron-700"
+                  <span className="font-mono text-[10px] text-[var(--v2-text-faint)]"
                     >{t("common.optional") || "optional"}</span
                   >
                 )}
@@ -368,7 +368,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
                   }));
                 }}
                 onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
-                className="h-10 w-full rounded-md border border-white/12 bg-white/[0.04] px-3 text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
+                className="h-10 w-full rounded-[var(--v2-radius-md)] border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 text-sm text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)] focus:border-[var(--v2-accent)]"
               />
             </div>
           )
@@ -377,14 +377,14 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
 
       {onboarding?.credential_next_step &&
       (
-        <p className="mt-4 text-xs leading-5 text-iron-300">
+        <p className="mt-4 text-xs leading-5 text-[var(--v2-text-muted)]">
           {onboarding.credential_next_step}
         </p>
       )}
       {isActive &&
       (
         <div
-          className="mt-4 rounded-md border border-mint/20 bg-mint/10 px-3 py-2 text-xs text-mint"
+          className="mt-4 rounded-md border border-[color-mix(in_srgb,var(--v2-positive-text)_30%,var(--v2-panel-border))] bg-[var(--v2-positive-soft)] px-3 py-2 text-xs text-[var(--v2-positive-text)]"
         >
           {t("extensions.activeConfigured")}
         </div>
@@ -392,7 +392,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
       {submitMutation.error &&
       (
         <div
-          className="mt-4 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200"
+          className="mt-4 rounded-md border border-[color-mix(in_srgb,var(--v2-danger-text)_34%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-3 py-2 text-xs text-[var(--v2-danger-text)]"
         >
           {submitMutation.error.message}
         </div>
@@ -400,7 +400,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
       {oauthMutation.error &&
       (
         <div
-          className="mt-4 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200"
+          className="mt-4 rounded-md border border-[color-mix(in_srgb,var(--v2-danger-text)_34%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-3 py-2 text-xs text-[var(--v2-danger-text)]"
         >
           {oauthMutation.error.message}
         </div>
@@ -409,7 +409,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
       oauthMutation.authError &&
       (
         <div
-          className="mt-4 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200"
+          className="mt-4 rounded-md border border-[color-mix(in_srgb,var(--v2-danger-text)_34%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-3 py-2 text-xs text-[var(--v2-danger-text)]"
         >
           {oauthMutation.authError}
         </div>
@@ -419,7 +419,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
       popupBlockedError &&
       (
         <div
-          className="mt-4 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200"
+          className="mt-4 rounded-md border border-[color-mix(in_srgb,var(--v2-danger-text)_34%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-3 py-2 text-xs text-[var(--v2-danger-text)]"
         >
           {popupBlockedError}
         </div>
@@ -474,7 +474,7 @@ function ModalShell({ onClose, title, children }) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--v2-scrim)] backdrop-blur-sm"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -487,11 +487,11 @@ function ModalShell({ onClose, title, children }) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-5 flex items-center justify-between">
-          <h3 id={titleId} className="text-lg font-medium text-white">{title}</h3>
+          <h3 id={titleId} className="text-lg font-medium text-[var(--v2-text-strong)]">{title}</h3>
           <button
             onClick={onClose}
             aria-label={t("common.close")}
-            className="grid h-8 w-8 place-items-center rounded-md text-iron-300 hover:bg-white/[0.06] hover:text-white"
+            className="grid h-8 w-8 place-items-center rounded-md text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
           >
             <Icon name="close" className="h-4 w-4" />
           </button>

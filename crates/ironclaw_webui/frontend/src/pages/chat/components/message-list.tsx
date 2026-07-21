@@ -19,7 +19,7 @@ const TOP_LOAD_THRESHOLD_PX = 100;
 const FLOATING_CONTROL_BOTTOM_OFFSET_PX = 8;
 const FLOATING_CONTROL_STYLE = { bottom: FLOATING_CONTROL_BOTTOM_OFFSET_PX };
 const FLOATING_LOGS_BUTTON_CLASS =
-  "group absolute right-5 z-10 hidden size-9 items-center justify-center gap-0 overflow-hidden rounded-full border border-[color-mix(in_srgb,var(--v2-accent)_28%,var(--v2-panel-border))] bg-[color-mix(in_srgb,var(--v2-surface)_88%,var(--v2-accent)_12%)] text-xs font-medium text-[var(--v2-text-base)] shadow-[0_14px_34px_-18px_rgba(0,0,0,0.95),0_0_0_1px_rgba(255,255,255,0.04)] backdrop-blur-md transition-all hover:border-[color-mix(in_srgb,var(--v2-accent)_50%,var(--v2-panel-border))] hover:bg-[color-mix(in_srgb,var(--v2-surface-muted)_82%,var(--v2-accent)_18%)] hover:text-[var(--v2-text-strong)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--v2-accent)_42%,transparent)] sm:inline-flex";
+  "group absolute right-5 z-10 hidden size-9 items-center justify-center gap-0 overflow-hidden rounded-full border border-[color-mix(in_srgb,var(--v2-accent)_28%,var(--v2-panel-border))] bg-[color-mix(in_srgb,var(--v2-surface)_88%,var(--v2-accent)_12%)] text-xs font-medium text-[var(--v2-text)] shadow-[var(--v2-shadow-menu)] backdrop-blur-md transition-all hover:border-[color-mix(in_srgb,var(--v2-accent)_50%,var(--v2-panel-border))] hover:bg-[color-mix(in_srgb,var(--v2-surface-muted)_82%,var(--v2-accent)_18%)] hover:text-[var(--v2-text-strong)] focus:outline-none focus:ring-2 focus:ring-[color-mix(in_srgb,var(--v2-accent)_42%,transparent)] sm:inline-flex";
 const JUMP_TO_BOTTOM_BUTTON_CLASS =
   "absolute left-1/2 z-10 inline-flex max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-1.5 whitespace-nowrap rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] px-3 py-1.5 text-xs font-medium text-[var(--v2-text-strong)] shadow-[var(--v2-shadow-menu)] hover:border-[color-mix(in_srgb,var(--v2-accent)_40%,var(--v2-panel-border))]";
 
@@ -376,7 +376,7 @@ export function MessageList({
               onClick={loadOlder}
               disabled={isLoading}
               data-testid="message-list-load-older"
-              className="v2-button rounded-md border border-white/10 px-3 py-1.5 text-xs text-iron-300 hover:border-signal/35 hover:text-white disabled:opacity-50"
+              className="v2-button rounded-md border border-[var(--v2-panel-border)] px-3 py-1.5 text-xs text-[var(--v2-text-muted)] hover:border-[var(--v2-accent)]/35 hover:text-[var(--v2-text-strong)] disabled:opacity-50"
             >
               {isLoading
                 ? t("chat.history.loading")

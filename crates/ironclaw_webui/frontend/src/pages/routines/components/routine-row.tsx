@@ -21,14 +21,14 @@ export function RoutineRow({
       className={[
         "group flex flex-col gap-4 rounded-[18px] border p-5",
         selected
-          ? "border-signal/35 bg-signal/10"
-          : "border-iron-700 bg-iron-800/60 hover:border-signal/30 hover:bg-iron-800/80",
+          ? "border-[var(--v2-accent)]/35 bg-[var(--v2-accent-soft)]"
+          : "border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] hover:border-[var(--v2-accent)]/30 hover:bg-[var(--v2-surface-muted)]",
       ].join(" ")}
     >
       <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
         <button onClick={() => onSelectRoutine(routine.id)} className="min-w-0 text-left">
           <div className="flex flex-wrap items-center gap-2">
-            <h3 className="truncate text-lg font-medium text-iron-100">{routine.name}</h3>
+            <h3 className="truncate text-lg font-medium text-[var(--v2-text-strong)]">{routine.name}</h3>
             <StatusPill
               tone={routineStatusTone(routine.status, routine.enabled)}
               label={routine.enabled ? routine.status : "disabled"}
@@ -38,10 +38,10 @@ export function RoutineRow({
               label={routine.verification_status || "unknown"}
             />
           </div>
-          <p className="mt-2 line-clamp-2 text-sm leading-6 text-iron-300">
+          <p className="mt-2 line-clamp-2 text-sm leading-6 text-[var(--v2-text-muted)]">
             {routine.description || routine.trigger_summary || "No description"}
           </p>
-          <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300">
+          <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">
             <span>{routine.trigger_type}</span>
             <span>{routine.action_type}</span>
             <span>runs {routine.run_count || 0}</span>

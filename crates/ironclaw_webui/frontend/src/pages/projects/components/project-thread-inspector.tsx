@@ -14,9 +14,9 @@ import {
 
 function MetaCard({ label, value }) {
   return (
-    <div className="rounded-2xl border border-white/8 bg-iron-950/60 p-3">
-      <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-iron-300">{label}</div>
-      <div className="mt-2 text-sm leading-6 text-white">{value}</div>
+    <div className="rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)]/60 p-3">
+      <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{label}</div>
+      <div className="mt-2 text-sm leading-6 text-[var(--v2-text-strong)]">{value}</div>
     </div>
   );
 }
@@ -30,17 +30,17 @@ export function ProjectThreadInspector({ thread }) {
       <Panel className="p-4 sm:p-5">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{presentation.subtitle}</div>
-            <h2 className="mt-2 text-2xl font-medium tracking-tight text-white">{presentation.title}</h2>
+            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{presentation.subtitle}</div>
+            <h2 className="mt-2 text-2xl font-medium tracking-tight text-[var(--v2-text-strong)]">{presentation.title}</h2>
           </div>
           <StatusPill tone={threadTone(thread.state)} label={formatThreadState(thread.state, t)} />
         </div>
 
         {presentation.brief
           ? (
-              <div className="mt-4 rounded-2xl border border-mint/15 bg-mint/10 p-4">
-                <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-mint">{t("projects.thread.brief")}</div>
-                <div className="mt-3 text-sm leading-6 text-iron-100">
+              <div className="mt-4 rounded-2xl border border-[color-mix(in_srgb,var(--v2-positive-text)_15%,transparent)] bg-[var(--v2-positive-soft)] p-4">
+                <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--v2-positive-text)]">{t("projects.thread.brief")}</div>
+                <div className="mt-3 text-sm leading-6 text-[var(--v2-text-strong)]">
                   <MarkdownRenderer content={presentation.brief} />
                 </div>
               </div>
@@ -58,19 +58,19 @@ export function ProjectThreadInspector({ thread }) {
       </Panel>
 
       <Panel className="p-4 sm:p-5">
-        <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("projects.thread.timeline")}</div>
+        <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{t("projects.thread.timeline")}</div>
         <div className="mt-4 space-y-3">
           {thread.messages?.length
             ? thread.messages.map((message, index) => (
-                <article key={index} className="rounded-2xl border border-white/8 bg-iron-950/60 p-4">
-                  <div className="text-xs uppercase tracking-[0.16em] text-iron-400">{formatMessageRole(message.role, t)}</div>
-                  <div className="mt-3 text-sm leading-6 text-iron-100">
+                <article key={index} className="rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)]/60 p-4">
+                  <div className="text-xs uppercase tracking-[0.16em] text-[var(--v2-text-faint)]">{formatMessageRole(message.role, t)}</div>
+                  <div className="mt-3 text-sm leading-6 text-[var(--v2-text-strong)]">
                     <MarkdownRenderer content={messageContent(message)} />
                   </div>
                 </article>
               ))
             : (
-                <div className="rounded-2xl border border-dashed border-white/10 px-4 py-8 text-sm leading-6 text-iron-300">
+                <div className="rounded-2xl border border-dashed border-[var(--v2-panel-border)] px-4 py-8 text-sm leading-6 text-[var(--v2-text-muted)]">
                   {t("projects.thread.noMessages")}
                 </div>
               )}

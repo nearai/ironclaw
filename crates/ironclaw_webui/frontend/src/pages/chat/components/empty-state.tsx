@@ -40,12 +40,12 @@ export function EmptyState({
     >
       <div className="w-full max-w-5xl text-center">
         <h2
-          className="mx-auto max-w-[16ch] text-4xl font-medium leading-[1.04] text-white sm:text-5xl lg:text-6xl"
+          className="mx-auto max-w-[16ch] text-4xl font-medium leading-[1.04] text-[var(--v2-text-strong)] sm:text-5xl lg:text-6xl"
         >
           {t("chat.heroTitle")}
         </h2>
         <p
-          className="mx-auto mt-4 max-w-[64ch] text-base leading-relaxed text-iron-300"
+          className="mx-auto mt-4 max-w-[64ch] text-base leading-relaxed text-[var(--v2-text-muted)]"
         >
           {t("chat.heroDesc")}
         </p>
@@ -74,18 +74,18 @@ export function EmptyState({
               type="button"
               key={item.title}
               onClick={() => onSuggestion(item.title)}
-              className="v2-button group grid grid-cols-[auto_1fr_auto] items-center gap-3 border-t border-white/10 px-2 py-4 text-left hover:border-signal/35"
+              className="v2-button group grid grid-cols-[auto_1fr_auto] items-center gap-3 border-t border-[var(--v2-panel-border)] px-2 py-4 text-left hover:border-[var(--v2-accent)]/35"
             >
               <span
-                className="grid h-8 w-8 place-items-center rounded-full border border-white/10 bg-white/[0.035] text-iron-300 group-hover:border-signal/35 group-hover:text-signal"
+                className="grid h-8 w-8 place-items-center rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] text-[var(--v2-text-muted)] group-hover:border-[var(--v2-accent)]/35 group-hover:text-[var(--v2-accent-text)]"
               >
                 <Icon name={item.icon} className="h-4 w-4" />
               </span>
               <span className="min-w-0">
-                <span className="block text-sm font-medium text-iron-100">
+                <span className="block text-sm font-medium text-[var(--v2-text-strong)]">
                   {item.title}
                 </span>
-                <span className="mt-0.5 block text-sm text-iron-300">
+                <span className="mt-0.5 block text-sm text-[var(--v2-text-muted)]">
                   {item.detail}
                 </span>
               </span>

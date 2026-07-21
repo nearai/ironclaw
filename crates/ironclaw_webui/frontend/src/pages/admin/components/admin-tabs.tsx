@@ -21,16 +21,16 @@ export function AdminTabs({ activeTab, onTabChange }) {
             className={[
               "group flex items-center gap-3 rounded-md px-3 py-2.5 text-left text-sm",
               activeTab === tab.id
-                ? "v2-nav-active text-white"
-                : "text-iron-300 hover:bg-white/[0.045] hover:text-white",
+                ? "v2-nav-active text-[var(--v2-text-strong)]"
+                : "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]",
             ].join(" ")}
           >
             <span
               className={[
                 "grid h-7 w-7 shrink-0 place-items-center rounded-md border",
                 activeTab === tab.id
-                  ? "border-signal/35 bg-signal/10 text-signal"
-                  : "border-white/10 bg-white/[0.035] text-iron-300 group-hover:border-signal/35 group-hover:text-signal",
+                  ? "border-[color-mix(in_srgb,var(--v2-accent)_35%,transparent)] bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
+                  : "border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] text-[var(--v2-text-muted)] group-hover:border-[color-mix(in_srgb,var(--v2-accent)_35%,transparent)] group-hover:text-[var(--v2-accent-text)]",
               ].join(" ")}
             >
               <Icon name={tab.icon} className="h-3.5 w-3.5" />
@@ -55,8 +55,8 @@ export function AdminTabsMobile({ activeTab, onTabChange }) {
             className={[
               "flex shrink-0 items-center gap-2 rounded-md px-3 py-2 text-sm whitespace-nowrap",
               activeTab === tab.id
-                ? "border border-signal/35 bg-signal/10 text-white"
-                : "border border-transparent text-iron-300 hover:text-white",
+                ? "border border-[color-mix(in_srgb,var(--v2-accent)_35%,transparent)] bg-[var(--v2-accent-soft)] text-[var(--v2-text-strong)]"
+                : "border border-transparent text-[var(--v2-text-muted)] hover:text-[var(--v2-text-strong)]",
             ].join(" ")}
           >
             <Icon name={tab.icon} className="h-3.5 w-3.5" />

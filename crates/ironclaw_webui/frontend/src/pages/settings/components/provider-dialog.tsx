@@ -88,7 +88,7 @@ export function ProviderDialog({
 
         {isBuiltin &&
         (
-          <div className="rounded-md border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-[var(--v2-text-muted)]">
+          <div className="rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2 text-sm text-[var(--v2-text-muted)]">
             {adapterLabel(provider.adapter)}
           </div>
         )}
@@ -128,7 +128,7 @@ export function ProviderDialog({
 
         {message &&
         (
-          <div className={message.tone === "error" ? "text-sm text-red-200" : "text-sm text-mint"} role="status">
+          <div className={message.tone === "error" ? "text-sm text-[var(--v2-danger-text)]" : "text-sm text-[var(--v2-positive-text)]"} role="status">
             {message.text}
           </div>
         )}

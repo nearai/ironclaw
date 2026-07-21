@@ -16,7 +16,7 @@ export function JobsSummaryStrip({ summary }) {
         {SUMMARY_CARDS.map((card) => (
           <div
             key={card.key}
-            className="rounded-2xl border border-white/8 bg-white/[0.03] p-4"
+            className="rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-4"
           >
             <StatCard
               label={card.label}

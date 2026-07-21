@@ -12,11 +12,11 @@ import { RoutineRecentRuns } from "./routine-recent-runs";
 
 function MetaItem({ label, value }) {
   return (
-    <div className="rounded-xl border border-iron-700 bg-iron-950/50 p-3">
-      <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-iron-400">
+    <div className="rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)]/50 p-3">
+      <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--v2-text-faint)]">
         {label}
       </div>
-      <div className="mt-2 min-w-0 break-words text-sm text-iron-100">
+      <div className="mt-2 min-w-0 break-words text-sm text-[var(--v2-text-strong)]">
         {value || "—"}
       </div>
     </div>
@@ -26,9 +26,9 @@ function MetaItem({ label, value }) {
 function JsonBlock({ title, value }) {
   return (
     <div>
-      <h3 className="text-sm font-medium text-iron-100">{title}</h3>
+      <h3 className="text-sm font-medium text-[var(--v2-text-strong)]">{title}</h3>
       <pre
-        className="mt-3 max-h-72 overflow-auto rounded-xl border border-iron-700 bg-iron-950/70 p-4 text-xs leading-5 text-iron-200"
+        className="mt-3 max-h-72 overflow-auto rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-code-bg)] p-4 text-xs leading-5 text-[var(--v2-text)]"
       >{JSON.stringify(value || {}, null, 2)}</pre>
     </div>
   );
@@ -71,7 +71,7 @@ export function RoutineDetailPanel({
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="truncate text-2xl font-medium tracking-tight text-iron-100">
+            <h2 className="truncate text-2xl font-medium tracking-tight text-[var(--v2-text-strong)]">
               {routine.name}
             </h2>
             <StatusPill
@@ -83,7 +83,7 @@ export function RoutineDetailPanel({
               label={routine.verification_status || "unknown"}
             />
           </div>
-          <p className="mt-2 max-w-3xl text-sm leading-6 text-iron-300">
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--v2-text-muted)]">
             {routine.description || routine.trigger_summary || "No description"}
           </p>
         </div>
@@ -123,7 +123,7 @@ export function RoutineDetailPanel({
       </div>
 
       <div className="mt-6">
-        <h3 className="mb-3 text-sm font-medium text-iron-100">Recent runs</h3>
+        <h3 className="mb-3 text-sm font-medium text-[var(--v2-text-strong)]">Recent runs</h3>
         <RoutineRecentRuns runs={routine.recent_runs} />
       </div>
     </Panel>

@@ -45,14 +45,14 @@ function ExamplePrompt({ promptKey }) {
     <li
       className="flex items-center gap-3 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3"
     >
-      <span className="min-w-0 flex-1 text-sm leading-6 text-iron-200">{text}</span>
+      <span className="min-w-0 flex-1 text-sm leading-6 text-[var(--v2-text)]">{text}</span>
       <button
         type="button"
         onClick={onCopy}
         aria-label={copied ? t("automations.empty.copied") : t("automations.empty.copyPrompt")}
         title={copied ? t("automations.empty.copied") : t("automations.empty.copyPrompt")}
         className={cn(
-          "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[var(--v2-panel-border)] text-iron-300 hover:text-iron-100 hover:border-white/20",
+          "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[var(--v2-panel-border)] text-[var(--v2-text-muted)] hover:text-[var(--v2-text-strong)] hover:border-[color-mix(in_srgb,var(--v2-text-strong)_20%,var(--v2-panel-border))]",
           "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--v2-accent)]",
           copied && "text-[var(--v2-positive-text)]"
         )}
@@ -74,15 +74,15 @@ export function AutomationsEmptyState() {
   return (
     <Panel className="p-6 sm:p-8">
       <div className="max-w-2xl">
-        <h2 className="mt-4 text-2xl font-medium tracking-tight text-iron-100 flex items-center gap-3">
+        <h2 className="mt-4 text-2xl font-medium tracking-tight text-[var(--v2-text-strong)] flex items-center gap-3">
           {t("automations.empty.onboardingTitle")}
         </h2>
-        <p className="mt-3 text-sm leading-6 text-iron-300">
+        <p className="mt-3 text-sm leading-6 text-[var(--v2-text-muted)]">
           {t("automations.empty.onboardingDescription")}
         </p>
 
         <div className="mt-6">
-          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-400">
+          <div className="font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-faint)]">
             {t("automations.empty.examplesTitle")}
           </div>
           <ul className="mt-3 space-y-2">

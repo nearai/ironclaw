@@ -84,11 +84,11 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onConfigure, onCan
     return (
       <div
         data-testid="onboarding-pairing-card"
-        className="mx-auto mt-4 w-full max-w-lg rounded-lg border border-signal/25 bg-signal/5 p-4"
+        className="mx-auto mt-4 w-full max-w-lg rounded-lg border border-[var(--v2-accent)]/25 bg-[var(--v2-accent)]/5 p-4"
       >
-        <h3 className="text-sm font-medium text-iron-100">{copy.title}</h3>
+        <h3 className="text-sm font-medium text-[var(--v2-text-strong)]">{copy.title}</h3>
         {instructions &&
-        (<p className="mt-1 text-sm leading-6 text-iron-300">{instructions}</p>)}
+        (<p className="mt-1 text-sm leading-6 text-[var(--v2-text-muted)]">{instructions}</p>)}
         <TelegramPairingPanel compact />
         {onCancel &&
         (
@@ -112,10 +112,10 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onConfigure, onCan
     return (
       <div
         data-testid="onboarding-pairing-card"
-        className="mx-auto mt-4 w-full max-w-lg rounded-lg border border-signal/25 bg-signal/5 p-4"
+        className="mx-auto mt-4 w-full max-w-lg rounded-lg border border-[var(--v2-accent)]/25 bg-[var(--v2-accent)]/5 p-4"
       >
-        <h3 className="text-sm font-medium text-iron-100">{copy.title}</h3>
-        <p className="mt-1 text-sm leading-6 text-iron-300">{copy.instructions}</p>
+        <h3 className="text-sm font-medium text-[var(--v2-text-strong)]">{copy.title}</h3>
+        <p className="mt-1 text-sm leading-6 text-[var(--v2-text-muted)]">{copy.instructions}</p>
         <div className="mt-3 flex flex-wrap gap-2">
           {onConfigure &&
           (
@@ -141,12 +141,12 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onConfigure, onCan
         </div>
         {!onConfigure &&
         (
-          <p className="mt-2 text-xs leading-5 text-iron-400">
+          <p className="mt-2 text-xs leading-5 text-[var(--v2-text-faint)]">
             {t("pairing.connectFromExtensions", { name: copy.displayName })}
           </p>
         )}
         {error &&
-        (<p role="alert" className="mt-3 text-xs leading-5 text-red-300">{error}</p>)}
+        (<p role="alert" className="mt-3 text-xs leading-5 text-[var(--v2-danger-text)]">{error}</p>)}
       </div>
     );
   }
@@ -154,11 +154,11 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onConfigure, onCan
   return (
     <div
       data-testid="onboarding-pairing-card"
-      className="mx-auto mt-4 w-full max-w-lg rounded-lg border border-signal/25 bg-signal/5 p-4"
+      className="mx-auto mt-4 w-full max-w-lg rounded-lg border border-[var(--v2-accent)]/25 bg-[var(--v2-accent)]/5 p-4"
     >
       <div className="mb-3">
-        <h3 className="text-sm font-medium text-iron-100">{copy.title}</h3>
-        <p className="mt-1 text-sm leading-6 text-iron-300">{copy.instructions}</p>
+        <h3 className="text-sm font-medium text-[var(--v2-text-strong)]">{copy.title}</h3>
+        <p className="mt-1 text-sm leading-6 text-[var(--v2-text-muted)]">{copy.instructions}</p>
       </div>
 
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
@@ -170,7 +170,7 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onConfigure, onCan
           placeholder={copy.placeholder}
           aria-label={copy.placeholder}
           disabled={busy}
-          className="h-9 min-w-0 flex-1 rounded-md border border-white/12 bg-white/[0.04] px-3 font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45 disabled:cursor-not-allowed disabled:opacity-60"
+          className="h-9 min-w-0 flex-1 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 font-mono text-sm text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)] focus:border-[var(--v2-accent)]/45 disabled:cursor-not-allowed disabled:opacity-60"
         />
         <Button
           variant="secondary"
@@ -195,7 +195,7 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onConfigure, onCan
       </div>
 
       {error &&
-      (<p role="alert" className="mt-3 text-xs leading-5 text-red-300">{error}</p>)}
+      (<p role="alert" className="mt-3 text-xs leading-5 text-[var(--v2-danger-text)]">{error}</p>)}
     </div>
   );
 }

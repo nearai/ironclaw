@@ -67,7 +67,7 @@ export function ConnectionStatus({ status }: ConnectionStatusProps) {
             data-testid="connection-status"
             title={statusLabel}
             className={[
-              "hidden h-7 max-w-48 shrink-0 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium shadow-[0_8px_20px_-14px_rgba(0,0,0,0.72)] sm:inline-flex",
+              "hidden h-7 max-w-48 shrink-0 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium shadow-[var(--v2-shadow-sm)] sm:inline-flex",
               statusStyle,
             ].join(" ")}
           >
@@ -110,7 +110,7 @@ export function ConnectionStatus({ status }: ConnectionStatusProps) {
             data-testid="connection-status-label"
             aria-hidden={expanded ? "false" : "true"}
             className={[
-              "pointer-events-none absolute right-0 top-[calc(100%+0.375rem)] z-50 w-max max-w-[calc(100vw_-_1.5rem)] rounded-lg border px-3 py-2 text-xs font-medium shadow-[0_12px_28px_-14px_rgba(0,0,0,0.72)] transition duration-150 sm:hidden",
+              "pointer-events-none absolute right-0 top-[calc(100%+0.375rem)] z-50 w-max max-w-[calc(100vw_-_1.5rem)] rounded-lg border px-3 py-2 text-xs font-medium shadow-[var(--v2-shadow-menu)] transition duration-150 sm:hidden",
               expanded
                 ? "visible translate-y-0 opacity-100"
                 : "invisible -translate-y-1 opacity-0",

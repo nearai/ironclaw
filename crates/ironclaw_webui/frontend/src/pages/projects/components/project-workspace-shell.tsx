@@ -30,9 +30,9 @@ export function ProjectWorkspaceShell({
     >
       <div className="space-y-5">
         <div className="min-w-0">
-          <h2 data-testid="project-workspace-title" className="text-2xl font-medium tracking-tight text-white">{project.name}</h2>
+          <h2 data-testid="project-workspace-title" className="text-2xl font-medium tracking-tight text-[var(--v2-text-strong)]">{project.name}</h2>
           {project.description
-            ? (<p className="mt-1 text-sm leading-6 text-iron-300">{project.description}</p>)
+            ? (<p className="mt-1 text-sm leading-6 text-[var(--v2-text-muted)]">{project.description}</p>)
             : null}
         </div>
 

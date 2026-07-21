@@ -35,13 +35,13 @@ export function AutomationsList({
       <Panel className="p-4 sm:p-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">
+            <div className="font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]">
               {t("automations.eyebrow")}
             </div>
-            <h2 className="mt-2 text-2xl font-medium tracking-tight text-iron-100">
+            <h2 className="mt-2 text-2xl font-medium tracking-tight text-[var(--v2-text-strong)]">
               {t("automations.title")}
             </h2>
-            <p className="mt-2 max-w-2xl text-sm leading-6 text-iron-300">
+            <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--v2-text-muted)]">
               {t("automations.description")}
             </p>
           </div>
@@ -102,19 +102,19 @@ export function AutomationsList({
                   <table className="w-full min-w-[900px] border-collapse">
                     <thead>
                       <tr className="border-b border-[var(--v2-panel-border)] text-left">
-                        <th className="px-5 py-3 text-xs font-medium uppercase tracking-[0.12em] text-iron-300">
+                        <th className="px-5 py-3 text-xs font-medium uppercase tracking-[0.12em] text-[var(--v2-text-muted)]">
                           {t("automations.table.name")}
                         </th>
-                        <th className="px-5 py-3 text-xs font-medium uppercase tracking-[0.12em] text-iron-300">
+                        <th className="px-5 py-3 text-xs font-medium uppercase tracking-[0.12em] text-[var(--v2-text-muted)]">
                           {t("automations.table.schedule")}
                         </th>
-                        <th className="px-5 py-3 text-xs font-medium uppercase tracking-[0.12em] text-iron-300">
+                        <th className="px-5 py-3 text-xs font-medium uppercase tracking-[0.12em] text-[var(--v2-text-muted)]">
                           {t("automations.table.nextRun")}
                         </th>
-                        <th className="px-5 py-3 text-xs font-medium uppercase tracking-[0.12em] text-iron-300">
+                        <th className="px-5 py-3 text-xs font-medium uppercase tracking-[0.12em] text-[var(--v2-text-muted)]">
                           {t("automations.table.recentRuns")}
                         </th>
-                        <th className="px-5 py-3 text-xs font-medium uppercase tracking-[0.12em] text-iron-300">
+                        <th className="px-5 py-3 text-xs font-medium uppercase tracking-[0.12em] text-[var(--v2-text-muted)]">
                           {t("automations.table.status")}
                         </th>
                       </tr>
@@ -129,7 +129,7 @@ export function AutomationsList({
                             data-testid="automation-row"
                             data-automation-id={automation.automation_id}
                             className={cn(
-                              "border-b border-[var(--v2-panel-border)] last:border-0 hover:bg-white/[0.03]",
+                              "border-b border-[var(--v2-panel-border)] last:border-0 hover:bg-[var(--v2-surface-soft)]",
                               selected && "bg-[var(--v2-accent-soft)]/30"
                             )}
                           >
@@ -142,18 +142,18 @@ export function AutomationsList({
                                 onClick={() => onSelectAutomation(automation.automation_id)}
                                 className="block w-full min-w-0 rounded text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--v2-accent)]"
                               >
-                                <div className="truncate text-sm font-medium text-iron-100">
+                                <div className="truncate text-sm font-medium text-[var(--v2-text-strong)]">
                                   {automation.display_name}
                                 </div>
-                                <div className="mt-1 truncate font-mono text-[11px] uppercase tracking-[0.12em] text-iron-400">
+                                <div className="mt-1 truncate font-mono text-[11px] uppercase tracking-[0.12em] text-[var(--v2-text-faint)]">
                                   {automation.automation_id}
                                 </div>
                               </button>
                             </td>
-                            <td className="px-5 py-4 align-top text-sm text-iron-200">
+                            <td className="px-5 py-4 align-top text-sm text-[var(--v2-text)]">
                               {automation.schedule_label}
                             </td>
-                            <td className="px-5 py-4 align-top text-sm text-iron-200">
+                            <td className="px-5 py-4 align-top text-sm text-[var(--v2-text)]">
                               {automation.next_run_label}
                             </td>
                             <td className="px-5 py-4 align-top">

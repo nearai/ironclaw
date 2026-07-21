@@ -72,7 +72,7 @@ export function AutomationsSummaryStrip({ summary, activeFilter, onSelectFilter 
             />
           );
           const baseClass =
-            "rounded-[14px] border border-white/8 bg-white/[0.03] p-4 text-left";
+            "rounded-[14px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-4 text-left";
           if (!interactive) {
             return (<div key={card.key} className={baseClass}>{inner}</div>);
           }
@@ -85,7 +85,7 @@ export function AutomationsSummaryStrip({ summary, activeFilter, onSelectFilter 
               onClick={() => onSelectFilter(card.filter)}
               className={cn(
                 baseClass,
-                "transition-colors hover:border-white/20 hover:bg-white/[0.05]",
+                "transition-colors hover:border-[color-mix(in_srgb,var(--v2-text-strong)_20%,var(--v2-panel-border))] hover:bg-[var(--v2-surface-muted)]",
                 "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--v2-accent)]",
                 isActive && "border-[var(--v2-accent)]/60 bg-[var(--v2-accent-soft)]/30"
               )}

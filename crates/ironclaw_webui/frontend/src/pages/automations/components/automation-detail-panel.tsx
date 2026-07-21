@@ -26,7 +26,7 @@ function MetaItem({ label, value, tone = "muted" }) {
           "mt-2 min-w-0 break-words text-sm text-[var(--v2-text-strong)]",
           tone === "success" && "text-[var(--v2-positive-text)]",
           tone === "danger" && "text-[var(--v2-danger-text)]",
-          tone === "info" && "text-sky-200"
+          tone === "info" && "text-[var(--v2-info-text)]"
         )}
       >
         {value || "—"}

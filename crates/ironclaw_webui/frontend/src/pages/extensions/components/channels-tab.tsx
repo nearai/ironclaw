@@ -166,7 +166,7 @@ export function ChannelsTab({
     <div className="space-y-5">
       <div className="v2-panel rounded-[18px] p-5 sm:p-6">
         <h3
-          className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
+          className="mb-4 font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-accent-text)]"
         >
           {t("channels.builtIn")}
         </h3>
@@ -233,7 +233,7 @@ export function ChannelsTab({
       (
         <div className="v2-panel rounded-[18px] p-5 sm:p-6">
           <h3
-            className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
+            className="mb-4 font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-accent-text)]"
           >
             {t("channels.messaging")}
           </h3>
@@ -277,7 +277,7 @@ export function ChannelsTab({
       (
         <div className="v2-panel rounded-[18px] p-5 sm:p-6">
           <h3
-            className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
+            className="mb-4 font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-accent-text)]"
           >
             {t("channels.availableChannels")}
           </h3>
@@ -312,20 +312,20 @@ function BuiltinRow({
   const effectiveStatusLabel = statusLabel || (enabled ? t("channels.statusOn") : t("channels.statusOff"));
   return (
     <div
-      className="border-t border-white/[0.06] py-4 first:border-0 first:pt-0"
+      className="border-t border-[var(--v2-panel-border)] py-4 first:border-0 first:pt-0"
     >
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
-            <span className="text-sm font-medium text-iron-200">{name}</span>
+            <span className="text-sm font-medium text-[var(--v2-text)]">{name}</span>
             <StatusPill
               tone={statusTone}
               label={effectiveStatusLabel}
             />
           </div>
-          <div className="mt-1 text-xs text-iron-300">{description}</div>
+          <div className="mt-1 text-xs text-[var(--v2-text-muted)]">{description}</div>
           {detail &&
-          (<div className="mt-1 font-mono text-[11px] text-iron-700">
+          (<div className="mt-1 font-mono text-[11px] text-[var(--v2-text-faint)]">
             {detail}
           </div>)}
         </div>

@@ -13,7 +13,7 @@ export function SuggestionChips({ suggestions, onSelect, disabled = false }) {
                 if (!disabled) onSelect(text);
               }}
               disabled={disabled}
-              className="v2-button rounded-full border border-white/10 bg-white/[0.035] px-3 py-1.5 text-xs text-iron-100 hover:border-signal/40 hover:text-signal disabled:cursor-not-allowed disabled:opacity-50"
+              className="v2-button rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-1.5 text-xs text-[var(--v2-text-strong)] hover:border-[var(--v2-accent)]/40 hover:text-[var(--v2-accent-text)] disabled:cursor-not-allowed disabled:opacity-50"
             >
               {text}
             </button>

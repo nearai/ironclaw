@@ -44,7 +44,7 @@ export function AuthGateShell({
     <div
       data-testid={testId}
       data-auth-challenge={challengeKind || undefined}
-      className="mx-auto w-full max-w-lg rounded-xl border border-[rgba(76,167,230,0.34)] bg-[rgba(76,167,230,0.08)]"
+      className="mx-auto w-full max-w-lg rounded-xl border border-[var(--v2-accent)]/35 bg-[var(--v2-accent)]/10"
     >
       <button
         type="button"
@@ -53,17 +53,17 @@ export function AuthGateShell({
         aria-controls={controlsId}
         className="flex w-full items-center gap-3 rounded-xl border-0 bg-transparent px-4 py-3 text-left"
       >
-        <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md border border-[rgba(76,167,230,0.28)] bg-[rgba(76,167,230,0.1)] text-[#8fc8f2]">
+        <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md border border-[var(--v2-accent)]/30 bg-[var(--v2-accent)]/10 text-[var(--v2-accent-text)]">
           <Icon name={icon} className="h-4 w-4" />
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block truncate font-medium text-white">
+          <span className="block truncate font-medium text-[var(--v2-text-strong)]">
             {headline || t("authGate.title")}
           </span>
           {subtitle &&
-          (<span className="block truncate text-xs text-iron-300">{subtitle}</span>)}
+          (<span className="block truncate text-xs text-[var(--v2-text-muted)]">{subtitle}</span>)}
         </span>
-        <span className="ml-auto flex shrink-0 items-center gap-1.5 text-xs font-medium text-[#8fc8f2]">
+        <span className="ml-auto flex shrink-0 items-center gap-1.5 text-xs font-medium text-[var(--v2-accent-text)]">
           {pillHint && (<span className="hidden sm:inline">{pillHint}</span>)}
           <Icon
             name="chevron"
@@ -76,14 +76,14 @@ export function AuthGateShell({
       (
         <div
           id={controlsId}
-          className="border-t border-[rgba(76,167,230,0.2)] px-4 pb-4 pt-3"
+          className="border-t border-[var(--v2-accent)]/20 px-4 pb-4 pt-3"
         >
           {body &&
-          (<div className="mb-3 text-sm text-iron-200">{body}</div>)}
+          (<div className="mb-3 text-sm text-[var(--v2-text)]">{body}</div>)}
           {children}
           {expiresAt &&
           (
-            <p className="mt-2 text-xs text-iron-300">
+            <p className="mt-2 text-xs text-[var(--v2-text-muted)]">
               {t("authGate.expiresAt")}: {new Date(expiresAt).toLocaleString()}
             </p>
           )}

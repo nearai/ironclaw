@@ -412,7 +412,7 @@ export function ChatInput({
   ].join(" ");
   const textClass = [
     "w-full flex-1 resize-none border-0 !border-transparent !bg-transparent px-2 text-[0.9375rem] leading-6",
-    "text-white outline-none placeholder:text-iron-700 focus:!border-transparent focus:!bg-transparent focus:!outline-none focus:!shadow-none disabled:opacity-50",
+    "text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)] focus:!border-transparent focus:!bg-transparent focus:!outline-none focus:!shadow-none disabled:opacity-50",
     isHero ? "min-h-[72px]" : "min-h-[40px]",
   ].join(" ");
 
@@ -456,7 +456,7 @@ export function ChatInput({
               (att) => (
                 <div
                   key={att.id}
-                  className="group/att relative flex items-center gap-2 rounded-lg border border-iron-700 bg-iron-900/60 py-1.5 pl-1.5 pr-7 text-xs text-iron-100"
+                  className="group/att relative flex items-center gap-2 rounded-lg border border-[var(--v2-panel-border)] bg-[var(--v2-surface)]/60 py-1.5 pl-1.5 pr-7 text-xs text-[var(--v2-text-strong)]"
                 >
                   {att.previewUrl
                     ? (<img
@@ -465,7 +465,7 @@ export function ChatInput({
                         className="h-9 w-9 shrink-0 rounded object-cover"
                       />)
                     : (<span
-                        className="grid h-9 w-9 shrink-0 place-items-center rounded bg-iron-800 text-signal"
+                        className="grid h-9 w-9 shrink-0 place-items-center rounded bg-[var(--v2-surface-soft)] text-[var(--v2-accent-text)]"
                       >
                         <Icon name="file" className="h-4 w-4" />
                       </span>)}
@@ -473,14 +473,14 @@ export function ChatInput({
                     <span className="max-w-[12rem] truncate font-medium">
                       {att.filename}
                     </span>
-                    <span className="text-[10px] text-iron-400">{att.sizeLabel}</span>
+                    <span className="text-[10px] text-[var(--v2-text-faint)]">{att.sizeLabel}</span>
                   </span>
                   <button
                     type="button"
                     onClick={() => removeAttachment(att.id)}
                     aria-label={t("chat.attachmentRemove")}
                     title={t("chat.attachmentRemove")}
-                    className="absolute right-1 top-1 grid h-5 w-5 place-items-center rounded-full text-iron-400 hover:bg-iron-700 hover:text-white"
+                    className="absolute right-1 top-1 grid h-5 w-5 place-items-center rounded-full text-[var(--v2-text-faint)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
                   >
                     <Icon name="close" className="h-3 w-3" />
                   </button>

@@ -14,7 +14,7 @@
 
 import React from "react";
 import { Modal, ModalBody, ModalFooter, ModalHeader } from "@ironclaw/design-system";
-import { Icon } from "@ironclaw/design-system";
+import { Button, Icon } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import { fetchAttachmentBlob, blobToDataUrl } from "../../../lib/api";
 import { saveBlob } from "../../../lib/download";
@@ -96,15 +96,18 @@ export function AttachmentPreviewModal({ attachment, onClose }) {
       </ModalHeader>
       <ModalBody className="flex min-h-[12rem] items-center justify-center">
         {status === "loading" &&
-        (<div className="text-sm text-iron-400">{t("common.loading")}</div>)}
+        (<div className="text-sm text-[var(--v2-text-faint)]">{t("common.loading")}</div>)}
         {status === "error" &&
-        (<div className="text-sm text-iron-400">{t("chat.attachmentLoadFailed")}</div>)}
+        (<div className="text-sm text-[var(--v2-text-faint)]">{t("chat.attachmentLoadFailed")}</div>)}
         {status === "ready" &&
         (<PreviewBody mode={mode} view={view} filename={filename} t={t} />)}
       </ModalBody>
       <ModalFooter>
         {view.downloadUrl &&
-        (<a
+        (<Button
+          as="a"
+          variant="secondary"
+          size="sm"
           href={view.downloadUrl}
           download={filename}
           onClick={view.downloadBlob ? (event) => {
@@ -112,18 +115,14 @@ export function AttachmentPreviewModal({ attachment, onClose }) {
             saveBlob(view.downloadBlob, filename);
           } : undefined}
           data-testid="attachment-download"
-          className="v2-button inline-flex items-center gap-1.5 rounded-md border border-white/10 px-3 py-1.5 text-xs text-iron-200 hover:border-signal/35 hover:text-white"
+          className="gap-1.5"
         >
           <Icon name="download" className="h-3.5 w-3.5" />
           <span>{t("common.download")}</span>
-        </a>)}
-        <button
-          type="button"
-          onClick={onClose}
-          className="v2-button rounded-md border border-white/10 px-3 py-1.5 text-xs text-iron-200 hover:border-signal/35 hover:text-white"
-        >
+        </Button>)}
+        <Button type="button" variant="secondary" size="sm" onClick={onClose}>
           {t("common.close")}
-        </button>
+        </Button>
       </ModalFooter>
     </Modal>
   );
@@ -145,23 +144,23 @@ function PreviewBody({ mode, view, filename, t }) {
       return (<iframe
         src={view.frameUrl}
         title={filename}
-        className="h-[70vh] w-full rounded border border-iron-700 bg-white"
+        className="h-[70vh] w-full rounded border border-[var(--v2-panel-border)] bg-white"
       />);
     case "text":
       return (<div className="w-full">
         <pre
-          className="max-h-[70vh] w-full overflow-auto whitespace-pre-wrap break-words rounded bg-iron-900/60 p-3 text-xs text-iron-200"
+          className="max-h-[70vh] w-full overflow-auto whitespace-pre-wrap break-words rounded bg-[var(--v2-code-bg)] p-3 text-xs text-[var(--v2-text)]"
         >{view.text}</pre>
         {view.truncated &&
-        (<div className="mt-2 text-xs text-iron-400">
+        (<div className="mt-2 text-xs text-[var(--v2-text-faint)]">
           {t("chat.attachmentPreviewTruncated")}
         </div>)}
       </div>);
     default:
       // Binary we won't render inline; the Download action in the footer is the
       // way out.
-      return (<div className="flex flex-col items-center gap-2 text-iron-400">
-        <Icon name="file" className="h-10 w-10 text-signal" />
+      return (<div className="flex flex-col items-center gap-2 text-[var(--v2-text-faint)]">
+        <Icon name="file" className="h-10 w-10 text-[var(--v2-accent-text)]" />
         <div className="text-sm">{t("chat.attachmentPreviewUnavailable")}</div>
       </div>);
   }

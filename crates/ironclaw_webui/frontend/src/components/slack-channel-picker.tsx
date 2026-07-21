@@ -101,18 +101,18 @@ export function SlackChannelPicker({ action }) {
     subjectsQuery.isError && channels.some((channel) => !channel.subject_user_id);
 
   return (
-    <div className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
+    <div className="mt-3 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-4">
       <div className="mb-3 flex items-start justify-between gap-3">
         <div>
-          <h4 className="font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
+          <h4 className="font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-accent-text)]">
             {copy.title}
           </h4>
-          <p className="mt-2 text-xs leading-5 text-iron-300">
+          <p className="mt-2 text-xs leading-5 text-[var(--v2-text-muted)]">
             {copy.instructions}
           </p>
         </div>
         {channelsQuery.data?.team_id &&
-        (<span className="shrink-0 rounded-md border border-white/[0.08] px-2 py-1 font-mono text-[10px] text-[var(--v2-text-muted)]">
+        (<span className="shrink-0 rounded-md border border-[var(--v2-panel-border)] px-2 py-1 font-mono text-[10px] text-[var(--v2-text-muted)]">
           {channelsQuery.data.team_id}
         </span>)}
       </div>
@@ -124,7 +124,7 @@ export function SlackChannelPicker({ action }) {
           onChange={(event) => setDraftChannelId(event.currentTarget.value)}
           onKeyDown={(event) => event.key === "Enter" && addChannel()}
           placeholder={copy.inputPlaceholder}
-          className="h-9 min-w-0 flex-1 rounded-md border border-white/12 bg-white/[0.04] px-3 font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
+          className="h-9 min-w-0 flex-1 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 font-mono text-sm text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)] focus:border-[var(--v2-accent)]"
         />
         <SelectMenu
           value={draftSubjectUserId}
@@ -134,7 +134,7 @@ export function SlackChannelPicker({ action }) {
           placeholder={hasRoutableSubjects ? copy.autoSubjectLabel : copy.noSubjectsLabel}
           ariaLabel={hasRoutableSubjects ? copy.autoSubjectLabel : copy.noSubjectsLabel}
           className="!min-w-0 sm:w-56"
-          buttonClassName="h-9 rounded-md border-white/12 bg-white/[0.04] px-3 font-sans text-sm text-iron-100"
+          buttonClassName="h-9 rounded-md border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 font-sans text-sm text-[var(--v2-text-strong)]"
         />
         <Button
           variant="secondary"
@@ -147,9 +147,9 @@ export function SlackChannelPicker({ action }) {
         </Button>
       </div>
 
-      <div className="mb-3 rounded-lg border border-white/[0.06] bg-black/10">
+      <div className="mb-3 rounded-lg border border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)]/40">
         {channelsQuery.isLoading &&
-        (<div className="px-3 py-2 text-xs text-iron-400">{copy.loadingMessage}</div>)}
+        (<div className="px-3 py-2 text-xs text-[var(--v2-text-faint)]">{copy.loadingMessage}</div>)}
         {!channelsQuery.isLoading &&
         channels.length === 0 &&
         (<div className="px-3 py-2 text-xs text-[var(--v2-text-muted)]">
@@ -159,10 +159,10 @@ export function SlackChannelPicker({ action }) {
           (channel) => (
             <div
               key={channel.channel_id}
-              className="flex min-h-10 items-center justify-between gap-3 border-t border-white/[0.05] px-3 first:border-t-0"
+              className="flex min-h-10 items-center justify-between gap-3 border-t border-[var(--v2-panel-border)] px-3 first:border-t-0"
             >
               <span className="min-w-0">
-                <span className="block truncate font-mono text-xs text-iron-200">
+                <span className="block truncate font-mono text-xs text-[var(--v2-text)]">
                   {channel.channel_id}
                 </span>
               </span>
@@ -175,7 +175,7 @@ export function SlackChannelPicker({ action }) {
                       onChange={(value) => updateChannelSubject(channel.channel_id, value)}
                       ariaLabel={`${copy.autoSubjectLabel} (${channel.channel_id})`}
                       className="w-44"
-                      buttonClassName="h-8 rounded-md border-white/10 bg-white/[0.04] px-2 font-sans text-xs text-iron-100"
+                      buttonClassName="h-8 rounded-md border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-2 font-sans text-xs text-[var(--v2-text-strong)]"
                     />
                   )
                   : (<span className="max-w-40 truncate text-xs text-[var(--v2-text-muted)]">
@@ -188,7 +188,7 @@ export function SlackChannelPicker({ action }) {
                   checked={true}
                   aria-label={copy.allowLabel(channel.channel_id)}
                   onChange={() => removeChannel(channel.channel_id)}
-                  className="h-4 w-4 rounded border-white/20 bg-white/[0.04] text-signal"
+                  className="h-4 w-4 rounded border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] text-[var(--v2-accent)]"
                 />
               </div>
             </div>
@@ -214,7 +214,7 @@ export function SlackChannelPicker({ action }) {
           {copy.successMessage}
         </p>)}
         {(channelsQuery.isError || subjectsQuery.isError || saveMutation.isError) &&
-        (<p className="text-xs text-red-300">
+        (<p className="text-xs text-[var(--v2-danger-text)]">
           {slackChannelPickerError(
             saveMutation.error || channelsQuery.error || subjectsQuery.error,
             copy.errorMessage,

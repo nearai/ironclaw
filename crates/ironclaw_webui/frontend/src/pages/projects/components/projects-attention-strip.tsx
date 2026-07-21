@@ -14,10 +14,10 @@ export function ProjectsAttentionStrip({ items, onOpenItem }) {
   if (!items?.length) return null;
 
   return (
-    <Panel className="overflow-hidden border-amber-300/10 p-0">
-      <div className="border-b border-amber-300/10 px-5 py-4 sm:px-6">
-        <div className="font-mono text-[11px] uppercase tracking-[0.18em] text-copper">{t("projects.attention.title")}</div>
-        <p className="mt-2 max-w-[70ch] text-sm leading-6 text-iron-200">
+    <Panel className="overflow-hidden border-[color-mix(in_srgb,var(--v2-warning-text)_10%,var(--v2-panel-border))] p-0">
+      <div className="border-b border-[color-mix(in_srgb,var(--v2-warning-text)_10%,var(--v2-panel-border))] px-5 py-4 sm:px-6">
+        <div className="font-mono text-[11px] uppercase tracking-[0.18em] text-[var(--v2-warning-text)]">{t("projects.attention.title")}</div>
+        <p className="mt-2 max-w-[70ch] text-sm leading-6 text-[var(--v2-text)]">
           {t("projects.attention.desc")}
         </p>
       </div>
@@ -26,12 +26,12 @@ export function ProjectsAttentionStrip({ items, onOpenItem }) {
           <button
             key={`${item.project_id}-${item.thread_id || item.message}`}
             onClick={() => onOpenItem(item)}
-            className="group rounded-2xl border border-white/10 bg-iron-950/55 p-4 text-left hover:border-signal/30 hover:bg-white/[0.05]"
+            className="group rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)]/55 p-4 text-left hover:border-[var(--v2-accent)]/30 hover:bg-[var(--v2-surface-muted)]"
           >
             <div className="flex items-start justify-between gap-3">
               <div>
-                <div className="text-sm font-medium text-white">{item.project_name}</div>
-                <div className="mt-1 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300">
+                <div className="text-sm font-medium text-[var(--v2-text-strong)]">{item.project_name}</div>
+                <div className="mt-1 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">
                   {item.thread_id
                     ? t("projects.attention.threadLabel", { id: String(item.thread_id).slice(0, 8) })
                     : t("projects.attention.projectLabel")}
@@ -39,8 +39,8 @@ export function ProjectsAttentionStrip({ items, onOpenItem }) {
               </div>
               <StatusPill tone={attentionTone(item)} label={attentionLabel(item, t)} />
             </div>
-            <p className="mt-3 text-sm leading-6 text-iron-200">{item.message}</p>
-            <div className="mt-4 text-xs uppercase tracking-[0.16em] text-signal group-hover:text-white">
+            <p className="mt-3 text-sm leading-6 text-[var(--v2-text)]">{item.message}</p>
+            <div className="mt-4 text-xs uppercase tracking-[0.16em] text-[var(--v2-accent-text)] group-hover:text-[var(--v2-text-strong)]">
               {t("projects.attention.openProject")}
             </div>
           </button>

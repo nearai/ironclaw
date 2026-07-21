@@ -72,7 +72,7 @@ export function PairingSection({
 
   if (isLoading) {
     return (
-      <div className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
+      <div className="mt-3 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-4">
         <div className="v2-skeleton h-3 w-24 rounded" />
       </div>
     );
@@ -81,12 +81,12 @@ export function PairingSection({
   return (
     <div
       data-testid="pairing-section"
-      className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4"
+      className="mt-3 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-4"
     >
-      <h4 className="mb-3 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
+      <h4 className="mb-3 font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-accent-text)]">
         {pairingCopy.title}
       </h4>
-      <p className="mb-4 text-xs leading-5 text-iron-300">{pairingCopy.instructions}</p>
+      <p className="mb-4 text-xs leading-5 text-[var(--v2-text-muted)]">{pairingCopy.instructions}</p>
 
       <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center">
         <input
@@ -96,7 +96,7 @@ export function PairingSection({
           onKeyDown={(e) => e.key === "Enter" && handleManualSubmit()}
           placeholder={pairingCopy.placeholder}
           data-testid="pairing-code-input"
-          className="h-9 min-w-0 flex-1 rounded-md border border-white/12 bg-white/[0.04] px-3 font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
+          className="h-9 min-w-0 flex-1 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 font-mono text-sm text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)] focus:border-[var(--v2-accent)]"
         />
         <Button
           variant="secondary"
@@ -114,11 +114,11 @@ export function PairingSection({
         {result.message || pairingCopy.success}
       </p>)}
       {result && !result.success &&
-      (<p data-testid="pairing-error" className="mb-3 text-xs text-red-300">
+      (<p data-testid="pairing-error" className="mb-3 text-xs text-[var(--v2-danger-text)]">
         {result.message || pairingCopy.error}
       </p>)}
       {error &&
-      (<p data-testid="pairing-error" className="mb-3 text-xs text-red-300">
+      (<p data-testid="pairing-error" className="mb-3 text-xs text-[var(--v2-danger-text)]">
         {pairingErrorMessage(error, pairingCopy.error)}
       </p>)}
 
@@ -128,12 +128,12 @@ export function PairingSection({
               {requests.map((req) => (
                 <div
                   key={req.code || req.id}
-                  className="flex items-center justify-between gap-3 rounded-md border border-white/[0.06] bg-white/[0.02] px-3 py-2"
+                  className="flex items-center justify-between gap-3 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2"
                 >
                   <div className="min-w-0">
-                    <span className="font-mono text-sm text-iron-200">{req.code || req.id}</span>
+                    <span className="font-mono text-sm text-[var(--v2-text)]">{req.code || req.id}</span>
                     {req.label && (
-                      <span className="ml-2 text-xs text-iron-300">{req.label}</span>
+                      <span className="ml-2 text-xs text-[var(--v2-text-muted)]">{req.label}</span>
                     )}
                   </div>
                   <Button
@@ -149,7 +149,7 @@ export function PairingSection({
             </div>
           )
         : showPendingRequests &&
-          (<p className="text-xs text-iron-300">{t(i18nKeys.empty)}</p>)}
+          (<p className="text-xs text-[var(--v2-text-muted)]">{t(i18nKeys.empty)}</p>)}
     </div>
   );
 }

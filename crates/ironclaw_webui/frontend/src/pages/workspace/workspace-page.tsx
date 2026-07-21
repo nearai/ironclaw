@@ -33,11 +33,11 @@ export function WorkspacePage() {
               <div className="flex items-center gap-2">
                 <h1
                   data-testid="workspace-heading"
-                  className="text-lg font-medium text-white"
+                  className="text-lg font-medium text-[var(--v2-text-strong)]"
                 >{t("workspace.title")}</h1>
                 <StatusPill tone="muted" label={t("workspace.readOnly")} />
               </div>
-              <p className="mt-0.5 text-sm text-iron-400">{t("workspace.subtitle")}</p>
+              <p className="mt-0.5 text-sm text-[var(--v2-text-faint)]">{t("workspace.subtitle")}</p>
             </div>
             <Button
               variant="secondary"
@@ -53,7 +53,7 @@ export function WorkspacePage() {
           (
             <div
               role="alert"
-              className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
+              className="rounded-xl border border-[color-mix(in_srgb,var(--v2-danger-text)_34%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-4 py-3 text-sm text-[var(--v2-danger-text)]"
             >
               {workspace.error.message}
             </div>

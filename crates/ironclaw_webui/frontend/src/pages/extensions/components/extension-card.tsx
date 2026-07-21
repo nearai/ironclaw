@@ -249,7 +249,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
 
       {onboardingHint &&
       (
-        <div className="mt-2 rounded-md border border-white/12 bg-white/[0.04] px-3 py-2 text-xs leading-5 text-[var(--v2-text-muted)]">
+        <div className="mt-2 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2 text-xs leading-5 text-[var(--v2-text-muted)]">
           {onboardingHint}
         </div>
       )}
