@@ -317,7 +317,7 @@ where
         // authorization, obligation preparation, and (Slice C) minting the
         // sealed `Authorized` witness — is one method. `invoke_json` maps its
         // `AuthorizeResult` back to today's exact dispatch and error behavior.
-        let (obligations, obligation_outcome) = match self.authorize(&request).await? {
+        let (witness, obligations, obligation_outcome) = match self.authorize(&request).await? {
             AuthorizeFold::Authorized(fold) => {
                 let AuthorizedFold {
                     result,
@@ -329,7 +329,7 @@ where
                     obligation_count = obligations.len(),
                     "capability authorization allowed dispatch"
                 );
-                (obligations, obligation_outcome)
+                (result, obligations, obligation_outcome)
             }
             AuthorizeFold::Denied { result, reason } => {
                 debug!(
@@ -354,6 +354,66 @@ where
             }
         };
 
+        // S6 (§5.3.2/§9): when the fold sealed an `Authorized` witness, dispatch
+        // routes through IT — consumed single-use (`into_parts` moves it, so a
+        // second dispatch is a compile error), failing closed on expiry. The
+        // sealed `mounts`/`reservation` are the fold's `obligation_outcome`
+        // values verbatim (the witness carries the exact `Option`s), so the
+        // dispatch inputs are byte-identical to the pre-S6 path; the `lane` was
+        // resolved from the descriptor at seal time and equals the dispatcher's
+        // own descriptor-derived lane (the dispatcher owns closed-lane routing),
+        // so it is consumed here as proof, not re-passed.
+        //
+        // A `None` witness is NOT an error and does NOT fail closed: the seal
+        // returns none for a host-internal `System`-runtime descriptor (no
+        // untrusted lane — the process-sandbox spawn is the live example on the
+        // spawn path) or, defensively, a context lacking both `origin` and
+        // `run_id`. Those keep today's obligation-derived dispatch inputs, which
+        // are exactly the values the witness would have carried. Failing closed
+        // here would break `system.process_sandbox` dispatch (see §9 / the S6
+        // review note), so this arm is a behavior-preserving fallback, not a
+        // second policy path.
+        let (dispatch_mounts, dispatch_reservation) = match witness {
+            Some(AuthorizeResult::Authorized(witness)) => {
+                match witness.into_parts(chrono::Utc::now()) {
+                    Ok((_invocation, _lane, mounts, reservation)) => (mounts, reservation),
+                    Err(expired) => {
+                        // Expiry cannot occur in a synchronous authorize→dispatch
+                        // today; this fail-closed arm is new-behavior-by-design.
+                        // Release the prepared obligations (the reservation goes
+                        // back through the obligation lifecycle) and consume the
+                        // witness via `abort` — never left to `Drop`.
+                        self.abort_obligations(
+                            CapabilityObligationPhase::Invoke,
+                            &request.context,
+                            &request.capability_id,
+                            &request.estimate,
+                            obligations.as_slice(),
+                            &obligation_outcome,
+                        )
+                        .await;
+                        let _ = expired.abort();
+                        fail_run_if_configured(
+                            self.run_state,
+                            &scope,
+                            invocation_id,
+                            "WitnessExpired",
+                        )
+                        .await;
+                        return Err(CapabilityInvocationError::AuthorizationDenied {
+                            capability: request.capability_id,
+                            reason: DenyReason::InternalInvariantViolation,
+                            detail: None,
+                        });
+                    }
+                }
+            }
+            _ => (
+                obligation_outcome.mounts.clone(),
+                obligation_outcome.resource_reservation.clone(),
+            ),
+        };
+
         debug!("capability dispatch starting");
         let dispatch = match self
             .dispatcher
@@ -363,8 +423,8 @@ where
                 authenticated_actor_user_id: request.context.authenticated_actor_user_id.clone(),
                 run_id: request.context.run_id,
                 estimate: request.estimate.clone(),
-                mounts: obligation_outcome.mounts.clone(),
-                resource_reservation: obligation_outcome.resource_reservation.clone(),
+                mounts: dispatch_mounts,
+                resource_reservation: dispatch_reservation,
                 input: request.input,
             })
             .await
@@ -1042,7 +1102,16 @@ where
             process_id: context.process_id,
             parent_process_id: context.parent_process_id,
         };
-        let mounts = obligation_outcome.mounts.clone().unwrap_or_default();
+        // The fold's mounts verbatim as an `Option` — never collapsed to a
+        // default `MountView`. `dispatch()` routes this byte-for-byte, and the
+        // `None`-vs-empty distinction the filesystem resolver relies on
+        // (`filesystem_for_plan` fails a `ScopedVirtual` capability closed on a
+        // `None` mount but proceeds on an empty one) is preserved. `None` only
+        // ever co-occurs with a capability that declares no mount-policy effect,
+        // which the planner classifies as not requiring a filesystem, so the
+        // resolver's `None` arm is unreachable for it either way — but the seal
+        // must not be the thing that erases the distinction.
+        let mounts = obligation_outcome.mounts.clone();
         // The real reservation the fold's `ReserveResources` obligation produced
         // (the estimate is already reserved in-fold), or `None` when the
         // capability declares no resource obligation. No synthesized placeholder.
@@ -1995,27 +2064,80 @@ where
         // obligation preparation, and (Slice C) minting the sealed `Authorized`
         // witness — is one method mirroring `authorize()`. `spawn_json` maps its
         // `AuthorizeFold` back to today's exact process-spawn and error behavior.
-        let (obligations, obligation_outcome) = match self.authorize_spawn(&request).await? {
-            AuthorizeFold::Authorized(fold) => {
-                let AuthorizedFold {
-                    obligations,
-                    obligation_outcome,
-                    ..
-                } = *fold;
-                (obligations, obligation_outcome)
+        let (witness, obligations, obligation_outcome) =
+            match self.authorize_spawn(&request).await? {
+                AuthorizeFold::Authorized(fold) => {
+                    let AuthorizedFold {
+                        result,
+                        obligations,
+                        obligation_outcome,
+                    } = *fold;
+                    (result, obligations, obligation_outcome)
+                }
+                AuthorizeFold::Denied { reason, .. } => {
+                    return Err(CapabilityInvocationError::AuthorizationDenied {
+                        capability: request.capability_id,
+                        reason,
+                        detail: None,
+                    });
+                }
+                AuthorizeFold::Blocked { .. } => {
+                    return Err(CapabilityInvocationError::AuthorizationRequiresApproval {
+                        capability: request.capability_id,
+                    });
+                }
+            };
+
+        // S6 (§5.3.2/§9): when the fold sealed a witness, the process start's
+        // mounts/reservation come from IT — consumed single-use, failing closed
+        // on expiry. The sealed values are the fold's `obligation_outcome`
+        // verbatim, so the process start inputs are byte-identical to the pre-S6
+        // path; the `lane` is consumed as proof (the process runtime still comes
+        // from the re-resolved descriptor below).
+        //
+        // A `None` witness is NOT an error here: `system.process_sandbox` is a
+        // host-internal `System`-runtime capability with no untrusted lane, so it
+        // seals no witness yet is legitimately spawned through this path (see the
+        // S6 review note). Rather than fail closed — which would break process-
+        // sandbox spawning — the `None` arm keeps today's obligation-derived
+        // inputs, exactly the values a witness would have carried.
+        let (witness_mounts, witness_reservation) = match witness {
+            Some(AuthorizeResult::Authorized(witness)) => {
+                match witness.into_parts(chrono::Utc::now()) {
+                    Ok((_invocation, _lane, mounts, reservation)) => (mounts, reservation),
+                    Err(expired) => {
+                        // Expiry cannot occur in a synchronous authorize→spawn
+                        // today; new-behavior-by-design. Release the prepared
+                        // obligations and consume the witness via `abort`.
+                        self.abort_obligations(
+                            CapabilityObligationPhase::Spawn,
+                            &request.context,
+                            &request.capability_id,
+                            &request.estimate,
+                            obligations.as_slice(),
+                            &obligation_outcome,
+                        )
+                        .await;
+                        let _ = expired.abort();
+                        fail_run_if_configured(
+                            self.run_state,
+                            &scope,
+                            invocation_id,
+                            "WitnessExpired",
+                        )
+                        .await;
+                        return Err(CapabilityInvocationError::AuthorizationDenied {
+                            capability: request.capability_id,
+                            reason: DenyReason::InternalInvariantViolation,
+                            detail: None,
+                        });
+                    }
+                }
             }
-            AuthorizeFold::Denied { reason, .. } => {
-                return Err(CapabilityInvocationError::AuthorizationDenied {
-                    capability: request.capability_id,
-                    reason,
-                    detail: None,
-                });
-            }
-            AuthorizeFold::Blocked { .. } => {
-                return Err(CapabilityInvocationError::AuthorizationRequiresApproval {
-                    capability: request.capability_id,
-                });
-            }
+            _ => (
+                obligation_outcome.mounts.clone(),
+                obligation_outcome.resource_reservation.clone(),
+            ),
         };
 
         // Re-resolve the descriptor for the process start. `authorize_spawn`
@@ -2026,6 +2148,7 @@ where
         let Some(descriptor) = self.registry.get_capability(&request.capability_id) else {
             // Obligations were already prepared by the fold — abort them so the
             // unreachable arm cannot leak a prepared reservation/mount grant.
+            // (The witness was already consumed by `into_parts` above.)
             self.abort_obligations(
                 CapabilityObligationPhase::Spawn,
                 &request.context,
@@ -2042,12 +2165,12 @@ where
             });
         };
 
-        let effective_mounts = obligation_outcome
-            .mounts
-            .clone()
-            .unwrap_or_else(|| request.context.mounts.clone());
-        let resource_reservation_id = obligation_outcome
-            .resource_reservation
+        // Byte-for-byte the prior spawn inputs: `witness_mounts` is the fold's
+        // `Option<MountView>` verbatim, so `unwrap_or_else(context.mounts)`
+        // reproduces today's `obligation_outcome.mounts…unwrap_or_else(…)`; the
+        // reservation id likewise comes from the fold's reservation.
+        let effective_mounts = witness_mounts.unwrap_or_else(|| request.context.mounts.clone());
+        let resource_reservation_id = witness_reservation
             .as_ref()
             .map(|reservation| reservation.id);
 
