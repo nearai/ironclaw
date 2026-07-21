@@ -22,7 +22,7 @@ async fn capability_host_uses_obligation_handler_before_dispatch() {
     let authorizer = ObligatingAuthorizer::new(vec![Obligation::AuditBefore]);
     let handler = RecordingObligationHandler::default();
     let host =
-        CapabilityHost::new(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
+        capability_host(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
 
     let result = host
         .invoke_json(CapabilityInvocationRequest {
@@ -30,7 +30,6 @@ async fn capability_host_uses_obligation_handler_before_dispatch() {
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "handled"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap();
@@ -53,7 +52,7 @@ async fn capability_host_still_fails_closed_when_handler_rejects_obligations() {
     let authorizer = ObligatingAuthorizer::new(vec![Obligation::RedactOutput]);
     let handler = RecordingObligationHandler::default();
     let host =
-        CapabilityHost::new(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
+        capability_host(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
 
     let err = host
         .invoke_json(CapabilityInvocationRequest {
@@ -61,7 +60,6 @@ async fn capability_host_still_fails_closed_when_handler_rejects_obligations() {
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "must not dispatch"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -108,14 +106,13 @@ async fn capability_host_passes_prepared_effects_to_dispatch() {
         aborted: Arc::new(AtomicBool::new(false)),
     };
     let host =
-        CapabilityHost::new(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
+        capability_host(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
 
     host.invoke_json(CapabilityInvocationRequest {
         context,
         capability_id: capability_id(),
         estimate: estimate.clone(),
         input: json!({"message": "prepared effects"}),
-        trust_decision: trust_decision(),
     })
     .await
     .unwrap();
@@ -145,7 +142,7 @@ async fn capability_host_completes_post_dispatch_obligations_before_returning() 
     let authorizer = ObligatingAuthorizer::new(vec![Obligation::RedactOutput]);
     let handler = RedactingObligationHandler;
     let host =
-        CapabilityHost::new(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
+        capability_host(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
 
     let result = host
         .invoke_json(CapabilityInvocationRequest {
@@ -153,7 +150,6 @@ async fn capability_host_completes_post_dispatch_obligations_before_returning() 
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "post dispatch"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap();
@@ -187,7 +183,7 @@ async fn capability_host_aborts_staged_obligations_when_completion_fails() {
         Obligation::RedactOutput,
     ]);
     let host =
-        CapabilityHost::new(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
+        capability_host(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
 
     let err = host
         .invoke_json(CapabilityInvocationRequest {
@@ -195,7 +191,6 @@ async fn capability_host_aborts_staged_obligations_when_completion_fails() {
             capability_id: capability_id(),
             estimate,
             input: json!({"message": "completion fails"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -226,7 +221,7 @@ async fn capability_host_passes_prepared_mounts_to_process_start() {
         aborted: Arc::new(AtomicBool::new(false)),
     };
     let process_manager = MountRecordingProcessManager::default();
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+    let host = capability_host(&registry, &dispatcher, &authorizer)
         .with_obligation_handler(&handler)
         .with_process_manager(&process_manager);
     let mut context = execution_context(CapabilitySet::default());
@@ -241,7 +236,6 @@ async fn capability_host_passes_prepared_mounts_to_process_start() {
         capability_id: capability_id(),
         estimate: ResourceEstimate::default(),
         input: json!({"message": "prepared mount"}),
-        trust_decision: trust_decision(),
     })
     .await
     .unwrap();
@@ -269,7 +263,7 @@ async fn capability_host_aborts_prepared_obligations_when_process_start_fails() 
     let authorizer =
         ObligatingAuthorizer::new(vec![Obligation::ReserveResources { reservation_id }]);
     let process_manager = FailingProcessManager;
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+    let host = capability_host(&registry, &dispatcher, &authorizer)
         .with_obligation_handler(&handler)
         .with_process_manager(&process_manager);
 
@@ -279,7 +273,6 @@ async fn capability_host_aborts_prepared_obligations_when_process_start_fails() 
             capability_id: capability_id(),
             estimate,
             input: json!({"message": "spawn fails"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -299,7 +292,7 @@ async fn capability_host_rejects_post_output_obligations_for_spawn_before_handle
         observed: Arc::clone(&observed),
     };
     let process_manager = PanicProcessManager;
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+    let host = capability_host(&registry, &dispatcher, &authorizer)
         .with_obligation_handler(&handler)
         .with_process_manager(&process_manager);
 
@@ -309,7 +302,6 @@ async fn capability_host_rejects_post_output_obligations_for_spawn_before_handle
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "must not spawn"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();

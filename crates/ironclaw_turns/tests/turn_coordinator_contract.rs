@@ -374,7 +374,7 @@ async fn submit_turn_records_advisory_model_route_from_requested_model() {
     let route = state
         .resolved_model_route
         .expect("advisory model route recorded from requested_model");
-    assert_eq!(route.model_id, "gpt-4o");
+    assert_eq!(route.model_id(), "gpt-4o");
     assert!(
         route.is_advisory(),
         "a caller-requested model is an advisory route, not an operator-resolved one"

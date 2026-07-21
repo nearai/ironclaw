@@ -2107,17 +2107,19 @@ fn invalid_transcript_ref_error() -> AgentLoopHostError {
 fn provider_call_reference_to_envelope(
     provider_call: ironclaw_turns::run_profile::ProviderToolCallReference,
 ) -> ProviderToolCallReferenceEnvelope {
+    let capability_id = provider_call.capability_id;
+    let replay = provider_call.replay;
     ProviderToolCallReferenceEnvelope {
-        provider_id: provider_call.provider_id,
-        provider_model_id: provider_call.provider_model_id,
-        provider_turn_id: provider_call.provider_turn_id,
-        provider_call_id: provider_call.provider_call_id,
-        provider_tool_name: provider_call.provider_tool_name,
-        capability_id: provider_call.capability_id,
-        arguments: provider_call.arguments,
-        response_reasoning: provider_call.response_reasoning,
-        reasoning: provider_call.reasoning,
-        signature: provider_call.signature,
+        provider_id: replay.provider_id,
+        provider_model_id: replay.provider_model_id,
+        provider_turn_id: replay.provider_turn_id,
+        provider_call_id: replay.provider_call_id,
+        provider_tool_name: replay.provider_tool_name,
+        capability_id,
+        arguments: replay.arguments,
+        response_reasoning: replay.response_reasoning,
+        reasoning: replay.reasoning,
+        signature: replay.signature,
     }
 }
 

@@ -26,7 +26,7 @@ async fn capability_host_spawn_runs_background_process_through_process_host() {
         .host()
         .with_poll_interval(Duration::from_millis(5));
     let authorizer = SpawnOnlyAuthorizer;
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+    let host = capability_host(&registry, &dispatcher, &authorizer)
         .with_run_state(&run_state)
         .with_process_manager(&process_manager);
     let parent_process_id = ProcessId::new();
@@ -52,7 +52,6 @@ async fn capability_host_spawn_runs_background_process_through_process_host() {
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap();
@@ -119,8 +118,8 @@ async fn capability_spawn_process_host_hides_cross_scope_status_and_output() {
         .host()
         .with_poll_interval(Duration::from_millis(5));
     let authorizer = SpawnOnlyAuthorizer;
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
-        .with_process_manager(&process_manager);
+    let host =
+        capability_host(&registry, &dispatcher, &authorizer).with_process_manager(&process_manager);
     let context = execution_context(CapabilitySet {
         grants: vec![spawn_grant()],
     });
@@ -135,7 +134,6 @@ async fn capability_spawn_process_host_hides_cross_scope_status_and_output() {
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message":"private"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap();
@@ -158,7 +156,7 @@ async fn capability_host_spawn_fails_closed_on_unsupported_obligations_before_pr
     let process_services = ProcessServices::in_memory();
     let executor = Arc::new(RecordingSuccessExecutor::default());
     let process_manager = process_services.background_manager(Arc::clone(&executor));
-    let host = CapabilityHost::new(&registry, &dispatcher, &SpawnObligatingAuthorizer)
+    let host = capability_host(&registry, &dispatcher, &SpawnObligatingAuthorizer)
         .with_run_state(&run_state)
         .with_process_manager(&process_manager);
     let context = execution_context(CapabilitySet {
@@ -173,7 +171,6 @@ async fn capability_host_spawn_fails_closed_on_unsupported_obligations_before_pr
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message":"must not spawn"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();

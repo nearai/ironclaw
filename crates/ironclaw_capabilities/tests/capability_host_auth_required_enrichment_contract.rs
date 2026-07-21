@@ -97,7 +97,7 @@ async fn invoke_json_enriches_auth_required_credential_requirements_from_obligat
     let dispatcher = TestDispatcher::auth_required();
     let handler = PassthroughObligationHandler;
     let host =
-        CapabilityHost::new(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
+        capability_host(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
     let context = execution_context(CapabilitySet {
         grants: vec![dispatch_grant()],
     });
@@ -108,7 +108,6 @@ async fn invoke_json_enriches_auth_required_credential_requirements_from_obligat
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"owner": "acme", "repo": "api", "issue_number": 1, "body": "hi"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -167,7 +166,7 @@ async fn invoke_json_preserves_non_empty_credential_requirements_from_dispatcher
     });
     let handler = PassthroughObligationHandler;
     let host =
-        CapabilityHost::new(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
+        capability_host(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
     let context = execution_context(CapabilitySet {
         grants: vec![dispatch_grant()],
     });
@@ -178,7 +177,6 @@ async fn invoke_json_preserves_non_empty_credential_requirements_from_dispatcher
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -232,7 +230,7 @@ async fn auth_resume_json_enriches_auth_required_credential_requirements_from_ob
     let handler = PassthroughObligationHandler;
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
 
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+    let host = capability_host(&registry, &dispatcher, &authorizer)
         .with_obligation_handler(&handler)
         .with_run_state(&run_state);
 
@@ -249,7 +247,6 @@ async fn auth_resume_json_enriches_auth_required_credential_requirements_from_ob
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: serde_json::json!({"owner": "acme", "repo": "api", "issue_number": 1, "body": "hi"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -274,7 +271,6 @@ async fn auth_resume_json_enriches_auth_required_credential_requirements_from_ob
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: serde_json::json!({"owner": "acme", "repo": "api", "issue_number": 1, "body": "hi"}),
-            trust_decision: trust_decision(),
             approval_request_id: None,
         })
         .await
@@ -350,7 +346,7 @@ async fn invoke_json_does_not_enrich_when_multiple_credential_obligations_declar
     let dispatcher = TestDispatcher::auth_required();
     let handler = PassthroughObligationHandler;
     let host =
-        CapabilityHost::new(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
+        capability_host(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
     let context = execution_context(CapabilitySet {
         grants: vec![dispatch_grant()],
     });
@@ -361,7 +357,6 @@ async fn invoke_json_does_not_enrich_when_multiple_credential_obligations_declar
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: serde_json::json!({}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -420,7 +415,7 @@ async fn invoke_json_preserves_required_secrets_from_dispatcher() {
     });
     let handler = PassthroughObligationHandler;
     let host =
-        CapabilityHost::new(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
+        capability_host(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
     let context = execution_context(CapabilitySet {
         grants: vec![dispatch_grant()],
     });
@@ -431,7 +426,6 @@ async fn invoke_json_preserves_required_secrets_from_dispatcher() {
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();

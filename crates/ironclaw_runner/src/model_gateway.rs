@@ -407,7 +407,7 @@ where
             request
                 .resolved_model_route
                 .as_ref()
-                .map(|snapshot| snapshot.model_id.as_str()),
+                .map(|snapshot| snapshot.model_id()),
         )?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
@@ -450,7 +450,7 @@ where
             request
                 .resolved_model_route
                 .as_ref()
-                .map(|snapshot| snapshot.model_id.as_str()),
+                .map(|snapshot| snapshot.model_id()),
         )?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
@@ -493,7 +493,7 @@ where
             request
                 .resolved_model_route
                 .as_ref()
-                .map(|snapshot| snapshot.model_id.as_str()),
+                .map(|snapshot| snapshot.model_id()),
         )?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
@@ -541,7 +541,7 @@ where
             request
                 .resolved_model_route
                 .as_ref()
-                .map(|snapshot| snapshot.model_id.as_str()),
+                .map(|snapshot| snapshot.model_id()),
         )?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
@@ -877,8 +877,11 @@ where
         slot: ModelSlot,
         snapshot: &HostManagedModelRouteSnapshot,
     ) -> Result<ModelSelectionMode, HostManagedModelError> {
-        let route = ModelRoute::new(snapshot.provider_id.clone(), snapshot.model_id.clone())
-            .map_err(map_model_route_error)?;
+        let route = ModelRoute::new(
+            snapshot.provider_id().to_string(),
+            snapshot.model_id().to_string(),
+        )
+        .map_err(map_model_route_error)?;
         self.route_resolver
             .validate_model_route(slot, &route)
             .map_err(map_model_route_error)
@@ -930,12 +933,15 @@ fn snapshot_from_host_request(
     snapshot: &HostManagedModelRouteSnapshot,
     policy_mode: ModelSelectionMode,
 ) -> Result<ResolvedModelRouteSnapshot, HostManagedModelError> {
-    let route = ModelRoute::new(snapshot.provider_id.clone(), snapshot.model_id.clone())
-        .map_err(map_model_route_error)?;
+    let route = ModelRoute::new(
+        snapshot.provider_id().to_string(),
+        snapshot.model_id().to_string(),
+    )
+    .map_err(map_model_route_error)?;
     let key = ModelRouteProviderKey::new(
         route,
-        snapshot.config_version.clone(),
-        snapshot.auth_version.clone(),
+        snapshot.config_version().to_string(),
+        snapshot.auth_version().to_string(),
     )
     .map_err(map_model_route_error)?;
     Ok(ResolvedModelRouteSnapshot::with_provider_key(

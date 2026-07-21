@@ -385,17 +385,12 @@ where
         let mut release_guard =
             ReservationReleaseGuard::new(self.accountant.as_ref(), &self.context);
 
-        if let Err(error) = self
-            .milestones
-            .model_started(request.model_preference.clone())
-            .await
-        {
-            tracing::debug!(
-                kind = ?error.kind,
-                diagnostic_ref = ?error.diagnostic_ref,
-                "loop model_started milestone failed before model request"
-            );
-        }
+        log_milestone_failure(
+            self.milestones
+                .model_started(request.model_preference.clone())
+                .await,
+            "loop model_started milestone failed before model request",
+        );
 
         // Bound inactivity, rather than total response time, so a hung gateway
         // fails before lease expiry without killing a healthy long stream.
@@ -445,13 +440,10 @@ where
             // usage or release), rather than abandoning the reservation.
             drop(release_guard);
             let host_error = post_error.into_host_error();
-            if let Err(milestone_error) = self.milestones.model_failed(host_error.kind).await {
-                tracing::debug!(
-                    kind = ?milestone_error.kind,
-                    diagnostic_ref = ?milestone_error.diagnostic_ref,
-                    "loop model_failed milestone failed after post-model accounting error"
-                );
-            }
+            log_milestone_failure(
+                self.milestones.model_failed(host_error.kind).await,
+                "loop model_failed milestone failed after post-model accounting error",
+            );
             return Err(host_error);
         }
         release_guard.disarm();
@@ -460,29 +452,21 @@ where
             Ok(response) => response,
             Err(error) => {
                 let host_error = error.into_host_error();
-                if let Err(milestone_error) = self.milestones.model_failed(host_error.kind).await {
-                    tracing::debug!(
-                        kind = ?milestone_error.kind,
-                        diagnostic_ref = ?milestone_error.diagnostic_ref,
-                        "loop model_failed milestone failed after model error"
-                    );
-                }
+                log_milestone_failure(
+                    self.milestones.model_failed(host_error.kind).await,
+                    "loop model_failed milestone failed after model error",
+                );
                 return Err(host_error);
             }
         };
 
         for safe_delta in &response.safe_reasoning_deltas {
-            if let Err(error) = self
-                .milestones
-                .model_reasoning_delta(safe_delta.clone())
-                .await
-            {
-                tracing::debug!(
-                    kind = ?error.kind,
-                    diagnostic_ref = ?error.diagnostic_ref,
-                    "loop model reasoning milestone failed after successful model response"
-                );
-            }
+            log_milestone_failure(
+                self.milestones
+                    .model_reasoning_delta(safe_delta.clone())
+                    .await,
+                "loop model reasoning milestone failed after successful model response",
+            );
         }
         if matches!(response.output, ParentLoopOutput::AssistantReply(_))
             && !progress_sink.emitted_text()
@@ -503,30 +487,20 @@ where
                 if !should_emit_fallback_text_delta(text_chunk_index, text_chunk_count) {
                     continue;
                 }
-                if let Err(error) = self
-                    .milestones
-                    .model_text_delta(accumulated_text.clone())
-                    .await
-                {
-                    tracing::debug!(
-                        kind = ?error.kind,
-                        diagnostic_ref = ?error.diagnostic_ref,
-                        "loop model text milestone failed after successful model response"
-                    );
-                }
+                log_milestone_failure(
+                    self.milestones
+                        .model_text_delta(accumulated_text.clone())
+                        .await,
+                    "loop model text milestone failed after successful model response",
+                );
             }
         }
-        if let Err(error) = self
-            .milestones
-            .model_completed(response.effective_model_profile_id.clone())
-            .await
-        {
-            tracing::debug!(
-                kind = ?error.kind,
-                diagnostic_ref = ?error.diagnostic_ref,
-                "loop model_completed milestone failed after successful model response"
-            );
-        }
+        log_milestone_failure(
+            self.milestones
+                .model_completed(response.effective_model_profile_id.clone())
+                .await,
+            "loop model_completed milestone failed after successful model response",
+        );
         Ok(response)
     }
 }
@@ -558,13 +532,10 @@ where
         self.emitted_text.store(true, Ordering::SeqCst);
         self.progress_generation
             .send_modify(|generation| *generation = generation.wrapping_add(1));
-        if let Err(error) = self.milestones.model_text_delta(safe_text).await {
-            tracing::debug!(
-                kind = ?error.kind,
-                diagnostic_ref = ?error.diagnostic_ref,
-                "loop model text progress milestone failed during model stream"
-            );
-        }
+        log_milestone_failure(
+            self.milestones.model_text_delta(safe_text).await,
+            "loop model text progress milestone failed during model stream",
+        );
     }
 }
 
@@ -650,6 +621,21 @@ fn sanitize_model_response(mut response: LoopModelResponse) -> LoopModelResponse
 
 fn should_emit_fallback_text_delta(chunk_index: usize, chunk_count: usize) -> bool {
     chunk_index == chunk_count || chunk_index.is_multiple_of(FALLBACK_TEXT_DELTA_MILESTONE_STEP)
+}
+
+/// Milestone emission is best-effort: a failed emit must never abort the model
+/// call, only leave a diagnostic. Every `stream_model` milestone site shares
+/// this "log kind + diagnostic_ref on error, otherwise ignore" shape, so it
+/// lives here once.
+fn log_milestone_failure(result: Result<(), AgentLoopHostError>, message: &'static str) {
+    if let Err(error) = result {
+        tracing::debug!(
+            kind = ?error.kind,
+            diagnostic_ref = ?error.diagnostic_ref,
+            "{}",
+            message
+        );
+    }
 }
 
 #[cfg(test)]

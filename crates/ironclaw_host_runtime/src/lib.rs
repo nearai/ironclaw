@@ -47,7 +47,6 @@ mod invocation_services;
 mod latency;
 pub mod memory_context;
 mod obligations;
-mod planner;
 mod post_edit_check;
 mod process_aliases;
 mod process_output;
@@ -112,7 +111,6 @@ pub use obligations::{
     ProcessObligationLifecycleStore, RuntimeCredentialAccessSecret,
     RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver,
 };
-pub use planner::{ExecutionPlan, PlannerError, plan_capability};
 pub use post_edit_check::{
     POST_EDIT_CHECK_ENV, POST_EDIT_CHECK_TIMEOUT_ENV, PostEditCheckConfig,
     PostEditCheckConfigError, PostEditCheckService,

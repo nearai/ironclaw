@@ -2368,6 +2368,128 @@ async fn turn_runner_worker_full_reborn_fails_when_checkpoint_state_disk_is_full
 }
 
 #[tokio::test]
+async fn turn_runner_worker_full_reborn_retry_recovers_after_transient_checkpoint_state_outage() {
+    let fixture = HostFixture::new_unsubmitted(
+        "thread-full-reborn-checkpoint-transient",
+        "hello transient checkpoint outage",
+    )
+    .await;
+    let turn_store = Arc::new(in_memory_turn_state_store());
+    let resolver = default_planned_run_profile_resolver().expect("planned profile resolver");
+    let failed_run_id = queue_fixture_turn(
+        &fixture,
+        turn_store.as_ref(),
+        &resolver,
+        "idem-full-reborn-checkpoint-transient",
+    )
+    .await;
+    let driver = planned_driver_for_full_reborn_test();
+    let descriptor = driver.descriptor();
+    let mut registry = DriverRegistry::new();
+    registry
+        .register_driver(
+            driver,
+            planned_requirements_without_capabilities(),
+            DriverKind::Reference,
+        )
+        .unwrap();
+    let checkpoint_state_store = Arc::new(NthPutUnavailableCheckpointStateStore::new(
+        in_memory_checkpoint_state_store(),
+        1,
+    ));
+    let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
+    let factory = RebornLoopDriverHostFactory::new(
+        fixture.thread_service.clone(),
+        fixture.thread_scope.clone(),
+        fixture.gateway.clone(),
+        checkpoint_state_store.clone(),
+        turn_store.clone(),
+        loop_checkpoint_store,
+        fixture.milestone_sink.clone(),
+        TextOnlyLoopHostConfig {
+            max_messages: 8,
+            require_model_route_snapshot: false,
+        },
+        InstructionSafetyContext::local_development_noop(),
+    )
+    .with_driver_requirements(driver_requirements_for(
+        &descriptor,
+        planned_requirements_without_capabilities(),
+    ));
+    let executor = Arc::new(RebornTurnRunExecutor::new(
+        loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
+        Arc::new(registry),
+        Arc::new(factory) as Arc<dyn HostFactory>,
+        None,
+    ));
+    let scheduler_handle = TurnRunScheduler::new(
+        turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
+        executor,
+        full_reborn_chaos_scheduler_config(),
+    )
+    .start();
+
+    let failed = wait_for_run_status(
+        turn_store.as_ref(),
+        &fixture.context.scope,
+        failed_run_id,
+        TurnStatus::Failed,
+        "full reborn run should record transient checkpoint outage as failed",
+    )
+    .await;
+    assert_eq!(
+        failed.failure.expect("failure").category(),
+        "host_stage_unavailable_checkpoint"
+    );
+    assert_eq!(checkpoint_state_store.put_attempts(), 1);
+    assert!(
+        fixture.gateway.requests().is_empty(),
+        "first checkpoint failure should happen before the model provider is called"
+    );
+
+    let retry = turn_store
+        .retry_turn(ironclaw_turns::RetryTurnRequest {
+            scope: fixture.context.scope.clone(),
+            actor: TurnActor::new(UserId::new("user-text-host").unwrap()),
+            run_id: failed_run_id,
+            source_binding_ref: SourceBindingRef::new("source-web-retry").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-retry").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-full-reborn-checkpoint-transient-retry")
+                .unwrap(),
+        })
+        .await
+        .expect("retry failed run");
+    assert_eq!(retry.status, TurnStatus::Queued);
+
+    let completed = wait_for_run_status(
+        turn_store.as_ref(),
+        &fixture.context.scope,
+        retry.run_id,
+        TurnStatus::Completed,
+        "retry should complete after transient checkpoint outage clears",
+    )
+    .await;
+    scheduler_handle.shutdown().await;
+
+    assert!(completed.failure.is_none());
+    assert_eq!(checkpoint_state_store.put_attempts(), 3);
+    assert_eq!(fixture.gateway.requests().len(), 1);
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(history.messages.iter().any(|message| {
+        message.kind == MessageKind::Assistant
+            && message.status == MessageStatus::Finalized
+            && message.content.as_deref() == Some("model says hi")
+    }));
+}
+
+#[tokio::test]
 async fn turn_runner_worker_full_reborn_fails_cleanly_when_model_provider_is_offline() {
     let fixture =
         HostFixture::new_unsubmitted("thread-full-reborn-model-offline", "hello model outage")
@@ -5807,7 +5929,7 @@ async fn text_only_host_stage_checkpoint_payload_returns_ref_usable_by_checkpoin
     let state_ref = host_dyn
         .stage_checkpoint_payload(StageCheckpointPayloadRequest {
             kind: LoopCheckpointKind::BeforeSideEffect,
-            schema_id: fixture.context.checkpoint_schema_id.as_str().to_string(),
+            schema_id: fixture.context.checkpoint_schema_id.clone(),
             payload: b"durable resume bytes".to_vec(),
         })
         .await
@@ -5896,7 +6018,8 @@ async fn text_only_host_stage_checkpoint_payload_rejects_foreign_schema_id() {
     let error = host_dyn
         .stage_checkpoint_payload(StageCheckpointPayloadRequest {
             kind: LoopCheckpointKind::BeforeModel,
-            schema_id: "some_other_schema_v1".to_string(),
+            schema_id: ironclaw_turns::run_profile::CheckpointSchemaId::new("some_other_schema_v1")
+                .expect("valid"),
             payload: b"payload bytes".to_vec(),
         })
         .await
@@ -9216,6 +9339,49 @@ impl CheckpointStateStore for DiskFullCheckpointStateStore {
         Err(TurnError::Unavailable {
             reason: "checkpoint state disk full".to_string(),
         })
+    }
+}
+
+struct NthPutUnavailableCheckpointStateStore {
+    inner: Arc<dyn CheckpointStateStore>,
+    fail_on_put_attempt: usize,
+    put_attempts: AtomicUsize,
+}
+
+impl NthPutUnavailableCheckpointStateStore {
+    fn new(inner: Arc<dyn CheckpointStateStore>, fail_on_put_attempt: usize) -> Self {
+        Self {
+            inner,
+            fail_on_put_attempt,
+            put_attempts: AtomicUsize::new(0),
+        }
+    }
+
+    fn put_attempts(&self) -> usize {
+        self.put_attempts.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl CheckpointStateStore for NthPutUnavailableCheckpointStateStore {
+    async fn put_checkpoint_state(
+        &self,
+        request: PutCheckpointStateRequest,
+    ) -> Result<ironclaw_turns::CheckpointStateRecord, TurnError> {
+        let attempt = self.put_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+        if attempt == self.fail_on_put_attempt {
+            return Err(TurnError::Unavailable {
+                reason: "transient checkpoint state outage".to_string(),
+            });
+        }
+        self.inner.put_checkpoint_state(request).await
+    }
+
+    async fn get_checkpoint_state(
+        &self,
+        request: GetCheckpointStateRequest,
+    ) -> Result<Option<ironclaw_turns::CheckpointStateRecord>, TurnError> {
+        self.inner.get_checkpoint_state(request).await
     }
 }
 

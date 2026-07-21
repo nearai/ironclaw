@@ -271,7 +271,8 @@ mod tests {
         wrapped
             .stage_checkpoint_payload(ironclaw_turns::run_profile::StageCheckpointPayloadRequest {
                 kind: LoopCheckpointKind::BeforeModel,
-                schema_id: "test-schema".to_string(),
+                schema_id: ironclaw_turns::run_profile::CheckpointSchemaId::new("test-schema")
+                    .expect("valid"),
                 payload: b"payload".to_vec(),
             })
             .await
@@ -304,7 +305,8 @@ mod tests {
         let stage_err = wrapped
             .stage_checkpoint_payload(ironclaw_turns::run_profile::StageCheckpointPayloadRequest {
                 kind: LoopCheckpointKind::BeforeModel,
-                schema_id: "test-schema".to_string(),
+                schema_id: ironclaw_turns::run_profile::CheckpointSchemaId::new("test-schema")
+                    .expect("valid"),
                 payload: b"payload".to_vec(),
             })
             .await

@@ -82,7 +82,12 @@ pub struct Authorized {
     invocation: Invocation,
     lane: RuntimeLane,
     mounts: MountView,
-    reservation: ResourceReservation,
+    /// The real reservation the fold's resource obligation produced (`Some`), or
+    /// `None` when the capability declares no resource obligation. This is the
+    /// authoritative reservation held for this invocation — never a synthesized
+    /// placeholder. Single-use, lane-bound, deadline-bounded like the witness
+    /// that carries it.
+    reservation: Option<ResourceReservation>,
     deadline: Timestamp,
 }
 
@@ -91,13 +96,15 @@ impl Authorized {
     /// only a [`CapabilityAuthorizer`] can produce — i.e. only `authorize()` in
     /// the kernel. The authorization *outputs* (`lane`, `mounts`, `reservation`,
     /// `deadline`) are results the fold computed, not caller-supplied request
-    /// fields.
+    /// fields. `reservation` is the real reservation the fold's resource
+    /// obligation produced (`Some`), or `None` when the capability declares no
+    /// resource obligation — never a synthesized placeholder.
     pub fn seal(
         _grant: AuthorizationGrant,
         invocation: Invocation,
         lane: RuntimeLane,
         mounts: MountView,
-        reservation: ResourceReservation,
+        reservation: Option<ResourceReservation>,
         deadline: Timestamp,
     ) -> Self {
         Self {
@@ -124,9 +131,11 @@ impl Authorized {
         &self.mounts
     }
 
-    /// The resource reservation held for this invocation.
-    pub fn reservation(&self) -> &ResourceReservation {
-        &self.reservation
+    /// The real reservation the fold's resource obligation produced (`Some`), or
+    /// `None` when the capability declares no resource obligation — never a
+    /// synthesized placeholder.
+    pub fn reservation(&self) -> Option<&ResourceReservation> {
+        self.reservation.as_ref()
     }
 
     /// The deadline past which this witness is no longer valid.
@@ -150,7 +159,15 @@ impl Authorized {
     pub fn into_parts(
         self,
         now: Timestamp,
-    ) -> Result<(Invocation, RuntimeLane, MountView, ResourceReservation), Box<Authorized>> {
+    ) -> Result<
+        (
+            Invocation,
+            RuntimeLane,
+            MountView,
+            Option<ResourceReservation>,
+        ),
+        Box<Authorized>,
+    > {
         if self.is_expired(now) {
             // Boxed: the witness is large and the expiry arm is cold
             // (clippy::result_large_err).
@@ -162,9 +179,11 @@ impl Authorized {
     /// Unwind a not-dispatched witness (cancel between authorize and dispatch,
     /// runner handoff, shutdown). Consumes the witness so its reservation is
     /// explicitly released rather than leaked. Returns the reservation for the
-    /// caller to release through the resource port; a failed release does not
-    /// strand authority (lease-expiry reclaims it, §5.3.2). Never `Drop`.
-    pub fn abort(self) -> ResourceReservation {
+    /// caller to release through the resource port (`None` when the capability
+    /// declared no resource obligation, so there is nothing to release); a failed
+    /// release does not strand authority (lease-expiry reclaims it, §5.3.2).
+    /// Never `Drop`.
+    pub fn abort(self) -> Option<ResourceReservation> {
         self.reservation
     }
 }
@@ -173,8 +192,8 @@ impl Authorized {
 /// `Blocked` fold into [`crate::Resolution::Denied`]/[`crate::Resolution::Blocked`]
 /// at the call site; `Authorized` proceeds to `dispatch()`.
 ///
-/// Not serializable: an `Authorized` holds a live reservation and is a one-shot
-/// capability, not wire data.
+/// Not serializable: an `Authorized` may hold a live reservation and is a
+/// one-shot capability, not wire data.
 #[derive(Debug)]
 pub enum AuthorizeResult {
     /// Passed the fold — proceed to dispatch. Boxed because an `Authorized`
