@@ -18,6 +18,7 @@ LLM + Chromium); it is CI-run, not exercised by `cargo test`.
 import json
 import re
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from playwright.async_api import expect
 
@@ -151,3 +152,102 @@ async def test_workspace_viewer_reports_download_failure(reborn_v2_yolo_page):
         has_text="Couldn't download this file. Please try again."
     )
     await expect(failure_toast).to_be_visible(timeout=5000)
+
+
+async def test_workspace_deep_link_expands_selected_file_parents(reborn_v2_yolo_page):
+    """A nested file deep link reveals its selected node in the Workspace tree."""
+    page = reborn_v2_yolo_page
+    listings = {
+        "": [{"name": "projects", "path": "projects", "kind": "directory"}],
+        "projects": [
+            {
+                "name": "ironclaw",
+                "path": "projects/ironclaw",
+                "kind": "directory",
+            }
+        ],
+        "projects/ironclaw": [
+            {
+                "name": "notes",
+                "path": "projects/ironclaw/notes",
+                "kind": "directory",
+            }
+        ],
+        "projects/ironclaw/notes": [
+            {
+                "name": "plan",
+                "path": "projects/ironclaw/notes/plan",
+                "kind": "file",
+            }
+        ],
+    }
+
+    async def serve_mounts(route):
+        await route.fulfill(
+            content_type="application/json",
+            body=json.dumps({"mounts": [{"mount": "workspace"}]}),
+        )
+
+    async def serve_listing(route):
+        query = parse_qs(urlparse(route.request.url).query)
+        path = query.get("path", [""])[0]
+        assert path in listings, f"unexpected Workspace listing path: {path}"
+        await route.fulfill(
+            content_type="application/json",
+            body=json.dumps({"mount": "workspace", "entries": listings[path]}),
+        )
+
+    async def serve_stat(route):
+        await route.fulfill(
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "stat": {
+                        "kind": "file",
+                        "mime_type": "text/markdown",
+                        "size_bytes": 6,
+                    }
+                }
+            ),
+        )
+
+    async def serve_content(route):
+        await route.fulfill(content_type="text/markdown", body="# Plan")
+
+    await page.route("**/api/webchat/v2/fs/mounts", serve_mounts)
+    await page.route(re.compile(r".*/api/webchat/v2/fs/list(?:\?.*)?$"), serve_listing)
+    await page.route(re.compile(r".*/api/webchat/v2/fs/stat(?:\?.*)?$"), serve_stat)
+    await page.route(
+        re.compile(r".*/api/webchat/v2/fs/content(?:\?.*)?$"),
+        serve_content,
+    )
+
+    origin = await page.evaluate("location.origin")
+    await page.goto(
+        f"{origin}/workspace/workspace/projects/ironclaw/notes/plan"
+    )
+    await expect(page.locator(SEL_V2["workspace_heading"])).to_be_visible(timeout=15000)
+
+    for path, label in (
+        ("workspace", "Home"),
+        ("workspace/projects", "projects"),
+        ("workspace/projects/ironclaw", "ironclaw"),
+        ("workspace/projects/ironclaw/notes", "notes"),
+    ):
+        expanded_directory = page.locator(SEL_V2["workspace_tree_entry"]).filter(
+            has_text=label
+        )
+        await expect(expanded_directory).to_have_attribute(
+            "data-entry-path", path, timeout=5000
+        )
+        await expect(expanded_directory).to_have_attribute(
+            "aria-expanded", "true", timeout=5000
+        )
+
+    selected_file = page.locator(SEL_V2["workspace_tree_entry"]).filter(
+        has_text="plan"
+    )
+    await expect(selected_file).to_have_attribute(
+        "data-entry-path", "workspace/projects/ironclaw/notes/plan", timeout=5000
+    )
+    await expect(selected_file).to_be_visible(timeout=5000)

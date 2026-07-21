@@ -43,6 +43,8 @@ function TreeNode({ entry, depth, selectedPath, expandedPaths, filter, onToggleD
       <div>
         <button
           type="button"
+          data-testid="workspace-tree-entry"
+          data-entry-path={entry.path}
           onClick={() => {
             // Navigate so the main pane lists this folder, and toggle its
             // expansion in the tree — one click drives both the master (tree)
@@ -87,6 +89,8 @@ function TreeNode({ entry, depth, selectedPath, expandedPaths, filter, onToggleD
   return (
     <button
       type="button"
+      data-testid="workspace-tree-entry"
+      data-entry-path={entry.path}
       onClick={() => onSelectFile(entry.path)}
       className={[
         "flex min-h-8 w-full items-center gap-2 rounded-md px-2 text-left text-sm",
