@@ -54,8 +54,8 @@ use ironclaw_turns::{
         LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
         LoopRunContext, LoopTranscriptPort, ModelVisibleToolObservation, ObservationTrust,
         ParentLoopOutput, PersonalContextPolicy, PromptMode, PromptSkillContextMetadata,
-        ProviderToolCallReference, ProviderToolCallReplay, ProviderToolDefinition, SkillVisibility,
-        ToolObservationDetail, ToolObservationStatus, UpdateAssistantDraft,
+        ProviderToolCallReference, ProviderToolCallReplay, ProviderToolDefinition, SkillTrustLevel,
+        SkillVisibility, ToolObservationDetail, ToolObservationStatus, UpdateAssistantDraft,
         VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
     },
 };
@@ -2021,7 +2021,7 @@ async fn prompt_port_records_installed_skill_trust_metadata_without_prompt_paylo
             if skill_context.as_slice() == [PromptSkillContextMetadata {
                 ordinal: 0,
                 source_name: "alpha".to_string(),
-                trust_level: "installed".to_string(),
+                trust_level: SkillTrustLevel::Installed,
             }]
     ));
     let wire = serde_json::to_string(&recorded).unwrap();
@@ -2085,12 +2085,12 @@ async fn prompt_port_records_multiple_active_skill_metadata_in_prompt_order() {
             PromptSkillContextMetadata {
                 ordinal: 0,
                 source_name: "alpha".to_string(),
-                trust_level: "installed".to_string(),
+                trust_level: SkillTrustLevel::Installed,
             },
             PromptSkillContextMetadata {
                 ordinal: 1,
                 source_name: "bravo".to_string(),
-                trust_level: "trusted".to_string(),
+                trust_level: SkillTrustLevel::Trusted,
             },
         ]
     );

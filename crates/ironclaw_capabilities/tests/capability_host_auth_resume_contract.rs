@@ -70,7 +70,7 @@ async fn auth_resume_json_accepts_blocked_auth_run_and_dispatches() {
         .await
         .unwrap();
 
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
+    let host = capability_host(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
 
     let result = host
         .auth_resume_json(CapabilityAuthResumeRequest {
@@ -78,7 +78,6 @@ async fn auth_resume_json_accepts_blocked_auth_run_and_dispatches() {
             capability_id: capability_id(),
             estimate,
             input,
-            trust_decision: trust_decision(),
             approval_request_id: None,
         })
         .await
@@ -118,7 +117,7 @@ async fn auth_resume_preserves_original_actor_and_rejects_forged_actor() {
         .await
         .unwrap();
 
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
+    let host = capability_host(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
     let mut forged_context = alice_context.clone();
     forged_context.authenticated_actor_user_id =
         Some(UserId::new("slack-bob").expect("valid forged authenticated actor user id"));
@@ -128,7 +127,6 @@ async fn auth_resume_preserves_original_actor_and_rejects_forged_actor() {
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "resume"}),
-            trust_decision: trust_decision(),
             approval_request_id: None,
         })
         .await
@@ -151,7 +149,6 @@ async fn auth_resume_preserves_original_actor_and_rejects_forged_actor() {
         capability_id: capability_id(),
         estimate: ResourceEstimate::default(),
         input: json!({"message": "resume"}),
-        trust_decision: trust_decision(),
         approval_request_id: None,
     })
     .await
@@ -179,7 +176,7 @@ async fn auth_resume_json_rejects_run_in_blocked_approval_status() {
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
 
     // Block the invocation at an approval gate (not auth).
-    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+    let block_host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
@@ -192,7 +189,6 @@ async fn auth_resume_json_rejects_run_in_blocked_approval_status() {
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "needs approval"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -203,14 +199,13 @@ async fn auth_resume_json_rejects_run_in_blocked_approval_status() {
 
     let auth_authorizer = GrantAuthorizer::new();
     let auth_host =
-        CapabilityHost::new(&registry, &dispatcher, &auth_authorizer).with_run_state(&run_state);
+        capability_host(&registry, &dispatcher, &auth_authorizer).with_run_state(&run_state);
     let err = auth_host
         .auth_resume_json(CapabilityAuthResumeRequest {
             context,
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "needs approval"}),
-            trust_decision: trust_decision(),
             approval_request_id: None,
         })
         .await
@@ -257,14 +252,13 @@ async fn auth_resume_json_rejects_run_in_running_status() {
         .await
         .unwrap();
 
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
+    let host = capability_host(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
     let err = host
         .auth_resume_json(CapabilityAuthResumeRequest {
             context,
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "try to resume running"}),
-            trust_decision: trust_decision(),
             approval_request_id: None,
         })
         .await
@@ -298,7 +292,7 @@ async fn auth_resume_json_rejects_fingerprint_mismatch_on_approval_request() {
     let leases = in_memory_backed_capability_lease_store();
 
     // Phase 1: invoke (needs approval).
-    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+    let block_host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let original_context = execution_context(CapabilitySet::default());
@@ -313,7 +307,6 @@ async fn auth_resume_json_rejects_fingerprint_mismatch_on_approval_request() {
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: original_input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -340,7 +333,7 @@ async fn auth_resume_json_rejects_fingerprint_mismatch_on_approval_request() {
 
     // Phase 3: auth_resume with MUTATED input — fingerprint will not match lease.
     let resume_authorizer = GrantAuthorizer::new();
-    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer)
+    let resume_host = capability_host(&registry, &dispatcher, &resume_authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -350,7 +343,6 @@ async fn auth_resume_json_rejects_fingerprint_mismatch_on_approval_request() {
             capability_id: capability_id(),
             estimate,
             input: json!({"message": "MUTATED input"}),
-            trust_decision: trust_decision(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -394,7 +386,7 @@ async fn auth_resume_json_with_approval_request_id_claims_active_lease_and_dispa
     let leases = in_memory_backed_capability_lease_store();
 
     // Phase 1: first invocation triggers approval.
-    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+    let block_host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let original_context = execution_context(CapabilitySet::default());
@@ -409,7 +401,6 @@ async fn auth_resume_json_with_approval_request_id_claims_active_lease_and_dispa
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -442,7 +433,7 @@ async fn auth_resume_json_with_approval_request_id_claims_active_lease_and_dispa
         grants: vec![dispatch_grant()],
     };
     let resume_authorizer_2 = GrantAuthorizer::new();
-    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer_2)
+    let resume_host = capability_host(&registry, &dispatcher, &resume_authorizer_2)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -453,7 +444,6 @@ async fn auth_resume_json_with_approval_request_id_claims_active_lease_and_dispa
             capability_id: capability_id(),
             estimate,
             input,
-            trust_decision: trust_decision(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -517,17 +507,20 @@ async fn auth_resume_json_rejects_capability_id_mismatch_against_run_record() {
         .await
         .unwrap();
 
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
+    let host = capability_host(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
 
-    // Attempt auth_resume with a DIFFERENT capability_id.
-    let different_id = CapabilityId::new("other.capability").unwrap();
+    // Attempt auth_resume with a DIFFERENT but KNOWN-and-plannable capability_id,
+    // so the run-state capability-mismatch check fires. (An unknown id would now
+    // short-circuit to `UnknownCapability` in `resume_preflight` before the
+    // mismatch check — existence-first, matching host_runtime's deleted
+    // pre-authorization; the unknown-capability precedence is covered separately.)
+    let different_id = other_capability_id();
     let err = host
         .auth_resume_json(CapabilityAuthResumeRequest {
             context,
             capability_id: different_id,
             estimate: ResourceEstimate::default(),
             input: serde_json::json!({"message": "mismatch"}),
-            trust_decision: trust_decision(),
             approval_request_id: None,
         })
         .await
@@ -610,7 +603,7 @@ async fn auth_resume_json_rejects_approval_not_yet_approved() {
         .await
         .unwrap();
 
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+    let host = capability_host(&registry, &dispatcher, &authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -621,7 +614,6 @@ async fn auth_resume_json_rejects_approval_not_yet_approved() {
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: serde_json::json!({"message": "pending approval"}),
-            trust_decision: trust_decision(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -687,7 +679,7 @@ async fn auth_resume_json_returns_store_missing_when_approval_requests_absent() 
         .unwrap();
 
     // Host has run_state but NO approval_requests store.
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
+    let host = capability_host(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
 
     let approval_id = ApprovalRequestId::new();
     let err = host
@@ -696,7 +688,6 @@ async fn auth_resume_json_returns_store_missing_when_approval_requests_absent() 
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: serde_json::json!({"message": "needs approval store"}),
-            trust_decision: trust_decision(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -754,7 +745,7 @@ async fn auth_resume_json_without_approval_request_id_skips_lease_path_and_dispa
         .await
         .unwrap();
 
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
+    let host = capability_host(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
 
     let result = host
         .auth_resume_json(CapabilityAuthResumeRequest {
@@ -762,7 +753,6 @@ async fn auth_resume_json_without_approval_request_id_skips_lease_path_and_dispa
             capability_id: capability_id(),
             estimate,
             input,
-            trust_decision: trust_decision(),
             approval_request_id: None, // no prior approval
         })
         .await
@@ -843,7 +833,7 @@ async fn auth_resume_after_real_approval_bounce_reuses_claimed_lease() {
     let leases = in_memory_backed_capability_lease_store();
 
     // ── Phase 1: invoke_json → BlockedApproval ──────────────────────────────
-    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+    let block_host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let original_context = execution_context(CapabilitySet::default());
@@ -858,7 +848,6 @@ async fn auth_resume_after_real_approval_bounce_reuses_claimed_lease() {
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -909,7 +898,7 @@ async fn auth_resume_after_real_approval_bounce_reuses_claimed_lease() {
         grants: vec![dispatch_grant()],
     };
     let resume_authorizer = GrantAuthorizer::new();
-    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer)
+    let resume_host = capability_host(&registry, &dispatcher, &resume_authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -921,7 +910,6 @@ async fn auth_resume_after_real_approval_bounce_reuses_claimed_lease() {
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -956,7 +944,7 @@ async fn auth_resume_after_real_approval_bounce_reuses_claimed_lease() {
 
     // ── Phase 4: auth_resume_json → reuses Claimed lease → dispatches ───────
     let auth_resume_authorizer = GrantAuthorizer::new();
-    let auth_resume_host = CapabilityHost::new(&registry, &dispatcher, &auth_resume_authorizer)
+    let auth_resume_host = capability_host(&registry, &dispatcher, &auth_resume_authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -968,7 +956,6 @@ async fn auth_resume_after_real_approval_bounce_reuses_claimed_lease() {
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -1080,7 +1067,7 @@ async fn auth_resume_json_terminal_dispatch_failure_revokes_claimed_lease() {
     let leases = in_memory_backed_capability_lease_store();
 
     // Phase 1: invoke → BlockedApproval.
-    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+    let block_host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let original_context = execution_context(CapabilitySet::default());
@@ -1095,7 +1082,6 @@ async fn auth_resume_json_terminal_dispatch_failure_revokes_claimed_lease() {
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -1122,7 +1108,7 @@ async fn auth_resume_json_terminal_dispatch_failure_revokes_claimed_lease() {
         grants: vec![dispatch_grant()],
     };
     let resume_authorizer = GrantAuthorizer::new();
-    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer)
+    let resume_host = capability_host(&registry, &dispatcher, &resume_authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -1134,7 +1120,6 @@ async fn auth_resume_json_terminal_dispatch_failure_revokes_claimed_lease() {
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -1149,7 +1134,7 @@ async fn auth_resume_json_terminal_dispatch_failure_revokes_claimed_lease() {
 
     // Phase 4: auth_resume_json — second call is terminal (UnknownCapability).
     let auth_resume_authorizer = GrantAuthorizer::new();
-    let auth_resume_host = CapabilityHost::new(&registry, &dispatcher, &auth_resume_authorizer)
+    let auth_resume_host = capability_host(&registry, &dispatcher, &auth_resume_authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -1160,7 +1145,6 @@ async fn auth_resume_json_terminal_dispatch_failure_revokes_claimed_lease() {
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -1221,7 +1205,7 @@ async fn auth_resume_json_non_terminal_auth_bounce_leaves_lease_claimed() {
     let leases = in_memory_backed_capability_lease_store();
 
     // Phase 1: invoke → BlockedApproval.
-    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+    let block_host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let original_context = execution_context(CapabilitySet::default());
@@ -1236,7 +1220,6 @@ async fn auth_resume_json_non_terminal_auth_bounce_leaves_lease_claimed() {
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -1262,7 +1245,7 @@ async fn auth_resume_json_non_terminal_auth_bounce_leaves_lease_claimed() {
         grants: vec![dispatch_grant()],
     };
     let resume_authorizer = GrantAuthorizer::new();
-    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer)
+    let resume_host = capability_host(&registry, &dispatcher, &resume_authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -1274,7 +1257,6 @@ async fn auth_resume_json_non_terminal_auth_bounce_leaves_lease_claimed() {
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -1291,7 +1273,7 @@ async fn auth_resume_json_non_terminal_auth_bounce_leaves_lease_claimed() {
     // This exercises the same reuse path from the prior test but now the
     // dispatcher bounces again: the lease must stay Claimed for another retry.
     let auth_resume_authorizer = GrantAuthorizer::new();
-    let auth_resume_host = CapabilityHost::new(&registry, &dispatcher, &auth_resume_authorizer)
+    let auth_resume_host = capability_host(&registry, &dispatcher, &auth_resume_authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -1302,7 +1284,6 @@ async fn auth_resume_json_non_terminal_auth_bounce_leaves_lease_claimed() {
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -1454,7 +1435,7 @@ async fn concurrent_auth_resume_claim_loser_returns_lease_error_without_failing_
     let leases = ClaimFailingLeaseStore::new();
 
     // Phase 1: invoke → BlockedApproval.
-    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+    let block_host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let original_context = execution_context(CapabilitySet::default());
@@ -1469,7 +1450,6 @@ async fn concurrent_auth_resume_claim_loser_returns_lease_error_without_failing_
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -1503,7 +1483,7 @@ async fn concurrent_auth_resume_claim_loser_returns_lease_error_without_failing_
         grants: vec![dispatch_grant()],
     };
     let authorizer = GrantAuthorizer::new();
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+    let host = capability_host(&registry, &dispatcher, &authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -1514,7 +1494,6 @@ async fn concurrent_auth_resume_claim_loser_returns_lease_error_without_failing_
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -1585,7 +1564,7 @@ async fn auth_resume_json_returns_store_missing_when_capability_leases_absent() 
         .unwrap();
 
     // Host has approval_requests configured BUT NO capability_leases.
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+    let host = capability_host(&registry, &dispatcher, &authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     // No .with_capability_leases() call — capability_leases is absent.
@@ -1597,7 +1576,6 @@ async fn auth_resume_json_returns_store_missing_when_capability_leases_absent() 
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: serde_json::json!({"message": "needs lease store"}),
-            trust_decision: trust_decision(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -1705,7 +1683,7 @@ async fn auth_resume_json_rejected_prior_approval_fails_blocked_auth_run() {
         "precondition: approval must be Denied"
     );
 
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+    let host = capability_host(&registry, &dispatcher, &authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -1716,7 +1694,6 @@ async fn auth_resume_json_rejected_prior_approval_fails_blocked_auth_run() {
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: serde_json::json!({"message": "denied approval"}),
-            trust_decision: trust_decision(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -1952,7 +1929,7 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
     let leases = StdArc::new(BarrierLeaseStore::new(StdArc::clone(&scan_barrier)));
 
     // ── Phase 1: invoke → BlockedApproval ──────────────────────────────────
-    let block_host = CapabilityHost::new(&registry, &*gating_dispatcher, &ApprovalAuthorizer)
+    let block_host = capability_host(&registry, &*gating_dispatcher, &ApprovalAuthorizer)
         .with_run_state(&*run_state)
         .with_approval_requests(&*approval_requests);
     let original_context = execution_context(CapabilitySet::default());
@@ -1967,7 +1944,6 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -1993,7 +1969,7 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
     };
     let resume_authorizer = GrantAuthorizer::new();
     {
-        let resume_host = CapabilityHost::new(&registry, &*gating_dispatcher, &resume_authorizer)
+        let resume_host = capability_host(&registry, &*gating_dispatcher, &resume_authorizer)
             .with_run_state(&*run_state)
             .with_approval_requests(&*approval_requests)
             .with_capability_leases(&*leases);
@@ -2004,7 +1980,6 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
                 capability_id: capability_id(),
                 estimate: estimate.clone(),
                 input: input.clone(),
-                trust_decision: trust_decision(),
             })
             .await
             .unwrap_err();
@@ -2052,7 +2027,7 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
     let task_a_input = input.clone();
 
     let task_a = tokio::spawn(async move {
-        let host = CapabilityHost::new(&task_a_registry, &*task_a_dispatcher, &task_a_authorizer)
+        let host = capability_host(&task_a_registry, &*task_a_dispatcher, &task_a_authorizer)
             .with_run_state(&*task_a_run_state)
             .with_approval_requests(&*task_a_approval_requests)
             .with_capability_leases(&*task_a_leases);
@@ -2061,7 +2036,6 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
             capability_id: capability_id(),
             estimate: task_a_estimate,
             input: task_a_input,
-            trust_decision: trust_decision(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -2081,7 +2055,7 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
     let task_b_input = input.clone();
 
     let task_b = tokio::spawn(async move {
-        let host = CapabilityHost::new(&task_b_registry, &*task_b_dispatcher, &task_b_authorizer)
+        let host = capability_host(&task_b_registry, &*task_b_dispatcher, &task_b_authorizer)
             .with_run_state(&*task_b_run_state)
             .with_approval_requests(&*task_b_approval_requests)
             .with_capability_leases(&*task_b_leases);
@@ -2090,7 +2064,6 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
             capability_id: capability_id(),
             estimate: task_b_estimate,
             input: task_b_input,
-            trust_decision: trust_decision(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -2220,7 +2193,7 @@ async fn auth_resume_json_authorization_deny_revokes_dispatching_lease() {
 
     // ── Phase 1: invoke → BlockedApproval ──────────────────────────────────
     let block_dispatcher = AuthRequiredOnFirstCall;
-    let block_host = CapabilityHost::new(&registry, &block_dispatcher, &ApprovalAuthorizer)
+    let block_host = capability_host(&registry, &block_dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
 
@@ -2236,7 +2209,6 @@ async fn auth_resume_json_authorization_deny_revokes_dispatching_lease() {
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -2263,7 +2235,7 @@ async fn auth_resume_json_authorization_deny_revokes_dispatching_lease() {
     };
     let resume_authorizer = GrantAuthorizer::new();
     let resume_dispatcher = AuthRequiredOnFirstCall;
-    let resume_host = CapabilityHost::new(&registry, &resume_dispatcher, &resume_authorizer)
+    let resume_host = capability_host(&registry, &resume_dispatcher, &resume_authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -2275,7 +2247,6 @@ async fn auth_resume_json_authorization_deny_revokes_dispatching_lease() {
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -2295,7 +2266,7 @@ async fn auth_resume_json_authorization_deny_revokes_dispatching_lease() {
     // Post-fix: lease revoked → Revoked.
     let deny_authorizer = DenyingAuthorizer;
     let deny_dispatcher = RecordingDispatcher::default();
-    let deny_host = CapabilityHost::new(&registry, &deny_dispatcher, &deny_authorizer)
+    let deny_host = capability_host(&registry, &deny_dispatcher, &deny_authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -2306,7 +2277,6 @@ async fn auth_resume_json_authorization_deny_revokes_dispatching_lease() {
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -2373,7 +2343,7 @@ async fn auth_resume_json_authorization_require_approval_revokes_dispatching_lea
     let leases = in_memory_backed_capability_lease_store();
 
     // ── Phase 1: invoke → BlockedApproval ──────────────────────────────────
-    let block_host = CapabilityHost::new(&registry, &AlwaysAuthRequired, &ApprovalAuthorizer)
+    let block_host = capability_host(&registry, &AlwaysAuthRequired, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
 
@@ -2389,7 +2359,6 @@ async fn auth_resume_json_authorization_require_approval_revokes_dispatching_lea
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -2415,7 +2384,7 @@ async fn auth_resume_json_authorization_require_approval_revokes_dispatching_lea
         grants: vec![dispatch_grant()],
     };
     let resume_grant_authorizer = GrantAuthorizer::new();
-    let resume_host = CapabilityHost::new(&registry, &AlwaysAuthRequired, &resume_grant_authorizer)
+    let resume_host = capability_host(&registry, &AlwaysAuthRequired, &resume_grant_authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -2427,7 +2396,6 @@ async fn auth_resume_json_authorization_require_approval_revokes_dispatching_lea
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -2446,7 +2414,7 @@ async fn auth_resume_json_authorization_require_approval_revokes_dispatching_lea
     // Post-fix: lease → Revoked.
     let approval_authorizer_for_resume = ApprovalAuthorizer;
     let recording_dispatcher = RecordingDispatcher::default();
-    let req_approval_host = CapabilityHost::new(
+    let req_approval_host = capability_host(
         &registry,
         &recording_dispatcher,
         &approval_authorizer_for_resume,
@@ -2461,7 +2429,6 @@ async fn auth_resume_json_authorization_require_approval_revokes_dispatching_lea
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -2509,7 +2476,7 @@ async fn auth_resume_json_returns_store_missing_when_run_state_absent() {
     let dispatcher = RecordingDispatcher::default();
 
     // Host has NO run_state store — only the bare minimum.
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer);
+    let host = capability_host(&registry, &dispatcher, &authorizer);
     // Do NOT call .with_run_state(...).
 
     let err = host
@@ -2520,7 +2487,6 @@ async fn auth_resume_json_returns_store_missing_when_run_state_absent() {
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: serde_json::json!({"message": "no run_state store"}),
-            trust_decision: trust_decision(),
             approval_request_id: None,
         })
         .await
@@ -2564,7 +2530,7 @@ async fn auth_resume_json_unknown_invocation_when_run_record_missing() {
         grants: vec![dispatch_grant()],
     });
 
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
+    let host = capability_host(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
 
     let err = host
         .auth_resume_json(CapabilityAuthResumeRequest {
@@ -2572,7 +2538,6 @@ async fn auth_resume_json_unknown_invocation_when_run_record_missing() {
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: serde_json::json!({"message": "no run record seeded"}),
-            trust_decision: trust_decision(),
             approval_request_id: None,
         })
         .await
@@ -2681,7 +2646,7 @@ async fn auth_resume_json_approval_request_mismatch_action() {
         .await
         .unwrap();
 
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+    let host = capability_host(&registry, &dispatcher, &authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -2692,7 +2657,6 @@ async fn auth_resume_json_approval_request_mismatch_action() {
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: serde_json::json!({"message": "action mismatch"}),
-            trust_decision: trust_decision(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -2770,7 +2734,7 @@ async fn auth_resume_json_approval_request_mismatch_correlation_id() {
         .await
         .unwrap();
 
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+    let host = capability_host(&registry, &dispatcher, &authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -2781,7 +2745,6 @@ async fn auth_resume_json_approval_request_mismatch_correlation_id() {
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: serde_json::json!({"message": "correlation_id mismatch"}),
-            trust_decision: trust_decision(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -2854,7 +2817,7 @@ async fn auth_resume_json_approval_request_mismatch_requested_by() {
         .await
         .unwrap();
 
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+    let host = capability_host(&registry, &dispatcher, &authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -2865,7 +2828,6 @@ async fn auth_resume_json_approval_request_mismatch_requested_by() {
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: serde_json::json!({"message": "requested_by mismatch"}),
-            trust_decision: trust_decision(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -3068,7 +3030,7 @@ async fn concurrent_auth_resume_fresh_active_lease_loser_does_not_double_dispatc
     ));
 
     // ── Phase 1: invoke → BlockedApproval ──────────────────────────────────
-    let block_host = CapabilityHost::new(&registry, &*dispatcher, &ApprovalAuthorizer)
+    let block_host = capability_host(&registry, &*dispatcher, &ApprovalAuthorizer)
         .with_run_state(&*run_state)
         .with_approval_requests(&*approval_requests);
     let original_context = execution_context(CapabilitySet::default());
@@ -3083,7 +3045,6 @@ async fn concurrent_auth_resume_fresh_active_lease_loser_does_not_double_dispatc
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -3133,7 +3094,7 @@ async fn concurrent_auth_resume_fresh_active_lease_loser_does_not_double_dispatc
     let task_a_input = input.clone();
 
     let task_a = tokio::spawn(async move {
-        let host = CapabilityHost::new(&task_a_registry, &*task_a_dispatcher, &task_a_authorizer)
+        let host = capability_host(&task_a_registry, &*task_a_dispatcher, &task_a_authorizer)
             .with_run_state(&*task_a_run_state)
             .with_approval_requests(&*task_a_approval_requests)
             .with_capability_leases(&*task_a_leases);
@@ -3142,7 +3103,6 @@ async fn concurrent_auth_resume_fresh_active_lease_loser_does_not_double_dispatc
             capability_id: capability_id(),
             estimate: task_a_estimate,
             input: task_a_input,
-            trust_decision: trust_decision(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -3160,7 +3120,7 @@ async fn concurrent_auth_resume_fresh_active_lease_loser_does_not_double_dispatc
     winner_context.grants = CapabilitySet {
         grants: vec![dispatch_grant()],
     };
-    let winner_result = CapabilityHost::new(&registry, &*dispatcher, &GrantAuthorizer::new())
+    let winner_result = capability_host(&registry, &*dispatcher, &GrantAuthorizer::new())
         .with_run_state(&*run_state)
         .with_approval_requests(&*approval_requests)
         .with_capability_leases(&*leases)
@@ -3169,7 +3129,6 @@ async fn concurrent_auth_resume_fresh_active_lease_loser_does_not_double_dispatc
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
             approval_request_id: Some(approval_id),
         })
         .await;
@@ -3350,7 +3309,7 @@ async fn auth_resume_json_unknown_capability_does_not_strand_active_approval_lea
         .unwrap();
 
     // Host is wired with the EMPTY registry (capability not registered).
-    let host = CapabilityHost::new(&empty_registry, &dispatcher, &authorizer)
+    let host = capability_host(&empty_registry, &dispatcher, &authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -3361,7 +3320,6 @@ async fn auth_resume_json_unknown_capability_does_not_strand_active_approval_lea
             capability_id: capability_id(),
             estimate,
             input,
-            trust_decision: trust_decision(),
             approval_request_id: Some(approval_id),
         })
         .await
@@ -3492,7 +3450,7 @@ async fn auth_resume_json_unknown_capability_does_not_strand_claimed_approval_le
         .await
         .unwrap();
 
-    let host = CapabilityHost::new(&empty_registry, &dispatcher, &authorizer)
+    let host = capability_host(&empty_registry, &dispatcher, &authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -3503,7 +3461,6 @@ async fn auth_resume_json_unknown_capability_does_not_strand_claimed_approval_le
             capability_id: capability_id(),
             estimate,
             input,
-            trust_decision: trust_decision(),
             approval_request_id: Some(approval_id),
         })
         .await

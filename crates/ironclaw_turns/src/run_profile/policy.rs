@@ -73,6 +73,11 @@ pub struct ResourceBudgetPolicy {
 }
 
 impl ResourceBudgetPolicy {
+    /// Ceilings the privileged `mission_high` tier is clamped to when the caller
+    /// lacks the `HighBudget` authority (the mission-standard budget bound).
+    pub(crate) const MISSION_STANDARD_MAX_MODEL_CALLS: u32 = 128;
+    pub(crate) const MISSION_STANDARD_MAX_CAPABILITY_INVOCATIONS: u32 = 512;
+
     /// The interactive-coding tier resource budget, shared by the interactive
     /// profile and its legacy-persisted reconstruction.
     pub(crate) fn interactive() -> Self {

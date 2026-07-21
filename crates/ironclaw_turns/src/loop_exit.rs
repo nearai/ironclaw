@@ -5,9 +5,9 @@ use ironclaw_host_api::RuntimeCredentialAuthRequirement;
 use serde::{Deserialize, Serialize, de};
 
 use crate::{
-    BlockedReason, CapabilityActivityId, GateRef, LoopDiagnosticRef, LoopExitId, LoopGateRef,
-    LoopMessageRef, LoopResultRef, ResolvedRunProfile, SanitizedFailure, TurnCheckpointId,
-    TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
+    BlockedReason, CapabilityActivityId, GateKind, GateRef, LoopDiagnosticRef, LoopExitId,
+    LoopGateRef, LoopMessageRef, LoopResultRef, ResolvedRunProfile, SanitizedFailure,
+    TurnCheckpointId, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
     run_profile::{LoopCheckpointKind, LoopCheckpointStateRef},
     runner::{
         ApplyValidatedLoopExitRequest, ClaimedTurnRun, TurnRunTransitionPort, TurnRunnerOutcome,
@@ -406,6 +406,18 @@ pub enum LoopBlockedKind {
     ExternalTool,
 }
 
+impl From<LoopBlockedKind> for GateKind {
+    fn from(kind: LoopBlockedKind) -> Self {
+        match kind {
+            LoopBlockedKind::Approval => Self::Approval,
+            LoopBlockedKind::Auth => Self::Auth,
+            LoopBlockedKind::Resource => Self::Resource,
+            LoopBlockedKind::AwaitDependentRun => Self::AwaitDependentRun,
+            LoopBlockedKind::ExternalTool => Self::ExternalTool,
+        }
+    }
+}
+
 impl LoopBlockedKind {
     fn to_blocked_reason(
         self,
@@ -413,16 +425,7 @@ impl LoopBlockedKind {
         credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
     ) -> Result<BlockedReason, ()> {
         let gate_ref = GateRef::new(gate_ref.as_str()).map_err(|_| ())?;
-        Ok(match self {
-            Self::Approval => BlockedReason::Approval { gate_ref },
-            Self::Auth => BlockedReason::Auth {
-                gate_ref,
-                credential_requirements,
-            },
-            Self::Resource => BlockedReason::Resource { gate_ref },
-            Self::AwaitDependentRun => BlockedReason::AwaitDependentRun { gate_ref },
-            Self::ExternalTool => BlockedReason::ExternalTool { gate_ref },
-        })
+        Ok(GateKind::from(self).into_blocked_reason(gate_ref, credential_requirements))
     }
 }
 
