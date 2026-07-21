@@ -334,19 +334,6 @@ pub struct RuntimeCapabilityRequest {
     /// and must not trust caller estimates as binding limits or actual usage.
     pub estimate: ResourceEstimate,
     pub input: Value,
-    /// Caller-supplied dedup hint.
-    ///
-    /// **This field is currently advisory at this layer.** The composed
-    /// capability host does not yet implement caller-driven idempotent
-    /// retries, so two `invoke_capability` calls carrying the same key will
-    /// both execute. Upper turn/loop services that need at-most-once
-    /// semantics must dedupe themselves until idempotency lands in the
-    /// capability host. The field is kept on the contract surface so that
-    /// shape doesn't break when dedup is wired through downstream.
-    ///
-    /// The host runtime still validates and forwards the key into
-    /// observability spans for audit/tracing.
-    pub idempotency_key: Option<IdempotencyKey>,
 }
 
 impl RuntimeCapabilityRequest {
@@ -366,13 +353,7 @@ impl RuntimeCapabilityRequest {
             capability_id,
             estimate,
             input,
-            idempotency_key: None,
         }
-    }
-
-    pub fn with_idempotency_key(mut self, key: IdempotencyKey) -> Self {
-        self.idempotency_key = Some(key);
-        self
     }
 }
 
@@ -389,7 +370,6 @@ pub struct RuntimeCapabilityResumeRequest {
     pub capability_id: CapabilityId,
     pub estimate: ResourceEstimate,
     pub input: Value,
-    pub idempotency_key: Option<IdempotencyKey>,
 }
 
 impl RuntimeCapabilityResumeRequest {
@@ -406,13 +386,7 @@ impl RuntimeCapabilityResumeRequest {
             capability_id,
             estimate,
             input,
-            idempotency_key: None,
         }
-    }
-
-    pub fn with_idempotency_key(mut self, key: IdempotencyKey) -> Self {
-        self.idempotency_key = Some(key);
-        self
     }
 }
 
@@ -429,7 +403,6 @@ pub struct RuntimeCapabilityAuthResumeRequest {
     pub capability_id: CapabilityId,
     pub estimate: ResourceEstimate,
     pub input: Value,
-    pub idempotency_key: Option<IdempotencyKey>,
     /// Present when the invocation previously passed an approval gate.
     /// Used to locate and claim the matching fingerprinted approval lease
     /// so the re-dispatch does not require a second approval.
@@ -449,14 +422,8 @@ impl RuntimeCapabilityAuthResumeRequest {
             capability_id,
             estimate,
             input,
-            idempotency_key: None,
             approval_request_id,
         }
-    }
-
-    pub fn with_idempotency_key(mut self, key: IdempotencyKey) -> Self {
-        self.idempotency_key = Some(key);
-        self
     }
 }
 

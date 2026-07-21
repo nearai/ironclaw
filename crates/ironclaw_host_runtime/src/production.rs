@@ -484,22 +484,10 @@ impl HostRuntime for DefaultHostRuntime {
             capability_id,
             estimate,
             input,
-            idempotency_key,
         } = request;
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
         let total_started_at = live_latency_started_at();
-        // Forward the (currently advisory) idempotency key into spans for
-        // audit/tracing only — dedupe enforcement is not yet implemented at
-        // this layer (see `RuntimeCapabilityRequest::idempotency_key`).
-        let idempotency_key = idempotency_key.map(|key| key.as_str().to_string());
-        if let Some(key) = idempotency_key.as_deref() {
-            tracing::debug!(
-                capability_id = %capability_id,
-                idempotency_key = %key,
-                "capability invocation accepted advisory idempotency key (not yet enforced)"
-            );
-        }
 
         let trust_decision = match self.open_pre_authorization(&mut context, &capability_id) {
             Ok(trust_decision) => trust_decision,
@@ -623,7 +611,6 @@ impl HostRuntime for DefaultHostRuntime {
                 tracing::debug!(
                     capability_id = %capability_id,
                     error_kind = failure_kind_from(&error).as_str(),
-                    idempotency_key = idempotency_key.as_deref().unwrap_or(""),
                     "capability invocation failed"
                 );
                 let translated = self
@@ -663,7 +650,6 @@ impl HostRuntime for DefaultHostRuntime {
             capability_id,
             estimate,
             input,
-            idempotency_key,
         } = request;
         let input = match host_runtime_spawn_input_for_capability(&capability_id, input)? {
             SpawnInputPreparation::Ready(input) => input,
@@ -677,14 +663,6 @@ impl HostRuntime for DefaultHostRuntime {
         };
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
-        let idempotency_key = idempotency_key.map(|key| key.as_str().to_string());
-        if let Some(key) = idempotency_key.as_deref() {
-            tracing::debug!(
-                capability_id = %capability_id,
-                idempotency_key = %key,
-                "capability spawn accepted advisory idempotency key (not yet enforced)"
-            );
-        }
 
         let trust_decision = match self.open_pre_authorization(&mut context, &capability_id) {
             Ok(trust_decision) => trust_decision,
@@ -741,7 +719,6 @@ impl HostRuntime for DefaultHostRuntime {
                 tracing::debug!(
                     capability_id = %capability_id,
                     error_kind = failure_kind_from(&error).as_str(),
-                    idempotency_key = idempotency_key.as_deref().unwrap_or(""),
                     "capability spawn failed"
                 );
                 self.translate_invocation_error(error, capability_id, scope, invocation_id)
@@ -760,22 +737,12 @@ impl HostRuntime for DefaultHostRuntime {
             capability_id,
             estimate,
             input,
-            idempotency_key,
         } = request;
         if let Some(outcome) = self
             .resume_actor_preflight_guard(&context, &capability_id)
             .await?
         {
             return Ok(outcome);
-        }
-        let idempotency_key = idempotency_key.map(|key| key.as_str().to_string());
-        if let Some(key) = idempotency_key.as_deref() {
-            tracing::debug!(
-                capability_id = %capability_id,
-                approval_request_id = %approval_request_id,
-                idempotency_key = %key,
-                "capability resume accepted advisory idempotency key (not yet enforced)"
-            );
         }
 
         let trust_decision = match self.open_pre_authorization(&mut context, &capability_id) {
@@ -823,7 +790,6 @@ impl HostRuntime for DefaultHostRuntime {
                 tracing::debug!(
                     capability_id = %capability_id,
                     error_kind = failure_kind_from(&error).as_str(),
-                    idempotency_key = idempotency_key.as_deref().unwrap_or(""),
                     "capability resume failed"
                 );
                 match error {
@@ -854,7 +820,6 @@ impl HostRuntime for DefaultHostRuntime {
             capability_id,
             estimate,
             input,
-            idempotency_key,
             approval_request_id,
         } = request;
         if let Some(outcome) = self
@@ -862,15 +827,6 @@ impl HostRuntime for DefaultHostRuntime {
             .await?
         {
             return Ok(outcome);
-        }
-        let idempotency_key = idempotency_key.map(|key| key.as_str().to_string());
-        if let Some(key) = idempotency_key.as_deref() {
-            tracing::debug!(
-                capability_id = %capability_id,
-                approval_request_id = approval_request_id.map(|id| id.to_string()).as_deref().unwrap_or("none"),
-                idempotency_key = %key,
-                "capability auth-resume accepted advisory idempotency key (not yet enforced)"
-            );
         }
 
         let trust_decision = match self.open_pre_authorization(&mut context, &capability_id) {
@@ -934,7 +890,6 @@ impl HostRuntime for DefaultHostRuntime {
                 tracing::debug!(
                     capability_id = %capability_id,
                     error_kind = failure_kind_from(&error).as_str(),
-                    idempotency_key = idempotency_key.as_deref().unwrap_or(""),
                     "capability auth-resume failed"
                 );
                 match error {
@@ -966,7 +921,6 @@ impl HostRuntime for DefaultHostRuntime {
             capability_id,
             estimate,
             input,
-            idempotency_key,
         } = request;
         if let Some(outcome) = self
             .resume_actor_preflight_guard(&context, &capability_id)
@@ -984,15 +938,6 @@ impl HostRuntime for DefaultHostRuntime {
                 return Ok(RuntimeCapabilityOutcome::Failed(failure));
             }
         };
-        let idempotency_key = idempotency_key.map(|key| key.as_str().to_string());
-        if let Some(key) = idempotency_key.as_deref() {
-            tracing::debug!(
-                capability_id = %capability_id,
-                approval_request_id = %approval_request_id,
-                idempotency_key = %key,
-                "capability spawn resume accepted advisory idempotency key (not yet enforced)"
-            );
-        }
 
         if let Err(error) = self.enforce_runtime_policy(&capability_id) {
             tracing::debug!(
@@ -1049,7 +994,6 @@ impl HostRuntime for DefaultHostRuntime {
                 tracing::debug!(
                     capability_id = %capability_id,
                     error_kind = failure_kind_from(&error).as_str(),
-                    idempotency_key = idempotency_key.as_deref().unwrap_or(""),
                     "capability spawn resume failed"
                 );
                 // Mirror resume_capability: AuthorizationRequiresAuth must return

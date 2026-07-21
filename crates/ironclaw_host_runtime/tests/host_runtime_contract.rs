@@ -94,8 +94,7 @@ async fn default_runtime_returns_completed_outcome_for_authorized_dispatch() {
         capability_id(),
         ResourceEstimate::default(),
         json!({"message": "hello"}),
-    )
-    .with_idempotency_key(IdempotencyKey::new("turn-1/tool-1").unwrap());
+    );
 
     let outcome = runtime.invoke_capability(request).await.unwrap();
 
@@ -355,11 +354,10 @@ async fn default_runtime_surfaces_authorization_failure_when_authorizer_denies()
 }
 
 #[tokio::test]
-async fn default_runtime_idempotency_key_is_advisory_and_does_not_dedupe() {
-    // Pins the documented limitation: idempotency_key is advisory only at
-    // this layer. Two invocations carrying the same key both reach dispatch.
-    // If a future change wires dedupe through the capability host, this test
-    // is the canary that flags the contract change.
+async fn default_runtime_repeated_invocations_are_not_deduped_by_host_runtime_request_shape() {
+    // Host-runtime requests no longer carry a caller-provided idempotency key.
+    // Loop-host owns invocation replay/dedup before this boundary; repeated
+    // host-runtime invocations are ordinary independent dispatches.
     let registry = Arc::new(registry_with_echo_capability());
     let dispatcher = Arc::new(CountingDispatcher::default());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
@@ -372,16 +370,13 @@ async fn default_runtime_idempotency_key_is_advisory_and_does_not_dedupe() {
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy()));
 
-    let key = IdempotencyKey::new("turn-1/tool-1").unwrap();
-
     let context_a = execution_context_with_dispatch_grant();
     let request_a = RuntimeCapabilityRequest::new(
         context_a,
         capability_id(),
         ResourceEstimate::default(),
         json!({"n": 1}),
-    )
-    .with_idempotency_key(key.clone());
+    );
     let _ = runtime.invoke_capability(request_a).await.unwrap();
 
     let context_b = execution_context_with_dispatch_grant();
@@ -390,14 +385,13 @@ async fn default_runtime_idempotency_key_is_advisory_and_does_not_dedupe() {
         capability_id(),
         ResourceEstimate::default(),
         json!({"n": 2}),
-    )
-    .with_idempotency_key(key);
+    );
     let _ = runtime.invoke_capability(request_b).await.unwrap();
 
     assert_eq!(
         dispatcher.count(),
         2,
-        "idempotency_key is advisory only — dedupe is not enforced at this layer"
+        "dedupe is enforced by loop-host before the host-runtime request boundary"
     );
 }
 
