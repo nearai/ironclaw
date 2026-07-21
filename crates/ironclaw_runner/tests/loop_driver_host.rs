@@ -88,7 +88,7 @@ use ironclaw_runner::subagent::{
         store::FilesystemAwaitEdgeStore,
     },
     flavors::StaticSubagentDefinitionResolver,
-    goal_store::InMemoryBoundedSubagentGoalStore,
+    goal_store::FilesystemSubagentGoalStore,
 };
 use ironclaw_runner::text_loop_driver::TextOnlyModelReplyDriver;
 use ironclaw_runner::turn_run_executor::RebornTurnRunExecutor;
@@ -212,6 +212,20 @@ fn build_test_await_edge_trio(
         Arc::clone(&store),
     ));
     (store, resolver, driver)
+}
+
+fn in_memory_subagent_goal_store() -> Arc<FilesystemSubagentGoalStore<InMemoryBackend>> {
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/turns").unwrap(),
+        VirtualPath::new("/turns").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    let fs = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(InMemoryBackend::new()),
+        mounts,
+    ));
+    Arc::new(FilesystemSubagentGoalStore::new(fs))
 }
 
 /// Build a fresh, never-written-to in-memory await-edge store for call sites
@@ -3673,7 +3687,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
     let surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
         CapabilityAllowSet::allowlist([allowed_id.clone()]),
     ));
-    let subagent_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+    let subagent_goal_store = in_memory_subagent_goal_store();
     let (await_edge_store, await_edge_resolver, await_edge_writer) = build_test_await_edge_trio(
         subagent_goal_store.clone() as Arc<dyn SubagentSpawnGoalStore>,
         turn_store.clone() as Arc<dyn TurnSpawnTreeStateStore>,
@@ -3848,7 +3862,7 @@ async fn pre_minted_scheduler_wake_wiring_drives_scheduler_on_coordinator_submit
     let surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
         CapabilityAllowSet::allowlist([allowed_id.clone()]),
     ));
-    let subagent_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+    let subagent_goal_store = in_memory_subagent_goal_store();
     let (await_edge_store, await_edge_resolver, await_edge_writer) = build_test_await_edge_trio(
         subagent_goal_store.clone() as Arc<dyn SubagentSpawnGoalStore>,
         turn_store.clone() as Arc<dyn TurnSpawnTreeStateStore>,
@@ -4026,7 +4040,7 @@ async fn build_runtime_host_with_optional_hooks(
     let surface_resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
         CapabilityAllowSet::allowlist([allowed_id.clone()]),
     ));
-    let subagent_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+    let subagent_goal_store = in_memory_subagent_goal_store();
     let (await_edge_store, await_edge_resolver, await_edge_writer) = build_test_await_edge_trio(
         subagent_goal_store.clone() as Arc<dyn SubagentSpawnGoalStore>,
         turn_store.clone() as Arc<dyn TurnSpawnTreeStateStore>,
@@ -4388,7 +4402,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         ),
     );
 
-    let subagent_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+    let subagent_goal_store = in_memory_subagent_goal_store();
     let (await_edge_store, await_edge_resolver, await_edge_writer) = build_test_await_edge_trio(
         subagent_goal_store.clone() as Arc<dyn SubagentSpawnGoalStore>,
         turn_store.clone() as Arc<dyn TurnSpawnTreeStateStore>,
@@ -4517,7 +4531,7 @@ async fn product_live_parts_for_gate_test(
             ModelRoute::new("nearai", "qwen3-coder").unwrap(),
         ),
     );
-    let subagent_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+    let subagent_goal_store = in_memory_subagent_goal_store();
     let (await_edge_store, await_edge_resolver, await_edge_writer) = build_test_await_edge_trio(
         subagent_goal_store.clone() as Arc<dyn SubagentSpawnGoalStore>,
         turn_store.clone() as Arc<dyn TurnSpawnTreeStateStore>,

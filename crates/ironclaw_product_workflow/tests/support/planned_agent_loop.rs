@@ -52,6 +52,7 @@ use ironclaw_runner::{
         boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
         store::FilesystemAwaitEdgeStore,
     },
+    subagent::goal_store::FilesystemSubagentGoalStore,
 };
 use ironclaw_threads::{
     InMemorySessionThreadService, SessionThreadService, ThreadHistoryRequest, ThreadMessageRecord,
@@ -370,9 +371,18 @@ impl ProductLiveAgentLoopHarness {
         let await_edge_store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::new(
             ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), await_edge_mounts),
         )));
-        let await_edge_goal_store = Arc::new(
-            ironclaw_runner::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new(),
-        );
+        let await_edge_goal_mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/turns").unwrap(),
+            VirtualPath::new("/turns").unwrap(),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .unwrap();
+        let await_edge_goal_store = Arc::new(FilesystemSubagentGoalStore::new(Arc::new(
+            ScopedFilesystem::with_fixed_view(
+                Arc::new(InMemoryBackend::new()),
+                await_edge_goal_mounts,
+            ),
+        )));
         let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound(
             Arc::clone(&await_edge_store),
             await_edge_goal_store.clone() as Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,

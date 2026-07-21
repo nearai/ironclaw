@@ -32,7 +32,6 @@ use uuid::Uuid;
 
 use ironclaw_events::{DurableAuditLog, DurableEventLog, InMemoryAuditSink, RuntimeEvent};
 use ironclaw_extensions::ExtensionRegistry;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_first_party_extension_ports::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
@@ -76,10 +75,7 @@ use ironclaw_runner::subagent::await_edge::{
     store::FilesystemAwaitEdgeStore,
 };
 use ironclaw_runner::subagent::flavors::StaticSubagentDefinitionResolver;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_runner::subagent::goal_store::FilesystemSubagentGoalStore;
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-use ironclaw_runner::subagent::goal_store::InMemoryBoundedSubagentGoalStore;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, MessageKind, MessageStatus,
     SessionThreadService, ThreadHistoryRequest, ThreadScope,
@@ -235,9 +231,7 @@ struct RuntimeStoreParts<'a> {
 }
 
 /// Non-durable await-edge fallback for the composition profile with neither
-/// `libsql` nor `postgres` enabled (no real filesystem backend exists in
-/// that mode at all — the same reduced-durability posture
-/// `InMemoryBoundedSubagentGoalStore` already accepts for the goal store).
+/// `libsql` nor `postgres` enabled.
 /// Reported limitation, not silently papered over: this mode never
 /// delivers a subagent's result back to a parked parent (the settler never
 /// fires) and never recognizes an awaited-child gate as blocked-exit
@@ -325,13 +319,9 @@ impl AwaitDependentRunEvidenceStore for NonDurableAwaitDependentRunEvidence {
 fn local_runtime_parts(
     local_runtime: &crate::factory::RebornRuntimeSubstrate,
 ) -> RuntimeStoreParts<'_> {
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     let subagent_goal_store = Arc::new(FilesystemSubagentGoalStore::new(Arc::clone(
         &local_runtime.subagent_goal_filesystem,
     ))) as Arc<dyn RuntimeSubagentGoalStore>;
-    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-    let subagent_goal_store =
-        Arc::new(InMemoryBoundedSubagentGoalStore::new()) as Arc<dyn RuntimeSubagentGoalStore>;
 
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     let (subagent_await_edge_writer, subagent_await_edge_settler, subagent_await_edge_evidence) = {

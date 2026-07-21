@@ -48,6 +48,7 @@ use ironclaw_runner::subagent::await_edge::{
     boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
     store::FilesystemAwaitEdgeStore,
 };
+use ironclaw_runner::subagent::goal_store::FilesystemSubagentGoalStore;
 use ironclaw_threads::{
     InMemorySessionThreadService, MessageStatus, SessionThreadService, ThreadHistoryRequest,
     ThreadScope,
@@ -433,8 +434,8 @@ fn turn_state_store_dyn(
 /// Test-only in-memory await-edge trio (writer/settler/evidence trait
 /// objects, plus the goal store the resolver and `subagent_goal_store`
 /// share) — these harness tests don't exercise real subagent spawn/settle
-/// flows, so an in-memory `ScopedFilesystem` fixture is behavior-equivalent
-/// to the deleted `BoundedSubagentGateResolutionStore` for their purposes.
+/// flows, so in-memory `ScopedFilesystem` fixtures are enough for their
+/// purposes.
 #[allow(clippy::type_complexity)]
 fn test_await_edge_trio(
     turn_store: &Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
@@ -455,8 +456,15 @@ fn test_await_edge_trio(
     let store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::new(
         ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), mounts),
     )));
-    let goal_store =
-        Arc::new(ironclaw_runner::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
+    let goal_mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/turns").unwrap(),
+        VirtualPath::new("/turns").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    let goal_store = Arc::new(FilesystemSubagentGoalStore::new(Arc::new(
+        ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), goal_mounts),
+    )));
     let resolver = Arc::new(AwaitEdgeResolver::new_unbound(
         Arc::clone(&store),
         goal_store.clone() as Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,

@@ -87,14 +87,10 @@ const FROZEN_DEBT_INMEMORY_STORES: &[&str] = &[
 /// §1.4 lock-step store duplicates. Each annotation states the reason; do not
 /// "consolidate" these without first invalidating that reason in review.
 const JUSTIFIED_KEEP_INMEMORY_STORES: &[&str] = &[
-    // --- Bounded volatile caches next to already-wired durable stores
-    //     (`FilesystemSubagentGoalStore` in the libSQL/Postgres runner
-    //     adapters; `FilesystemOpenAiCompatRefStore` in OpenAI-compatible
-    //     serving). Do NOT swap them for a durable store in tests that
-    //     exercise the bounded/evicting cache semantics. ---
-    //   BoundedSubagentGoal: capacity-bounded, evict-oldest (VecDeque insertion
-    //     order) cache of in-flight subagent-spawn goals — goal_store.rs.
-    "InMemoryBoundedSubagentGoalStore",
+    // --- Bounded volatile cache next to an already-wired durable store
+    //     (`FilesystemOpenAiCompatRefStore` in OpenAI-compatible serving).
+    //     Do NOT swap it for a durable store in tests that exercise the
+    //     bounded/evicting cache semantics. ---
     //   OpenAiCompatRef: capacity-bounded with oldest-created eviction (evicts
     //     the minimum `created_at`; reads do not refresh recency — NOT an LRU)
     //     AND the crate's documented filesystem-free default so contract-only
