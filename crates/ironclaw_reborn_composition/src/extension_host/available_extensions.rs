@@ -324,9 +324,16 @@ fn credential_requirements(
             };
             let handle = requirement.handle.as_str().to_string();
             if let Some(seen) = groups.iter_mut().find(|seen| {
-                seen.handle == handle
-                    && seen.provider == provider
+                seen.provider == provider
                     && can_merge_lifecycle_credential_setup(&seen.setup, &setup)
+                    && (seen.handle == handle
+                        || matches!(
+                            (&seen.setup, &setup),
+                            (
+                                LifecycleExtensionCredentialSetup::OAuth { .. },
+                                LifecycleExtensionCredentialSetup::OAuth { .. }
+                            )
+                        ))
             }) {
                 seen.required |= requirement.required;
                 merge_lifecycle_credential_setup(&mut seen.setup, setup);
