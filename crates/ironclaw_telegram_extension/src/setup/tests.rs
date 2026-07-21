@@ -1,15 +1,14 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use ironclaw_filesystem::InMemoryBackend;
-use ironclaw_host_api::{AgentId, ResourceScope, SecretHandle, TenantId, UserId};
-use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore, SecretStoreError};
+use ironclaw_filesystem::{Fault, FaultInjecting, FilesystemOperation, InMemoryBackend};
+use ironclaw_host_api::{AgentId, TenantId, UserId};
+use ironclaw_secrets::{FilesystemSecretStore, SecretStore};
 use secrecy::{ExposeSecret, SecretString};
 
 use super::*;
 use crate::state::FilesystemTelegramHostState;
 use crate::test_support::{
-    RecordedBotApiCall as BotApiCall, RecordingBotApi, fault_injected_telegram_state,
+    RecordedBotApiCall as BotApiCall, RecordingBotApi, fault_injecting_telegram_state,
     telegram_state,
 };
 
@@ -44,115 +43,37 @@ fn service_with_secret_store(
     )
 }
 
-/// Delegating secret store whose mutations can be switched to fail —
-/// everything else forwards to a real in-memory store.
-#[derive(Debug)]
-struct FaultInjectingSecretStore {
-    inner: FilesystemSecretStore<InMemoryBackend>,
-    fail_puts: std::sync::atomic::AtomicBool,
-    fail_deletes: std::sync::atomic::AtomicBool,
+/// The real [`FilesystemSecretStore`] over a shared [`FaultInjecting`] backend,
+/// armed to fail secret **deletes** on the failed revision. Replaces the former
+/// whole-trait `FaultInjectingSecretStore` fake: the store now runs its genuine
+/// serialization, lease/CAS mechanics, and
+/// `FilesystemError::Backend -> SecretStoreError::StoreUnavailable` mapping
+/// under the injected backend fault. `nth(1)` targets the first (fail-closed)
+/// compensation delete; the caller's retry then deletes cleanly (the fault is a
+/// one-shot), mirroring the old fake's `fail_deletes()` / `accept_deletes()`
+/// toggle without needing to disarm.
+fn secret_store_failing_first_delete() -> Arc<FilesystemSecretStore<FaultInjecting<InMemoryBackend>>>
+{
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()).with_fault(
+        Fault::on(FilesystemOperation::Delete)
+            .path("secrets")
+            .nth(1)
+            .backend("injected secret deletion outage"),
+    ));
+    Arc::new(FilesystemSecretStore::ephemeral_over(backend))
 }
 
-impl FaultInjectingSecretStore {
-    fn new() -> Self {
-        Self {
-            inner: FilesystemSecretStore::ephemeral(),
-            fail_puts: std::sync::atomic::AtomicBool::new(false),
-            fail_deletes: std::sync::atomic::AtomicBool::new(false),
-        }
-    }
-
-    fn fail_puts(&self) {
-        self.fail_puts
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    fn fail_deletes(&self) {
-        self.fail_deletes
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    fn accept_deletes(&self) {
-        self.fail_deletes
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-    }
-}
-
-#[async_trait]
-impl ironclaw_secrets::SecretStore for FaultInjectingSecretStore {
-    async fn put(
-        &self,
-        scope: ResourceScope,
-        handle: SecretHandle,
-        material: SecretMaterial,
-        expires_at: Option<ironclaw_host_api::Timestamp>,
-    ) -> Result<ironclaw_secrets::SecretMetadata, SecretStoreError> {
-        if self.fail_puts.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(SecretStoreError::StoreUnavailable {
-                reason: "test secret outage".to_string(),
-            });
-        }
-        self.inner.put(scope, handle, material, expires_at).await
-    }
-
-    async fn metadata(
-        &self,
-        scope: &ResourceScope,
-        handle: &SecretHandle,
-    ) -> Result<Option<ironclaw_secrets::SecretMetadata>, SecretStoreError> {
-        self.inner.metadata(scope, handle).await
-    }
-
-    async fn metadata_for_scope(
-        &self,
-        scope: &ResourceScope,
-    ) -> Result<Vec<ironclaw_secrets::SecretMetadata>, SecretStoreError> {
-        self.inner.metadata_for_scope(scope).await
-    }
-
-    async fn delete(
-        &self,
-        scope: &ResourceScope,
-        handle: &SecretHandle,
-    ) -> Result<bool, SecretStoreError> {
-        if self.fail_deletes.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(SecretStoreError::StoreUnavailable {
-                reason: "test secret deletion outage".to_string(),
-            });
-        }
-        self.inner.delete(scope, handle).await
-    }
-
-    async fn lease_once(
-        &self,
-        scope: &ResourceScope,
-        handle: &SecretHandle,
-    ) -> Result<ironclaw_secrets::SecretLease, SecretStoreError> {
-        self.inner.lease_once(scope, handle).await
-    }
-
-    async fn consume(
-        &self,
-        scope: &ResourceScope,
-        lease_id: ironclaw_secrets::SecretLeaseId,
-    ) -> Result<SecretMaterial, SecretStoreError> {
-        self.inner.consume(scope, lease_id).await
-    }
-
-    async fn revoke(
-        &self,
-        scope: &ResourceScope,
-        lease_id: ironclaw_secrets::SecretLeaseId,
-    ) -> Result<ironclaw_secrets::SecretLease, SecretStoreError> {
-        self.inner.revoke(scope, lease_id).await
-    }
-
-    async fn leases_for_scope(
-        &self,
-        scope: &ResourceScope,
-    ) -> Result<Vec<ironclaw_secrets::SecretLease>, SecretStoreError> {
-        self.inner.leases_for_scope(scope).await
-    }
+/// The real [`FilesystemSecretStore`] over a shared [`FaultInjecting`] backend,
+/// armed to fail every secret **write**. Replaces the former whole-trait fake's
+/// `fail_puts()`: the first secret persist hits the injected backend fault and
+/// the store surfaces it as `SecretStoreError::StoreUnavailable`.
+fn secret_store_failing_writes() -> Arc<FilesystemSecretStore<FaultInjecting<InMemoryBackend>>> {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()).with_fault(
+        Fault::on(FilesystemOperation::WriteFile)
+            .path("secrets")
+            .backend("injected secret put outage"),
+    ));
+    Arc::new(FilesystemSecretStore::ephemeral_over(backend))
 }
 
 fn update_with_token(token: &str) -> TelegramInstallationSetupUpdate {
@@ -499,7 +420,10 @@ async fn clear_keeps_retryable_intent_when_delete_webhook_fails() {
 #[tokio::test]
 async fn clear_keeps_retryable_intent_when_secret_deletion_fails() {
     let store = telegram_state();
-    let secret_store = Arc::new(FaultInjectingSecretStore::new());
+    // Pre-armed one-shot: the save writes secrets cleanly (no deletes), then the
+    // first fail-closed compensation delete during `clear()` hits the injected
+    // backend fault.
+    let secret_store = secret_store_failing_first_delete();
     let bot_api = Arc::new(RecordingBotApi::default());
     let service = service_with_secret_store(
         Arc::clone(&store),
@@ -511,7 +435,6 @@ async fn clear_keeps_retryable_intent_when_secret_deletion_fails() {
         .save_with_previous(update_with_token("123:abc"))
         .await
         .expect("save");
-    secret_store.fail_deletes();
 
     assert!(matches!(
         service
@@ -529,7 +452,7 @@ async fn clear_keeps_retryable_intent_when_secret_deletion_fails() {
         "secret deletion failure must retain durable cleanup metadata"
     );
 
-    secret_store.accept_deletes();
+    // The Delete fault was a one-shot (`nth(1)`); the retry deletes cleanly.
     service.clear().await.expect("retry completes cleanup");
     assert!(
         store
@@ -627,7 +550,9 @@ async fn rollback_keeps_intent_until_compensating_set_webhook_succeeds() {
 #[tokio::test]
 async fn rollback_keeps_intent_until_failed_revision_secrets_are_deleted() {
     let store = telegram_state();
-    let secret_store = Arc::new(FaultInjectingSecretStore::new());
+    // Both saves write secrets cleanly (no deletes); the first fail-closed
+    // compensation delete during rollback hits the pre-armed one-shot fault.
+    let secret_store = secret_store_failing_first_delete();
     let bot_api = Arc::new(RecordingBotApi::default());
     let service = service_with_secret_store(
         Arc::clone(&store),
@@ -643,7 +568,6 @@ async fn rollback_keeps_intent_until_failed_revision_secrets_are_deleted() {
         .save_with_previous(update_with_token("123:rotated"))
         .await
         .expect("second save");
-    secret_store.fail_deletes();
 
     assert!(matches!(
         service
@@ -660,7 +584,7 @@ async fn rollback_keeps_intent_until_failed_revision_secrets_are_deleted() {
         Some((second.clone(), Some(first.clone()), true))
     );
 
-    secret_store.accept_deletes();
+    // The Delete fault was a one-shot (`nth(1)`); the retry deletes cleanly.
     service
         .rollback_failed_activation_save(&second, previous.as_ref())
         .await
@@ -685,8 +609,8 @@ async fn current_webhook_secret(service: &TelegramSetupService) -> String {
 #[tokio::test]
 async fn failed_secret_persist_deletes_fresh_webhook_when_no_previous() {
     let store = telegram_state();
-    let secret_store = Arc::new(FaultInjectingSecretStore::new());
-    secret_store.fail_puts();
+    // Pre-armed to fail every secret write, so the first persist fails.
+    let secret_store = secret_store_failing_writes();
     let bot_api = Arc::new(RecordingBotApi::default());
     let service = service_with_secret_store(
         Arc::clone(&store),
@@ -717,7 +641,7 @@ async fn failed_secret_persist_deletes_fresh_webhook_when_no_previous() {
 /// old one, and ingress rejects every webhook.
 #[tokio::test]
 async fn failed_record_persist_restores_previous_webhook_for_same_bot() {
-    let (store, filesystem) = fault_injected_telegram_state();
+    let (store, backend) = fault_injecting_telegram_state();
     let bot_api = Arc::new(RecordingBotApi::default());
     let service = service_with(
         Arc::clone(&store),
@@ -730,7 +654,9 @@ async fn failed_record_persist_restores_previous_webhook_for_same_bot() {
         .expect("first save");
     let first_secret = current_webhook_secret(&service).await;
 
-    filesystem.fail_writes();
+    backend.add_fault(
+        Fault::on(FilesystemOperation::WriteFile).backend("test-injected filesystem failure"),
+    );
     let error = service
         .save_with_previous(update_with_token("123:rotated"))
         .await

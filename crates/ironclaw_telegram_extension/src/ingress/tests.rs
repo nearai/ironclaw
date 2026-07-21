@@ -38,7 +38,8 @@ use crate::setup::{
 use crate::telegram_actor_identity::{
     TELEGRAM_IDENTITY_PROVIDER, telegram_user_identity_provider_user_id,
 };
-use crate::test_support::fault_injected_telegram_state;
+use crate::test_support::fault_injecting_telegram_state;
+use ironclaw_filesystem::{Fault, FilesystemOperation};
 use secrecy::SecretString;
 
 /// Rebuild the Telegram ingress descriptor as a Rust literal so the
@@ -358,8 +359,8 @@ async fn telegram_updates_handler_returns_401_when_unconfigured() {
 /// is the 401 shape.
 #[tokio::test]
 async fn telegram_updates_handler_returns_503_when_setup_store_is_down() {
-    let (state, filesystem) = fault_injected_telegram_state();
-    filesystem.fail_reads();
+    let (state, backend) = fault_injecting_telegram_state();
+    backend.add_fault(Fault::on(FilesystemOperation::ReadFile).backend("test-injected filesystem failure"));
     let setup = unconfigured_setup_service_with_state(Arc::new(RecordingBotApi::default()), state);
     let pairing = pairing_service_with(Arc::clone(&setup));
     let resolver = Arc::new(DynamicTelegramInstallationResolver::new(

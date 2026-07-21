@@ -1314,6 +1314,13 @@ impl RuntimeCredentialAccountResolver for SourceScopedHandleResolver {
 }
 
 #[derive(Debug)]
+// TOCTOU domain-state fake, not an I/O fault — cannot move to
+// `ironclaw_filesystem::FaultInjecting`. The "present at preflight, absent at
+// lease" transition is coupled inside a single `handler.prepare()` call (the
+// delete fires between `metadata` and `lease_once`, with no external seam to
+// interleave), and it needs the second read to return `Ok(None)` — a
+// genuinely-absent secret yielding `UnknownSecret` — which a filesystem
+// backend fault (only ever an `Err`) cannot reproduce.
 struct SecretDisappearsAfterPreflight {
     inner: FilesystemSecretStore<InMemoryBackend>,
     metadata_calls: AtomicUsize,
