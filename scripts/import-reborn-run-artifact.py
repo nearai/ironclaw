@@ -175,13 +175,39 @@ def artifact_turns(
 def trace_candidate(artifact: dict[str, Any], model_override: str | None) -> dict[str, Any]:
     turns: list[dict[str, Any]] = []
     captured_models: list[str] = []
+    skipped_incomplete_runs: list[dict[str, Any]] = []
     message_groups, skipped_unscoped = artifact_turns(artifact)
     if not message_groups:
         raise ValueError("thread artifact has no complete run-scoped replayable turns")
     for messages in message_groups:
+        user = next(
+            (
+                message
+                for message in messages
+                if message.get("kind") == "user"
+                and str(message.get("content", "")).strip()
+            ),
+            None,
+        )
+        has_assistant_response = any(
+            message.get("kind") == "assistant"
+            and str(message.get("content", "")).strip()
+            for message in messages
+        )
+        if artifact.get("schema") == THREAD_SCHEMA and user and not has_assistant_response:
+            skipped_incomplete_runs.append(
+                {
+                    "run_id": messages[0].get("run_id"),
+                    "sequence": user.get("sequence"),
+                    "reason": "run has no finalized assistant response",
+                }
+            )
+            continue
         turn, turn_models = build_turn(messages)
         turns.append(turn)
         captured_models.extend(turn_models)
+    if not turns:
+        raise ValueError("thread artifact has no complete run-scoped replayable turns")
 
     model_name = model_override or (captured_models[0] if captured_models else "reborn-qa-import")
     required_actions = [
@@ -194,6 +220,11 @@ def trace_candidate(artifact: dict[str, Any], model_override: str | None) -> dic
             0,
             "Review skipped_unscoped_messages from accepted submissions that never received a run ID.",
         )
+    if skipped_incomplete_runs:
+        required_actions.insert(
+            0,
+            "Review skipped_incomplete_runs that had no finalized assistant response.",
+        )
     review = {
         "status": "candidate",
         "source_schema": artifact.get("schema"),
@@ -204,6 +235,8 @@ def trace_candidate(artifact: dict[str, Any], model_override: str | None) -> dic
     }
     if skipped_unscoped:
         review["skipped_unscoped_messages"] = skipped_unscoped
+    if skipped_incomplete_runs:
+        review["skipped_incomplete_runs"] = skipped_incomplete_runs
     return {
         "_review": review,
         "model_name": model_name,

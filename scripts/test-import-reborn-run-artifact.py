@@ -137,6 +137,54 @@ class RunArtifactImporterTest(unittest.TestCase):
         self.assertEqual([turn["user_input"] for turn in candidate["turns"]], ["first", "second"])
         self.assertEqual(candidate["_review"]["source_schema"], MODULE.THREAD_SCHEMA)
         self.assertEqual(candidate["_review"]["source_thread_id"], "thread-1")
+
+    def test_thread_artifact_reports_incomplete_run_without_discarding_completed_turns(
+        self,
+    ) -> None:
+        artifact = self.thread_artifact(
+            {"sequence": 1, "run_id": "run-1", "kind": "user", "content": "first"},
+            {
+                "sequence": 2,
+                "run_id": "run-1",
+                "kind": "assistant",
+                "status": "finalized",
+                "content": "done",
+            },
+            {
+                "sequence": 3,
+                "run_id": "run-2",
+                "kind": "user",
+                "status": "submitted",
+                "content": "still running",
+            },
+        )
+
+        candidate = MODULE.trace_candidate(artifact, None)
+
+        self.assertEqual([turn["user_input"] for turn in candidate["turns"]], ["first"])
+        self.assertEqual(
+            candidate["_review"]["skipped_incomplete_runs"],
+            [
+                {
+                    "run_id": "run-2",
+                    "sequence": 3,
+                    "reason": "run has no finalized assistant response",
+                }
+            ],
+        )
+        self.assertIn(
+            "skipped_incomplete_runs",
+            candidate["_review"]["required_actions"][0],
+        )
+
+    def test_thread_artifact_rejects_when_every_run_is_incomplete(self) -> None:
+        artifact = self.thread_artifact(
+            {"sequence": 1, "run_id": "run-1", "kind": "user", "content": "pending"}
+        )
+
+        with self.assertRaisesRegex(ValueError, "no complete run-scoped replayable turns"):
+            MODULE.trace_candidate(artifact, None)
+
     def test_thread_artifact_reports_accepted_message_without_run_id(self) -> None:
         artifact = self.thread_artifact(
             {"sequence": 1, "kind": "user", "status": "accepted", "content": "failed"},

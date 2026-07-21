@@ -39,4 +39,7 @@ the assertion of what must continue happening.
 For full-thread downloads, an accepted user message may lack a run id when turn
 submission failed before a run was created. The importer excludes only those
 incomplete submissions from replay turns and lists their sequence, kind, and
-status under `_review.skipped_unscoped_messages` for explicit review.
+status under `_review.skipped_unscoped_messages` for explicit review. It also
+preserves completed turns when another run is still awaiting a finalized
+assistant response and reports that run under `_review.skipped_incomplete_runs`.
+Malformed run groups still fail the import instead of being silently skipped.
