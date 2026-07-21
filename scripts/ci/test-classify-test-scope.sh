@@ -212,6 +212,22 @@ has_legacy_tests=true
 has_reborn_tests=true"
 
 assert_scope \
+  "Reborn crate bucket script" \
+  "scripts/ci/reborn-crate-test-buckets.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "Reborn crate bucket regression suite" \
+  "scripts/ci/test-reborn-crate-test-buckets.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
   "Reborn Responses E2E manifest checker" \
   "scripts/ci/check-reborn-responses-e2e-manifest.py" \
   "docs_only=false

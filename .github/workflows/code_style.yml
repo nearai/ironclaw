@@ -219,6 +219,7 @@ jobs:
           scripts/ci/test-check-hermetic-env.sh
           scripts/ci/test-classify-test-scope.sh
           scripts/ci/test-package-feature-flags.sh
+          scripts/ci/test-reborn-crate-test-buckets.sh
           bash .github/scripts/test-pr-labeler.sh
 
   clippy:

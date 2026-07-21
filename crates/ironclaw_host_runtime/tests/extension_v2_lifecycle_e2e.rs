@@ -533,12 +533,18 @@ fn dispatch_error_for_runtime(
     kind: RuntimeDispatchErrorKind,
 ) -> DispatchError {
     match runtime {
-        RuntimeKind::Script => DispatchError::Script { kind },
+        RuntimeKind::Script => DispatchError::Script {
+            kind,
+            model_visible_cause: None,
+        },
         RuntimeKind::Wasm => DispatchError::Wasm {
             kind,
-            safe_summary: None,
+            model_visible_cause: None,
         },
-        RuntimeKind::Mcp => DispatchError::Mcp { kind },
+        RuntimeKind::Mcp => DispatchError::Mcp {
+            kind,
+            model_visible_cause: None,
+        },
         RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::UnsupportedRuntime {
             capability: CapabilityId::new("system.unsupported").unwrap(),
             runtime,
