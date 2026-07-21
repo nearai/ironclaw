@@ -11,6 +11,7 @@ transport = "http"
 url = "https://mcp.notion.com/mcp"
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "notion.notion-search"
 description = "Search Notion workspace content and connected sources through Notion MCP."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -25,6 +26,7 @@ prompt_doc_ref = "prompts/notion/notion-search.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "notion.notion-fetch"
 description = "Fetch a Notion page, database, or data source by URL or ID through Notion MCP."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -39,6 +41,7 @@ prompt_doc_ref = "prompts/notion/notion-fetch.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "notion.notion-create-pages"
 description = "Create one or more Notion pages with properties, content, templates, icons, or covers through Notion MCP."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -53,6 +56,7 @@ prompt_doc_ref = "prompts/notion/notion-create-pages.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "notion.notion-update-page"
 description = "Update a Notion page's properties, content, icon, cover, or template through Notion MCP."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -67,6 +71,7 @@ prompt_doc_ref = "prompts/notion/notion-update-page.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "notion.notion-move-pages"
 description = "Move one or more Notion pages or databases to a new parent through Notion MCP."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -81,6 +86,7 @@ prompt_doc_ref = "prompts/notion/notion-move-pages.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "notion.notion-duplicate-page"
 description = "Duplicate a Notion page within the connected workspace through Notion MCP."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -95,6 +101,7 @@ prompt_doc_ref = "prompts/notion/notion-duplicate-page.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "notion.notion-create-database"
 description = "Create a Notion database, initial data source, and initial view through Notion MCP."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -109,6 +116,7 @@ prompt_doc_ref = "prompts/notion/notion-create-database.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "notion.notion-update-data-source"
 description = "Update a Notion data source's properties, name, description, or other attributes through Notion MCP."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -123,6 +131,7 @@ prompt_doc_ref = "prompts/notion/notion-update-data-source.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "notion.notion-create-view"
 description = "Create a Notion database view with filters, sorts, grouping, or display configuration through Notion MCP."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -137,6 +146,7 @@ prompt_doc_ref = "prompts/notion/notion-create-view.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "notion.notion-update-view"
 description = "Update a Notion database view's name, filters, sorts, grouping, or display configuration through Notion MCP."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -151,6 +161,7 @@ prompt_doc_ref = "prompts/notion/notion-update-view.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "notion.notion-query-data-sources"
 description = "Query across multiple Notion data sources with structured summaries, grouping, and filters through Notion MCP."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -165,6 +176,7 @@ prompt_doc_ref = "prompts/notion/notion-query-data-sources.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "notion.notion-query-database-view"
 description = "Query data from a Notion database using a predefined view's filters and sorts through Notion MCP."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -179,6 +191,7 @@ prompt_doc_ref = "prompts/notion/notion-query-database-view.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "notion.notion-create-comment"
 description = "Add a page-level, block-level, inline, or reply comment through Notion MCP."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -193,6 +206,7 @@ prompt_doc_ref = "prompts/notion/notion-create-comment.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "notion.notion-get-comments"
 description = "List comments and discussions on a Notion page through Notion MCP."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -207,6 +221,7 @@ prompt_doc_ref = "prompts/notion/notion-get-comments.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "notion.notion-get-teams"
 description = "Retrieve teams and teamspaces in the connected Notion workspace through Notion MCP."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -221,6 +236,7 @@ prompt_doc_ref = "prompts/notion/notion-get-teams.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "notion.notion-get-users"
 description = "List users in the connected Notion workspace through Notion MCP."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -235,6 +251,7 @@ prompt_doc_ref = "prompts/notion/notion-get-users.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "notion.notion-get-user"
 description = "Retrieve Notion user information by ID through Notion MCP."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -249,6 +266,7 @@ prompt_doc_ref = "prompts/notion/notion-get-user.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "notion.notion-get-self"
 description = "Retrieve the connected bot user and workspace information through Notion MCP."
 effects = ["dispatch_capability", "network", "use_secret"]

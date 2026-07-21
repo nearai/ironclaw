@@ -185,6 +185,82 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
     }
 }
 
+/// §5.3 S3 (behavior-neutral): every builtin tool-package descriptor carries a
+/// declared `origin_gate_matrix`. `LoopRun` mirrors today's effect gate exactly
+/// (Ungated iff the id is in the reviewed `UNGATED_LOOP_RUN_CAPABILITIES`
+/// allowlist, else GatedUnlessGranted); `Product`/`Automation` are deny-by-
+/// default until a reviewed ingress slice declares a producer. This is the
+/// load-bearing "allowlist <=> loop_run == Ungated" invariant, checked over the
+/// production descriptors the tool package actually emits.
+#[tokio::test]
+async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matrix() {
+    let package = builtin_first_party_package().unwrap();
+    for descriptor in &package.capabilities {
+        let matrix = descriptor
+            .origin_gate_matrix
+            .as_ref()
+            .unwrap_or_else(|| panic!("{} must declare an origin_gate_matrix", descriptor.id));
+        assert_eq!(
+            matrix.product,
+            OriginGatePolicy::Forbidden,
+            "{} product must be deny-by-default",
+            descriptor.id
+        );
+        assert_eq!(
+            matrix.automation,
+            OriginGatePolicy::Forbidden,
+            "{} automation must be deny-by-default",
+            descriptor.id
+        );
+        let expected_loop_run = if UNGATED_LOOP_RUN_CAPABILITIES.contains(&descriptor.id.as_str()) {
+            OriginGatePolicy::Ungated
+        } else {
+            OriginGatePolicy::GatedUnlessGranted
+        };
+        assert_eq!(
+            matrix.loop_run, expected_loop_run,
+            "{} loop_run must match its allowlist membership",
+            descriptor.id
+        );
+    }
+
+    // Concrete spot checks so a reader sees the intended posture, independent of
+    // the allowlist derivation: read-only/dispatch-only caps are Ungated, any
+    // write/network/process cap is GatedUnlessGranted.
+    let loop_run = |id: &str| {
+        package
+            .capabilities
+            .iter()
+            .find(|descriptor| descriptor.id.as_str() == id)
+            .and_then(|descriptor| descriptor.origin_gate_matrix.as_ref())
+            .map(|matrix| matrix.loop_run)
+            .unwrap_or_else(|| panic!("{id} descriptor with matrix"))
+    };
+    for ungated in [
+        ECHO_CAPABILITY_ID,
+        JSON_CAPABILITY_ID,
+        READ_FILE_CAPABILITY_ID,
+        MEMORY_SEARCH_CAPABILITY_ID,
+        TRIGGER_LIST_CAPABILITY_ID,
+        PROFILE_SET_CAPABILITY_ID,
+    ] {
+        assert_eq!(loop_run(ungated), OriginGatePolicy::Ungated, "{ungated}");
+    }
+    for gated in [
+        WRITE_FILE_CAPABILITY_ID,
+        HTTP_CAPABILITY_ID,
+        MEMORY_WRITE_CAPABILITY_ID,
+        SKILL_INSTALL_CAPABILITY_ID,
+        TRIGGER_CREATE_CAPABILITY_ID,
+    ] {
+        assert_eq!(
+            loop_run(gated),
+            OriginGatePolicy::GatedUnlessGranted,
+            "{gated}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn builtin_first_party_processless_package_and_handlers_omit_process_port_backed_shell() {
     let package =

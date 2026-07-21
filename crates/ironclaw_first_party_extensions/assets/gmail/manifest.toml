@@ -10,6 +10,7 @@ kind = "first_party"
 service = "gmail"
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "gmail.list_messages"
 description = "List Gmail messages."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -23,6 +24,7 @@ output_schema_ref = "schemas/gmail/list_messages.output.v1.json"
 prompt_doc_ref = "prompts/gmail/list_messages.md"
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "gmail.get_message"
 description = "Get a Gmail message."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -36,6 +38,7 @@ output_schema_ref = "schemas/gmail/get_message.output.v1.json"
 prompt_doc_ref = "prompts/gmail/get_message.md"
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "gmail.send_message"
 description = "Send a Gmail message."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -49,6 +52,7 @@ output_schema_ref = "schemas/gmail/send_message.output.v1.json"
 prompt_doc_ref = "prompts/gmail/send_message.md"
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "gmail.create_draft"
 description = "Create a Gmail draft."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -62,6 +66,7 @@ output_schema_ref = "schemas/gmail/create_draft.output.v1.json"
 prompt_doc_ref = "prompts/gmail/create_draft.md"
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "gmail.reply_to_message"
 description = "Reply to a Gmail message."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -75,6 +80,7 @@ output_schema_ref = "schemas/gmail/reply_to_message.output.v1.json"
 prompt_doc_ref = "prompts/gmail/reply_to_message.md"
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "gmail.trash_message"
 description = "Move a Gmail message to trash."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]

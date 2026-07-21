@@ -92,6 +92,31 @@ pub struct OriginGateMatrix {
     pub automation: OriginGatePolicy,
 }
 
+/// §5.2.1/§10 — capabilities the model (LoopRun) may invoke UNGATED.
+/// Behavior-preserving seed (grandfathered: these are ungated under today's
+/// `AskDestructive` effect gate, i.e. their effects are a subset of
+/// `{read_filesystem, dispatch_capability}` or they are exempt from approval).
+/// Additions require security review (S5 ratchet).
+pub const UNGATED_LOOP_RUN_CAPABILITIES: &[&str] = &[
+    "builtin.echo",
+    "builtin.time",
+    "builtin.json",
+    "builtin.trace_commons.status",
+    "builtin.trace_commons.credits",
+    "builtin.trace_commons.onboard",
+    "builtin.profile_set",
+    "builtin.memory_search",
+    "builtin.memory_read",
+    "builtin.memory_tree",
+    "builtin.read_file",
+    "builtin.list_dir",
+    "builtin.glob",
+    "builtin.grep",
+    "builtin.skill_list",
+    "builtin.trigger_list",
+    "builtin.extension_search",
+];
+
 impl OriginGateMatrix {
     /// The gate policy this matrix declares for the given invocation origin.
     /// Maps each [`InvocationOrigin`] variant to its matching matrix field;
@@ -101,6 +126,27 @@ impl OriginGateMatrix {
             InvocationOrigin::LoopRun(_) => self.loop_run,
             InvocationOrigin::Product(_) => self.product,
             InvocationOrigin::Automation(_) => self.automation,
+        }
+    }
+
+    /// Behavior-preserving per-capability matrix seed for a first-party builtin
+    /// capability (§5.3 S3). `LoopRun` is [`OriginGatePolicy::Ungated`] exactly
+    /// when `id` is in the reviewed [`UNGATED_LOOP_RUN_CAPABILITIES`] allowlist,
+    /// otherwise [`OriginGatePolicy::GatedUnlessGranted`] (every non-allowlisted
+    /// builtin is GATED under today's effect gate, so this mirrors current
+    /// behavior). `Product` and `Automation` are deny-by-default
+    /// ([`OriginGatePolicy::Forbidden`]) until a later reviewed ingress slice
+    /// declares a live producer for them.
+    pub fn builtin_loop_run_seed(id: &str) -> Self {
+        let loop_run = if UNGATED_LOOP_RUN_CAPABILITIES.contains(&id) {
+            OriginGatePolicy::Ungated
+        } else {
+            OriginGatePolicy::GatedUnlessGranted
+        };
+        Self {
+            loop_run,
+            product: OriginGatePolicy::Forbidden,
+            automation: OriginGatePolicy::Forbidden,
         }
     }
 }
@@ -270,8 +316,47 @@ mod credential_setup_wire_tests {
 
 #[cfg(test)]
 mod origin_gate_wire_tests {
-    use super::{OriginGateMatrix, OriginGatePolicy};
-    use crate::{InvocationOrigin, ProductKind, RoutineId, RunId};
+    use super::{OriginGateMatrix, OriginGatePolicy, UNGATED_LOOP_RUN_CAPABILITIES};
+    use crate::{CapabilityId, InvocationOrigin, ProductKind, RoutineId, RunId};
+
+    /// The checked-in Ungated-for-LoopRun allowlist seed (§5.2.1/§10) must be
+    /// internally consistent: non-empty, free of duplicates, and every entry a
+    /// well-formed capability id. The full "every descriptor matches the
+    /// allowlist" ratchet is a later slice (S5); this locks the seed itself.
+    #[test]
+    fn ungated_loop_run_allowlist_is_internally_consistent() {
+        assert!(
+            !UNGATED_LOOP_RUN_CAPABILITIES.is_empty(),
+            "the allowlist seed must not be empty"
+        );
+        let mut seen = std::collections::HashSet::new();
+        for id in UNGATED_LOOP_RUN_CAPABILITIES {
+            assert!(
+                seen.insert(*id),
+                "duplicate id in UNGATED_LOOP_RUN_CAPABILITIES: {id}"
+            );
+            CapabilityId::new(*id).unwrap_or_else(|_| {
+                panic!("allowlist id {id} must be a well-formed capability id")
+            });
+        }
+    }
+
+    /// `builtin_loop_run_seed` mirrors today's effect gate: an allowlisted id is
+    /// `Ungated` for `LoopRun`, everything else `GatedUnlessGranted`, and
+    /// `Product`/`Automation` are always deny-by-default (`Forbidden`).
+    #[test]
+    fn builtin_loop_run_seed_mirrors_allowlist_membership() {
+        for id in UNGATED_LOOP_RUN_CAPABILITIES {
+            let matrix = OriginGateMatrix::builtin_loop_run_seed(id);
+            assert_eq!(matrix.loop_run, OriginGatePolicy::Ungated, "{id}");
+            assert_eq!(matrix.product, OriginGatePolicy::Forbidden, "{id}");
+            assert_eq!(matrix.automation, OriginGatePolicy::Forbidden, "{id}");
+        }
+        let gated = OriginGateMatrix::builtin_loop_run_seed("builtin.write_file");
+        assert_eq!(gated.loop_run, OriginGatePolicy::GatedUnlessGranted);
+        assert_eq!(gated.product, OriginGatePolicy::Forbidden);
+        assert_eq!(gated.automation, OriginGatePolicy::Forbidden);
+    }
 
     /// `OriginGatePolicy` is a wire-stable enum: every variant must serialize to
     /// its snake_case tag and round-trip back. (§5.2.1)

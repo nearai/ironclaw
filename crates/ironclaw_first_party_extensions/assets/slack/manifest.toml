@@ -17,6 +17,7 @@ module = "wasm/slack_user_tool.wasm"
 # separately (see the follow-up issue referenced on SLACK_PERSONAL_OAUTH_SETUP_SCOPES).
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "slack.search_messages"
 description = "Search across all messages you can see (your DMs, group DMs, and channels you belong to). This is indexed search: do not use it to answer the single newest message when a conversation is known; call slack.get_conversation_history instead for newest-first history. Matches carry the author's resolved user_display_name, and mentions inside match text are already resolved to @display-names (use display names in user-facing output); threaded hits carry thread_ts (follow up with slack.get_thread_replies). When total exceeds count, fetch more with page. Requires the search:read user scope. Raw Slack ids (U…/W…/C…/D…) are for tool calls only — never include one in a reply, not even in parentheses; refer to people and channels by name."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -31,6 +32,7 @@ prompt_doc_ref = "prompts/slack/search_messages.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "slack.list_conversations"
 description = "List channels, private channels, DMs (im), and group DMs (mpim) visible to you — not only ones you belong to; is_member=true is the authoritative membership signal. Use this to discover DM conversation IDs. DM entries include the raw counterpart user id in their user field for subsequent tool calls or <@U…> mentions, plus the resolved user_display_name for user-facing text. Results page: pass the previous call's next_cursor as cursor until next_cursor is absent. Raw Slack ids (U…/W…/C…/D…) are for tool calls only — never include one in a reply, not even in parentheses; refer to people and channels by name."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -45,6 +47,7 @@ prompt_doc_ref = "prompts/slack/list_conversations.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "slack.get_conversation_info"
 description = "Retrieve one Slack conversation by its exact conversation ID. Use this whenever the ID is already known instead of scanning slack.list_conversations. For a DM, the returned conversation.user is the raw counterpart user ID and authoritative mention target; conversation.user_display_name is the human-readable name. Raw Slack ids (U…/W…/C…/D…) are for subsequent tool calls only — never include one in a reply, not even in parentheses; refer to people and channels by name."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -59,6 +62,7 @@ prompt_doc_ref = "prompts/slack/get_conversation_info.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "slack.get_conversation_history"
 description = "Read message history from any channel or DM you can see, identified by its conversation ID. Results are newest-first, at most 999 per call (limit above 999 is clamped; Slack rejects 1000); when has_more is true, fetch older messages by calling again with latest set to the oldest returned ts. Messages include the author's raw user id plus user_display_name and humanized text whose mentions are already resolved to @display-names — use user_display_name and humanized text in user-facing output. Messages with is_current_user=true were written by the connected account (result-level current_user_id): they are the requesting user's own words — attribute them to the requester, not a third party. Thread replies are NOT included — a parent's reply_count > 0 means there is a thread; fetch it with slack.get_thread_replies. Raw Slack ids (U…/W…/C…/D…) are for subsequent tool calls only — never include one in a reply, not even in parentheses; refer to people and channels by name."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -73,6 +77,7 @@ prompt_doc_ref = "prompts/slack/get_conversation_history.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "slack.get_thread_replies"
 description = "Read the replies of one thread (channel + the parent message's thread_ts). Conversation history only shows thread parents (reply_count), never the replies — use this whenever a thread's content matters. Same output shape as history: resolved user_display_name per message, is_current_user marking, and current_user_id. Raw Slack ids (U…/W…/C…/D…) are for tool calls only — never include one in a reply, not even in parentheses; refer to people and channels by name."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -87,6 +92,7 @@ prompt_doc_ref = "prompts/slack/get_thread_replies.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "slack.get_user_info"
 description = "Get information about a Slack user (name, real name); includes presence-relevant profile fields: status text/emoji, timezone, and title. History and DM-list outputs already carry resolved display names; use this for extra fields on a specific user, e.g. before answering whether someone is away or what time it is for them. Raw Slack ids (U…/W…/C…/D…) are for tool calls only — never include one in a reply, not even in parentheses; refer to people and channels by name."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -101,6 +107,7 @@ prompt_doc_ref = "prompts/slack/get_user_info.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "slack.whoami"
 description = "Resolve who the connected Slack account is: the user id (and display name when resolvable) that search/history/DM results belong to. Call this before answering anything that depends on which messages are the requester's own. Takes no parameters. Raw Slack ids (U…/W…/C…/D…) are for tool calls only — never include one in a reply, not even in parentheses; refer to people and channels by name."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -115,6 +122,7 @@ prompt_doc_ref = "prompts/slack/whoami.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "slack.send_message"
 description = "Send a message as you to a channel or DM; it appears to come from your account and requires the chat:write user scope. Never call this — or instruct a trigger to call it — for that run's own final reply when outbound delivery or delivery_target_id is configured; that result is delivered automatically to the configured outbound delivery target. Do not use this to deliver your reply or a routine/trigger result — it would arrive twice. Use it only when messaging someone else or posting somewhere is itself the requested task. To notify someone in the text, use the mention encoding <@U…> with their real user id (e.g. <@U0123ABCD>); a plain @name does not notify anyone. Never guess a user id or derive one from a channel or DM conversation id. When a DM conversation ID is known, first call slack.get_conversation_info with that exact ID and use the returned conversation's user field as the authoritative real user id. When only a name is known, call slack.list_conversations to discover and match the DM."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
