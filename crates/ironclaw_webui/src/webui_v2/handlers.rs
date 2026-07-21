@@ -985,7 +985,11 @@ fn sse_error_event(error: RebornServicesError) -> Event {
         kind: error.kind,
         retryable: error.retryable,
     };
-    match Event::default().event("error").json_data(payload) {
+    // `error` is a reserved EventSource transport event in browsers. Using it
+    // for an application frame invokes both the message listener and the
+    // connection-error handler, which can leave the SPA in a phantom
+    // reconnect loop even though the server delivered a classified error.
+    match Event::default().event("stream_error").json_data(payload) {
         Ok(event) => event,
         Err(error) => {
             tracing::debug!(
@@ -994,7 +998,7 @@ fn sse_error_event(error: RebornServicesError) -> Event {
                 "failed to serialize redacted SSE error payload",
             );
             Event::default()
-                .event("error")
+                .event("stream_error")
                 .data(r#"{"error":"unavailable","kind":"service_unavailable","retryable":true}"#)
         }
     }

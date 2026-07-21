@@ -14,7 +14,6 @@ publish = false
 layer = "products"
 
 [features]
-default = []
 # Compile in `InMemorySessionStore` + `EmailUserDirectory` as public crate
 # items. Off by default so a production deployment cannot accidentally wire the
 # process-local store as a `SessionStore` impl — `SessionAuthenticator` would
@@ -86,7 +85,7 @@ ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
 # composed into `webui_v2_app`. It builds a local-dev
 # runtime through composition's public builders, so it needs composition's
 # `test-support` + `libsql` seams plus the model-gateway / capability-port traits.
-ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", features = ["test-support", "libsql"] }
+ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", features = ["test-support"] }
 ironclaw_loop_host = { path = "../ironclaw_loop_host" }
 tempfile = "3"
 ironclaw_threads = { path = "../ironclaw_threads" }

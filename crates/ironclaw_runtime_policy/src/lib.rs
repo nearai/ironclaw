@@ -49,8 +49,16 @@
 //! profile.
 #![warn(unreachable_pub)]
 
+mod planner;
 mod resolver;
 
+// `plan_capability` picks the per-capability backend kinds from a resolved
+// `EffectiveRuntimePolicy` — the "which backends will we use" half of this
+// crate's charter, sitting directly on top of the resolver output. Relocated
+// here from `ironclaw_host_runtime` (arch-simplification §5.3.1/§9) so the
+// capability kernel can run runtime-policy enforcement inside `authorize()`
+// without an upward dependency on the host runtime.
+pub use planner::{ExecutionPlan, PlannerError, plan_capability};
 pub use resolver::{
     BudgetEnforcement, MinimalApprovalBypass, OrgPolicyConstraints, ResolveError, ResolveRequest,
     budget_enforcement, minimal_approval_bypass, resolve,

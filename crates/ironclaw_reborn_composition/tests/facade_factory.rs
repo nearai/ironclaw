@@ -15,8 +15,6 @@ use chrono::Utc;
 use deadpool_postgres::tokio_postgres;
 #[cfg(feature = "libsql")]
 use ironclaw_auth::{OAuthClientId, OAuthRedirectUri};
-#[cfg(feature = "postgres")]
-use ironclaw_host_api::{AgentId, ProjectId, TenantId};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{
     AuditMode, DeploymentMode, EffectKind, FilesystemBackendKind, NetworkMode, PackageId,
@@ -36,10 +34,6 @@ use ironclaw_host_runtime::{
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn_composition::RebornRuntimeProcessBinding;
-#[cfg(feature = "postgres")]
-use ironclaw_reborn_composition::{
-    LocalTriggerAccessRole, LocalTriggerAccessSeed, LocalTriggerAccessSource,
-};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn_composition::{RebornBuildError, RebornCompositionProfile, RebornServices};
 use ironclaw_reborn_composition::{
@@ -51,8 +45,6 @@ use ironclaw_reborn_composition::{
     RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
     RebornReadinessDiagnosticStatus,
 };
-#[cfg(feature = "postgres")]
-use ironclaw_reborn_config::{RebornConfigFile, StorageBackend, StorageSection};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_runner::turn_scheduler::{
     SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
@@ -66,8 +58,8 @@ use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPoli
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::{
-    InMemoryTurnStateStore,
     runner::{ClaimedTurnRun, TurnRunTransitionPort},
+    test_support::in_memory_turn_state_store,
 };
 #[cfg(feature = "postgres")]
 use postgres_support::assert_postgres_accepts_connections;
@@ -81,9 +73,6 @@ use tokio::sync::Mutex;
 
 #[cfg(feature = "libsql")]
 static SECRETS_MASTER_KEY_ENV_LOCK: Mutex<()> = Mutex::const_new(());
-
-#[cfg(feature = "postgres")]
-static HOSTED_TRIGGER_ACCESS_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(feature = "libsql")]
 struct EnvVarGuard {
@@ -109,49 +98,6 @@ impl Drop for EnvVarGuard {
     fn drop(&mut self) {
         // SAFETY: EnvVarGuard is only constructed while
         // SECRETS_MASTER_KEY_ENV_LOCK is held by this test module.
-        unsafe {
-            match &self.previous {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
-
-#[cfg(feature = "postgres")]
-struct PostgresEnvVarGuard {
-    key: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
-#[cfg(feature = "postgres")]
-impl PostgresEnvVarGuard {
-    fn set(key: &'static str, value: &str) -> Self {
-        let previous = std::env::var_os(key);
-        // SAFETY: tests serialize process-env mutation with
-        // HOSTED_TRIGGER_ACCESS_ENV_LOCK and restore the prior value on drop.
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, previous }
-    }
-
-    fn clear(key: &'static str) -> Self {
-        let previous = std::env::var_os(key);
-        // SAFETY: tests serialize process-env mutation with
-        // HOSTED_TRIGGER_ACCESS_ENV_LOCK and restore the prior value on drop.
-        unsafe {
-            std::env::remove_var(key);
-        }
-        Self { key, previous }
-    }
-}
-
-#[cfg(feature = "postgres")]
-impl Drop for PostgresEnvVarGuard {
-    fn drop(&mut self) {
-        // SAFETY: PostgresEnvVarGuard is only constructed while
-        // HOSTED_TRIGGER_ACCESS_ENV_LOCK is held by this test module.
         unsafe {
             match &self.previous {
                 Some(value) => std::env::set_var(self.key, value),
@@ -400,14 +346,21 @@ fn assert_failed_capability(
     };
     assert_eq!(failure.capability_id.as_str(), capability_id);
     assert_eq!(failure.kind, expected_kind);
+    let message = failure.message.as_deref().unwrap_or_default();
     assert!(
-        failure
-            .message
-            .as_deref()
-            .is_some_and(|message| message.contains(expected_message)),
+        message.contains(expected_message),
         "expected {capability_id} failure message to contain {expected_message:?}, got {:?}",
         failure.message
     );
+    // Denial messages must explain the reason in plain language and never leak
+    // internal planner enum tokens to the model (see #6386 and the
+    // `builtin_http_runtime_policy_denial_stops_before_egress` sibling check).
+    for token in ["ProcessBackendKind::", "NetworkMode::", "SecretMode::"] {
+        assert!(
+            !message.contains(token),
+            "{capability_id} failure message leaked internal planner enum token {token:?}: {message}"
+        );
+    }
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -467,7 +420,7 @@ async fn assert_process_capabilities_unavailable_for_processless_runtime(
         spawn_outcome,
         SPAWN_SUBAGENT_CAPABILITY_ID,
         RuntimeFailureKind::Authorization,
-        "ProcessBackendKind::None",
+        "process execution is disabled",
     );
 }
 
@@ -547,7 +500,7 @@ fn empty_trust_policy() -> Arc<HostTrustPolicy> {
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn live_wake_notifier() -> (Arc<SchedulerTurnRunWakeNotifier>, TurnRunSchedulerHandle) {
-    let transitions: Arc<dyn TurnRunTransitionPort> = Arc::new(InMemoryTurnStateStore::default());
+    let transitions: Arc<dyn TurnRunTransitionPort> = Arc::new(in_memory_turn_state_store());
     let executor: Arc<dyn TurnRunExecutor> = Arc::new(NoopTurnRunExecutor);
     let handle =
         TurnRunScheduler::new(transitions, executor, TurnRunSchedulerConfig::default()).start();
@@ -730,7 +683,7 @@ async fn hosted_single_tenant_volume_hides_process_capabilities() {
     assert_process_capabilities_unavailable_for_processless_runtime(
         &services,
         RuntimeFailureKind::Authorization,
-        "ProcessBackendKind::None",
+        "process execution is disabled",
     )
     .await;
 }
@@ -1530,85 +1483,6 @@ async fn production_postgres_services_migrate_trigger_repository_before_runtime_
         .expect("trigger table exists after production build");
     let count: i64 = row.get(0);
     assert_eq!(count, 0);
-}
-
-#[cfg(feature = "postgres")]
-#[tokio::test]
-async fn hosted_single_tenant_trigger_access_store_persists_across_reopen() {
-    let Some((_container, _pool, database_url)) = postgres_pool_or_skip().await else {
-        return;
-    };
-    let _env_lock = HOSTED_TRIGGER_ACCESS_ENV_LOCK.lock().await;
-    let _database_url = PostgresEnvVarGuard::set("IRONCLAW_REBORN_POSTGRES_URL", &database_url);
-    let _secret_master_key = PostgresEnvVarGuard::set(
-        "IRONCLAW_REBORN_SECRET_MASTER_KEY",
-        "01234567890123456789012345678901",
-    );
-    let _pool_max_size = PostgresEnvVarGuard::set("IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE", "1");
-    let _resource_governor_singleton = PostgresEnvVarGuard::set(
-        "IRONCLAW_REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON",
-        "true",
-    );
-    let _allow_cleartext =
-        PostgresEnvVarGuard::set("IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT", "true");
-    let _ssl_mode = PostgresEnvVarGuard::clear("DATABASE_SSLMODE");
-    let root = tempfile::tempdir().expect("runtime root");
-    let config = RebornConfigFile {
-        storage: Some(StorageSection {
-            backend: Some(StorageBackend::Postgres),
-            pool_max_size: Some(1),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let tenant_id = TenantId::new("hosted-trigger-tenant").expect("tenant id");
-    let user_id = UserId::new("hosted-trigger-user").expect("user id");
-    let agent_id = AgentId::new("hosted-trigger-agent").expect("agent id");
-    let project_id = ProjectId::new("hosted-trigger-project").expect("project id");
-
-    let input = RebornBuildInput::hosted_single_tenant_postgres_from_config_and_env(
-        RebornCompositionProfile::HostedSingleTenant,
-        "hosted-trigger-owner",
-        root.path().to_path_buf(),
-        Some(&config),
-    )
-    .expect("hosted postgres build input resolves from env");
-    let store = input
-        .open_hosted_single_tenant_trigger_access_store()
-        .await
-        .expect("open hosted trigger access store");
-    store
-        .seed_local_access(LocalTriggerAccessSeed {
-            tenant_id: &tenant_id,
-            user_id: &user_id,
-            agent_id: Some(&agent_id),
-            project_id: Some(&project_id),
-            role: LocalTriggerAccessRole::Owner,
-            source: LocalTriggerAccessSource::LocalDevEnvBootstrap,
-        })
-        .await
-        .expect("seed hosted trigger access");
-    drop(store);
-
-    let reopened_input = RebornBuildInput::hosted_single_tenant_postgres_from_config_and_env(
-        RebornCompositionProfile::HostedSingleTenant,
-        "hosted-trigger-owner",
-        root.path().to_path_buf(),
-        Some(&config),
-    )
-    .expect("reopened hosted postgres build input resolves from env");
-    let reopened_store = reopened_input
-        .open_hosted_single_tenant_trigger_access_store()
-        .await
-        .expect("reopen hosted trigger access store");
-
-    assert!(
-        reopened_store
-            .has_active_local_access(&tenant_id, &user_id, Some(&agent_id), Some(&project_id))
-            .await
-            .expect("check reopened hosted trigger access"),
-        "hosted-single-tenant trigger access must persist through the filesystem-backed Postgres store"
-    );
 }
 
 #[cfg(feature = "postgres")]

@@ -226,7 +226,18 @@ then
   esac
 fi
 
-host="${IRONCLAW_REBORN_SERVE_HOST:-127.0.0.1}"
+# Serve-host resolution: an explicit IRONCLAW_REBORN_SERVE_HOST always wins.
+# Otherwise, on Railway (and any platform that sets the RAILWAY_* markers) the
+# container MUST bind 0.0.0.0 or the platform health check / ingress cannot
+# reach it — a loopback bind fails the deploy. Off-Railway (e.g. a local
+# `docker run`) keeps the conservative loopback default.
+if [ -n "${IRONCLAW_REBORN_SERVE_HOST:-}" ]; then
+  host="${IRONCLAW_REBORN_SERVE_HOST}"
+elif railway_runtime_detected; then
+  host="0.0.0.0"
+else
+  host="127.0.0.1"
+fi
 port="${PORT:-${IRONCLAW_REBORN_SERVE_PORT:-3000}}"
 
 resolve_env_placeholder_arg() {

@@ -125,6 +125,79 @@ pub trait TriggerFireAccessChecker: Send + Sync {
     ) -> Result<TriggerFireAccessDecision, TriggerFireAccessError>;
 }
 
+/// A single fire-time access grant. The granted scope is exact (`None` project
+/// means "no project", never a wildcard), matching [`TriggerFireAccessCheck`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerFireAccessGrant {
+    /// A single static owner may fire triggers for the granted scope — the
+    /// env-token `serve` and CLI `run` owner grant. `owner` is the
+    /// caller-configured owner id (formerly seeded into the trigger-access
+    /// store); the check is a pure comparison, no persistence.
+    StaticOwner {
+        owner: UserId,
+        agent: AgentId,
+        project: Option<ProjectId>,
+    },
+    /// Any active member of the host tenant may fire triggers for the granted
+    /// scope — the SSO/WebUI deployment. Membership is resolved at fire time
+    /// from the canonical identity directory (the `StoredUser` records SSO
+    /// login persists), so a suspended or unknown creator is denied.
+    TenantMembership {
+        agent: AgentId,
+        project: Option<ProjectId>,
+    },
+}
+
+/// How fire-time trigger access is authorized for this deployment — the set of
+/// grants that authorize a fire, OR-combined.
+///
+/// This is the config value that replaced the former `local_trigger_access`
+/// shadow store (arch-simplification §4.4): the owner grant is *data* resolved
+/// at the serve/run edge, and `build_reborn_runtime` builds the matching
+/// [`TriggerFireAccessChecker`] from it — no per-deployment store type. An empty
+/// policy wires no authorizer (poller disabled / authorization supplied out of
+/// band). A `serve` with both the operator owner and SSO carries both a
+/// `StaticOwner` and a `TenantMembership` grant, preserving the union the old
+/// single store expressed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TriggerFireAccessPolicy {
+    grants: Vec<TriggerFireAccessGrant>,
+}
+
+impl TriggerFireAccessPolicy {
+    /// No fire-time authorizer.
+    pub fn disabled() -> Self {
+        Self::default()
+    }
+
+    /// Grant the caller-configured static owner access for the exact scope.
+    pub fn with_static_owner(
+        mut self,
+        owner: UserId,
+        agent: AgentId,
+        project: Option<ProjectId>,
+    ) -> Self {
+        self.grants.push(TriggerFireAccessGrant::StaticOwner {
+            owner,
+            agent,
+            project,
+        });
+        self
+    }
+
+    /// Grant any active member of the host tenant access for the exact scope.
+    pub fn with_tenant_membership(mut self, agent: AgentId, project: Option<ProjectId>) -> Self {
+        self.grants
+            .push(TriggerFireAccessGrant::TenantMembership { agent, project });
+        self
+    }
+
+    /// The declared grants, OR-combined at fire time by the build.
+    pub(crate) fn grants(&self) -> &[TriggerFireAccessGrant] {
+        &self.grants
+    }
+}
+
 #[derive(Clone)]
 pub struct ResolvedRebornLlm {
     provider_id: String,
@@ -418,7 +491,15 @@ pub struct RebornRuntimeInput {
     pub tool_disclosure: Option<ToolDisclosureMode>,
     pub trigger_poller: TriggerPollerSettings,
     pub credential_refresh: CredentialRefreshSettings,
+    /// Explicit fire-time access checker override. Primarily a test/advanced
+    /// seam; production callers set [`trigger_fire_access`](Self::trigger_fire_access)
+    /// and let the build construct the checker. When set, it takes precedence
+    /// over the policy.
     pub trigger_fire_access_checker: Option<Arc<dyn TriggerFireAccessChecker>>,
+    /// The deployment's fire-time access policy. `build_reborn_runtime` builds
+    /// the matching [`TriggerFireAccessChecker`] from this when the trigger
+    /// poller is enabled and no explicit checker override is supplied.
+    pub trigger_fire_access: TriggerFireAccessPolicy,
     pub poll: PollSettings,
     pub identity: RebornRuntimeIdentity,
     /// Optional project scope for runtime-owned thread I/O. Channel adapters
@@ -487,6 +568,7 @@ impl RebornRuntimeInput {
             trigger_poller: TriggerPollerSettings::default(),
             credential_refresh: CredentialRefreshSettings::default(),
             trigger_fire_access_checker: None,
+            trigger_fire_access: TriggerFireAccessPolicy::default(),
             poll: PollSettings::default(),
             identity: RebornRuntimeIdentity::default(),
             default_project_id: None,
@@ -632,6 +714,11 @@ impl RebornRuntimeInput {
         self
     }
 
+    pub fn with_trigger_fire_access_policy(mut self, policy: TriggerFireAccessPolicy) -> Self {
+        self.trigger_fire_access = policy;
+        self
+    }
+
     pub fn with_poll_settings(mut self, poll: PollSettings) -> Self {
         self.poll = poll;
         self
@@ -660,6 +747,26 @@ impl RebornRuntimeInput {
         self.services = self
             .services
             .map(|services| services.with_owner_id(owner_id));
+        self
+    }
+
+    /// Forward the build-time Slack host-beta wiring signal onto the
+    /// substrate build input. No-op when the services input is absent,
+    /// mirroring `with_owner_id` above.
+    pub fn with_slack_host_beta_enabled(mut self, enabled: bool) -> Self {
+        self.services = self
+            .services
+            .map(|services| services.with_slack_host_beta_enabled(enabled));
+        self
+    }
+
+    /// Forward the build-time Slack personal-OAuth redirect-URI signal onto
+    /// the substrate build input. No-op when the services input is absent,
+    /// mirroring `with_slack_host_beta_enabled` above.
+    pub fn with_slack_personal_oauth_redirect_uri_configured(mut self, configured: bool) -> Self {
+        self.services = self
+            .services
+            .map(|services| services.with_slack_personal_oauth_redirect_uri_configured(configured));
         self
     }
 

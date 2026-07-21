@@ -106,6 +106,8 @@ const TreeNode = React.memo(function WorkspaceTreeNode({
         aria-level={depth + 1}
         aria-posinset={positionInSet}
         aria-setsize={siblingCount}
+        data-testid="workspace-tree-entry"
+        data-entry-path={entry.path}
         data-tree-path={entry.path}
         data-tree-depth={depth}
         onFocus={(event) => onTreeItemFocus(event.currentTarget)}
@@ -177,6 +179,8 @@ const TreeNode = React.memo(function WorkspaceTreeNode({
       aria-level={depth + 1}
       aria-posinset={positionInSet}
       aria-setsize={siblingCount}
+      data-testid="workspace-tree-entry"
+      data-entry-path={entry.path}
       data-tree-path={entry.path}
       data-tree-depth={depth}
       onFocus={(event) => onTreeItemFocus(event.currentTarget)}

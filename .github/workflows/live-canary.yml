@@ -812,7 +812,7 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "0"
         run: >-
           cargo build
-          -p ironclaw_reborn_cli
+          -p ironclaw
           --bin ironclaw
 
       - name: Package fallback Reborn WebUI v2 binary

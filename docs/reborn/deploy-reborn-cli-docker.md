@@ -1,10 +1,10 @@
 # Reborn CLI Docker Deployment
 
-`Dockerfile.reborn` builds the standalone `ironclaw-reborn` binary with the
+`Dockerfile.reborn` builds the standalone `ironclaw` binary with the
 WebUI v2 and Slack host-beta features enabled. The image defaults to:
 
 ```text
-ironclaw-reborn serve --host ${IRONCLAW_REBORN_SERVE_HOST:-127.0.0.1} --port ${PORT:-3000}
+ironclaw serve --host ${IRONCLAW_REBORN_SERVE_HOST:-127.0.0.1} --port ${PORT:-3000}
 ```
 
 Railway supplies `PORT`; set `IRONCLAW_REBORN_SERVE_HOST=0.0.0.0` for
@@ -79,7 +79,7 @@ keep `IRONCLAW_REBORN_SERVE_HOST=0.0.0.0`. The Reborn WebUI service serves
 `/api/health` for Railway's healthcheck.
 
 Leave Railway's Start Command empty for the Docker image. The image entrypoint
-builds the `ironclaw-reborn serve` arguments from `PORT` and
+builds the `ironclaw serve` arguments from `PORT` and
 `IRONCLAW_REBORN_SERVE_HOST`; Railway does not shell-expand `$VAR` placeholders
 in Docker command arguments before they reach the entrypoint.
 
@@ -115,7 +115,7 @@ disposable test deployment.
 For managed Postgres providers with a small session-pool cap, set
 `IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE=1` or `2` rather than relying on the
 provider to queue excess sessions.
-For `hosted-single-tenant`, `ironclaw-reborn serve` binds the WebUI listener
+For `hosted-single-tenant`, `ironclaw serve` binds the WebUI listener
 and serves `/api/health` before PostgreSQL-backed runtime assembly finishes.
 Non-health routes return `503` until the runtime router is ready. This lets
 Railway drain the old deployment and release PgBouncer session-mode
@@ -124,7 +124,7 @@ connections before the new deployment needs one for startup migrations.
 how long runtime assembly waits for PostgreSQL once the healthcheck listener is
 up; the default is 5 minutes.
 
-`ironclaw-reborn serve` exits before binding the HTTP listener if the WebUI
+`ironclaw serve` exits before binding the HTTP listener if the WebUI
 token/user variables are missing. The bundled config selects NearAI as the
 default LLM provider, so set `NEARAI_API_KEY` unless a custom mounted config
 selects a different provider.

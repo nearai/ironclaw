@@ -551,7 +551,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Config recovery on clobber | ✅ | ❌ | Restore last-known-good config on critical clobber signatures (missing metadata, missing `gateway.mode`, sharp size drops); foreground/service notices include rejected paths |
 | Modular `$include` files | ✅ | ❌ | Single-file top-level includes for isolated mutations; `plugins install`/`update` updates `plugins.json5` instead of flattening |
 | `config set --merge`/`--replace` | ✅ | ❌ | Additive vs intentional clobber for provider model maps |
-| Wrapper-based service install | ✅ | ✅ (Reborn) | `--wrapper`/`OPENCLAW_WRAPPER` validated executable LaunchAgent/systemd wrappers; Reborn's `ironclaw-reborn service install` covers launchd (macOS)/systemd (Linux) with a webui-token-file fallback and atomic install + rollback on failure |
+| Wrapper-based service install | ✅ | ✅ (Reborn) | `--wrapper`/`OPENCLAW_WRAPPER` validated executable LaunchAgent/systemd wrappers; Reborn's `ironclaw service install` covers launchd (macOS)/systemd (Linux) with a webui-token-file fallback and atomic install + rollback on failure |
 
 ### Owner: _Unassigned_
 
@@ -835,7 +835,7 @@ CLAUDE.md for the full mapping + gap catalog.
 
 ### P1 - High Priority
 
-- 🚧 Slack channel (real implementation): Reborn host-beta route can be explicitly mounted by `ironclaw-reborn serve` with Slack Events API signing, extension-card personal OAuth setup that binds Slack `authed_user.id` to the authenticated Reborn user, DM/app-mention routing through Product Workflow/Reborn, final-reply delivery, admin-managed allowed-channel picker, durable WebUI channel-route assignment APIs, provider-side default outbound target inventory for shared channels and explicitly provisioned personal DMs, and a host-bundled Reborn extension manifest declaring the Slack ProductAdapter host API; DMs execute as the OAuth-bound actor, while shared channel turns route to allowed dynamic or static channel subjects and fail closed for unrouted channels in admin-managed mode; broader production install/setup hardening remains follow-up.
+- 🚧 Slack channel (real implementation): Reborn host-beta route can be explicitly mounted by `ironclaw serve` with Slack Events API signing, extension-card personal OAuth setup that binds Slack `authed_user.id` to the authenticated Reborn user, DM/app-mention routing through Product Workflow/Reborn, final-reply delivery, admin-managed allowed-channel picker, durable WebUI channel-route assignment APIs, provider-side default outbound target inventory for shared channels and explicitly provisioned personal DMs, and a host-bundled Reborn extension manifest declaring the Slack ProductAdapter host API; DMs execute as the OAuth-bound actor, while shared channel turns route to allowed dynamic or static channel subjects and fail closed for unrouted channels in admin-managed mode; broader production install/setup hardening remains follow-up.
 - ✅ Telegram channel (WASM, polling-first setup, DM pairing, caption, /start)
 - ❌ WhatsApp channel
 - ✅ Multi-provider failover (`FailoverProvider` with retryable error classification)

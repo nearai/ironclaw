@@ -35,7 +35,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(feature = "postgres")]
 use crate::redaction::redact_postgres_url;
 use crate::{
     api_capacity::ApiCapacitySummary,
@@ -148,22 +147,12 @@ pub(crate) struct Args {
     #[arg(long, value_enum, default_value_t = Scenario::ReserveRelease)]
     pub(crate) scenario: Scenario,
 
-    /// Turn-state store backend for user-turn scenarios. `filesystem` = durable
-    /// per-user state.json (CAS, current production path);
+    /// Turn-state store backend for user-turn scenarios.
     /// `filesystem-row` = durable typed append-log deltas with a hot
-    /// in-process row cache; `memory` = one shared in-process authority
-    /// (runtime-wedge prototype). No effect on non-turn scenarios.
-    #[arg(long, value_enum, default_value_t = TurnStateBackend::Filesystem)]
+    /// in-process row cache (the production path); `row-memory` = the same row
+    /// store over an in-memory backend. No effect on non-turn scenarios.
+    #[arg(long, value_enum, default_value_t = TurnStateBackend::FilesystemRow)]
     pub(crate) turn_state_backend: TurnStateBackend,
-
-    /// Durable-commit policy for the row-store backends (`filesystem-row`,
-    /// `row-memory`). `write-through` (default) awaits every delta's durable ack;
-    /// `write-behind` returns non-critical transitions (Queued/Running) before
-    /// their ack while keeping gate-park + terminal transitions synchronously
-    /// durable — the `inmemory-turn-state` production profile's policy. No effect
-    /// on the `filesystem`/`memory` backends.
-    #[arg(long, value_enum, default_value_t = TurnStateDurability::WriteThrough)]
-    pub(crate) turn_state_durability: TurnStateDurability,
 
     /// Override max retained terminal run records in the turn-state store.
     /// Useful for measuring filesystem snapshot growth sensitivity.
@@ -535,9 +524,9 @@ impl Args {
         }
     }
 
-    pub(crate) fn turn_state_store_limits(&self) -> ironclaw_turns::InMemoryTurnStateStoreLimits {
-        let defaults = ironclaw_turns::InMemoryTurnStateStoreLimits::default();
-        ironclaw_turns::InMemoryTurnStateStoreLimits {
+    pub(crate) fn turn_state_store_limits(&self) -> ironclaw_turns::TurnStateStoreLimits {
+        let defaults = ironclaw_turns::TurnStateStoreLimits::default();
+        ironclaw_turns::TurnStateStoreLimits {
             max_events: self.turn_state_max_events.unwrap_or(defaults.max_events),
             max_terminal_records: self
                 .turn_state_max_terminal_records
@@ -617,73 +606,20 @@ impl Backend {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum TurnStateBackend {
-    /// Durable per-user `state.json` via the filesystem store (per-step CAS
-    /// read-modify-write). The current production path; livelocks under
-    /// concurrent same-user writers.
-    Filesystem,
     /// Durable typed append-log deltas with one hot in-process store per
-    /// tenant/user. Candidate filesystem fix for the blob growth curve.
+    /// tenant/user. The production turn-state store.
     FilesystemRow,
-    /// The row store over an in-memory `RootFilesystem` backend — the proposed
-    /// replacement for the direct `InMemoryTurnStateStore` authority in the
-    /// `inmemory-turn-state` profile. Measures the row-store mechanism's
-    /// overhead with the durable backend cost removed.
+    /// The row store over an in-memory `RootFilesystem` backend — the in-memory
+    /// turn-state authority: coordination in memory with the durable backend
+    /// cost removed. Measures the row-store mechanism's overhead in isolation.
     RowMemory,
-    /// One shared in-process `InMemoryTurnStateStore` authority — coordination
-    /// in memory, no per-step CAS. Prototype for the runtime-wedge fix.
-    Memory,
-    /// The shipped hosted-single-tenant-volume config: the shared in-memory
-    /// authority with a durable persist-on-block sink attached. The sink fires
-    /// only when the gate-blocked set changes (off the hot path), so this
-    /// measures the extra cost the durability wiring adds to the normal
-    /// claim/complete path versus plain `Memory`.
-    MemoryPersistOnBlock,
 }
 
 impl TurnStateBackend {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
-            Self::Filesystem => "filesystem",
             Self::FilesystemRow => "filesystem-row",
             Self::RowMemory => "row-memory",
-            Self::Memory => "memory",
-            Self::MemoryPersistOnBlock => "memory-persist-on-block",
-        }
-    }
-
-    /// Whether a durable persist-on-block sink is attached to the in-memory
-    /// authority.
-    pub(crate) fn persists_on_block(self) -> bool {
-        matches!(self, Self::MemoryPersistOnBlock)
-    }
-}
-
-/// Durable-commit policy for the row-store turn-state backends. Mirrors
-/// `ironclaw_turns::TurnStateDurabilityPolicy` as a `ValueEnum` for the CLI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum TurnStateDurability {
-    /// Await every delta's durable ack (current default; byte-for-byte the
-    /// pre-#6263-Step-3 behavior).
-    WriteThrough,
-    /// Non-critical transitions return before their durable ack; gate-park and
-    /// terminal transitions stay synchronously durable. The `inmemory-turn-state`
-    /// production profile's policy.
-    WriteBehind,
-}
-
-impl TurnStateDurability {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::WriteThrough => "write-through",
-            Self::WriteBehind => "write-behind",
-        }
-    }
-
-    pub(crate) fn to_policy(self) -> ironclaw_turns::TurnStateDurabilityPolicy {
-        match self {
-            Self::WriteThrough => ironclaw_turns::TurnStateDurabilityPolicy::WriteThrough,
-            Self::WriteBehind => ironclaw_turns::TurnStateDurabilityPolicy::WriteBehind,
         }
     }
 }
@@ -884,7 +820,6 @@ struct RunSummary {
     active_thread_count: usize,
     threads_per_owner: usize,
     turn_state_backend: TurnStateBackend,
-    turn_state_durability: TurnStateDurability,
     turn_state_max_terminal_records: Option<usize>,
     turn_state_max_events: Option<usize>,
     turn_state_max_idempotency_records: Option<usize>,
@@ -1540,8 +1475,6 @@ fn run_child_processes(args: &Args, run_id: &str) -> Result<Vec<RunSummary>, Str
             .arg(args.scenario.as_str())
             .arg("--turn-state-backend")
             .arg(args.turn_state_backend.as_str())
-            .arg("--turn-state-durability")
-            .arg(args.turn_state_durability.as_str())
             .arg("--postgres-pool-size")
             .arg(args.postgres_pool_size.to_string())
             .arg("--progress-interval-seconds")
@@ -2272,7 +2205,6 @@ fn summarize(args: &Args, run_id: &str, input: SummaryInput) -> RunSummary {
         active_thread_count: args.active_thread_count,
         threads_per_owner: args.threads_per_owner,
         turn_state_backend: args.turn_state_backend,
-        turn_state_durability: args.turn_state_durability,
         turn_state_max_terminal_records: args.turn_state_max_terminal_records,
         turn_state_max_events: args.turn_state_max_events,
         turn_state_max_idempotency_records: args.turn_state_max_idempotency_records,
@@ -2334,7 +2266,6 @@ async fn build_backend(args: &Args, run_id: &str) -> Result<BackendHandle, Strin
     }
 }
 
-#[cfg(feature = "libsql")]
 async fn build_libsql_backend(args: &Args, run_id: &str) -> Result<BackendHandle, String> {
     let (filesystem, target) = build_libsql_root(args).await?;
     Ok(BackendHandle {
@@ -2343,7 +2274,6 @@ async fn build_libsql_backend(args: &Args, run_id: &str) -> Result<BackendHandle
     })
 }
 
-#[cfg(feature = "libsql")]
 pub(crate) async fn build_libsql_root(
     args: &Args,
 ) -> Result<(Arc<ironclaw_filesystem::LibSqlRootFilesystem>, String), String> {
@@ -2366,12 +2296,6 @@ pub(crate) async fn build_libsql_root(
     Ok((filesystem, redact_libsql_path(&path)))
 }
 
-#[cfg(not(feature = "libsql"))]
-async fn build_libsql_backend(_args: &Args, _run_id: &str) -> Result<BackendHandle, String> {
-    Err("binary was built without the libsql feature".to_string())
-}
-
-#[cfg(feature = "postgres")]
 async fn build_postgres_backend(args: &Args, run_id: &str) -> Result<BackendHandle, String> {
     let (filesystem, _pool, target) = build_postgres_root_and_pool(args).await?;
     Ok(BackendHandle {
@@ -2380,7 +2304,6 @@ async fn build_postgres_backend(args: &Args, run_id: &str) -> Result<BackendHand
     })
 }
 
-#[cfg(feature = "postgres")]
 pub(crate) async fn build_postgres_root_and_pool(
     args: &Args,
 ) -> Result<
@@ -2405,11 +2328,6 @@ pub(crate) async fn build_postgres_root_and_pool(
     let filesystem = Arc::new(PostgresRootFilesystem::new(pool.clone()));
     filesystem.run_migrations().await.map_err(display_err)?;
     Ok((filesystem, pool, redact_postgres_url(&url)))
-}
-
-#[cfg(not(feature = "postgres"))]
-async fn build_postgres_backend(_args: &Args, _run_id: &str) -> Result<BackendHandle, String> {
-    Err("binary was built without the postgres feature".to_string())
 }
 
 pub(crate) fn governor_from_root<F>(
@@ -2492,7 +2410,6 @@ fn panic_payload_to_string(payload: &Box<dyn Any + Send + 'static>) -> String {
     "non-string panic payload".to_string()
 }
 
-#[cfg(feature = "postgres")]
 pub(crate) fn resolve_postgres_url(args: &Args) -> Result<String, String> {
     if let Some(url) = args.postgres_url.clone() {
         return Ok(url);
@@ -2510,7 +2427,6 @@ pub(crate) fn resolve_postgres_url(args: &Args) -> Result<String, String> {
     )
 }
 
-#[cfg(feature = "postgres")]
 fn optional_env_var(name: &str) -> Result<Option<String>, String> {
     match std::env::var(name) {
         Ok(value) => Ok(Some(value)),

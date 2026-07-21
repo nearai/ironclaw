@@ -306,6 +306,21 @@ impl<S: ?Sized> LifecyclePublishingTurnStateStore<S> {
         }
     }
 
+    /// Publish the lifecycle event for a run-transition result and return the
+    /// state. The event kind and sanitized reason are derived from the state
+    /// ([`event_kind_for_state`] / [`sanitized_reason_for_state`]) — the same
+    /// values every `TurnRunTransitionPort` terminal transition would compute
+    /// by hand, so this is the one place that shape lives.
+    async fn publish_transition(&self, state: TurnRunState) -> Result<TurnRunState, TurnError> {
+        let event = TurnLifecycleEvent::from_run_state(
+            &state,
+            event_kind_for_state(&state),
+            sanitized_reason_for_state(&state),
+        );
+        self.publish_state_once(state.clone(), event).await?;
+        Ok(state)
+    }
+
     async fn publish_state_once_best_effort(
         &self,
         state: TurnRunState,
@@ -705,16 +720,12 @@ where
 
     async fn block_run(&self, request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
         let state = self.inner.block_run(request).await?;
-        let event = TurnLifecycleEvent::from_run_state(&state, TurnEventKind::Blocked, None);
-        self.publish_state_once(state.clone(), event).await?;
-        Ok(state)
+        self.publish_transition(state).await
     }
 
     async fn complete_run(&self, request: CompleteRunRequest) -> Result<TurnRunState, TurnError> {
         let state = self.inner.complete_run(request).await?;
-        let event = TurnLifecycleEvent::from_run_state(&state, TurnEventKind::Completed, None);
-        self.publish_state_once(state.clone(), event).await?;
-        Ok(state)
+        self.publish_transition(state).await
     }
 
     async fn cancel_run(
@@ -722,20 +733,12 @@ where
         request: CancelRunCompletionRequest,
     ) -> Result<TurnRunState, TurnError> {
         let state = self.inner.cancel_run(request).await?;
-        let event = TurnLifecycleEvent::from_run_state(&state, TurnEventKind::Cancelled, None);
-        self.publish_state_once(state.clone(), event).await?;
-        Ok(state)
+        self.publish_transition(state).await
     }
 
     async fn fail_run(&self, request: FailRunRequest) -> Result<TurnRunState, TurnError> {
         let state = self.inner.fail_run(request).await?;
-        let event = TurnLifecycleEvent::from_run_state(
-            &state,
-            TurnEventKind::Failed,
-            sanitized_reason_for_state(&state),
-        );
-        self.publish_state_once(state.clone(), event).await?;
-        Ok(state)
+        self.publish_transition(state).await
     }
 
     async fn record_runner_failure(
@@ -743,13 +746,7 @@ where
         request: RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
         let state = self.inner.record_runner_failure(request).await?;
-        let event = TurnLifecycleEvent::from_run_state(
-            &state,
-            event_kind_for_state(&state),
-            sanitized_reason_for_state(&state),
-        );
-        self.publish_state_once(state.clone(), event).await?;
-        Ok(state)
+        self.publish_transition(state).await
     }
 
     async fn relinquish_run(
@@ -757,13 +754,7 @@ where
         request: RelinquishRunRequest,
     ) -> Result<TurnRunState, TurnError> {
         let state = self.inner.relinquish_run(request).await?;
-        let event = TurnLifecycleEvent::from_run_state(
-            &state,
-            event_kind_for_state(&state),
-            sanitized_reason_for_state(&state),
-        );
-        self.publish_state_once(state.clone(), event).await?;
-        Ok(state)
+        self.publish_transition(state).await
     }
 
     async fn apply_validated_loop_exit(
@@ -771,12 +762,6 @@ where
         request: ApplyValidatedLoopExitRequest,
     ) -> Result<TurnRunState, TurnError> {
         let state = self.inner.apply_validated_loop_exit(request).await?;
-        let event = TurnLifecycleEvent::from_run_state(
-            &state,
-            event_kind_for_state(&state),
-            sanitized_reason_for_state(&state),
-        );
-        self.publish_state_once(state.clone(), event).await?;
-        Ok(state)
+        self.publish_transition(state).await
     }
 }

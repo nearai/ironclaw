@@ -32,12 +32,11 @@ regression-check exemption rather than silently omitting coverage.
   feature-gated dead code — a `#[cfg(feature = "x")]`-only caller makes its
   helper *live* under `--all-features` and *dead* (a `-D warnings` error)
   everywhere the feature is off. **PR CI runs only the slim `all-features` lane;
-  the full `default` / `libsql-only` matrix runs post-merge**, so this class
-  breaks `main` after a green PR. If you add or move a `#[cfg(feature = ...)]`
-  gate, or touch a helper only reachable through one, run the full matrix
-  locally before merging (see "Required checks"). When you gate the only
-  caller(s) of a helper behind a feature, gate the helper's definition with the
-  same `#[cfg]`.
+  the broader `default` lane runs post-merge**, so this class can break `main`
+  after a green PR. If you add or move a `#[cfg(feature = ...)]` gate, or touch
+  a helper only reachable through one, run the relevant feature lanes locally
+  before merging (see "Required checks"). When you gate the only caller(s) of a
+  helper behind a feature, gate the helper's definition with the same `#[cfg]`.
 - **UTF-8:** never byte-slice user or external strings with `&value[..n]`.
   Use `char_indices()`, `chars()`, or an `is_char_boundary()`-checked boundary.
   Search changed Rust files for suspicious `[..` slicing.
@@ -72,13 +71,12 @@ Workspace-wide zero-warning clippy:
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-Full feature matrix — reproduces the post-merge `Code Style` gate that PR CI
-skips (it only runs the `all-features` lane). Run all three whenever a change
-adds, moves, or relies on a `#[cfg(feature = ...)]` gate:
+Feature matrix — reproduces the post-merge `Code Style` gate that PR CI skips
+(it only runs the `all-features` lane). Run both whenever a change adds, moves,
+or relies on a `#[cfg(feature = ...)]` gate:
 
 ```bash
 cargo clippy --all --tests --examples -- -D warnings                              # default
-cargo clippy --all --tests --examples --no-default-features --features libsql -- -D warnings  # libsql-only
 cargo clippy --all --tests --examples --all-features -- -D warnings               # all-features
 ```
 
@@ -94,6 +92,44 @@ is unchanged, keep behavioral fixes separate, and record follow-up issues for
 problems discovered during the move. After moving or renaming code, search
 `.claude/`, `AGENTS.md`, `CLAUDE.md`, `crates/AGENTS.md`,
 `docs/reborn/contracts/`, and other Markdown references for stale paths.
+
+## Removing a "redundant" layer un-masks behavior
+
+A layer you delete as redundant is often silently *backstopping* behavior the
+downstream code does not reproduce. Deleting it does not remove the behavior —
+it exposes the gap, as a test failure if you are lucky and a silent regression
+if you are not. This is the dominant hazard of consolidation/dedup refactors.
+Motivating case: PRs #6386/#6392 (the `authorize()` policy consolidation) —
+removing `ironclaw_host_runtime`'s "redundant" pre-authorization surfaced five
+behaviors it had been masking (a stale import, model-message sanitization,
+run-record ordering for unknown capabilities, dropped runtime-policy enforcement
+on the resume paths, and a mismatch-vs-unknown precedence flip).
+
+Discipline when deleting a layer you believe is redundant:
+
+- **Run the full, unfiltered suite for every touched crate** — `cargo test -p
+  <crate> --no-fail-fast` — and do **not** pipe test output through `head`/`tail`.
+  A partial view under-counts failures (this hid three real failures twice
+  during #6392). Filtered green is not green.
+- **Every surfaced failure is a candidate real behavior, not a test to edit.**
+  For each, determine whether the deleted layer was providing it and whether the
+  surviving code reproduces it. **Preserve the behavior; do not weaken the
+  assertion to go green** unless you have proven the old behavior was itself
+  wrong (and say why in the PR). Silently updating a test to match the new output
+  is how a consolidation ships a regression.
+- **The load-bearing observable is the failure *kind* and durable state**
+  (`RuntimeFailureKind`, run-state transitions, audit `error_kind`) — not the
+  message text. Preserve the kind exactly; the sanitized model-visible message is
+  a separate, weaker contract (`error-handling.md`).
+- **"Redundant" is per-path.** A check redundant on one entry path (e.g.
+  invoke/spawn) can be the *only* copy on another (e.g. resume/auth-resume).
+  Confirm the survivor covers **every** path before deleting, not just the one
+  you inspected.
+
+When the work is sliced across subagents, give each the standing instruction to
+**stop and report a surfaced behavior rather than commit green or weaken a
+test** — the reviewer, not the slice author, decides whether a delta is
+acceptable.
 
 ## Guardrails are code
 

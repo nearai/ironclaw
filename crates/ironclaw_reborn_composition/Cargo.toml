@@ -22,20 +22,6 @@ layer = "app"
 # default names one instead of declaring a build shape nothing uses.
 # `--no-default-features --features postgres` selects the other.
 default = ["libsql"]
-# Use the single-process in-memory turn-state authority for the local-dev /
-# hosted runtime family instead of the per-user `state.json` filesystem CAS
-# store, even in libSQL/Postgres builds. This is the runtime-wedge fix: all of a
-# user's concurrent turns (foreground + routines) coordinate in one in-process
-# `InMemoryTurnStateStore` (no per-step CAS livelock) rather than contending on a
-# single per-user turn-state document. Durability trade-off: in-flight compute
-# turns are volatile across a process restart (short-lived, re-triggerable), but
-# turns parked on a human gate (approval/auth) are persisted off the hot path via
-# persist-on-block and rehydrated on startup, so a deploy does not silently drop
-# an "Approve"-pending turn. Intended to be enabled by the
-# hosted-single-tenant-volume deployment build; see
-# `tools/ironclaw_stress/results/2026-06-30-turn-state-inmemory/` for the
-# contention measurements that motivated it.
-inmemory-turn-state = []
 # Expose test-only helpers (mock LLM gateway, budget runtime accessors)
 # so integration tests in this crate's `tests/` directory and downstream
 # crates can drive `build_reborn_runtime` with a stub model gateway
@@ -53,22 +39,11 @@ test-support = [
 migration-support = []
 libsql = [
     "dep:libsql",
-    "ironclaw_filesystem/libsql",
-    "ironclaw_reborn_openai_compat/libsql",
-    "ironclaw_product_workflow/libsql",
     "ironclaw_host_runtime/libsql",
-    "ironclaw_runner/filesystem-goal-store",
-    "ironclaw_reborn_event_store/libsql",
-    "ironclaw_triggers/libsql",
 ]
 postgres = [
     "dep:deadpool-postgres",
-    "ironclaw_filesystem/postgres",
     "ironclaw_host_runtime/postgres",
-    "ironclaw_runner/filesystem-goal-store",
-    "ironclaw_runner/filesystem-local-trigger-access",
-    "ironclaw_reborn_event_store/postgres",
-    "ironclaw_triggers/postgres",
 ]
 [dependencies]
 async-trait = "0.1"
@@ -105,7 +80,7 @@ ironclaw_processes = { path = "../ironclaw_processes" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = ["host-auth-mint"] }
 ironclaw_product_adapter_registry = { path = "../ironclaw_product_adapter_registry" }
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
-ironclaw_runner = { path = "../ironclaw_runner", features = ["webui-user-store"] }
+ironclaw_runner = { path = "../ironclaw_runner" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
 ironclaw_reborn_identity = { path = "../ironclaw_reborn_identity" }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
@@ -190,7 +165,7 @@ ironclaw_host_runtime = { path = "../ironclaw_host_runtime", features = ["test-s
 ironclaw_conversations = { path = "../ironclaw_conversations" }
 ironclaw_reborn_composition = { path = ".", features = ["test-support"] }
 ironclaw_threads = { path = "../ironclaw_threads" }
-ironclaw_turns = { path = "../ironclaw_turns" }
+ironclaw_turns = { path = "../ironclaw_turns", features = ["test-support"] }
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = ["test-support"] }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }

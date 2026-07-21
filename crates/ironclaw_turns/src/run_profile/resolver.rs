@@ -275,7 +275,7 @@ impl RunProfileDefinition {
         request: &RunProfileResolutionRequest,
         provenance: &mut RedactedRunProfileProvenance,
     ) -> ResourceBudgetPolicy {
-        if self.resource_budget_policy.tier.as_str() == "mission_high"
+        if self.resource_budget_policy.tier.is_mission_high()
             && !request
                 .authority
                 .allows(PrivilegedRunProfileDimension::HighBudget)
@@ -287,12 +287,15 @@ impl RunProfileDefinition {
                     .to_string(),
             });
             return ResourceBudgetPolicy {
-                tier: ResourceBudgetTier::from_trusted_static("mission_standard"),
-                max_model_calls: self.resource_budget_policy.max_model_calls.min(128),
+                tier: ResourceBudgetTier::mission_standard(),
+                max_model_calls: self
+                    .resource_budget_policy
+                    .max_model_calls
+                    .min(ResourceBudgetPolicy::MISSION_STANDARD_MAX_MODEL_CALLS),
                 max_capability_invocations: self
                     .resource_budget_policy
                     .max_capability_invocations
-                    .min(512),
+                    .min(ResourceBudgetPolicy::MISSION_STANDARD_MAX_CAPABILITY_INVOCATIONS),
             };
         }
 
@@ -331,28 +334,11 @@ fn interactive_profile() -> RunProfileDefinition {
             // path in `ironclaw_agent_loop`.
             allow_driver_specific_nudges: true,
         },
-        cancellation_policy: CancellationPolicy {
-            allow_cancel: true,
-            require_checkpoint_before_cancel: false,
-        },
-        checkpoint_policy: CheckpointPolicy {
-            require_before_model: false,
-            require_before_side_effect: true,
-            require_before_block: true,
-            max_checkpoint_bytes: 64 * 1024,
-            require_final_checkpoint: false,
-            allow_no_reply_completion: false,
-        },
-        resource_budget_policy: ResourceBudgetPolicy {
-            tier: ResourceBudgetTier::from_trusted_static("interactive_standard"),
-            max_model_calls: 32,
-            max_capability_invocations: 64,
-        },
+        cancellation_policy: CancellationPolicy::interactive(),
+        checkpoint_policy: CheckpointPolicy::interactive(),
+        resource_budget_policy: ResourceBudgetPolicy::interactive(),
         personal_context_policy: PersonalContextPolicy::Excluded,
-        runtime_constraints: RuntimeProfileConstraints {
-            allow_raw_runtime_backend_selection: false,
-            allow_broad_capability_surface: false,
-        },
+        runtime_constraints: RuntimeProfileConstraints::locked(),
         runner_pool_id: None,
         scheduling_class: SchedulingClass::from_trusted_static("interactive"),
         concurrency_class: ConcurrencyClass::from_trusted_static("thread_serial"),
@@ -403,10 +389,7 @@ fn long_running_mission_profile() -> RunProfileDefinition {
             max_capability_invocations: 1024,
         },
         personal_context_policy: PersonalContextPolicy::Excluded,
-        runtime_constraints: RuntimeProfileConstraints {
-            allow_raw_runtime_backend_selection: false,
-            allow_broad_capability_surface: false,
-        },
+        runtime_constraints: RuntimeProfileConstraints::locked(),
         runner_pool_id: Some(RunnerPoolId::from_trusted_static("mission_workers")),
         scheduling_class: SchedulingClass::from_trusted_static("background"),
         concurrency_class: ConcurrencyClass::from_trusted_static("mission_serial"),
