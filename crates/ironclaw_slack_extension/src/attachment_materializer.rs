@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_attachments::{DEFAULT_ATTACHMENT_BUDGETS, InboundAttachment};
+use ironclaw_common::{is_supported_mime, normalize_mime_type};
 use ironclaw_product_adapters::{
     DeclaredEgressHost, EgressCredentialHandle, EgressMethod, EgressPath, EgressRequest,
     ProductAttachmentDescriptor, ProductInboundEnvelope, ProtocolHttpEgress,
@@ -49,7 +50,7 @@ impl InboundAttachmentMaterializer for SlackAttachmentMaterializer {
         }
         preflight(descriptors)?;
         let mut materialized = Vec::with_capacity(descriptors.len());
-        let mut total_bytes = 0usize;
+        let mut refreshed_total_bytes = 0u64;
         for descriptor in descriptors {
             let query = url::form_urlencoded::Serializer::new(String::new())
                 .append_pair("file", &descriptor.external_file_id)
@@ -81,9 +82,34 @@ impl InboundAttachmentMaterializer for SlackAttachmentMaterializer {
                     "Slack rejected the attachment lookup",
                 ));
             }
-            let private_url = file_info
-                .file
-                .and_then(|file| file.url_private_download.or(file.url_private))
+            let file = file_info.file.ok_or_else(|| {
+                AttachmentMaterializationError::permanent("Slack attachment has no file metadata")
+            })?;
+            if file.id != descriptor.external_file_id {
+                return Err(AttachmentMaterializationError::permanent(
+                    "Slack returned metadata for a different attachment",
+                ));
+            }
+            let mime_type = normalize_mime_type(&file.mimetype);
+            if !is_supported_mime(&mime_type) {
+                return Err(AttachmentMaterializationError::permanent(
+                    "Slack attachment MIME type is not supported",
+                ));
+            }
+            if file.size > DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64 {
+                return Err(AttachmentMaterializationError::permanent(
+                    "Slack attachment exceeds the channel size limit",
+                ));
+            }
+            refreshed_total_bytes = refreshed_total_bytes.saturating_add(file.size);
+            if refreshed_total_bytes > DEFAULT_ATTACHMENT_BUDGETS.max_total_bytes as u64 {
+                return Err(AttachmentMaterializationError::permanent(
+                    "Slack attachments exceed the channel batch limit",
+                ));
+            }
+            let private_url = file
+                .url_private_download
+                .or(file.url_private)
                 .ok_or_else(|| {
                     AttachmentMaterializationError::permanent(
                         "Slack attachment has no downloadable URL",
@@ -111,16 +137,15 @@ impl InboundAttachmentMaterializer for SlackAttachmentMaterializer {
                     "Slack attachment exceeds the channel size limit",
                 ));
             }
-            total_bytes = total_bytes.saturating_add(response.body().len());
-            if total_bytes > DEFAULT_ATTACHMENT_BUDGETS.max_total_bytes {
-                return Err(AttachmentMaterializationError::permanent(
-                    "Slack attachments exceed the channel batch limit",
+            if response.body().len() as u64 != file.size {
+                return Err(AttachmentMaterializationError::retryable(
+                    "Slack attachment download was incomplete",
                 ));
             }
             materialized.push(InboundAttachment {
-                id: descriptor.external_file_id.clone(),
-                mime_type: descriptor.mime_type.clone(),
-                filename: descriptor.filename.clone(),
+                id: file.id,
+                mime_type,
+                filename: file.name,
                 bytes: response.body().to_vec(),
             });
         }
@@ -158,6 +183,11 @@ fn preflight(
     }
     let mut declared_total = 0u64;
     for descriptor in descriptors {
+        if !is_supported_mime(&descriptor.mime_type) {
+            return Err(AttachmentMaterializationError::permanent(
+                "Slack attachment MIME type is not supported",
+            ));
+        }
         if let Some(size) = descriptor.size_bytes {
             if size > DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64 {
                 return Err(AttachmentMaterializationError::permanent(
@@ -204,6 +234,10 @@ struct SlackFileInfoResponse {
 
 #[derive(Deserialize)]
 struct SlackFileInfo {
+    id: String,
+    name: Option<String>,
+    mimetype: String,
+    size: u64,
     url_private: Option<String>,
     url_private_download: Option<String>,
 }

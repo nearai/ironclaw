@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_attachments::{DEFAULT_ATTACHMENT_BUDGETS, InboundAttachment};
+use ironclaw_common::{is_supported_mime, normalize_mime_type};
 use ironclaw_product_adapters::{
     DeclaredEgressHost, EgressCredentialHandle, EgressMethod, EgressPath, EgressRequest,
     ProductAttachmentDescriptor, ProductInboundEnvelope, ProtocolHttpEgress,
@@ -77,7 +78,8 @@ impl InboundAttachmentMaterializer for TelegramAttachmentMaterializer {
             let result = file.result.ok_or_else(|| {
                 AttachmentMaterializationError::permanent("Telegram attachment has no file result")
             })?;
-            validate_lookup_size(result.file_size)?;
+            let expected_size = result.file_size.or(descriptor.size_bytes);
+            validate_lookup_size(expected_size)?;
             let file_path = result.file_path.ok_or_else(|| {
                 AttachmentMaterializationError::permanent(
                     "Telegram attachment has no downloadable path",
@@ -100,6 +102,11 @@ impl InboundAttachmentMaterializer for TelegramAttachmentMaterializer {
                     "Telegram attachment exceeds the channel size limit",
                 ));
             }
+            if expected_size.is_some_and(|size| response.body().len() as u64 != size) {
+                return Err(AttachmentMaterializationError::retryable(
+                    "Telegram attachment download was incomplete",
+                ));
+            }
             total_bytes = total_bytes.saturating_add(response.body().len());
             if total_bytes > DEFAULT_ATTACHMENT_BUDGETS.max_total_bytes {
                 return Err(AttachmentMaterializationError::permanent(
@@ -108,7 +115,7 @@ impl InboundAttachmentMaterializer for TelegramAttachmentMaterializer {
             }
             materialized.push(InboundAttachment {
                 id: descriptor.external_file_id.clone(),
-                mime_type: descriptor.mime_type.clone(),
+                mime_type: normalize_mime_type(&descriptor.mime_type),
                 filename: descriptor
                     .filename
                     .clone()
@@ -130,6 +137,11 @@ fn preflight(
     }
     let mut declared_total = 0u64;
     for descriptor in descriptors {
+        if !is_supported_mime(&descriptor.mime_type) {
+            return Err(AttachmentMaterializationError::permanent(
+                "Telegram attachment MIME type is not supported",
+            ));
+        }
         if let Some(size) = descriptor.size_bytes {
             if size > DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64 {
                 return Err(AttachmentMaterializationError::permanent(

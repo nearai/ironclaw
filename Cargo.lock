@@ -5346,6 +5346,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "ironclaw_attachments",
+ "ironclaw_common",
  "ironclaw_product_adapters",
  "ironclaw_product_workflow",
  "ironclaw_slack_v2_adapter",

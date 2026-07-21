@@ -72,6 +72,8 @@ pub(crate) struct ScriptedTelegramNetwork {
     /// fault between webhook attempts so provider redelivery can prove the
     /// attachment transfer is retried end to end.
     get_file_failure_status: Mutex<Option<u16>>,
+    /// Return a deliberately short 2xx body for the attachment download.
+    truncate_attachment_download: Mutex<bool>,
 }
 
 impl ScriptedTelegramNetwork {
@@ -89,6 +91,13 @@ impl ScriptedTelegramNetwork {
             .get_file_failure_status
             .lock()
             .expect("getFile failure toggle lock") = status;
+    }
+
+    pub(crate) fn set_truncate_attachment_download(&self, truncate: bool) {
+        *self
+            .truncate_attachment_download
+            .lock()
+            .expect("attachment truncation toggle lock") = truncate;
     }
 
     pub(crate) fn request_bodies_for(&self, url_substr: &str) -> Vec<Value> {
@@ -262,11 +271,25 @@ impl NetworkHttpEgress for ScriptedTelegramNetwork {
                 ),
                 None => json_response(
                     200,
-                    json!({"ok": true, "result": {"file_path": "documents/journey-notes.txt"}}),
+                    json!({"ok": true, "result": {
+                        "file_path": "documents/journey-notes.txt",
+                        "file_size": 24
+                    }}),
                 ),
             }
         } else if url.contains("/file/bot") && url.ends_with("/documents/journey-notes.txt") {
-            bytes_response(200, b"journey attachment bytes".to_vec())
+            let truncate = *self
+                .truncate_attachment_download
+                .lock()
+                .expect("attachment truncation toggle lock");
+            bytes_response(
+                200,
+                if truncate {
+                    b"short".to_vec()
+                } else {
+                    b"journey attachment bytes".to_vec()
+                },
+            )
         } else if url.ends_with("/sendMessage") {
             let matched_failure = {
                 let mut toggle = self.fail_matching_send.lock().expect("fail toggle lock");

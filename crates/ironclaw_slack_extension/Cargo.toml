@@ -16,6 +16,7 @@ layer = "products"
 [dependencies]
 async-trait = "0.1"
 ironclaw_attachments = { path = "../ironclaw_attachments" }
+ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
 ironclaw_slack_v2_adapter = { path = "../ironclaw_slack_v2_adapter" }

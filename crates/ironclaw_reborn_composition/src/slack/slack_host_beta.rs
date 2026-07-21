@@ -1892,7 +1892,16 @@ mod tests {
 
     #[tokio::test]
     async fn build_slack_host_beta_mounts_lands_file_share_before_running_turn() {
-        let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+        let egress = Arc::new(RecordingRuntimeHttpEgress::with_files_info_file(
+            serde_json::json!({
+                "id": "F-JOURNEY",
+                "name": "fresh-notes.csv",
+                "mimetype": "text/csv",
+                "size": 24,
+                "url_private_download":
+                    "https://files.slack.com/files-pri/T0HOST-F-JOURNEY/journey-notes.txt"
+            }),
+        ));
         let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
             host_egress_port_for_test(Arc::clone(&egress)),
         )))
@@ -1916,8 +1925,8 @@ mod tests {
         assert_eq!(accepted_message.attachments.len(), 1);
         let attachment = &accepted_message.attachments[0];
         assert_eq!(attachment.id, "F-JOURNEY");
-        assert_eq!(attachment.filename.as_deref(), Some("journey-notes.txt"));
-        assert_eq!(attachment.mime_type, "text/plain");
+        assert_eq!(attachment.filename.as_deref(), Some("fresh-notes.csv"));
+        assert_eq!(attachment.mime_type, "text/csv");
         assert_eq!(attachment.size_bytes, Some(24));
         let storage_key = attachment
             .storage_key
@@ -2013,6 +2022,94 @@ mod tests {
             0,
             "an unconfined URL must not cause a download or turn-delivery provider side effect"
         );
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn build_slack_host_beta_rejects_unsupported_attachment_mime_before_lookup() {
+        let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+        let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
+            host_egress_port_for_test(Arc::clone(&egress)),
+        )))
+        .await;
+        let mounts =
+            build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
+        bind_slack_oauth_user(&mounts).await;
+        let mut body: serde_json::Value =
+            serde_json::from_str(&dm_file_share_event_body()).expect("file event JSON");
+        body["event"]["files"][0]["mimetype"] = serde_json::json!("application/x-made-up");
+
+        assert_eq!(
+            post_signed_slack_event_status(&mounts.events, &body.to_string()).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_no_slack_threads_for_owner(&runtime, Some(UserId::new(USER).expect("user"))).await;
+        assert!(
+            !egress
+                .requests()
+                .iter()
+                .any(|request| request.url.contains("/api/files.info")),
+            "unsupported MIME must fail before Slack provider IO"
+        );
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn build_slack_host_beta_rejects_mismatched_files_info_id_before_download() {
+        let egress = Arc::new(RecordingRuntimeHttpEgress::with_files_info_file(
+            serde_json::json!({
+                "id": "F-DIFFERENT",
+                "name": "journey-notes.txt",
+                "mimetype": "text/plain",
+                "size": 24,
+                "url_private_download":
+                    "https://files.slack.com/files-pri/T0HOST-F-JOURNEY/journey-notes.txt"
+            }),
+        ));
+        let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
+            host_egress_port_for_test(Arc::clone(&egress)),
+        )))
+        .await;
+        let mounts =
+            build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
+        bind_slack_oauth_user(&mounts).await;
+
+        assert_eq!(
+            post_signed_slack_event_status(&mounts.events, &dm_file_share_event_body()).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_no_slack_threads_for_owner(&runtime, Some(UserId::new(USER).expect("user"))).await;
+        assert!(
+            !egress
+                .requests()
+                .iter()
+                .any(|request| request.url.contains("files.slack.com")),
+            "mismatched provider identity must fail before byte download"
+        );
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn build_slack_host_beta_rejects_known_short_download_without_turn() {
+        let egress = Arc::new(RecordingRuntimeHttpEgress::with_attachment_download_body(
+            b"short",
+        ));
+        let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
+            host_egress_port_for_test(Arc::clone(&egress)),
+        )))
+        .await;
+        let mounts =
+            build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
+        bind_slack_oauth_user(&mounts).await;
+
+        assert_eq!(
+            post_signed_slack_event_status(&mounts.events, &dm_file_share_event_body()).await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_no_slack_threads_for_owner(&runtime, Some(UserId::new(USER).expect("user"))).await;
 
         runtime.shutdown().await.expect("runtime shuts down");
     }
@@ -4560,8 +4657,10 @@ mod tests {
         requests: std::sync::Mutex<Vec<NetworkHttpRequest>>,
         /// While set, every files.info request returns this status.
         files_info_failure_status: std::sync::Mutex<Option<u16>>,
-        /// Provider-issued download URL returned by files.info.
-        files_info_download_url: Option<String>,
+        /// Complete file object override for refreshed-metadata scenarios.
+        files_info_file_override: Option<serde_json::Value>,
+        /// Optional body returned by the private file download.
+        attachment_download_body: Option<Vec<u8>>,
         /// If set, returned for ALL conversations.open calls.
         conversations_open_response: Option<(u16, Vec<u8>)>,
         /// If set, conversations.open succeeds this many times then fails.
@@ -4590,17 +4689,21 @@ mod tests {
                         br#"{"ok":false,"error":"scripted_files_info_failure"}"#.to_vec(),
                     ),
                     None => {
-                        let download_url = self.files_info_download_url.as_deref().unwrap_or(
-                            "https://files.slack.com/files-pri/T0HOST-F-JOURNEY/journey-notes.txt",
-                        );
+                        let file = self.files_info_file_override.clone().unwrap_or_else(|| {
+                            serde_json::json!({
+                                    "id": "F-JOURNEY",
+                                    "name": "journey-notes.txt",
+                                    "mimetype": "text/plain",
+                                    "size": 24,
+                                    "url_private_download":
+                                        "https://files.slack.com/files-pri/T0HOST-F-JOURNEY/journey-notes.txt"
+                            })
+                        });
                         (
                             200,
-                            serde_json::json!({
-                                "ok": true,
-                                "file": {"url_private_download": download_url}
-                            })
-                            .to_string()
-                            .into_bytes(),
+                            serde_json::json!({"ok": true, "file": file})
+                                .to_string()
+                                .into_bytes(),
                         )
                     }
                 }
@@ -4608,7 +4711,12 @@ mod tests {
                 .url
                 .ends_with("/files-pri/T0HOST-F-JOURNEY/journey-notes.txt")
             {
-                (200, b"journey attachment bytes".to_vec())
+                (
+                    200,
+                    self.attachment_download_body
+                        .clone()
+                        .unwrap_or_else(|| b"journey attachment bytes".to_vec()),
+                )
             } else if request.url.contains("/api/files.getUploadURLExternal") {
                 (
                     200,
@@ -4744,7 +4852,27 @@ mod tests {
 
         fn with_files_info_download_url(url: &str) -> Self {
             Self {
-                files_info_download_url: Some(url.to_string()),
+                files_info_file_override: Some(serde_json::json!({
+                    "id": "F-JOURNEY",
+                    "name": "journey-notes.txt",
+                    "mimetype": "text/plain",
+                    "size": 24,
+                    "url_private_download": url
+                })),
+                ..Self::default()
+            }
+        }
+
+        fn with_attachment_download_body(body: &[u8]) -> Self {
+            Self {
+                attachment_download_body: Some(body.to_vec()),
+                ..Self::default()
+            }
+        }
+
+        fn with_files_info_file(file: serde_json::Value) -> Self {
+            Self {
+                files_info_file_override: Some(file),
                 ..Self::default()
             }
         }
@@ -4753,7 +4881,8 @@ mod tests {
             Self {
                 requests: std::sync::Mutex::new(Vec::new()),
                 files_info_failure_status: std::sync::Mutex::new(None),
-                files_info_download_url: None,
+                files_info_file_override: None,
+                attachment_download_body: None,
                 conversations_open_response: Some((status, body.to_vec())),
                 conversations_open_fail_after: None,
                 strict_attachment_exchange: false,

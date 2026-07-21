@@ -104,10 +104,11 @@ the current values and supported-format registry unchanged:
 Add a channel-neutral Rust workspace-reference extractor to
 `ironclaw_attachments`. Its fixtures pin parity with
 `frontend/src/pages/chat/lib/project-file-paths.ts`: paths must start with
-`/workspace/`, must have a supported filename/extension, are ignored inside code
-spans, must be bare paths or local Markdown hrefs rather than suffixes inside an
-external URL, and are deduplicated without reordering. The browser helper stays
-a UI presentation helper; the Rust helper is authoritative for host delivery.
+`/workspace/`, must have an alphanumeric filename extension, are ignored inside
+code spans, must be bare paths or local Markdown hrefs rather than suffixes
+inside an external URL, and are deduplicated without reordering. The browser
+helper stays a UI presentation helper; the Rust helper is authoritative for
+host delivery.
 
 ### Inbound materialization port
 
@@ -147,8 +148,11 @@ Provider implementations:
   The default Bot API's 20 MiB download ceiling is above IronClaw's 5 MiB file
   limit, so IronClaw rejects declared oversize before `getFile` and bounds the
   streamed response at the shared limit.
-- **Slack:** call `files.info(file=<id>)` with `files:read`, validate that the
-  returned id/name/MIME/size agree with the descriptor, accept only an HTTPS
+- **Slack:** call `files.info(file=<id>)` with `files:read`, require the returned
+  id to match the requested descriptor, and treat the refreshed name/MIME/size
+  as authoritative. This avoids rejecting a legitimate metadata update between
+  the signed event and the lookup while still enforcing the supported-MIME and
+  size budgets against the latest provider response. Accept only an HTTPS
   `files.slack.com` `url_private_download`, and download it with host-injected
   bearer authorization. The incoming event's `url_private` remains discarded.
   This provider transfer implementation lives in `ironclaw_slack_extension`;
@@ -290,8 +294,10 @@ Three approaches were evaluated:
 4. Count/per-file/total budgets and supported MIME registry are identical for
    WebUI and channel paths.
 5. Rust workspace-path extraction matches WebUI fixtures for prose, punctuation,
-   duplicates, unsupported extensions, inline code, fenced code, traversal, and
-   rejection of `/workspace/...` suffixes inside external URLs.
+   duplicates, arbitrary alphanumeric extensions, inline code, fenced code,
+   traversal, and rejection of `/workspace/...` suffixes inside external URLs.
+   Unknown outbound extensions remain downloadable as
+   `application/octet-stream`, matching the existing WebUI behavior.
 6. Outbound reader resolves only scoped `/workspace/...` paths and rejects
    missing, oversized, aggregate-oversized, and cross-scope files.
 7. An adapter that does not override attachment rendering rejects non-empty
@@ -327,8 +333,9 @@ API and file-host double:
    download -> shared landing -> transcript/model -> native reply.
 2. Attachment-only and multiple-file events preserve order.
 3. Replayed event id performs one lookup/download/landing/turn.
-4. Forged download host, metadata mismatch, missing `files:read`, unsupported or
-   oversized files, 401, 429/5xx, and truncated bodies fail without a turn.
+4. Forged download host, returned file-id mismatch, missing `files:read`,
+   unsupported or oversized refreshed metadata, 401, 429/5xx, and truncated
+   bodies fail without a turn.
 5. A transient `files.info`/download failure returns a retryable webhook
    response; redelivery of the same event id lands once and produces one
    turn/reply.

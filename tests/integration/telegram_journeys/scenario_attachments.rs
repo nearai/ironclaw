@@ -3,9 +3,26 @@ use super::reborn_support::reply::RebornScriptedReply;
 use axum::http::StatusCode;
 use ironclaw_host_api::NetworkMethod;
 use ironclaw_product_workflow::RebornGetRunStateRequest;
+use ironclaw_product_workflow::WebUiListThreadsRequest;
 use ironclaw_threads::{MessageKind, MessageStatus};
 use ironclaw_turns::TurnStatus;
 use serde_json::json;
+
+async fn assert_no_telegram_threads(stack: &JourneyStack) {
+    let threads = stack
+        .webui
+        .api
+        .list_threads(
+            stack.caller.clone(),
+            WebUiListThreadsRequest::default().set_limit(1),
+        )
+        .await
+        .expect("list caller threads");
+    assert!(
+        threads.threads.is_empty(),
+        "unexpected Telegram-created thread"
+    );
+}
 
 /// A Telegram document follows the production webhook -> descriptor ->
 /// mediated provider download -> canonical workspace lander -> turn -> native
@@ -183,6 +200,57 @@ async fn telegram_transient_attachment_download_retries_before_webhook_ack() {
         1,
         "provider redelivery must produce one delivered final reply"
     );
+
+    stack.runtime.shutdown().await.expect("runtime shuts down");
+}
+
+#[tokio::test]
+async fn telegram_rejects_unsupported_attachment_mime_before_provider_io() {
+    let stack = build_journey_stack([RebornScriptedReply::text("must not run")]).await;
+    let secret = admin_save(&stack).await;
+    pair_via_webhook(&stack, &secret, 1).await;
+    let mut update = dm_document_update(2);
+    update["message"]["document"]["mime_type"] = json!("application/x-made-up");
+
+    assert_eq!(
+        stack.webhook_update(&secret, update).await,
+        StatusCode::BAD_REQUEST
+    );
+    assert!(
+        !stack
+            .network
+            .requests()
+            .iter()
+            .any(|request| request.url.contains("/getFile?") || request.url.contains("/file/bot")),
+        "unsupported MIME must fail before provider file transfer"
+    );
+    assert_no_telegram_threads(&stack).await;
+
+    stack.runtime.shutdown().await.expect("runtime shuts down");
+}
+
+#[tokio::test]
+async fn telegram_rejects_known_short_download_without_creating_a_turn() {
+    let stack = build_journey_stack([RebornScriptedReply::text("must not run")]).await;
+    let secret = admin_save(&stack).await;
+    pair_via_webhook(&stack, &secret, 1).await;
+    stack.network.set_truncate_attachment_download(true);
+
+    assert_eq!(
+        stack.webhook_update(&secret, dm_document_update(2)).await,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        stack
+            .network
+            .requests()
+            .iter()
+            .filter(|request| request.url.contains("/file/bot"))
+            .count(),
+        1,
+        "known-short response reaches the bounded download once"
+    );
+    assert_no_telegram_threads(&stack).await;
 
     stack.runtime.shutdown().await.expect("runtime shuts down");
 }

@@ -126,9 +126,8 @@ pub use filesystem_ledger::RebornLibSqlIdempotencyLedger;
 pub use filesystem_ledger::RebornPostgresIdempotencyLedger;
 pub use in_memory_ledger::InMemoryIdempotencyLedger;
 pub use inbound_turn::{
-    AttachmentMaterializationError, AttachmentMaterializationFailureKind,
-    DefaultInboundTurnService, InboundAttachmentMaterializer, InboundTurnOutcome,
-    InboundTurnService, InboundUserMessageDispatch,
+    AttachmentMaterializationError, DefaultInboundTurnService, InboundAttachmentMaterializer,
+    InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
 };
 pub use ironclaw_common::{AutomationName, AutomationNameError, MAX_AUTOMATION_NAME_BYTES};
 pub use ledger::{IdempotencyDecision, IdempotencyLedger};

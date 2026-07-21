@@ -53,7 +53,7 @@ const BEFORE_INBOUND_POLICY_TIMEOUT: Duration = Duration::from_millis(10);
 
 /// Whether a provider attachment transfer can safely be retried unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AttachmentMaterializationFailureKind {
+enum AttachmentMaterializationFailureKind {
     Retryable,
     Permanent,
 }
@@ -82,7 +82,7 @@ impl AttachmentMaterializationError {
         }
     }
 
-    pub const fn kind(&self) -> AttachmentMaterializationFailureKind {
+    const fn kind(&self) -> AttachmentMaterializationFailureKind {
         self.kind
     }
 
