@@ -42,9 +42,11 @@ pub(crate) trait PromptSource {
         entries: &[ironclaw_reborn_composition::ProviderMenuEntry],
     ) -> Result<String, LlmCredentialPromptError>;
 
-    /// Prompt for `provider`'s API key with input masked (not echoed).
+    /// Prompt for `provider`'s API key with input masked (not echoed), or
+    /// report that the operator wants to pick a different provider
+    /// ([`ApiKeyAnswer::Back`]).
     #[cfg(feature = "libsql")]
-    fn api_key(&mut self, provider: &str) -> Result<String, LlmCredentialPromptError>;
+    fn api_key(&mut self, provider: &str) -> Result<ApiKeyAnswer, LlmCredentialPromptError>;
 
     /// Ask a yes/no `question`, defaulting to yes on a blank answer (`[Y/n]`
     /// framing). Used by onboard's env-detect-and-confirm step: "Found
@@ -65,6 +67,39 @@ pub(crate) trait PromptSource {
         provider_id: &str,
         default_model: &str,
     ) -> Result<Option<String>, LlmCredentialPromptError>;
+}
+
+/// What the operator answered at the API-key prompt.
+///
+/// `Back` is a normal outcome, not an error: the API-key prompt used to be a
+/// terminal state (a key, or an error that aborted onboarding), so an operator
+/// who realized mid-flow that they had picked the wrong provider had to cancel
+/// the whole run and start over. `Back` is the control-flow signal
+/// [`super::llm_credentials::provision_llm_credentials`] loops on to re-show
+/// the provider menu — same "success variant, not an error" shape
+/// [`ArrowMenuOutcome::Cancelled`] already uses.
+///
+/// `Key` is the key *as typed* — it carries no probe/verification status; that
+/// is `probe_and_confirm_key`'s job downstream.
+#[cfg(feature = "libsql")]
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum ApiKeyAnswer {
+    Key(String),
+    /// Return to the provider menu without entering a key (Esc at the prompt).
+    Back,
+}
+
+/// Manual `Debug`, not derived: `Key` wraps a plaintext LLM API key, and a
+/// derived impl would print it verbatim on any `{:?}` formatting (e.g. a
+/// panic message or a debug log). Redact it instead.
+#[cfg(feature = "libsql")]
+impl std::fmt::Debug for ApiKeyAnswer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Key(_) => write!(f, "Key(<redacted>)"),
+            Self::Back => write!(f, "Back"),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -140,7 +175,7 @@ impl PromptSource for StdinPromptSource {
     }
 
     #[cfg(feature = "libsql")]
-    fn api_key(&mut self, provider: &str) -> Result<String, LlmCredentialPromptError> {
+    fn api_key(&mut self, provider: &str) -> Result<ApiKeyAnswer, LlmCredentialPromptError> {
         if !std::io::stdin().is_terminal() {
             return Err(LlmCredentialPromptError::NonInteractive);
         }
@@ -151,15 +186,22 @@ impl PromptSource for StdinPromptSource {
         // request.
         const MAX_ATTEMPTS: u8 = 3;
         for attempt in 1..=MAX_ATTEMPTS {
-            print!("{provider} API key (input hidden): ");
+            print!("{provider} API key (input hidden, Esc to pick a different provider): ");
             std::io::stdout()
                 .flush()
                 .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
-            let key = read_masked_line()
-                .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
+            let key = match read_masked_line()
+                .map_err(|error| LlmCredentialPromptError::Other(error.into()))?
+            {
+                MaskedLine::Entered(key) => key,
+                MaskedLine::Cancelled => {
+                    println!();
+                    return Ok(ApiKeyAnswer::Back);
+                }
+            };
             println!();
             if !key.trim().is_empty() {
-                return Ok(key);
+                return Ok(ApiKeyAnswer::Key(key));
             }
             if attempt < MAX_ATTEMPTS {
                 println!("API key must not be blank; please try again.");
@@ -554,13 +596,18 @@ fn render_menu(
 ///
 /// `pub(crate)` — reused by `commands::config::set` for secret-valued
 /// `config set` keys so a plaintext secret never echoes to the terminal.
-pub(crate) fn read_masked_line() -> std::io::Result<String> {
+///
+/// Esc returns [`MaskedLine::Cancelled`] (discarding anything typed so far)
+/// rather than being ignored, so callers can offer an escape hatch out of a
+/// secret prompt — onboarding's API-key prompt turns it into
+/// [`ApiKeyAnswer::Back`], `config set` into an explicit "cancelled" error.
+pub(crate) fn read_masked_line() -> std::io::Result<MaskedLine> {
     use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use crossterm::{execute, style::Print, terminal};
 
     let mut input = String::new();
     terminal::enable_raw_mode()?;
-    let result = (|| -> std::io::Result<()> {
+    let result = (|| -> std::io::Result<bool> {
         drain_pending_events();
         loop {
             if let Event::Key(KeyEvent {
@@ -572,6 +619,7 @@ pub(crate) fn read_masked_line() -> std::io::Result<String> {
             {
                 match code {
                     KeyCode::Enter => break,
+                    KeyCode::Esc => return Ok(true),
                     KeyCode::Backspace if !input.is_empty() => {
                         input.pop();
                         execute!(std::io::stdout(), Print("\x08 \x08"))?;
@@ -593,11 +641,24 @@ pub(crate) fn read_masked_line() -> std::io::Result<String> {
                 }
             }
         }
-        Ok(())
+        Ok(false)
     })();
     terminal::disable_raw_mode()?;
-    result?;
-    Ok(input)
+    Ok(if result? {
+        // Drop anything typed before Esc — a cancelled prompt must not leak a
+        // partial secret back to the caller.
+        MaskedLine::Cancelled
+    } else {
+        MaskedLine::Entered(input)
+    })
+}
+
+/// Outcome of [`read_masked_line`]: a submitted line (Enter), or a prompt the
+/// operator backed out of (Esc). Ctrl-C stays an `Interrupted` `io::Error`, as
+/// before — that aborts, it does not hand control back to the caller.
+pub(crate) enum MaskedLine {
+    Entered(String),
+    Cancelled,
 }
 
 /// Discard any terminal input events buffered before raw mode was entered,

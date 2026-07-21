@@ -381,13 +381,32 @@ impl SecretValueSource for StdinSecretValueSource {
                  entered with input hidden"
             );
         }
-        print!("{label} (input hidden): ");
+        print!("{label} (input hidden, Esc to cancel): ");
         std::io::stdout()
             .flush()
             .context("flush stdout before secret prompt")?;
-        let value = crate::commands::onboard::prompts::read_masked_line()?;
+        let read = crate::commands::onboard::prompts::read_masked_line()?;
         println!();
-        Ok(value)
+        masked_line_to_secret(read, label)
+    }
+}
+
+/// Turns a [`MaskedLine`](crate::commands::onboard::prompts::MaskedLine)
+/// read from the terminal into the prompt's result. Pulled out as a free
+/// function (rather than left inline in `StdinSecretValueSource::prompt`)
+/// so the cancel decision can be unit-tested without a real terminal —
+/// `StdinSecretValueSource` itself can only be exercised interactively.
+fn masked_line_to_secret(
+    line: crate::commands::onboard::prompts::MaskedLine,
+    label: &str,
+) -> anyhow::Result<String> {
+    match line {
+        crate::commands::onboard::prompts::MaskedLine::Entered(value) => Ok(value),
+        // Esc used to be ignored here (the read loop kept waiting); it now
+        // backs out of the prompt without writing anything.
+        crate::commands::onboard::prompts::MaskedLine::Cancelled => {
+            anyhow::bail!("`config set {label}` cancelled at the value prompt; nothing written")
+        }
     }
 }
 
@@ -546,6 +565,28 @@ mod tests {
         let message = unknown_key_message("nonsense.key");
         assert!(message.contains("unknown config key `nonsense.key`"));
         assert!(message.contains("config list"));
+    }
+
+    #[test]
+    fn masked_line_cancelled_errors_without_writing_anything() {
+        let err = masked_line_to_secret(
+            crate::commands::onboard::prompts::MaskedLine::Cancelled,
+            "llm.api_key",
+        )
+        .expect_err("Cancelled must not resolve to a value");
+        let message = err.to_string();
+        assert!(message.contains("llm.api_key"), "error: {message}");
+        assert!(message.contains("nothing written"), "error: {message}");
+    }
+
+    #[test]
+    fn masked_line_entered_returns_the_typed_value() {
+        let value = masked_line_to_secret(
+            crate::commands::onboard::prompts::MaskedLine::Entered("some-value".to_string()),
+            "llm.api_key",
+        )
+        .expect("Entered must resolve to the typed value");
+        assert_eq!(value, "some-value");
     }
 
     struct FailingStoreOpener;
