@@ -1910,8 +1910,13 @@ mod tests {
             build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
         bind_slack_oauth_user(&mounts).await;
 
-        let body = dm_file_share_event_body();
-        post_signed_slack_event(&mounts.events, &body).await;
+        let mut body: serde_json::Value =
+            serde_json::from_str(&dm_file_share_event_body()).expect("file event JSON");
+        body["event"]["files"][0]["mimetype"] = serde_json::json!("application/x-made-up");
+        body["event"]["files"][0]["size"] = serde_json::json!(
+            ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64 + 1
+        );
+        post_signed_slack_event(&mounts.events, &body.to_string()).await;
         if let Some(drain) = mounts.events.drain.as_ref() {
             drain.drain().await;
         }
@@ -2027,33 +2032,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_slack_host_beta_rejects_unsupported_attachment_mime_before_lookup() {
-        let egress = Arc::new(RecordingRuntimeHttpEgress::default());
-        let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
-            host_egress_port_for_test(Arc::clone(&egress)),
-        )))
-        .await;
-        let mounts =
-            build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
-        bind_slack_oauth_user(&mounts).await;
-        let mut body: serde_json::Value =
-            serde_json::from_str(&dm_file_share_event_body()).expect("file event JSON");
-        body["event"]["files"][0]["mimetype"] = serde_json::json!("application/x-made-up");
+    async fn build_slack_host_beta_rejects_invalid_refreshed_metadata_before_download() {
+        for (label, mime_type, size) in [
+            ("unsupported MIME", "application/x-made-up", 24),
+            (
+                "oversized file",
+                "text/plain",
+                ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64 + 1,
+            ),
+        ] {
+            let egress = Arc::new(RecordingRuntimeHttpEgress::with_files_info_file(
+                serde_json::json!({
+                    "id": "F-JOURNEY",
+                    "name": "journey-notes.txt",
+                    "mimetype": mime_type,
+                    "size": size,
+                    "url_private_download":
+                        "https://files.slack.com/files-pri/T0HOST-F-JOURNEY/journey-notes.txt"
+                }),
+            ));
+            let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
+                host_egress_port_for_test(Arc::clone(&egress)),
+            )))
+            .await;
+            let mounts = build_slack_host_beta_mounts(&runtime, config_without_legacy_actor())
+                .expect("mounts");
+            bind_slack_oauth_user(&mounts).await;
 
-        assert_eq!(
-            post_signed_slack_event_status(&mounts.events, &body.to_string()).await,
-            StatusCode::BAD_REQUEST
-        );
-        assert_no_slack_threads_for_owner(&runtime, Some(UserId::new(USER).expect("user"))).await;
-        assert!(
-            !egress
-                .requests()
-                .iter()
-                .any(|request| request.url.contains("/api/files.info")),
-            "unsupported MIME must fail before Slack provider IO"
-        );
+            assert_eq!(
+                post_signed_slack_event_status(&mounts.events, &dm_file_share_event_body()).await,
+                StatusCode::BAD_REQUEST,
+                "{label}"
+            );
+            assert_no_slack_threads_for_owner(&runtime, Some(UserId::new(USER).expect("user")))
+                .await;
+            let requests = egress.requests();
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|request| request.url.contains("/api/files.info"))
+                    .count(),
+                1,
+                "{label} must be decided from one refreshed lookup"
+            );
+            assert!(
+                !requests
+                    .iter()
+                    .any(|request| request.url.contains("files.slack.com")),
+                "{label} must fail before byte download"
+            );
 
-        runtime.shutdown().await.expect("runtime shuts down");
+            runtime.shutdown().await.expect("runtime shuts down");
+        }
     }
 
     #[tokio::test]

@@ -181,27 +181,6 @@ fn preflight(
             "Slack message has too many attachments",
         ));
     }
-    let mut declared_total = 0u64;
-    for descriptor in descriptors {
-        if !is_supported_mime(&descriptor.mime_type) {
-            return Err(AttachmentMaterializationError::permanent(
-                "Slack attachment MIME type is not supported",
-            ));
-        }
-        if let Some(size) = descriptor.size_bytes {
-            if size > DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64 {
-                return Err(AttachmentMaterializationError::permanent(
-                    "Slack attachment exceeds the channel size limit",
-                ));
-            }
-            declared_total = declared_total.saturating_add(size);
-        }
-    }
-    if declared_total > DEFAULT_ATTACHMENT_BUDGETS.max_total_bytes as u64 {
-        return Err(AttachmentMaterializationError::permanent(
-            "Slack attachments exceed the channel batch limit",
-        ));
-    }
     Ok(())
 }
 
