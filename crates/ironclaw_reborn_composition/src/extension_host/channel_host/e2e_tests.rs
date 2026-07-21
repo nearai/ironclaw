@@ -129,7 +129,7 @@ fn slack_manifest_from_bundled_inventory() -> String {
     ironclaw_first_party_extensions::packages::bundled_packages()
         .into_iter()
         .find(|bundle| bundle.id == "slack")
-        .expect("Slack is in the bundled package inventory")
+        .expect("Slack is in the bundled package inventory") // safety: test-only fixture uses the static bundled Slack inventory.
         .manifest_toml
         .into_owned()
 }
