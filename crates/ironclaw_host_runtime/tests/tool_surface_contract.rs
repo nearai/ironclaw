@@ -6,7 +6,7 @@ use support::legacy_capability_fixture_to_v2_with_schema_suffix as legacy_capabi
 use std::{
     collections::BTreeMap,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
@@ -22,6 +22,7 @@ use ironclaw_filesystem::{
     DirEntry, DiskFilesystem, FileStat, FileType, FilesystemError, FilesystemOperation,
     RootFilesystem,
 };
+use ironclaw_host_api::dispatch_test_support::TestDispatcher;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, CapabilitySurfaceVersion, DefaultHostRuntime, HTTP_CAPABILITY_ID,
@@ -1037,7 +1038,7 @@ async fn visible_surface_marks_askable_capabilities_without_granting_authority()
 
 #[tokio::test]
 async fn hidden_capability_direct_invoke_still_fails_closed_through_authorization() {
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let runtime = DefaultHostRuntime::new(
         Arc::new(registry_from_manifests([(
             ECHO_MANIFEST,
@@ -1077,7 +1078,7 @@ async fn hidden_capability_direct_invoke_still_fails_closed_through_authorizatio
         }
         other => panic!("expected authorization failure, got {other:?}"),
     }
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
 }
 
 #[tokio::test]
@@ -1542,7 +1543,7 @@ async fn visible_surface_hides_secret_when_policy_denies_secrets() {
 
 #[tokio::test]
 async fn runtime_policy_denied_extension_invoke_does_not_dispatch() {
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let dispatcher_for_runtime: Arc<dyn CapabilityDispatcher> = dispatcher.clone();
     let runtime = runtime_with_dispatcher(
         registry_from_manifests([(ECHO_NETWORK_MANIFEST, "/system/extensions/echo")]),
@@ -1582,14 +1583,14 @@ async fn runtime_policy_denied_extension_invoke_does_not_dispatch() {
             .contains("NetworkMode::Deny")
     );
     assert!(
-        !dispatcher.has_request(),
+        dispatcher.call_count() == 0,
         "runtime-policy denial must happen before generic extension dispatch"
     );
 }
 
 #[tokio::test]
 async fn runtime_policy_denied_secret_invoke_does_not_dispatch() {
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let dispatcher_for_runtime: Arc<dyn CapabilityDispatcher> = dispatcher.clone();
     let runtime = runtime_with_dispatcher(
         registry_from_manifests([(SECRET_MANIFEST, "/system/extensions/secret-tool")]),
@@ -1626,14 +1627,14 @@ async fn runtime_policy_denied_secret_invoke_does_not_dispatch() {
             .contains("SecretMode::Deny")
     );
     assert!(
-        !dispatcher.has_request(),
+        dispatcher.call_count() == 0,
         "runtime-policy secret denial must happen before generic extension dispatch"
     );
 }
 
 #[tokio::test]
 async fn runtime_policy_denied_mcp_http_invoke_does_not_dispatch_when_effect_underdeclared() {
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let dispatcher_for_runtime: Arc<dyn CapabilityDispatcher> = dispatcher.clone();
     let runtime = runtime_with_dispatcher(
         registry_from_manifests([(MCP_UNDERDECLARED_NETWORK_MANIFEST, "/system/extensions/mcp")]),
@@ -1673,7 +1674,7 @@ async fn runtime_policy_denied_mcp_http_invoke_does_not_dispatch_when_effect_und
             .contains("NetworkMode::Deny")
     );
     assert!(
-        !dispatcher.has_request(),
+        dispatcher.call_count() == 0,
         "runtime-policy denial must happen before MCP dispatch"
     );
 }
@@ -1982,7 +1983,7 @@ fn runtime_with(
     runtime_with_dispatcher(
         registry,
         authorizer,
-        Arc::new(RecordingDispatcher::default()),
+        Arc::new(TestDispatcher::ok(dispatch_result())),
     )
 }
 
@@ -2114,45 +2115,21 @@ impl TrustPolicy for PanicTrustPolicy {
     }
 }
 
-#[derive(Default)]
-struct RecordingDispatcher {
-    request: Mutex<Option<CapabilityDispatchRequest>>,
-}
-
-impl RecordingDispatcher {
-    fn has_request(&self) -> bool {
-        self.request
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_some()
-    }
-}
-
-#[async_trait]
-impl CapabilityDispatcher for RecordingDispatcher {
-    async fn dispatch_json(
-        &self,
-        request: CapabilityDispatchRequest,
-    ) -> Result<CapabilityDispatchResult, DispatchError> {
-        *self
-            .request
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(request.clone());
-        Ok(CapabilityDispatchResult {
-            capability_id: request.capability_id,
-            provider: ExtensionId::new("echo").unwrap(),
-            runtime: RuntimeKind::Wasm,
-            output: json!({"ok": true}),
-            display_preview: None,
-            usage: ResourceUsage::default(),
-            receipt: ResourceReceipt {
-                id: ResourceReservationId::new(),
-                scope: request.scope,
-                status: ReservationStatus::Reconciled,
-                estimate: request.estimate,
-                actual: Some(ResourceUsage::default()),
-            },
-        })
+fn dispatch_result() -> CapabilityDispatchResult {
+    CapabilityDispatchResult {
+        capability_id: capability_id("echo.say"),
+        provider: ExtensionId::new("echo").unwrap(),
+        runtime: RuntimeKind::Wasm,
+        output: json!({"ok": true}),
+        display_preview: None,
+        usage: ResourceUsage::default(),
+        receipt: ResourceReceipt {
+            id: ResourceReservationId::new(),
+            scope: ResourceScope::system(),
+            status: ReservationStatus::Reconciled,
+            estimate: ResourceEstimate::default(),
+            actual: Some(ResourceUsage::default()),
+        },
     }
 }
 

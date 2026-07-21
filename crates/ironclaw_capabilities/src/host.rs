@@ -2933,20 +2933,6 @@ mod tests {
 
     // `authorize()` never dispatches; this satisfies the `CapabilityHost` type
     // parameter without pulling in the integration-tier recording dispatcher.
-    struct UnusedDispatcher;
-
-    #[async_trait::async_trait]
-    impl CapabilityDispatcher for UnusedDispatcher {
-        async fn dispatch_json(
-            &self,
-            request: CapabilityDispatchRequest,
-        ) -> Result<CapabilityDispatchResult, DispatchError> {
-            Err(DispatchError::UnknownCapability {
-                capability: request.capability_id,
-            })
-        }
-    }
-
     const ECHO_MANIFEST_FIXTURE: &str = r#"
 schema_version = "reborn.extension_manifest.v2"
 id = "echo"
@@ -3027,7 +3013,14 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
         use ironclaw_host_api::UserId;
 
         let registry = echo_registry();
-        let dispatcher = UnusedDispatcher;
+        // Never dispatched on this authorize-only path; errors if it ever is.
+        let dispatcher = ironclaw_host_api::dispatch_test_support::TestDispatcher::responding(
+            |req, _| {
+                Err(DispatchError::UnknownCapability {
+                    capability: req.capability_id.clone(),
+                })
+            },
+        );
         let authorizer = AllowAuthorizer;
         let host = CapabilityHost::new(&registry, &dispatcher, &authorizer);
 

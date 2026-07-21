@@ -32,6 +32,7 @@ use ironclaw_filesystem::{
     DiskFilesystem, Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, RootFilesystem,
     ScopedFilesystem,
 };
+use ironclaw_host_api::dispatch_test_support::TestDispatcher;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, BuiltinObligationServices, CapabilitySurfaceVersion,
@@ -1003,7 +1004,7 @@ pub(crate) async fn stage_process_handoffs(
 
 pub(crate) struct SpawnObligationFixture {
     pub(crate) registry: Arc<ExtensionRegistry>,
-    pub(crate) dispatcher: Arc<NoopDispatcher>,
+    pub(crate) dispatcher: Arc<TestDispatcher>,
     pub(crate) authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
     pub(crate) handler: Arc<BuiltinObligationHandler>,
     pub(crate) process_manager: Arc<BackgroundProcessManager>,
@@ -1082,7 +1083,9 @@ where
     R: ProcessResultStore + 'static,
 {
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
-    let dispatcher = Arc::new(NoopDispatcher);
+    let dispatcher = Arc::new(TestDispatcher::responding(|_, _| {
+        panic!("spawn tests must not invoke the foreground dispatcher")
+    }));
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let obligation_services = BuiltinObligationServices::new(
@@ -1294,11 +1297,13 @@ pub(crate) fn secret_store_failing_reads() -> (
     Arc<FilesystemSecretStore<FaultInjecting<InMemoryBackend>>>,
     Arc<FaultInjecting<InMemoryBackend>>,
 ) {
-    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()).with_fault(
-        Fault::on(FilesystemOperation::ReadFile)
-            .path("secrets")
-            .backend("injected secret read failure"),
-    ));
+    let backend = Arc::new(
+        FaultInjecting::new(InMemoryBackend::new()).with_fault(
+            Fault::on(FilesystemOperation::ReadFile)
+                .path("secrets")
+                .backend("injected secret read failure"),
+        ),
+    );
     let store = Arc::new(FilesystemSecretStore::ephemeral_over(backend.clone()));
     (store, backend)
 }
@@ -1397,18 +1402,6 @@ impl ironclaw_processes::ProcessManager for FailingSpawnManager {
         Err(ProcessError::InvalidStoredRecord {
             reason: "start failed".to_string(),
         })
-    }
-}
-
-pub(crate) struct NoopDispatcher;
-
-#[async_trait]
-impl CapabilityDispatcher for NoopDispatcher {
-    async fn dispatch_json(
-        &self,
-        _request: CapabilityDispatchRequest,
-    ) -> Result<CapabilityDispatchResult, DispatchError> {
-        panic!("spawn tests must not invoke the foreground dispatcher")
     }
 }
 

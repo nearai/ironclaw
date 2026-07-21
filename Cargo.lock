@@ -3762,6 +3762,7 @@ dependencies = [
  "sha2 0.11.0",
  "static_assertions",
  "thiserror 2.0.18",
+ "tokio",
  "uuid",
  "zeroize",
 ]

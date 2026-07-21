@@ -1,10 +1,5 @@
 #![allow(dead_code)]
 
-use std::sync::{
-    Mutex,
-    atomic::{AtomicUsize, Ordering},
-};
-
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::*;
@@ -13,60 +8,45 @@ use ironclaw_host_api::*;
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use serde_json::json;
 
-#[derive(Default)]
-pub struct RecordingDispatcher {
-    request: Mutex<Option<CapabilityDispatchRequest>>,
-    dispatch_count: AtomicUsize,
+// The shared `CapabilityDispatcher` double. Re-exported so every test file that
+// does `use support::*` gets it without importing the feature-gated module path.
+pub use ironclaw_host_api::dispatch_test_support::TestDispatcher;
+
+/// The standard success dispatch result, echoing the request's capability id,
+/// scope, and estimate — the exact shape the retired hand-rolled
+/// `RecordingDispatcher` returned.
+pub fn ok_dispatch_result(request: &CapabilityDispatchRequest) -> CapabilityDispatchResult {
+    dispatch_result_with_output(request, json!({"ok": true}))
 }
 
-impl RecordingDispatcher {
-    pub fn take_request(&self) -> CapabilityDispatchRequest {
-        self.request
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-            .unwrap()
-    }
-
-    pub fn has_request(&self) -> bool {
-        self.request
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_some()
-    }
-
-    pub fn dispatch_count(&self) -> usize {
-        self.dispatch_count.load(Ordering::SeqCst)
+/// Like [`ok_dispatch_result`] but with a caller-supplied output payload — the
+/// replacement for the retired `OutputDispatcher`.
+pub fn dispatch_result_with_output(
+    request: &CapabilityDispatchRequest,
+    output: serde_json::Value,
+) -> CapabilityDispatchResult {
+    CapabilityDispatchResult {
+        capability_id: request.capability_id.clone(),
+        provider: extension_id(),
+        runtime: RuntimeKind::Wasm,
+        output,
+        display_preview: None,
+        usage: ResourceUsage::default(),
+        receipt: ResourceReceipt {
+            id: ResourceReservationId::new(),
+            scope: request.scope.clone(),
+            status: ReservationStatus::Reconciled,
+            estimate: request.estimate.clone(),
+            actual: Some(ResourceUsage::default()),
+        },
     }
 }
 
-#[async_trait]
-impl CapabilityDispatcher for RecordingDispatcher {
-    async fn dispatch_json(
-        &self,
-        request: CapabilityDispatchRequest,
-    ) -> Result<CapabilityDispatchResult, DispatchError> {
-        self.dispatch_count.fetch_add(1, Ordering::SeqCst);
-        *self
-            .request
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(request.clone());
-        Ok(CapabilityDispatchResult {
-            capability_id: request.capability_id,
-            provider: extension_id(),
-            runtime: RuntimeKind::Wasm,
-            output: json!({"ok": true}),
-            display_preview: None,
-            usage: ResourceUsage::default(),
-            receipt: ResourceReceipt {
-                id: ResourceReservationId::new(),
-                scope: request.scope,
-                status: ReservationStatus::Reconciled,
-                estimate: request.estimate,
-                actual: Some(ResourceUsage::default()),
-            },
-        })
-    }
+/// Drop-in replacement for the retired `RecordingDispatcher`: records every
+/// dispatched request and returns the standard success result. Assert on it via
+/// `.recorded()` / `.call_count()` / `.last_request()`.
+pub fn recording_dispatcher() -> TestDispatcher {
+    TestDispatcher::responding(|request, _| Ok(ok_dispatch_result(request)))
 }
 
 pub struct ApprovalAuthorizer;

@@ -41,5 +41,7 @@ ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support
 ironclaw_run_state = { path = "../ironclaw_run_state", features = ["test-support"] }
 ironclaw_dispatcher = { path = "../ironclaw_dispatcher" }
 ironclaw_events = { path = "../ironclaw_events" }
+# Enables the shared TestDispatcher CapabilityDispatcher double for tests only.
+ironclaw_host_api = { path = "../ironclaw_host_api", features = ["test-support"] }
 ironclaw_resources = { path = "../ironclaw_resources" }
 tokio = { version = "1", features = ["macros", "rt"] }
