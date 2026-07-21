@@ -1714,6 +1714,34 @@ impl RebornRuntime {
         None
     }
 
+    /// First-class projects + membership (ACL) facade over the host-owned scoped
+    /// substrate, backing the WebUI project surface. `None` only when the runtime
+    /// has no durable substrate at all (neither a local-runtime nor a production
+    /// store graph). Production-shaped builds source it from the production graph.
+    pub(crate) fn reborn_project_service(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_product_workflow::ProjectService>> {
+        if let Some(local) = self.services.local_runtime.as_ref() {
+            return Some(Arc::clone(&local.project_service));
+        }
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        {
+            if let Some(production) = self.services.production_runtime.as_ref() {
+                return Some(match production {
+                    #[cfg(feature = "libsql")]
+                    crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
+                        Arc::clone(&graph.project_service)
+                    }
+                    #[cfg(feature = "postgres")]
+                    crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
+                        Arc::clone(&graph.project_service)
+                    }
+                });
+            }
+        }
+        None
+    }
+
     /// The admin API-token minter supplied via
     /// [`RebornRuntimeInput::with_admin_api_token_minter`], if any.
     pub(crate) fn reborn_admin_token_minter(&self) -> Option<Arc<dyn crate::AdminApiTokenMinter>> {

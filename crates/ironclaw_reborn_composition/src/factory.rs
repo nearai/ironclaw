@@ -1170,6 +1170,10 @@ where
     /// user-management surface for production profiles where `local_runtime` is
     /// None; mirrors the local substrate's `admin_secret_provisioner`.
     pub(crate) admin_secret_provisioner: Arc<dyn crate::admin_secrets::AdminSecretProvisioner>,
+    /// First-class projects + membership (ACL) facade over the production scoped
+    /// filesystem. Backs the WebUI project surface for production profiles where
+    /// `local_runtime` is None; mirrors the local substrate's `project_service`.
+    pub(crate) project_service: Arc<dyn ProjectService>,
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -5248,7 +5252,7 @@ where
     let secret_store: Arc<dyn SecretStore> = stores.secret_credentials.secret_store.clone();
     let skill_management_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
     let skill_management = Arc::new(RebornLocalSkillManagementPort::new_with_mount_resolver(
-        owner_user_id,
+        owner_user_id.clone(),
         skill_management_filesystem,
         Arc::new(production_skill_management_mount_view),
     ));
@@ -5298,6 +5302,24 @@ where
             Arc::clone(&stores.filesystem),
             Arc::clone(&stores.secret_credentials.crypto),
         ));
+    // Projects persist over the production scoped filesystem (tenant supplied
+    // per call; the scope carries only the control-plane owner/agent identity),
+    // exactly as the local substrate builds them — see the `local_runtime`
+    // project repository. Production is always durable, so there is no
+    // in-memory fallback arm here.
+    let project_agent_id = ironclaw_host_api::AgentId::new("reborn-projects").map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("invalid project agent id: {error}"),
+        }
+    })?;
+    let project_repository: Arc<dyn ProjectRepository> =
+        Arc::new(ironclaw_projects::FilesystemProjectRepository::new(
+            Arc::clone(&stores.scoped_filesystem),
+            owner_user_id.clone(),
+            project_agent_id,
+        ));
+    let project_service: Arc<dyn ProjectService> =
+        Arc::new(RebornProjectService::new(project_repository));
     let production_runtime_graph = Arc::new(RebornProductionRuntimeStoreGraph {
         scoped_filesystem: Arc::clone(&stores.scoped_filesystem),
         extension_registry: Arc::clone(&extension_registry),
@@ -5311,6 +5333,7 @@ where
         event_log,
         audit_log,
         admin_secret_provisioner,
+        project_service,
     });
     let production_runtime = production_runtime_services(production_runtime_graph);
     // Same store-backed lookup the WebUI automations panel builds via
