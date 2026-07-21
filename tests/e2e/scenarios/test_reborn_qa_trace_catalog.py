@@ -1,10 +1,9 @@
 """Execute every harvested live-QA trace and probe its Emulate-backed tools.
 
 Every trace is replayed response-by-response through the same mock LLM adapter
-used by standalone Reborn. Provider operations supported by pinned
-Emulate.dev are also exercised against seeded provider state. Unsupported
-provider operations stay explicit and fail the catalog check if the inventory
-changes, rather than silently skipping an entire trace.
+used by standalone Reborn. Provider operations supported by the pinned Emulate
+fork are also exercised against seeded provider state. The closed inventory
+fails if a harvested operation lacks a provider-backed assertion.
 """
 
 import json
@@ -36,34 +35,28 @@ EMULATE_SUPPORTED_TOOLS = {
     "github__list_releases",
     "google-calendar__list_calendars",
     "google-calendar__list_events",
-    "google-drive__download_file",
-    "google-drive__list_files",
-    "slack__get_conversation_history",
-    "slack__get_conversation_info",
-    "slack__get_thread_replies",
-    "slack__get_user_info",
-    "slack__list_conversations",
-    "slack__send_message",
-    "slack__whoami",
-}
-
-# Emulate 0.7.0 advertises Gmail, Calendar, Drive, GitHub, and Slack, but does
-# not implement the Docs/Sheets APIs or Slack's search.messages endpoint. The
-# full model sequence still replays for traces containing these calls. Keeping
-# this list exact makes an Emulate upgrade or a new harvested operation demand
-# an intentional provider-backed assertion.
-EMULATE_UNSUPPORTED_TOOLS = {
     "google-docs__create_document",
     "google-docs__insert_text",
     "google-docs__read_content",
+    "google-drive__download_file",
+    "google-drive__list_files",
     "google-sheets__append_values",
     "google-sheets__create_spreadsheet",
     "google-sheets__get_spreadsheet",
     "google-sheets__read_values",
     "google-sheets__rename_sheet",
     "google-sheets__write_values",
+    "slack__get_conversation_history",
+    "slack__get_conversation_info",
+    "slack__get_thread_replies",
+    "slack__get_user_info",
+    "slack__list_conversations",
     "slack__search_messages",
+    "slack__send_message",
+    "slack__whoami",
 }
+
+EMULATE_UNSUPPORTED_TOOLS: set[str] = set()
 
 PROVIDER_PREFIXES = (
     "gmail__",
@@ -249,6 +242,8 @@ async def _probe_google_tool(
         )
         response.raise_for_status()
         assert response.json().get("items"), case
+    elif tool.startswith("google-docs__"):
+        await _probe_google_docs_tool(client, base_url, headers, tool, case)
     elif tool == "google-drive__list_files":
         response = await client.get(
             f"{base_url}/drive/v3/files",
@@ -268,8 +263,145 @@ async def _probe_google_tool(
         )
         response.raise_for_status()
         assert "PepsiCo account brief" in response.text
+    elif tool.startswith("google-sheets__"):
+        await _probe_google_sheets_tool(client, base_url, headers, tool, case)
     else:
         raise AssertionError(f"missing Google Emulate probe for {tool}")
+
+
+async def _probe_google_docs_tool(
+    client: httpx.AsyncClient,
+    base_url: str,
+    headers: dict[str, str],
+    tool: str,
+    case: str,
+) -> None:
+    marker = f"{case}-{tool}-local-replay"
+    created = await client.post(
+        f"{base_url}/v1/documents",
+        headers=headers,
+        json={"title": marker},
+    )
+    created.raise_for_status()
+    document_id = created.json()["documentId"]
+    assert document_id
+    if tool == "google-docs__create_document":
+        assert created.json()["title"] == marker
+        return
+
+    updated = await client.post(
+        f"{base_url}/v1/documents/{document_id}:batchUpdate",
+        headers=headers,
+        json={
+            "requests": [
+                {
+                    "insertText": {
+                        "endOfSegmentLocation": {},
+                        "text": marker,
+                    }
+                }
+            ]
+        },
+    )
+    updated.raise_for_status()
+    assert updated.json()["writeControl"]["requiredRevisionId"]
+
+    document = await client.get(
+        f"{base_url}/v1/documents/{document_id}",
+        headers=headers,
+    )
+    document.raise_for_status()
+    text = "".join(
+        element.get("textRun", {}).get("content", "")
+        for structural in document.json()["body"]["content"]
+        for element in structural.get("paragraph", {}).get("elements", [])
+    )
+    assert marker in text
+
+
+async def _probe_google_sheets_tool(
+    client: httpx.AsyncClient,
+    base_url: str,
+    headers: dict[str, str],
+    tool: str,
+    case: str,
+) -> None:
+    marker = f"{case}-{tool}-local-replay"
+    created = await client.post(
+        f"{base_url}/v4/spreadsheets",
+        headers=headers,
+        json={"properties": {"title": marker}},
+    )
+    created.raise_for_status()
+    spreadsheet = created.json()
+    spreadsheet_id = spreadsheet["spreadsheetId"]
+    sheet_id = spreadsheet["sheets"][0]["properties"]["sheetId"]
+    if tool == "google-sheets__create_spreadsheet":
+        assert spreadsheet["properties"]["title"] == marker
+        return
+
+    if tool == "google-sheets__get_spreadsheet":
+        metadata = await client.get(
+            f"{base_url}/v4/spreadsheets/{spreadsheet_id}",
+            headers=headers,
+        )
+        metadata.raise_for_status()
+        assert metadata.json()["properties"]["title"] == marker
+        return
+
+    if tool == "google-sheets__rename_sheet":
+        renamed = await client.post(
+            f"{base_url}/v4/spreadsheets/{spreadsheet_id}:batchUpdate",
+            headers=headers,
+            json={
+                "requests": [
+                    {
+                        "updateSheetProperties": {
+                            "properties": {
+                                "sheetId": sheet_id,
+                                "title": "Results",
+                            },
+                            "fields": "title",
+                        }
+                    }
+                ]
+            },
+        )
+        renamed.raise_for_status()
+        metadata = await client.get(
+            f"{base_url}/v4/spreadsheets/{spreadsheet_id}",
+            headers=headers,
+        )
+        metadata.raise_for_status()
+        assert metadata.json()["sheets"][0]["properties"]["title"] == "Results"
+        return
+
+    written = await client.put(
+        f"{base_url}/v4/spreadsheets/{spreadsheet_id}/values/Sheet1!A1:B1",
+        headers=headers,
+        json={"values": [[marker, "seed"]]},
+    )
+    written.raise_for_status()
+    assert written.json()["updatedCells"] == 2
+
+    if tool == "google-sheets__append_values":
+        appended = await client.post(
+            f"{base_url}/v4/spreadsheets/{spreadsheet_id}/values/Sheet1:append",
+            headers=headers,
+            json={"values": [[marker, "appended"]]},
+        )
+        appended.raise_for_status()
+        assert appended.json()["updates"]["updatedCells"] == 2
+
+    values = await client.get(
+        f"{base_url}/v4/spreadsheets/{spreadsheet_id}/values/Sheet1!A1:B2",
+        headers=headers,
+    )
+    values.raise_for_status()
+    rows = values.json()["values"]
+    assert rows[0] == [marker, "seed"]
+    if tool == "google-sheets__append_values":
+        assert rows[1] == [marker, "appended"]
 
 
 async def _probe_github_tool(
@@ -395,6 +527,24 @@ async def _probe_slack_tool(
             {"channel": channel_id, "ts": root_ts},
         )
         assert any(message["text"] == marker for message in body["messages"])
+    elif tool == "slack__search_messages":
+        await slack_post(
+            client,
+            base_url,
+            "chat.postMessage",
+            {"channel": channel_id, "text": marker},
+        )
+        response = await client.get(
+            f"{base_url}/api/search.messages",
+            headers=slack_headers(),
+            params={"query": marker, "count": 20, "sort": "timestamp"},
+        )
+        response.raise_for_status()
+        body = response.json()
+        assert body["ok"] is True
+        assert any(
+            match["text"] == marker for match in body["messages"]["matches"]
+        )
     else:
         raise AssertionError(f"missing Slack Emulate probe for {tool}")
 
@@ -419,7 +569,15 @@ async def _probe_supported_tools(
 
     async with httpx.AsyncClient(timeout=15) as client:
         for tool in sorted(provider_tools & EMULATE_SUPPORTED_TOOLS):
-            if tool.startswith(("gmail__", "google-calendar__", "google-drive__")):
+            if tool.startswith(
+                (
+                    "gmail__",
+                    "google-calendar__",
+                    "google-docs__",
+                    "google-drive__",
+                    "google-sheets__",
+                )
+            ):
                 await _probe_google_tool(client, google_url, tool, case)
             elif tool.startswith("github__"):
                 await _probe_github_tool(client, github_url, tool)

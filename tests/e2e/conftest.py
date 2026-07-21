@@ -63,6 +63,7 @@ _WASM_TOOLS_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-wasm-tools
 _WASM_CHANNELS_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-wasm-channels-")
 
 EMULATE_NPM_PACKAGE = "emulate@0.7.0"
+EMULATE_CLI_PATH = os.environ.get("IRONCLAW_EMULATE_CLI")
 EMULATE_GOOGLE_SEED = ROOT / "tests/e2e/fixtures/emulate/google_gmail.yaml"
 EMULATE_SLACK_SEED = ROOT / "tests/e2e/fixtures/emulate/slack.yaml"
 EMULATE_GITHUB_SEED = ROOT / "tests/e2e/fixtures/emulate/github.yaml"
@@ -535,10 +536,23 @@ async def _run_emulate_server(
     ready_json: dict[str, Any] | None = None,
 ) -> AsyncIterator[dict[str, str]]:
     """Start a pinned Emulate service and wait for a seeded endpoint."""
-    if shutil.which("npx") is None:
+    if EMULATE_CLI_PATH:
+        emulate_cli = Path(EMULATE_CLI_PATH)
+        if not emulate_cli.is_file():
+            _emulate_unavailable(
+                f"IRONCLAW_EMULATE_CLI does not exist: {emulate_cli}"
+            )
+        if shutil.which("node") is None:
+            _emulate_unavailable(
+                f"node is required to run the Emulate {service} E2E fixture"
+            )
+        command = ["node", str(emulate_cli)]
+    elif shutil.which("npx") is None:
         _emulate_unavailable(
             f"npx is required to run the Emulate {service} E2E fixture"
         )
+    else:
+        command = ["npx", "--yes", EMULATE_NPM_PACKAGE]
 
     port = _find_free_port()
     url = f"http://127.0.0.1:{port}"
@@ -548,9 +562,7 @@ async def _run_emulate_server(
         "EMULATE_PORT": str(port),
     }
     proc = await asyncio.create_subprocess_exec(
-        "npx",
-        "--yes",
-        EMULATE_NPM_PACKAGE,
+        *command,
         "--service",
         service,
         "--port",
