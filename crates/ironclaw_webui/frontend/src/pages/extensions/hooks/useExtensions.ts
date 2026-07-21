@@ -36,10 +36,10 @@ const OAUTH_SETUP_TIMEOUT_MS = 10 * 60 * 1000;
 // `lib/product-auth-oauth-events.ts`. This hook keeps only its setup-watcher
 // state machine below.
 
-function authPopupFailureMessage(reason) {
+function authPopupFailureMessage(reason, t) {
   return reason === "popup_blocked"
-    ? "Authorization popup was blocked."
-    : "Authorization URL must use HTTPS.";
+    ? t("authGate.popupBlocked")
+    : t("extensions.oauthInvalidAuthorizationUrl");
 }
 
 function oauthResponseFlowId(response) {
@@ -164,7 +164,7 @@ export function useExtensions() {
         if (installAuthPopup && !installAuthPopup.ok) {
           setActionResult({
             type: "error",
-            message: authPopupFailureMessage(installAuthPopup.reason),
+            message: authPopupFailureMessage(installAuthPopup.reason, t),
           });
         } else if (
           !res.auth_url &&
@@ -214,7 +214,7 @@ export function useExtensions() {
           if (!opened.ok) {
             setActionResult({
               type: "error",
-              message: authPopupFailureMessage(opened.reason),
+              message: authPopupFailureMessage(opened.reason, t),
             });
           }
         }
@@ -225,7 +225,7 @@ export function useExtensions() {
         } else {
           setActionResult({
             type: "error",
-            message: authPopupFailureMessage(opened.reason),
+            message: authPopupFailureMessage(opened.reason, t),
           });
         }
       } else if (res.awaiting_token) {
@@ -379,6 +379,7 @@ export function useExtensionSetup(packageRef) {
 }
 
 export function useSetupSubmit(packageRef, onSuccess) {
+  const t = useT();
   const queryClient = useQueryClient();
   const packageKey = packageRef?.id || packageRef;
 
@@ -386,7 +387,7 @@ export function useSetupSubmit(packageRef, onSuccess) {
     mutationFn: ({ secrets, fields }) =>
       submitExtensionSetup(packageRef, secrets, fields).then((res) => {
         if (res.success === false) {
-          throw new Error(res.message || "Setup failed");
+          throw new Error(res.message || t("extensions.setupFailed"));
         }
         return res;
       }),
@@ -399,6 +400,7 @@ export function useSetupSubmit(packageRef, onSuccess) {
 }
 
 export function useOauthSetup(packageRef, { onConfigured } = {}) {
+  const t = useT();
   const queryClient = useQueryClient();
   const packageKey = packageRef?.id || packageRef;
   const watcherRef = React.useRef(null);
@@ -515,7 +517,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
             // status endpoint remains unavailable.
             return false;
           }
-          setAuthError("Authorization failed. Try connecting again.");
+          setAuthError(t("extensions.oauthFailed"));
           stopWatcher();
           refreshSetupState();
           return true;
@@ -544,10 +546,10 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
             } else if (["failed", "canceled", "expired"].includes(status)) {
               setAuthError(
                 status === "expired"
-                  ? "Authorization expired. Try connecting again."
+                  ? t("extensions.oauthExpired")
                   : status === "canceled"
-                    ? "Authorization was canceled. Try connecting again."
-                    : "Authorization failed. Try connecting again.",
+                    ? t("extensions.oauthCanceled")
+                    : t("extensions.oauthFailed"),
               );
               stopWatcher();
               refreshSetupState();
@@ -588,7 +590,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
           if (timedOut) {
             // An abandoned reconnect otherwise ends after 10 minutes with no
             // signal at all — the button was disabled the whole time.
-            setAuthError("Authorization timed out. Try connecting again.");
+            setAuthError(t("extensions.oauthTimedOut"));
           }
           stopWatcher();
           refreshSetupState();
@@ -597,7 +599,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
       watcherRef.current = cleanup;
       handleCompletion(readLatestProductAuthOAuthCompletion(browserWindow));
     },
-    [clearWatcher, onConfigured, refreshSetupState, setAuthError, setupIsConfigured]
+    [clearWatcher, onConfigured, refreshSetupState, setAuthError, setupIsConfigured, t]
   );
 
   React.useEffect(() => clearWatcher, [clearWatcher]);
@@ -611,10 +613,10 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
       clearWatcher();
       return startExtensionOauth(packageRef, secret).then((res) => {
         if (res.success === false) {
-          throw new Error(res.message || "OAuth setup failed");
+          throw new Error(res.message || t("extensions.oauthSetupFailed"));
         }
         if (res.authorization_url && !isHttpsAuthUrl(res.authorization_url)) {
-          throw new Error("Authorization URL must use HTTPS.");
+          throw new Error(t("extensions.oauthInvalidAuthorizationUrl"));
         }
         return { res, popup, generation };
       });
@@ -634,7 +636,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
         const opened = openAuthPopup(res.authorization_url, popup);
         authPopup = opened.popup;
         if (!opened.ok) {
-          throw new Error(authPopupFailureMessage(opened.reason));
+          throw new Error(authPopupFailureMessage(opened.reason, t));
         }
       } else if (popup && !popup.closed) {
         popup.close();
