@@ -16,7 +16,7 @@ use ironclaw_hooks::middleware::{
     HookedLoopCapabilityPort, HookedLoopCheckpointPort, HookedLoopModelPort, HookedLoopPromptPort,
     HookedLoopTranscriptPort,
 };
-use ironclaw_host_api::{CapabilityId, ExtensionId};
+use ironclaw_host_api::{CapabilityId, ExtensionId, Resolution, ResolutionBatch};
 use ironclaw_loop_host::{
     ACTIVE_TASK_COMPACTION_SYSTEM_PROMPT, CapabilityResolveError, CapabilitySurfaceProfileFilter,
     CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, EmptyUserProfileSource,
@@ -113,21 +113,20 @@ use ironclaw_turns::{
     TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
-        CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityInvocation, CapabilityOutcome,
-        CommunicationContextProvider, FinalizeAssistantMessage, HookMilestoneSink,
-        HostManagedLoopModelPort, HostManagedLoopPromptPort,
-        InMemoryInstructionMaterializationStore, InstructionBundleMaterializedMessage,
-        InstructionMaterializationStore, InstructionSafetyContext, LoadCheckpointPayloadRequest,
-        LoadedCheckpointPayload, LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort,
-        LoopCheckpointPort, LoopCheckpointRequest, LoopCompactionError, LoopCompactionOutcome,
-        LoopCompactionPort, LoopCompactionRequest, LoopContextBundle, LoopContextPort,
-        LoopContextRequest, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
-        LoopInputCursor, LoopInputPort, LoopModelBudgetAccountant, LoopModelGateway,
-        LoopModelPolicyGuard, LoopModelPort, LoopModelRequest, LoopModelResponse,
-        LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
-        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopRunInfoPort,
-        LoopRuntimeContext, LoopTranscriptPort, NoOpBudgetAccountant, NoOpPolicyGuard,
-        ProviderToolCall, ProviderToolDefinition, RegisterProviderToolCallRequest,
+        CapabilityBatchInvocation, CapabilityInvocation, CommunicationContextProvider,
+        FinalizeAssistantMessage, HookMilestoneSink, HostManagedLoopModelPort,
+        HostManagedLoopPromptPort, InMemoryInstructionMaterializationStore,
+        InstructionBundleMaterializedMessage, InstructionMaterializationStore,
+        InstructionSafetyContext, LoadCheckpointPayloadRequest, LoadedCheckpointPayload,
+        LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort,
+        LoopCheckpointRequest, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
+        LoopCompactionRequest, LoopContextBundle, LoopContextPort, LoopContextRequest,
+        LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort,
+        LoopModelBudgetAccountant, LoopModelGateway, LoopModelPolicyGuard, LoopModelPort,
+        LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
+        LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+        LoopRunInfoPort, LoopRuntimeContext, LoopTranscriptPort, NoOpBudgetAccountant,
+        NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition, RegisterProviderToolCallRequest,
         RunScopedHookMilestoneSink, StageCheckpointPayloadRequest, SystemInferencePort,
         UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
@@ -302,28 +301,28 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         let may_change_surface = capability_may_change_visible_surface(&request.capability_id);
-        let outcome = self.inner.invoke_capability(request).await?;
+        let resolution = self.inner.invoke_capability(request).await?;
         if may_change_surface {
             self.surface_state.clear_current()?;
         }
-        Ok(outcome)
+        Ok(resolution)
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
         let may_change_surface = request
             .invocations
             .iter()
             .any(|invocation| capability_may_change_visible_surface(&invocation.capability_id));
-        let outcome = self.inner.invoke_capability_batch(request).await?;
+        let resolution = self.inner.invoke_capability_batch(request).await?;
         if may_change_surface {
             self.surface_state.clear_current()?;
         }
-        Ok(outcome)
+        Ok(resolution)
     }
 }
 
@@ -1986,8 +1985,8 @@ where
             };
             let slot = slot_for_model_profile(&run_context)?;
             let route = crate::model_routes::ModelRoute::new(
-                snapshot.provider_id.clone(),
-                snapshot.model_id.clone(),
+                snapshot.provider_id().to_string(),
+                snapshot.model_id().to_string(),
             )
             .map_err(model_route_error_to_host_error)?;
             resolver
@@ -2007,7 +2006,10 @@ where
         let snapshot = resolver
             .resolve_model_route(slot)
             .map_err(model_route_error_to_host_error)?;
-        Ok(run_context.with_resolved_model_route(snapshot.to_loop_model_route_snapshot()))
+        let route_snapshot = snapshot
+            .to_loop_model_route_snapshot()
+            .map_err(|reason| RebornLoopDriverHostError::InvalidRequest { reason })?;
+        Ok(run_context.with_resolved_model_route(route_snapshot))
     }
 }
 
@@ -2148,14 +2150,14 @@ impl LoopCapabilityPort for RebornLoopDriverHost {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         self.capabilities.invoke_capability(request).await
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
         self.capabilities.invoke_capability_batch(request).await
     }
 }
@@ -2781,11 +2783,13 @@ mod compaction_tests;
 mod tests {
     use super::*;
 
+    use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_loop_host::FilesystemCheckpointStateStore;
+    use ironclaw_turns::test_support::in_memory_turn_state_store;
     use ironclaw_turns::{
-        InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryRunProfileResolver,
-        PutLoopCheckpointRequest, RunProfileResolver, TurnActor, TurnCheckpointId, TurnId,
-        TurnRunId, TurnScope,
+        FilesystemTurnStateRowStore, InMemoryRunProfileResolver, PutLoopCheckpointRequest,
+        RunProfileResolver, TurnActor, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
         run_profile::{
             AgentLoopHostErrorKind, CheckpointSchemaId, InMemoryLoopHostMilestoneSink,
             LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopCheckpointRequest,
@@ -2857,15 +2861,17 @@ mod tests {
         );
     }
 
+    use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
+
     fn test_checkpoint_port(
         context: LoopRunContext,
     ) -> (
         HostManagedLoopCheckpointPort,
-        Arc<InMemoryCheckpointStateStore>,
-        Arc<InMemoryLoopCheckpointStore>,
+        Arc<FilesystemCheckpointStateStore<InMemoryBackend>>,
+        Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
     ) {
-        let state_store = Arc::new(InMemoryCheckpointStateStore::default());
-        let checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
+        let state_store = in_memory_checkpoint_state_store();
+        let checkpoint_store = Arc::new(in_memory_turn_state_store());
         let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
         let port = HostManagedLoopCheckpointPort::new(
             context,
@@ -2887,7 +2893,7 @@ mod tests {
         let state_ref = port
             .stage_checkpoint_payload(StageCheckpointPayloadRequest {
                 kind: LoopCheckpointKind::BeforeSideEffect,
-                schema_id: expected_schema_id.as_str().to_string(),
+                schema_id: expected_schema_id.clone(),
                 payload: payload.clone(),
             })
             .await
@@ -2925,7 +2931,7 @@ mod tests {
         let state_ref = port
             .stage_checkpoint_payload(StageCheckpointPayloadRequest {
                 kind: LoopCheckpointKind::BeforeModel,
-                schema_id: expected_schema_id.as_str().to_string(),
+                schema_id: expected_schema_id.clone(),
                 payload: b"{}".to_vec(),
             })
             .await
@@ -2961,7 +2967,7 @@ mod tests {
         let state_ref = port
             .stage_checkpoint_payload(StageCheckpointPayloadRequest {
                 kind: LoopCheckpointKind::BeforeModel,
-                schema_id: expected_schema_id.as_str().to_string(),
+                schema_id: expected_schema_id.clone(),
                 payload: b"{}".to_vec(),
             })
             .await

@@ -547,7 +547,7 @@ impl RebornGetRunStateResponse {
         let priced_model = value
             .resolved_model_route
             .as_ref()
-            .map(|route| route.model_id.as_str())
+            .map(|route| route.model_id())
             .or(active_model_id)
             .map(str::trim)
             .filter(|model| !model.is_empty() && !model.eq_ignore_ascii_case("default"));
@@ -1452,6 +1452,9 @@ pub enum RebornExtensionCredentialSetup {
         scopes: Vec<String>,
         invocation_id: String,
     },
+    /// Channel pairing: the setup card routes to the channel's pairing panel
+    /// (host-issued code + deep link), never a token-submit form.
+    Pairing,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

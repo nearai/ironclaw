@@ -2,7 +2,7 @@
 /**
  * check-design-tokens.mjs — design-token ratchet for the WebUI v2.
  *
- * Scans crates/ironclaw_webui_v2/frontend/src/** (excluding vendor/,
+ * Scans crates/ironclaw_webui/frontend/src/** (excluding vendor/,
  * dist/, node_modules/, and colocated *.test.* files) for:
  *
  * 1. Hardcoded color literals — hex (#abc / #aabbcc / #aabbccdd) and
@@ -33,8 +33,8 @@ import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCAN_ROOTS = [
-  join(REPO_ROOT, "crates/ironclaw_webui_v2/frontend/src"),
-  join(REPO_ROOT, "crates/ironclaw_webui_v2/frontend/packages/design-system/src"),
+  join(REPO_ROOT, "crates/ironclaw_webui/frontend/src"),
+  join(REPO_ROOT, "crates/ironclaw_webui/frontend/packages/design-system/src"),
 ];
 const BASELINE_PATH = join(REPO_ROOT, "scripts/design-tokens-baseline.json");
 
@@ -153,7 +153,7 @@ if (failed) {
       "instead. In particular `text-white` does NOT render white: the " +
       "compat shim remaps it to the theme ink color; use " +
       "text-[var(--v2-on-accent)] on accent fills. See " +
-      "crates/ironclaw_webui_v2/DESIGN_SYSTEM.md. If you removed other " +
+      "crates/ironclaw_webui/DESIGN_SYSTEM.md. If you removed other " +
       "violations in the same file, re-run with --update-baseline."
   );
   process.exit(1);

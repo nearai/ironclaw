@@ -5,20 +5,20 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_dispatcher::{
-    CapabilityDispatcher, DispatchError, RuntimeAdapter, RuntimeAdapterRequest,
-    RuntimeAdapterResult, RuntimeDispatchErrorKind, RuntimeDispatcher,
+    CapabilityDispatcher, DispatchError, RuntimeAdapterRequest, RuntimeAdapterResult,
+    RuntimeDispatchErrorKind, RuntimeDispatcher, RuntimeExecutor,
 };
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionError, ExtensionLifecycleService, ExtensionManifest,
     ExtensionPackage, ExtensionRegistry, ExtensionRuntime, ManifestSource, ManifestV2Error,
 };
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::{
     CapabilityId, EffectKind, ExtensionId, HostPath, MountView, NetworkScheme,
     NetworkTargetPattern, PermissionMode, ReservationStatus, ResourceEstimate,
     ResourceReservationId, ResourceScope, ResourceUsage, RuntimeCredentialAccountProviderId,
-    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
-    TenantId, UserId, VirtualPath,
+    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeKind, RuntimeLane,
+    SecretHandle, TenantId, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     default_host_api_contract_registry, default_host_port_catalog,
@@ -85,13 +85,13 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
                 .set_max_output_bytes(10_000),
         )
         .unwrap();
-    let adapter = Arc::new(RecordingAdapter::new(
-        RuntimeKind::Script,
-        json!({"message":"script ok"}),
-    ));
-    let dispatcher =
-        RuntimeDispatcher::from_arcs(Arc::new(discovered), Arc::new(fs), Arc::clone(&governor))
-            .with_runtime_adapter_arc(RuntimeKind::Script, Arc::clone(&adapter));
+    let adapter = RecordingAdapter::new(RuntimeKind::Script, json!({"message":"script ok"}));
+    let dispatcher = RuntimeDispatcher::from_arcs(
+        Arc::new(discovered),
+        Arc::new(fs),
+        Arc::clone(&governor),
+        adapter.clone(),
+    );
     let dispatch_port: &dyn CapabilityDispatcher = &dispatcher;
     let reservation = governor.reserve(scope.clone(), estimate.clone()).unwrap();
     let reservation_id = reservation.id;
@@ -99,6 +99,7 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
 
     let result = dispatch_port
         .dispatch_json(ironclaw_host_api::CapabilityDispatchRequest {
+            run_id: None,
             capability_id: CapabilityId::new("script.echo").unwrap(),
             scope: scope.clone(),
             authenticated_actor_user_id: None,
@@ -202,13 +203,14 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
         "github.trigger_workflow",
         "github.get_workflow_runs",
         "github.get_workflow_run_jobs",
+        "github.get_job_logs",
         "github.get_workflow_run_artifacts",
         "github.rerun_failed_workflow_run_jobs",
         "github.rerun_workflow_job",
         "github.fork_repo",
         "github.handle_webhook",
     ];
-    assert_eq!(expected_github_capability_ids.len(), 48);
+    assert_eq!(expected_github_capability_ids.len(), 49);
     assert_eq!(
         package
             .capabilities
@@ -328,7 +330,7 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
             .as_slice(),
         expected_github_capability_ids
     );
-    assert_eq!(hot_catalog.capabilities.len(), 48);
+    assert_eq!(hot_catalog.capabilities.len(), 49);
 
     let search = hot_catalog
         .get(&CapabilityId::new("github.search_issues").unwrap())
@@ -469,10 +471,15 @@ struct RecordedAdapterRequest {
 }
 
 #[async_trait]
-impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingAdapter {
+impl RuntimeExecutor<DiskFilesystem, InMemoryResourceGovernor> for RecordingAdapter {
+    fn supports_lane(&self, lane: RuntimeLane) -> bool {
+        RuntimeLane::from_runtime_kind(self.runtime) == Some(lane)
+    }
+
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+        _lane: RuntimeLane,
+        request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         self.requests.lock().unwrap().push(RecordedAdapterRequest {
             provider: request.package.id.clone(),
@@ -526,12 +533,18 @@ fn dispatch_error_for_runtime(
     kind: RuntimeDispatchErrorKind,
 ) -> DispatchError {
     match runtime {
-        RuntimeKind::Script => DispatchError::Script { kind },
+        RuntimeKind::Script => DispatchError::Script {
+            kind,
+            model_visible_cause: None,
+        },
         RuntimeKind::Wasm => DispatchError::Wasm {
             kind,
-            safe_summary: None,
+            model_visible_cause: None,
         },
-        RuntimeKind::Mcp => DispatchError::Mcp { kind },
+        RuntimeKind::Mcp => DispatchError::Mcp {
+            kind,
+            model_visible_cause: None,
+        },
         RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::UnsupportedRuntime {
             capability: CapabilityId::new("system.unsupported").unwrap(),
             runtime,
@@ -539,7 +552,7 @@ fn dispatch_error_for_runtime(
     }
 }
 
-fn mounted_extension_fs(id: &str, manifest: &str) -> (tempfile::TempDir, LocalFilesystem) {
+fn mounted_extension_fs(id: &str, manifest: &str) -> (tempfile::TempDir, DiskFilesystem) {
     let storage = tempdir().unwrap();
     let extension_root = storage.path().join(id);
     std::fs::create_dir_all(extension_root.join("schemas/script")).unwrap();
@@ -561,7 +574,7 @@ fn mounted_extension_fs(id: &str, manifest: &str) -> (tempfile::TempDir, LocalFi
     )
     .unwrap();
 
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage.path().to_path_buf()),
@@ -570,7 +583,7 @@ fn mounted_extension_fs(id: &str, manifest: &str) -> (tempfile::TempDir, LocalFi
     (storage, fs)
 }
 
-fn mounted_github_package_fs() -> (tempfile::TempDir, LocalFilesystem) {
+fn mounted_github_package_fs() -> (tempfile::TempDir, DiskFilesystem) {
     let storage = tempdir().unwrap();
     let source_root = github_first_party_asset_root();
     let package_root = storage.path().join("github");
@@ -585,7 +598,7 @@ fn mounted_github_package_fs() -> (tempfile::TempDir, LocalFilesystem) {
         &package_root.join("prompts/github"),
     );
 
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/system/extensions").unwrap(),
         HostPath::from_path_buf(storage.path().to_path_buf()),

@@ -75,10 +75,13 @@ mod extensions;
 mod fs_browse;
 mod lifecycle_setup;
 mod llm_config;
+mod log_views;
 mod project_fs;
 mod projects;
+mod run_artifact;
 mod trace_credits;
 mod types;
+mod views;
 
 use admin_users::{
     ADMIN_USER_LIST_DEFAULT_LIMIT, ADMIN_USER_LIST_MAX_LIMIT, RejectingAdminUserService,
@@ -115,6 +118,7 @@ pub use llm_config::{
     NearAiWalletLoginRequest, NearAiWalletLoginResult, SetActiveLlmRequest,
     UpsertLlmProviderRequest,
 };
+pub use log_views::{LOGS_VIEW, OPERATOR_LOGS_VIEW};
 pub use project_fs::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
     ProjectFsStat, RebornProjectFsListRequest, RebornProjectFsListResponse,
@@ -127,6 +131,10 @@ pub use projects::{
     RebornListProjectsResponse, RebornProjectInfo, RebornProjectMemberInfo,
     RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole, RebornProjectState,
     RebornRemoveMemberRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+};
+pub use run_artifact::{
+    RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornRunArtifact, RebornRunArtifactRequest,
+    RunArtifactLogs, RunArtifactMessage, RunArtifactRedaction, RunArtifactToolCall,
 };
 pub use types::{
     RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationActiveHold,
@@ -165,6 +173,7 @@ pub use types::{
     RebornStreamEventsSubscription, RebornSubmitTurnResponse, RebornTimelineRequest,
     RebornTimelineResponse,
 };
+pub use views::{RebornViewDescriptor, RebornViewPage, RebornViewQuery};
 
 type SkillActivationRecorder =
     dyn Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), RebornServicesError> + Send + Sync;
@@ -1785,6 +1794,18 @@ pub trait RebornServicesApi: Send + Sync {
         Ok(false)
     }
 
+    /// Query one descriptor-declared, read-only product view. This is the
+    /// generic read conduit; new views register an id rather than growing this
+    /// facade with per-feature methods.
+    async fn query(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: RebornViewQuery,
+    ) -> Result<RebornViewPage, RebornServicesError> {
+        let _ = (caller, query);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
     /// Read the raw bytes of one landed attachment so the browser can render an
     /// image thumbnail (or download a file) for a persisted message. The default
     /// reports the bytes are unavailable; compositions that wire a reader over
@@ -2526,24 +2547,6 @@ pub trait RebornServicesApi: Send + Sync {
         ))
     }
 
-    async fn query_logs(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        query: RebornLogQueryRequest,
-    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
-        let _ = (caller, query);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn query_operator_logs(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        query: RebornOperatorLogsQuery,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
-        let _ = (caller, query);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
     async fn run_operator_service_lifecycle(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -2716,7 +2719,7 @@ pub struct RebornServices {
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
     llm_config: Option<Arc<dyn LlmConfigService>>,
-    // arch-exempt: optional_arc, genuinely optional — the active-model reader is wired only under the root-llm-provider feature; cold-boot/no-LLM builds and tests run without it (mirrors the sibling optional llm_config field), plan #5985
+    // arch-exempt: optional_arc, genuinely optional — the active-model reader is wired only when the runtime has an LLM reload handle; runtimes built without one, and tests, run without it (mirrors the sibling optional llm_config field), plan #5985
     active_model_reader: Option<Arc<dyn ActiveModelReader>>,
     operator_approval_config: Option<RebornOperatorApprovalConfig>,
     thread_operation_locks: Arc<ThreadOperationLocks>,
@@ -3908,6 +3911,56 @@ impl RebornServicesApi for RebornServices {
         })
     }
 
+    async fn query(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: RebornViewQuery,
+    ) -> Result<RebornViewPage, RebornServicesError> {
+        match query.view_id.as_str() {
+            id if id == LOGS_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(RebornServicesError::internal_from)?;
+                let response = self.build_logs_view(caller, request, query.cursor).await?;
+                let next_cursor = response.next_cursor.clone();
+                let payload =
+                    serde_json::to_value(response).map_err(RebornServicesError::internal_from)?;
+                Ok(RebornViewPage {
+                    payload,
+                    next_cursor,
+                })
+            }
+            id if id == OPERATOR_LOGS_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(RebornServicesError::internal_from)?;
+                let response = self
+                    .build_operator_logs_view(caller, request, query.cursor)
+                    .await?;
+                let next_cursor = response
+                    .logs
+                    .as_ref()
+                    .and_then(|logs| logs.next_cursor.clone());
+                let payload =
+                    serde_json::to_value(response).map_err(RebornServicesError::internal_from)?;
+                Ok(RebornViewPage {
+                    payload,
+                    next_cursor,
+                })
+            }
+            id if id == RUN_ARTIFACT_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(RebornServicesError::internal_from)?;
+                let artifact = self.build_run_artifact(caller, request).await?;
+                let payload =
+                    serde_json::to_value(artifact).map_err(RebornServicesError::internal_from)?;
+                Ok(RebornViewPage {
+                    payload,
+                    next_cursor: None,
+                })
+            }
+            _ => Err(RebornServicesError::not_found()),
+        }
+    }
+
     async fn list_project_dir(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -4929,49 +4982,6 @@ impl RebornServicesApi for RebornServices {
             message: "operator status is available".to_string(),
             operator_status: Some(status),
             logs: None,
-            service_lifecycle: None,
-            diagnostics: Vec::new(),
-        })
-    }
-
-    async fn query_logs(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        query: RebornLogQueryRequest,
-    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
-        validate_log_query_modes(query.tail, query.follow)?;
-
-        let request = bounded_log_query(query);
-        let thread_id = request.thread_id.clone().ok_or_else(|| {
-            RebornServicesError::validation(WebUiInboundValidationError::new(
-                "thread_id",
-                WebUiInboundValidationCode::MissingField,
-            ))
-        })?;
-        let thread_id = parse_thread_id_field("thread_id", thread_id)?;
-        let actor = caller.actor();
-        let scope = caller.turn_scope(thread_id);
-        self.resolve_thread_access_for_caller(caller.clone(), scope, &actor)
-            .await?;
-
-        self.operator_logs.query_logs(caller, request).await
-    }
-
-    async fn query_operator_logs(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        query: RebornOperatorLogsQuery,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
-        validate_log_query_modes(query.tail, query.follow)?;
-
-        let request = bounded_operator_logs_query(query);
-        let logs = self.operator_logs.query_logs(caller, request).await?;
-        Ok(RebornOperatorCommandPlaneResponse {
-            area: RebornOperatorArea::Logs,
-            status: RebornOperatorSurfaceStatus::Available,
-            message: "operator logs query completed".to_string(),
-            operator_status: None,
-            logs: Some(logs),
             service_lifecycle: None,
             diagnostics: Vec::new(),
         })

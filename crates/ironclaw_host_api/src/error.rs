@@ -30,6 +30,10 @@ pub enum HostApiError {
     InvalidNetworkTarget { value: String, reason: String },
     #[error("invalid runtime credential target '{value}': {reason}")]
     InvalidRuntimeCredentialTarget { value: String, reason: String },
+    #[error("invalid safe summary: {reason}")]
+    InvalidSafeSummary { reason: String },
+    #[error("invalid host remediation: {reason}")]
+    InvalidHostRemediation { reason: String },
     #[error("host API invariant violation: {reason}")]
     InvariantViolation { reason: String },
 }
@@ -83,6 +87,25 @@ impl HostApiError {
 
     pub(crate) fn invariant(reason: impl Into<String>) -> Self {
         Self::InvariantViolation {
+            reason: reason.into(),
+        }
+    }
+
+    /// Validation failure for a [`crate::SafeSummary`]. Deliberately carries only
+    /// the reason, never the rejected value — the value may hold exactly the raw
+    /// payload/credential material the redaction rule caught.
+    pub(crate) fn invalid_safe_summary(reason: impl Into<String>) -> Self {
+        Self::InvalidSafeSummary {
+            reason: reason.into(),
+        }
+    }
+
+    /// Validation failure for a [`crate::HostRemediation`]. Carries only the
+    /// reason for the same rationale as [`Self::invalid_safe_summary`]: the
+    /// rejected value may hold the very credential material the guard caught.
+    pub(crate) fn invalid_host_remediation(reason: impl Into<String>) -> Self {
+        // pub-api-exempt: crate-internal, called by host_remediation::validate_host_remediation
+        Self::InvalidHostRemediation {
             reason: reason.into(),
         }
     }

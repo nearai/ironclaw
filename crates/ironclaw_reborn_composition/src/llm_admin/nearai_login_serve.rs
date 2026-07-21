@@ -28,7 +28,7 @@ use crate::LlmReloadTrigger;
 use crate::llm_admin::llm_config_service::{
     NEARAI_LOGIN_CALLBACK_PATH, NearAiLoginStateStore, apply_nearai_login,
 };
-use crate::webui::webui_serve::PublicRouteMount;
+use crate::webui::route_mounts::PublicRouteMount;
 
 const NEARAI_CALLBACK_RATE_WINDOW_SECONDS: NonZeroU32 = match NonZeroU32::new(60) {
     Some(value) => value,
@@ -78,7 +78,7 @@ async fn nearai_callback(
 }
 
 /// Build the public NEAR AI login callback mount for composition to merge via
-/// [`crate::webui::webui_serve::WebuiServeConfig::with_public_route_mount`].
+/// `ironclaw_webui::WebuiServeConfig::with_public_route_mount`.
 pub(crate) fn nearai_login_callback_mount(
     session: Arc<ironclaw_llm::SessionManager>,
     reload: Arc<dyn LlmReloadTrigger>,

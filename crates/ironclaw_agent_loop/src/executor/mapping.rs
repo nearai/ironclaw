@@ -1,8 +1,9 @@
+use ironclaw_host_api::{Resolution, ToolVerdict};
 use ironclaw_turns::{
     LoopBlockedKind, LoopFailureKind, SanitizedFailure,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, CapabilityFailureKind,
-        CapabilityOutcome, LoopCheckpointKind, LoopGateKind,
+        LoopCheckpointKind, LoopGateKind, LoopSafeSummary, sanitize_model_visible_text,
     },
 };
 
@@ -52,29 +53,24 @@ pub(super) fn batch_policy_kind(policy: BatchPolicy) -> BatchPolicyKind {
     }
 }
 
-pub(super) fn capability_batch_counts(outcomes: &[CapabilityOutcome]) -> (u32, u32, u32, u32) {
+pub(super) fn capability_batch_counts(resolutions: &[Resolution]) -> (u32, u32, u32, u32) {
     let mut result_count = 0;
     let mut denied_count = 0;
     let mut gated_count = 0;
     let mut failed_count = 0;
-    for outcome in outcomes {
-        match outcome {
-            CapabilityOutcome::Completed(_) | CapabilityOutcome::SpawnedChildRun { .. } => {
-                result_count += 1
-            }
-            CapabilityOutcome::Denied(_) => denied_count += 1,
-            CapabilityOutcome::ApprovalRequired { .. }
-            | CapabilityOutcome::AuthRequired { .. }
-            | CapabilityOutcome::ResourceBlocked { .. }
-            // ExternalToolPending: the run parks waiting for the client to submit
-            // tool output — a non-completing, non-failing, non-denied gate.
-            | CapabilityOutcome::ExternalToolPending { .. }
-            | CapabilityOutcome::AwaitDependentRun { .. }
-            // SpawnedProcess: treated as gated — it is a non-completing, non-failing, non-denied
-            // outcome that defers completion to a background process. Grouped with gated to avoid
-            // treating it as completed or failed in batch accounting.
-            | CapabilityOutcome::SpawnedProcess(_) => gated_count += 1,
-            CapabilityOutcome::Failed(_) => failed_count += 1,
+    for resolution in resolutions {
+        // Exhaustive over `Resolution`, no wildcard (§11.9). `Done` splits on its
+        // verdict: `Success`/`ChildSpawned` are results, a `RecoverableFailure` is
+        // a model-visible failure. `Denied` is denied; every `Blocked` gate and
+        // every `Suspended` (process/dependent-run/external-tool) is gated — a
+        // non-completing, non-failing, non-denied outcome that defers completion.
+        match resolution {
+            Resolution::Done(outcome) => match &outcome.verdict {
+                ToolVerdict::Success | ToolVerdict::ChildSpawned { .. } => result_count += 1,
+                ToolVerdict::RecoverableFailure { .. } => failed_count += 1,
+            },
+            Resolution::Denied(_) => denied_count += 1,
+            Resolution::Blocked(_) | Resolution::Suspended(_) => gated_count += 1,
         }
     }
     (result_count, denied_count, gated_count, failed_count)
@@ -122,13 +118,39 @@ pub(super) fn capability_host_error(error: AgentLoopHostError) -> AgentLoopExecu
     if error.kind == AgentLoopHostErrorKind::Cancelled {
         return AgentLoopExecutorError::Cancelled;
     }
-    tracing::warn!(
-        kind = error.kind.as_str(),
-        safe_summary = error.safe_summary.as_str(),
-        "capability host error mapped to HostUnavailable"
-    );
-    AgentLoopExecutorError::HostUnavailable {
+    // Fail soft on a malformed summary: a summary that fails strict validation
+    // (e.g. contains `/`, `{`) must NOT bork the run. Degrade to a canned
+    // fallback and carry the real cause on the model-visible detail channel so
+    // the failure explainer/runner still sees why the call failed. debug! only
+    // — info!/warn! corrupt the REPL/TUI (see repo CLAUDE.md).
+    let raw_summary = error.safe_summary;
+    let (safe_summary, rejected_summary_detail) = match LoopSafeSummary::new(raw_summary.clone()) {
+        Ok(summary) => (summary, None),
+        Err(validation_error) => {
+            tracing::debug!(
+                kind = error.kind.as_str(),
+                validation_error = %validation_error,
+                "capability host error summary rejected; using fallback"
+            );
+            (
+                LoopSafeSummary::capability_failure_summary(raw_summary.clone()),
+                Some(sanitize_model_visible_text(raw_summary)),
+            )
+        }
+    };
+    let detail = error.detail.or(rejected_summary_detail);
+    if detail.is_none() && error.reason_kind.is_none() && error.diagnostic_ref.is_none() {
+        return AgentLoopExecutorError::HostUnavailable {
+            stage: HostStage::Capability,
+        };
+    }
+    AgentLoopExecutorError::HostUnavailableWithDiagnostics {
         stage: HostStage::Capability,
+        kind: error.kind,
+        safe_summary,
+        reason_kind: error.reason_kind,
+        diagnostic_ref: error.diagnostic_ref,
+        detail,
     }
 }
 
@@ -244,12 +266,27 @@ fn sanitized_failure_category(
     })
 }
 
-pub(super) fn sanitized_strategy_summary(
+/// Sanitize a strategy summary, failing soft: a summary that fails strict
+/// validation degrades to a fixed fallback instead of aborting the run, and the
+/// secret-value-scrubbed raw cause is returned alongside so the caller can carry
+/// it on the model-visible detail channel.
+pub(super) fn sanitized_strategy_summary_or_fallback(
     summary: String,
-) -> Result<SanitizedStrategySummary, AgentLoopExecutorError> {
-    SanitizedStrategySummary::new(summary).map_err(|_| AgentLoopExecutorError::PlannerContract {
-        detail: "host returned unsafe strategy summary",
-    })
+    fallback: &'static str,
+) -> (SanitizedStrategySummary, Option<String>) {
+    match SanitizedStrategySummary::new(summary.clone()) {
+        Ok(summary) => (summary, None),
+        Err(validation_error) => {
+            tracing::debug!(
+                validation_error = %validation_error,
+                "strategy summary rejected; using fallback"
+            );
+            (
+                SanitizedStrategySummary::from_trusted_static(fallback),
+                Some(sanitize_model_visible_text(summary)),
+            )
+        }
+    }
 }
 
 pub(super) fn honor_retry_alteration(

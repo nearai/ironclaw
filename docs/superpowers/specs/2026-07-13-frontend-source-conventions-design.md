@@ -9,7 +9,7 @@ tagged templates.
 ## Scope
 
 The conventions apply to authored code modules under
-`crates/ironclaw_webui_v2/frontend/src`:
+`crates/ironclaw_webui/frontend/src`:
 
 - Code modules use `.ts` when they contain no JSX and `.tsx` when they contain
   JSX. JavaScript-family alternatives such as `.js`, `.jsx`, `.mjs`, `.cjs`,

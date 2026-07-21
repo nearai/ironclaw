@@ -15,17 +15,17 @@ use crate::{OpenAiChatCompletionsWorkflow, OpenAiCompatModelCatalog, OpenAiRespo
 
 #[derive(Clone, Default)]
 pub struct OpenAiCompatRouterState {
-    /// Wired by host composition when `openai-compat-beta` is active.
+    /// Wired by host composition.
     /// When `None`, chat completions requests return 501 fail-closed.
     /// arch-exempt: optional Arc, genuinely optional by design; default
     /// fail-closed behavior is intentional until host composition wires #4444.
     chat_completions: Option<Arc<OpenAiChatCompletionsWorkflow>>,
-    /// Wired by host composition when `openai-compat-beta` is active.
+    /// Wired by host composition.
     /// When `None`, Responses requests return 501 fail-closed.
     /// arch-exempt: optional Arc, genuinely optional by design; default
     /// fail-closed behavior is intentional until host composition wires #4445.
     responses: Option<Arc<OpenAiResponsesWorkflow>>,
-    /// Wired by host composition when `openai-compat-beta` is active.
+    /// Wired by host composition.
     /// When `None`, `GET /v1/models` returns 501 fail-closed.
     /// arch-exempt: optional Arc, genuinely optional by design; default
     /// fail-closed behavior is intentional until host composition wires the

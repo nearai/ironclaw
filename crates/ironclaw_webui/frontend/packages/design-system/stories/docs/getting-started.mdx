@@ -1,0 +1,76 @@
+import { Meta } from "@storybook/addon-docs/blocks";
+
+<Meta title="Docs/Getting started" />
+
+# IronClaw Design System
+
+Radix-based, shadcn-patterned React components; the canonical `--v2-*`
+design tokens; and a restrained motion vocabulary. One import surface for
+every IronClaw UI: the WebUI v2 agent workspace consumes this package today,
+and any future repository (marketing, sub-UIs, third-party hosts) can import
+the same package for brand-consistent UI.
+
+**Why this exists** (per the product design review): a strong, agent-legible
+system means small UI changes can be delegated — to engineers *and* to
+agents — without a design review, because the decision space is already
+constrained. This Storybook is the living spec.
+
+## Architecture
+
+- **Radix primitives** underneath every interactive component: Dialog,
+  Select, DropdownMenu, Tabs, Tooltip, Popover, Checkbox, Switch,
+  RadioGroup, Slider, Avatar, Separator, ScrollArea. Keyboard navigation,
+  focus management, and ARIA semantics come from the primitive, not from
+  bespoke code.
+- **shadcn patterns** for the styling layer: CVA variants, a `cn()`
+  merger (clsx + tailwind-merge), Tailwind classes bound to CSS custom
+  properties.
+- **Tokens, not values**: colors, radii, control heights, spacing, type
+  sizes, shadows, durations, and z-layers are all `--v2-*` custom
+  properties (see the Tokens section). Components never restate raw values.
+
+## Installation
+
+Inside the ironclaw repo the frontend app already consumes the package via
+pnpm workspaces (`"@ironclaw/design-system": "workspace:*"`). From another
+repository, add it as a git dependency or link a local checkout:
+
+```bash
+# link a local checkout for development (symlink)
+pnpm link /path/to/ironclaw/crates/ironclaw_webui/frontend/packages/design-system
+
+# or as a file dependency
+# "@ironclaw/design-system": "file:../ironclaw/crates/ironclaw_webui/frontend/packages/design-system"
+```
+
+The package is **source-first** — `exports` point at TypeScript source, so
+a bundler that compiles TSX from `node_modules` (Vite does out of the box)
+is expected. `pnpm build` also emits a compiled ESM bundle + declarations
+in `dist/` for hosts that cannot.
+
+## Setup
+
+```css
+/* your app.css — Tailwind v4 host */
+@import "tailwindcss";
+@import "@ironclaw/design-system/tokens.css";
+@source "../node_modules/@ironclaw/design-system/src";
+```
+
+Set `data-theme="light" | "dark"` on `<html>` (or use the exported
+`useInterfaceTheme` hook). Localized hosts can bridge their translator
+through `DesignSystemI18nProvider`; without it, built-in strings fall back
+to English.
+
+## Usage
+
+```tsx
+import { Button, Card, Modal, SelectMenu, Tabs } from "@ironclaw/design-system";
+import { COLOR_TOKENS, STATUS_CANON } from "@ironclaw/design-system/tokens";
+import { MOTION_DURATION } from "@ironclaw/design-system/motion";
+```
+
+Every component page in this Storybook shows the variants, a props table,
+and the story source (the `Show code` toggle under each canvas) — use those
+as copy-paste starting points. The `/playground` route in the running WebUI
+renders the same components inside the real app shell.

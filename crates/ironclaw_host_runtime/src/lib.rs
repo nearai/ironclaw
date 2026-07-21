@@ -47,7 +47,7 @@ mod invocation_services;
 mod latency;
 pub mod memory_context;
 mod obligations;
-mod planner;
+mod post_edit_check;
 mod process_aliases;
 mod process_output;
 mod process_port;
@@ -111,10 +111,13 @@ pub use obligations::{
     ProcessObligationLifecycleStore, RuntimeCredentialAccessSecret,
     RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver,
 };
-pub use planner::{ExecutionPlan, PlannerError, plan_capability};
+pub use post_edit_check::{
+    POST_EDIT_CHECK_ENV, POST_EDIT_CHECK_TIMEOUT_ENV, PostEditCheckConfig,
+    PostEditCheckConfigError, PostEditCheckService,
+};
 pub use process_output::{SavedCommandOutput, SavedCommandOutputSanitization};
 pub use process_port::{
-    CommandExecutionOutput, CommandExecutionRequest, LocalHostProcessPort, RuntimeProcessError,
+    CommandExecutionOutput, CommandExecutionRequest, HostProcessPort, RuntimeProcessError,
     RuntimeProcessPort, SandboxCommandTransport, TenantSandboxProcessPort,
 };
 pub use production::DefaultHostRuntime;
@@ -329,60 +332,34 @@ pub struct RuntimeCapabilityRequest {
     /// and must not trust caller estimates as binding limits or actual usage.
     pub estimate: ResourceEstimate,
     pub input: Value,
-    /// Caller-supplied dedup hint.
-    ///
-    /// **This field is currently advisory at this layer.** The composed
-    /// capability host does not yet implement caller-driven idempotent
-    /// retries, so two `invoke_capability` calls carrying the same key will
-    /// both execute. Upper turn/loop services that need at-most-once
-    /// semantics must dedupe themselves until idempotency lands in the
-    /// capability host. The field is kept on the contract surface so that
-    /// shape doesn't break when dedup is wired through downstream.
-    ///
-    /// The host runtime still validates and forwards the key into
-    /// observability spans for audit/tracing.
-    pub idempotency_key: Option<IdempotencyKey>,
-    /// Legacy caller-supplied trust decision kept for transitional request-shape
-    /// compatibility.
-    ///
-    /// [`DefaultHostRuntime`](crate::DefaultHostRuntime) ignores this value: it
-    /// resolves the capability provider's package identity, evaluates the
-    /// host-owned policy, stamps the resulting effective trust onto the
-    /// execution context, and passes that host-owned decision to the capability
-    /// host. Callers must not rely on this field to widen or narrow authority.
-    pub trust_decision: TrustDecision,
 }
 
 impl RuntimeCapabilityRequest {
+    // Deliberately NO `trust_decision` parameter — do not re-add one. Trust is
+    // host-owned: `DefaultHostRuntime` evaluates it itself, and a caller-supplied
+    // decision would be unvalidated authority input the runtime must ignore
+    // (arch-simplification §1.1).
+    // Removed so it is no longer carried across the capability hops.
     pub fn new(
         context: ExecutionContext,
         capability_id: CapabilityId,
         estimate: ResourceEstimate,
         input: Value,
-        trust_decision: TrustDecision,
     ) -> Self {
         Self {
             context,
             capability_id,
             estimate,
             input,
-            idempotency_key: None,
-            trust_decision,
         }
-    }
-
-    pub fn with_idempotency_key(mut self, key: IdempotencyKey) -> Self {
-        self.idempotency_key = Some(key);
-        self
     }
 }
 
 /// Request to resume one approval-blocked capability through the composed host runtime.
 ///
 /// The shape mirrors [`RuntimeCapabilityRequest`] but additionally carries the
-/// approval request selected by an upper approval workflow. Like invoke requests,
-/// `trust_decision` is transitional compatibility data: the default host runtime
-/// evaluates provider trust itself before delegating to `CapabilityHost`.
+/// approval request selected by an upper approval workflow. The default host
+/// runtime evaluates provider trust itself before delegating to `CapabilityHost`.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct RuntimeCapabilityResumeRequest {
@@ -391,8 +368,6 @@ pub struct RuntimeCapabilityResumeRequest {
     pub capability_id: CapabilityId,
     pub estimate: ResourceEstimate,
     pub input: Value,
-    pub idempotency_key: Option<IdempotencyKey>,
-    pub trust_decision: TrustDecision,
 }
 
 impl RuntimeCapabilityResumeRequest {
@@ -402,7 +377,6 @@ impl RuntimeCapabilityResumeRequest {
         capability_id: CapabilityId,
         estimate: ResourceEstimate,
         input: Value,
-        trust_decision: TrustDecision,
     ) -> Self {
         Self {
             context,
@@ -410,14 +384,7 @@ impl RuntimeCapabilityResumeRequest {
             capability_id,
             estimate,
             input,
-            idempotency_key: None,
-            trust_decision,
         }
-    }
-
-    pub fn with_idempotency_key(mut self, key: IdempotencyKey) -> Self {
-        self.idempotency_key = Some(key);
-        self
     }
 }
 
@@ -434,8 +401,6 @@ pub struct RuntimeCapabilityAuthResumeRequest {
     pub capability_id: CapabilityId,
     pub estimate: ResourceEstimate,
     pub input: Value,
-    pub idempotency_key: Option<IdempotencyKey>,
-    pub trust_decision: TrustDecision,
     /// Present when the invocation previously passed an approval gate.
     /// Used to locate and claim the matching fingerprinted approval lease
     /// so the re-dispatch does not require a second approval.
@@ -448,7 +413,6 @@ impl RuntimeCapabilityAuthResumeRequest {
         capability_id: CapabilityId,
         estimate: ResourceEstimate,
         input: Value,
-        trust_decision: TrustDecision,
         approval_request_id: Option<ApprovalRequestId>,
     ) -> Self {
         Self {
@@ -456,15 +420,8 @@ impl RuntimeCapabilityAuthResumeRequest {
             capability_id,
             estimate,
             input,
-            idempotency_key: None,
-            trust_decision,
             approval_request_id,
         }
-    }
-
-    pub fn with_idempotency_key(mut self, key: IdempotencyKey) -> Self {
-        self.idempotency_key = Some(key);
-        self
     }
 }
 
@@ -575,12 +532,61 @@ pub struct RuntimeProcessHandle {
 }
 
 /// Sanitized capability failure outcome.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `message` is the public label: it is persisted into run-state rows,
+/// published on the runtime event sink, and rendered by product surfaces, so
+/// producers keep it host-authored/strict-validated (wild raw causes degrade
+/// to the kind's fixed sentence). The raw descriptive cause rides
+/// `model_visible_cause` instead — an in-process-only channel.
+#[derive(Clone, Eq)]
 pub struct RuntimeCapabilityFailure {
     pub capability_id: CapabilityId,
     pub kind: RuntimeFailureKind,
     pub message: Option<String>,
     pub detail: Option<DispatchFailureDetail>,
+    /// Registry-scrubbed descriptive cause for the model-visible Diagnostic
+    /// channel ONLY. Deliberately absent from `Debug`/`PartialEq` and never
+    /// persisted or published by run-state/event writers — the loop-support
+    /// seam (`runtime_failure_diagnostic_detail`) re-scrubs and injection-
+    /// fences it before it reaches the model.
+    model_visible_cause: Option<String>,
+}
+
+impl fmt::Debug for RuntimeCapabilityFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `model_visible_cause` is intentionally omitted and raw Diagnostic
+        // text is redacted: Debug renders flow into tracing logs and
+        // test/public assertions, and either channel may carry backend paths
+        // or provider text. Structured invalid-input and host-remediation
+        // details remain useful and are already bounded by their contracts.
+        let mut debug = f.debug_struct("RuntimeCapabilityFailure");
+        debug
+            .field("capability_id", &self.capability_id)
+            .field("kind", &self.kind)
+            .field("message", &self.message);
+        match &self.detail {
+            Some(DispatchFailureDetail::Diagnostic { .. }) => {
+                debug.field("detail", &"<diagnostic redacted>");
+            }
+            detail => {
+                debug.field("detail", detail);
+            }
+        }
+        debug.finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for RuntimeCapabilityFailure {
+    fn eq(&self, other: &Self) -> bool {
+        // Mirror the `Debug` exclusion: `model_visible_cause` is a private
+        // diagnostic channel, so equality compares only the public fields.
+        // Otherwise two failures differing only in the hidden cause would fail
+        // `assert_eq!` while their `Debug` diffs print identical.
+        self.capability_id == other.capability_id
+            && self.kind == other.kind
+            && self.message == other.message
+            && self.detail == other.detail
+    }
 }
 
 /// Explicit fallback for outcome categories that the loop adapter cannot handle
@@ -765,12 +771,27 @@ impl RuntimeCapabilityFailure {
             kind,
             message,
             detail: None,
+            model_visible_cause: None,
         }
     }
 
     pub fn with_detail(mut self, detail: DispatchFailureDetail) -> Self {
         self.detail = Some(detail);
         self
+    }
+
+    /// Attach the registry-scrubbed descriptive cause for the model-visible
+    /// Diagnostic channel. Never rendered in `Debug`, run-state rows, or
+    /// runtime events.
+    pub fn with_model_visible_cause(mut self, cause: impl Into<String>) -> Self {
+        self.model_visible_cause = Some(cause.into());
+        self
+    }
+
+    /// Return the scrubbed cause for the loop adapter's model-visible
+    /// Diagnostic seam. This value is never a public display label.
+    pub fn model_visible_cause(&self) -> Option<&str> {
+        self.model_visible_cause.as_deref()
     }
 
     pub fn safe_summary(&self) -> Option<String> {

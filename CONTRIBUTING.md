@@ -48,6 +48,10 @@ Refactor-only PRs are not accepted from contributors outside the core team. If a
 
 ## Development Workflow
 
+Use the [Ironclaw TDD playbook](docs/internal/testing-playbook.md) to choose the
+smallest test layers that prove a feature or bug fix and to find the correct
+test location.
+
 ```bash
 cargo fmt                                                    # format
 cargo clippy --all --benches --tests --examples --all-features  # lint (zero warnings)

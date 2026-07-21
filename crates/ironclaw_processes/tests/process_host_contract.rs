@@ -1,12 +1,10 @@
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use ironclaw_filesystem::{
+    Fault, FaultInjecting, FilesystemError, FilesystemOperation, InMemoryBackend, RootFilesystem,
+    ScopedFilesystem,
+};
 use ironclaw_host_api::*;
 use ironclaw_processes::*;
 use serde_json::json;
@@ -14,12 +12,16 @@ use tokio::time::timeout;
 
 #[tokio::test]
 async fn process_host_status_reads_scoped_process_record() {
-    let store = InMemoryProcessStore::new();
+    let store = in_mem_process_store();
     let host = ProcessHost::new(&store);
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
-    let other_scope = sample_scope(invocation_id, "tenant2", "user1");
+    // A different project is path-isolated on a single mount; cross-tenant
+    // isolation is mount-structural (arch-simplification §4.3), covered by
+    // `filesystem_process_store_isolates_two_tenants_with_same_user_project_ids`.
+    let mut other_scope = sample_scope(invocation_id, "tenant1", "user1");
+    other_scope.project_id = Some(ProjectId::new("project2").unwrap());
 
     store
         .start(process_start(process_id, invocation_id, scope.clone()))
@@ -39,7 +41,7 @@ async fn process_host_status_reads_scoped_process_record() {
 
 #[tokio::test]
 async fn process_host_kill_transitions_running_process() {
-    let store = InMemoryProcessStore::new();
+    let store = in_mem_process_store();
     let host = ProcessHost::new(&store);
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
@@ -65,7 +67,7 @@ async fn process_host_kill_transitions_running_process() {
 
 #[tokio::test]
 async fn process_host_await_process_returns_terminal_exit_after_background_completion() {
-    let store = Arc::new(InMemoryProcessStore::new());
+    let store = Arc::new(in_mem_process_store());
     let manager = BackgroundProcessManager::new(store.clone(), Arc::new(DelayedSuccessExecutor));
     let host = ProcessHost::new(store.as_ref()).with_poll_interval(Duration::from_millis(5));
     let invocation_id = InvocationId::new();
@@ -86,8 +88,8 @@ async fn process_host_await_process_returns_terminal_exit_after_background_compl
 
 #[tokio::test]
 async fn process_host_kill_retries_result_side_effect_for_already_killed_process() {
-    let store = InMemoryProcessStore::new();
-    let result_store = Arc::new(FailOnceKillResultStore::new());
+    let store = in_mem_process_store();
+    let (result_store, backend) = result_store_failing_first_kill_write();
     let host = ProcessHost::new(&store).with_result_store(result_store.clone());
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
@@ -99,10 +101,17 @@ async fn process_host_kill_retries_result_side_effect_for_already_killed_process
         .unwrap();
 
     let first_err = host.kill(&scope, process_id).await.unwrap_err();
+    // The real store mapped the injected `FilesystemError::Backend` on the
+    // first kill-result write through its `#[from] FilesystemError` path. The
+    // former fake hand-returned `ProcessResultUnavailable`, a variant the
+    // filesystem-backed store never actually produces for an I/O fault — see
+    // the migration finding in the PR notes.
     assert!(matches!(
         first_err,
-        ProcessError::ProcessResultUnavailable { process_id: id } if id == process_id
+        ProcessError::Filesystem(FilesystemError::Backend { .. })
     ));
+    // Exactly one result write was attempted (and faulted) so far.
+    assert_eq!(backend.count(FilesystemOperation::WriteFile), 1);
     assert_eq!(
         host.status(&scope, process_id)
             .await
@@ -122,6 +131,8 @@ async fn process_host_kill_retries_result_side_effect_for_already_killed_process
     let repaired = host.kill(&scope, process_id).await.unwrap();
 
     assert_eq!(repaired.status, ProcessStatus::Killed);
+    // The retry (2nd write) passed the `nth(1)` fault and persisted the record.
+    assert_eq!(backend.count(FilesystemOperation::WriteFile), 2);
     assert_eq!(
         result_store
             .get(&scope, process_id)
@@ -135,7 +146,7 @@ async fn process_host_kill_retries_result_side_effect_for_already_killed_process
 
 #[tokio::test]
 async fn process_host_await_process_returns_terminal_exit_for_already_killed_process() {
-    let store = InMemoryProcessStore::new();
+    let store = in_mem_process_store();
     let host = ProcessHost::new(&store);
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
@@ -154,12 +165,16 @@ async fn process_host_await_process_returns_terminal_exit_for_already_killed_pro
 
 #[tokio::test]
 async fn process_host_await_process_fails_closed_for_unknown_or_other_scope_process() {
-    let store = InMemoryProcessStore::new();
+    let store = in_mem_process_store();
     let host = ProcessHost::new(&store);
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
-    let other_scope = sample_scope(invocation_id, "tenant2", "user1");
+    // A different project is path-isolated on a single mount; cross-tenant
+    // isolation is mount-structural (arch-simplification §4.3), covered by
+    // `filesystem_process_store_isolates_two_tenants_with_same_user_project_ids`.
+    let mut other_scope = sample_scope(invocation_id, "tenant1", "user1");
+    other_scope.project_id = Some(ProjectId::new("project2").unwrap());
 
     let missing = host.await_process(&scope, process_id).await.unwrap_err();
     assert!(matches!(missing, ProcessError::UnknownProcess { process_id: id } if id == process_id));
@@ -178,7 +193,7 @@ async fn process_host_await_process_fails_closed_for_unknown_or_other_scope_proc
 
 #[tokio::test]
 async fn process_host_subscribe_emits_initial_and_terminal_records() {
-    let store = InMemoryProcessStore::new();
+    let store = in_mem_process_store();
     let host = ProcessHost::new(&store).with_poll_interval(Duration::from_millis(5));
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
@@ -202,7 +217,7 @@ async fn process_host_subscribe_emits_initial_and_terminal_records() {
 
 #[tokio::test]
 async fn process_host_subscribe_tracks_background_completion() {
-    let store = Arc::new(InMemoryProcessStore::new());
+    let store = Arc::new(in_mem_process_store());
     let manager = BackgroundProcessManager::new(store.clone(), Arc::new(DelayedSuccessExecutor));
     let host = ProcessHost::new(store.as_ref()).with_poll_interval(Duration::from_millis(5));
     let invocation_id = InvocationId::new();
@@ -230,7 +245,7 @@ async fn process_host_subscribe_tracks_background_completion() {
 
 #[tokio::test]
 async fn process_host_subscribe_closes_after_initial_terminal_record() {
-    let store = InMemoryProcessStore::new();
+    let store = in_mem_process_store();
     let host = ProcessHost::new(&store).with_poll_interval(Duration::from_millis(5));
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
@@ -253,12 +268,16 @@ async fn process_host_subscribe_closes_after_initial_terminal_record() {
 
 #[tokio::test]
 async fn process_host_subscribe_fails_closed_for_unknown_or_other_scope_process() {
-    let store = InMemoryProcessStore::new();
+    let store = in_mem_process_store();
     let host = ProcessHost::new(&store);
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
-    let other_scope = sample_scope(invocation_id, "tenant2", "user1");
+    // A different project is path-isolated on a single mount; cross-tenant
+    // isolation is mount-structural (arch-simplification §4.3), covered by
+    // `filesystem_process_store_isolates_two_tenants_with_same_user_project_ids`.
+    let mut other_scope = sample_scope(invocation_id, "tenant1", "user1");
+    other_scope.project_id = Some(ProjectId::new("project2").unwrap());
 
     let missing = host.subscribe(&scope, process_id).await.unwrap_err();
     assert!(matches!(missing, ProcessError::UnknownProcess { process_id: id } if id == process_id));
@@ -272,58 +291,30 @@ async fn process_host_subscribe_fails_closed_for_unknown_or_other_scope_process(
     assert!(matches!(hidden, ProcessError::UnknownProcess { process_id: id } if id == process_id));
 }
 
-struct FailOnceKillResultStore {
-    inner: InMemoryProcessResultStore,
-    fail_next_kill: AtomicBool,
-}
-
-impl FailOnceKillResultStore {
-    fn new() -> Self {
-        Self {
-            inner: InMemoryProcessResultStore::new(),
-            fail_next_kill: AtomicBool::new(true),
-        }
-    }
-}
-
-#[async_trait]
-impl ProcessResultStore for FailOnceKillResultStore {
-    async fn complete(
-        &self,
-        scope: &ResourceScope,
-        process_id: ProcessId,
-        output: serde_json::Value,
-    ) -> Result<ProcessResultRecord, ProcessError> {
-        self.inner.complete(scope, process_id, output).await
-    }
-
-    async fn fail(
-        &self,
-        scope: &ResourceScope,
-        process_id: ProcessId,
-        error_kind: String,
-    ) -> Result<ProcessResultRecord, ProcessError> {
-        self.inner.fail(scope, process_id, error_kind).await
-    }
-
-    async fn kill(
-        &self,
-        scope: &ResourceScope,
-        process_id: ProcessId,
-    ) -> Result<ProcessResultRecord, ProcessError> {
-        if self.fail_next_kill.swap(false, Ordering::SeqCst) {
-            return Err(ProcessError::ProcessResultUnavailable { process_id });
-        }
-        self.inner.kill(scope, process_id).await
-    }
-
-    async fn get(
-        &self,
-        scope: &ResourceScope,
-        process_id: ProcessId,
-    ) -> Result<Option<ProcessResultRecord>, ProcessError> {
-        self.inner.get(scope, process_id).await
-    }
+/// The real `FilesystemProcessResultStore` over a [`FaultInjecting`] backend
+/// armed to fail the 1st result write — the kill-result write. Replaces the
+/// former whole-trait `FailOnceKillResultStore` fake: the store now runs its
+/// genuine path building, CAS write, and `FilesystemError -> ProcessError`
+/// mapping under the injected backend fault, so the kill-side-effect retry
+/// path is proven through the production store instead of a hand-rolled
+/// stand-in. Returns the store plus the fault handle for asserting backend
+/// traffic.
+fn result_store_failing_first_kill_write() -> (
+    Arc<FilesystemProcessResultStore<FaultInjecting<InMemoryBackend>>>,
+    Arc<FaultInjecting<InMemoryBackend>>,
+) {
+    let backend = Arc::new(
+        FaultInjecting::new(InMemoryBackend::new()).with_fault(
+            Fault::on(FilesystemOperation::WriteFile)
+                .path("results")
+                .nth(1)
+                .backend("injected kill result write failure"),
+        ),
+    );
+    let store = Arc::new(FilesystemProcessResultStore::new(processes_fs_over(
+        backend.clone(),
+    )));
+    (store, backend)
 }
 
 struct DelayedSuccessExecutor;
@@ -373,4 +364,22 @@ fn sample_scope(invocation_id: InvocationId, tenant: &str, user: &str) -> Resour
         thread_id: Some(ThreadId::new("thread1").unwrap()),
         invocation_id,
     }
+}
+
+fn processes_fs_over<F: RootFilesystem>(backend: Arc<F>) -> Arc<ScopedFilesystem<F>> {
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/processes").expect("alias"),
+        VirtualPath::new("/engine/tenants/tenant1/users/user1/processes").expect("target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
+}
+
+fn processes_test_fs() -> Arc<ScopedFilesystem<InMemoryBackend>> {
+    processes_fs_over(Arc::new(InMemoryBackend::new()))
+}
+
+fn in_mem_process_store() -> FilesystemProcessStore<InMemoryBackend> {
+    FilesystemProcessStore::new(processes_test_fs())
 }

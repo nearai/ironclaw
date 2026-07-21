@@ -292,7 +292,7 @@ fn dispatch_errors_preserve_typed_failure_kind() {
     assert_eq!(
         DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Guest,
-            safe_summary: None,
+            model_visible_cause: None,
         }
         .failure_kind(),
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest)
@@ -1661,6 +1661,7 @@ fn sample_context() -> ExecutionContext {
     let project_id = ProjectId::new("project1").unwrap();
 
     ExecutionContext {
+        run_id: None,
         invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,

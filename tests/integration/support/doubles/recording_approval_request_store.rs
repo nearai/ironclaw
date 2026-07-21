@@ -1,6 +1,5 @@
-/// Test double substituting the production `ApprovalRequestStore` impls
-/// (`InMemoryApprovalRequestStore` / `FilesystemApprovalRequestStore`,
-/// `crates/ironclaw_run_state/src/lib.rs`).
+/// Test double substituting the production `ApprovalRequestStore` impl
+/// (`FilesystemApprovalRequestStore`, `crates/ironclaw_run_state/src/lib.rs`).
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},

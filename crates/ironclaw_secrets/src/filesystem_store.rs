@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical LocalFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
 //! Filesystem-backed implementations of the scoped secret and credential stores.
 //!
 //! Routes persistence through the unified
@@ -46,10 +47,13 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use ironclaw_filesystem::{
     CasApply, CasExpectation, CasUpdateError, ContentType, Entry, FilesystemError, Filter,
-    IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page, RecordKind, RootFilesystem,
-    ScopedFilesystem, cas_update,
+    InMemoryBackend, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page, RecordKind,
+    RootFilesystem, ScopedFilesystem, cas_update,
 };
-use ironclaw_host_api::{HostApiError, ResourceScope, ScopedPath, SecretHandle, Timestamp};
+use ironclaw_host_api::{
+    HostApiError, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope,
+    SYSTEM_RESERVED_ID, ScopedPath, SecretHandle, Timestamp, VirtualPath,
+};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -70,7 +74,7 @@ use crate::{
 // Every persisted entry must carry a `RecordKind` so that record-aware
 // backends (Postgres, libSQL) can distinguish schema families and reject
 // byte-only `CasExpectation::Absent` blind-write attempts that the
-// `LocalFilesystem` byte-only backend would otherwise let through.
+// `DiskFilesystem` byte-only backend would otherwise let through.
 
 const SECRET_RECORD_KIND: &str = "secret_record";
 const SECRET_LEASE_KIND: &str = "secret_lease";
@@ -235,6 +239,20 @@ where
         }
     }
 
+    /// Like [`FilesystemSecretStore::ephemeral`], but over a caller-supplied
+    /// backend mounted under the same tenant-rewriting `/secrets` view and an
+    /// ephemeral master key.
+    ///
+    /// The seam for fault testing: wrap the backend in
+    /// `ironclaw_filesystem::FaultInjecting` and drive the **real** store
+    /// against injected backend faults, exercising its encryption, CAS write,
+    /// and `FilesystemError -> SecretStoreError` mapping — instead of
+    /// substituting a whole-trait `SecretStore` fake that runs none of that.
+    pub fn ephemeral_over(backend: Arc<F>) -> Self {
+        let scoped = ScopedFilesystem::new(backend, ephemeral_secrets_mount_view);
+        Self::new(Arc::new(scoped), Arc::new(SecretsCrypto::ephemeral()))
+    }
+
     // The FS-stored master-key sentinel and `verify_can_decrypt_existing_secrets`
     // method that used to live here were removed when the per-tenant
     // `ScopedFilesystem` design landed: the sentinel record would have moved to
@@ -339,6 +357,58 @@ where
             }
             other => other,
         }
+    }
+}
+
+/// Redacted `Debug`: never walks the backend or crypto state, so no secret
+/// material, ciphertext, or lease contents can leak through `{:?}` output
+/// (test wrappers `#[derive(Debug)]` around this store).
+impl<F> std::fmt::Debug for FilesystemSecretStore<F>
+where
+    F: RootFilesystem,
+{
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FilesystemSecretStore")
+            .field("filesystem", &self.filesystem)
+            .field("lease_ttl", &self.lease_ttl)
+            .finish_non_exhaustive()
+    }
+}
+
+impl FilesystemSecretStore<InMemoryBackend> {
+    /// Volatile, encrypted secret store: the production `FilesystemSecretStore`
+    /// over a fresh [`InMemoryBackend`] with an ephemeral master key and a
+    /// tenant-rewriting mount resolver (`/secrets` ->
+    /// `/tenants/<tenant>/users/<user>/secrets`), matching production
+    /// composition's `invocation_mount_view` shape so cross-tenant isolation
+    /// stays structural. Replaces the deleted `InMemorySecretStore` (§4.3 of
+    /// `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`).
+    pub fn ephemeral() -> Self {
+        Self::ephemeral_over(Arc::new(InMemoryBackend::new()))
+    }
+}
+
+/// Tenant-rewriting `/secrets` mount resolver used by
+/// [`FilesystemSecretStore::ephemeral`]. Mirrors production composition's
+/// `invocation_mount_view` for the `/secrets` alias, including the
+/// `__system__` path segment for the reserved system sentinel scope (the raw
+/// sentinel contains control bytes and is not path-safe).
+fn ephemeral_secrets_mount_view(scope: &ResourceScope) -> Result<MountView, HostApiError> {
+    let tenant_id = ephemeral_scope_path_segment(scope.tenant_id.as_str());
+    let user_id = ephemeral_scope_path_segment(scope.user_id.as_str());
+    MountView::new(vec![MountGrant::new(
+        MountAlias::new("/secrets")?,
+        VirtualPath::new(format!("/tenants/{tenant_id}/users/{user_id}/secrets"))?,
+        MountPermissions::read_write_list_delete(),
+    )])
+}
+
+fn ephemeral_scope_path_segment(value: &str) -> &str {
+    if value == SYSTEM_RESERVED_ID {
+        "__system__"
+    } else {
+        value
     }
 }
 
@@ -1368,7 +1438,7 @@ fn tag_entry_with_tenant(entry: Entry, scope: &ResourceScope) -> Entry {
 }
 
 /// Declare the `tenant_id` exact-equality index on the `/secrets` mount,
-/// tolerating backends that don't materialize indexes (LocalFilesystem).
+/// tolerating backends that don't materialize indexes (DiskFilesystem).
 /// Idempotent across the mount lifetime and avoids per-owner DDL churn under
 /// concurrent secret/lease writes.
 async fn ensure_tenant_id_index_secret<F>(

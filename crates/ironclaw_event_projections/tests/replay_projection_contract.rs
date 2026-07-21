@@ -14,12 +14,16 @@ use ironclaw_events::{
     EventStreamKey, InMemoryDurableAuditLog, InMemoryDurableEventLog, ReadScope, RuntimeEvent,
     RuntimeEventId, RuntimeEventKind, UNCLASSIFIED_ERROR_KIND,
 };
+use ironclaw_filesystem::{
+    Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, ScopedFilesystem,
+};
 use ironclaw_host_api::{
     Action, ActionResultSummary, ActionSummary, AgentId, AuditEnvelope, AuditEventId, AuditStage,
-    CapabilityId, CapabilitySet, CorrelationId, DenyReason, ExtensionId, InvocationId, MountView,
-    ProcessId, ProjectId, ResourceScope, RuntimeKind, ScopedPath, TenantId, ThreadId, TrustClass,
-    UserId,
+    CapabilityId, CapabilitySet, CorrelationId, DenyReason, ExtensionId, InvocationId, MountAlias,
+    MountGrant, MountPermissions, MountView, ProcessId, ProjectId, ResourceScope, RuntimeKind,
+    ScopedPath, TenantId, ThreadId, TrustClass, UserId, VirtualPath,
 };
+use ironclaw_reborn_event_store::FilesystemDurableEventLog;
 
 #[test]
 fn audit_projection_stage_wire_strings_stay_compatible_with_audit_stage() {
@@ -1901,7 +1905,7 @@ async fn replay_projection_output_does_not_expose_raw_runtime_details() {
 
 #[tokio::test]
 async fn replay_projection_errors_do_not_expose_backend_details() {
-    let service = ReplayEventProjectionService::new(Arc::new(FailingDurableEventLog));
+    let service = ReplayEventProjectionService::new(projection_source_failing_with_sentinels());
     let scope = scope_for_thread(ThreadId::new("thread-a").unwrap());
 
     let error = service
@@ -1927,42 +1931,49 @@ async fn replay_projection_errors_do_not_expose_backend_details() {
     assert!(message.contains("projection source failed"));
 }
 
-struct FailingDurableEventLog;
-
-#[async_trait]
-impl DurableEventLog for FailingDurableEventLog {
-    async fn append(
-        &self,
-        _event: RuntimeEvent,
-    ) -> Result<EventLogEntry<RuntimeEvent>, EventError> {
-        Err(EventError::DurableLog {
-            reason: "DATABASE_PROJECTION_SENTINEL /tmp/backend-private-path sk_live".to_string(),
-        })
-    }
-
-    async fn read_after_cursor(
-        &self,
-        _stream: &EventStreamKey,
-        _filter: &ReadScope,
-        _after: Option<EventCursor>,
-        _limit: usize,
-    ) -> Result<EventReplay<RuntimeEvent>, EventError> {
-        Err(EventError::DurableLog {
-            reason: "DATABASE_PROJECTION_SENTINEL /tmp/backend-private-path sk_live".to_string(),
-        })
-    }
-
-    async fn head_cursor(
-        &self,
-        _stream: &EventStreamKey,
-        _after: EventCursor,
-    ) -> Result<EventCursor, EventError> {
-        Err(EventError::DurableLog {
-            reason: "DATABASE_PROJECTION_SENTINEL /tmp/backend-private-path sk_live".to_string(),
-        })
-    }
+/// The real [`FilesystemDurableEventLog`] over a [`FaultInjecting`] backend
+/// armed to fail the replay `Tail` op with a backend reason that embeds
+/// sentinel tokens (a fake DB marker, a private host path, a secret-shaped
+/// string). Replaces the former whole-trait `FailingDurableEventLog` fake:
+/// the projection service now sanitizes an error produced by the *real*
+/// store's `FilesystemError -> EventError` mapping, whose `Backend` Display
+/// (`"filesystem backend error during {operation} at {path}: {reason}"`)
+/// threads the injected reason through `map_filesystem_tail_error` verbatim.
+/// This proves the projection boundary strips genuine backend detail the store
+/// actually surfaces, not just a fake's hand-returned string.
+fn projection_source_failing_with_sentinels()
+-> Arc<FilesystemDurableEventLog<FaultInjecting<InMemoryBackend>>> {
+    let backend = Arc::new(
+        FaultInjecting::new(InMemoryBackend::new()).with_fault(
+            Fault::on(FilesystemOperation::Tail)
+                .backend("DATABASE_PROJECTION_SENTINEL /tmp/backend-private-path sk_live"),
+        ),
+    );
+    // The filesystem log routes every stream through scoped paths under
+    // `/events`; grant the read/tail permissions the replay path needs.
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/events").expect("alias"),
+        VirtualPath::new("/events").expect("target"),
+        MountPermissions {
+            read: true,
+            write: true,
+            delete: false,
+            list: true,
+            execute: false,
+        },
+    )])
+    .expect("mount view");
+    Arc::new(FilesystemDurableEventLog::new(Arc::new(
+        ScopedFilesystem::with_fixed_view(backend, mounts),
+    )))
 }
 
+// domain-state fake, not an I/O fault — cannot move to
+// ironclaw_filesystem::FaultInjecting. Serves canned `entries` at fixed cursors
+// and records the `after` cursor of each `read_after_cursor` call to assert the
+// projection service's pagination/cursor-advance behavior. Those are
+// above-the-store observations (cursor arguments, not filesystem ops) that
+// FaultInjecting — which records only op+path — cannot reproduce.
 struct CountingDurableEventLog {
     entries: Vec<EventLogEntry<RuntimeEvent>>,
     reads: Mutex<Vec<Option<EventCursor>>>,
@@ -2063,6 +2074,7 @@ fn scope_for_thread_with_invocation(
 
 fn execution_context_for_scope(scope: ResourceScope) -> ironclaw_host_api::ExecutionContext {
     let context = ironclaw_host_api::ExecutionContext {
+        run_id: None,
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
@@ -2434,6 +2446,12 @@ async fn replay_projection_updates_with_small_limit_handles_long_prefix() {
 /// the first `read_after_cursor(after=None, ..)` call and an empty page
 /// otherwise. Used for regressions that need to inject hand-built
 /// `RuntimeEvent`s that bypass the typed sanitizing constructors.
+//
+// domain-state fake, not an I/O fault — cannot move to
+// ironclaw_filesystem::FaultInjecting. Its whole purpose is to feed the
+// projection service hand-built events that bypass the typed sanitizing
+// constructors; the real store serializes/deserializes through that sanitizer,
+// so it structurally cannot carry these unsanitized records.
 struct StaticDurableEventLog {
     entries: Vec<EventLogEntry<RuntimeEvent>>,
 }

@@ -1,18 +1,11 @@
-#![cfg(any(feature = "libsql", feature = "postgres"))]
-
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-#[cfg(feature = "postgres")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::Duration;
-#[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
-#[cfg(feature = "postgres")]
 use ironclaw_filesystem::PostgresRootFilesystem;
-#[cfg(feature = "libsql")]
 use ironclaw_product_workflow::RebornLibSqlIdempotencyLedger;
-#[cfg(feature = "postgres")]
 use ironclaw_product_workflow::RebornPostgresIdempotencyLedger;
 
 // Shared ledger test support was renamed on fold-in to avoid colliding with the
@@ -21,8 +14,6 @@ use ironclaw_product_workflow::RebornPostgresIdempotencyLedger;
 mod support;
 
 use support::*;
-
-#[cfg(feature = "postgres")]
 fn unique_suffix(name: &str) -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -30,8 +21,6 @@ fn unique_suffix(name: &str) -> String {
         .as_nanos();
     format!("{name}-{nanos}")
 }
-
-#[cfg(feature = "libsql")]
 async fn libsql_filesystem(path: &str) -> Arc<LibSqlRootFilesystem> {
     let db = Arc::new(
         libsql::Builder::new_local(path)
@@ -46,8 +35,6 @@ async fn libsql_filesystem(path: &str) -> Arc<LibSqlRootFilesystem> {
         .expect("run libsql filesystem migrations");
     filesystem
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_settled_action_survives_reopen_and_replays() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -59,8 +46,6 @@ async fn libsql_settled_action_survives_reopen_and_replays() {
     assert_settled_action_survives_reopen_and_replays(&ledger, &reopened, "libsql-settled-replay")
         .await;
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_in_flight_action_blocks_until_lease_expires() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -71,8 +56,6 @@ async fn libsql_in_flight_action_blocks_until_lease_expires() {
     );
     assert_in_flight_action_blocks_until_lease_expires(&ledger, "libsql-lease").await;
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_release_allows_retry_without_waiting_for_lease() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -83,8 +66,6 @@ async fn libsql_release_allows_retry_without_waiting_for_lease() {
     );
     assert_release_allows_retry_without_waiting_for_lease(&ledger, "libsql-release").await;
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_duplicate_reservation_contention_serializes() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -101,8 +82,6 @@ async fn libsql_duplicate_reservation_contention_serializes() {
 
     assert_duplicate_reservation_contention_serializes(&first, &second, "libsql-contention").await;
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_settled_entry_limit_prunes_oldest() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -115,8 +94,6 @@ async fn libsql_settled_entry_limit_prunes_oldest() {
 
     assert_settled_entry_limit_prunes_oldest(&ledger, "libsql-retention").await;
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_settled_prune_interval_defers_until_interval() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -130,8 +107,6 @@ async fn libsql_settled_prune_interval_defers_until_interval() {
 
     assert_settled_prune_interval_defers_until_interval(&ledger, "libsql-prune-interval").await;
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_superseded_reservation_cannot_settle() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -143,8 +118,6 @@ async fn libsql_superseded_reservation_cannot_settle() {
 
     assert_superseded_reservation_cannot_settle(&ledger, "libsql-superseded").await;
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_settle_missing_reservation_returns_transient() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -154,8 +127,6 @@ async fn libsql_settle_missing_reservation_returns_transient() {
 
     assert_settle_missing_reservation_returns_transient(&ledger, "libsql-missing-settle").await;
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_custom_root_isolated_from_default_root() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -170,8 +141,6 @@ async fn libsql_custom_root_isolated_from_default_root() {
 
     assert_custom_root_isolated_from_default_root(&custom, &default, "libsql-custom-root").await;
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_actor_identity_is_part_of_fingerprint_path() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -181,8 +150,6 @@ async fn libsql_actor_identity_is_part_of_fingerprint_path() {
 
     assert_actor_identity_is_part_of_fingerprint_path(&ledger, "libsql-actor-isolation").await;
 }
-
-#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_settled_action_survives_reopen_and_replays_when_configured() {
     let Some(filesystem) = postgres_filesystem().await else {
@@ -198,8 +165,6 @@ async fn postgres_settled_action_survives_reopen_and_replays_when_configured() {
     )
     .await;
 }
-
-#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_in_flight_action_blocks_until_lease_expires_when_configured() {
     let Some(filesystem) = postgres_filesystem().await else {
@@ -211,8 +176,6 @@ async fn postgres_in_flight_action_blocks_until_lease_expires_when_configured() 
     assert_in_flight_action_blocks_until_lease_expires(&ledger, &unique_suffix("postgres-lease"))
         .await;
 }
-
-#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_release_allows_retry_without_waiting_for_lease_when_configured() {
     let Some(filesystem) = postgres_filesystem().await else {
@@ -227,8 +190,6 @@ async fn postgres_release_allows_retry_without_waiting_for_lease_when_configured
     )
     .await;
 }
-
-#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_duplicate_reservation_contention_serializes_when_configured() {
     let Some(filesystem) = postgres_filesystem().await else {
@@ -248,8 +209,6 @@ async fn postgres_duplicate_reservation_contention_serializes_when_configured() 
     )
     .await;
 }
-
-#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_settled_entry_limit_prunes_oldest_when_configured() {
     let Some(filesystem) = postgres_filesystem().await else {
@@ -261,8 +220,6 @@ async fn postgres_settled_entry_limit_prunes_oldest_when_configured() {
 
     assert_settled_entry_limit_prunes_oldest(&ledger, &unique_suffix("postgres-retention")).await;
 }
-
-#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_settled_prune_interval_defers_until_interval_when_configured() {
     let Some(filesystem) = postgres_filesystem().await else {
@@ -279,8 +236,6 @@ async fn postgres_settled_prune_interval_defers_until_interval_when_configured()
     )
     .await;
 }
-
-#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_superseded_reservation_cannot_settle_when_configured() {
     let Some(filesystem) = postgres_filesystem().await else {
@@ -292,8 +247,6 @@ async fn postgres_superseded_reservation_cannot_settle_when_configured() {
     assert_superseded_reservation_cannot_settle(&ledger, &unique_suffix("postgres-superseded"))
         .await;
 }
-
-#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_settle_missing_reservation_returns_transient_when_configured() {
     let Some(filesystem) = postgres_filesystem().await else {
@@ -307,8 +260,6 @@ async fn postgres_settle_missing_reservation_returns_transient_when_configured()
     )
     .await;
 }
-
-#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_custom_root_isolated_from_default_root_when_configured() {
     let Some(filesystem) = postgres_filesystem().await else {
@@ -328,8 +279,6 @@ async fn postgres_custom_root_isolated_from_default_root_when_configured() {
     )
     .await;
 }
-
-#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_actor_identity_is_part_of_fingerprint_path_when_configured() {
     let Some(filesystem) = postgres_filesystem().await else {
@@ -343,8 +292,6 @@ async fn postgres_actor_identity_is_part_of_fingerprint_path_when_configured() {
     )
     .await;
 }
-
-#[cfg(feature = "postgres")]
 async fn postgres_filesystem() -> Option<Arc<PostgresRootFilesystem>> {
     let url = match std::env::var("IRONCLAW_PRODUCT_WORKFLOW_POSTGRES_URL") {
         Ok(url) => url,

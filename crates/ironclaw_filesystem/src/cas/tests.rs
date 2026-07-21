@@ -22,6 +22,14 @@ use crate::{
     FilesystemOperation, InMemoryBackend, RecordKind, RecordVersion, RootFilesystem,
     ScopedFilesystem, VersionedEntry,
 };
+// The generic get/put backend-error regressions inject a `Backend` fault below
+// the real CAS-capable `InMemoryBackend` via the shared `FaultInjecting`
+// decorator instead of hand-rolling a whole-trait fake. `FaultInjecting` lives
+// behind the `test-support` feature, so the import and the two tests that use
+// it are gated to keep the default `cargo test` lane compiling with the feature
+// off.
+#[cfg(feature = "test-support")]
+use crate::{Fault, FaultInjecting};
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────
 
@@ -611,54 +619,6 @@ async fn unsupported_write_file_maps_to_cas_unsupported() {
     );
 }
 
-// ─── A CAS-capable backend whose `get` returns a generic error ────────────────
-
-/// CAS-capable backend whose `get` always returns a [`FilesystemError::Backend`]
-/// error — not a not-found / `Ok(None)`, not a `VersionMismatch`. Used to
-/// exercise the `get`-error arm of `cas_update_loop` — the
-/// `Err(error) => return Err(CasUpdateError::Backend(error))` branch of the
-/// `match filesystem.get(...)` — when the read itself fails. The pre-flight
-/// gate passes because full capabilities are declared; `get` then fails before any
-/// decode or apply runs.
-struct GetErrorBackend;
-
-#[async_trait]
-impl RootFilesystem for GetErrorBackend {
-    fn capabilities(&self) -> BackendCapabilities {
-        // Full CAS-capable shape — pre-flight gate passes and the loop enters.
-        BackendCapabilities::in_memory_full()
-    }
-
-    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
-        // A plain infrastructure error on the read path. Not a not-found
-        // (`Ok(None)`) and not a `VersionMismatch` — a backend that is simply
-        // broken or temporarily unavailable. The loop's get-error arm must
-        // forward it unchanged as `CasUpdateError::Backend`.
-        Err(FilesystemError::Backend {
-            path: path.clone(),
-            operation: FilesystemOperation::ReadFile,
-            reason: "simulated backend read failure".to_string(),
-        })
-    }
-
-    async fn put(
-        &self,
-        _path: &VirtualPath,
-        _entry: Entry,
-        _cas: CasExpectation,
-    ) -> Result<RecordVersion, FilesystemError> {
-        unimplemented!("GetErrorBackend::put is unreachable in this test")
-    }
-
-    async fn list_dir(&self, _path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        unimplemented!("GetErrorBackend::list_dir is unreachable in this test")
-    }
-
-    async fn stat(&self, _path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        unimplemented!("GetErrorBackend::stat is unreachable in this test")
-    }
-}
-
 // ─── A backend whose `get` returns a record with an unparseable body ──────────
 
 /// CAS-capable backend whose `get` always returns a [`VersionedEntry`] whose
@@ -758,57 +718,17 @@ impl RootFilesystem for PutTrackingBackend {
     }
 }
 
-// ─── A CAS-capable backend whose `put` returns a generic non-CAS error ────────
+// ─── Generic backend get/put errors, injected via `FaultInjecting` ────────────
+//
+// `GetErrorBackend` and `GenericPutErrorBackend` (hand-rolled whole-trait
+// `RootFilesystem` fakes) folded into `ironclaw_filesystem::FaultInjecting`:
+// each test now wraps the real CAS-capable `InMemoryBackend` and injects a
+// `Backend` fault on the read / write op, so the regression exercises the
+// genuine backend under the injected fault rather than a bespoke stand-in.
+// Gated on `test-support` because `FaultInjecting` is (the default `cargo test`
+// lane keeps compiling this module with the feature off).
 
-/// CAS-capable backend whose `get` returns `Ok(None)` and whose `put` returns
-/// a plain [`FilesystemError::Backend`] — neither `VersionMismatch` nor
-/// `Unsupported { operation: WriteFile }`. Used to exercise the catch-all
-/// `Err(error) => Err(CasUpdateError::Backend(error))` arm in `cas_update_loop`
-/// — the fallback after the `VersionMismatch` and `Unsupported { operation:
-/// WriteFile, .. }` arms on the `match filesystem.put(...)`. The pre-flight gate
-/// passes because full capabilities are declared; `get` returns absent so the
-/// loop attempts a first write; `put` then returns the generic error the loop
-/// must forward as-is.
-struct GenericPutErrorBackend;
-
-#[async_trait]
-impl RootFilesystem for GenericPutErrorBackend {
-    fn capabilities(&self) -> BackendCapabilities {
-        // Full CAS-capable shape — pre-flight gate passes and the loop enters.
-        BackendCapabilities::in_memory_full()
-    }
-
-    async fn get(&self, _path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
-        // No existing record — loop takes the first-write path and reaches `put`.
-        Ok(None)
-    }
-
-    async fn put(
-        &self,
-        path: &VirtualPath,
-        _entry: Entry,
-        _cas: CasExpectation,
-    ) -> Result<RecordVersion, FilesystemError> {
-        // A plain backend failure that is neither `VersionMismatch` (which
-        // would trigger a retry) nor `Unsupported { WriteFile }` (which maps
-        // to `CasUnsupported`). The loop's catch-all arm must forward it as
-        // `CasUpdateError::Backend`.
-        Err(FilesystemError::Backend {
-            path: path.clone(),
-            operation: FilesystemOperation::WriteFile,
-            reason: "simulated generic backend failure".to_string(),
-        })
-    }
-
-    async fn list_dir(&self, _path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        unimplemented!("GenericPutErrorBackend::list_dir is unreachable in this test")
-    }
-
-    async fn stat(&self, _path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        unimplemented!("GenericPutErrorBackend::stat is unreachable in this test")
-    }
-}
-
+#[cfg(feature = "test-support")]
 #[tokio::test]
 async fn backend_put_error_maps_to_backend() {
     // Regression for the catch-all `Err(error) => Err(CasUpdateError::Backend(error))`
@@ -816,14 +736,17 @@ async fn backend_put_error_maps_to_backend() {
     // after the `VersionMismatch` (retry) and `Unsupported { operation: WriteFile,
     // .. }` (CasUnsupported) arms.
     //
-    // The backend advertises full CAS capability so the pre-flight gate passes
-    // and the helper enters the loop. `get` returns `Ok(None)` so the loop
+    // `InMemoryBackend` advertises full CAS capability so the pre-flight gate
+    // passes and the helper enters the loop. The record is absent so the loop
     // takes the first-write (`CasExpectation::Absent`) path and calls `put`.
-    // `put` returns `FilesystemError::Backend` — a generic infrastructure
-    // failure that is neither `VersionMismatch` (retry) nor
-    // `Unsupported { WriteFile }` (maps to CasUnsupported). The helper must
+    // `FaultInjecting` faults that write with `FilesystemError::Backend` — a
+    // generic infrastructure failure that is neither `VersionMismatch` (retry)
+    // nor `Unsupported { WriteFile }` (maps to CasUnsupported). The helper must
     // forward it unchanged as `CasUpdateError::Backend(_)`.
-    let fs = Arc::new(scoped(Arc::new(GenericPutErrorBackend)));
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()).with_fault(
+        Fault::on(FilesystemOperation::WriteFile).backend("simulated generic backend failure"),
+    ));
+    let fs = Arc::new(scoped(backend));
     let scope = ResourceScope::system();
 
     let result: Result<u64, CasUpdateError<TestError>> = cas_update(
@@ -843,17 +766,22 @@ async fn backend_put_error_maps_to_backend() {
     );
 }
 
+#[cfg(feature = "test-support")]
 #[tokio::test]
 async fn backend_get_error_maps_to_backend() {
     // Regression for the `get`-error arm in `cas_update_loop`:
     // `Err(error) => return Err(CasUpdateError::Backend(error))` on the
     // `match filesystem.get(...)`.
     //
-    // The backend advertises full CAS capability so the pre-flight gate passes
-    // and the helper enters the loop. `get` then returns a plain infrastructure
-    // error (not `Ok(None)` and not a `VersionMismatch`). The helper must
-    // forward it unchanged as `CasUpdateError::Backend(_)`.
-    let fs = Arc::new(scoped(Arc::new(GetErrorBackend)));
+    // `InMemoryBackend` advertises full CAS capability so the pre-flight gate
+    // passes and the helper enters the loop. `FaultInjecting` faults the read
+    // with a plain infrastructure `Backend` error (not `Ok(None)` and not a
+    // `VersionMismatch`). The helper must forward it unchanged as
+    // `CasUpdateError::Backend(_)`.
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()).with_fault(
+        Fault::on(FilesystemOperation::ReadFile).backend("simulated backend read failure"),
+    ));
+    let fs = Arc::new(scoped(backend));
     let scope = ResourceScope::system();
 
     let result: Result<u64, CasUpdateError<TestError>> = cas_update(
@@ -948,7 +876,7 @@ async fn encode_failure_maps_to_apply_without_write() {
 /// time) whose `get` returns `Ok(None)` (absent → first write) and whose `put`
 /// gates on `entry.kind.is_some()`: a record-shaped entry is rejected with
 /// `FilesystemError::Unsupported { operation: WriteFile }`, while a byte-only
-/// entry (kind = None) would be accepted. This models `LocalFilesystem`'s check
+/// entry (kind = None) would be accepted. This models `DiskFilesystem`'s check
 /// at local.rs:189-208: `if entry.kind.is_some() || !entry.indexed.is_empty() {
 /// return Unsupported { WriteFile } }`.
 ///
@@ -993,7 +921,7 @@ impl RootFilesystem for KindGatedByteOnlyBackend {
             "first writes must use CasExpectation::Absent"
         );
         if entry.kind.is_some() {
-            // Record-shaped entries are rejected — mirrors `LocalFilesystem`'s
+            // Record-shaped entries are rejected — mirrors `DiskFilesystem`'s
             // `if entry.kind.is_some() || !entry.indexed.is_empty()` guard.
             Err(FilesystemError::Unsupported {
                 path: path.clone(),
@@ -1021,7 +949,7 @@ async fn record_shaped_first_write_fails_closed_on_byte_only_backend() {
     // Regression for the byte-only first-write fail-closed gap.
     //
     // Store encoders now set `entry.kind = Some(RecordKind)` (record-shaped).
-    // `LocalFilesystem` rejects record-shaped entries with `Unsupported { WriteFile }`
+    // `DiskFilesystem` rejects record-shaped entries with `Unsupported { WriteFile }`
     // BEFORE the CAS check (local.rs:189-208: `if entry.kind.is_some() ||
     // !entry.indexed.is_empty() { return Unsupported { WriteFile } }`), even for
     // `CasExpectation::Absent`. This means `cas_update` with a record-shaped encode

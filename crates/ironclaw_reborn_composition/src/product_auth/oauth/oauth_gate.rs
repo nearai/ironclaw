@@ -621,7 +621,7 @@ mod tests {
     use ironclaw_host_api::{
         AgentId, ExtensionId, RuntimeCredentialAccountProviderId, TenantId, ThreadId, UserId,
     };
-    use ironclaw_secrets::InMemorySecretStore;
+    use ironclaw_secrets::FilesystemSecretStore;
     use tokio::sync::Notify;
     use tokio::time::timeout;
 
@@ -692,7 +692,7 @@ mod tests {
         let provider = Arc::new(RaceOAuthProvider {
             state: state.clone(),
         });
-        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let winner_driver = Arc::new(OAuthGateFlowDriver::new(
             provider.clone(),
             secret_store.clone(),
@@ -777,7 +777,7 @@ mod tests {
         let provider = Arc::new(RaceOAuthProvider {
             state: state.clone(),
         });
-        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let crashed_driver = Arc::new(OAuthGateFlowDriver::new(
             provider.clone(),
             secret_store.clone(),
@@ -886,7 +886,6 @@ mod tests {
     /// OAuth client credentials) must not swallow the whole gate: pre-fix, a
     /// requirements list with `slack_personal` first errored `challenge_for_gate`
     /// entirely and the user got no auth prompt at all.
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn gate_registry_falls_through_unavailable_provider_to_next_requirement() {
         use crate::slack::slack_personal_oauth::SlackPersonalOAuthGateProvider;
@@ -902,7 +901,7 @@ mod tests {
                     .unwrap(),
                 ),
             )),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
         ));
         let registry =
             OAuthGateProviderRegistry::new(vec![slack_driver, Arc::new(fixture.driver.clone())]);
@@ -1116,7 +1115,7 @@ mod tests {
                 flow_source,
                 driver: OAuthGateFlowDriver::new(
                     Arc::new(GoogleOAuthGateProvider::new(client)),
-                    Arc::new(InMemorySecretStore::new()),
+                    Arc::new(FilesystemSecretStore::ephemeral()),
                 ),
                 scope: TurnScope::new(
                     TenantId::new("tenant-alpha").unwrap(),

@@ -7,9 +7,6 @@ publish = false
 [package.metadata.ironclaw]
 layer = "substrates"
 
-[features]
-default = []
-
 [dependencies]
 aes-gcm = "0.10"
 async-trait = "0.1"

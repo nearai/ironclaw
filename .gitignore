@@ -68,7 +68,7 @@ trace_*.json
 
 # Generated WebUI v2 bundle. Cargo builds and embeds this from OUT_DIR when
 # `webui-v2-beta` is enabled; the reviewable source lives under static/js/.
-/crates/ironclaw_webui_v2/static/dist/
+/crates/ironclaw_webui/static/dist/
 
 # Python cache
 __pycache__/
@@ -96,3 +96,10 @@ tests/fixtures/llm_traces/live/*.log
 # scripts/build-test-tools.sh; only sources/manifests/schemas/prompts are tracked.
 test-tools/*.zip
 test-tools/*/wasm-src/target/
+
+# node_modules must never be committed — vendored JS deps belong to the package
+# manager + lockfile, not git. A bare `node_modules/` (no leading slash) matches
+# a directory of that name at ANY depth, so this catches every frontend
+# (webui_v2, e2e, tooling, …) and stops the recurring accidental adds
+# (#6298/#6305).
+node_modules/

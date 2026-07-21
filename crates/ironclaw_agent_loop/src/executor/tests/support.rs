@@ -9,7 +9,7 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, AssistantReply,
         CancellationPolicy, CapabilityBatchInvocation, CapabilityCallCandidate,
-        CapabilityDescriptorView, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
+        CapabilityDescriptorView, CapabilityInputRef, CapabilityInvocation,
         CapabilitySurfaceProfileId, CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId,
         ConcurrencyClass, ContextProfileId, FinalizeAssistantMessage, LoopCancelReasonKind,
         LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest,
@@ -53,8 +53,8 @@ pub(super) struct MockHost {
     compaction: MockCompactionSupport,
     input_batches: Arc<Mutex<VecDeque<LoopInputBatch>>>,
     acked_input_tokens: Arc<Mutex<Vec<LoopInputAckToken>>>,
-    batch_outcomes: Arc<Mutex<VecDeque<ironclaw_turns::run_profile::CapabilityBatchOutcome>>>,
-    single_outcomes: Arc<Mutex<VecDeque<CapabilityOutcome>>>,
+    batch_outcomes: Arc<Mutex<VecDeque<ironclaw_host_api::ResolutionBatch>>>,
+    single_outcomes: Arc<Mutex<VecDeque<ironclaw_host_api::Resolution>>>,
     checkpoints: Arc<Mutex<Vec<LoopCheckpointKind>>>,
     batch_invocations: Arc<Mutex<Vec<CapabilityBatchInvocation>>>,
     single_invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
@@ -80,7 +80,7 @@ pub(super) struct MockHost {
     cancel_after_model_response: Arc<Mutex<bool>>,
     cancel_after_batch_invocation: Arc<Mutex<bool>>,
     fail_checkpoint: Arc<Mutex<Option<LoopCheckpointKind>>>,
-    fail_checkpoint_payload: Arc<Mutex<Option<(LoopCheckpointKind, AgentLoopHostErrorKind)>>>,
+    fail_checkpoint_payload: Arc<Mutex<Option<(LoopCheckpointKind, AgentLoopHostError)>>>,
     fail_visible_capabilities: bool,
     fail_prompt_bundle: bool,
     fail_batch_with: Arc<Mutex<Option<AgentLoopHostErrorKind>>>,
@@ -167,13 +167,13 @@ impl MockHost {
 
     pub(super) fn with_batch_outcomes(
         self,
-        outcomes: Vec<ironclaw_turns::run_profile::CapabilityBatchOutcome>,
+        outcomes: Vec<ironclaw_host_api::ResolutionBatch>,
     ) -> Self {
         *self.batch_outcomes.lock().expect("lock") = outcomes.into();
         self
     }
 
-    pub(super) fn with_single_outcomes(self, outcomes: Vec<CapabilityOutcome>) -> Self {
+    pub(super) fn with_single_outcomes(self, outcomes: Vec<ironclaw_host_api::Resolution>) -> Self {
         *self.single_outcomes.lock().expect("lock") = outcomes.into();
         self
     }
@@ -349,7 +349,19 @@ impl MockHost {
         kind: LoopCheckpointKind,
         error_kind: AgentLoopHostErrorKind,
     ) -> Self {
-        *self.fail_checkpoint_payload.lock().expect("lock") = Some((kind, error_kind));
+        *self.fail_checkpoint_payload.lock().expect("lock") = Some((
+            kind,
+            AgentLoopHostError::new(error_kind, "scripted checkpoint payload failure"),
+        ));
+        self
+    }
+
+    pub(super) fn fail_checkpoint_payload_with_error(
+        self,
+        kind: LoopCheckpointKind,
+        error: AgentLoopHostError,
+    ) -> Self {
+        *self.fail_checkpoint_payload.lock().expect("lock") = Some((kind, error));
         self
     }
 
@@ -766,7 +778,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
         self.single_invocations.lock().expect("lock").push(request);
         self.single_outcomes
             .lock()
@@ -780,12 +792,12 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<ironclaw_turns::run_profile::CapabilityBatchOutcome, AgentLoopHostError> {
+    ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
         self.batch_invocations.lock().expect("lock").push(request);
         if let Some(kind) = *self.fail_batch_with.lock().expect("lock") {
             return Err(AgentLoopHostError::new(kind, "scripted batch failure"));
         }
-        let outcome = self
+        let batch = self
             .batch_outcomes
             .lock()
             .expect("lock")
@@ -796,7 +808,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
         if *self.cancel_after_batch_invocation.lock().expect("lock") {
             self.request_cancellation(LoopCancelReasonKind::UserRequested);
         }
-        Ok(outcome)
+        Ok(batch)
     }
 }
 
@@ -878,18 +890,15 @@ impl ironclaw_turns::run_profile::LoopCheckpointPort for MockHost {
         &self,
         request: StageCheckpointPayloadRequest,
     ) -> Result<LoopCheckpointStateRef, AgentLoopHostError> {
-        if let Some((_, error_kind)) = self
+        if let Some((_, error)) = self
             .fail_checkpoint_payload
             .lock()
             .expect("lock")
             .as_ref()
             .filter(|(kind, _)| *kind == request.kind)
-            .copied()
+            .cloned()
         {
-            return Err(AgentLoopHostError::new(
-                error_kind,
-                "scripted checkpoint payload failure",
-            ));
+            return Err(error);
         }
         self.staged_payloads.lock().expect("lock").push(request);
         LoopCheckpointStateRef::for_run(&self.context, "state")

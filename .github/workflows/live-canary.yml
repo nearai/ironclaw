@@ -769,7 +769,7 @@ jobs:
               python3 scripts/live-canary/validate_reborn_binary_artifact.py \
                 artifacts/prepared-reborn-webui-v2-binary \
                 "${TARGET_REF}" \
-                "webui-v2-beta,slack-v2-host-beta"
+                "libsql"
             ); then
               echo "::warning::The Reborn E2E artifact could not be downloaded or validated; using the canary fallback build."
               rm -rf artifacts/prepared-reborn-webui-v2-binary
@@ -812,9 +812,8 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "0"
         run: >-
           cargo build
-          -p ironclaw_reborn_cli
-          --features webui-v2-beta,slack-v2-host-beta
-          --bin ironclaw-reborn
+          -p ironclaw
+          --bin ironclaw
 
       - name: Package fallback Reborn WebUI v2 binary
         id: fallback
@@ -825,14 +824,17 @@ jobs:
           set -euo pipefail
           rm -rf artifacts/prepared-reborn-webui-v2-binary
           mkdir -p artifacts/prepared-reborn-webui-v2-binary
-          tar -C target/debug -czf artifacts/prepared-reborn-webui-v2-binary/ironclaw-reborn.tar.gz ironclaw-reborn
+          # Temporary compatibility member for downstream QA consumers; remove
+          # after every consumer invokes the canonical ironclaw binary.
+          cp target/debug/ironclaw target/debug/ironclaw-reborn
+          tar -C target/debug -czf artifacts/prepared-reborn-webui-v2-binary/ironclaw-reborn.tar.gz ironclaw ironclaw-reborn
           (
             cd artifacts/prepared-reborn-webui-v2-binary
             sha256sum ironclaw-reborn.tar.gz > ironclaw-reborn.tar.gz.sha256
           )
           jq -n \
             --arg product_ref "${TARGET_REF}" \
-            --argjson features '["slack-v2-host-beta","webui-v2-beta"]' \
+            --argjson features '["libsql"]' \
             '{format_version: 1, product_ref: $product_ref, features: $features}' \
             > artifacts/prepared-reborn-webui-v2-binary/manifest.json
           echo "source=canary-fallback" >> "${GITHUB_OUTPUT}"
@@ -1108,10 +1110,10 @@ jobs:
           python3 scripts/live-canary/validate_reborn_binary_artifact.py \
             .live-qa-binary \
             "${TARGET_REF}" \
-            "webui-v2-beta,slack-v2-host-beta"
+            "libsql"
           mkdir -p target/debug
           tar -C target/debug -xzf .live-qa-binary/ironclaw-reborn.tar.gz
-          chmod 755 target/debug/ironclaw-reborn
+          chmod 755 target/debug/ironclaw target/debug/ironclaw-reborn
       - name: Materialize Reborn WebUI v2 live QA sensitive secrets to files
         if: steps.filter_reborn_webui_v2_google_cases.outputs.skip_shard != '1'
         shell: bash

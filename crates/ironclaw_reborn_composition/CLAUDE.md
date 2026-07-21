@@ -4,7 +4,7 @@
 - Expose facade-shaped handles only: `HostRuntime`, `TurnCoordinator`, product-auth `RebornProductAuthServices`, WebUI `RebornServicesApi`, readiness.
 - Keep lower substrate handles private to factories and owning crates.
 - Substrate handles MAY be exposed via `#[cfg(any(test, feature = "test-support"))]` pub accessors on `RebornRuntime` when downstream integration tests need to drive production-shape state the facade doesn't yet surface (e.g. seeding `TriggerRecord` rows, `pair_external_actor` calls). These seams ship zero bytes in production binaries. New test-support accessors must carry a doc-comment naming the production call site they mirror and an explicit note that the handle is for tests only.
-- Outbound state stores are composition-owned via `RebornLocalRuntimeServices`; do not construct `FilesystemOutboundStateStore` in consumer modules (lint-enforced via `clippy::disallowed-methods`).
+- Outbound state stores are composition-owned via `RebornRuntimeSubstrate`; do not construct `FilesystemOutboundStateStore` in consumer modules (lint-enforced via `clippy::disallowed-methods`).
 - Do not depend on the root `ironclaw` crate or `src/` modules.
 - Do not add legacy bridge modes here until an accepted migration contract exists.
 - Do not route live v1/product traffic here; callers must opt in through explicit Reborn adapters.
@@ -22,11 +22,19 @@
   handler must claim the scoped flow/state/provider through `AuthFlowManager`
   before exchanging provider material through `AuthProviderClient`, then
   complete the flow and emit typed continuations.
-- The first WebUI-mounted OAuth route keeps raw PKCE verifiers in a bounded,
-  expiring process-local cache because `ironclaw_auth` durable records may
-  store hashes only. Do not treat that route as multi-replica/restart-safe
-  until a host-owned encrypted verifier store or equivalent sticky callback
-  mechanism is wired.
+- Raw PKCE verifiers for setup-path OAuth flows live in the injected
+  `SecretStore` under a per-flow handle (`product-auth-setup-pkce-{flow_id}`),
+  written by `RebornProductAuthServices::start_setup_oauth_flow` with
+  TTL = the flow's `expires_at`, and read back once via `lease_once`/`consume`.
+  `ironclaw_auth` durable records still store hashes only. This mirrors the
+  blocked-turn gate driver (`oauth_gate.rs`), so setup callbacks are
+  restart- and replica-safe: the verifier survives anywhere the secret store
+  does. Do not reintroduce a process-local verifier cache — a bounded
+  route-local cache strands a LIVE flow's verifier on eviction or restart, and
+  the callback then fails `unknown_or_expired_flow` on a good flow.
+  The verifier write belongs at the shared start seam, before `create_flow`,
+  so a failed secret write fails the start (fail-closed) rather than minting a
+  flow whose callback can never complete.
 - Manual-token setup routes should call
   `RebornProductAuthServices::request_manual_token_setup` for the typed
   challenge and `RebornProductAuthServices::submit_manual_token` with a
@@ -54,7 +62,7 @@
   calling `SessionThreadService`; do not append with the runtime/base
   `ThreadScope` directly in multi-user WebUI paths.
 
-## WebUI v2 native surface (`webui-v2-beta` feature)
+## WebUI v2 native surface
 
 The Reborn-side host composition for the WebChat v2 HTTP gateway lives
 in this crate. Implements Path A of
@@ -71,7 +79,7 @@ middleware with v1's `src/channels/web/`.
 | `RebornProjectionServices` (in `src/projection.rs`) | Runtime-owned projection/event-stream composition; owns the single local-dev `EventStreamManager` and creates product-specific `ProjectionStream` adapters over it |
 | `WebuiAuthenticator` trait | Host-supplied bearer-token verifier; returns `Option<WebuiAuthentication>` so identity and request-scoped WebUI capabilities travel together |
 | `WebuiServeConfig { tenant_id, authenticator, max_body_bytes, allowed_origins, csp_header }` | Required config for `webui_v2_app`; no defaults that silently disable security |
-| `webui_v2_app(bundle, config) -> Router` | Build the fully-composed axum `Router`. This is the seam between this product/API crate and host-owned HTTP ingress: tests drive it via `tower::ServiceExt::oneshot`; the `ironclaw-reborn serve` subcommand (follow-up PR) hands it to `axum::serve` from a host-owned listener |
+| `webui_v2_app(bundle, config) -> Router` | Build the fully-composed axum `Router`. This is the seam between this product/API crate and host-owned HTTP ingress: tests drive it via `tower::ServiceExt::oneshot`; the `ironclaw serve` subcommand hands it to `axum::serve` from a host-owned listener |
 | `ProtectedRouteMount` | Host-supplied protected API route fragment merged inside the WebUI bearer-auth layer with descriptor-driven body/rate limits. Reborn OpenAI-compatible routes use this seam; do not use it for v1 gateway routers. |
 
 ### Middleware stack composed by `webui_v2_app`
@@ -89,7 +97,7 @@ Inbound order (outer → inner → handler):
    capped, strictly tighter, by the per-route limit below.
 5. **Descriptor-driven per-route body limit**
    (`webui_body_limit::enforce_body_limit`) — reads each route's
-   `BodyLimitPolicy` from `ironclaw_webui_v2::webui_v2_routes()` and,
+   `BodyLimitPolicy` from `ironclaw_webui::webui_v2_routes()` and,
    when present, product-auth route descriptors at composition time and
    enforces it before auth runs (so an oversized payload never spends a
    bearer-validation step). Today: `create_thread`, product-auth OAuth
@@ -120,13 +128,13 @@ Inbound order (outer → inner → handler):
    `config.tenant_id` plus the authentication result's `UserId`, and a
    request-scoped `WebUiV2Capabilities` extension from the same
    authentication result.
-   When `openai-compat-beta` is enabled, the same verified bearer result also
+   The same verified bearer result also
    inserts an `OpenAiCompatAuthenticatedCaller` extension with tenant-scoped
    verified auth evidence for protected OpenAI-compatible route mounts; route
    crates must not mint this evidence.
 8. **Descriptor-driven per-route rate limit**
    (`webui_rate_limit::enforce_rate_limit`) — reads
-   `ironclaw_webui_v2::webui_v2_routes()` plus mounted product-auth
+   `ironclaw_webui::webui_v2_routes()` plus mounted product-auth
    descriptors at composition time and enforces the declared
    `RateLimitPolicy` with a sliding window. Authenticated WebUI/product
    auth start routes use `RateLimitScope::PerCaller`; the public OAuth
@@ -135,7 +143,7 @@ Inbound order (outer → inner → handler):
    Composition fails closed if a future descriptor declares an unsupported
    scope.
 9. `webui_v2_router(WebUiV2State::new(bundle.api))` — the v2
-   handlers from `ironclaw_webui_v2` (create-thread, list-threads, delete-thread,
+   handlers from `ironclaw_webui` (create-thread, list-threads, delete-thread,
    send-message, get-timeline, stream-events SSE, stream-events WS,
    cancel-run, resolve-gate, setup-extension, list/rename automations).
 
@@ -228,7 +236,7 @@ merged into the composed app OUTSIDE the bearer-auth layer but
 INSIDE the outer security-header / CORS / global-body-limit
 stack. The seam exists for the WebChat v2 SSO login surface
 shipped by
-`ironclaw_reborn_webui_ingress::webui_v2_auth_router`, which
+`ironclaw_webui::webui_v2_auth_router`, which
 mounts `/auth/providers`, `/auth/login/{provider}`,
 `/auth/callback/{provider}`, and `/auth/logout`. The browser must
 reach those routes without a session (the whole point of login),
@@ -274,7 +282,7 @@ Rationale:
   `Referrer-Policy: no-referrer` as defense in depth.
 - **Logout actually revokes.** `POST /auth/logout` calls
   `SessionStore::revoke`; the regression in
-  `crates/ironclaw_reborn_webui_ingress/tests/session_round_trip.rs`
+  `crates/ironclaw_webui/tests/session_round_trip.rs`
   locks that a post-revoke bearer fails on `/api/webchat/v2/threads`.
 
 This is a deliberate divergence from the v1 gateway, which sets a
@@ -308,7 +316,7 @@ rows are inventoried here, not implemented in the current PR.
 | Operator status/readiness | v1 doctor/readiness surfaces | `GET /api/webchat/v2/operator/status` | Mapped to Reborn readiness projection through the product facade; left unmounted with other operator routes for multi-user authenticators |
 | Operator logs | `src/cli/logs.rs` command path | `GET /api/webchat/v2/operator/logs` | Mapped to the in-process operator log buffer with bounded query, tail, follow, filter, cursor, and redaction behavior |
 | Operator service lifecycle | `src/cli/service.rs` command path | `POST /api/webchat/v2/operator/service` | Mapped to a Reborn composition lifecycle backend; launchd/systemd user services are supported, other OS targets report unsupported |
-| SSO login (Google) | `GET /auth/providers`, `GET /auth/login/{p}`, `GET /auth/callback/{p}`, `POST /auth/logout` | Same paths on the v2 listener via `ironclaw_reborn_webui_ingress::webui_v2_auth_router`, merged into `webui_v2_app` through [`WebuiServeConfig::with_public_route_mount`] (typed `{ router, descriptors }` so the per-route body-limit / rate-limit middleware applies) | Mapped (Google); GitHub + NEAR follow under #4116 |
+| SSO login (Google) | `GET /auth/providers`, `GET /auth/login/{p}`, `GET /auth/callback/{p}`, `POST /auth/logout` | Same paths on the v2 listener via `ironclaw_webui::webui_v2_auth_router`, merged into `webui_v2_app` through [`WebuiServeConfig::with_public_route_mount`] (typed `{ router, descriptors }` so the per-route body-limit / rate-limit middleware applies) | Mapped (Google); GitHub + NEAR follow under #4116 |
 
 ### Security invariants on every "Mapped" row
 
@@ -335,7 +343,7 @@ rows are inventoried here, not implemented in the current PR.
   preflight.
 - **Body limit** — descriptor-driven per-route via
   `webui_body_limit::enforce_body_limit`. Caps come from
-  `ironclaw_webui_v2::webui_v2_routes()`: `create_thread` 16 KiB,
+  `ironclaw_webui::webui_v2_routes()`: `create_thread` 16 KiB,
   `send_message` 14 MiB, `cancel_run` / `resolve_gate` 4 KiB,
   `get_timeline` / `stream_events` `NoBody`. The outer
   `RequestBodyLimitLayer` at `config.max_body_bytes` (14 MiB default)
@@ -348,7 +356,7 @@ rows are inventoried here, not implemented in the current PR.
   outer `SetResponseHeaderLayer`s; default CSP is
   `default-src 'self'; object-src 'none'; frame-ancestors 'none';
   base-uri 'self'`.
-- **Connection limit (SSE)** — bounded by `ironclaw_webui_v2`'s own
+- **Connection limit (SSE)** — bounded by `ironclaw_webui`'s own
   `SseCapacity` (3 streams per `(tenant, user)`, 5-minute max stream
   lifetime). No WS surface to bound.
 - **Caller construction** — `WebUiAuthenticatedCaller` is built from
@@ -368,11 +376,11 @@ Per Path A in `docs/reborn/how-to-port-channel-to-reborn.md`:
   `feat/webui-v2-gateway-composition-3580` deliberately keeps the v1
   binary untouched.
 
-### How the standalone `ironclaw-reborn serve` consumes this
+### How the standalone `ironclaw serve` consumes this
 
 The `serve` subcommand builds a full local-dev `RebornRuntime`, asks
 `build_webui_services(&runtime, None)` for the WebUI bundle, and hands
-the resulting router to the host-owned `ironclaw_reborn_webui_ingress`
+the resulting router to the host-owned `ironclaw_webui`
 listener lifecycle. The bundle's default projection stream is backed by
 the runtime-owned durable event log plus `EventStreamManager`, so
 `/events` and `/ws` no longer advertise routes that only return
@@ -450,7 +458,7 @@ axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
 - `src/webui/webui_rate_limit.rs::tests` — unit tests for the sliding-window
   policy resolver, a regression test that `build_rate_limit_state`
   accepts every descriptor returned by
-  `ironclaw_webui_v2::webui_v2_routes()`, and
+  `ironclaw_webui::webui_v2_routes()`, and
   `unsupported_scope_is_rejected_at_composition` locking the
   fail-closed branch for non-`PerCaller` scopes.
 - `src/webui/webui_body_limit.rs::tests` — composition-time tests that

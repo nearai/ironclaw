@@ -3,7 +3,6 @@ use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-#[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID;
 use ironclaw_auth::{
     AuthProductError, AuthProviderClient, GOOGLE_PROVIDER_ID, OAuthProviderCallbackRequest,
@@ -22,11 +21,9 @@ use crate::product_auth::oauth::oauth_gate::{
     GoogleOAuthGateProvider, OAuthGateFlowDriver, OAuthGateProviderRegistry,
 };
 use crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderClient;
-#[cfg(feature = "slack-v2-host-beta")]
 use crate::slack::slack_personal_oauth::{
     SlackPersonalOAuthGateProvider, slack_personal_provider_spec,
 };
-#[cfg(feature = "slack-v2-host-beta")]
 use crate::slack::slack_setup::SlackPersonalSetupServiceSlot;
 
 #[derive(Clone)]
@@ -42,17 +39,13 @@ pub(crate) fn compose_provider_client(
     dcr_configs: Vec<OAuthDcrProviderBackendConfig>,
     secret_store: Arc<dyn SecretStore>,
     runtime_ports: ProductAuthProviderRuntimePorts,
-    #[cfg(feature = "slack-v2-host-beta")] slack_personal_oauth_slot: Option<
-        SlackPersonalSetupServiceSlot,
-    >,
-    #[cfg(not(feature = "slack-v2-host-beta"))] _slack_personal_oauth_slot: Option<()>,
+    slack_personal_oauth_slot: Option<SlackPersonalSetupServiceSlot>,
 ) -> Result<OAuthProviderComposition, RebornBuildError> {
     compose_provider_client_with_runtime(
         configs,
         dcr_configs,
         secret_store,
         OAuthProviderRuntimePorts::from_product_auth_ports(runtime_ports),
-        #[cfg(feature = "slack-v2-host-beta")]
         slack_personal_oauth_slot,
     )
 }
@@ -62,9 +55,7 @@ fn compose_provider_client_with_runtime(
     dcr_configs: Vec<OAuthDcrProviderBackendConfig>,
     secret_store: Arc<dyn SecretStore>,
     runtime_ports: OAuthProviderRuntimePorts,
-    #[cfg(feature = "slack-v2-host-beta")] slack_personal_oauth_slot: Option<
-        SlackPersonalSetupServiceSlot,
-    >,
+    slack_personal_oauth_slot: Option<SlackPersonalSetupServiceSlot>,
 ) -> Result<OAuthProviderComposition, RebornBuildError> {
     let mut clients = Vec::new();
     let mut gate_drivers = Vec::new();
@@ -94,7 +85,6 @@ fn compose_provider_client_with_runtime(
         }
         clients.push((provider_id, Arc::new(client) as Arc<dyn AuthProviderClient>));
     }
-    #[cfg(feature = "slack-v2-host-beta")]
     if let Some(slot) = slack_personal_oauth_slot {
         gate_drivers.push(Arc::new(OAuthGateFlowDriver::new(
             Arc::new(SlackPersonalOAuthGateProvider::new(slot.clone())),
@@ -160,7 +150,6 @@ fn compose_provider_client_with_runtime(
     })
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 struct LazySlackPersonalExchangeClient {
     slot: SlackPersonalSetupServiceSlot,
     spec: crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderSpec,
@@ -169,7 +158,6 @@ struct LazySlackPersonalExchangeClient {
     obligation_handler: Arc<dyn CapabilityObligationHandler>,
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 impl LazySlackPersonalExchangeClient {
     async fn build_client(
         &self,
@@ -201,7 +189,6 @@ impl LazySlackPersonalExchangeClient {
     }
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 impl fmt::Debug for LazySlackPersonalExchangeClient {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -210,7 +197,6 @@ impl fmt::Debug for LazySlackPersonalExchangeClient {
     }
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 #[async_trait]
 impl AuthProviderClient for LazySlackPersonalExchangeClient {
     async fn exchange_callback(
@@ -377,7 +363,7 @@ mod tests {
         RuntimeHttpEgressResponse, SecretHandle, TenantId, ThreadId, UserId,
     };
     use ironclaw_product_adapters::AuthPromptChallengeKind;
-    use ironclaw_secrets::{InMemorySecretStore, SecretStore};
+    use ironclaw_secrets::{FilesystemSecretStore, SecretStore};
     use ironclaw_turns::{TurnRunId, TurnScope};
     use secrecy::SecretString;
     use std::sync::Mutex;
@@ -421,9 +407,8 @@ mod tests {
                 },
             ],
             Vec::new(),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
             OAuthProviderRuntimePorts::new(egress.clone(), Arc::new(NoopObligationHandler)),
-            #[cfg(feature = "slack-v2-host-beta")]
             None,
         )
         .expect("provider client composition")
@@ -464,12 +449,11 @@ mod tests {
                 client: oauth_client("google-client", "https://app.example/oauth/google"),
             }],
             Vec::new(),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
             OAuthProviderRuntimePorts::new(
                 Arc::new(RecordingEgress::ok(Vec::new())),
                 Arc::new(NoopObligationHandler),
             ),
-            #[cfg(feature = "slack-v2-host-beta")]
             None,
         )
         .expect("provider composition");
@@ -524,7 +508,7 @@ mod tests {
             br#"{"access_token":"new-google-access","refresh_token":"new-google-refresh","expires_in":3600}"#
                 .to_vec(),
         ));
-        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let resource_scope = sample_scope();
         let auth_scope = AuthProductScope::new(resource_scope.clone(), AuthSurface::Callback);
         let old_access = SecretHandle::new("google-old-access").unwrap();
@@ -562,7 +546,6 @@ mod tests {
             Vec::new(),
             secret_store,
             OAuthProviderRuntimePorts::new(egress.clone(), Arc::new(NoopObligationHandler)),
-            #[cfg(feature = "slack-v2-host-beta")]
             None,
         )
         .expect("provider composition")
@@ -633,7 +616,7 @@ mod tests {
             400,
             br#"{"error":"invalid_grant"}"#.to_vec(),
         ));
-        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let resource_scope = sample_scope();
         let auth_scope = AuthProductScope::new(resource_scope.clone(), AuthSurface::Callback);
         let old_access = SecretHandle::new("google-old-access").unwrap();
@@ -671,7 +654,6 @@ mod tests {
             Vec::new(),
             secret_store,
             OAuthProviderRuntimePorts::new(egress.clone(), Arc::new(NoopObligationHandler)),
-            #[cfg(feature = "slack-v2-host-beta")]
             None,
         )
         .expect("provider composition")

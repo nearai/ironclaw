@@ -26,6 +26,10 @@ jq -c -n --argjson packages "${packages_json}" '
     "events-conversations",
     "auth-security",
     "memory-skills",
+    "channel-delivery",
+    "channel-host",
+    "reborn-migration",
+    "telegram-extension",
     "adapters-misc"
   ];
 
@@ -41,7 +45,7 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_loop_host: "agent-runtime",
 
       ironclaw_runner: "reborn-core",
-      ironclaw_reborn_cli: "reborn-core",
+      ironclaw: "reborn-core",
       ironclaw_reborn_config: "reborn-core",
       ironclaw_reborn_event_store: "reborn-core",
       ironclaw_reborn_identity: "reborn-core",
@@ -56,9 +60,8 @@ jq -c -n --argjson packages "${packages_json}" '
 
       ironclaw_attachments: "webui-ingress",
       ironclaw_projects: "webui-ingress",
-      ironclaw_reborn_webui_ingress: "webui-ingress",
+      ironclaw_webui: "webui-ingress",
       ironclaw_resources: "webui-ingress",
-      ironclaw_webui_v2: "webui-ingress",
 
       ironclaw_first_party_extension_ports: "wasm-sandbox",
       ironclaw_first_party_extensions: "wasm-sandbox",
@@ -99,6 +102,14 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_scripts: "memory-skills",
       ironclaw_skill_learning: "memory-skills",
       ironclaw_skills: "memory-skills",
+
+      # These packages dominate cold/partial-cache wall time. Keep each in its
+      # own matrix lane so compilation overlaps instead of serializing behind
+      # the miscellaneous adapters bucket.
+      ironclaw_channel_delivery: "channel-delivery",
+      ironclaw_channel_host: "channel-host",
+      ironclaw_reborn_migration: "reborn-migration",
+      ironclaw_telegram_extension: "telegram-extension",
 
       ironclaw_architecture: "adapters-misc",
       ironclaw_common: "adapters-misc",

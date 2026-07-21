@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{DispatchInputIssueCode, InvocationId, UserId};
+use ironclaw_host_api::{DispatchInputIssueCode, InvocationId, Resolution, UserId};
 use ironclaw_loop_host::{CapabilityResultWrite, DurablePersistence};
 use ironclaw_threads::{
     MessageKind, MessageStatus, ReadToolResultRecordRequest, SessionThreadError,
@@ -9,27 +9,27 @@ use ironclaw_threads::{
     ToolResultReferenceEnvelope,
 };
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailure, CapabilityFailureDetail,
-    CapabilityFailureKind, CapabilityInputIssue, CapabilityOutcome, CapabilityProgress,
-    CapabilityResultMessage, ConcurrencyHint, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
-    ModelVisibleArtifact, ModelVisibleToolObservation, ObservationTrust, ToolObservationDetail,
-    ToolObservationStatus, sanitize_model_visible_text,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureDetail, CapabilityFailureKind,
+    CapabilityInputIssue, CapabilityProgress, ConcurrencyHint,
+    MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleArtifact,
+    ModelVisibleToolObservation, ObservationTrust, ToolObservationDetail, ToolObservationStatus,
+    resolution, sanitize_model_visible_text,
 };
 
 use super::{
     local_dev_thread_scope_for_run,
     synthetic_capability::{
-        LocalDevSyntheticCapability, LocalDevSyntheticCapabilityDescriptor,
-        LocalDevSyntheticCapabilityHandler, LocalDevSyntheticCapabilityInvocation,
+        SyntheticCapability, SyntheticCapabilityDescriptor, SyntheticCapabilityHandler,
+        SyntheticCapabilityInvocation,
     },
 };
 
 /// Test-support wrap: layers the synthetic `result_read` capability onto
 /// `inner`, mirroring how `refreshing_capability_port.rs`'s `build_inner`
-/// wires it in production (unconditionally, via `wrap_local_dev_synthetic_capabilities`).
+/// wires it in production (unconditionally, via `wrap_synthetic_capabilities`).
 /// `input_resolver`/`result_writer` MUST be the SAME shared io object the
 /// harness's capability port already uses -- see
-/// `RefreshingLocalDevCapabilityPortTestParts::input_resolver` in
+/// `RefreshingCapabilityPortTestParts::input_resolver` in
 /// `test_support/refreshing_capability_port.rs` for the identical
 /// same-object requirement. Tests only -- gated behind `test-support`,
 /// ships zero bytes in production builds.
@@ -42,14 +42,23 @@ pub(crate) fn wrap_result_read_capability_for_test(
     input_resolver: Arc<dyn ironclaw_loop_host::LoopCapabilityInputResolver>,
     result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter>,
 ) -> Result<Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>, AgentLoopHostError> {
-    super::synthetic_capability::wrap_local_dev_synthetic_capabilities(
+    super::synthetic_capability::wrap_synthetic_capabilities(
         inner,
-        vec![result_read_capability(thread_service, fallback_user_id)?],
+        vec![result_read_capability(
+            thread_service,
+            fallback_user_id.clone(),
+        )?],
         run_context,
+        fallback_user_id,
         input_resolver,
         result_writer,
         // trajectory_observer: None — not wired in the integration-test harness.
         None,
+        // `result_read` never raises an approval gate, so its resume path never
+        // loads a replay payload; an in-memory store keeps the seam wired.
+        Arc::new(ironclaw_capabilities::FilesystemReplayPayloadStore::new(
+            crate::wrap_scoped(Arc::new(ironclaw_filesystem::InMemoryBackend::new())),
+        )),
     )
 }
 
@@ -66,9 +75,9 @@ const RESULT_READ_MAX_BYTES: u64 = TOOL_RESULT_RECORD_READ_MAX_BYTES as u64;
 pub(super) fn result_read_capability(
     thread_service: Arc<dyn SessionThreadService>,
     fallback_user_id: UserId,
-) -> Result<LocalDevSyntheticCapability, AgentLoopHostError> {
-    Ok(LocalDevSyntheticCapability::new(
-        LocalDevSyntheticCapabilityDescriptor::new(
+) -> Result<SyntheticCapability, AgentLoopHostError> {
+    Ok(SyntheticCapability::new(
+        SyntheticCapabilityDescriptor::new(
             RESULT_READ_CAPABILITY_ID,
             RESULT_READ_PROVIDER_TOOL_NAME,
             "Read a bounded continuation of a previously completed tool result by result reference.",
@@ -88,7 +97,7 @@ struct ResultReadHandler {
 }
 
 #[async_trait]
-impl LocalDevSyntheticCapabilityHandler for ResultReadHandler {
+impl SyntheticCapabilityHandler for ResultReadHandler {
     fn validate_provider_arguments(
         &self,
         _arguments: &serde_json::Value,
@@ -101,11 +110,11 @@ impl LocalDevSyntheticCapabilityHandler for ResultReadHandler {
 
     async fn invoke(
         &self,
-        invocation: LocalDevSyntheticCapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        invocation: SyntheticCapabilityInvocation,
+    ) -> Result<Resolution, AgentLoopHostError> {
         let input = match parse_result_read_input(&invocation.input) {
             Ok(input) => input,
-            Err(failure) => return Ok(CapabilityOutcome::Failed(failure)),
+            Err(resolution) => return Ok(*resolution),
         };
         let scope = local_dev_thread_scope_for_run(&invocation.run_context, &self.fallback_user_id)
             .ok_or_else(|| {
@@ -197,15 +206,15 @@ impl LocalDevSyntheticCapabilityHandler for ResultReadHandler {
             next_offset,
             sanitize_model_visible_text(content),
         ));
-        Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
-            result_ref: write.result_ref,
-            safe_summary: "result chunk returned".to_string(),
-            progress: CapabilityProgress::MadeProgress,
-            terminate_hint: false,
-            byte_len: write.byte_len,
-            output_digest: write.output_digest,
-            model_observation: write.model_observation,
-        }))
+        Ok(resolution::completed(
+            write.result_ref,
+            "result chunk returned".to_string(),
+            CapabilityProgress::MadeProgress,
+            false,
+            write.byte_len,
+            write.output_digest,
+            write.model_observation,
+        ))
     }
 }
 
@@ -238,20 +247,20 @@ fn result_read_observation(
     }
 }
 
-fn unavailable_result_reference() -> CapabilityOutcome {
-    CapabilityOutcome::Failed(CapabilityFailure {
-        error_kind: CapabilityFailureKind::InvalidInput,
-        safe_summary: "result reference is unavailable in this thread".to_string(),
-        detail: None,
-    })
+fn unavailable_result_reference() -> Resolution {
+    resolution::failed(
+        CapabilityFailureKind::InvalidInput,
+        "result reference is unavailable in this thread".to_string(),
+        None,
+    )
 }
 
-fn non_text_result_content() -> CapabilityOutcome {
-    CapabilityOutcome::Failed(CapabilityFailure {
-        error_kind: CapabilityFailureKind::InvalidInput,
-        safe_summary: "stored tool result cannot be returned as text".to_string(),
-        detail: None,
-    })
+fn non_text_result_content() -> Resolution {
+    resolution::failed(
+        CapabilityFailureKind::InvalidInput,
+        "stored tool result cannot be returned as text".to_string(),
+        None,
+    )
 }
 
 fn storage_unavailable_error(
@@ -271,17 +280,18 @@ struct ResultReadInput {
     max_bytes: u64,
 }
 
-/// Builds the `InvalidInput` `CapabilityFailure` every
+/// Builds the `InvalidInput` recoverable-failure `Resolution` every
 /// `parse_result_read_input` error arm returns, carrying one structured
-/// repair issue.
-fn invalid_input_failure(safe_summary: &str, issue: CapabilityInputIssue) -> CapabilityFailure {
-    CapabilityFailure {
-        error_kind: CapabilityFailureKind::InvalidInput,
-        safe_summary: safe_summary.to_string(),
-        detail: Some(CapabilityFailureDetail::InvalidInput {
+/// repair issue. Boxed because a `Resolution` in the `Err` position of the
+/// parse result is large (`clippy::result_large_err`).
+fn invalid_input_failure(safe_summary: &str, issue: CapabilityInputIssue) -> Box<Resolution> {
+    Box::new(resolution::failed(
+        CapabilityFailureKind::InvalidInput,
+        safe_summary.to_string(),
+        Some(CapabilityFailureDetail::InvalidInput {
             issues: vec![issue],
         }),
-    }
+    ))
 }
 
 /// JSON type name for a `CapabilityInputIssue::received` value, distinct from
@@ -319,9 +329,7 @@ fn safe_issue_path(key: &str) -> String {
     }
 }
 
-fn parse_result_read_input(
-    value: &serde_json::Value,
-) -> Result<ResultReadInput, CapabilityFailure> {
+fn parse_result_read_input(value: &serde_json::Value) -> Result<ResultReadInput, Box<Resolution>> {
     let object = value.as_object().ok_or_else(|| {
         invalid_input_failure(
             "result_read arguments must be an object",

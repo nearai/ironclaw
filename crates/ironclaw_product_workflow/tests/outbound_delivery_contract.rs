@@ -1,21 +1,28 @@
+// arch-exempt: large_file, mechanical InMemoryOutboundStateStore -> FilesystemOutboundStateStore<InMemoryBackend> §4.3 store consolidation, no logic change, plan #6168
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_filesystem::{
+    Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, ScopedFilesystem,
+};
+use ironclaw_host_api::{
+    AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId, ThreadId,
+    UserId, VirtualPath,
+};
+use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
-    CommunicationPreferenceVersion, DeliveryDefaultScope, InMemoryOutboundStateStore,
-    LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundError, OutboundPolicyService,
-    OutboundStateStore, ProjectionSubscriptionRecord, ReplyTargetBindingClaim,
+    CommunicationPreferenceVersion, DeliveryDefaultScope, FilesystemOutboundStateStore,
+    OutboundError, OutboundPolicyService, OutboundStateStore, ReplyTargetBindingClaim,
     ReplyTargetBindingValidator, RequestedOutboundContext, RequestedOutboundKind,
     RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin, SystemEventReasonCode,
-    ThreadNotificationPolicy, ThreadProjectionAccessClaim, ThreadProjectionAccessPolicy,
-    ThreadProjectionAccessRequest, TriggerFireSlot, TriggerOriginRef, TriggerSourceKind,
-    UpdateDeliveryStatusRequest, VersionedCommunicationPreferenceRecord,
+    ThreadProjectionAccessClaim, ThreadProjectionAccessPolicy, ThreadProjectionAccessRequest,
+    TriggerFireSlot, TriggerOriginRef, TriggerSourceKind, VersionedCommunicationPreferenceRecord,
     WriteCommunicationPreferenceRequest,
 };
 use ironclaw_product_adapters::{
@@ -283,106 +290,87 @@ impl ProductOutboundTargetResolver for DmRequiringFakeProductOutboundTargetResol
     }
 }
 
-#[derive(Default)]
-struct StatusFailingOutboundStore {
-    inner: InMemoryOutboundStateStore,
-    status_update_requests: Mutex<Vec<UpdateDeliveryStatusRequest>>,
+/// The production [`FilesystemOutboundStateStore`] over a [`FaultInjecting`]
+/// backend armed to fail the delivery status-update write. Replaces the former
+/// whole-trait `StatusFailingOutboundStore` fake, which returned
+/// `Err(OutboundError::Backend)` from `update_delivery_status` without ever
+/// running the real store. The store now performs its genuine
+/// read-then-CAS-write and `FilesystemError::Backend -> OutboundError::Backend`
+/// mapping (`map_fs_error`) under the injected fault, so these tests exercise
+/// the production store path.
+///
+/// The fault fires on the **2nd** `WriteFile` to the `/deliveries/` subtree: the
+/// 1st is the initial `Pending` attempt row written by `record_delivery_attempt`
+/// during preparation; the 2nd is the status-update write, which is the only one
+/// we want to fail. The `.path("deliveries")` guard keeps the earlier
+/// communication-preference write untouched, and matches the tenant-rewritten
+/// virtual path (`/engine/outbound/deliveries/{id}.json`) by substring.
+///
+/// Returns the store plus the fault handle for asserting the backend traffic the
+/// store produced.
+fn status_update_failing_outbound_store() -> (
+    FilesystemOutboundStateStore<FaultInjecting<InMemoryBackend>>,
+    Arc<FaultInjecting<InMemoryBackend>>,
+) {
+    let backend = Arc::new(
+        FaultInjecting::new(InMemoryBackend::new()).with_fault(
+            Fault::on(FilesystemOperation::WriteFile)
+                .path("deliveries")
+                .nth(2)
+                .backend("injected delivery status-update write failure"),
+        ),
+    );
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/outbound").expect("static valid mount alias"),
+        VirtualPath::new("/engine/outbound").expect("static valid virtual path"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("static valid outbound mount view");
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(backend.clone(), mounts));
+    // `FilesystemOutboundStateStore::new` is composition-reserved
+    // (`clippy::disallowed_methods`); this fault-backed test constructor is the
+    // sanctioned seam, mirroring `in_memory_backed_outbound_state_store`.
+    #[allow(clippy::disallowed_methods)]
+    let store = FilesystemOutboundStateStore::new(scoped);
+    (store, backend)
 }
 
-impl StatusFailingOutboundStore {
-    fn status_update_requests(&self) -> Vec<UpdateDeliveryStatusRequest> {
-        self.status_update_requests
-            .lock()
-            .expect("status update lock")
-            .clone()
-    }
+/// Paths of the `WriteFile` ops the store issued to the `/deliveries/` subtree,
+/// in call order. Used to assert the real store attempted exactly one
+/// status-update write for a delivery after its initial `Pending` row — the
+/// backend-seam equivalent of the old fake's `status_update_requests()`.
+fn recorded_delivery_writes(backend: &FaultInjecting<InMemoryBackend>) -> Vec<String> {
+    backend
+        .recorded_paths(FilesystemOperation::WriteFile)
+        .into_iter()
+        .filter(|path| path.as_str().contains("/deliveries/"))
+        .map(|path| path.as_str().to_string())
+        .collect()
 }
 
-#[async_trait]
-impl CommunicationPreferenceRepository for StatusFailingOutboundStore {
-    async fn put_communication_preference(
-        &self,
-        record: CommunicationPreferenceRecord,
-    ) -> Result<(), OutboundError> {
-        self.inner.put_communication_preference(record).await
-    }
-
-    async fn load_communication_preference(
-        &self,
-        key: CommunicationPreferenceKey,
-    ) -> Result<Option<VersionedCommunicationPreferenceRecord>, OutboundError> {
-        self.inner.load_communication_preference(key).await
-    }
-
-    async fn write_communication_preference(
-        &self,
-        request: WriteCommunicationPreferenceRequest,
-    ) -> Result<VersionedCommunicationPreferenceRecord, OutboundError> {
-        self.inner.write_communication_preference(request).await
-    }
-}
-
-#[async_trait]
-impl OutboundStateStore for StatusFailingOutboundStore {
-    async fn put_thread_notification_policy(
-        &self,
-        policy: ThreadNotificationPolicy,
-    ) -> Result<(), OutboundError> {
-        self.inner.put_thread_notification_policy(policy).await
-    }
-
-    async fn load_thread_notification_policy(
-        &self,
-        scope: TurnScope,
-    ) -> Result<ThreadNotificationPolicy, OutboundError> {
-        self.inner.load_thread_notification_policy(scope).await
-    }
-
-    async fn upsert_subscription(
-        &self,
-        record: ProjectionSubscriptionRecord,
-    ) -> Result<(), OutboundError> {
-        self.inner.upsert_subscription(record).await
-    }
-
-    async fn load_subscription_cursor(
-        &self,
-        request: LoadSubscriptionCursorRequest,
-    ) -> Result<Option<ironclaw_event_projections::ProjectionCursor>, OutboundError> {
-        self.inner.load_subscription_cursor(request).await
-    }
-
-    async fn advance_subscription_cursor(
-        &self,
-        request: ironclaw_outbound::AdvanceSubscriptionCursorRequest,
-    ) -> Result<(), OutboundError> {
-        self.inner.advance_subscription_cursor(request).await
-    }
-
-    async fn record_delivery_attempt(
-        &self,
-        attempt: OutboundDeliveryAttempt,
-    ) -> Result<(), OutboundError> {
-        self.inner.record_delivery_attempt(attempt).await
-    }
-
-    async fn update_delivery_status(
-        &self,
-        request: UpdateDeliveryStatusRequest,
-    ) -> Result<(), OutboundError> {
-        self.status_update_requests
-            .lock()
-            .expect("status update lock")
-            .push(request);
-        Err(OutboundError::Backend)
-    }
-
-    async fn list_delivery_attempts(
-        &self,
-        scope: TurnScope,
-    ) -> Result<Vec<OutboundDeliveryAttempt>, OutboundError> {
-        self.inner.list_delivery_attempts(scope).await
-    }
+/// Assert the store wrote the initial `Pending` attempt row and then attempted
+/// exactly one status-update write, both targeting `delivery_id`. The
+/// status/failure-kind the workflow writes on the *successful* store path is
+/// covered by the non-fault sibling tests
+/// (`authorized_final_reply_renders_through_telegram_egress_after_validation`,
+/// `mismatched_payload_kind_marks_authorized_attempt_failed_without_render`,
+/// `target_metadata_failure_marks_attempt_failed_without_render`); here the write
+/// fails by construction, so it never persists and cannot be read back.
+fn assert_single_status_update_write(
+    backend: &FaultInjecting<InMemoryBackend>,
+    delivery_id: &ironclaw_outbound::OutboundDeliveryId,
+) {
+    let writes = recorded_delivery_writes(backend);
+    assert_eq!(
+        writes.len(),
+        2,
+        "initial Pending attempt row + one failed status-update write"
+    );
+    let needle = delivery_id.to_string();
+    assert!(
+        writes.iter().all(|path| path.contains(&needle)),
+        "both delivery writes must target delivery {needle}: {writes:?}"
+    );
 }
 
 struct SynchronousResponseAdapter {
@@ -690,7 +678,7 @@ fn progress_payload() -> ProductOutboundPayload {
 }
 
 fn configured_policy<'a>(
-    store: &'a InMemoryOutboundStateStore,
+    store: &'a FilesystemOutboundStateStore<InMemoryBackend>,
     validator: &'a FakeReplyTargetBindingValidator,
 ) -> OutboundPolicyService<'a> {
     OutboundPolicyService::new(store, &ACCESS_POLICY, validator)
@@ -716,7 +704,7 @@ fn preference_record(scope: &TurnScope) -> CommunicationPreferenceRecord {
 #[tokio::test]
 async fn authorized_final_reply_renders_through_telegram_egress_after_validation() {
     let scope = scope();
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_backed_outbound_state_store();
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     let preferences = FakePreferenceRepository::default();
@@ -788,7 +776,7 @@ async fn authorized_final_reply_renders_through_telegram_egress_after_validation
 #[tokio::test]
 async fn synchronous_response_marks_attempt_delivered() {
     let scope = scope();
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_backed_outbound_state_store();
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     let preferences = FakePreferenceRepository::default();
@@ -834,7 +822,7 @@ async fn synchronous_response_marks_attempt_delivered() {
 #[tokio::test]
 async fn deferred_render_keeps_attempt_pending_and_skips_delivery_status_side_effects() {
     let scope = scope();
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_backed_outbound_state_store();
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     let preferences = FakePreferenceRepository::default();
@@ -883,7 +871,7 @@ async fn deferred_render_keeps_attempt_pending_and_skips_delivery_status_side_ef
 #[tokio::test]
 async fn status_update_failure_after_render_does_not_turn_send_into_failure() {
     let scope = scope();
-    let store = StatusFailingOutboundStore::default();
+    let (store, backend) = status_update_failing_outbound_store();
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     store
@@ -927,19 +915,15 @@ async fn status_update_failure_after_render_does_not_turn_send_into_failure() {
         render_outcome,
         ProductRenderOutcome::DeliveryRecorded
     ));
+    // The injected backend fault failed the status-update put; the real store
+    // mapped `FilesystemError::Backend -> OutboundError::Backend` (which the old
+    // whole-trait fake short-circuited), and the workflow surfaced it as
+    // `ProductOutboundStatusUpdateFailure::Backend`.
     assert_eq!(
         status_update_error,
         ProductOutboundStatusUpdateFailure::Backend
     );
-    let status_update_requests = store.status_update_requests();
-    assert_eq!(status_update_requests.len(), 1);
-    assert_eq!(status_update_requests[0].delivery_id, attempt.delivery_id);
-    assert_eq!(status_update_requests[0].scope, attempt.scope);
-    assert_eq!(
-        status_update_requests[0].status,
-        ironclaw_outbound::OutboundDeliveryStatus::Delivered
-    );
-    assert_eq!(status_update_requests[0].failure_kind, None);
+    assert_single_status_update_write(&backend, &attempt.delivery_id);
     assert_eq!(egress.calls().len(), 1);
     assert!(matches!(
         sink.statuses().as_slice(),
@@ -958,7 +942,7 @@ async fn requested_outbound_preserves_actor_and_modality_before_rendering() {
     let scope = scope();
     let requesting_actor = actor();
     let requested_modality = CommunicationModality::Voice;
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_backed_outbound_state_store();
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     validator.require_actor(requesting_actor.clone());
@@ -1018,7 +1002,7 @@ async fn requested_outbound_preserves_actor_and_modality_before_rendering() {
 #[tokio::test]
 async fn mismatched_payload_kind_marks_authorized_attempt_failed_without_render() {
     let scope = scope();
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_backed_outbound_state_store();
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     let preferences = FakePreferenceRepository::default();
@@ -1075,7 +1059,7 @@ async fn mismatched_payload_kind_marks_authorized_attempt_failed_without_render(
 #[tokio::test]
 async fn payload_kind_mismatch_preserves_status_update_failure() {
     let scope = scope();
-    let store = StatusFailingOutboundStore::default();
+    let (store, backend) = status_update_failing_outbound_store();
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     store
@@ -1124,27 +1108,18 @@ async fn payload_kind_mismatch_preserves_status_update_failure() {
         attempts[0].status,
         ironclaw_outbound::OutboundDeliveryStatus::Pending
     );
-    let status_update_requests = store.status_update_requests();
-    assert_eq!(status_update_requests.len(), 1);
-    assert_eq!(
-        status_update_requests[0].delivery_id,
-        attempts[0].delivery_id
-    );
-    assert_eq!(status_update_requests[0].scope, scope);
-    assert_eq!(
-        status_update_requests[0].status,
-        ironclaw_outbound::OutboundDeliveryStatus::Failed
-    );
-    assert_eq!(
-        status_update_requests[0].failure_kind,
-        Some(ironclaw_outbound::DeliveryFailureKind::Rejected)
-    );
+    // The workflow attempted the Failed/Rejected status update; the injected
+    // fault failed that write, so the row stays Pending (asserted above) and the
+    // error is preserved as `Backend`. The Failed/Rejected classification on the
+    // successful store path is covered by
+    // `mismatched_payload_kind_marks_authorized_attempt_failed_without_render`.
+    assert_single_status_update_write(&backend, &attempts[0].delivery_id);
 }
 
 #[tokio::test]
 async fn target_metadata_failure_with_status_update_failure_preserves_workflow_error() {
     let scope = scope();
-    let store = StatusFailingOutboundStore::default();
+    let (store, backend) = status_update_failing_outbound_store();
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     store
@@ -1194,27 +1169,18 @@ async fn target_metadata_failure_with_status_update_failure_preserves_workflow_e
         attempts[0].status,
         ironclaw_outbound::OutboundDeliveryStatus::Pending
     );
-    let status_update_requests = store.status_update_requests();
-    assert_eq!(status_update_requests.len(), 1);
-    assert_eq!(
-        status_update_requests[0].delivery_id,
-        attempts[0].delivery_id
-    );
-    assert_eq!(status_update_requests[0].scope, scope);
-    assert_eq!(
-        status_update_requests[0].status,
-        ironclaw_outbound::OutboundDeliveryStatus::Failed
-    );
-    assert_eq!(
-        status_update_requests[0].failure_kind,
-        Some(ironclaw_outbound::DeliveryFailureKind::TransportUnavailable)
-    );
+    // The workflow attempted the Failed/TransportUnavailable status update; the
+    // injected fault failed that write, so the row stays Pending (asserted above)
+    // and the workflow error is preserved with `status_update_error: Backend`.
+    // The Failed/TransportUnavailable classification on the successful store path
+    // is covered by `target_metadata_failure_marks_attempt_failed_without_render`.
+    assert_single_status_update_write(&backend, &attempts[0].delivery_id);
 }
 
 #[tokio::test]
 async fn target_metadata_failure_marks_attempt_failed_without_render() {
     let scope = scope();
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_backed_outbound_state_store();
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     let preferences = FakePreferenceRepository::default();
@@ -1283,7 +1249,7 @@ async fn target_metadata_rejection_errors_mark_attempt_failed_rejected() {
 
     for (index, workflow_error) in cases.into_iter().enumerate() {
         let scope = scope();
-        let store = InMemoryOutboundStateStore::default();
+        let store = in_memory_backed_outbound_state_store();
         let validator = FakeReplyTargetBindingValidator::default();
         validator.allow(validated_reply_target());
         let preferences = FakePreferenceRepository::default();
@@ -1343,7 +1309,7 @@ async fn target_metadata_rejection_errors_mark_attempt_failed_rejected() {
 #[tokio::test]
 async fn keep_alive_payload_marks_authorized_attempt_failed_without_render() {
     let scope = scope();
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_backed_outbound_state_store();
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     let preferences = FakePreferenceRepository::default();
@@ -1403,7 +1369,7 @@ async fn keep_alive_payload_marks_authorized_attempt_failed_without_render() {
 #[tokio::test]
 async fn adapter_render_failure_is_returned_and_marks_attempt_failed() {
     let scope = scope();
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_backed_outbound_state_store();
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     let preferences = FakePreferenceRepository::default();
@@ -1488,7 +1454,7 @@ async fn adapter_non_retryable_errors_mark_attempt_failed_rejected() {
 
     for (index, adapter_error) in cases.into_iter().enumerate() {
         let scope = scope();
-        let store = InMemoryOutboundStateStore::default();
+        let store = in_memory_backed_outbound_state_store();
         let validator = FakeReplyTargetBindingValidator::default();
         validator.allow(validated_reply_target());
         let preferences = FakePreferenceRepository::default();
@@ -1546,7 +1512,7 @@ async fn adapter_non_retryable_errors_mark_attempt_failed_rejected() {
 #[tokio::test]
 async fn adapter_render_failure_preserves_adapter_error_when_status_update_fails() {
     let scope = scope();
-    let store = StatusFailingOutboundStore::default();
+    let (store, backend) = status_update_failing_outbound_store();
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     store
@@ -1595,27 +1561,18 @@ async fn adapter_render_failure_preserves_adapter_error_when_status_update_fails
         attempts[0].status,
         ironclaw_outbound::OutboundDeliveryStatus::Pending
     );
-    let status_update_requests = store.status_update_requests();
-    assert_eq!(status_update_requests.len(), 1);
-    assert_eq!(
-        status_update_requests[0].delivery_id,
-        attempts[0].delivery_id
-    );
-    assert_eq!(status_update_requests[0].scope, scope);
-    assert_eq!(
-        status_update_requests[0].status,
-        ironclaw_outbound::OutboundDeliveryStatus::Failed
-    );
-    assert_eq!(
-        status_update_requests[0].failure_kind,
-        Some(ironclaw_outbound::DeliveryFailureKind::TransportUnavailable)
-    );
+    // The adapter error is primary; the workflow still attempted the
+    // Failed/TransportUnavailable status update, whose write the injected fault
+    // failed (row stays Pending, asserted above). The Failed/TransportUnavailable
+    // classification on the successful store path is covered by
+    // `adapter_render_failure_is_returned_and_marks_attempt_failed`.
+    assert_single_status_update_write(&backend, &attempts[0].delivery_id);
 }
 
 #[tokio::test]
 async fn revoked_or_rejected_target_does_not_call_render_or_egress() {
     let scope = scope();
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_backed_outbound_state_store();
     let validator = FakeReplyTargetBindingValidator::default();
     let preferences = FakePreferenceRepository::default();
     seed_preference(&preferences, &scope);
@@ -1662,7 +1619,7 @@ async fn revoked_or_rejected_target_does_not_call_render_or_egress() {
 #[tokio::test]
 async fn no_delivery_system_event_does_not_call_render_or_egress() {
     let scope = scope();
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_backed_outbound_state_store();
     let validator = FakeReplyTargetBindingValidator::default();
     let preferences = FakePreferenceRepository::default();
     let resolver = FakeProductOutboundTargetResolver::default();
@@ -1716,7 +1673,7 @@ async fn no_delivery_system_event_does_not_call_render_or_egress() {
 #[tokio::test]
 async fn require_direct_message_true_propagates_to_resolver_and_maps_to_rejected() {
     let scope = scope();
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_backed_outbound_state_store();
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     let preferences = FakePreferenceRepository::default();
@@ -1777,7 +1734,7 @@ async fn require_direct_message_true_propagates_to_resolver_and_maps_to_rejected
 #[tokio::test]
 async fn require_direct_message_false_does_not_trigger_dm_rejection() {
     let scope = scope();
-    let store = InMemoryOutboundStateStore::default();
+    let store = in_memory_backed_outbound_state_store();
     let validator = FakeReplyTargetBindingValidator::default();
     validator.allow(validated_reply_target());
     let preferences = FakePreferenceRepository::default();

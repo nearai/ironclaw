@@ -1,4 +1,4 @@
-//! Resolves how to invoke `ironclaw-reborn serve` as a child process.
+//! Resolves how to invoke `ironclaw serve` as a child process.
 //!
 //! Consumed by the `service` subcommand's plist/unit generators
 //! (`commands/service/`) so the installed service unit's `serve`
@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use ironclaw_reborn_config::{REBORN_HOME_ENV, REBORN_PROFILE_ENV, RebornBootConfig};
 
-/// A fully resolved way to launch `ironclaw-reborn serve` as a child
+/// A fully resolved way to launch `ironclaw serve` as a child
 /// process: the binary path, its arguments, and the environment pairs a
 /// caller must set so `serve` resolves the same Reborn home/profile as
 /// the invoking process.

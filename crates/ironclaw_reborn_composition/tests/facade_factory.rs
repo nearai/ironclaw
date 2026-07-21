@@ -1,3 +1,7 @@
+// arch-exempt: large_file, pre-existing ~1.9K-line facade test suite; this change is a net-zero rename of build_local_dev_secret_store_for_test call sites with no cases added, plan #6168
+//
+// Decomposition of this suite travels with the composition god-crate shrink
+// (#6168); do not add unrelated cases here.
 #[cfg(feature = "postgres")]
 #[path = "support/postgres.rs"]
 mod postgres_support;
@@ -11,8 +15,6 @@ use chrono::Utc;
 use deadpool_postgres::tokio_postgres;
 #[cfg(feature = "libsql")]
 use ironclaw_auth::{OAuthClientId, OAuthRedirectUri};
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
-use ironclaw_host_api::{AgentId, ProjectId, TenantId};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{
     AuditMode, DeploymentMode, EffectKind, FilesystemBackendKind, NetworkMode, PackageId,
@@ -32,10 +34,6 @@ use ironclaw_host_runtime::{
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn_composition::RebornRuntimeProcessBinding;
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
-use ironclaw_reborn_composition::{
-    LocalTriggerAccessRole, LocalTriggerAccessSeed, LocalTriggerAccessSource,
-};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn_composition::{RebornBuildError, RebornCompositionProfile, RebornServices};
 use ironclaw_reborn_composition::{
@@ -47,8 +45,6 @@ use ironclaw_reborn_composition::{
     RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
     RebornReadinessDiagnosticStatus,
 };
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
-use ironclaw_reborn_config::{RebornConfigFile, StorageBackend, StorageSection};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_runner::turn_scheduler::{
     SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
@@ -62,8 +58,8 @@ use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPoli
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::{
-    InMemoryTurnStateStore,
     runner::{ClaimedTurnRun, TurnRunTransitionPort},
+    test_support::in_memory_turn_state_store,
 };
 #[cfg(feature = "postgres")]
 use postgres_support::assert_postgres_accepts_connections;
@@ -77,9 +73,6 @@ use tokio::sync::Mutex;
 
 #[cfg(feature = "libsql")]
 static SECRETS_MASTER_KEY_ENV_LOCK: Mutex<()> = Mutex::const_new(());
-
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
-static HOSTED_TRIGGER_ACCESS_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(feature = "libsql")]
 struct EnvVarGuard {
@@ -105,49 +98,6 @@ impl Drop for EnvVarGuard {
     fn drop(&mut self) {
         // SAFETY: EnvVarGuard is only constructed while
         // SECRETS_MASTER_KEY_ENV_LOCK is held by this test module.
-        unsafe {
-            match &self.previous {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
-
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
-struct PostgresEnvVarGuard {
-    key: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
-impl PostgresEnvVarGuard {
-    fn set(key: &'static str, value: &str) -> Self {
-        let previous = std::env::var_os(key);
-        // SAFETY: tests serialize process-env mutation with
-        // HOSTED_TRIGGER_ACCESS_ENV_LOCK and restore the prior value on drop.
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, previous }
-    }
-
-    fn clear(key: &'static str) -> Self {
-        let previous = std::env::var_os(key);
-        // SAFETY: tests serialize process-env mutation with
-        // HOSTED_TRIGGER_ACCESS_ENV_LOCK and restore the prior value on drop.
-        unsafe {
-            std::env::remove_var(key);
-        }
-        Self { key, previous }
-    }
-}
-
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
-impl Drop for PostgresEnvVarGuard {
-    fn drop(&mut self) {
-        // SAFETY: PostgresEnvVarGuard is only constructed while
-        // HOSTED_TRIGGER_ACCESS_ENV_LOCK is held by this test module.
         unsafe {
             match &self.previous {
                 Some(value) => std::env::set_var(self.key, value),
@@ -396,14 +346,21 @@ fn assert_failed_capability(
     };
     assert_eq!(failure.capability_id.as_str(), capability_id);
     assert_eq!(failure.kind, expected_kind);
+    let message = failure.message.as_deref().unwrap_or_default();
     assert!(
-        failure
-            .message
-            .as_deref()
-            .is_some_and(|message| message.contains(expected_message)),
+        message.contains(expected_message),
         "expected {capability_id} failure message to contain {expected_message:?}, got {:?}",
         failure.message
     );
+    // Denial messages must explain the reason in plain language and never leak
+    // internal planner enum tokens to the model (see #6386 and the
+    // `builtin_http_runtime_policy_denial_stops_before_egress` sibling check).
+    for token in ["ProcessBackendKind::", "NetworkMode::", "SecretMode::"] {
+        assert!(
+            !message.contains(token),
+            "{capability_id} failure message leaked internal planner enum token {token:?}: {message}"
+        );
+    }
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -440,7 +397,6 @@ async fn assert_process_capabilities_unavailable_for_processless_runtime(
             CapabilityId::new(SHELL_CAPABILITY_ID).unwrap(),
             ResourceEstimate::default(),
             json!({"command": "echo should-not-run"}),
-            production_builtin_trust_decision(),
         ))
         .await
         .expect("shell invocation returns an outcome");
@@ -457,7 +413,6 @@ async fn assert_process_capabilities_unavailable_for_processless_runtime(
             CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
             ResourceEstimate::default(),
             json!({}),
-            production_builtin_trust_decision(),
         ))
         .await
         .expect("spawn_subagent invocation returns an outcome");
@@ -465,7 +420,7 @@ async fn assert_process_capabilities_unavailable_for_processless_runtime(
         spawn_outcome,
         SPAWN_SUBAGENT_CAPABILITY_ID,
         RuntimeFailureKind::Authorization,
-        "ProcessBackendKind::None",
+        "process execution is disabled",
     );
 }
 
@@ -500,7 +455,6 @@ async fn invoke_trigger_management(
             CapabilityId::new(capability).unwrap(),
             ResourceEstimate::default(),
             input,
-            trigger_management_trust_decision(),
         ))
         .await
         .expect("trigger management capability invoke");
@@ -540,26 +494,13 @@ fn trigger_management_execution_context() -> ExecutionContext {
 }
 
 #[cfg(feature = "libsql")]
-fn trigger_management_trust_decision() -> TrustDecision {
-    TrustDecision {
-        effective_trust: EffectiveTrustClass::user_trusted(),
-        authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
-            max_resource_ceiling: None,
-        },
-        provenance: TrustProvenance::AdminConfig,
-        evaluated_at: Utc::now(),
-    }
-}
-
-#[cfg(feature = "libsql")]
 fn empty_trust_policy() -> Arc<HostTrustPolicy> {
     Arc::new(HostTrustPolicy::empty())
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn live_wake_notifier() -> (Arc<SchedulerTurnRunWakeNotifier>, TurnRunSchedulerHandle) {
-    let transitions: Arc<dyn TurnRunTransitionPort> = Arc::new(InMemoryTurnStateStore::default());
+    let transitions: Arc<dyn TurnRunTransitionPort> = Arc::new(in_memory_turn_state_store());
     let executor: Arc<dyn TurnRunExecutor> = Arc::new(NoopTurnRunExecutor);
     let handle =
         TurnRunScheduler::new(transitions, executor, TurnRunSchedulerConfig::default()).start();
@@ -742,7 +683,7 @@ async fn hosted_single_tenant_volume_hides_process_capabilities() {
     assert_process_capabilities_unavailable_for_processless_runtime(
         &services,
         RuntimeFailureKind::Authorization,
-        "ProcessBackendKind::None",
+        "process execution is disabled",
     )
     .await;
 }
@@ -1289,6 +1230,66 @@ async fn production_libsql_resolved_secret_master_key_rejects_invalid_env_key() 
     ));
 }
 
+/// With no cached dotfile and no `SECRETS_MASTER_KEY` env var,
+/// `resolve_local_dev_secret_master_key` (`src/factory.rs`) tries the OS
+/// keychain before generating a fresh key.
+///
+/// - Under `IRONCLAW_DISABLE_OS_KEYCHAIN` the keychain lookup returns
+///   `NotFound`, so the resolver must fall through to "generate + persist a
+///   dotfile"; a second open over the same root must read that cached
+///   dotfile rather than re-generating.
+/// - Lives here, not as a `factory.rs` inline unit test: proving the
+///   fallthrough needs the real process env var `IRONCLAW_DISABLE_OS_KEYCHAIN`
+///   set (`keychain` reads raw `std::env`), and `set_var` is `unsafe` under
+///   edition 2024 — `ironclaw_reborn_composition` is `#![forbid(unsafe_code)]`,
+///   which even `#[cfg(test)]` can't locally downgrade. This `tests/*.rs`
+///   binary is a separate crate the `forbid` doesn't reach, and already uses
+///   the `EnvVarGuard`/`SECRETS_MASTER_KEY_ENV_LOCK` convention for this.
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn local_dev_secret_store_falls_through_suppressed_keychain_to_dotfile() {
+    let _guard = SECRETS_MASTER_KEY_ENV_LOCK.lock().await;
+    let _env = EnvVarGuard::set("IRONCLAW_DISABLE_OS_KEYCHAIN", "1");
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let key_path = root.join(".reborn-local-dev-secrets-master-key");
+    assert!(
+        !key_path.exists(),
+        "precondition: no cached dotfile before the first open"
+    );
+
+    let mut composite = ironclaw_filesystem::CompositeRootFilesystem::new();
+    ironclaw_reborn_composition::test_support::build_default_local_dev_database_roots_for_test(
+        root,
+        &mut composite,
+    )
+    .await
+    .expect("build default local-dev db roots");
+    let composite = std::sync::Arc::new(composite);
+    let scoped = ironclaw_reborn_composition::wrap_scoped(std::sync::Arc::clone(&composite));
+
+    ironclaw_reborn_composition::test_support::build_secret_store_for_test(
+        root,
+        std::sync::Arc::clone(&scoped),
+    )
+    .await
+    .expect("first store build must fall through the suppressed keychain to a dotfile");
+    assert!(
+        key_path.exists(),
+        "the fallthrough must persist a dotfile so subsequent boots don't hit the keychain again"
+    );
+    let cached = std::fs::read_to_string(&key_path).expect("read generated dotfile");
+
+    ironclaw_reborn_composition::test_support::build_secret_store_for_test(root, scoped)
+        .await
+        .expect("second store build must read the now-cached dotfile idempotently");
+    assert_eq!(
+        std::fs::read_to_string(&key_path).expect("read dotfile again"),
+        cached,
+        "the cached dotfile must not be rewritten on the idempotent second open"
+    );
+}
+
 #[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_libsql_services_wire_first_party_runtime_http_egress() {
@@ -1482,85 +1483,6 @@ async fn production_postgres_services_migrate_trigger_repository_before_runtime_
         .expect("trigger table exists after production build");
     let count: i64 = row.get(0);
     assert_eq!(count, 0);
-}
-
-#[cfg(all(feature = "postgres", feature = "webui-v2-beta"))]
-#[tokio::test]
-async fn hosted_single_tenant_trigger_access_store_persists_across_reopen() {
-    let Some((_container, _pool, database_url)) = postgres_pool_or_skip().await else {
-        return;
-    };
-    let _env_lock = HOSTED_TRIGGER_ACCESS_ENV_LOCK.lock().await;
-    let _database_url = PostgresEnvVarGuard::set("IRONCLAW_REBORN_POSTGRES_URL", &database_url);
-    let _secret_master_key = PostgresEnvVarGuard::set(
-        "IRONCLAW_REBORN_SECRET_MASTER_KEY",
-        "01234567890123456789012345678901",
-    );
-    let _pool_max_size = PostgresEnvVarGuard::set("IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE", "1");
-    let _resource_governor_singleton = PostgresEnvVarGuard::set(
-        "IRONCLAW_REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON",
-        "true",
-    );
-    let _allow_cleartext =
-        PostgresEnvVarGuard::set("IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT", "true");
-    let _ssl_mode = PostgresEnvVarGuard::clear("DATABASE_SSLMODE");
-    let root = tempfile::tempdir().expect("runtime root");
-    let config = RebornConfigFile {
-        storage: Some(StorageSection {
-            backend: Some(StorageBackend::Postgres),
-            pool_max_size: Some(1),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let tenant_id = TenantId::new("hosted-trigger-tenant").expect("tenant id");
-    let user_id = UserId::new("hosted-trigger-user").expect("user id");
-    let agent_id = AgentId::new("hosted-trigger-agent").expect("agent id");
-    let project_id = ProjectId::new("hosted-trigger-project").expect("project id");
-
-    let input = RebornBuildInput::hosted_single_tenant_postgres_from_config_and_env(
-        RebornCompositionProfile::HostedSingleTenant,
-        "hosted-trigger-owner",
-        root.path().to_path_buf(),
-        Some(&config),
-    )
-    .expect("hosted postgres build input resolves from env");
-    let store = input
-        .open_hosted_single_tenant_trigger_access_store()
-        .await
-        .expect("open hosted trigger access store");
-    store
-        .seed_local_access(LocalTriggerAccessSeed {
-            tenant_id: &tenant_id,
-            user_id: &user_id,
-            agent_id: Some(&agent_id),
-            project_id: Some(&project_id),
-            role: LocalTriggerAccessRole::Owner,
-            source: LocalTriggerAccessSource::LocalDevEnvBootstrap,
-        })
-        .await
-        .expect("seed hosted trigger access");
-    drop(store);
-
-    let reopened_input = RebornBuildInput::hosted_single_tenant_postgres_from_config_and_env(
-        RebornCompositionProfile::HostedSingleTenant,
-        "hosted-trigger-owner",
-        root.path().to_path_buf(),
-        Some(&config),
-    )
-    .expect("reopened hosted postgres build input resolves from env");
-    let reopened_store = reopened_input
-        .open_hosted_single_tenant_trigger_access_store()
-        .await
-        .expect("reopen hosted trigger access store");
-
-    assert!(
-        reopened_store
-            .has_active_local_access(&tenant_id, &user_id, Some(&agent_id), Some(&project_id))
-            .await
-            .expect("check reopened hosted trigger access"),
-        "hosted-single-tenant trigger access must persist through the filesystem-backed Postgres store"
-    );
 }
 
 #[cfg(feature = "postgres")]

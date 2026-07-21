@@ -331,8 +331,14 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
             {
                 // Prefer the secret-scrubbed model-visible detail; fall back to
                 // the bounded safe summary so the explainer still gets the real
-                // cause rather than only the category.
-                let detail = detail.or_else(|| Some(safe_summary.as_str().to_string()));
+                // cause rather than only the category. Fail-closed backstop:
+                // executor-side producers can only run the token-prefix scrub
+                // (ironclaw_agent_loop cannot depend on the hardened scrubber),
+                // so re-scrub through the full LeakDetector registry +
+                // injection fencing here, where the detail becomes visible.
+                let detail = detail
+                    .or_else(|| Some(safe_summary.as_str().to_string()))
+                    .map(ironclaw_loop_host::scrub_model_visible_detail);
                 return AgentLoopDriverError::Failed {
                     reason_kind: category.to_string(),
                     detail,
@@ -427,18 +433,17 @@ mod tests {
         LoopMessageRef, RedactedCheckpointPayload, TurnCheckpointId,
         run_profile::{
             AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef,
-            BeginAssistantDraft, CapabilityBatchInvocation, CapabilityBatchOutcome,
-            CapabilityInvocation, CapabilityOutcome, CheckpointSchemaId, FinalizeAssistantMessage,
-            LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCancellationPort,
-            LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest,
-            LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
-            LoopCompactionRequest, LoopContextBundle, LoopContextPort, LoopContextRequest,
-            LoopDriverId, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort,
-            LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent,
-            LoopProgressPort, LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort,
-            LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
-            StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
-            VisibleCapabilitySurface,
+            BeginAssistantDraft, CapabilityBatchInvocation, CapabilityInvocation,
+            CheckpointSchemaId, FinalizeAssistantMessage, LoadCheckpointPayloadRequest,
+            LoadedCheckpointPayload, LoopCancellationPort, LoopCancellationSignal,
+            LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef,
+            LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort, LoopCompactionRequest,
+            LoopContextBundle, LoopContextPort, LoopContextRequest, LoopDriverId,
+            LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort, LoopModelPort,
+            LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort,
+            LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+            LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, StageCheckpointPayloadRequest,
+            UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
         },
     };
     use std::sync::Mutex;
@@ -642,6 +647,44 @@ mod tests {
         match mapped {
             AgentLoopDriverError::Failed { detail, .. } => {
                 assert_eq!(detail.as_deref(), Some("HTTP 404 model not found"));
+            }
+            other => panic!("expected Failed with detail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn executor_diagnostics_detail_is_rescrubbed_at_the_driver_seam() {
+        // Fail-closed backstop: executor-side producers (checkpoint/mapping/
+        // model stages) scrub detail with the token-prefix pass only —
+        // ironclaw_agent_loop cannot depend on the hardened scrubber. This
+        // seam is where the detail becomes driver/model-visible, so registry
+        // secrets must be redacted here even if an upstream producer missed
+        // them. The descriptive cause survives.
+        let secret = concat!("ghp_", "012345678901234567890123456789012345");
+        let mapped = map_executor_error(AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Model,
+            kind: AgentLoopHostErrorKind::CredentialUnavailable,
+            safe_summary: LoopSafeSummary::new("model credentials are unavailable").expect("safe"),
+            reason_kind: None,
+            diagnostic_ref: None,
+            detail: Some(format!("provider rejected token {secret} at /host/route")),
+        });
+
+        match mapped {
+            AgentLoopDriverError::Failed { detail, .. } => {
+                let detail = detail.expect("detail must survive the seam");
+                assert!(
+                    !detail.contains(secret),
+                    "registry secret must be redacted at the driver seam: {detail}"
+                );
+                assert!(
+                    detail.contains("provider rejected token"),
+                    "descriptive cause must survive: {detail}"
+                );
+                assert!(
+                    detail.contains("/host/route"),
+                    "paths must survive on the model-visible detail: {detail}"
+                );
             }
             other => panic!("expected Failed with detail, got {other:?}"),
         }
@@ -1080,14 +1123,14 @@ mod tests {
         async fn invoke_capability(
             &self,
             request: CapabilityInvocation,
-        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
             self.inner.invoke_capability(request).await
         }
 
         async fn invoke_capability_batch(
             &self,
             request: CapabilityBatchInvocation,
-        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
             self.inner.invoke_capability_batch(request).await
         }
     }
@@ -1208,7 +1251,6 @@ mod tests {
             resume_token: None,
             activity_id,
             prior_approval: None,
-            replay: None,
             disposition: None,
         });
         state
@@ -1361,7 +1403,7 @@ mod tests {
         context: &LoopRunContext,
     ) -> ironclaw_agent_loop::state::LoopExecutionState {
         use ironclaw_agent_loop::state::PendingApprovalResume;
-        use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId, ResourceEstimate};
+        use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId};
         use ironclaw_turns::LoopGateRef;
         use ironclaw_turns::run_profile::{
             CapabilityInputRef, CapabilityResumeToken, CapabilitySurfaceVersion,
@@ -1385,8 +1427,6 @@ mod tests {
                 .expect("valid input ref"),
             effective_capability_ids: Vec::new(),
             provider_replay: None,
-            input: serde_json::Value::Null,
-            estimate: ResourceEstimate::default(),
             disposition: None,
         });
         state
@@ -1551,7 +1591,7 @@ mod tests {
         context: &LoopRunContext,
     ) -> ironclaw_agent_loop::state::LoopExecutionState {
         use ironclaw_agent_loop::state::{PendingApprovalResume, PendingAuthResume};
-        use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId, ResourceEstimate};
+        use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId};
         use ironclaw_turns::LoopGateRef;
         use ironclaw_turns::run_profile::{
             CapabilityInputRef, CapabilityResumeToken, CapabilitySurfaceVersion,
@@ -1576,7 +1616,6 @@ mod tests {
             resume_token: None,
             activity_id: auth_activity_id,
             prior_approval: None,
-            replay: None,
             disposition: None,
         });
         state.pending_approval_resume = Some(PendingApprovalResume {
@@ -1593,8 +1632,6 @@ mod tests {
             input_ref: CapabilityInputRef::new("input:dual-approval").expect("valid input ref"),
             effective_capability_ids: Vec::new(),
             provider_replay: None,
-            input: serde_json::Value::Null,
-            estimate: ResourceEstimate::default(),
             disposition: None,
         });
         state
@@ -1741,7 +1778,7 @@ mod tests {
         context: &LoopRunContext,
     ) -> ironclaw_agent_loop::state::LoopExecutionState {
         use ironclaw_agent_loop::state::{PendingApprovalResume, PendingAuthResume};
-        use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId, ResourceEstimate};
+        use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId};
         use ironclaw_turns::LoopGateRef;
         use ironclaw_turns::run_profile::{
             CapabilityInputRef, CapabilityResumeToken, CapabilitySurfaceVersion,
@@ -1763,7 +1800,6 @@ mod tests {
             resume_token: None,
             activity_id: auth_activity_id,
             prior_approval: None,
-            replay: None,
             disposition: None,
         });
         state.pending_approval_resume = Some(PendingApprovalResume {
@@ -1781,8 +1817,6 @@ mod tests {
                 .expect("valid input ref"),
             effective_capability_ids: Vec::new(),
             provider_replay: None,
-            input: serde_json::Value::Null,
-            estimate: ResourceEstimate::default(),
             disposition: None,
         });
         state

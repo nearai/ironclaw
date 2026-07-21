@@ -5,87 +5,16 @@
 
 use std::sync::Arc;
 
-use ironclaw_conversations::ExternalActorBindingEpoch;
-use ironclaw_host_api::UserId;
 use ironclaw_product_adapters::AdapterInstallationId;
 use ironclaw_product_workflow::{
     ProductActorUserResolutionRequest, ProductActorUserResolver, ProductWorkflowError,
     ResolvedProductActorUser,
 };
 use ironclaw_slack_v2_adapter::{SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID};
-use thiserror::Error;
+
+use ironclaw_channel_host::identity::RebornUserIdentityLookup;
 
 pub(crate) const SLACK_IDENTITY_PROVIDER: &str = "slack";
-
-#[derive(Debug, Error)]
-pub enum RebornUserIdentityLookupError {
-    #[error("reborn user identity backend unavailable: {0}")]
-    Backend(String),
-    #[error("stored user identity is invalid: {0}")]
-    InvalidUserId(String),
-}
-
-#[async_trait::async_trait]
-pub trait RebornUserIdentityLookup: Send + Sync {
-    async fn resolve_user_identity(
-        &self,
-        provider: &str,
-        provider_user_id: &str,
-    ) -> Result<Option<UserId>, RebornUserIdentityLookupError>;
-
-    async fn resolve_user_identity_with_binding_epoch(
-        &self,
-        provider: &str,
-        provider_user_id: &str,
-    ) -> Result<Option<(UserId, Option<ExternalActorBindingEpoch>)>, RebornUserIdentityLookupError>
-    {
-        self.resolve_user_identity(provider, provider_user_id)
-            .await
-            .map(|resolved| resolved.map(|user_id| (user_id, None)))
-    }
-
-    async fn user_identity_binding_epoch_is_current(
-        &self,
-        provider: &str,
-        provider_user_id: &str,
-        expected_user_id: &UserId,
-        expected_epoch: &ExternalActorBindingEpoch,
-    ) -> Result<bool, RebornUserIdentityLookupError> {
-        Ok(self
-            .resolve_user_identity_with_binding_epoch(provider, provider_user_id)
-            .await?
-            .is_some_and(|(user_id, epoch)| {
-                user_id == *expected_user_id && epoch.as_ref() == Some(expected_epoch)
-            }))
-    }
-
-    /// Whether the given IronClaw user has any binding for `provider` — the
-    /// reverse of [`resolve_user_identity`]. Used to tell whether the calling
-    /// user has personally connected a channel (e.g. Slack personal OAuth).
-    async fn user_has_provider_binding(
-        &self,
-        provider: &str,
-        user_id: &UserId,
-    ) -> Result<bool, RebornUserIdentityLookupError>;
-
-    /// Whether the given IronClaw user has a provider binding whose provider
-    /// user id starts with `provider_user_id_prefix`. Channel connection state
-    /// uses this for installation-scoped providers such as Slack, where a user
-    /// bound in one Slack installation must not satisfy setup in another.
-    async fn user_has_provider_binding_with_provider_user_id_prefix(
-        &self,
-        provider: &str,
-        user_id: &UserId,
-        provider_user_id_prefix: Option<&str>,
-    ) -> Result<bool, RebornUserIdentityLookupError> {
-        if provider_user_id_prefix.is_none() {
-            return self.user_has_provider_binding(provider, user_id).await;
-        }
-        Err(RebornUserIdentityLookupError::Backend(
-            "scoped provider binding lookup is unavailable".to_string(),
-        ))
-    }
-}
 
 #[derive(Clone)]
 pub struct SlackUserIdentityActorResolver {
@@ -195,9 +124,12 @@ pub(crate) fn parse_slack_user_identity_provider_user_id(
 mod tests {
     use std::collections::HashMap;
 
+    use ironclaw_conversations::ExternalActorBindingEpoch;
+    use ironclaw_host_api::UserId;
     use ironclaw_product_adapters::{AdapterInstallationId, ExternalActorRef, ProductAdapterId};
 
     use super::*;
+    use ironclaw_channel_host::identity::RebornUserIdentityLookupError;
 
     #[tokio::test]
     async fn slack_actor_identity_resolver_uses_installation_scoped_provider_user_id() {

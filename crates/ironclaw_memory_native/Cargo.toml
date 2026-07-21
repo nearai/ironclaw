@@ -14,21 +14,6 @@ publish = false
 layer = "substrates"
 
 [features]
-default = []
-# Conditional gate for substrate-level regression tests that anticipate
-# specific guards beyond what #3180 itself delivers: min_score-after-
-# normalization, deterministic tiebreaking, `ensure_path_matches_context`
-# / `ensure_scope_matches_context` checks, and `.system/engine/
-# orchestrator/*` protected-path registration. The followup PR(s) that
-# implement these must enable `pr3180-ready` in their merge commit so
-# the gated tests run in CI on the merge-queue branch.
-#
-# Empirical note (2026-05-12): on `reborn-integration` HEAD (#3180
-# merged), enabling this feature surfaces ~7 test failures because the
-# anticipated APIs (`ensure_path_matches_context`, deterministic
-# tie-breakers, orchestrator path registration) do not exist yet. The
-# gates are accurate; the substrate just isn't there yet.
-pr3180-ready = []
 # Exposes the trait-level contract test harness in
 # `src/contract_tests.rs` to downstream crates and integration tests.
 # Off by default so panic-style calls in the harness (`.expect`,
@@ -36,7 +21,7 @@ pr3180-ready = []
 # the `scripts/check_no_panics.py` scanner. This crate's own
 # integration tests in `tests/` enable the feature via the self
 # dev-dependency below.
-contract-tests = []
+test-support = []
 
 [dependencies]
 async-trait = "0.1"
@@ -55,13 +40,13 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-# Self dev-dependency enables `contract-tests` for the crate's
+# Self dev-dependency enables `test-support` for the crate's
 # integration tests in `tests/`, which import the contract suite and
 # the `contract_test!` macro. The harness contains `.expect`/`.unwrap`/
 # `assert!*` calls (intentional — it's a test harness) and must stay
 # gated off in the production-facing build of the library so the
 # no-panics scanner only sees production code.
-ironclaw_memory_native = { path = ".", features = ["contract-tests"] }
+ironclaw_memory_native = { path = ".", features = ["test-support"] }
 tempfile = "3"
 # `rt-multi-thread` is required by the race-safety test's
 # `#[tokio::test(flavor = "multi_thread", worker_threads = 2)]` —
