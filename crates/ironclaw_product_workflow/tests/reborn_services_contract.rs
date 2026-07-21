@@ -104,14 +104,15 @@ use ironclaw_threads::{
     UpdateToolResultReferenceRequest,
 };
 use ironclaw_turns::run_profile::{LoopModelRouteSnapshot, LoopModelUsage};
+use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
     CancelRunResponse, DefaultTurnCoordinator, EventCursor, GateRef, GetRunStateRequest,
-    InMemoryTurnStateStore, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
-    ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, RunProfileId, RunProfileVersion,
-    SanitizedFailure, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCapacityResource, TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId,
-    TurnRunState, TurnScope, TurnStatus,
+    ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest, ResumeTurnResponse,
+    RetryTurnRequest, RetryTurnResponse, RunProfileId, RunProfileVersion, SanitizedFailure,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCapacityResource,
+    TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState, TurnScope,
+    TurnStatus,
 };
 use secrecy::SecretString;
 use serde_json::json;
@@ -3167,7 +3168,7 @@ async fn duplicate_submit_rejects_cross_thread_reuse_maps_to_duplicate_kind() {
 async fn concurrent_duplicate_submit_creates_one_message_and_replays_outcome() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(DefaultTurnCoordinator::new(Arc::new(
-        InMemoryTurnStateStore::default(),
+        in_memory_turn_state_store(),
     )));
     let services = RebornServices::new(threads, coordinator);
     create_thread_for(&services, caller(), "thread-alpha").await;

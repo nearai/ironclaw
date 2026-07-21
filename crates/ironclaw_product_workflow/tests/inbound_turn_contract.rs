@@ -52,12 +52,13 @@ use ironclaw_threads::{
     InMemorySessionThreadService, MessageStatus, SessionThreadService, ThreadHistoryRequest,
     ThreadScope,
 };
+use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
-    CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator, EventCursor, GetRunStateRequest,
-    IdempotencyKey, InMemoryTurnStateStore, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
-    RunProfileVersion, SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
-    TurnActor, TurnCoordinator, TurnError, TurnId, TurnOriginKind, TurnRunId, TurnRunState,
-    TurnRunWake, TurnScope, TurnStateStore, TurnStatus,
+    CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator, EventCursor,
+    FilesystemTurnStateRowStore, GetRunStateRequest, IdempotencyKey, ResumeTurnRequest,
+    ResumeTurnResponse, RunProfileId, RunProfileVersion, SanitizedCancelReason, SubmitTurnRequest,
+    SubmitTurnResponse, ThreadBusy, TurnActor, TurnCoordinator, TurnError, TurnId, TurnOriginKind,
+    TurnRunId, TurnRunState, TurnRunWake, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
         LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken,
@@ -423,7 +424,9 @@ impl RunCancellationFactory for UnretainedRunCancellationFactory {
     }
 }
 
-fn turn_state_store_dyn(store: &Arc<InMemoryTurnStateStore>) -> Arc<dyn TurnStateStore> {
+fn turn_state_store_dyn(
+    store: &Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
+) -> Arc<dyn TurnStateStore> {
     Arc::clone(store) as Arc<dyn TurnStateStore>
 }
 
@@ -434,7 +437,7 @@ fn turn_state_store_dyn(store: &Arc<InMemoryTurnStateStore>) -> Arc<dyn TurnStat
 /// to the deleted `BoundedSubagentGateResolutionStore` for their purposes.
 #[allow(clippy::type_complexity)]
 fn test_await_edge_trio(
-    turn_store: &Arc<InMemoryTurnStateStore>,
+    turn_store: &Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
     capability_result_writer: Arc<dyn LoopCapabilityResultWriter>,
     thread_service: Arc<InMemorySessionThreadService>,
 ) -> (
@@ -557,7 +560,7 @@ fn sample_user_message_envelope_with_install_text_and_trigger(
 async fn user_message_resolves_binding_persists_message_and_submits_turn() {
     let binding_service = FakeConversationBindingService::new();
     let thread_service = InMemorySessionThreadService::default();
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let coordinator = DefaultTurnCoordinator::new(store);
     let service =
         DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
@@ -654,7 +657,7 @@ async fn shared_user_message_submits_subject_owned_turn_scope() {
 async fn user_message_no_profile_submission_uses_planned_reborn_default() {
     let binding_service = FakeConversationBindingService::new();
     let thread_service = InMemorySessionThreadService::default();
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let resolver =
         Arc::new(default_planned_run_profile_resolver().expect("planned default profile resolver"));
     let coordinator =
@@ -698,7 +701,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
     binding_service.program_binding(envelope.source_binding_key(), binding.clone());
 
     let thread_service = InMemorySessionThreadService::default();
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let checkpoint_store = Arc::clone(&turn_store);
     let model_requests = Arc::new(Mutex::new(Vec::new()));
     let model_gateway = Arc::new(ReplyModelGateway {
@@ -877,7 +880,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
     binding_service.program_binding(envelope.source_binding_key(), binding.clone());
 
     let thread_service = InMemorySessionThreadService::default();
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let checkpoint_store = Arc::clone(&turn_store);
     let model_requests = Arc::new(Mutex::new(Vec::new()));
     let model_release = CancellationToken::new();
@@ -1074,7 +1077,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
     binding_service.program_binding(envelope.source_binding_key(), binding.clone());
 
     let thread_service = InMemorySessionThreadService::default();
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let checkpoint_store = Arc::clone(&turn_store);
     let model_gateway = Arc::new(ReplyModelGateway {
         reply: "planned product reply".to_string(),
@@ -1136,7 +1139,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
         loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
             Arc::new(InMemorySessionThreadService::default()),
-            Arc::new(InMemoryTurnStateStore::default()) as Arc<dyn TurnStateStore>,
+            Arc::new(in_memory_turn_state_store()) as Arc<dyn TurnStateStore>,
             checkpoint_store,
             subagent_await_edge_evidence,
             thread_scope,
@@ -1168,7 +1171,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
 async fn busy_thread_persists_second_message_as_rejected_busy() {
     let binding_service = FakeConversationBindingService::new();
     let thread_service = InMemorySessionThreadService::default();
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let coordinator = DefaultTurnCoordinator::new(store);
     let service =
         DefaultInboundTurnService::new(binding_service, thread_service.clone(), coordinator);
@@ -1462,7 +1465,7 @@ async fn reply_target_binding_ref_has_single_reply_prefix() {
 async fn max_valid_external_ids_do_not_overflow_turn_refs() {
     let binding_service = FakeConversationBindingService::new();
     let thread_service = InMemorySessionThreadService::default();
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let coordinator = DefaultTurnCoordinator::new(store);
     let service = DefaultInboundTurnService::new(binding_service, thread_service, coordinator);
 
@@ -1512,7 +1515,7 @@ async fn binding_failure_surfaces_workflow_error() {
     });
 
     let thread_service = InMemorySessionThreadService::default();
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let coordinator = DefaultTurnCoordinator::new(store);
     let service = DefaultInboundTurnService::new(binding_service, thread_service, coordinator);
 

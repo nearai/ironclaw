@@ -1,6 +1,5 @@
 ---
 paths:
-  - "src/**"
   - "crates/**"
   - "tests/**"
 ---
@@ -192,7 +191,7 @@ never response fields, ad-hoc response bodies, or bootstrap aliases.
 
 ## Applies to
 
-`src/**`, `crates/**`, and `tests/**`. Any code inside the IronClaw workspace. The rule
+`crates/**` and `tests/**`. Any code inside the IronClaw workspace. The rule
 doesn't apply to wire payloads (which are `String`
 by virtue of JSON), log lines, or error messages — those *are* the
 boundary.

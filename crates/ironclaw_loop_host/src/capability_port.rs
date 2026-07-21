@@ -3523,6 +3523,14 @@ fn dispatch_failure_detail_to_loop(
         // values and normalize control characters before the model sees it.
         DispatchFailureDetail::Diagnostic { text } => model_visible_diagnostic_text(&text)
             .map(|text| CapabilityFailureDetail::Diagnostic { text }),
+        // Host-authored remediation: already validated at construction (bounded,
+        // newline-only control characters, credential-VALUE shapes rejected), so
+        // it passes through verbatim. Running it through
+        // `model_visible_diagnostic_text` would be a no-op at best and a
+        // vocabulary scrub at worst — the text NAMES config keys on purpose.
+        DispatchFailureDetail::HostRemediation { text } => {
+            Some(CapabilityFailureDetail::HostRemediation { text })
+        }
     }
 }
 

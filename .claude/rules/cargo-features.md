@@ -19,12 +19,12 @@ A new `[features]` entry is justified by exactly one of:
    qualify. The win must be a real dependency you can name, not "less
    code."
 2. **A genuinely shipped build shape.** Some artifact this repo produces
-   builds it OFF. If `Dockerfile.reborn`, `reborn-release-compile.yml`,
+   builds it OFF. If `Dockerfile`, `reborn-release-compile.yml`,
    and `scripts/ci/package-feature-flags.sh` all turn it ON, it is not a
    build shape — it is the product.
 3. **A CI lane selector** that gates test *targets*, not production code
    — `integration`, `replay`, `libsql-restart-tests`. These carry zero
-   `#[cfg]` in `src/`.
+   `#[cfg]` in production crate code.
 4. **A dev-only seam** kept out of production binaries. Exactly one name
    for this: **`test-support`**. Not `testing`, not `contract-tests`, not
    `dev-in-memory-session`.
@@ -56,7 +56,7 @@ when introduced:
   `ironclaw_outbound`** — declared, forwarded to by three crates, never
   read; they pulled `libsql`, `deadpool-postgres`, and `tokio-postgres`
   into builds that used none of them.
-- **`full` on `ironclaw_reborn_cli`** — an alias no build invoked.
+- **`full` on the `ironclaw` package** — an alias no build invoked.
 - **Six names for the one dev-seam concept.**
 
 ## Rules for adding one

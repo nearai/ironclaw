@@ -7,7 +7,7 @@ app bundle, the gateway assembly + middleware, the listener/serve loop, and all
 host-side authentication.
 
 It sits in the `products` layer, one level **above** composition, and is driven
-by the `ironclaw-reborn` binary (`crates/ironclaw_reborn_cli`). Composition
+by the `ironclaw` binary (`crates/ironclaw_reborn_cli`). Composition
 deliberately stops at the `reborn_product_api_crates_do_not_bind_http_ingress`
 boundary — it returns a fully composed `axum::Router` but must never bind a
 socket. This crate is the host-owned counterpart that does.

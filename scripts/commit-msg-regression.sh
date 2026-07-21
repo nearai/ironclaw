@@ -30,7 +30,7 @@ fi
 ALL_EXEMPT=true
 while IFS= read -r file; do
   case "$file" in
-    src/channels/web/static/*) ;;
+    crates/ironclaw_webui/frontend/public/*) ;;
     *.md) ;;
     *) ALL_EXEMPT=false; break ;;
   esac

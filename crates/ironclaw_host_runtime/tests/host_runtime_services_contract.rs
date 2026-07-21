@@ -61,7 +61,7 @@ use ironclaw_secrets::{
 };
 use ironclaw_triggers::InMemoryTriggerRepository;
 #[cfg(feature = "libsql")]
-use ironclaw_turns::FilesystemTurnStateStore;
+use ironclaw_turns::FilesystemTurnStateRowStore;
 use ironclaw_turns::NoopTurnRunWakeNotifier;
 #[cfg(feature = "libsql")]
 use ironclaw_turns::{
@@ -711,14 +711,14 @@ async fn production_turn_state_selection_accepts_filesystem_turn_state_store() {
             ProductionWiringComponent::TurnState,
             ProductionWiringIssueKind::Missing
         ),
-        "FilesystemTurnStateStore must satisfy production turn-state presence: {report:?}"
+        "FilesystemTurnStateRowStore must satisfy production turn-state presence: {report:?}"
     );
     assert!(
         !report.contains(
             ProductionWiringComponent::TurnState,
             ProductionWiringIssueKind::LocalOnlyImplementation
         ),
-        "FilesystemTurnStateStore over LibSqlRootFilesystem must not be classified local-only: {report:?}"
+        "FilesystemTurnStateRowStore over LibSqlRootFilesystem must not be classified local-only: {report:?}"
     );
 }
 
@@ -750,7 +750,7 @@ async fn production_turn_coordinator_uses_configured_store_and_notifier() {
     let response = coordinator.submit_turn(request.clone()).await.unwrap();
     let SubmitTurnResponse::Accepted { run_id, .. } = response;
 
-    let reopened = FilesystemTurnStateStore::new(scoped);
+    let reopened = FilesystemTurnStateRowStore::new(scoped);
     let state = reopened
         .get_run_state(ironclaw_turns::GetRunStateRequest {
             scope: request.scope,
@@ -5881,10 +5881,22 @@ async fn spawned_obligation_lifecycle_abort_cleans_up_when_process_start_fails()
     )
     .await;
     let failing_manager = FailingSpawnManager;
+    // Kernel now computes trust + runtime-policy in-fold (§5.3.2/§9); supply a
+    // trust policy mirroring the former dispatch-authority ceiling and a runtime
+    // policy that permits the script process backend, so the fold reaches the
+    // (failing) process spawn.
+    let trust_policy = local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability, EffectKind::Network],
+    );
+    let runtime_policy = local_dev_runtime_policy();
     let host = CapabilityHost::new(
         fixture.registry.as_ref(),
         fixture.dispatcher.as_ref(),
         fixture.authorizer.as_ref(),
+        &trust_policy,
+        &runtime_policy,
+        &PermissiveHostPolicyFacts,
     )
     .with_obligation_handler(fixture.handler.as_ref())
     .with_process_manager(&failing_manager);
@@ -5895,7 +5907,6 @@ async fn spawned_obligation_lifecycle_abort_cleans_up_when_process_start_fails()
             capability_id: script_capability_id(),
             estimate: fixture.estimate.clone(),
             input: json!({"message": "spawn fails"}),
-            trust_decision: trust_decision_with_dispatch_authority(),
         })
         .await
         .unwrap_err();

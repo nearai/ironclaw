@@ -26,8 +26,11 @@ fn reborn_boundary_rules_active_crates_are_workspace_members() {
 
     let root = workspace_root();
     for rule in boundary_rules() {
-        let crate_dir = root.join("crates").join(rule.crate_name);
-        let manifest = crate_dir.join("Cargo.toml");
+        let manifest = if rule.crate_name == "ironclaw" {
+            root.join("crates/ironclaw_reborn_cli/Cargo.toml")
+        } else {
+            root.join("crates").join(rule.crate_name).join("Cargo.toml")
+        };
         if !manifest.exists() {
             continue;
         }
@@ -144,7 +147,7 @@ fn reborn_workspace_crates_declare_layers_and_follow_layer_matrix() {
             let Some(dependency_layer) = layers.get(dependency_name) else {
                 continue;
             };
-            if dependency_layer == "legacy" && crate_name != "ironclaw" {
+            if dependency_layer == "legacy" && crate_name != "ironclaw_legacy" {
                 if let Some(exception) = layer_matrix_exception(crate_name, dependency_name) {
                     used_exceptions.insert((exception.crate_name, exception.dependency_name));
                     continue;
@@ -525,8 +528,8 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
     let manifest =
         std::fs::read_to_string(&manifest_path).expect("Reborn CLI manifest must be readable");
     assert!(
-        manifest.contains("name = \"ironclaw_reborn_cli\""),
-        "Reborn CLI crate package name should be ironclaw_reborn_cli"
+        manifest.contains("name = \"ironclaw\""),
+        "Reborn CLI crate package name should be ironclaw"
     );
     assert!(
         manifest.contains("[[bin]]") && manifest.contains("name = \"ironclaw\""),
@@ -565,14 +568,14 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
 
     assert_workspace_deps_exactly(
         &dependencies,
-        "ironclaw_reborn_cli",
+        "ironclaw",
         [
             "ironclaw_reborn_composition",
             "ironclaw_reborn_config",
             "ironclaw_reborn_traces",
             "ironclaw_webui",
         ],
-        "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn_composition (assembled-runtime and provider-admin facade), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), and ironclaw_webui (host-owned WebUI serve lifecycle) only. Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
+        "ironclaw should enter Reborn through ironclaw_reborn_composition (assembled-runtime and provider-admin facade), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), and ironclaw_webui (host-owned WebUI serve lifecycle) only. Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
     );
     assert_workspace_deps_exactly(
         &dependencies_all_kinds,
@@ -793,26 +796,8 @@ fn reborn_turns_public_surface_keeps_runner_api_explicit() {
 }
 
 #[test]
-fn reborn_runner_llm_wiring_stays_out_of_root_src() {
+fn reborn_runner_llm_wiring_is_isolated() {
     let root = workspace_root();
-    let root_lib =
-        std::fs::read_to_string(root.join("src/lib.rs")).expect("root src/lib.rs must be readable");
-    assert!(
-        !root_lib.contains("pub mod reborn_loop_support;"),
-        "retired Reborn loop-support wiring must not return to root src/lib.rs"
-    );
-    assert!(
-        !root.join("src/reborn_loop_support.rs").exists(),
-        "retired Reborn loop-support wiring must not return under root src/"
-    );
-    assert!(
-        !root_lib.contains("pub mod reborn_loop_host;"),
-        "Reborn loop-host wiring must live under crates/ironclaw_loop_host, not root src/lib.rs"
-    );
-    assert!(
-        !root.join("src/reborn_loop_host.rs").exists(),
-        "Reborn loop-host wiring must not live under root src/"
-    );
 
     let reborn_gateway = root.join("crates/ironclaw_runner/src/model_gateway.rs");
     assert!(
@@ -828,9 +813,10 @@ fn reborn_runner_llm_wiring_stays_out_of_root_src() {
     );
 
     // Reborn crates may reuse the extracted LLM crate, but never on its default
-    // terms: `ironclaw_llm`'s defaults drag in the root app's postgres/libsql/tui
-    // feature set, which would couple the Reborn stack back to the v1 monolith.
-    // `default-features = false` on every edge is the durable invariant.
+    // terms: `ironclaw_llm`'s defaults pull in extra provider/backend features
+    // (e.g. `bedrock`) Reborn doesn't need. `default-features = false` on every
+    // edge is the durable invariant, keeping the Reborn stack's dependency
+    // footprint minimal and explicit.
     for manifest_path in [
         "crates/ironclaw_runner/Cargo.toml",
         "crates/ironclaw_reborn_composition/Cargo.toml",
@@ -863,7 +849,9 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         "crates/ironclaw_safety/src/provider_validation.rs",
         // Host loop/run/thread protocol structs that preserve exact model
         // provider names for tool-result roundtrips and historical replay.
-        "crates/ironclaw_turns/src/run_profile/host.rs",
+        // The provider-tool-call DTOs live in the `capability` submodule after
+        // the `host.rs` -> `host/` decomposition.
+        "crates/ironclaw_turns/src/run_profile/host/capability.rs",
         "crates/ironclaw_threads/src/tool_result_reference.rs",
         // Loop support owns capability-id <-> provider-name surface snapshots,
         // synthetic provider tools, provider-call registration, and replay refs.
@@ -2770,12 +2758,15 @@ fn boundary_rules() -> Vec<BoundaryRule> {
     vec![
         BoundaryRule {
             // The v1→Reborn migration tool is an intentional one-way bridge:
-            // it reads through the root `ironclaw` crate and writes through the
-            // Reborn state substrate + composition's `migration-support` seam.
-            // That bridge must stay a *state* converter — it must not grow
-            // direct deps on the serving/runtime/engine layers (gateway, engine,
-            // runtime lanes, dispatcher, webui) or it would quietly become a
-            // second live entry point into Reborn.
+            // it reads through its own frozen v1 read path
+            // (`crates/ironclaw_reborn_migration/src/legacy_snapshot/`, ported
+            // off the live `ironclaw_legacy` crate so it survives Tier B) and
+            // writes through the Reborn state substrate + composition's
+            // `migration-support` seam. That bridge must stay a *state*
+            // converter — it must not grow direct deps on the serving/
+            // runtime/engine layers (gateway, engine, runtime lanes,
+            // dispatcher, webui) or it would quietly become a second live
+            // entry point into Reborn.
             crate_name: "ironclaw_reborn_migration",
             forbidden: vec![
                 "ironclaw_dispatcher",
@@ -2788,7 +2779,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_product_adapters",
                 "ironclaw_product_workflow",
                 "ironclaw_runner",
-                "ironclaw_reborn_cli",
+                "ironclaw",
                 "ironclaw_reborn_event_store",
                 "ironclaw_run_state",
                 "ironclaw_runtime_policy",
@@ -2817,7 +2808,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             crate_name: "ironclaw_channel_delivery",
             forbidden: vec![
                 "ironclaw_reborn_composition",
-                "ironclaw_reborn_cli",
+                "ironclaw",
                 "ironclaw_webui_v2",
                 "ironclaw_slack_v2_adapter",
                 "ironclaw_telegram_extension",
@@ -2830,7 +2821,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // stores, runtimes, or channel-specific stacks.
             crate_name: "ironclaw_auth",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_approvals",
                 "ironclaw_authorization",
                 "ironclaw_capabilities",
@@ -2854,7 +2845,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_product_adapter_registry",
                 "ironclaw_product_workflow",
                 "ironclaw_runner",
-                "ironclaw_reborn_cli",
+                "ironclaw",
                 "ironclaw_reborn_composition",
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
@@ -2887,7 +2878,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // paths or reach into runtime/composition services directly.
             crate_name: "ironclaw_reborn_openai_compat",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_capabilities",
                 "ironclaw_conversations",
                 "ironclaw_dispatcher",
@@ -2911,7 +2902,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_processes",
                 "ironclaw_product_workflow",
                 "ironclaw_runner",
-                "ironclaw_reborn_cli",
+                "ironclaw",
                 "ironclaw_reborn_composition",
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
@@ -2941,7 +2932,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // WASM/channel crates would bypass the Reborn registry boundary.
             crate_name: "ironclaw_product_adapter_registry",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_authorization",
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
@@ -2979,7 +2970,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // runtime handles.
             crate_name: "ironclaw_first_party_extensions",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_approvals",
                 "ironclaw_authorization",
                 "ironclaw_capabilities",
@@ -3023,7 +3014,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // product composition.
             crate_name: "ironclaw_first_party_extension_ports",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_approvals",
                 "ironclaw_authorization",
                 "ironclaw_capabilities",
@@ -3061,7 +3052,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         BoundaryRule {
             crate_name: "ironclaw_reborn_config",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_approvals",
                 "ironclaw_authorization",
                 "ironclaw_capabilities",
@@ -3106,9 +3097,9 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // loop drivers, LLM registry/auth internals, etc.) and
             // re-introduces the narrow-surface regression this rule exists to
             // prevent.
-            crate_name: "ironclaw_reborn_cli",
+            crate_name: "ironclaw",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_engine",
                 "ironclaw_gateway",
                 "ironclaw_llm",
@@ -3134,7 +3125,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // builders).
             crate_name: "ironclaw_webui",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_authorization",
                 "ironclaw_capabilities",
                 "ironclaw_conversations",
@@ -3155,7 +3146,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_product_adapters",
                 "ironclaw_product_adapter_registry",
                 "ironclaw_runner",
-                "ironclaw_reborn_cli",
+                "ironclaw",
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
                 "ironclaw_resources",
@@ -3286,7 +3277,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // pending-gate types.
             crate_name: "ironclaw_event_projections",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_authorization",
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
@@ -3308,7 +3299,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         BoundaryRule {
             crate_name: "ironclaw_event_streams",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_authorization",
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
@@ -3329,7 +3320,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_product_workflow",
                 "ironclaw_reborn_event_store",
                 "ironclaw_runner",
-                "ironclaw_reborn_cli",
+                "ironclaw",
                 "ironclaw_reborn_composition",
                 "ironclaw_reborn_config",
                 "ironclaw_resources",
@@ -3355,7 +3346,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // the adapter crate.
             crate_name: "ironclaw_slack_v2_adapter",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_authorization",
                 "ironclaw_approvals",
                 "ironclaw_auth",
@@ -3380,7 +3371,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_product_adapter_registry",
                 "ironclaw_product_workflow",
                 "ironclaw_runner",
-                "ironclaw_reborn_cli",
+                "ironclaw",
                 "ironclaw_reborn_composition",
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
@@ -3402,7 +3393,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         BoundaryRule {
             crate_name: "ironclaw_outbound",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_authorization",
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
@@ -3437,7 +3428,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // owners, not by reaching upward from this crate.
             crate_name: "ironclaw_triggers",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_authorization",
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
@@ -3457,7 +3448,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_product_adapters",
                 "ironclaw_product_workflow",
                 "ironclaw_runner",
-                "ironclaw_reborn_cli",
+                "ironclaw",
                 "ironclaw_reborn_composition",
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
@@ -3478,7 +3469,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         BoundaryRule {
             crate_name: "ironclaw_wasm_product_adapters",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_authorization",
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
@@ -3613,7 +3604,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         BoundaryRule {
             crate_name: "ironclaw_threads",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_authorization",
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
@@ -3684,7 +3675,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_capabilities",
                 "ironclaw_dispatcher",
                 "ironclaw_extensions",
-                // ironclaw_filesystem is permitted: FilesystemTurnStateStore
+                // ironclaw_filesystem is permitted: FilesystemTurnStateRowStore
                 // routes turn-coordination persistence through ScopedFilesystem
                 // under the universal-fs-dispatch rework (plan
                 // 2026-05-14-universal-fs-dispatch).
@@ -3734,7 +3725,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         BoundaryRule {
             crate_name: "ironclaw_agent_loop",
             forbidden: vec![
-                "ironclaw",
+                "ironclaw_legacy",
                 "ironclaw_approvals",
                 "ironclaw_auth",
                 "ironclaw_authorization",
@@ -3759,7 +3750,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_product_adapters",
                 "ironclaw_product_workflow",
                 "ironclaw_runner",
-                "ironclaw_reborn_cli",
+                "ironclaw",
                 "ironclaw_reborn_composition",
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
@@ -3982,13 +3973,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         introduced: "2026-07-09",
         removes_in: "W3.6",
         reason: "webui ingress still reaches composition until the composition webui module is folded into ingress and runtime handles are inverted",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_reborn_migration",
-        dependency_name: "ironclaw",
-        introduced: "2026-07-09",
-        removes_in: "Tier B",
-        reason: "the migration app intentionally reads v1 state until the legacy root is retired",
     },
 ];
 

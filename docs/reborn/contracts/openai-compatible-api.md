@@ -91,7 +91,7 @@ bind sockets or call `axum::serve`.
 
 ## Non-Streaming Chat Completions
 
-`ironclaw-reborn serve` mounts
+`ironclaw serve` mounts
 `openai_compat_router_with_state(...)` inside the Reborn protected route stack
 with an `OpenAiChatCompletionsWorkflow` for `POST /v1/chat/completions`.
 Default routers remain fail-closed unless host composition injects that

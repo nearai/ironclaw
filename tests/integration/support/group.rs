@@ -102,8 +102,8 @@ use ironclaw_turns::run_profile::{
     ModelProfileId,
 };
 use ironclaw_turns::{
-    FilesystemTurnStateStore, InMemoryTurnEventSink, InMemoryTurnStateStoreLimits,
-    LoopCheckpointStore, TurnCoordinator, TurnEventSink, TurnScope, TurnStateStore,
+    FilesystemTurnStateRowStore, InMemoryTurnEventSink, LoopCheckpointStore, TurnCoordinator,
+    TurnEventSink, TurnScope, TurnStateStore, TurnStateStoreLimits,
 };
 
 use super::builder::{
@@ -203,9 +203,9 @@ pub(crate) struct GroupSharedStorage {
     /// model hot path.
     pub(crate) scope_gateway: Arc<ScopeRegistryGateway>,
     /// The group's single shared turn-state store. All threads share one
-    /// `FilesystemTurnStateStore` (isolation is by `run_id`, not by path —
+    /// `FilesystemTurnStateRowStore` (isolation is by `run_id`, not by path —
     /// see `turns_scope_path`, which has no `thread_id` component).
-    pub(crate) turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
+    pub(crate) turn_store: Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>>,
     /// S2 seam: the SAME canonical binding `turn_store`'s `/turns` mount is
     /// scoped to (`scoped_turns_fs_composite`). Retained so a reopen can
     /// rebuild the identical scoped path independently, instead of
@@ -744,16 +744,16 @@ impl RebornIntegrationGroupBuilder {
         // public builder method (`ironclaw_turns::filesystem_store`); this only
         // calls it a second time with a shortened `runner_lease_ttl` when a test
         // opts in via `with_runner_lease_ttl_for_test`. `None` (default) leaves
-        // `InMemoryTurnStateStoreLimits::default()` untouched, byte-identical to
+        // `TurnStateStoreLimits::default()` untouched, byte-identical to
         // today's behavior.
-        let mut turn_state_limits = InMemoryTurnStateStoreLimits::default();
+        let mut turn_state_limits = TurnStateStoreLimits::default();
         if let Some(ttl) = self.runner_lease_ttl_override {
             turn_state_limits.runner_lease_ttl = ttl;
         }
         let turns_scoped_fs =
             scoped_turns_fs_composite(Arc::clone(&base.composite), &base.canonical_binding)?;
-        let turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>> = Arc::new(
-            FilesystemTurnStateStore::new(Arc::clone(&turns_scoped_fs))
+        let turn_store: Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>> = Arc::new(
+            FilesystemTurnStateRowStore::new(Arc::clone(&turns_scoped_fs))
                 .with_limits(turn_state_limits),
         );
         let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();

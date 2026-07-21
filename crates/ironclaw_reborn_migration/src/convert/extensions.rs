@@ -25,8 +25,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use ironclaw::channels::wasm::{StoredWasmChannel, WasmChannelStore};
-use ironclaw::tools::wasm::{StoredWasmTool, ToolStatus, WasmToolStore};
 use ironclaw_extensions::{
     ExtensionActivationState, ExtensionCredentialBinding, ExtensionCredentialHandle,
     ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
@@ -37,6 +35,13 @@ use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle, UserId};
 use ironclaw_host_runtime::{default_host_api_contract_registry, default_host_port_catalog};
 
 use crate::error::MigrationError;
+#[cfg(feature = "libsql")]
+use crate::legacy_snapshot::wasm_stores::{LibSqlWasmChannelStore, LibSqlWasmToolStore};
+#[cfg(feature = "postgres")]
+use crate::legacy_snapshot::wasm_stores::{PostgresWasmChannelStore, PostgresWasmToolStore};
+use crate::legacy_snapshot::wasm_stores::{
+    StoredWasmChannel, StoredWasmTool, ToolStatus, WasmChannelStore, WasmToolStore,
+};
 use crate::options::MigrationOptions;
 use crate::report::{Domain, LossReason, MigrationReport};
 use crate::source::V1Source;
@@ -436,15 +441,11 @@ async fn tool_credential_bindings(
 fn build_tool_store(src: &V1Source) -> Option<Arc<dyn WasmToolStore>> {
     #[cfg(feature = "libsql")]
     if let Some(db) = src.handles.libsql_db.as_ref() {
-        return Some(Arc::new(ironclaw::tools::wasm::LibSqlWasmToolStore::new(
-            db.clone(),
-        )));
+        return Some(Arc::new(LibSqlWasmToolStore::new(db.clone())));
     }
     #[cfg(feature = "postgres")]
     if let Some(pool) = src.handles.pg_pool.as_ref() {
-        return Some(Arc::new(ironclaw::tools::wasm::PostgresWasmToolStore::new(
-            pool.clone(),
-        )));
+        return Some(Arc::new(PostgresWasmToolStore::new(pool.clone())));
     }
     None
 }
@@ -452,15 +453,11 @@ fn build_tool_store(src: &V1Source) -> Option<Arc<dyn WasmToolStore>> {
 fn build_channel_store(src: &V1Source) -> Option<Arc<dyn WasmChannelStore>> {
     #[cfg(feature = "libsql")]
     if let Some(db) = src.handles.libsql_db.as_ref() {
-        return Some(Arc::new(
-            ironclaw::channels::wasm::LibSqlWasmChannelStore::new(db.clone()),
-        ));
+        return Some(Arc::new(LibSqlWasmChannelStore::new(db.clone())));
     }
     #[cfg(feature = "postgres")]
     if let Some(pool) = src.handles.pg_pool.as_ref() {
-        return Some(Arc::new(
-            ironclaw::channels::wasm::PostgresWasmChannelStore::new(pool.clone()),
-        ));
+        return Some(Arc::new(PostgresWasmChannelStore::new(pool.clone())));
     }
     None
 }
