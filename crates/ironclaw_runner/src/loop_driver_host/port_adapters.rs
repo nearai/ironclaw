@@ -194,7 +194,7 @@ impl LoopCheckpointPort for HostManagedLoopCheckpointPort {
         // profile's resolved checkpoint schema — the read-side
         // `get_checkpoint_state` checks `(state_ref, schema_id, kind)` as a
         // unit, so mismatches here would lead to phantom resume rejections.
-        if request.schema_id != self.run_context.checkpoint_schema_id.as_str() {
+        if request.schema_id != self.run_context.checkpoint_schema_id {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::CheckpointRejected,
                 "staged checkpoint payload schema_id does not match the run profile's checkpoint schema",

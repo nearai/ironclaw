@@ -1557,9 +1557,33 @@ impl RebornRuntime {
     /// `tenant_id`. Rides the same `reborn-local-dev.db` handle the runtime
     /// already owns rather than opening a second handle to that file (the
     /// host filesystem abstraction owns the substrate, not the caller).
-    /// Returns `None` when the runtime was built without a local-runtime
-    /// substrate, so callers fail closed instead of synthesizing a second
-    /// identity store outside the host-owned substrate.
+    /// Construct the canonical identity store over a host scoped filesystem.
+    /// Shared by the local-runtime and production-shaped accessors: the store is
+    /// generic over the backend filesystem `F`, tenant-partitions records by the
+    /// per-call tenant in the path, and takes the runtime-owner caller identity as
+    /// its fixed host-API scope.
+    fn identity_store_over<F>(
+        &self,
+        scoped_filesystem: Arc<ironclaw_filesystem::ScopedFilesystem<F>>,
+    ) -> ironclaw_reborn_identity::FilesystemRebornIdentityStore<F>
+    where
+        F: RootFilesystem + 'static,
+    {
+        ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
+            scoped_filesystem,
+            self.thread_scope.tenant_id.clone(),
+            self.actor_user_id.clone(),
+            self.thread_scope.agent_id.clone(),
+            self.thread_scope.project_id.clone(),
+        )
+    }
+
+    /// Open the SSO/admin identity resolver over the host-owned identity substrate.
+    /// `None` only when the runtime has no durable substrate at all (neither a
+    /// local-runtime nor a production store graph), so callers fail closed instead
+    /// of synthesizing a second identity store. Local-runtime builds additionally
+    /// run the one-time legacy libSQL fold; production-shaped builds do not (that
+    /// migration is a local-only concern). See #5013.
     pub async fn open_reborn_identity_resolver(
         &self,
         tenant_id: &TenantId,
@@ -1569,67 +1593,165 @@ impl RebornRuntime {
             ironclaw_reborn_identity::RebornIdentityError,
         >,
     > {
-        let local = self.services.local_runtime.as_ref()?;
-        // Build the store on the host scoped filesystem (same substrate
-        // boundary as every other durable store), scoped by the runtime-owner
-        // caller identity. Data is partitioned by tenant in the record path.
-        let store = ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
-            Arc::clone(&local.identity_filesystem),
-            self.thread_scope.tenant_id.clone(),
-            self.actor_user_id.clone(),
-            self.thread_scope.agent_id.clone(),
-            self.thread_scope.project_id.clone(),
-        );
-        // One-time legacy fold: the pre-#4381 WebUI store wrote `user_identities`
-        // rows into the same libSQL substrate. Reading that SQL table is a
-        // substrate-level concern, so it lives here in the host layer (not the
-        // identity crate) and binds each row into the filesystem-backed store.
-        #[cfg(feature = "libsql")]
-        {
-            if let Some(identity_substrate_db) = &local.identity_substrate_db
-                && let Err(err) =
-                    fold_legacy_webui_identities(identity_substrate_db, tenant_id, &store).await
+        // Local-runtime substrate: build the store on the host scoped filesystem
+        // (same substrate boundary as every other durable store), scoped by the
+        // runtime-owner caller identity, and run the one-time legacy libSQL fold.
+        if let Some(local) = self.services.local_runtime.as_ref() {
+            let store = self.identity_store_over(Arc::clone(&local.identity_filesystem));
+            // One-time legacy fold: the pre-#4381 WebUI store wrote `user_identities`
+            // rows into the same libSQL substrate. Reading that SQL table is a
+            // substrate-level concern, so it lives here in the host layer (not the
+            // identity crate) and binds each row into the filesystem-backed store.
+            #[cfg(feature = "libsql")]
             {
-                return Some(Err(err));
+                if let Some(identity_substrate_db) = &local.identity_substrate_db
+                    && let Err(err) =
+                        fold_legacy_webui_identities(identity_substrate_db, tenant_id, &store).await
+                {
+                    return Some(Err(err));
+                }
+            }
+            return Some(Ok(
+                Arc::new(store) as Arc<dyn ironclaw_reborn_identity::RebornIdentityResolver>
+            ));
+        }
+
+        // Production-shaped substrate (#5013): the identity store lives on the same
+        // `/tenant-shared/reborn-identity` mount the local build uses — production's
+        // `wrap_scoped` installs the identical `invocation_mount_view` resolver, which
+        // rewrites the prefix by the runtime-owner scope's tenant and treats the
+        // per-call tenant as an opaque path tail, so one owner-scoped store serves
+        // every tenant. The legacy fold is a local libSQL-only migration; a fresh
+        // production substrate has no `user_identities` table to fold.
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        {
+            let _ = tenant_id;
+            if let Some(production) = self.services.production_runtime.as_ref() {
+                let store: Arc<dyn ironclaw_reborn_identity::RebornIdentityResolver> =
+                    match production {
+                        #[cfg(feature = "libsql")]
+                        crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
+                            Arc::new(self.identity_store_over(Arc::clone(&graph.scoped_filesystem)))
+                        }
+                        #[cfg(feature = "postgres")]
+                        crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
+                            Arc::new(self.identity_store_over(Arc::clone(&graph.scoped_filesystem)))
+                        }
+                    };
+                return Some(Ok(store));
             }
         }
-        Some(Ok(
-            Arc::new(store) as Arc<dyn ironclaw_reborn_identity::RebornIdentityResolver>
-        ))
+        None
     }
 
     /// Open the admin user-directory surface over the host-owned identity
     /// substrate. Same store [`open_reborn_identity_resolver`] uses
     /// (`FilesystemRebornIdentityStore` implements both traits), so admin CRUD
-    /// enumerates exactly the users SSO login persists. `None` when the runtime
-    /// has no local-runtime substrate (fail closed). Synchronous and fold-free
-    /// (the legacy fold seeds identity/index records, not `StoredUser` rows the
-    /// directory reads), so `build_webui_services` can call it directly.
+    /// enumerates exactly the users SSO login persists. `None` only when the
+    /// runtime has no durable substrate at all — neither a local-runtime nor a
+    /// production store graph (fail closed). Synchronous and fold-free (the legacy
+    /// fold seeds identity/index records, not `StoredUser` rows the directory
+    /// reads), so `build_webui_services` can call it directly.
     pub(crate) fn reborn_user_directory(
         &self,
     ) -> Option<Arc<dyn ironclaw_reborn_identity::RebornUserDirectory>> {
-        let local = self.services.local_runtime.as_ref()?;
-        let store = ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
-            Arc::clone(&local.identity_filesystem),
-            self.thread_scope.tenant_id.clone(),
-            self.actor_user_id.clone(),
-            self.thread_scope.agent_id.clone(),
-            self.thread_scope.project_id.clone(),
-        );
-        Some(Arc::new(store) as Arc<dyn ironclaw_reborn_identity::RebornUserDirectory>)
+        if let Some(local) = self.services.local_runtime.as_ref() {
+            return Some(
+                Arc::new(self.identity_store_over(Arc::clone(&local.identity_filesystem)))
+                    as Arc<dyn ironclaw_reborn_identity::RebornUserDirectory>,
+            );
+        }
+        // Production-shaped substrate (#5013): same identity mount and per-call
+        // tenant partitioning as the local path — see `open_reborn_identity_resolver`.
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        {
+            if let Some(production) = self.services.production_runtime.as_ref() {
+                let directory: Arc<dyn ironclaw_reborn_identity::RebornUserDirectory> =
+                    match production {
+                        #[cfg(feature = "libsql")]
+                        crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
+                            Arc::new(self.identity_store_over(Arc::clone(&graph.scoped_filesystem)))
+                        }
+                        #[cfg(feature = "postgres")]
+                        crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
+                            Arc::new(self.identity_store_over(Arc::clone(&graph.scoped_filesystem)))
+                        }
+                    };
+                return Some(directory);
+            }
+        }
+        None
+    }
+
+    /// Test-only accessor for the admin user directory the WebUI facade wires.
+    /// Mirrors the production call `build_webui_services` makes to
+    /// [`Self::reborn_user_directory`] (`pub(crate)`), which integration tests
+    /// in a separate crate cannot reach. Gated behind `test-support` so the
+    /// substrate handle never leaks into production builds. For tests only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn reborn_user_directory_for_tests(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_reborn_identity::RebornUserDirectory>> {
+        self.reborn_user_directory()
     }
 
     /// Admin per-user secret provisioner over the host-owned secret substrate,
-    /// scoped to an arbitrary target user (not the runtime owner). `None` when
-    /// no filesystem secret store was built. See `admin_secrets.rs`.
+    /// scoped to an arbitrary target user (not the runtime owner). `None` only
+    /// when no durable secret store was built (a no-storage local build).
+    /// Production-shaped builds source it from the production store graph.
+    /// See `admin_secrets.rs`.
     pub(crate) fn reborn_admin_secret_provisioner(
         &self,
     ) -> Option<Arc<dyn crate::admin_secrets::AdminSecretProvisioner>> {
-        self.services
-            .local_runtime
-            .as_ref()?
-            .admin_secret_provisioner
-            .clone()
+        if let Some(local) = self.services.local_runtime.as_ref() {
+            return local.admin_secret_provisioner.clone();
+        }
+        // Production-shaped substrate: the provisioner was built over the raw
+        // production root + the runtime's own crypto in `build_backend_production`.
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        {
+            if let Some(production) = self.services.production_runtime.as_ref() {
+                return Some(match production {
+                    #[cfg(feature = "libsql")]
+                    crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
+                        Arc::clone(&graph.admin_secret_provisioner)
+                    }
+                    #[cfg(feature = "postgres")]
+                    crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
+                        Arc::clone(&graph.admin_secret_provisioner)
+                    }
+                });
+            }
+        }
+        None
+    }
+
+    /// First-class projects + membership (ACL) facade over the host-owned scoped
+    /// substrate, backing the WebUI project surface. `None` only when the runtime
+    /// has no durable substrate at all (neither a local-runtime nor a production
+    /// store graph). Production-shaped builds source it from the production graph.
+    pub(crate) fn reborn_project_service(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_product_workflow::ProjectService>> {
+        if let Some(local) = self.services.local_runtime.as_ref() {
+            return Some(Arc::clone(&local.project_service));
+        }
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        {
+            if let Some(production) = self.services.production_runtime.as_ref() {
+                return Some(match production {
+                    #[cfg(feature = "libsql")]
+                    crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
+                        Arc::clone(&graph.project_service)
+                    }
+                    #[cfg(feature = "postgres")]
+                    crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
+                        Arc::clone(&graph.project_service)
+                    }
+                });
+            }
+        }
+        None
     }
 
     /// The admin API-token minter supplied via

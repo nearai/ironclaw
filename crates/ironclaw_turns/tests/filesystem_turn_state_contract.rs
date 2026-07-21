@@ -16,24 +16,25 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use ironclaw_filesystem::{
     BackendCapabilities, BackendId, BackendKind, CasExpectation, CompositeRootFilesystem,
-    ContentKind, DirEntry, DiskFilesystem, Entry, FileStat, FilesystemError, FilesystemOperation,
-    InMemoryBackend, IndexPolicy, MountDescriptor, RecordVersion, RootFilesystem, ScopedFilesystem,
-    SeqNo, StorageClass, VersionedEntry,
+    ContentKind, ContentType, DirEntry, DiskFilesystem, Entry, FileStat, FilesystemError,
+    FilesystemOperation, InMemoryBackend, IndexPolicy, MountDescriptor, RecordVersion,
+    RootFilesystem, ScopedFilesystem, SeqNo, StorageClass, VersionedEntry,
 };
 use ironclaw_host_api::{
-    AgentId, HostPath, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, ScopedPath,
-    TenantId, ThreadId, UserId, VirtualPath,
+    AgentId, HostPath, MountAlias, MountGrant, MountPermissions, MountView, ProjectId,
+    ResourceScope, ScopedPath, TenantId, ThreadId, UserId, VirtualPath,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AllowAllTurnAdmissionPolicy, BlockedReason,
-    CheckpointSchemaId, FilesystemTurnStateBlockPersistence, FilesystemTurnStateRowStore, GateRef,
-    GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver,
-    LoopCheckpointStore, LoopExitMapping, ProductTurnContext, PutLoopCheckpointRequest,
-    ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest, RunOriginAdapter,
-    RunProfileRequest, RunProfileVersion, SanitizedCancelReason, SanitizedFailure,
-    SourceBindingRef, SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnAdmissionPolicy, TurnCheckpointId, TurnError, TurnEventKind, TurnEventProjectionSource,
-    TurnId, TurnLeaseToken, TurnOriginKind, TurnOwner, TurnRunId, TurnRunnerId, TurnScope,
+    CheckpointSchemaId, EventCursor, FilesystemTurnStateBlockPersistence,
+    FilesystemTurnStateRowStore, GateRef, GetLoopCheckpointRequest, GetRunStateRequest,
+    IdempotencyKey, InMemoryRunProfileResolver, LoopCheckpointStore, LoopExitMapping,
+    ProductTurnContext, PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnPrecondition,
+    ResumeTurnRequest, RunOriginAdapter, RunProfileRequest, RunProfileVersion,
+    SanitizedCancelReason, SanitizedFailure, SourceBindingRef, SubmitChildRunRequest,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy, TurnCheckpointId,
+    TurnError, TurnEventKind, TurnEventProjectionSource, TurnId, TurnLeaseToken,
+    TurnLifecycleEvent, TurnOriginKind, TurnOwner, TurnRunId, TurnRunnerId, TurnScope,
     TurnSpawnTreeStateStore, TurnStateBlockPersistence, TurnStateStore, TurnStateStoreLimits,
     TurnStatus,
     run_profile::{LoopCheckpointKind, LoopCheckpointStateRef},
@@ -3358,5 +3359,286 @@ async fn filesystem_turn_state_store_persists_product_context_through_snapshot_r
     assert!(
         state_none.product_context.is_none(),
         "None product_context must remain None after snapshot round-trip"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Durable turn-event indexed-query read path (#6382 follow-up).
+//
+// `read_turn_events_after` serves a scoped `cursor > after` range via the
+// backend `query` over an `Entry::indexed` projection, instead of listing the
+// whole events collection and reading every cross-thread row after the cursor.
+// These tests pin the three behaviors that path introduces: scope pruning,
+// query-only visibility (an unprojected row is invisible), and the one-time
+// backfill that re-projects pre-upgrade rows so historical events survive.
+// ---------------------------------------------------------------------------
+
+/// A bare (unwrapped) `TurnLifecycleEvent` row body — the `StoredRow::Raw`
+/// shape an event row persisted before the indexed-projection change would
+/// have on disk (no `journal_seq` wrapper, no `indexed` projection).
+fn raw_submitted_event(scope: &TurnScope, cursor: u64, run_id: TurnRunId) -> TurnLifecycleEvent {
+    TurnLifecycleEvent {
+        cursor: EventCursor(cursor),
+        scope: scope.clone(),
+        occurred_at: None,
+        owner_user_id: None,
+        run_id,
+        status: TurnStatus::Queued,
+        kind: TurnEventKind::Submitted,
+        blocked_gate: None,
+        sanitized_reason: None,
+        retryable: None,
+        detail: None,
+    }
+}
+
+/// Write a pre-upgrade event row (bare body, no `indexed` projection) at the
+/// exact scoped row path the store reads, through the same scoped filesystem.
+async fn write_unprojected_event_row(
+    scoped: &ScopedFilesystem<CompositeRootFilesystem>,
+    event: &TurnLifecycleEvent,
+) {
+    let path =
+        ScopedPath::new(format!("/turns/rows/v1/events/{:020}.json", event.cursor.0)).unwrap();
+    let entry =
+        Entry::bytes(serde_json::to_vec(event).unwrap()).with_content_type(ContentType::json());
+    scoped
+        .put(
+            &ResourceScope::system(),
+            &path,
+            entry,
+            CasExpectation::Absent,
+        )
+        .await
+        .expect("write unprojected event row");
+}
+
+/// Pre-mark the durable event-index backfill complete so the store does NOT
+/// re-project on read.
+async fn mark_events_index_backfilled(scoped: &ScopedFilesystem<CompositeRootFilesystem>) {
+    let path = ScopedPath::new("/turns/rows/v1/meta/events-index.json").unwrap();
+    let entry =
+        Entry::bytes(br#"{"backfilled":true}"#.to_vec()).with_content_type(ContentType::json());
+    scoped
+        .put(&ResourceScope::system(), &path, entry, CasExpectation::Any)
+        .await
+        .expect("write backfill marker");
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_events_query_isolates_scopes_across_threads() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = FilesystemTurnStateRowStore::new(scoped);
+    let resolver = InMemoryRunProfileResolver::default();
+
+    let scope_a = turn_scope("thread-events-a");
+    let scope_b = turn_scope("thread-events-b");
+    let run_a = accepted_run_id(
+        &store
+            .submit_turn(
+                submit_request_for(scope_a.clone(), "idem-events-a"),
+                &AllowAllTurnAdmissionPolicy,
+                &resolver,
+            )
+            .await
+            .unwrap(),
+    );
+    let run_b = accepted_run_id(
+        &store
+            .submit_turn(
+                submit_request_for(scope_b.clone(), "idem-events-b"),
+                &AllowAllTurnAdmissionPolicy,
+                &resolver,
+            )
+            .await
+            .unwrap(),
+    );
+
+    let page_a = retry_read_turn_events(&store, &scope_a).await;
+    assert!(
+        page_a.entries.iter().all(|event| event.scope == scope_a),
+        "the scoped indexed query must return only the requested scope's events"
+    );
+    assert!(
+        page_a
+            .entries
+            .iter()
+            .any(|event| event.run_id == run_a && event.kind == TurnEventKind::Submitted),
+        "thread-a's own Submitted event must be returned"
+    );
+    assert!(
+        !page_a.entries.iter().any(|event| event.run_id == run_b),
+        "thread-b's events must not leak into thread-a's timeline"
+    );
+
+    // The cursor range is exclusive-after: replaying past the newest cursor
+    // yields an empty page rather than re-serving the same events.
+    let newest = page_a
+        .entries
+        .iter()
+        .map(|event| event.cursor)
+        .max()
+        .expect("thread-a has at least one event");
+    let after_newest = store
+        .read_turn_events_after(&scope_a, None, Some(newest), 100)
+        .await
+        .unwrap();
+    assert!(
+        after_newest.entries.is_empty(),
+        "reading after the newest cursor must return no further events"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_events_query_hides_rows_missing_index_projection() {
+    // A pre-upgrade event row carries no `indexed` projection. With the backfill
+    // marker pre-set (so no re-projection runs), the indexed query must NOT
+    // surface it — this is what proves the read path is the indexed query and
+    // not the legacy directory scan (which ignores `indexed` and would find it).
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let scope = turn_scope("thread-events-unprojected");
+    write_unprojected_event_row(&scoped, &raw_submitted_event(&scope, 1, TurnRunId::new())).await;
+    mark_events_index_backfilled(&scoped).await;
+
+    let store = FilesystemTurnStateRowStore::new(scoped);
+    let page = store
+        .read_turn_events_after(&scope, None, None, 100)
+        .await
+        .unwrap();
+    assert!(
+        page.entries.is_empty(),
+        "the indexed query must not surface an event row that carries no scope_key projection"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_events_backfill_reprojects_preexisting_rows() {
+    // Same pre-upgrade row, but WITHOUT the backfill marker: first read must
+    // re-project it so the indexed query surfaces the historical event, and the
+    // projection must survive a reopen.
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let scope = turn_scope("thread-events-backfill");
+    let run_id = TurnRunId::new();
+    write_unprojected_event_row(&scoped, &raw_submitted_event(&scope, 1, run_id)).await;
+
+    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let page = store
+        .read_turn_events_after(&scope, None, None, 100)
+        .await
+        .unwrap();
+    assert!(
+        page.entries
+            .iter()
+            .any(|event| event.run_id == run_id && event.cursor == EventCursor(1)),
+        "backfill must re-project a pre-upgrade event row so the indexed query surfaces it"
+    );
+
+    let reopened = FilesystemTurnStateRowStore::new(scoped);
+    let reopened_page = reopened
+        .read_turn_events_after(&scope, None, None, 100)
+        .await
+        .unwrap();
+    assert!(
+        reopened_page
+            .entries
+            .iter()
+            .any(|event| event.run_id == run_id),
+        "the durable re-projection must persist across a row-store reopen"
+    );
+}
+
+/// Write a pre-upgrade **tombstone** event row (materialized shape with a null
+/// `value` and no `indexed` projection) — the on-disk residue of a pruned event
+/// that the one-time backfill must read, recognize as a tombstone, and skip
+/// (never re-project, never surface) without failing or stalling the migration.
+async fn write_events_tombstone_row(
+    scoped: &ScopedFilesystem<CompositeRootFilesystem>,
+    cursor: u64,
+) {
+    let path = ScopedPath::new(format!("/turns/rows/v1/events/{cursor:020}.json")).unwrap();
+    let entry = Entry::bytes(br#"{"journal_seq":1,"value":null}"#.to_vec())
+        .with_content_type(ContentType::json());
+    scoped
+        .put(
+            &ResourceScope::system(),
+            &path,
+            entry,
+            CasExpectation::Absent,
+        )
+        .await
+        .expect("write tombstone event row");
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_events_backfill_skips_tombstones_and_reprojects_live_rows() {
+    // Regression for the durable-read backfill over a tombstone-inclusive events
+    // collection (#6390): the events collection retains a durable tombstone for
+    // every pruned event, so the one-time backfill scans a set NOT bounded by
+    // the live-event count. It must re-project every live pre-upgrade row (now
+    // at bounded concurrency, not serially), skip tombstones without surfacing
+    // or failing on them, and still write the completion marker so a reopen does
+    // not repeat the work.
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let scope = turn_scope("thread-events-backfill-tombstones");
+    let other = turn_scope("thread-events-backfill-other");
+
+    // Live pre-upgrade rows for the target scope, interleaved (by cursor) with
+    // tombstones and another scope's rows across the shared cursor space.
+    let mut live_run_ids = Vec::new();
+    for cursor in 1..=20u64 {
+        match cursor % 4 {
+            0 => write_events_tombstone_row(&scoped, cursor).await,
+            1 => {
+                let run_id = TurnRunId::new();
+                live_run_ids.push(run_id);
+                write_unprojected_event_row(&scoped, &raw_submitted_event(&scope, cursor, run_id))
+                    .await;
+            }
+            _ => {
+                write_unprojected_event_row(
+                    &scoped,
+                    &raw_submitted_event(&other, cursor, TurnRunId::new()),
+                )
+                .await;
+            }
+        }
+    }
+
+    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let page = store
+        .read_turn_events_after(&scope, None, None, 100)
+        .await
+        .unwrap();
+
+    for run_id in &live_run_ids {
+        assert!(
+            page.entries.iter().any(|event| event.run_id == *run_id),
+            "backfill must re-project every live pre-upgrade row for the target scope"
+        );
+    }
+    assert!(
+        page.entries.iter().all(|event| event.scope == scope),
+        "tombstones and other scopes' rows must never surface in the scoped query"
+    );
+
+    // The completion marker is written even over a tombstone-heavy collection,
+    // so a reopen serves from the index without re-running the backfill scan.
+    let marker = scoped
+        .get(
+            &ResourceScope::system(),
+            &ScopedPath::new("/turns/rows/v1/meta/events-index.json").unwrap(),
+        )
+        .await
+        .unwrap()
+        .expect("backfill completion marker present");
+    let marker: serde_json::Value = serde_json::from_slice(&marker.entry.body).unwrap();
+    assert_eq!(
+        marker.get("backfilled").and_then(|value| value.as_bool()),
+        Some(true),
+        "backfill must record completion even when the events collection is tombstone-heavy"
     );
 }

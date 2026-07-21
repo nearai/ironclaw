@@ -245,31 +245,19 @@ fn provider_tool_name_error(error: HostApiError) -> AgentLoopHostError {
 }
 
 /// Durable reference to provider tool-call metadata for tool-result replay.
+///
+/// This is [`ProviderToolCallReplay`] plus the canonical IronClaw
+/// `capability_id`. The replay fields are `#[serde(flatten)]`ed so the
+/// serialized shape stays byte-identical to the historical field-per-field
+/// layout while the nine shared fields live in exactly one place.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderToolCallReference {
-    /// Provider identity selected by the host route.
-    pub provider_id: String,
-    /// Concrete provider model selected by the host route.
-    pub provider_model_id: String,
-    /// Provider turn grouping token for reconstructing assistant tool calls.
-    pub provider_turn_id: String,
-    /// Provider call id referenced by the matching tool result.
-    pub provider_call_id: String,
-    /// Provider-facing tool name returned by the model.
-    pub provider_tool_name: ProviderToolName,
+    /// Provider-originated tool-call metadata needed to replay tool results
+    /// back to the same provider.
+    #[serde(flatten)]
+    pub replay: ProviderToolCallReplay,
     /// Canonical IronClaw capability id backing this provider tool.
     pub capability_id: CapabilityId,
-    /// Provider-facing tool arguments returned by the model.
-    pub arguments: serde_json::Value,
-    /// Provider response-level reasoning attached to the tool-call batch.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub response_reasoning: Option<String>,
-    /// Provider call-level reasoning attached to this tool call.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning: Option<String>,
-    /// Opaque provider thought-signature metadata, not an IronClaw auth signature.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub signature: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

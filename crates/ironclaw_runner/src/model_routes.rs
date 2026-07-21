@@ -262,8 +262,8 @@ impl ResolvedModelRouteSnapshot {
         self.source
     }
 
-    pub fn to_loop_model_route_snapshot(&self) -> LoopModelRouteSnapshot {
-        LoopModelRouteSnapshot::new(
+    pub fn to_loop_model_route_snapshot(&self) -> Result<LoopModelRouteSnapshot, String> {
+        LoopModelRouteSnapshot::try_new(
             self.provider_key.route().provider_id(),
             self.provider_key.route().model_id(),
             self.provider_key.config_version(),

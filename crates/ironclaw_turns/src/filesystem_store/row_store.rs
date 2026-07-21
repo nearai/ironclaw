@@ -24,6 +24,7 @@ use super::{
 
 mod commit;
 mod delta;
+mod events_index;
 mod io;
 mod journal;
 mod load;
@@ -113,6 +114,13 @@ where
     /// [`TurnStateStoreLimits::max_pending_write_behind_deltas`]; at the cap
     /// the next non-critical op awaits the oldest before enqueuing.
     pending_write_behind: AsyncMutex<VecDeque<DeltaAck>>,
+    /// One-time-per-process readiness of the durable event-row index used by
+    /// the query-backed `read_turn_events_after` path: declares the event
+    /// indexes and runs the pre-index-projection backfill exactly once. Caches
+    /// `true` when the query path is usable and `false` when the mount does not
+    /// support `query`/`ensure_index` (byte-only fallback backends), so the
+    /// read path degrades to the legacy directory scan without re-probing.
+    events_index_ready: tokio::sync::OnceCell<bool>,
 }
 
 struct PendingRowCommit<T> {
@@ -157,6 +165,7 @@ where
             delta_journal: DeltaJournal::new(filesystem, materialize_gate),
             apply_timeout: FILESYSTEM_APPLY_TIMEOUT,
             pending_write_behind: AsyncMutex::new(VecDeque::new()),
+            events_index_ready: tokio::sync::OnceCell::new(),
         }
     }
 

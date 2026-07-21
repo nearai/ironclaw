@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::run_profile::instruction_bundle::InstructionBundleFingerprint;
 use crate::run_profile::refs::ModelProfileId;
-use crate::{CapabilityActivityId, LoopMessageRef};
+use crate::{CapabilityActivityId, LoopMessageRef, TurnRunId};
 
 use super::capability::ProviderToolCallReplay;
 use super::context::{LoopContextCompactionMetadata, LoopInputCursor};
@@ -138,7 +138,7 @@ pub struct LoopPromptBundleAuthority {
 
 #[derive(Default)]
 struct LoopPromptBundleAuthorityState {
-    latest_by_run: HashMap<String, LoopPromptBundleGrant>,
+    latest_by_run: HashMap<TurnRunId, LoopPromptBundleGrant>,
 }
 
 impl LoopPromptBundleAuthority {
@@ -160,7 +160,7 @@ impl LoopPromptBundleAuthority {
         }
 
         self.lock_state()?.latest_by_run.insert(
-            context.run_id.to_string(),
+            context.run_id,
             LoopPromptBundleGrant {
                 bundle_ref: bundle.bundle_ref.clone(),
                 messages: bundle.messages.clone(),
@@ -180,7 +180,7 @@ impl LoopPromptBundleAuthority {
         let grant = self
             .lock_state()?
             .latest_by_run
-            .remove(&context.run_id.to_string())
+            .remove(&context.run_id)
             .ok_or_else(|| {
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::InvalidInvocation,
@@ -208,6 +208,19 @@ impl LoopPromptBundleAuthority {
         }
 
         Ok(grant)
+    }
+
+    /// Evict any prompt-bundle grant issued for `run_id`.
+    ///
+    /// [`Self::authorize_latest_model_request`] already removes a grant on the
+    /// success path, but a run that aborts or errors *between* issuing a bundle
+    /// and authorizing its model request would otherwise leave its grant in this
+    /// process-lifetime map forever. Terminal/abort handling calls this so the
+    /// map stays scoped to live runs. Idempotent: evicting a run with no pending
+    /// grant is a no-op.
+    pub fn evict_run(&self, run_id: TurnRunId) -> Result<(), AgentLoopHostError> {
+        self.lock_state()?.latest_by_run.remove(&run_id);
+        Ok(())
     }
 
     fn lock_state(
@@ -331,4 +344,64 @@ pub trait LoopModelPort: Send + Sync {
         &self,
         request: LoopModelRequest,
     ) -> Result<LoopModelResponse, AgentLoopHostError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+
+    use super::*;
+    use crate::run_profile::snapshot::ResolvedRunProfile;
+    use crate::{RunProfileId, RunProfileVersion, TurnId, TurnScope};
+
+    fn test_context() -> LoopRunContext {
+        let scope = TurnScope::new(
+            TenantId::new("tenant-prompt-authority").unwrap(),
+            Some(AgentId::new("agent-prompt-authority").unwrap()),
+            Some(ProjectId::new("project-prompt-authority").unwrap()),
+            ThreadId::new("thread-prompt-authority").unwrap(),
+        );
+        let resolved_run_profile = ResolvedRunProfile::legacy_compatibility(
+            RunProfileId::interactive_default(),
+            RunProfileVersion::new(1),
+            true,
+        );
+        LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), resolved_run_profile)
+    }
+
+    fn bundle_for(context: &LoopRunContext) -> LoopPromptBundle {
+        LoopPromptBundle {
+            bundle_ref: LoopPromptBundleRef::for_run(context, "token").expect("valid bundle ref"),
+            messages: Vec::new(),
+            surface_version: None,
+            compaction_message_index: Vec::new(),
+            instruction_fingerprint: None,
+            identity_message_count: 0,
+            instruction_snippet_count: 0,
+        }
+    }
+
+    #[test]
+    fn evict_run_drops_a_grant_never_authorized() {
+        // Regression: a run that issues a bundle but aborts before authorizing
+        // its model request must not leak its grant in the process-lifetime map.
+        let authority = LoopPromptBundleAuthority::default();
+        let context = test_context();
+        authority
+            .issue_bundle(&context, &bundle_for(&context))
+            .expect("issue bundle");
+
+        authority.evict_run(context.run_id).expect("evict run");
+        // Idempotent: evicting an already-absent run is a no-op.
+        authority
+            .evict_run(context.run_id)
+            .expect("evict run again");
+
+        // With the grant evicted, authorization fails closed exactly as if no
+        // bundle had ever been issued for the run.
+        let error = authority
+            .authorize_latest_model_request(&context, &[], &None)
+            .expect_err("evicted grant must not authorize a model request");
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
 }

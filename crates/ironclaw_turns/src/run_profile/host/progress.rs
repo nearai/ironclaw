@@ -59,8 +59,9 @@ pub enum LoopProgressEvent {
         /// Bounded, host-authored sanitized failure summary (e.g. a builtin's
         /// `"invalid JSON: ..."` message) so the live per-tool UI card can show
         /// the real reason, not just the kind. Additive; `None` when no
-        /// host-authored summary is available.
-        safe_summary: Option<String>,
+        /// host-authored summary is available. Validated at construction, in
+        /// lockstep with the sibling `LoopSafeSummary`-typed summary fields.
+        safe_summary: Option<LoopSafeSummary>,
     },
     GateBlocked {
         iteration: u32,

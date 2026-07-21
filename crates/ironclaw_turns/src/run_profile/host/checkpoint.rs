@@ -56,7 +56,7 @@ pub struct StageCheckpointPayloadRequest {
     /// Schema id of the payload — usually the framework's
     /// `CHECKPOINT_SCHEMA_ID` constant. Stored alongside the bytes so the
     /// read-side can authenticate the boundary on resume.
-    pub schema_id: String,
+    pub schema_id: CheckpointSchemaId,
     /// Canonical payload bytes (e.g. `serde_json::to_vec(&state)`). The
     /// implementation does not parse the bytes; it persists them and returns
     /// an opaque ref.

@@ -54,8 +54,8 @@ use ironclaw_turns::{
         LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
         LoopRunContext, LoopTranscriptPort, ModelVisibleToolObservation, ObservationTrust,
         ParentLoopOutput, PersonalContextPolicy, PromptMode, PromptSkillContextMetadata,
-        ProviderToolCallReference, ProviderToolDefinition, SkillTrustLevel, SkillVisibility,
-        ToolObservationDetail, ToolObservationStatus, UpdateAssistantDraft,
+        ProviderToolCallReference, ProviderToolCallReplay, ProviderToolDefinition, SkillTrustLevel,
+        SkillVisibility, ToolObservationDetail, ToolObservationStatus, UpdateAssistantDraft,
         VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
     },
 };
@@ -2374,17 +2374,19 @@ async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
             result_ref: result_ref.clone(),
             safe_summary: "tool completed".to_string(),
             provider_call: Some(ProviderToolCallReference {
-                provider_id: "test-provider".to_string(),
-                provider_model_id: "test-model".to_string(),
-                provider_turn_id: "turn_1".to_string(),
-                provider_call_id: "call_1".to_string(),
-                provider_tool_name: ProviderToolName::new("demo__echo")
-                    .expect("provider tool name"),
+                replay: ProviderToolCallReplay {
+                    provider_id: "test-provider".to_string(),
+                    provider_model_id: "test-model".to_string(),
+                    provider_turn_id: "turn_1".to_string(),
+                    provider_call_id: "call_1".to_string(),
+                    provider_tool_name: ProviderToolName::new("demo__echo")
+                        .expect("provider tool name"),
+                    arguments: serde_json::json!({"message":"hello"}),
+                    response_reasoning: Some("provider reasoning".to_string()),
+                    reasoning: Some("provider reasoning".to_string()),
+                    signature: Some("sig-1".to_string()),
+                },
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
-                arguments: serde_json::json!({"message":"hello"}),
-                response_reasoning: Some("provider reasoning".to_string()),
-                reasoning: Some("provider reasoning".to_string()),
-                signature: Some("sig-1".to_string()),
             }),
             model_observation: None,
         })

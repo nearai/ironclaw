@@ -256,11 +256,15 @@ fn model_token_needs_redaction(token: &str) -> bool {
     let normalized = token
         .trim_matches(|character: char| !character.is_ascii_alphanumeric() && character != '_')
         .to_ascii_lowercase();
-    normalized.starts_with("sk-")
-        || normalized.contains("api_key")
+    normalized.contains("api_key")
         || normalized.contains("access_token")
         || normalized.contains("raw_credential_sentinel")
         || normalized.contains("raw_provider_secret")
+        // Reuse the shared prefix heuristic so every provider-token format this
+        // file already recognizes (`sk-`, GitHub `ghp_`/`gho_`/…, GitLab, GCP,
+        // Google, AWS `AKIA`/`ASIA`) is redacted at the model-visible boundary,
+        // not just the handful of substrings enumerated above.
+        || is_secret_like_token(&normalized)
 }
 
 #[cfg(test)]
@@ -301,5 +305,29 @@ mod tests {
         // Path / payload delimiters must still be rejected.
         validate_loop_safe_summary("missing schema at /system/extensions".to_string())
             .expect_err("path delimiter `/` must still be rejected");
+    }
+
+    #[test]
+    fn sanitize_model_visible_text_redacts_provider_token_formats() {
+        // The model-visible boundary must redact every provider-token format the
+        // file already recognizes via `is_secret_like_token`, not only `sk-`,
+        // `api_key`, and `access_token`. Regression for GitHub/AWS/GCP/Google
+        // formats leaking through `sanitize_model_visible_text`.
+        for secret in [
+            "ghp_0123456789abcdefABCDEF0123456789abcd",
+            "AKIAIOSFODNN7EXAMPLE",
+            "ya29.a0ARrdaM-exampletoken",
+            "AIzaSyExampleToken1234567890",
+        ] {
+            let sanitized = sanitize_model_visible_text(format!("token {secret} here"));
+            assert!(
+                sanitized.contains("[redacted]"),
+                "`{secret}` should have been redacted, got: {sanitized}"
+            );
+            assert!(
+                !sanitized.contains(secret),
+                "`{secret}` leaked through sanitization: {sanitized}"
+            );
+        }
     }
 }

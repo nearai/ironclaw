@@ -41,11 +41,11 @@ use thiserror::Error;
 
 use crate::LoopMessageRef;
 
-use super::snippet_ref::{sanitize_ref_suffix, stable_skill_snippet_display_hash};
 use super::{
     AgentLoopHostError, AgentLoopHostErrorKind, LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES,
     LOOP_CONTEXT_TOTAL_MODEL_CONTENT_MAX_BYTES, LoopContextSnippet, LoopContextSnippetMetadata,
 };
+use crate::run_profile::snippet_ref::{sanitize_ref_suffix, stable_skill_snippet_display_hash};
 
 // ---------------------------------------------------------------------------
 // Errors
