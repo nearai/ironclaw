@@ -1369,6 +1369,10 @@ registerPack("ko", {
 
 registerPack("ko", {
   "app.checkingSession": "세션 확인 중...",
+  "app.sessionCheckFailedTitle": "세션을 확인할 수 없습니다",
+  "app.sessionCheckFailedDescription":
+    "서버에 연결할 수 없습니다. 로그인 정보는 유지됩니다. 연결을 확인한 후 다시 시도하세요.",
+  "app.retrySession": "다시 시도",
   "common.close": "닫기",
   "common.download": "다운로드",
   "common.copy": "복사",

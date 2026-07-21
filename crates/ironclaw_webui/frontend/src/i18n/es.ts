@@ -1370,6 +1370,10 @@ registerPack("es", {
 
 registerPack("es", {
   "app.checkingSession": "Comprobando sesión...",
+  "app.sessionCheckFailedTitle": "No se pudo verificar tu sesión",
+  "app.sessionCheckFailedDescription":
+    "No pudimos contactar con el servidor. Tu inicio de sesión sigue guardado. Comprueba la conexión e inténtalo de nuevo.",
+  "app.retrySession": "Reintentar",
   "common.close": "Cerrar",
   "common.download": "Descargar",
   "common.copy": "Copiar",

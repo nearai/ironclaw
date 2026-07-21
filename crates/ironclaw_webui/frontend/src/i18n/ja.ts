@@ -1369,6 +1369,10 @@ registerPack("ja", {
 
 registerPack("ja", {
   "app.checkingSession": "セッションを確認中...",
+  "app.sessionCheckFailedTitle": "セッションを確認できませんでした",
+  "app.sessionCheckFailedDescription":
+    "サーバーに接続できませんでした。サインイン情報は保持されています。接続を確認して再試行してください。",
+  "app.retrySession": "再試行",
   "common.close": "閉じる",
   "common.download": "ダウンロード",
   "common.copy": "コピー",

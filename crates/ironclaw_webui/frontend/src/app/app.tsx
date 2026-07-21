@@ -17,12 +17,41 @@ import { ExtensionsPage } from "../pages/extensions/extensions-page";
 import { SettingsPage } from "../pages/settings/settings-page";
 import { AdminPage } from "../pages/admin/admin-page";
 import { LogsPage } from "../pages/logs/logs-page";
+import { Button } from "../design-system/button";
 
 function AuthLoading() {
   const t = useT();
   return (
     <main className="grid min-h-[100dvh] place-items-center bg-[var(--v2-canvas)] px-6">
       <div className="text-sm text-[var(--v2-text-muted)]">{t("app.checkingSession")}</div>
+    </main>
+  );
+}
+
+function AuthSessionError({ onRetry }) {
+  const t = useT();
+  return (
+    <main className="grid min-h-[100dvh] place-items-center bg-[var(--v2-canvas)] px-6">
+      <div
+        role="alert"
+        data-testid="session-check-error"
+        className="w-full max-w-md rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] p-6 text-center shadow-sm"
+      >
+        <h1 className="text-lg font-semibold text-[var(--v2-text-strong)]">
+          {t("app.sessionCheckFailedTitle")}
+        </h1>
+        <p className="mt-2 text-sm text-[var(--v2-text-muted)]">
+          {t("app.sessionCheckFailedDescription")}
+        </p>
+        <Button
+          type="button"
+          className="mt-5"
+          data-testid="session-check-retry"
+          onClick={onRetry}
+        >
+          {t("app.retrySession")}
+        </Button>
+      </div>
     </main>
   );
 }
@@ -48,6 +77,10 @@ function LoginPage({ auth }) {
     return (<AuthLoading />);
   }
 
+  if (auth.sessionCheckFailed) {
+    return (<AuthSessionError onRetry={auth.retrySessionCheck} />);
+  }
+
   if (auth.isAuthenticated) {
     return (<Navigate to={from} replace />);
   }
@@ -65,6 +98,10 @@ function RequireAuth({ auth, children }) {
 
   if (auth.isChecking) {
     return (<AuthLoading />);
+  }
+
+  if (auth.sessionCheckFailed) {
+    return (<AuthSessionError onRetry={auth.retrySessionCheck} />);
   }
 
   if (!auth.isAuthenticated) {

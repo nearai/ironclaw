@@ -1369,6 +1369,10 @@ registerPack("ar", {
 
 registerPack("ar", {
   "app.checkingSession": "جارٍ التحقق من الجلسة...",
+  "app.sessionCheckFailedTitle": "تعذّر التحقق من جلستك",
+  "app.sessionCheckFailedDescription":
+    "تعذّر الوصول إلى الخادم. ما زال تسجيل دخولك محفوظًا. تحقق من اتصالك وحاول مرة أخرى.",
+  "app.retrySession": "إعادة المحاولة",
   "common.close": "إغلاق",
   "common.download": "تنزيل",
   "common.copy": "نسخ",

@@ -1369,6 +1369,10 @@ registerPack("zh-CN", {
 
 registerPack("zh-CN", {
   "app.checkingSession": "正在检查会话...",
+  "app.sessionCheckFailedTitle": "无法验证你的会话",
+  "app.sessionCheckFailedDescription":
+    "暂时无法连接服务器。你的登录信息仍已保存，请检查网络后重试。",
+  "app.retrySession": "重试",
   "common.close": "关闭",
   "common.download": "下载",
   "common.copy": "复制",
