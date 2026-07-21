@@ -1875,10 +1875,16 @@ impl From<DispatchFailureKind> for RuntimeFailureKind {
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UndeclaredCapability) => {
                 RuntimeFailureKind::InvalidInput
             }
+            // A guest trap is the extension's own execution failing on the
+            // inputs it was given — deterministic with respect to the call,
+            // so infra retries can never resolve it. Surface it to the model
+            // immediately instead of burning the availability retry budget.
+            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest) => {
+                RuntimeFailureKind::OperationFailed
+            }
             DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Client)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor)
-            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Manifest)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UnsupportedRunner) => {
                 RuntimeFailureKind::Backend
@@ -2093,7 +2099,10 @@ mod tests {
                 RuntimeDispatchErrorKind::FilesystemDenied,
                 RuntimeFailureKind::Authorization,
             ),
-            (RuntimeDispatchErrorKind::Guest, RuntimeFailureKind::Backend),
+            (
+                RuntimeDispatchErrorKind::Guest,
+                RuntimeFailureKind::OperationFailed,
+            ),
             (
                 RuntimeDispatchErrorKind::InputEncode,
                 RuntimeFailureKind::InvalidInput,
