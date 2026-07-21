@@ -1,5 +1,5 @@
 import React from "react";
-import { openEventStream } from "../../../lib/api";
+import { clientActionId, openEventStream } from "../../../lib/api";
 import {
   CONNECTION_STATUS,
   type ConnectionStatus,
@@ -35,10 +35,7 @@ const EVENT_SOURCE_OPEN = 1;
 // Stable for this browser tab's loaded SPA. Reusing it across Chat route
 // mounts lets the server supersede a proxy-held stream from the prior thread
 // instead of rejecting the replacement against the per-user connection cap.
-const SSE_CONNECTION_ID =
-  typeof globalThis.crypto?.randomUUID === "function"
-    ? globalThis.crypto.randomUUID()
-    : undefined;
+const SSE_CONNECTION_ID = clientActionId();
 let nextConnectionGeneration = 0;
 
 function connectionGeneration() {

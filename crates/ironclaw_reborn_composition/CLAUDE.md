@@ -401,7 +401,8 @@ The opaque WebUI projection cursor stamps its process-local live position with
 the projection-services epoch. On an epoch mismatch, resume preserves durable
 runtime and turn positions but clears the volatile live position so a browser
 cursor retained across a deployment cannot suppress the restarted process's
-interim updates.
+interim updates. This is enforced by
+`WebuiRuntimeProjectionStream::runtime_subscription` in `src/projection.rs`.
 
 ```rust
 // Inside a host-owned ingress crate / binary (NOT in this crate —

@@ -1032,10 +1032,12 @@ fn sse_error_event(error: RebornServicesError) -> Event {
     }
 }
 
+const STREAM_READY_PAYLOAD: &str = r#"{"type":"keep_alive"}"#;
+
 fn sse_ready_event() -> Event {
     Event::default()
         .event("keep_alive")
-        .data(r#"{"type":"keep_alive"}"#)
+        .data(STREAM_READY_PAYLOAD)
 }
 
 fn build_sse_stream(
@@ -2425,6 +2427,19 @@ async fn ws_drain_loop(
                 return;
             }
         };
+        let send_budget = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+        if ws_send_with_timeout(
+            &mut socket,
+            Some(axum::extract::ws::Message::Text(
+                STREAM_READY_PAYLOAD.into(),
+            )),
+            send_budget,
+        )
+        .await
+        .is_err()
+        {
+            return;
+        }
         loop {
             let remaining = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
             if remaining.is_zero() {

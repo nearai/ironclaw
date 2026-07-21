@@ -6305,7 +6305,7 @@ async fn stream_events_ws_uses_subscription_when_facade_supports_it() {
 
     let mut text_frames: Vec<String> = Vec::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while std::time::Instant::now() < deadline && text_frames.len() < 2 {
+    while std::time::Instant::now() < deadline && text_frames.len() < 3 {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         match tokio::time::timeout(remaining, ws.next()).await {
             Ok(Some(Ok(WsMessage::Text(text)))) => text_frames.push(text.to_string()),
@@ -6319,19 +6319,22 @@ async fn stream_events_ws_uses_subscription_when_facade_supports_it() {
     serve_handle.abort();
 
     assert!(
-        text_frames.len() >= 2,
-        "expected subscription projection frames; got {} text frame(s): {:?}",
+        text_frames.len() >= 3,
+        "expected readiness + subscription projection frames; got {} text frame(s): {:?}",
         text_frames.len(),
         text_frames,
     );
 
-    let envelope_a_json: Value = serde_json::from_str(&text_frames[0]).expect("envelope a parses");
+    let ready_json: Value = serde_json::from_str(&text_frames[0]).expect("ready frame parses");
+    assert_eq!(ready_json, serde_json::json!({ "type": "keep_alive" }));
+
+    let envelope_a_json: Value = serde_json::from_str(&text_frames[1]).expect("envelope a parses");
     let expected_a: Value = serde_json::to_value(&envelope_a).expect("envelope a value");
     assert_eq!(
         envelope_a_json, expected_a,
-        "first WS frame must carry the first subscription envelope",
+        "first projection WS frame must carry the first subscription envelope",
     );
-    let envelope_b_json: Value = serde_json::from_str(&text_frames[1]).expect("envelope b parses");
+    let envelope_b_json: Value = serde_json::from_str(&text_frames[2]).expect("envelope b parses");
     let expected_b: Value = serde_json::to_value(&envelope_b).expect("envelope b value");
     assert_eq!(
         envelope_b_json, expected_b,

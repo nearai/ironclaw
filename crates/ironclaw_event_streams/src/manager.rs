@@ -432,8 +432,13 @@ fn compact_live_replay_to_current_state(
                 latest_live_position = Some(position);
                 latest_live_update = Some((update.cursor.clone(), update.thread_id.clone()));
                 for item in update.items.iter().cloned() {
-                    latest_items.insert(live_projection_item_key(&item), (live_item_order, item));
-                    live_item_order = live_item_order.saturating_add(1);
+                    let key = live_projection_item_key(&item);
+                    if let Some((_, latest_item)) = latest_items.get_mut(&key) {
+                        *latest_item = item;
+                    } else {
+                        latest_items.insert(key, (live_item_order, item));
+                        live_item_order = live_item_order.saturating_add(1);
+                    }
                 }
             }
             _ => passthrough.push((position, envelope)),

@@ -46,6 +46,7 @@ function createHarness({
   const context = {
     CONNECTION_STATUS,
     authScope: () => "tenant:user",
+    clientActionId: () => "browser-tab-connection",
     EventSource,
     JSON,
     Math,
