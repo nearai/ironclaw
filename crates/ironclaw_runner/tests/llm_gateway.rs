@@ -306,6 +306,36 @@ async fn gateway_stream_model_with_progress_uses_provider_streaming_and_sanitize
 }
 
 #[tokio::test]
+async fn text_only_stream_failure_marks_externally_visible_partial_output() {
+    let provider = Arc::new(StreamingRecordingLlmProvider::fail_after_deltas(vec![
+        "partial response".to_string(),
+    ]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let sink = Arc::new(RecordingHostStreamSink::default());
+
+    let error = gateway
+        .stream_model_with_progress(model_request(interactive_model()), sink.clone())
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        error.reason_kind,
+        Some(AgentLoopHostErrorReasonKind::ModelPartialOutputVisible)
+    );
+    assert_eq!(sink.updates(), vec!["partial response".to_string()]);
+    assert_eq!(provider.streaming_requests.lock().unwrap().len(), 1);
+    assert!(
+        provider.complete_requests.lock().unwrap().is_empty(),
+        "a failed streaming attempt must not fall back to non-streaming completion"
+    );
+}
+
+#[tokio::test]
 async fn gateway_coalesces_late_system_messages_before_provider_call() {
     let provider = Arc::new(RecordingLlmProvider::reply("assistant response"));
     let gateway = LlmProviderModelGateway::with_provider_identity(
@@ -3549,6 +3579,7 @@ struct StreamingRecordingLlmProvider {
     streaming_requests: Mutex<Vec<CompletionRequest>>,
     streaming_deltas: Vec<String>,
     response_content: String,
+    fail_after_streaming: bool,
 }
 
 impl StreamingRecordingLlmProvider {
@@ -3559,6 +3590,14 @@ impl StreamingRecordingLlmProvider {
             streaming_requests: Mutex::new(Vec::new()),
             streaming_deltas,
             response_content: response_content.to_string(),
+            fail_after_streaming: false,
+        }
+    }
+
+    fn fail_after_deltas(streaming_deltas: Vec<String>) -> Self {
+        Self {
+            fail_after_streaming: true,
+            ..Self::new(streaming_deltas, "")
         }
     }
 }
@@ -3589,6 +3628,12 @@ impl LlmProvider for StreamingRecordingLlmProvider {
         self.streaming_requests.lock().unwrap().push(request);
         for delta in &self.streaming_deltas {
             sink.text_delta(delta.clone()).await;
+        }
+        if self.fail_after_streaming {
+            return Err(LlmError::RateLimited {
+                provider: self.model_name.clone(),
+                retry_after: None,
+            });
         }
         Ok(CompletionResponse {
             content: self.response_content.clone(),

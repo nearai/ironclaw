@@ -55,12 +55,13 @@ use super::capability_backend::{
     CapabilityScriptingInputs, MOCK_MCP_PROVIDER_ID, RebornCapabilityBackend, ShellMode,
 };
 use super::doubles::ParkingCapabilityGate;
-use super::group::{GroupCapability, GroupSharedStorage, RebornIntegrationGroup};
+use super::group::{GroupCapability, GroupSharedStorage, RebornIntegrationGroup, ThreadModelMode};
 use super::harness::{HarnessCapabilityRecorder, HarnessTurnBackend, RecordedCapabilityResult};
 use super::http_matcher::ScriptedHttpResponse;
 use super::planned_runtime_parts_shape::DefaultPlannedRuntimePartsShape;
 use super::process::ScriptedProcessResult;
 use super::reply::RebornScriptedReply;
+use super::scripted_provider::IncompleteModelAttemptProbe;
 use super::scripted_provider::ParkingModelGate;
 use super::session_thread::RebornThreadHarness;
 use super::test_adapter::RebornTestIngress;
@@ -116,13 +117,9 @@ pub struct RebornIntegrationHarnessBuilder {
     /// construction — the last shell-selecting builder method wins, and a live
     /// runtime can never carry a stale scripted result.
     shell_mode: ShellMode,
-    /// E-GATEWAY: when set, the model call parks until released, enabling a
-    /// mid-turn cancel test. Threaded into the degenerate one-thread group.
-    park_gate: Option<ParkingModelGate>,
-    /// E-GATEWAY (C-ERRORS): when `true`, the model call always fails with a
-    /// fixed non-retryable `LlmError`. Threaded into the degenerate one-thread
-    /// group. See [`RebornThreadBuilder::fail_model`].
-    fail_model: bool,
+    /// E-GATEWAY: model behavior for the degenerate one-thread group. The last
+    /// model-mode-selecting builder method wins.
+    model_mode: ThreadModelMode,
     /// C-TRACECAP seam: install an in-memory `TurnEventSink` when `true`.
     turn_event_sink: bool,
     /// Force `ToolDisclosureMode::Bridged` into the underlying group's ONE
@@ -220,7 +217,7 @@ impl RebornIntegrationHarnessBuilder {
     /// so a test can cancel the run mid-turn. See
     /// [`RebornThreadBuilder::park_model`].
     pub fn park_model(mut self, gate: ParkingModelGate) -> Self {
-        self.park_gate = Some(gate);
+        self.model_mode = ThreadModelMode::Parked(gate);
         self
     }
 
@@ -228,7 +225,14 @@ impl RebornIntegrationHarnessBuilder {
     /// `LlmError` (E-GATEWAY seam, C-ERRORS). See
     /// [`RebornThreadBuilder::fail_model`](super::group::RebornThreadBuilder::fail_model).
     pub fn fail_model(mut self) -> Self {
-        self.fail_model = true;
+        self.model_mode = ThreadModelMode::Failing;
+        self
+    }
+
+    /// Fail after the raw provider has observed a partial text or tool-call
+    /// stream, before it can return a terminal response.
+    pub fn fail_incomplete_model_attempt(mut self, probe: IncompleteModelAttemptProbe) -> Self {
+        self.model_mode = ThreadModelMode::Incomplete(probe);
         self
     }
 
@@ -534,8 +538,7 @@ impl RebornIntegrationHarnessBuilder {
         group
             .thread(self.conversation_id)
             .script(self.replies)
-            .park_model_opt(self.park_gate)
-            .fail_model_opt(self.fail_model)
+            .model_mode(self.model_mode)
             .build()
             .await
     }
@@ -630,8 +633,7 @@ impl RebornIntegrationHarness {
             storage: StorageMode::default(),
             safety_context: None,
             shell_mode: ShellMode::default(),
-            park_gate: None,
-            fail_model: false,
+            model_mode: ThreadModelMode::default(),
             turn_event_sink: false,
             tool_disclosure: None,
             budget_accounting: false,

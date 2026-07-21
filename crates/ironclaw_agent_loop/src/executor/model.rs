@@ -105,6 +105,11 @@ impl ExecutorStage<ModelInput> for ModelStage {
         for _ in 0..max_model_attempts {
             match ctx.host.stream_model(request.clone()).await {
                 Ok(response) => {
+                    // This `Ok` is the loop-side completed-response commit
+                    // barrier. Streaming progress is emitted out-of-band by the
+                    // host and never enters loop state; only this one terminal,
+                    // decoded response may reach assistant finalization or the
+                    // capability stage below.
                     match &response.output {
                         ironclaw_turns::run_profile::ParentLoopOutput::AssistantReply(reply) => {
                             debug!(

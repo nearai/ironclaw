@@ -2,8 +2,9 @@ use ironclaw_host_api::{Resolution, ToolVerdict};
 use ironclaw_turns::{
     LoopBlockedKind, LoopFailureKind, SanitizedFailure,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, CapabilityFailureKind,
-        LoopCheckpointKind, LoopGateKind, LoopSafeSummary, sanitize_model_visible_text,
+        AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind, BatchPolicyKind,
+        CapabilityFailureKind, LoopCheckpointKind, LoopGateKind, LoopSafeSummary,
+        sanitize_model_visible_text,
     },
 };
 
@@ -88,6 +89,13 @@ pub(super) fn model_preference_to_host(
 }
 
 pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelErrorClass> {
+    // The provider layer may perform its one replacement-safe retry after text
+    // escapes through the stream sink. Once that decorated call returns this
+    // terminal reason, the outer loop must not start a fresh request that could
+    // duplicate externally visible output.
+    if error.reason_kind == Some(AgentLoopHostErrorReasonKind::ModelPartialOutputVisible) {
+        return None;
+    }
     match error.kind {
         AgentLoopHostErrorKind::Unavailable => Some(ModelErrorClass::Unavailable),
         AgentLoopHostErrorKind::Internal => Some(ModelErrorClass::Internal),

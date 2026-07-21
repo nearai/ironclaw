@@ -20,10 +20,12 @@
 use ironclaw_events::{SecurityBoundary, SecurityDecision};
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::ResourceGovernor;
-use ironclaw_turns::run_profile::LoopHostMilestoneKind;
+use ironclaw_threads::MessageKind;
+use ironclaw_turns::{TurnRunId, TurnStatus, run_profile::LoopHostMilestoneKind};
 use rust_decimal::Decimal;
 
 use super::builder::RebornIntegrationHarness;
+use super::scripted_provider::{IncompleteModelAttemptKind, IncompleteModelAttemptProbe};
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -944,6 +946,83 @@ impl RebornIntegrationHarness {
     /// multi-turn harness.
     pub async fn history_len(&self) -> HarnessResult<usize> {
         Ok(self.persisted_history().await?.len())
+    }
+
+    /// Assert that a model attempt appended neither a finalized assistant
+    /// message nor a tool-result reference carrying provider-call replay data.
+    /// These are the two model-visible durable transcript shapes an accepted
+    /// model response can create in the whole-turn harness.
+    pub async fn assert_no_model_attempt_commit_since(&self, baseline: usize) -> HarnessResult<()> {
+        let history = self.persisted_history().await?;
+        let committed: Vec<String> = Self::history_slice(&history, baseline)?
+            .iter()
+            .filter(|message| {
+                matches!(
+                    message.kind,
+                    ironclaw_threads::MessageKind::Assistant
+                        | ironclaw_threads::MessageKind::ToolResultReference
+                )
+            })
+            .map(|message| format!("{:?}:{}", message.kind, message.sequence))
+            .collect();
+        if committed.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "incomplete model attempt committed durable model-visible history: {committed:?}"
+        )
+        .into())
+    }
+
+    /// Assert the whole-turn safety contract for a provider attempt that ends
+    /// before a terminal response: bounded attempts, no model-visible commit,
+    /// and no capability dispatch.
+    pub async fn assert_incomplete_model_attempt_isolated(
+        &self,
+        run_id: TurnRunId,
+        baseline: usize,
+        user_text: &str,
+        capability_id: &str,
+        probe: &IncompleteModelAttemptProbe,
+    ) -> HarnessResult<()> {
+        self.wait_for_status(run_id, TurnStatus::Failed).await?;
+        match probe.kind() {
+            IncompleteModelAttemptKind::PartialText => {
+                if probe.attempts() != 2 {
+                    return Err(format!(
+                        "expected initial partial-text attempt plus one replacement-safe retry, saw {}",
+                        probe.attempts()
+                    )
+                    .into());
+                }
+            }
+            IncompleteModelAttemptKind::PartialToolCall => {
+                if probe.attempts() == 0 || probe.partial_tool_fragments() != probe.attempts() {
+                    return Err(format!(
+                        "expected one partial tool fragment per attempt, saw {} fragment(s) across {} attempt(s)",
+                        probe.partial_tool_fragments(),
+                        probe.attempts()
+                    )
+                    .into());
+                }
+            }
+        }
+        if probe.streaming_attempts() != probe.attempts() {
+            return Err(format!(
+                "expected every attempt to use streaming, saw {} streaming attempt(s) across {} total",
+                probe.streaming_attempts(),
+                probe.attempts()
+            )
+            .into());
+        }
+        self.assert_conversation_history_role_contains_since(
+            baseline,
+            MessageKind::User,
+            user_text,
+        )
+        .await?;
+        self.assert_no_model_attempt_commit_since(baseline).await?;
+        self.assert_tool_not_invoked(capability_id).await
     }
 
     /// The MOST RECENT persisted `ToolResultReference` message (highest

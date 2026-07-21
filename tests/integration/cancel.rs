@@ -24,7 +24,7 @@ use ironclaw_product_adapters::ProductInboundAck;
 use ironclaw_turns::TurnStatus;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::reply::RebornScriptedReply;
-use reborn_support::scripted_provider::ParkingModelGate;
+use reborn_support::scripted_provider::{IncompleteModelAttemptProbe, ParkingModelGate};
 
 #[tokio::test]
 async fn cancels_a_parked_mid_turn_run() {
@@ -168,6 +168,63 @@ async fn mid_turn_provider_error_reaches_failed_with_model_error_category() {
         "model_context_overflow",
         "expected the context-overflow fidelity category (ContextLengthExceeded), got {failure:?}"
     );
+}
+
+/// A retryable provider error after an externally visible text delta may use
+/// the provider decorator's single replacement-safe retry. Once that decorated
+/// call fails, the outer loop must not retry, commit assistant/tool-call
+/// transcript history, or dispatch a capability.
+#[tokio::test]
+async fn partial_text_failure_does_not_commit_or_dispatch() {
+    let probe = IncompleteModelAttemptProbe::partial_text();
+    let harness = RebornIntegrationHarness::test_default()
+        .with_builtin_http_tools()
+        .fail_incomplete_model_attempt(probe.clone())
+        .build()
+        .await
+        .expect("harness builds");
+    let run_id = harness
+        .submit_turn_async("use builtin.echo")
+        .await
+        .expect("turn submitted");
+    harness
+        .assert_incomplete_model_attempt_isolated(
+            run_id,
+            0,
+            "use builtin.echo",
+            "builtin.echo",
+            &probe,
+        )
+        .await
+        .expect("partial text remains progress-only and cannot dispatch");
+}
+
+/// A tool-call fragment that never reaches a terminal provider response is not
+/// a capability call. It must leave no model-visible durable history and must
+/// dispatch nothing.
+#[tokio::test]
+async fn partial_tool_call_failure_does_not_commit_or_dispatch() {
+    let probe = IncompleteModelAttemptProbe::partial_tool_call();
+    let harness = RebornIntegrationHarness::test_default()
+        .with_builtin_http_tools()
+        .fail_incomplete_model_attempt(probe.clone())
+        .build()
+        .await
+        .expect("harness builds");
+    let run_id = harness
+        .submit_turn_async("use builtin.echo")
+        .await
+        .expect("turn submitted");
+    harness
+        .assert_incomplete_model_attempt_isolated(
+            run_id,
+            0,
+            "use builtin.echo",
+            "builtin.echo",
+            &probe,
+        )
+        .await
+        .expect("partial tool call remains uncommitted and cannot dispatch");
 }
 
 /// Regression guard, `Failed`-path sibling of

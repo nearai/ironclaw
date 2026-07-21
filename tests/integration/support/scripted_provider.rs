@@ -10,12 +10,16 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use ironclaw_llm::{
-    CompletionRequest, CompletionResponse, LlmError, LlmProvider, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, CompletionStreamSink, LlmError, LlmProvider,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 use rust_decimal::Decimal;
 use tokio::sync::oneshot;
@@ -216,6 +220,151 @@ impl LlmProvider for ErrLlm {
         _request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
         Err(LlmError::ContextLengthExceeded { used: 1, limit: 1 })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Incomplete streaming attempt provider (E-GATEWAY seam) — commit barrier.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IncompleteModelAttemptKind {
+    PartialText,
+    PartialToolCall,
+}
+
+/// Shared observation handle for an incomplete streaming provider attempt.
+///
+/// The caller retains a clone while the harness installs another clone beneath
+/// the real decorator chain. This lets the whole-turn test account for every
+/// streaming attempt without exposing provider internals through the
+/// production model-gateway API.
+#[derive(Clone)]
+pub struct IncompleteModelAttemptProbe {
+    kind: IncompleteModelAttemptKind,
+    attempts: Arc<AtomicUsize>,
+    streaming_attempts: Arc<AtomicUsize>,
+    partial_tool_fragments: Arc<AtomicUsize>,
+}
+
+impl IncompleteModelAttemptProbe {
+    pub fn partial_text() -> Self {
+        Self::new(IncompleteModelAttemptKind::PartialText)
+    }
+
+    pub fn partial_tool_call() -> Self {
+        Self::new(IncompleteModelAttemptKind::PartialToolCall)
+    }
+
+    fn new(kind: IncompleteModelAttemptKind) -> Self {
+        Self {
+            kind,
+            attempts: Arc::new(AtomicUsize::new(0)),
+            streaming_attempts: Arc::new(AtomicUsize::new(0)),
+            partial_tool_fragments: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    pub fn kind(&self) -> IncompleteModelAttemptKind {
+        self.kind
+    }
+
+    pub fn attempts(&self) -> usize {
+        self.attempts.load(Ordering::SeqCst)
+    }
+
+    pub fn streaming_attempts(&self) -> usize {
+        self.streaming_attempts.load(Ordering::SeqCst)
+    }
+
+    pub fn partial_tool_fragments(&self) -> usize {
+        self.partial_tool_fragments.load(Ordering::SeqCst)
+    }
+}
+
+pub struct IncompleteAttemptLlm {
+    probe: IncompleteModelAttemptProbe,
+}
+
+impl IncompleteAttemptLlm {
+    pub fn new(probe: IncompleteModelAttemptProbe) -> Self {
+        Self { probe }
+    }
+
+    fn record_attempt(&self, streaming: bool) {
+        self.probe.attempts.fetch_add(1, Ordering::SeqCst);
+        if streaming {
+            self.probe.streaming_attempts.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    async fn fail_streaming_attempt(&self, sink: Arc<dyn CompletionStreamSink>) -> LlmError {
+        self.record_attempt(true);
+        match self.probe.kind {
+            IncompleteModelAttemptKind::PartialText => {
+                sink.text_delta("partial response that must not commit".to_string())
+                    .await;
+            }
+            IncompleteModelAttemptKind::PartialToolCall => {
+                // The provider trait deliberately exposes no tool-call-delta
+                // sink: tool calls become authoritative only in the returned
+                // terminal ToolCompletionResponse. Record that the fake vendor
+                // decoder saw a fragment, then fail before returning one.
+                self.probe
+                    .partial_tool_fragments
+                    .fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        LlmError::RateLimited {
+            provider: SCRIPTED_MODEL_NAME.to_string(),
+            retry_after: Some(Duration::ZERO),
+        }
+    }
+
+    fn fail_non_streaming_attempt(&self) -> LlmError {
+        self.record_attempt(false);
+        LlmError::InvalidResponse {
+            provider: SCRIPTED_MODEL_NAME.to_string(),
+            reason: "incomplete attempt unexpectedly used non-streaming path".to_string(),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for IncompleteAttemptLlm {
+    fn model_name(&self) -> &str {
+        SCRIPTED_MODEL_NAME
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        Err(self.fail_non_streaming_attempt())
+    }
+
+    async fn complete_streaming(
+        &self,
+        _request: CompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        Err(self.fail_streaming_attempt(sink).await)
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        Err(self.fail_non_streaming_attempt())
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        _request: ToolCompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        Err(self.fail_streaming_attempt(sink).await)
     }
 }
 
