@@ -33,8 +33,11 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_reborn_composition::test_support::BudgetTestGateway;
 use ironclaw_reborn_composition::{
-    RebornBuildInput, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle,
-    build_reborn_runtime, build_webui_services, local_dev_runtime_policy,
+    ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
+    RebornBuildInput, RebornChannelConnectStrategy, RebornRuntime, RebornRuntimeIdentity,
+    RebornRuntimeInput, RebornWebuiBundle, RuntimeCredentialAccountSetup,
+    RuntimeCredentialAuthRequirement, VendorId, build_reborn_runtime, build_webui_services,
+    local_dev_runtime_policy,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnEventProjectionSource, TurnStatus};
 use ironclaw_webui::webui_v2::{
@@ -1376,9 +1379,9 @@ async fn user_extension_removal_does_not_erase_admin_configuration() {
 
 /// A manifest-declared channel consumer must resolve the tenant's saved admin
 /// values through the generic configuration path. This drives the ordinary
-/// extension setup projection rather than reading the admin store directly;
-/// both Telegram secret handles must already be present after a pre-install
-/// operator save, with no Telegram-specific adapter branch in this journey.
+/// extension setup and pairing projections rather than reading the admin store
+/// directly: pairing is available after install, before activation, with no
+/// Telegram-specific adapter branch in this journey.
 #[tokio::test]
 async fn extension_setup_consumer_sees_manifest_admin_configuration() {
     let fixture = AdminConfigurationFixture::new("effective-consumer").await;
@@ -1405,11 +1408,22 @@ async fn extension_setup_consumer_sees_manifest_admin_configuration() {
         "/api/webchat/v2/extensions/telegram/setup",
     )
     .await;
+    let (pairing_status, pairing_body) = post_json(
+        fixture.pairing_member_router(),
+        "/api/webchat/v2/extensions/telegram/pairing/mint",
+        serde_json::json!({}),
+    )
+    .await;
 
     assert_eq!(
-        (save_status, install_status, setup_status),
-        (StatusCode::OK, StatusCode::OK, StatusCode::OK),
-        "save: {save_body}; install: {install_body}; setup: {setup_body}"
+        (save_status, install_status, setup_status, pairing_status),
+        (
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::OK,
+        ),
+        "save: {save_body}; install: {install_body}; setup: {setup_body}; pairing: {pairing_body}"
     );
     for handle in ["telegram_bot_token", "telegram_webhook_secret"] {
         let secret = setup_body["secrets"]
@@ -1425,6 +1439,18 @@ async fn extension_setup_consumer_sees_manifest_admin_configuration() {
             "setup projection must remain presence-only: {secret}"
         );
     }
+    assert!(
+        pairing_body["code"]
+            .as_str()
+            .is_some_and(|code| !code.is_empty()),
+        "pairing mint omitted its code: {pairing_body}"
+    );
+    assert!(
+        pairing_body["deep_link"]
+            .as_str()
+            .is_some_and(|link| link.starts_with("https://t.me/ironclaw_test_bot?start=")),
+        "pairing mint did not consume the manifest-configured deep-link value: {pairing_body}"
+    );
     fixture.shutdown().await;
 }
 
@@ -1444,6 +1470,7 @@ impl AdminConfigurationFixture {
         let input = RebornBuildInput::local_dev(user_id.as_str(), root.path().join("local-dev"))
             .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
             .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+            .with_account_setup_descriptors(vec![telegram_pairing_descriptor()])
             .with_network_http_egress_for_test(Arc::new(
                 reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
             ));
@@ -1488,10 +1515,46 @@ impl AdminConfigurationFixture {
         }))
     }
 
+    fn pairing_member_router(&self) -> Router {
+        let pairing = self
+            .runtime
+            .channel_pairing_route_mount()
+            .expect("Telegram pairing route mount");
+        pairing
+            .router
+            .layer(axum::Extension(self.caller.clone()))
+            .layer(axum::Extension(WebUiV2Capabilities::default()))
+    }
+
     async fn shutdown(self) {
         let Self { runtime, webui, .. } = self;
         drop(webui);
         runtime.shutdown().await.expect("runtime shuts down");
+    }
+}
+
+fn telegram_pairing_descriptor() -> ExtensionAccountSetupDescriptor {
+    let extension_id = ExtensionId::new("telegram").expect("extension id");
+    ExtensionAccountSetupDescriptor {
+        extension_id: extension_id.clone(),
+        auth_requirement: RuntimeCredentialAuthRequirement {
+            provider: VendorId::new("telegram").expect("vendor id"),
+            setup: RuntimeCredentialAccountSetup::Pairing,
+            requester_extension: extension_id,
+            provider_scopes: Vec::new(),
+        },
+        connection_requirement: ChannelConnectionRequirement {
+            channel: "telegram".to_string(),
+            display_name: "Telegram".to_string(),
+            strategy: RebornChannelConnectStrategy::WebGeneratedCode,
+            instructions: "Pair Telegram".to_string(),
+            input_placeholder: String::new(),
+            submit_label: "Open pairing".to_string(),
+            error_message: "Pairing failed".to_string(),
+        },
+        connection_notices: ChannelConnectionNoticePolicy::generic("Telegram"),
+        activation_success_message: "Telegram paired".to_string(),
+        pairing_deep_link_template: Some("https://t.me/{bot_username}?start={code}".to_string()),
     }
 }
 
