@@ -223,6 +223,9 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
     calendar_restore
         .assert_tool_result_contains("\"activated\":true")
         .await?;
+    calendar_restore
+        .assert_model_message_content_contains(r#"\"activated\":true"#)
+        .await?;
 
     let drive_restore = g
         .thread("google-family-drive-restore")
@@ -238,6 +241,9 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
     drive_restore.submit_turn("activate google drive").await?;
     drive_restore
         .assert_tool_result_contains("\"activated\":true")
+        .await?;
+    drive_restore
+        .assert_model_message_content_contains(r#"\"activated\":true"#)
         .await?;
 
     Ok(())

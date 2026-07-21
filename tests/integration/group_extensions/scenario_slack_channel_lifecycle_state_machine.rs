@@ -165,6 +165,12 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     lifecycle
         .assert_tool_result_contains("\"activated\":true")
         .await?;
+    lifecycle
+        .assert_model_message_content_contains(r#"\"installed\":true"#)
+        .await?;
+    lifecycle
+        .assert_model_message_content_contains(r#"\"activated\":true"#)
+        .await?;
     // Activation published the tool surface…
     lifecycle
         .assert_tool_result_contains(r#""slack.send_message""#)
@@ -241,6 +247,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     remover
         .assert_tool_result_contains("\"removed\":true")
         .await?;
+    remover
+        .assert_model_message_content_contains(r#"\"removed\":true"#)
+        .await?;
     // Every surface flips together: connection facade…
     if slack.caller_channel_connected("slack", &actor).await? {
         return Err("slack still reports connected after extension_remove; \
@@ -279,6 +288,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     }
     // Non-vacuity: the catalog entry itself must still be discoverable.
     viewer.assert_tool_result_contains("\"slack\"").await?;
+    viewer
+        .assert_model_message_content_contains(r#"\"id\":\"slack\""#)
+        .await?;
 
     // ── Phase 5: use after remove — the identical call no longer dispatches ─
     eprintln!("SLACK-LIFECYCLE PHASE5-send-after-remove begin");
@@ -327,6 +339,12 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .await?;
     restorer
         .assert_tool_result_contains("\"activated\":true")
+        .await?;
+    restorer
+        .assert_model_message_content_contains(r#"\"installed\":true"#)
+        .await?;
+    restorer
+        .assert_model_message_content_contains(r#"\"activated\":true"#)
         .await?;
     configure_slack_connection_scoping(g).await?;
     slack

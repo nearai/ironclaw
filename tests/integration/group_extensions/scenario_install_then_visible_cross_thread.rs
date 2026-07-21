@@ -29,6 +29,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     installer
         .assert_tool_result_contains("\"installed\":true")
         .await?;
+    installer
+        .assert_model_message_content_contains(r#"\"installed\":true"#)
+        .await?;
 
     // ── Thread B: viewer (DIFFERENT conversation, SAME shared store) ─────────
     let viewer = g
@@ -47,6 +50,12 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // satisfy this — so this proves thread B observes thread A's success.
     viewer
         .assert_tool_result_contains(r#""installation_phase":"installed""#)
+        .await?;
+    viewer
+        .assert_model_message_content_contains(r#"\"id\":\"github\""#)
+        .await?;
+    viewer
+        .assert_model_message_content_contains(r#"\"installation_phase\":\"installed\""#)
         .await?;
 
     // Non-vacuity guard: a never-installed marker must be absent, proving

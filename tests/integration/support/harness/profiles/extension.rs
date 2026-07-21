@@ -56,6 +56,7 @@ pub(crate) fn extension_lifecycle_tools_profile_for_user(
                 true,
             )?),
         )
+        .with_durable_capability_io()
         .with_seed_extension_credentials()
         .with_recording_network_egress(network_egress),
         network_policy_override: Some(wildcard_test_policy()),

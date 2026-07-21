@@ -5364,7 +5364,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_capability_port_extension_search_reads_system_catalog() {
+    async fn local_dev_extension_search_makes_every_bundled_result_model_visible() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
             "local-dev-extension-search-owner",
@@ -5412,29 +5412,46 @@ mod tests {
             .find(|definition| definition.capability_id.as_str() == EXTENSION_SEARCH_CAPABILITY_ID)
             .expect("extension_search tool definition");
 
-        let candidate = port
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
-                provider_tool_call_with_name(
-                    tool_definition.name.as_str(),
-                    serde_json::json!({"query": "gmail"}),
-                ),
-            ))
-            .await
-            .expect("extension_search provider tool call stages");
-        assert_eq!(
-            candidate.capability_id.as_str(),
-            EXTENSION_SEARCH_CAPABILITY_ID
-        );
+        let extension_ids = ironclaw_first_party_extensions::packages::bundled_packages()
+            .iter()
+            .map(|package| package.id)
+            .collect::<Vec<_>>();
+        for (index, extension_id) in extension_ids.into_iter().enumerate() {
+            let mut tool_call = provider_tool_call_with_name(
+                tool_definition.name.as_str(),
+                serde_json::json!({"query": extension_id}),
+            );
+            tool_call.turn_id = Some(format!("extension-search-turn-{index}"));
+            tool_call.id = format!("extension-search-call-{index}");
+            let candidate = port
+                .register_provider_tool_call(RegisterProviderToolCallRequest::new(tool_call))
+                .await
+                .expect("extension_search provider tool call stages");
+            assert_eq!(
+                candidate.capability_id.as_str(),
+                EXTENSION_SEARCH_CAPABILITY_ID
+            );
 
-        let outcome = port
-            .invoke_capability(invocation_for_candidate(&candidate))
-            .await
-            .expect("extension_search invocation");
+            let outcome = port
+                .invoke_capability(invocation_for_candidate(&candidate))
+                .await
+                .expect("extension_search invocation");
 
-        assert!(
-            matches!(outcome, Resolution::Done(_)),
-            "extension_search should be authorized to read the system extension catalog, got {outcome:?}"
-        );
+            let Resolution::Done(outcome) = outcome else {
+                panic!(
+                    "extension_search should be authorized to read the system extension catalog"
+                );
+            };
+            let preview = outcome.refs.preview.as_ref().unwrap_or_else(|| {
+                panic!("the model must receive the {extension_id} search result inline")
+            });
+            assert!(
+                preview
+                    .as_str()
+                    .contains(&format!("\"id\":\"{extension_id}\"")),
+                "the model-visible result must contain the {extension_id} catalog entry: {preview}"
+            );
+        }
     }
 
     #[tokio::test]

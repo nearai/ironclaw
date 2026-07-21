@@ -168,6 +168,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     restorer
         .assert_tool_result_contains("\"activated\":true")
         .await?;
+    restorer
+        .assert_model_message_content_contains(r#"\"activated\":true"#)
+        .await?;
 
     Ok(())
 }
