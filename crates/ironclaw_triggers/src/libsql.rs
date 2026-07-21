@@ -1,7 +1,3 @@
-#[cfg(feature = "libsql")]
-use std::{collections::HashMap, sync::Arc};
-
-#[cfg(feature = "libsql")]
 use crate::{
     ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire,
     ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
@@ -10,31 +6,20 @@ use crate::{
     TriggerSchedule, TriggerState, reject_failed_result_after_active_run,
     reject_non_future_next_run_at, reject_run_ref_rewrite, trigger_run_history_status_text,
 };
-#[cfg(feature = "libsql")]
 use async_trait::async_trait;
-#[cfg(feature = "libsql")]
 use chrono::{DateTime, SecondsFormat, Utc};
-#[cfg(feature = "libsql")]
 use ironclaw_common::AutomationName;
-#[cfg(feature = "libsql")]
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
-#[cfg(feature = "libsql")]
 use ironclaw_turns::TurnRunId;
-#[cfg(feature = "libsql")]
 use libsql::params;
-
-#[cfg(feature = "libsql")]
+use std::{collections::HashMap, sync::Arc};
 const TRIGGER_TABLE: &str = "trigger_records";
-#[cfg(feature = "libsql")]
 const TRIGGER_RUN_TABLE: &str = "trigger_run_history";
-
-#[cfg(feature = "libsql")]
 const TRIGGER_COLUMNS: &str = "\
     trigger_id, tenant_id, creator_user_id, agent_id, project_id, \
     name, source, schedule_expression, schedule_timezone, schedule_kind, prompt, \
     state, next_run_at, last_run_at, last_fired_slot, last_status, \
     active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target";
-#[cfg(feature = "libsql")]
 const RENAME_SCOPED_TRIGGER_SQL: &str = "\
     UPDATE trigger_records
        SET name = ?6
@@ -47,77 +32,42 @@ const RENAME_SCOPED_TRIGGER_SQL: &str = "\
        name, source, schedule_expression, schedule_timezone, schedule_kind, prompt,
        state, next_run_at, last_run_at, last_fired_slot, last_status,
        active_fire_slot, active_run_ref, created_at, schedule_at, delivery_target";
-
-#[cfg(feature = "libsql")]
 const TRIGGER_ID_COL: usize = 0;
-#[cfg(feature = "libsql")]
 const TENANT_ID_COL: usize = 1;
-#[cfg(feature = "libsql")]
 const CREATOR_USER_ID_COL: usize = 2;
-#[cfg(feature = "libsql")]
 const AGENT_ID_COL: usize = 3;
-#[cfg(feature = "libsql")]
 const PROJECT_ID_COL: usize = 4;
-#[cfg(feature = "libsql")]
 const NAME_COL: usize = 5;
-#[cfg(feature = "libsql")]
 const SOURCE_COL: usize = 6;
-#[cfg(feature = "libsql")]
 const SCHEDULE_EXPRESSION_COL: usize = 7;
-#[cfg(feature = "libsql")]
 const SCHEDULE_TIMEZONE_COL: usize = 8;
-#[cfg(feature = "libsql")]
 const SCHEDULE_KIND_COL: usize = 9;
-#[cfg(feature = "libsql")]
 const PROMPT_COL: usize = 10;
-#[cfg(feature = "libsql")]
 const STATE_COL: usize = 11;
-#[cfg(feature = "libsql")]
 const NEXT_RUN_AT_COL: usize = 12;
-#[cfg(feature = "libsql")]
 const LAST_RUN_AT_COL: usize = 13;
-#[cfg(feature = "libsql")]
 const LAST_FIRED_SLOT_COL: usize = 14;
-#[cfg(feature = "libsql")]
 const LAST_STATUS_COL: usize = 15;
-#[cfg(feature = "libsql")]
 const ACTIVE_FIRE_SLOT_COL: usize = 16;
-#[cfg(feature = "libsql")]
 const ACTIVE_RUN_REF_COL: usize = 17;
-#[cfg(feature = "libsql")]
 const CREATED_AT_COL: usize = 18;
-#[cfg(feature = "libsql")]
 const SCHEDULE_AT_COL: usize = 19;
-#[cfg(feature = "libsql")]
 const DELIVERY_TARGET_COL: usize = 20;
-
-#[cfg(feature = "libsql")]
 const TRIGGER_RUN_COLUMNS: &str = "\
     tenant_id, trigger_id, fire_slot, run_id, thread_id, status, submitted_at, completed_at";
-#[cfg(feature = "libsql")]
 const RUN_TENANT_ID_COL: usize = 0;
-#[cfg(feature = "libsql")]
 const RUN_TRIGGER_ID_COL: usize = 1;
-#[cfg(feature = "libsql")]
 const RUN_FIRE_SLOT_COL: usize = 2;
-#[cfg(feature = "libsql")]
 const RUN_ID_COL: usize = 3;
-#[cfg(feature = "libsql")]
 const RUN_THREAD_ID_COL: usize = 4;
-#[cfg(feature = "libsql")]
 const RUN_STATUS_COL: usize = 5;
-#[cfg(feature = "libsql")]
 const RUN_SUBMITTED_AT_COL: usize = 6;
-#[cfg(feature = "libsql")]
 const RUN_COMPLETED_AT_COL: usize = 7;
 
 /// Durable libSQL trigger repository.
-#[cfg(feature = "libsql")]
 pub struct LibSqlTriggerRepository {
     db: Arc<libsql::Database>,
 }
-
-#[cfg(feature = "libsql")]
 impl LibSqlTriggerRepository {
     pub fn new(db: Arc<libsql::Database>) -> Self {
         Self { db }
@@ -411,8 +361,6 @@ impl LibSqlTriggerRepository {
         Ok(conn)
     }
 }
-
-#[cfg(feature = "libsql")]
 #[async_trait]
 impl TriggerRepository for LibSqlTriggerRepository {
     async fn upsert_trigger(&self, record: TriggerRecord) -> Result<(), TriggerError> {
@@ -1361,8 +1309,6 @@ impl TriggerRepository for LibSqlTriggerRepository {
         Ok(runs_by_trigger)
     }
 }
-
-#[cfg(feature = "libsql")]
 fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
     let trigger_id = TriggerId::parse(&required_text(row, TRIGGER_ID_COL, "trigger_id")?)?;
     let tenant_id = TenantId::new(required_text(row, TENANT_ID_COL, "tenant_id")?)
@@ -1437,8 +1383,6 @@ fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
     record.validate()?;
     Ok(record)
 }
-
-#[cfg(feature = "libsql")]
 async fn fetch_record(
     conn: &libsql::Connection,
     tenant_id: &TenantId,
@@ -1462,8 +1406,6 @@ async fn fetch_record(
         Err(error) => Err(backend_error("read trigger record row", error)),
     }
 }
-
-#[cfg(feature = "libsql")]
 async fn returned_record(
     rows: &mut libsql::Rows,
     operation: &str,
@@ -1474,32 +1416,24 @@ async fn returned_record(
         Err(error) => Err(backend_error(operation, error)),
     }
 }
-
-#[cfg(feature = "libsql")]
 async fn begin_immediate(conn: &libsql::Connection, operation: &str) -> Result<(), TriggerError> {
     conn.execute("BEGIN IMMEDIATE", ())
         .await
         .map(|_| ())
         .map_err(|error| backend_error(operation, error))
 }
-
-#[cfg(feature = "libsql")]
 async fn commit(conn: &libsql::Connection, operation: &str) -> Result<(), TriggerError> {
     conn.execute("COMMIT", ())
         .await
         .map(|_| ())
         .map_err(|error| backend_error(operation, error))
 }
-
-#[cfg(feature = "libsql")]
 async fn rollback(conn: &libsql::Connection, operation: &str) -> Result<(), TriggerError> {
     conn.execute("ROLLBACK", ())
         .await
         .map(|_| ())
         .map_err(|error| backend_error(operation, error))
 }
-
-#[cfg(feature = "libsql")]
 async fn write_record(
     conn: &libsql::Connection,
     record: &TriggerRecord,
@@ -1561,8 +1495,6 @@ async fn write_record(
     .map_err(|error| backend_error("upsert trigger record", error))?;
     Ok(())
 }
-
-#[cfg(feature = "libsql")]
 async fn resolve_missed_fire_result_update(
     conn: &libsql::Connection,
     tenant_id: &TenantId,
@@ -1588,8 +1520,6 @@ async fn resolve_missed_fire_result_update(
         "update predicate failed while claimed fire remained active without a run ref",
     ))
 }
-
-#[cfg(feature = "libsql")]
 async fn mark_successful_fire_result(
     conn: &libsql::Connection,
     update: SuccessfulFireResultUpdate<'_>,
@@ -1708,8 +1638,6 @@ async fn mark_successful_fire_result(
     )
     .await
 }
-
-#[cfg(feature = "libsql")]
 struct SuccessfulFireResultUpdate<'a> {
     tenant_id: &'a TenantId,
     trigger_id: TriggerId,
@@ -1724,8 +1652,6 @@ struct SuccessfulFireResultUpdate<'a> {
     update_operation: &'static str,
     read_operation: &'static str,
 }
-
-#[cfg(feature = "libsql")]
 fn row_to_run_record(row: &libsql::Row) -> Result<TriggerRunRecord, TriggerError> {
     let tenant_id = TenantId::new(required_text(row, RUN_TENANT_ID_COL, "tenant_id")?)
         .map_err(|error| invalid_record("tenant_id", error.to_string()))?;
@@ -1762,8 +1688,6 @@ fn row_to_run_record(row: &libsql::Row) -> Result<TriggerRunRecord, TriggerError
         completed_at,
     })
 }
-
-#[cfg(feature = "libsql")]
 async fn upsert_run_history(
     conn: &libsql::Connection,
     run: &TriggerRunRecord,
@@ -1796,8 +1720,6 @@ async fn upsert_run_history(
     prune_run_history(conn, &run.tenant_id, run.trigger_id).await?;
     Ok(())
 }
-
-#[cfg(feature = "libsql")]
 fn trigger_ids_json_array(trigger_ids: &[TriggerId]) -> String {
     let mut value = String::from("[");
     for (index, trigger_id) in trigger_ids.iter().enumerate() {
@@ -1811,8 +1733,6 @@ fn trigger_ids_json_array(trigger_ids: &[TriggerId]) -> String {
     value.push(']');
     value
 }
-
-#[cfg(feature = "libsql")]
 async fn complete_run_history(
     conn: &libsql::Connection,
     tenant_id: &TenantId,
@@ -1848,8 +1768,6 @@ async fn complete_run_history(
     prune_run_history(conn, tenant_id, trigger_id).await?;
     Ok(())
 }
-
-#[cfg(feature = "libsql")]
 async fn prune_run_history(
     conn: &libsql::Connection,
     tenant_id: &TenantId,
@@ -1878,14 +1796,10 @@ async fn prune_run_history(
     .map_err(|error| backend_error("prune trigger run history", error))?;
     Ok(())
 }
-
-#[cfg(feature = "libsql")]
 fn required_text(row: &libsql::Row, index: usize, field: &str) -> Result<String, TriggerError> {
     row.get(index as i32)
         .map_err(|error| invalid_record(field, error.to_string()))
 }
-
-#[cfg(feature = "libsql")]
 fn optional_text(
     row: &libsql::Row,
     index: usize,
@@ -1894,54 +1808,38 @@ fn optional_text(
     row.get(index as i32)
         .map_err(|error| backend_error(&format!("read optional trigger field {field}"), error))
 }
-
-#[cfg(feature = "libsql")]
 fn parse_timestamp(value: &str, field: &str) -> Result<Timestamp, TriggerError> {
     DateTime::parse_from_rfc3339(value)
         .map(|value| value.with_timezone(&Utc))
         .map_err(|error| invalid_record(field, error.to_string()))
 }
-
-#[cfg(feature = "libsql")]
 fn parse_turn_run_id(value: &str) -> Result<TurnRunId, TriggerError> {
     parse_turn_run_id_with_field(value, "active_run_ref")
 }
-
-#[cfg(feature = "libsql")]
 fn parse_turn_run_id_with_field(value: &str, field: &str) -> Result<TurnRunId, TriggerError> {
     TurnRunId::parse(value).map_err(|error| invalid_record(field, error.to_string()))
 }
-
-#[cfg(feature = "libsql")]
 fn fmt_ts(value: &Timestamp) -> String {
     value.to_rfc3339_opts(SecondsFormat::Nanos, true)
 }
-
-#[cfg(feature = "libsql")]
 fn opt_ts(value: Option<&Timestamp>) -> libsql::Value {
     match value {
         Some(value) => libsql::Value::Text(fmt_ts(value)),
         None => libsql::Value::Null,
     }
 }
-
-#[cfg(feature = "libsql")]
 fn opt_turn_run_id(value: Option<&TurnRunId>) -> libsql::Value {
     match value {
         Some(value) => libsql::Value::Text(value.to_string()),
         None => libsql::Value::Null,
     }
 }
-
-#[cfg(feature = "libsql")]
 fn invalid_record(field: &str, reason: impl Into<String>) -> TriggerError {
     TriggerError::InvalidRecord {
         kind: crate::TriggerRecordValidationKind::Other,
         reason: format!("{field}: {}", reason.into()),
     }
 }
-
-#[cfg(feature = "libsql")]
 fn backend_error(operation: &str, error: impl std::fmt::Display) -> TriggerError {
     TriggerError::Backend {
         reason: format!("{operation}: {error}"),

@@ -1,18 +1,18 @@
 # Reborn Onboarding
 
-This document describes the standalone `ironclaw-reborn onboard` surface.
+This document describes the standalone `ironclaw onboard` surface.
 It is Reborn-owned and must not call into v1 `src/setup`, v1 database
 configuration, v1 channels, or v1 import state.
 
 ## Current Slice
 
-`ironclaw-reborn onboard` is a first-run bootstrap command for the standalone
+`ironclaw onboard` is a first-run bootstrap command for the standalone
 Reborn binary. It currently:
 
 1. resolves `IRONCLAW_REBORN_HOME` or the default `~/.ironclaw/reborn`;
 2. creates the Reborn home directory;
 3. creates missing `config.toml` and `providers.json` using the same atomic
-   writer as `ironclaw-reborn config init`;
+   writer as `ironclaw config init`;
 4. preserves existing operator-edited config files unless `--force` is passed;
 5. writes `.onboard-completed.json` in Reborn home; and
 6. prints explicit remaining setup work.
@@ -56,7 +56,7 @@ Legacy IronClaw startup also uses the same env pair to bootstrap the persisted
 ## Non-Goals In This Slice
 
 - No v1 `src/setup/wizard.rs` reuse.
-- No automatic first-run invocation before `ironclaw-reborn run`.
+- No automatic first-run invocation before `ironclaw run`.
 - No interactive provider credential prompts.
 - No keychain or encrypted secret setup for LLM keys.
 - No model picker.

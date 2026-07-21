@@ -32,6 +32,8 @@ pub enum HostApiError {
     InvalidRuntimeCredentialTarget { value: String, reason: String },
     #[error("invalid safe summary: {reason}")]
     InvalidSafeSummary { reason: String },
+    #[error("invalid host remediation: {reason}")]
+    InvalidHostRemediation { reason: String },
     #[error("host API invariant violation: {reason}")]
     InvariantViolation { reason: String },
 }
@@ -94,6 +96,16 @@ impl HostApiError {
     /// payload/credential material the redaction rule caught.
     pub(crate) fn invalid_safe_summary(reason: impl Into<String>) -> Self {
         Self::InvalidSafeSummary {
+            reason: reason.into(),
+        }
+    }
+
+    /// Validation failure for a [`crate::HostRemediation`]. Carries only the
+    /// reason for the same rationale as [`Self::invalid_safe_summary`]: the
+    /// rejected value may hold the very credential material the guard caught.
+    pub(crate) fn invalid_host_remediation(reason: impl Into<String>) -> Self {
+        // pub-api-exempt: crate-internal, called by host_remediation::validate_host_remediation
+        Self::InvalidHostRemediation {
             reason: reason.into(),
         }
     }

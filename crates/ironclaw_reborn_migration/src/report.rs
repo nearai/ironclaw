@@ -9,7 +9,6 @@
 
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "full-migration")]
 use ironclaw_host_api::UserId;
 
 /// The domain a converted item or a loss belongs to. Keeps report entries
@@ -120,7 +119,6 @@ impl MigrationReport {
     /// (threads owner, secrets, memory docs, identities, routines, missions) so
     /// the "validate → skip + record" shape has a single definition and cannot
     /// drift between copies.
-    #[cfg(feature = "full-migration")]
     pub(crate) fn valid_user_id(
         &mut self,
         domain: Domain,

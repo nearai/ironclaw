@@ -15,7 +15,9 @@ publish = false
 layer = "kernel"
 
 [features]
-default = []
+# In-memory turn-state store double (`test_support::in_memory_turn_state_store`)
+# for cross-crate tests. Enabled via dev-dependencies; never in production.
+test-support = []
 
 [dependencies]
 async-trait = "0.1"
@@ -37,7 +39,28 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
+# Self-reference so the crate's own integration tests see `test_support`.
+ironclaw_turns = { path = ".", features = ["test-support"] }
+# FaultInjecting decorator: drive store fault paths through the real
+# `FilesystemTurnStateRowStore` instead of a hand-rolled whole-trait fake.
+ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0", features = [
+    "test-support",
+] }
+# Test-only: the durable-read perf harness (`events_query_stress`) builds a real
+# libSQL-backed store. Matches `ironclaw_filesystem`'s libsql feature set.
+libsql = { version = "0.9", default-features = false, features = [
+    "core",
+    "replication",
+    "remote",
+    "tls",
+] }
 rand = "0.10"
 static_assertions = "1"
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt", "test-util", "time"] }
+tokio = { version = "1", features = [
+    "macros",
+    "rt",
+    "rt-multi-thread",
+    "test-util",
+    "time",
+] }

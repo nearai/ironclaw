@@ -14,6 +14,13 @@ publish = false
 [package.metadata.ironclaw]
 layer = "contracts"
 
+[features]
+# Dev-only seam (rule: cargo-features.md bar #4 — the sanctioned `test-support`
+# name). Compiles the shared `TestDispatcher` `CapabilityDispatcher` double so
+# downstream crates stop hand-rolling ~25 one-method dispatcher fakes. Never
+# enabled by a shipped artifact.
+test-support = []
+
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
@@ -28,3 +35,5 @@ zeroize = "1"
 [dev-dependencies]
 rust_decimal_macros = "1"
 static_assertions = "1"
+# `#[tokio::test]` for the async `dispatch_test_support::TestDispatcher` tests.
+tokio = { version = "1", features = ["macros", "rt"] }

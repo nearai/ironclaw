@@ -871,7 +871,6 @@ fn human_summary_places_db_probe_errors_in_matching_columns() {
     );
 }
 
-#[cfg(feature = "postgres")]
 #[test]
 fn postgres_probe_error_redacts_resolved_url() {
     let url = "postgresql://postgres:secret@localhost:5432/app";
@@ -1112,8 +1111,7 @@ fn run_summary_with_bottlenecks() -> RunSummary {
         users: 1,
         active_thread_count: 1,
         threads_per_owner: 1,
-        turn_state_backend: TurnStateBackend::Filesystem,
-        turn_state_durability: TurnStateDurability::WriteThrough,
+        turn_state_backend: TurnStateBackend::FilesystemRow,
         turn_state_max_terminal_records: None,
         turn_state_max_events: None,
         turn_state_max_idempotency_records: None,
@@ -1200,8 +1198,7 @@ fn test_args() -> Args {
         users: 4,
         active_thread_count: 0,
         threads_per_owner: 1,
-        turn_state_backend: TurnStateBackend::Filesystem,
-        turn_state_durability: TurnStateDurability::WriteThrough,
+        turn_state_backend: TurnStateBackend::FilesystemRow,
         turn_state_max_terminal_records: None,
         turn_state_max_events: None,
         turn_state_max_idempotency_records: None,

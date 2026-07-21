@@ -8,7 +8,8 @@ crate's `AGENTS.md`, then its `CLAUDE.md`, `CONTRACT.md`, or `README.md` when
 present. Cross-crate behavior is specified under `docs/reborn/contracts/`.
 
 All product work belongs in the Reborn workspace under `crates/`. The shipping
-binary is `ironclaw-reborn` from `crates/ironclaw_reborn_cli`. Start with:
+binary is `ironclaw` from the `ironclaw` package in
+`crates/ironclaw_reborn_cli`. Start with:
 
 - `.claude/skills/ironclaw-reborn-orientation/SKILL.md` for ownership and flow.
 - `.claude/skills/reborn-feature/SKILL.md` for cross-layer product work.
@@ -187,6 +188,12 @@ warnings surfaced by that command.
 
 Read the testing skill/rule for backend, recorded-model, browser, and live-canary
 tiers. Do not assume every tier ran merely because required PR checks are green.
+
+Agents opening or updating a pull request must preserve and complete the
+`Test Strategy` section from `.github/pull_request_template.md`. Every test tier
+must include evidence or `Not applicable: <reason>`; do not present the pull
+request as ready while fields are blank. Select tiers using
+`docs/internal/testing-playbook.md` rather than running every tier by default.
 
 ## Change discipline
 

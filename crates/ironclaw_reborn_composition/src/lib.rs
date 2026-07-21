@@ -38,7 +38,6 @@ mod lifecycle_auth_continuation;
 mod llm_admin;
 mod local_dev_authorization;
 mod local_dev_mounts;
-mod local_runtime_profile;
 mod observability;
 mod outbound;
 mod product_auth;
@@ -60,6 +59,7 @@ mod runtime_profile_approval_policy;
 mod support;
 #[cfg(feature = "test-support")]
 pub mod test_support;
+mod trigger_fire_access;
 mod turn_run_snapshot;
 mod web_access;
 mod webui;
@@ -140,6 +140,12 @@ pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
 // verified-bearer evidence for protected OpenAI-compatible mounts. Ingress must
 // not depend on `ironclaw_product_adapters` directly (architecture boundary), so
 // it reaches this helper through composition's facade.
+pub use deployment::{
+    RebornRuntimeProfileError, RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
+    hosted_single_tenant_volume_runtime_policy, local_dev_runtime_policy,
+    local_dev_yolo_runtime_policy, local_runtime_build_input,
+    local_runtime_build_input_with_options,
+};
 pub use ironclaw_product_adapters::mark_bearer_token_verified_for_tenant;
 pub use llm_admin::provider_admin::{
     DetectedEnvLlm, EXAMPLE_OVERLAY_PROVIDER_ID, ProviderMenuEntry, ProviderProbeOutcome,
@@ -149,12 +155,6 @@ pub use llm_admin::provider_admin::{
 };
 pub use llm_admin::provider_admin_product_command::RebornProviderAdminProductCommandService;
 pub use llm_admin::provider_repo::{ProviderRepo, ProviderRepoError};
-pub use local_runtime_profile::{
-    RebornRuntimeProfileError, RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
-    hosted_single_tenant_volume_runtime_policy, local_dev_runtime_policy,
-    local_dev_yolo_runtime_policy, local_runtime_build_input,
-    local_runtime_build_input_with_options,
-};
 pub use observability::budget::build_default_budget_accountant;
 pub use observability::budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
 pub use observability::hooks::{
@@ -215,7 +215,8 @@ pub use runtime_input::{
     CredentialRefreshSettings, DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL,
     DEFAULT_TURN_RUNNER_POLL_INTERVAL, PollSettings, RebornRuntimeIdentity, RebornRuntimeInput,
     TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
-    TriggerFireAccessError, TriggerPollerSettings, TurnRunnerSettings,
+    TriggerFireAccessError, TriggerFireAccessGrant, TriggerFireAccessPolicy, TriggerPollerSettings,
+    TurnRunnerSettings,
 };
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
 pub use slack::slack_actor_identity::{
@@ -287,71 +288,6 @@ pub mod host_api {
     };
 }
 
-#[cfg(feature = "postgres")]
-pub use ironclaw_runner::local_trigger_access::RebornFilesystemLocalTriggerAccessStore;
-/// Reborn-owned local trigger-fire access store, re-exported so host
-/// binaries reach it through this composition facade instead of taking a
-/// direct `ironclaw_runner` dependency (the
-/// `reborn_cli_binary_crate_stays_separate_from_v1_root` architecture
-/// boundary forbids that). The store is a reborn-owned repository. Local-dev
-/// callers use [`open_local_trigger_access_store`]; hosted-single-tenant
-/// callers use the filesystem-backed store through the host filesystem
-/// abstraction.
-pub use ironclaw_runner::local_trigger_access::{
-    LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSeed,
-    LocalTriggerAccessSource, LocalTriggerAccessStore, RebornLibSqlLocalTriggerAccessStore,
-    RebornLocalTriggerAccessStoreError,
-};
-
-struct LocalTriggerAccessFireChecker {
-    store: std::sync::Arc<dyn LocalTriggerAccessStore>,
-}
-
-impl LocalTriggerAccessFireChecker {
-    fn new(store: std::sync::Arc<dyn LocalTriggerAccessStore>) -> Self {
-        Self { store }
-    }
-}
-
-/// Wrap a backend-neutral local trigger access store as the runtime fire-time
-/// authorizer.
-pub fn local_trigger_access_fire_checker(
-    store: std::sync::Arc<dyn LocalTriggerAccessStore>,
-) -> std::sync::Arc<dyn runtime_input::TriggerFireAccessChecker> {
-    std::sync::Arc::new(LocalTriggerAccessFireChecker::new(store))
-}
-
-#[async_trait::async_trait]
-impl runtime_input::TriggerFireAccessChecker for LocalTriggerAccessFireChecker {
-    async fn check_trigger_fire_access(
-        &self,
-        request: runtime_input::TriggerFireAccessCheck,
-    ) -> Result<runtime_input::TriggerFireAccessDecision, runtime_input::TriggerFireAccessError>
-    {
-        self.store
-            .has_active_local_access(
-                &request.tenant_id,
-                &request.creator_user_id,
-                request.agent_id.as_ref(),
-                request.project_id.as_ref(),
-            )
-            .await
-            .map_err(|error| runtime_input::TriggerFireAccessError::Unavailable {
-                reason: error.to_string(),
-            })
-            .map(|allowed| {
-                if allowed {
-                    runtime_input::TriggerFireAccessDecision::Allowed
-                } else {
-                    runtime_input::TriggerFireAccessDecision::Denied {
-                        reason: "trigger creator does not have active local access for this scope"
-                            .to_string(),
-                    }
-                }
-            })
-    }
-}
-
 /// Canonical Reborn identity resolver vocabulary (issue #4381): the one
 /// boundary that maps every external identity — WebUI OAuth logins and
 /// external channel/product actors — to a stable `UserId` before runtime
@@ -403,95 +339,6 @@ pub fn open_reborn_identity_resolver(
             None,
         ),
     )
-}
-
-/// Open the reborn-owned local trigger access store on the substrate DB at
-/// `path`, creating the parent directory and running its idempotent
-/// migrations.
-///
-/// Opens a libSQL handle directly, so it needs this crate's `libsql` feature.
-#[cfg(feature = "libsql")]
-pub async fn open_local_trigger_access_store(
-    path: &std::path::Path,
-) -> Result<std::sync::Arc<RebornLibSqlLocalTriggerAccessStore>, RebornLocalTriggerAccessStoreError>
-{
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|err| RebornLocalTriggerAccessStoreError::Backend(err.to_string()))?;
-    }
-    let db = std::sync::Arc::new(
-        libsql::Builder::new_local(path)
-            .build()
-            .await
-            .map_err(|err| RebornLocalTriggerAccessStoreError::Backend(err.to_string()))?,
-    );
-    Ok(std::sync::Arc::new(
-        RebornLibSqlLocalTriggerAccessStore::open(db).await?,
-    ))
-}
-
-#[cfg(test)]
-mod webui_user_access_checker_tests {
-    use super::*;
-    use crate::runtime_input::{TriggerFireAccessCheck, TriggerFireAccessDecision};
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
-
-    #[tokio::test]
-    async fn user_store_trigger_fire_checker_uses_exact_seeded_scope() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let store = open_local_trigger_access_store(&root.path().join("reborn-local-dev.db"))
-            .await
-            .expect("open local trigger access store");
-        let tenant_id = TenantId::new("checker-tenant").expect("tenant id");
-        let user_id = UserId::new("checker-user").expect("user id");
-        let other_user_id = UserId::new("checker-other-user").expect("user id");
-        let agent_id = AgentId::new("checker-agent").expect("agent id");
-        let project_id = ProjectId::new("checker-project").expect("project id");
-
-        store
-            .seed_local_access(LocalTriggerAccessSeed {
-                tenant_id: &tenant_id,
-                user_id: &user_id,
-                agent_id: Some(&agent_id),
-                project_id: Some(&project_id),
-                role: LocalTriggerAccessRole::Owner,
-                source: LocalTriggerAccessSource::LocalDevEnvBootstrap,
-            })
-            .await
-            .expect("seed local access");
-
-        let checker = local_trigger_access_fire_checker(store);
-
-        let allowed = checker
-            .check_trigger_fire_access(TriggerFireAccessCheck {
-                tenant_id: tenant_id.clone(),
-                creator_user_id: user_id,
-                agent_id: Some(agent_id.clone()),
-                project_id: Some(project_id.clone()),
-                trigger_id: TriggerId::new(),
-                fire_slot: chrono::Utc::now(),
-            })
-            .await
-            .expect("check access");
-        assert_eq!(allowed, TriggerFireAccessDecision::Allowed);
-
-        let denied = checker
-            .check_trigger_fire_access(TriggerFireAccessCheck {
-                tenant_id,
-                creator_user_id: other_user_id,
-                agent_id: Some(agent_id),
-                project_id: Some(project_id),
-                trigger_id: TriggerId::new(),
-                fire_slot: chrono::Utc::now(),
-            })
-            .await
-            .expect("check access");
-        assert!(matches!(
-            denied,
-            TriggerFireAccessDecision::Denied { reason }
-                if reason.contains("does not have active local access")
-        ));
-    }
 }
 
 /// Reborn model purpose slot names exposed for diagnostic callers.

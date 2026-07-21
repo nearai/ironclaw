@@ -5,10 +5,17 @@ use super::{
     LoopExecutionState, LoopExit, LoopFailureKind, LoopGateRef, LoopResultRef, LoopSafeSummary,
     MockHost, active_task_preserving_compaction_index, calls_response, empty_gate_state,
     family_with_compaction_strategy, family_with_gate_outcome, family_with_iteration_limit,
-    family_with_reply_admission, final_staged_state, reply_response, reply_response_with_text,
-    resolution,
+    family_with_reply_admission, final_staged_state, provider_calls_response, reply_response,
+    reply_response_with_text, resolution,
 };
-use ironclaw_turns::run_profile::LoopRunInfoPort;
+use ironclaw_turns::run_profile::{
+    AppendCapabilityResultRef, CapabilityFailureDetail, LoopRunInfoPort, ToolObservationDetail,
+    ToolObservationStatus,
+};
+
+const PERMANENT_CAPABILITY_DETAIL: &str = "permanent dispatch failure code 47";
+const INVALID_OUTPUT_CAPABILITY_SUMMARY: &str = "MCP dispatch failed at /tmp/{socket}";
+const INVALID_OUTPUT_CAPABILITY_DETAIL: &str = "MCP dispatch failed with transport error";
 
 #[derive(Clone, Copy)]
 struct MatrixRow {
@@ -30,6 +37,7 @@ enum FailureSetup {
     NoProgressDetected,
     PolicyDenied,
     CapabilityPolicyDeniedRecoverable,
+    CapabilityAuthorizationRecoverable,
     CompactionUnavailable,
     TranscriptWriteFailed,
     CheckpointRejected,
@@ -61,6 +69,7 @@ struct ObservedTerminal {
     final_assistant_refs: Option<Vec<ironclaw_turns::LoopMessageRef>>,
     finalized_assistant_messages: Vec<String>,
     model_request_count: usize,
+    appended_result_refs: Vec<AppendCapabilityResultRef>,
 }
 
 #[derive(Debug)]
@@ -170,6 +179,19 @@ const ROWS: &[MatrixRow] = &[
         expects_explanation: false,
     },
     MatrixRow {
+        label: "PolicyDenied <- capability Failed(Authorization)",
+        setup: FailureSetup::CapabilityAuthorizationRecoverable,
+        // Regression: the auto-built card-summary prefix ("capability failed
+        // with authorization: ") used to trip the summary validator's own
+        // "authorization:" marker ban and terminally bork the run before
+        // handle_capability_error could fire. A 401/expired-scope tool failure
+        // is model-recoverable and must stay that way.
+        expected_kind: ExpectedTerminal::CompletedDivergence {
+            planned_kind: LoopFailureKind::PolicyDenied,
+        },
+        expects_explanation: false,
+    },
+    MatrixRow {
         label: "CompactionUnavailable <- compaction port returns Err",
         setup: FailureSetup::CompactionUnavailable,
         // stack #5838 makes best-effort compaction failures recoverable; matrix
@@ -244,9 +266,10 @@ matrix_row_test!(matrix_driver_bug_approval_skip_diverges, 6);
 matrix_row_test!(matrix_no_progress_detected, 7);
 matrix_row_test!(matrix_policy_denied_outcome_diverges, 8);
 matrix_row_test!(matrix_capability_policy_denied_recovers, 9);
-matrix_row_test!(matrix_compaction_unavailable, 10);
-matrix_row_test!(matrix_transcript_write_failed, 11);
-matrix_row_test!(matrix_checkpoint_rejected, 12);
+matrix_row_test!(matrix_capability_authorization_recovers, 10);
+matrix_row_test!(matrix_compaction_unavailable, 11);
+matrix_row_test!(matrix_transcript_write_failed, 12);
+matrix_row_test!(matrix_checkpoint_rejected, 13);
 
 async fn run_matrix_row(row: &MatrixRow) {
     let observed = run_setup(row.setup).await;
@@ -282,7 +305,9 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
             .with_batch_outcomes(vec![batch_outcome(resolution::failed(
                 CapabilityFailureKind::Permanent,
                 "permanent protocol failure".to_string(),
-                None,
+                Some(CapabilityFailureDetail::Diagnostic {
+                    text: PERMANENT_CAPABILITY_DETAIL.to_string(),
+                }),
             ))]);
             run_local(crate::families::default(), host, None).await
         }
@@ -299,12 +324,15 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
         }
         FailureSetup::CapabilityInvalidOutputRecoverable => {
             let host = MockHost::new(vec![
-                calls_response(),
+                provider_calls_response(),
                 reply_response_with_text("completed after invalid output"),
             ])
-            .with_batch_outcomes(vec![batch_outcome(failed_capability(
+            .with_batch_outcomes(vec![batch_outcome(resolution::failed(
                 CapabilityFailureKind::InvalidOutput,
-                "invalid tool output",
+                INVALID_OUTPUT_CAPABILITY_SUMMARY.to_string(),
+                Some(CapabilityFailureDetail::Diagnostic {
+                    text: INVALID_OUTPUT_CAPABILITY_DETAIL.to_string(),
+                }),
             ))]);
             run_local(crate::families::default(), host, None).await
         }
@@ -382,6 +410,17 @@ async fn run_setup(setup: FailureSetup) -> ObservedTerminal {
             ))]);
             run_local(crate::families::default(), host, None).await
         }
+        FailureSetup::CapabilityAuthorizationRecoverable => {
+            let host = MockHost::new(vec![
+                calls_response(),
+                reply_response_with_text("completed after authorization failure"),
+            ])
+            .with_batch_outcomes(vec![batch_outcome(failed_capability(
+                CapabilityFailureKind::Authorization,
+                "the provider token has expired",
+            ))]);
+            run_local(crate::families::default(), host, None).await
+        }
         FailureSetup::CompactionUnavailable => {
             let host = MockHost::new(vec![reply_response_with_text("compaction explanation")])
                 .with_prompt_compaction_index(active_task_preserving_compaction_index())
@@ -436,6 +475,7 @@ async fn run_local(
         final_assistant_refs,
         finalized_assistant_messages: host.finalized_assistant_messages(),
         model_request_count: host.model_requests().len(),
+        appended_result_refs: host.appended_result_refs(),
     }
 }
 
@@ -466,6 +506,17 @@ fn assert_expected_terminal(row: &MatrixRow, observed: &ObservedTerminal) {
                 row.label
             );
             assert_explanation_refs(row, &failed.explanation_message_refs);
+            if matches!(row.setup, FailureSetup::CapabilityProtocolError) {
+                assert_eq!(
+                    failed
+                        .safe_summary
+                        .as_ref()
+                        .and_then(|failure| failure.detail()),
+                    Some(PERMANENT_CAPABILITY_DETAIL),
+                    "{}: terminal capability cause should survive on detail",
+                    row.label
+                );
+            }
             let final_refs = observed
                 .final_assistant_refs
                 .as_ref()
@@ -529,6 +580,30 @@ fn assert_expected_terminal(row: &MatrixRow, observed: &ObservedTerminal) {
                 "{}: completed divergence row should still checkpoint final state",
                 row.label
             );
+            if matches!(row.setup, FailureSetup::CapabilityInvalidOutputRecoverable) {
+                // Phase 1: the capability failure's safe_summary carries `/`
+                // and `{` and fails strict validation. The run must NOT bork —
+                // it recovers (two model requests) and the real cause survives
+                // on the model-visible observation detail.
+                assert_eq!(
+                    observed.model_request_count, 2,
+                    "{}: malformed summary must remain recoverable",
+                    row.label
+                );
+                let observation = observed
+                    .appended_result_refs
+                    .iter()
+                    .find_map(|result| result.model_observation.as_ref())
+                    .expect("provider result should carry a model-visible observation");
+                assert_eq!(observation.status, ToolObservationStatus::Error);
+                assert!(matches!(
+                    &observation.detail,
+                    ToolObservationDetail::GenericFailure {
+                        failure_kind: CapabilityFailureKind::InvalidOutput,
+                        detail: Some(detail),
+                    } if detail == INVALID_OUTPUT_CAPABILITY_DETAIL
+                ));
+            }
         }
         _ => panic!(
             "{}: expected {:?}, observed {:?}",

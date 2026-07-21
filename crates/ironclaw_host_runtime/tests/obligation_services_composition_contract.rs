@@ -190,6 +190,12 @@ impl NetworkHttpEgress for RecordingNetwork {
     }
 }
 
+// KEPT (not `TestDispatcher`): this double does real work inside `dispatch_json`
+// that a `TestDispatcher` responder cannot express — it awaits `egress.execute`
+// with the staged credential injection, releases the resource reservation via the
+// governor, and records whether the staged handoffs were present. A `responding`
+// closure is synchronous and cannot `.await`; `ok`/`scripted` only return canned
+// values.
 struct ObligationAwareDispatcher {
     egress: Arc<dyn RuntimeHttpEgress>,
     resource_governor: Arc<InMemoryResourceGovernor>,
@@ -254,7 +260,7 @@ impl CapabilityDispatcher for ObligationAwareDispatcher {
             .await
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::NetworkDenied,
-                safe_summary: None,
+                model_visible_cause: None,
             })?;
         assert_eq!(egress_response.status, 200);
 

@@ -1,31 +1,39 @@
 //! v1 / engine-v2 read side.
 //!
-//! Opens the legacy database through the root `ironclaw` crate and exposes it
-//! as an `Arc<dyn Database>` plus the backend-specific handles that satellite
-//! v1 stores (secrets, wasm tools, identities) need. Engine-v2 mission/project
-//! state is not a separate connection — it lives as JSON blobs inside the
-//! `memory_documents` table and is read through the same `Database` handle
-//! (see [`crate::convert::automations`] and [`crate::v2_model`]).
-
-use std::sync::Arc;
-
-use ironclaw::config::{DatabaseBackend, DatabaseConfig, SslMode};
-use ironclaw::db::{Database, DatabaseHandles, connect_with_handles};
-use secrecy::SecretString;
+//! Opens the legacy database through the frozen [`crate::legacy_snapshot`]
+//! read path (independent of `ironclaw_legacy`, see that module's docs) and
+//! exposes it as a [`legacy_snapshot::LegacyDb`] plus the backend-specific
+//! handles that satellite v1 stores (secrets, wasm tools, identities) need.
+//! Engine-v2 mission/project state is not a separate connection — it lives as
+//! JSON blobs inside the `memory_documents` table and is read through the
+//! same handle (see [`crate::convert::automations`] and [`crate::v2_model`]).
 
 use crate::error::MigrationError;
+use crate::legacy_snapshot::{self, LegacyDb, LegacyHandles};
 use crate::options::SourceDb;
 
-/// A live, migrations-applied handle to the v1 source database.
+/// True when a PostgreSQL error is the "table/relation does not exist" class,
+/// the one case the read paths tolerate as "nothing here" (see
+/// [`is_missing_table_error`] for the string-based libSQL counterpart). Shared
+/// across every read site in the crate (source discovery, the frozen legacy
+/// queries, the wasm stores, and the identity converter).
+#[cfg(feature = "postgres")]
+pub(crate) fn is_missing_postgres_table_error(error: &tokio_postgres::Error) -> bool {
+    error
+        .as_db_error()
+        .is_some_and(|db| db.code() == &tokio_postgres::error::SqlState::UNDEFINED_TABLE)
+}
+
+/// A live handle to the v1 source database.
 ///
 /// Crate-internal: the only public entry point is [`crate::run_migration`], and
 /// this handle is consumed exclusively by the in-crate converters (mirrors the
 /// symmetric `RebornTarget` visibility).
 pub(crate) struct V1Source {
-    pub(crate) db: Arc<dyn Database>,
+    pub(crate) db: LegacyDb,
     /// Backend-specific handles for satellite v1 stores (secrets) and raw
     /// distinct-user / channel-identity discovery.
-    pub(crate) handles: DatabaseHandles,
+    pub(crate) handles: LegacyHandles,
 }
 
 /// Tables a v1 user_id can appear in. Queried independently so a DB missing one
@@ -35,8 +43,7 @@ const USER_ID_TABLES: [&str; 4] = ["conversations", "routines", "memory_document
 
 impl V1Source {
     pub(crate) async fn open(source: &SourceDb) -> Result<Self, MigrationError> {
-        let config = source_to_config(source);
-        let (db, handles) = connect_with_handles(&config)
+        let (db, handles) = legacy_snapshot::connect(source)
             .await
             .map_err(|e| MigrationError::OpenSource(e.to_string()))?;
         Ok(Self { db, handles })
@@ -99,7 +106,7 @@ impl V1Source {
             let client = pool.get().await.map_err(|e| read_err(&e))?;
             let stmt_rows = match client.query(sql.as_str(), &[]).await {
                 Ok(rows) => rows,
-                Err(e) if is_missing_table_error(&e.to_string()) => return Ok(Vec::new()),
+                Err(e) if is_missing_postgres_table_error(&e) => return Ok(Vec::new()),
                 Err(e) => return Err(read_err(&e)),
             };
             return stmt_rows
@@ -123,28 +130,4 @@ pub(crate) fn is_missing_table_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("no such table")
         || (lower.contains("relation") && lower.contains("does not exist"))
-}
-
-fn source_to_config(source: &SourceDb) -> DatabaseConfig {
-    match source {
-        SourceDb::LibSql { path } => DatabaseConfig {
-            backend: DatabaseBackend::LibSql,
-            // libSQL backend ignores `url`; the resolver uses this sentinel too.
-            url: SecretString::from("unused://libsql"),
-            pool_size: 4,
-            ssl_mode: SslMode::default(),
-            libsql_path: Some(path.clone()),
-            libsql_url: None,
-            libsql_auth_token: None,
-        },
-        SourceDb::Postgres { url } => DatabaseConfig {
-            backend: DatabaseBackend::Postgres,
-            url: url.clone(),
-            pool_size: 4,
-            ssl_mode: SslMode::default(),
-            libsql_path: None,
-            libsql_url: None,
-            libsql_auth_token: None,
-        },
-    }
 }

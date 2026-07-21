@@ -7,7 +7,7 @@
 
 use std::{future::Future, pin::Pin, sync::Arc};
 
-use ironclaw_auth::{AuthFlowId, Timestamp};
+use ironclaw_auth::AuthFlowId;
 use ironclaw_host_api::{TenantId, UserId};
 use ironclaw_product_adapters::AdapterInstallationId;
 use serde::{Deserialize, Serialize};
@@ -109,10 +109,19 @@ impl SlackUserIdentityCleanupBinding {
     }
 }
 
-/// Durable generation for one Slack connection attempt.
+/// Generation stamp for one Slack connection: the OAuth flow id of the
+/// callback that bound it, stamped onto the identity-binding, DM-target, and
+/// conversation-pairing rows that connection produced.
 ///
-/// Reusing the OAuth flow id keeps the lifecycle tied to the already-durable
-/// authorization attempt without introducing a second token namespace.
+/// This is a FENCE, not a liveness record. Attempt liveness belongs to the
+/// auth-flow record; the stamp exists so the disconnect and
+/// failed-connection sweeps can scope their multi-row deletions to one
+/// generation (a reconnect landing mid-sweep gets a fresh stamp the sweep
+/// will not touch) and so ingress can check a row against the owner's
+/// currently active generation. Reusing the flow id keeps the stamp tied to
+/// the already-durable authorization attempt without a second token
+/// namespace. ("Epoch" survives in the name for on-disk serde compatibility
+/// with rows written before the connect-attempt slot was deleted.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct SlackConnectionEpoch(AuthFlowId);
@@ -120,10 +129,6 @@ pub(crate) struct SlackConnectionEpoch(AuthFlowId);
 impl SlackConnectionEpoch {
     pub(crate) fn new(flow_id: AuthFlowId) -> Self {
         Self(flow_id)
-    }
-
-    pub(crate) fn flow_id(self) -> AuthFlowId {
-        self.0
     }
 }
 
@@ -133,6 +138,15 @@ impl std::fmt::Display for SlackConnectionEpoch {
     }
 }
 
+/// Lifecycle state of an owner's connection-generation record.
+///
+/// `Active` is written by the callback's identity bind and is what ingress
+/// authorization checks; `Disconnecting`/`Disconnected` journal the fenced
+/// cleanup sweeps. `Connecting` is legacy read-compat only: it was the
+/// pre-claim connect-attempt slot written at OAuth start before attempt
+/// liveness moved to the auth-flow record, and is now treated everywhere as
+/// a stale, never-activated generation (bindable, sweepable, never
+/// authorized).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum SlackConnectionState {
@@ -151,8 +165,10 @@ pub(crate) struct SlackConnectionOwner {
 
 /// Durable disconnect fence plus the connection generation whose derived
 /// state should be cleaned. A legacy owner can need a fresh fence while its
-/// identity and DM records have no epoch, so these values are deliberately
-/// separate.
+/// identity and DM records carry no generation stamp, so these values are
+/// deliberately separate. Together with the `begin_disconnect` /
+/// `complete_disconnect` journal it makes a crashed sweep resumable without
+/// ever deleting a fresh reconnect's differently-stamped rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SlackDisconnectFence {
     fence_epoch: SlackConnectionEpoch,
@@ -224,37 +240,23 @@ impl SlackConnectionOwner {
 pub(crate) enum SlackUserBindingLifecycleError {
     #[error("slack user binding lifecycle backend unavailable: {0}")]
     Backend(String),
-    #[error("another slack connection attempt is already in progress")]
-    ConnectionInProgress,
     #[error("slack disconnect cleanup is still in progress")]
     DisconnectInProgress,
     #[error("slack connection attempt is no longer current")]
     StaleEpoch,
 }
 
-/// Slack-specific lifecycle authority. OAuth and disconnect paths share this
-/// narrow port while the generic product-auth machinery remains provider
-/// agnostic.
+/// Slack-specific generation-fence authority for the disconnect and
+/// failed-connection sweeps. Connect-attempt liveness is NOT tracked here —
+/// that is the auth-flow record's job; this store only remembers which
+/// generation is active for ingress and journals multi-row cleanups so a
+/// crashed sweep converges without deleting a fresh reconnect's rows.
 #[async_trait::async_trait]
 pub(crate) trait SlackUserBindingLifecycleStore: Send + Sync {
-    async fn begin_connection(
-        &self,
-        owner: &SlackConnectionOwner,
-        epoch: SlackConnectionEpoch,
-        expires_at: Timestamp,
-    ) -> Result<(), SlackUserBindingLifecycleError>;
-
     async fn connection_state(
         &self,
         owner: &SlackConnectionOwner,
     ) -> Result<Option<(SlackConnectionEpoch, SlackConnectionState)>, SlackUserBindingLifecycleError>;
-
-    async fn connection_owner_for_epoch(
-        &self,
-        tenant_id: &TenantId,
-        user_id: &UserId,
-        epoch: SlackConnectionEpoch,
-    ) -> Result<Option<SlackConnectionOwner>, SlackUserBindingLifecycleError>;
 
     async fn connection_owners_for_user(
         &self,
@@ -284,12 +286,6 @@ pub(crate) trait SlackUserBindingLifecycleStore: Send + Sync {
     ) -> Result<(), SlackUserBindingLifecycleError>;
 
     async fn complete_disconnect(
-        &self,
-        owner: &SlackConnectionOwner,
-        epoch: SlackConnectionEpoch,
-    ) -> Result<(), SlackUserBindingLifecycleError>;
-
-    async fn abandon_connection(
         &self,
         owner: &SlackConnectionOwner,
         epoch: SlackConnectionEpoch,

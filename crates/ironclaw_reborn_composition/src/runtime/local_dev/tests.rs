@@ -59,7 +59,9 @@ mod tests {
         EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
         EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
     };
-    use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
+    use crate::outbound::outbound_preferences::{
+        OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner,
+    };
     use crate::outbound::{
         OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistry,
         RebornOutboundPreferencesFacade,
@@ -354,7 +356,11 @@ mod tests {
             {
                 return Ok(Vec::new());
             }
-            Ok(vec![self.entry.clone()])
+            // Fixture answers a single expected caller; claim that caller as
+            // owner so the entry survives the registry caller-scoping filter.
+            let mut entry = self.entry.clone();
+            entry.owner = OutboundDeliveryTargetOwner::for_caller(caller);
+            Ok(vec![entry])
         }
     }
 
@@ -620,13 +626,26 @@ mod tests {
         extension_state: GsuiteExtensionState,
     ) -> GsuiteSurfaceHarness {
         let dir = tempfile::tempdir().expect("tempdir");
+        // Dummy but well-formed Google OAuth backend: this harness exercises
+        // GSuite/Gmail activation and dispatch (per-account credential
+        // gating), not the provider-instance readiness map — without this,
+        // google-family activation below fails closed with
+        // `ProviderInstanceNotConfigured` before it ever reaches the
+        // per-account gate these tests target.
+        let google_oauth_backend = crate::OAuthClientConfig::new(
+            "itest-google-client-id.apps.googleusercontent.com",
+            "http://127.0.0.1/oauth/callback/google",
+            None,
+        )
+        .expect("valid test google oauth client config");
         let services = crate::build_reborn_services(
             crate::RebornBuildInput::local_dev_with_profile(
                 crate::RebornCompositionProfile::LocalDevYolo,
                 owner,
                 dir.path().join("local-dev"),
             )
-            .with_runtime_policy(local_dev_minimal_approval_policy()),
+            .with_runtime_policy(local_dev_minimal_approval_policy())
+            .with_google_oauth_backend(google_oauth_backend),
         )
         .await
         .expect("local-dev services build");
@@ -3626,6 +3645,11 @@ mod tests {
                 summary: slack_target_summary,
                 capabilities: slack_target_capabilities,
                 reply_target_binding_ref: slack_reply_target.clone(),
+                // Overwritten with the querying caller at list-time.
+                owner: OutboundDeliveryTargetOwner::new(
+                    TenantId::new("tenant-outbound-delivery").expect("tenant id"),
+                    UserId::new("outbound-delivery-owner").expect("user id"),
+                ),
             },
         ));
         let slack_provider_delegate: Arc<dyn OutboundDeliveryTargetProvider> =
@@ -4346,6 +4370,11 @@ mod tests {
                     auth_prompts: false,
                 },
                 reply_target_binding_ref: slack_reply_target.clone(),
+                // Overwritten with the querying caller at list-time.
+                owner: OutboundDeliveryTargetOwner::new(
+                    TenantId::new("tenant-outbound-delivery").expect("tenant id"),
+                    UserId::new("outbound-delivery-owner").expect("user id"),
+                ),
             },
         ));
         let slack_provider_delegate: Arc<dyn OutboundDeliveryTargetProvider> =

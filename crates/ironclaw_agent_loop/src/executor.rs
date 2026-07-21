@@ -55,7 +55,7 @@ use mapping::{
     batch_policy_kind, blocked_kind, capability_batch_counts, capability_error_class,
     capability_error_failure_category, capability_failure_kind, capability_host_error,
     checkpoint_kind_to_host, honor_retry_alteration, loop_gate_kind, model_error_class,
-    model_error_failure_summary, model_preference_to_host, sanitized_strategy_summary,
+    model_error_failure_summary, model_preference_to_host, sanitized_strategy_summary_or_fallback,
 };
 use model::{ModelInput, ModelStage, ModelStep};
 use pipeline::{DefaultExecutorPipeline, ExecutorStage, StageContext};

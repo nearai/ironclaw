@@ -1,7 +1,8 @@
 //! Durable persistence for blocked turns under the in-memory turn-state
 //! authority.
 //!
-//! The in-memory authority (`InMemoryTurnStateStore`) removes the per-user
+//! The in-memory authority (the `TurnStateEngine` embedded in the row store)
+//! removes the per-user
 //! `state.json` CAS livelock by coordinating turns in one process, but it is
 //! otherwise volatile: a process restart drops all runs. That is acceptable for
 //! in-flight compute (short-lived, re-triggerable), but **not** for a turn
@@ -23,11 +24,9 @@ use crate::TurnPersistenceSnapshot;
 /// Best-effort by contract: implementations log and swallow their own errors so
 /// a durable-write failure never fails an already-applied in-memory transition.
 /// On process start, composition rehydrates the store from the last persisted
-/// snapshot via [`InMemoryTurnStateStore::from_persistence_snapshot`], so only
+/// snapshot via `TurnStateEngine::from_persistence_snapshot`, so only
 /// blocked/terminal runs need survive — recovering a gate-blocked turn is the
 /// whole point.
-///
-/// [`InMemoryTurnStateStore::from_persistence_snapshot`]: crate::InMemoryTurnStateStore::from_persistence_snapshot
 #[async_trait]
 pub trait TurnStateBlockPersistence: Send + Sync {
     /// Persist the current turn-state snapshot. Called only on blocked-set

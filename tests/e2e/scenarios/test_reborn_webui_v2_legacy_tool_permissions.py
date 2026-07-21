@@ -47,7 +47,11 @@ def _tool_entry(
 
 
 async def _open_mocked_tools_page(
-    reborn_v2_server, reborn_v2_browser, *, fail_permission_saves: bool = False
+    reborn_v2_server,
+    reborn_v2_browser,
+    *,
+    fail_permission_saves: bool = False,
+    delay_permission_saves: bool = False,
 ):
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
@@ -70,6 +74,8 @@ async def _open_mocked_tools_page(
     }
     auto_approve_requests: list[dict] = []
     permission_requests: list[dict] = []
+    permission_save_started = asyncio.Event()
+    permission_save_release = asyncio.Event()
 
     def entries():
         return [
@@ -132,6 +138,9 @@ async def _open_mocked_tools_page(
             name = unquote(path.removeprefix("/api/webchat/v2/settings/tools/"))
             body = json.loads(request.post_data or "{}")
             permission_requests.append({"name": name, "body": body})
+            permission_save_started.set()
+            if delay_permission_saves:
+                await permission_save_release.wait()
             if fail_permission_saves:
                 await fulfill_json(
                     route,
@@ -186,6 +195,8 @@ async def _open_mocked_tools_page(
         "page": page,
         "auto_approve_requests": auto_approve_requests,
         "permission_requests": permission_requests,
+        "permission_save_started": permission_save_started,
+        "permission_save_release": permission_save_release,
     }
 
 
@@ -325,6 +336,41 @@ async def test_reborn_legacy_tool_permission_menu_persists_after_reload(
             "body": {"state": "default"},
         }
     finally:
+        await harness["context"].close()
+
+
+async def test_reborn_legacy_tool_permission_retains_selection_while_saving(
+    reborn_v2_server, reborn_v2_browser
+):
+    harness = await _open_mocked_tools_page(
+        reborn_v2_server,
+        reborn_v2_browser,
+        delay_permission_saves=True,
+    )
+    try:
+        page = harness["page"]
+        button = _permission_button(page, "echo")
+        await expect(button).to_contain_text("Always allow", timeout=5000)
+
+        await _choose_permission(page, "echo", "Ask each time")
+        await asyncio.wait_for(harness["permission_save_started"].wait(), timeout=5)
+
+        select = _tool_row(page, "echo").locator(
+            SEL_V2["settings_tool_permission_select"]
+        )
+        await expect(select).to_have_attribute("aria-busy", "true")
+        await expect(button).to_contain_text("Ask each time")
+        assert harness["permission_requests"][-1] == {
+            "name": "echo",
+            "body": {"state": "ask_each_time"},
+        }
+
+        harness["permission_save_release"].set()
+        await expect(_tool_row(page, "echo").get_by_text("saved")).to_be_visible(
+            timeout=5000
+        )
+    finally:
+        harness["permission_save_release"].set()
         await harness["context"].close()
 
 

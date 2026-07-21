@@ -134,6 +134,13 @@ pub(super) fn map_lifecycle_error(error: ProductWorkflowError) -> RebornServices
         | ProductWorkflowError::UnsupportedActionKind { .. } => {
             RebornServicesError::from_status(RebornServicesErrorCode::InvalidRequest, 400, false)
         }
+        // WebUI gets a plain 400 with no free text (the wire contract has no
+        // free-text field): the exact `config set` remediation reaches users
+        // via the LLM tool path and `ironclaw status`; bespoke WebUI
+        // messaging is a deliberately deferred scope-cut.
+        ProductWorkflowError::ProviderInstanceNotConfigured { .. } => {
+            RebornServicesError::from_status(RebornServicesErrorCode::InvalidRequest, 400, false)
+        }
         ProductWorkflowError::BindingAccessDenied => {
             RebornServicesError::from_status(RebornServicesErrorCode::Forbidden, 403, false)
         }
@@ -156,5 +163,28 @@ pub(super) fn map_lifecycle_error(error: ProductWorkflowError) -> RebornServices
         | ProductWorkflowError::DuplicateAction { .. }
         | ProductWorkflowError::OutboundTargetNotDirectMessage
         | ProductWorkflowError::UnknownInstallation => RebornServicesError::internal_invariant(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Scope-cut: the WebUI facade gets a plain sanitized 400, never the
+    /// host-authored `reason` text — no free-text field exists on the wire
+    /// contract (see the variant's doc comment in
+    /// `ironclaw_product_workflow::error`).
+    #[test]
+    fn provider_instance_not_configured_maps_to_sanitized_400() {
+        let error = ProductWorkflowError::ProviderInstanceNotConfigured {
+            reason: "ironclaw config set google.client_id <id>.apps.googleusercontent.com"
+                .to_string(),
+        };
+
+        let mapped = map_lifecycle_error(error);
+
+        assert_eq!(mapped.code, RebornServicesErrorCode::InvalidRequest);
+        assert_eq!(mapped.status_code, 400);
+        assert!(!mapped.retryable);
     }
 }

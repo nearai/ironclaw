@@ -103,7 +103,6 @@ pub(crate) fn parent_summary_value(
         "trace_interval_seconds": args.trace_interval_seconds,
         "active_thread_count": args.active_thread_count,
         "turn_state_backend": args.turn_state_backend,
-        "turn_state_durability": args.turn_state_durability,
         "turn_state_max_terminal_records": args.turn_state_max_terminal_records,
         "turn_state_max_events": args.turn_state_max_events,
         "turn_state_max_idempotency_records": args.turn_state_max_idempotency_records,
