@@ -4,16 +4,13 @@ use ironclaw_auth::{
     CredentialAccountLabel, CredentialAccountService, CredentialOwnership,
     InMemoryAuthProductServices, NewCredentialAccount,
 };
-use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_filesystem::{Fault, FaultInjecting, FilesystemOperation, InMemoryBackend};
 use ironclaw_host_api::{
     AgentId, CredentialStageError, ExtensionId, InvocationId, MissionId, ProjectId, ResourceScope,
     RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, SecretHandle, TenantId,
     ThreadId, UserId, VendorId,
 };
-use ironclaw_secrets::{
-    FilesystemSecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
-    SecretStoreError,
-};
+use ironclaw_secrets::{FilesystemSecretStore, SecretStore};
 
 use super::*;
 
@@ -82,79 +79,6 @@ impl RuntimeCredentialAccountRefreshPort for TestRuntimeCredentialRefreshPort {
         request: CredentialRefreshRequest,
     ) -> Result<CredentialRefreshReport, AuthProductError> {
         self.0.refresh_account(request).await
-    }
-}
-
-struct MetadataUnavailableSecretStore {
-    inner: Arc<FilesystemSecretStore<InMemoryBackend>>,
-}
-
-#[async_trait::async_trait]
-impl SecretStore for MetadataUnavailableSecretStore {
-    async fn put(
-        &self,
-        scope: ResourceScope,
-        handle: SecretHandle,
-        material: SecretMaterial,
-        expires_at: Option<chrono::DateTime<Utc>>,
-    ) -> Result<SecretMetadata, SecretStoreError> {
-        self.inner.put(scope, handle, material, expires_at).await
-    }
-
-    async fn metadata(
-        &self,
-        _scope: &ResourceScope,
-        _handle: &SecretHandle,
-    ) -> Result<Option<SecretMetadata>, SecretStoreError> {
-        Err(SecretStoreError::StoreUnavailable {
-            reason: "metadata unavailable for test".to_string(),
-        })
-    }
-
-    async fn metadata_for_scope(
-        &self,
-        scope: &ResourceScope,
-    ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
-        self.inner.metadata_for_scope(scope).await
-    }
-
-    async fn delete(
-        &self,
-        scope: &ResourceScope,
-        handle: &SecretHandle,
-    ) -> Result<bool, SecretStoreError> {
-        self.inner.delete(scope, handle).await
-    }
-
-    async fn lease_once(
-        &self,
-        scope: &ResourceScope,
-        handle: &SecretHandle,
-    ) -> Result<SecretLease, SecretStoreError> {
-        self.inner.lease_once(scope, handle).await
-    }
-
-    async fn consume(
-        &self,
-        scope: &ResourceScope,
-        lease_id: SecretLeaseId,
-    ) -> Result<SecretMaterial, SecretStoreError> {
-        self.inner.consume(scope, lease_id).await
-    }
-
-    async fn revoke(
-        &self,
-        scope: &ResourceScope,
-        lease_id: SecretLeaseId,
-    ) -> Result<SecretLease, SecretStoreError> {
-        self.inner.revoke(scope, lease_id).await
-    }
-
-    async fn leases_for_scope(
-        &self,
-        scope: &ResourceScope,
-    ) -> Result<Vec<SecretLease>, SecretStoreError> {
-        self.inner.leases_for_scope(scope).await
     }
 }
 
@@ -1097,8 +1021,11 @@ async fn resolver_propagates_backend_error_when_access_secret_metadata_is_unread
         .create(&accounts)
         .await;
     accounts.fail_next_refresh_backend_for_tests(account.id);
-    let inner_store = Arc::new(FilesystemSecretStore::ephemeral());
-    inner_store
+    let secret_backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral_over(
+        secret_backend.clone(),
+    ));
+    secret_store
         .put(
             scope.clone(),
             access_secret,
@@ -1106,11 +1033,19 @@ async fn resolver_propagates_backend_error_when_access_secret_metadata_is_unread
             Some(Utc::now() + chrono::Duration::hours(1)),
         )
         .await
-        .expect("seed access-token metadata before wrapping unreadable store");
-    let resolver = resolver_with_refresh_and_store(
-        accounts,
-        Arc::new(MetadataUnavailableSecretStore { inner: inner_store }),
+        .expect("seed access-token metadata before making its read fail");
+    // The seeded access secret is present, but its per-handle `metadata` read
+    // (a `ReadFile` `get`) now fails with a backend error. The real store maps
+    // that through `FilesystemError::Backend -> SecretStoreError::StoreUnavailable`,
+    // which the resolver propagates as `CredentialStageError::Backend`. Only
+    // `ReadFile` is faulted, so `metadata_for_scope` (`Query`) stays live —
+    // matching the old fake that failed only the per-handle metadata path.
+    secret_backend.add_fault(
+        Fault::on(FilesystemOperation::ReadFile)
+            .path("secrets")
+            .backend("metadata unavailable for test"),
     );
+    let resolver = resolver_with_refresh_and_store(accounts, secret_store);
 
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {

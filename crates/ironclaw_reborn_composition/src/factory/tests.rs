@@ -8,10 +8,8 @@ use ironclaw_auth::{
 };
 use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStore, GrantAuthorizer};
 use ironclaw_filesystem::FilesystemError;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_filesystem::{
-    DirEntry, FileStat, FilesystemOperation, RootFilesystem, VersionedEntry,
-};
+#[cfg(feature = "libsql")]
+use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::InstallationState;
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
@@ -236,32 +234,6 @@ impl ConversationActorPairingService for FailingConversationActorPairingService 
     }
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-struct FailingConversationStateFilesystem;
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-#[async_trait::async_trait]
-impl RootFilesystem for FailingConversationStateFilesystem {
-    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
-        Err(FilesystemError::Backend {
-            path: path.clone(),
-            operation: FilesystemOperation::ReadFile,
-            reason: "conversation state load failed".to_string(),
-        })
-    }
-
-    async fn list_dir(&self, _path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        Ok(Vec::new())
-    }
-
-    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        Err(FilesystemError::NotFound {
-            path: path.clone(),
-            operation: FilesystemOperation::ReadFile,
-        })
-    }
-}
-
 /// Per-trigger delivery targets validate against the SAME registry the
 /// outbound target surface publishes from: an id a provider resolves for
 /// the caller is accepted; an unknown id (or an empty registry) fails
@@ -426,7 +398,17 @@ async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornRuntime
                 BackendCapabilities::default(),
             )
             .expect("mount descriptor"),
-            Arc::new(FailingConversationStateFilesystem),
+            Arc::new(
+                ironclaw_filesystem::FaultInjecting::new(
+                    ironclaw_filesystem::InMemoryBackend::new(),
+                )
+                .with_fault(
+                    ironclaw_filesystem::Fault::on(
+                        ironclaw_filesystem::FilesystemOperation::ReadFile,
+                    )
+                    .backend("conversation state load failed"),
+                ),
+            ),
         )
         .expect("mount failing backend");
     Arc::new(RebornRuntimeSubstrate {

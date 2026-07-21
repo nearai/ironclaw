@@ -851,6 +851,150 @@ async def start_reborn_server(
     return proc, base_url
 
 
+def _extension_setup_submission(
+    setup: dict[str, object],
+    values: dict[str, object],
+) -> tuple[dict[str, str], dict[str, str]]:
+    declared: dict[str, str] = {}
+    for collection in ("secrets", "fields"):
+        descriptors = setup.get(collection)
+        if not isinstance(descriptors, list):
+            raise LiveQaError(
+                f"Extension setup API omitted the manifest-declared {collection} descriptors"
+            )
+        for descriptor in descriptors:
+            name = descriptor.get("name") if isinstance(descriptor, dict) else None
+            if not isinstance(name, str) or not name:
+                raise LiveQaError(
+                    f"Extension setup API returned an invalid {collection} descriptor"
+                )
+            declared[name] = collection
+
+    submission: dict[str, dict[str, str]] = {"secrets": {}, "fields": {}}
+    for source_name, raw_value in values.items():
+        value = str(raw_value or "").strip()
+        if not value:
+            continue
+        matches = [
+            name
+            for name in declared
+            if name == source_name or name.endswith(f"_{source_name}")
+        ]
+        if len(matches) != 1:
+            raise LiveQaError(
+                "Extension setup descriptors did not uniquely declare supplied field "
+                f"{source_name!r}: matches={matches!r}"
+            )
+        handle = matches[0]
+        submission[declared[handle]][handle] = value
+    return submission["secrets"], submission["fields"]
+
+
+def _require_extension_setup_response(
+    response: object,
+    operation: str,
+) -> dict[str, object]:
+    status_code = getattr(response, "status_code", None)
+    if not isinstance(status_code, int) or status_code < 200 or status_code >= 300:
+        raise LiveQaError(
+            f"Extension setup API {operation} returned HTTP {status_code}; "
+            "response body omitted because this endpoint handles secrets"
+        )
+    body = response.json()
+    if not isinstance(body, dict):
+        raise LiveQaError(f"Extension setup API {operation} returned non-object JSON")
+    return body
+
+
+async def _apply_extension_setup_api_after_start(
+    *,
+    base_url: str,
+    package_id: str,
+    values: dict[str, object],
+) -> dict[str, object]:
+    import httpx
+
+    headers = {"Authorization": f"Bearer {AUTH_TOKEN}"}
+    encoded_package_id = urllib.parse.quote(package_id, safe="")
+    extensions_url = f"{base_url}/api/webchat/v2/extensions"
+    setup_url = f"{extensions_url}/{encoded_package_id}/setup"
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        extensions_response = await client.get(extensions_url, headers=headers)
+        extensions_body = _require_extension_setup_response(
+            extensions_response,
+            "list",
+        )
+        extensions = extensions_body.get("extensions")
+        if not isinstance(extensions, list):
+            raise LiveQaError("Extensions API response omitted the extensions list")
+        if not _extension_is_listed(extensions, package_id):
+            install_response = await client.post(
+                f"{extensions_url}/install",
+                headers=headers,
+                json={"package_ref": {"kind": "extension", "id": package_id}},
+            )
+            install_body = _require_extension_setup_response(install_response, "install")
+            if install_body.get("success") is not True:
+                raise LiveQaError("Extension setup API install did not report success")
+
+        setup_response = await client.get(setup_url, headers=headers)
+        setup = _require_extension_setup_response(setup_response, "view")
+        secrets, fields = _extension_setup_submission(setup, values)
+        response = await client.post(
+            setup_url,
+            headers=headers,
+            json={
+                "action": "submit",
+                "payload": {"secrets": secrets, "fields": fields},
+            },
+        )
+        status = _require_extension_setup_response(response, "submit")
+
+    package_ref = status.get("package_ref")
+    if not isinstance(package_ref, dict) or package_ref.get("id") != package_id:
+        raise LiveQaError("Extension setup API returned a mismatched package projection")
+    projected_secrets = status.get("secrets")
+    projected_secret_presence = (
+        {
+            secret.get("name"): secret.get("provided")
+            for secret in projected_secrets
+            if isinstance(secret, dict) and isinstance(secret.get("name"), str)
+        }
+        if isinstance(projected_secrets, list)
+        else {}
+    )
+    missing_secret_presence = sorted(
+        handle for handle in secrets if projected_secret_presence.get(handle) is not True
+    )
+    projected_fields = status.get("fields")
+    projected_field_names = (
+        {
+            field.get("name")
+            for field in projected_fields
+            if isinstance(field, dict) and isinstance(field.get("name"), str)
+        }
+        if isinstance(projected_fields, list)
+        else set()
+    )
+    missing_fields = sorted(handle for handle in fields if handle not in projected_field_names)
+    if missing_secret_presence or missing_fields:
+        raise LiveQaError(
+            "Extension setup API returned incomplete setup projection: "
+            f"missing_secret_presence={missing_secret_presence!r} "
+            f"missing_fields={missing_fields!r}"
+        )
+    return {
+        "applied": True,
+        "status_code": response.status_code,
+        "request": {
+            "package_id": package_id,
+            "secret_handles": sorted(secrets),
+            "field_handles": sorted(fields),
+        },
+        "status": status,
+    }
+
+
 async def _apply_slack_setup_api_after_start(
     *,
     base_url: str,
@@ -867,54 +1011,17 @@ async def _apply_slack_setup_api_after_start(
     if payload is None:
         return {"applied": False, "reason": "setup_payload_missing", **preflight}
     try:
-        import httpx
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.put(
-                f"{base_url}/api/webchat/v2/channels/slack/setup",
-                headers={"Authorization": f"Bearer {AUTH_TOKEN}"},
-                json=payload,
-            )
-            if response.status_code < 200 or response.status_code >= 300:
-                raise LiveQaError(
-                    "Slack setup API returned HTTP "
-                    f"{response.status_code}; response body omitted because "
-                    "this endpoint handles Slack secrets"
-                )
-            status = response.json()
+        return await _apply_extension_setup_api_after_start(
+            base_url=base_url,
+            package_id="slack",
+            values=payload,
+        )
     except LiveQaError:
         raise
     except Exception as exc:
-        raise LiveQaError(f"Slack setup API call failed: {type(exc).__name__}: {exc}") from exc
-    if not isinstance(status, dict):
-        raise LiveQaError(f"Slack setup API returned non-object JSON: {status!r}")
-    required_flags = ["configured", "bot_token_configured", "signing_secret_configured"]
-    if payload.get("oauth_client_id") or payload.get("oauth_client_secret"):
-        required_flags.extend(["oauth_client_id_configured", "oauth_client_secret_configured"])
-    missing_flags = [flag for flag in required_flags if status.get(flag) is not True]
-    mismatched_identity = [
-        key
-        for key in ("installation_id", "team_id", "api_app_id")
-        if str(status.get(key) or "") != str(payload.get(key) or "")
-    ]
-    if missing_flags or mismatched_identity:
         raise LiveQaError(
-            "Slack setup API returned incomplete setup status: "
-            f"missing_flags={missing_flags!r} "
-            f"mismatched_identity={mismatched_identity!r}"
-        )
-    return {
-        "applied": True,
-        "status_code": response.status_code,
-        "request": {
-            "installation_id": payload.get("installation_id"),
-            "team_id": payload.get("team_id"),
-            "api_app_id": payload.get("api_app_id"),
-            "oauth_client_id_configured": bool(payload.get("oauth_client_id")),
-            "oauth_client_secret_configured": bool(payload.get("oauth_client_secret")),
-        },
-        "status": status,
-    }
+            f"Extension setup API call failed: {type(exc).__name__}: {exc}"
+        ) from exc
 
 
 _BROWSER_EVENT_LIMIT = 1_000

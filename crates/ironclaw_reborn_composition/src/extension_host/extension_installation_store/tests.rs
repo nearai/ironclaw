@@ -8,8 +8,7 @@ use ironclaw_extensions::{
     ExtensionManifestRef, InstallationOwner, MANIFEST_SCHEMA_VERSION,
 };
 use ironclaw_filesystem::{
-    BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemOperation,
-    InMemoryBackend, RecordVersion, RootFilesystem, VersionedEntry,
+    Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, RootFilesystem,
 };
 use ironclaw_host_api::{HostPortCatalog, SecretHandle};
 
@@ -58,7 +57,10 @@ async fn load_at_treats_not_found_as_empty_state() {
 
 #[tokio::test]
 async fn load_at_sanitizes_filesystem_read_errors() {
-    let filesystem: Arc<dyn RootFilesystem> = Arc::new(ReadFailureFilesystem::new());
+    let filesystem: Arc<dyn RootFilesystem> = Arc::new(
+        FaultInjecting::new(InMemoryBackend::new())
+            .with_fault(Fault::on(FilesystemOperation::ReadFile).backend("raw backend detail")),
+    );
     let state_path = VirtualPath::new("/tenants/acme/system/extensions/.installations/state.json")
         .expect("valid state path");
 
@@ -446,7 +448,7 @@ async fn load_at_rejects_credential_conflicts_without_rewriting_state() {
 
 #[tokio::test]
 async fn load_at_returns_rewrite_failure_without_exposing_normalized_store() {
-    let backend = Arc::new(InMemoryBackend::new());
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
     let seed_filesystem: Arc<dyn RootFilesystem> = backend.clone();
     let state_path = test_state_path();
     let original = seed_state(
@@ -468,9 +470,14 @@ async fn load_at_returns_rewrite_failure_without_exposing_normalized_store() {
         ],
     )
     .await;
-    let failing_filesystem: Arc<dyn RootFilesystem> = Arc::new(WriteFailureFilesystem {
-        inner: backend.clone(),
-    });
+    // Arm the write fault only after seeding, so the store's canonical rewrite
+    // during load fails at the backend and flows through the real store's
+    // `FilesystemError -> ExtensionInstallationError` mapping.
+    backend.add_fault(
+        Fault::on(FilesystemOperation::WriteFile)
+            .backend("injected extension installation write failure"),
+    );
+    let failing_filesystem: Arc<dyn RootFilesystem> = backend.clone();
 
     let error =
         match FilesystemExtensionInstallationStore::load_at(failing_filesystem, state_path.clone())
@@ -684,70 +691,9 @@ fn stored_installation_with_bindings(
     .unwrap()
 }
 
-struct FailNextWriteFilesystem {
-    inner: Arc<InMemoryBackend>,
-    fail_next: std::sync::atomic::AtomicBool,
-}
-
-impl FailNextWriteFilesystem {
-    fn new() -> Self {
-        Self {
-            inner: Arc::new(InMemoryBackend::new()),
-            fail_next: std::sync::atomic::AtomicBool::new(false),
-        }
-    }
-
-    fn fail_next_write(&self) {
-        self.fail_next
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-}
-
-#[async_trait]
-impl RootFilesystem for FailNextWriteFilesystem {
-    fn capabilities(&self) -> BackendCapabilities {
-        self.inner.capabilities()
-    }
-
-    async fn put(
-        &self,
-        path: &VirtualPath,
-        entry: Entry,
-        cas: CasExpectation,
-    ) -> Result<RecordVersion, FilesystemError> {
-        if self
-            .fail_next
-            .swap(false, std::sync::atomic::Ordering::SeqCst)
-        {
-            return Err(FilesystemError::Backend {
-                path: path.clone(),
-                operation: FilesystemOperation::WriteFile,
-                reason: "injected one-shot write failure".to_string(),
-            });
-        }
-        self.inner.put(path, entry, cas).await
-    }
-
-    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
-        self.inner.get(path).await
-    }
-
-    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.inner.list_dir(path).await
-    }
-
-    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        self.inner.stat(path).await
-    }
-
-    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        self.inner.delete(path).await
-    }
-}
-
 #[tokio::test]
 async fn failed_snapshot_write_rolls_back_the_in_memory_mutation_so_retry_converges() {
-    let filesystem = Arc::new(FailNextWriteFilesystem::new());
+    let filesystem = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
     let state_path = test_state_path();
     let store = FilesystemExtensionInstallationStore::load_at(
         Arc::clone(&filesystem) as Arc<dyn RootFilesystem>,
@@ -762,7 +708,14 @@ async fn failed_snapshot_write_rolls_back_the_in_memory_mutation_so_retry_conver
         .await
         .expect("seed installation");
 
-    filesystem.fail_next_write();
+    // One-shot: fault the next write (the delete's snapshot rewrite) only; the
+    // retry's write passes through so the delete converges. `nth(1)` on a freshly
+    // added fault fires on the first matching write after arming, then is spent.
+    filesystem.add_fault(
+        Fault::on(FilesystemOperation::WriteFile)
+            .nth(1)
+            .backend("injected one-shot write failure"),
+    );
     let error = store
         .delete_installation(&installation_id)
         .await
@@ -800,92 +753,4 @@ async fn failed_snapshot_write_rolls_back_the_in_memory_mutation_so_retry_conver
             .expect("reload lookup")
             .is_none()
     );
-}
-
-struct WriteFailureFilesystem {
-    inner: Arc<InMemoryBackend>,
-}
-
-#[async_trait]
-impl RootFilesystem for WriteFailureFilesystem {
-    fn capabilities(&self) -> BackendCapabilities {
-        self.inner.capabilities()
-    }
-
-    async fn put(
-        &self,
-        path: &VirtualPath,
-        _entry: Entry,
-        _cas: CasExpectation,
-    ) -> Result<RecordVersion, FilesystemError> {
-        Err(FilesystemError::Backend {
-            path: path.clone(),
-            operation: FilesystemOperation::WriteFile,
-            reason: "injected extension installation write failure".to_string(),
-        })
-    }
-
-    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
-        self.inner.get(path).await
-    }
-
-    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.inner.list_dir(path).await
-    }
-
-    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        self.inner.stat(path).await
-    }
-
-    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        self.inner.delete(path).await
-    }
-}
-
-struct ReadFailureFilesystem {
-    inner: InMemoryBackend,
-}
-
-impl ReadFailureFilesystem {
-    fn new() -> Self {
-        Self {
-            inner: InMemoryBackend::new(),
-        }
-    }
-}
-
-#[async_trait]
-impl RootFilesystem for ReadFailureFilesystem {
-    fn capabilities(&self) -> BackendCapabilities {
-        self.inner.capabilities()
-    }
-
-    async fn put(
-        &self,
-        path: &VirtualPath,
-        entry: Entry,
-        cas: CasExpectation,
-    ) -> Result<RecordVersion, FilesystemError> {
-        self.inner.put(path, entry, cas).await
-    }
-
-    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
-        Err(FilesystemError::Backend {
-            path: path.clone(),
-            operation: FilesystemOperation::ReadFile,
-            reason: "raw backend detail".to_string(),
-        })
-    }
-
-    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.inner.list_dir(path).await
-    }
-
-    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        self.inner.stat(path).await
-    }
-
-    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        self.inner.delete(path).await
-    }
 }

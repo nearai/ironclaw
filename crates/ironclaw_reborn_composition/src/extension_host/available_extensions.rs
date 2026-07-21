@@ -1031,8 +1031,8 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw_extensions::{ExtensionManifest, ManifestSource};
     use ironclaw_filesystem::{
-        BackendCapabilities, DirEntry, FileStat, FilesystemError, FilesystemOperation,
-        InMemoryBackend,
+        BackendCapabilities, DirEntry, Fault, FaultInjecting, FileStat, FilesystemError,
+        FilesystemOperation, InMemoryBackend,
     };
     use ironclaw_host_api::{
         EffectKind, HostPortCatalog, PermissionMode, RuntimeCredentialAccountSetup,
@@ -2052,7 +2052,15 @@ handle = "web_token"
 
     #[tokio::test]
     async fn materialize_fails_on_filesystem_error_and_rolls_back_written_assets() {
-        let fs = FailingWriteFilesystem::default();
+        // The wasm write is faulted at the backend; the real materialize path
+        // then rolls back the manifest write it already committed. `recorded_*`
+        // proves the true op stream (writes include the faulted wasm write; the
+        // rollback deletes the one prior committed asset).
+        let fs = FaultInjecting::new(InMemoryBackend::new()).with_fault(
+            Fault::on(FilesystemOperation::WriteFile)
+                .path("fixture.wasm")
+                .backend("write rejected"),
+        );
         let extension = test_extension_package();
 
         let error = materialize_available_extension(&fs, &extension)
@@ -2060,16 +2068,25 @@ handle = "web_token"
             .expect_err("second write fails");
 
         assert!(matches!(error, ProductWorkflowError::Transient { .. }));
-        let state = fs.state.lock().unwrap();
+        let writes = fs
+            .recorded_paths(FilesystemOperation::WriteFile)
+            .iter()
+            .map(|path| path.as_str().to_string())
+            .collect::<Vec<_>>();
         assert_eq!(
-            state.writes,
+            writes,
             vec![
                 "/system/extensions/fixture/manifest.toml".to_string(),
                 "/system/extensions/fixture/wasm/fixture.wasm".to_string()
             ]
         );
+        let deletes = fs
+            .recorded_paths(FilesystemOperation::Delete)
+            .iter()
+            .map(|path| path.as_str().to_string())
+            .collect::<Vec<_>>();
         assert_eq!(
-            state.deletes,
+            deletes,
             vec!["/system/extensions/fixture/manifest.toml".to_string()]
         );
     }
@@ -2249,17 +2266,6 @@ credential_handle = "channel_ext_token"
     }
 
     #[derive(Default)]
-    struct FailingWriteFilesystem {
-        state: Arc<Mutex<FailingWriteState>>,
-    }
-
-    #[derive(Default)]
-    struct FailingWriteState {
-        writes: Vec<String>,
-        deletes: Vec<String>,
-    }
-
-    #[derive(Default)]
     struct RecordingMaterializeFilesystem {
         files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
         writes: Arc<Mutex<Vec<String>>>,
@@ -2317,56 +2323,6 @@ credential_handle = "channel_ext_token"
                 .lock()
                 .unwrap()
                 .insert(path.as_str().to_string(), bytes.to_vec());
-            Ok(())
-        }
-    }
-
-    #[async_trait]
-    impl RootFilesystem for FailingWriteFilesystem {
-        fn capabilities(&self) -> BackendCapabilities {
-            BackendCapabilities::default()
-        }
-
-        async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-            Err(FilesystemError::Unsupported {
-                path: path.clone(),
-                operation: FilesystemOperation::ListDir,
-            })
-        }
-
-        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-            Err(FilesystemError::NotFound {
-                path: path.clone(),
-                operation: FilesystemOperation::Stat,
-            })
-        }
-
-        async fn write_file(
-            &self,
-            path: &VirtualPath,
-            _bytes: &[u8],
-        ) -> Result<(), FilesystemError> {
-            self.state
-                .lock()
-                .unwrap()
-                .writes
-                .push(path.as_str().to_string());
-            if path.as_str().ends_with("fixture.wasm") {
-                return Err(FilesystemError::Backend {
-                    path: path.clone(),
-                    operation: FilesystemOperation::WriteFile,
-                    reason: "write rejected".to_string(),
-                });
-            }
-            Ok(())
-        }
-
-        async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-            self.state
-                .lock()
-                .unwrap()
-                .deletes
-                .push(path.as_str().to_string());
             Ok(())
         }
     }

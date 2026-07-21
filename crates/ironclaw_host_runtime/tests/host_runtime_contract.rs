@@ -6,7 +6,7 @@ use support::legacy_capability_fixture_to_v2;
 use std::{
     collections::BTreeMap,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicUsize, Ordering},
     },
 };
@@ -20,7 +20,10 @@ use ironclaw_authorization::{
 use ironclaw_extensions::{
     ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource, SharedExtensionRegistry,
 };
-use ironclaw_filesystem::{FilesystemError, FilesystemOperation, InMemoryBackend};
+use ironclaw_filesystem::{
+    Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, ScopedFilesystem,
+};
+use ironclaw_host_api::dispatch_test_support::TestDispatcher;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CancelReason, CancelRuntimeWorkRequest, CapabilitySurfacePolicy, CapabilitySurfaceVersion,
@@ -30,7 +33,7 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_processes::{
     FilesystemProcessResultStore, FilesystemProcessStore, ProcessCancellationRegistry,
-    ProcessError, ProcessRecord, ProcessResultStore, ProcessStart, ProcessStatus, ProcessStore,
+    ProcessResultStore, ProcessStart, ProcessStatus, ProcessStore,
 };
 use ironclaw_run_state::{
     ApprovalRecord, ApprovalRequestStore, RunRecord, RunStart, RunStateApprovalStore,
@@ -72,7 +75,7 @@ fn bounded_contract_strings_share_validation_semantics() {
 #[tokio::test]
 async fn default_runtime_returns_completed_outcome_for_authorized_dispatch() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
@@ -106,13 +109,13 @@ async fn default_runtime_returns_completed_outcome_for_authorized_dispatch() {
         }
         other => panic!("expected Completed outcome, got {:?}", other),
     }
-    assert!(dispatcher.has_request());
+    assert!(dispatcher.call_count() > 0);
 }
 
 #[tokio::test]
 async fn default_runtime_surfaces_approval_required_with_persisted_request_id() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(ApprovalAuthorizer);
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
@@ -157,7 +160,7 @@ async fn default_runtime_surfaces_approval_required_with_persisted_request_id() 
 #[tokio::test]
 async fn default_runtime_uses_combined_store_for_atomic_approval_block() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(ApprovalAuthorizer);
     let combined_store = Arc::new(RecordingCombinedRunStateApprovalStore::new());
     let leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStore> =
@@ -221,7 +224,7 @@ async fn default_runtime_propagates_unavailable_when_run_state_lookup_fails_duri
     // `HostRuntimeError::Unavailable` so callers can distinguish between a
     // missing record and a broken backend.
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(ApprovalAuthorizer);
     let inner_run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let run_state: Arc<dyn RunStateStore> = Arc::new(FailingGetRunStateStore {
@@ -267,7 +270,7 @@ async fn default_runtime_propagates_unavailable_when_run_state_lookup_fails_duri
 #[tokio::test]
 async fn default_runtime_returns_failed_for_unknown_capability() {
     let registry = Arc::new(ExtensionRegistry::new());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let runtime = DefaultHostRuntime::new(
@@ -300,8 +303,9 @@ async fn default_runtime_returns_failed_for_unknown_capability() {
         }
         other => panic!("expected Failed outcome, got {:?}", other),
     }
-    assert!(
-        !dispatcher.has_request(),
+    assert_eq!(
+        dispatcher.call_count(),
+        0,
         "unknown capabilities must fail during trust evaluation before dispatch"
     );
     assert!(
@@ -320,7 +324,7 @@ async fn default_runtime_surfaces_authorization_failure_when_authorizer_denies()
     // as Failed with kind=Authorization, not bubble up as a HostRuntimeError
     // or get swallowed.
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(DenyAuthorizer);
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -351,7 +355,7 @@ async fn default_runtime_surfaces_authorization_failure_when_authorizer_denies()
         other => panic!("expected Failed(Authorization), got {:?}", other),
     }
     // Deny must short-circuit before dispatch runs.
-    assert!(!dispatcher.has_request());
+    assert_eq!(dispatcher.call_count(), 0);
 }
 
 #[tokio::test]
@@ -361,7 +365,7 @@ async fn default_runtime_idempotency_key_is_advisory_and_does_not_dedupe() {
     // If a future change wires dedupe through the capability host, this test
     // is the canary that flags the contract change.
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(CountingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -395,7 +399,7 @@ async fn default_runtime_idempotency_key_is_advisory_and_does_not_dedupe() {
     let _ = runtime.invoke_capability(request_b).await.unwrap();
 
     assert_eq!(
-        dispatcher.count(),
+        dispatcher.call_count(),
         2,
         "idempotency_key is advisory only — dedupe is not enforced at this layer"
     );
@@ -406,7 +410,7 @@ async fn default_runtime_status_returns_default_when_no_run_state_attached() {
     // Pins the no-run-state branch: callers must get an empty status rather
     // than a panic or an Unavailable error.
     let registry = Arc::new(ExtensionRegistry::new());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -434,7 +438,7 @@ async fn default_runtime_status_propagates_unavailable_on_run_state_error() {
     // surface as HostRuntimeError::Unavailable with a redacted reason, not
     // leak the underlying filesystem string.
     let registry = Arc::new(ExtensionRegistry::new());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let inner = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let run_state: Arc<dyn RunStateStore> = Arc::new(FailingRecordsRunStateStore { inner });
@@ -471,11 +475,26 @@ async fn default_runtime_status_propagates_unavailable_on_run_state_error() {
 #[tokio::test]
 async fn default_runtime_status_redacts_process_filesystem_errors() {
     let registry = Arc::new(ExtensionRegistry::new());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
-    let process_store: Arc<dyn ProcessStore> = Arc::new(FailingRecordsProcessStore {
-        inner: Arc::new(ironclaw_processes::in_memory_backed_process_store()),
-    });
+    // Real process store over a fault backend armed to fail `records_for_scope`
+    // (its `query` op) with a leaky reason, so the test proves the host-runtime
+    // path maps `ProcessError::Filesystem` to the sanitized, path-free
+    // "process filesystem unavailable" through the production store.
+    let backend = Arc::new(
+        FaultInjecting::new(InMemoryBackend::new()).with_fault(
+            Fault::on(FilesystemOperation::Query)
+                .backend("simulated read failure: /tmp/processes.db connection refused"),
+        ),
+    );
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/processes").unwrap(),
+        VirtualPath::new("/engine/processes").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts));
+    let process_store: Arc<dyn ProcessStore> = Arc::new(FilesystemProcessStore::new(scoped));
     let runtime = DefaultHostRuntime::new(
         registry,
         dispatcher,
@@ -512,7 +531,7 @@ async fn default_runtime_status_filters_to_running_records_only() {
     // active_work. Surfacing terminal records as "active" would mislead
     // upper services about which work to wait on.
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
 
@@ -575,7 +594,7 @@ async fn default_runtime_visible_capabilities_returns_empty_descriptors_for_empt
     // Pins the empty-registry path: the surface still carries a deterministic
     // version derived from the configured base version and request policy.
     let registry = Arc::new(ExtensionRegistry::new());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -602,7 +621,7 @@ async fn default_runtime_visible_capabilities_returns_empty_descriptors_for_empt
 #[tokio::test]
 async fn default_runtime_returns_versioned_visible_surface_with_registry_descriptors() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let runtime = DefaultHostRuntime::new(
         registry.clone(),
@@ -628,7 +647,7 @@ async fn default_runtime_returns_versioned_visible_surface_with_registry_descrip
 #[tokio::test]
 async fn default_runtime_visible_surface_tracks_shared_registry_mutations() {
     let registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let runtime = DefaultHostRuntime::from_shared_registry(
         Arc::clone(&registry),
@@ -679,7 +698,7 @@ async fn default_runtime_visible_surface_tracks_shared_registry_mutations() {
 #[tokio::test]
 async fn default_runtime_status_reports_running_invocations_only() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
 
@@ -723,7 +742,7 @@ async fn default_runtime_status_reports_running_invocations_only() {
 #[tokio::test]
 async fn default_runtime_cancel_reports_running_invocations_as_unsupported() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let runtime = DefaultHostRuntime::new(
@@ -766,7 +785,7 @@ async fn default_runtime_cancel_reports_running_invocations_as_unsupported() {
 #[tokio::test]
 async fn default_runtime_cancel_kills_running_processes_and_cancels_tokens() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let process_store = Arc::new(ironclaw_processes::in_memory_backed_process_store());
     let cancellation_registry = Arc::new(ProcessCancellationRegistry::new());
@@ -812,7 +831,7 @@ async fn default_runtime_cancel_kills_running_processes_and_cancels_tokens() {
 #[tokio::test]
 async fn spawn_process_returns_unavailable_when_process_manager_is_none() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -837,7 +856,7 @@ async fn spawn_process_returns_unavailable_when_process_manager_is_none() {
 #[tokio::test]
 async fn default_runtime_status_includes_running_processes_from_process_store() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let process_store = Arc::new(ironclaw_processes::in_memory_backed_process_store());
     let runtime = DefaultHostRuntime::new(
@@ -876,7 +895,7 @@ async fn default_runtime_status_includes_running_processes_from_process_store() 
 #[tokio::test]
 async fn default_runtime_cancel_writes_killed_process_result_record() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let processes_filesystem = ironclaw_processes::in_memory_backed_processes_filesystem();
     let process_store = Arc::new(FilesystemProcessStore::new(Arc::clone(
@@ -927,7 +946,7 @@ async fn default_runtime_cancel_writes_killed_process_result_record() {
 #[tokio::test]
 async fn default_runtime_status_does_not_duplicate_process_backed_invocations() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let process_store = Arc::new(ironclaw_processes::in_memory_backed_process_store());
@@ -975,7 +994,7 @@ async fn default_runtime_status_does_not_duplicate_process_backed_invocations() 
 #[tokio::test]
 async fn default_runtime_health_reports_ready_when_registry_requires_no_backends() {
     let registry = Arc::new(ExtensionRegistry::new());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -994,7 +1013,7 @@ async fn default_runtime_health_reports_ready_when_registry_requires_no_backends
 #[tokio::test]
 async fn default_runtime_health_without_probe_reports_required_runtimes_missing() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -1013,7 +1032,7 @@ async fn default_runtime_health_without_probe_reports_required_runtimes_missing(
 #[tokio::test]
 async fn default_runtime_health_uses_configured_backend_probe() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let runtime = DefaultHostRuntime::new(
         registry,
@@ -1126,65 +1145,6 @@ impl RunStateStore for FailingRecordsRunStateStore {
         Err(RunStateError::Filesystem(
             "simulated read failure: /private/users/secret/runstate.db".to_string(),
         ))
-    }
-}
-
-/// Wraps a `FilesystemProcessStore` but fails every `records_for_scope` call
-/// so runtime-status exercises process-store error sanitization through the
-/// public host-runtime path.
-struct FailingRecordsProcessStore {
-    inner: Arc<FilesystemProcessStore<InMemoryBackend>>,
-}
-
-#[async_trait]
-impl ProcessStore for FailingRecordsProcessStore {
-    async fn start(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
-        self.inner.start(start).await
-    }
-
-    async fn complete(
-        &self,
-        scope: &ResourceScope,
-        process_id: ProcessId,
-    ) -> Result<ProcessRecord, ProcessError> {
-        self.inner.complete(scope, process_id).await
-    }
-
-    async fn fail(
-        &self,
-        scope: &ResourceScope,
-        process_id: ProcessId,
-        error_kind: String,
-    ) -> Result<ProcessRecord, ProcessError> {
-        self.inner.fail(scope, process_id, error_kind).await
-    }
-
-    async fn kill(
-        &self,
-        scope: &ResourceScope,
-        process_id: ProcessId,
-    ) -> Result<ProcessRecord, ProcessError> {
-        self.inner.kill(scope, process_id).await
-    }
-
-    async fn get(
-        &self,
-        scope: &ResourceScope,
-        process_id: ProcessId,
-    ) -> Result<Option<ProcessRecord>, ProcessError> {
-        self.inner.get(scope, process_id).await
-    }
-
-    async fn records_for_scope(
-        &self,
-        _scope: &ResourceScope,
-    ) -> Result<Vec<ProcessRecord>, ProcessError> {
-        Err(FilesystemError::Backend {
-            path: VirtualPath::new("/users/user1/processes").unwrap(),
-            operation: FilesystemOperation::ListDir,
-            reason: "simulated read failure: /tmp/processes.db connection refused".to_string(),
-        }
-        .into())
     }
 }
 
@@ -1414,39 +1374,21 @@ impl RunStateApprovalStore for RecordingCombinedRunStateApprovalStore {
     }
 }
 
-#[derive(Default)]
-struct CountingDispatcher {
-    count: Mutex<usize>,
-}
-
-impl CountingDispatcher {
-    fn count(&self) -> usize {
-        *self.count.lock().unwrap_or_else(|p| p.into_inner())
-    }
-}
-
-#[async_trait]
-impl CapabilityDispatcher for CountingDispatcher {
-    async fn dispatch_json(
-        &self,
-        request: CapabilityDispatchRequest,
-    ) -> Result<CapabilityDispatchResult, DispatchError> {
-        *self.count.lock().unwrap_or_else(|p| p.into_inner()) += 1;
-        Ok(CapabilityDispatchResult {
-            capability_id: request.capability_id,
-            provider: extension_id(),
-            runtime: RuntimeKind::Wasm,
-            output: json!({"ok": true}),
-            display_preview: None,
-            usage: ResourceUsage::default(),
-            receipt: ResourceReceipt {
-                id: ResourceReservationId::new(),
-                scope: request.scope,
-                status: ReservationStatus::Reconciled,
-                estimate: request.estimate,
-                actual: Some(ResourceUsage::default()),
-            },
-        })
+fn dispatch_result() -> CapabilityDispatchResult {
+    CapabilityDispatchResult {
+        capability_id: capability_id(),
+        provider: extension_id(),
+        runtime: RuntimeKind::Wasm,
+        output: json!({"ok": true}),
+        display_preview: None,
+        usage: ResourceUsage::default(),
+        receipt: ResourceReceipt {
+            id: ResourceReservationId::new(),
+            scope: ResourceScope::system(),
+            status: ReservationStatus::Reconciled,
+            estimate: ResourceEstimate::default(),
+            actual: Some(ResourceUsage::default()),
+        },
     }
 }
 
@@ -1464,48 +1406,6 @@ impl TrustAwareCapabilityDispatchAuthorizer for DenyAuthorizer {
         Decision::Deny {
             reason: DenyReason::PolicyDenied,
         }
-    }
-}
-
-#[derive(Default)]
-struct RecordingDispatcher {
-    request: Mutex<Option<CapabilityDispatchRequest>>,
-}
-
-impl RecordingDispatcher {
-    fn has_request(&self) -> bool {
-        self.request
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_some()
-    }
-}
-
-#[async_trait]
-impl CapabilityDispatcher for RecordingDispatcher {
-    async fn dispatch_json(
-        &self,
-        request: CapabilityDispatchRequest,
-    ) -> Result<CapabilityDispatchResult, DispatchError> {
-        *self
-            .request
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(request.clone());
-        Ok(CapabilityDispatchResult {
-            capability_id: request.capability_id,
-            provider: extension_id(),
-            runtime: RuntimeKind::Wasm,
-            output: json!({"ok": true}),
-            display_preview: None,
-            usage: ResourceUsage::default(),
-            receipt: ResourceReceipt {
-                id: ResourceReservationId::new(),
-                scope: request.scope,
-                status: ReservationStatus::Reconciled,
-                estimate: request.estimate,
-                actual: Some(ResourceUsage::default()),
-            },
-        })
     }
 }
 

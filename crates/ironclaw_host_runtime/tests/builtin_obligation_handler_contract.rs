@@ -15,6 +15,7 @@ use ironclaw_capabilities::{
 use ironclaw_events::InMemoryAuditSink;
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_host_api::dispatch_test_support::TestDispatcher;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, BuiltinObligationServices, CapabilitySurfaceVersion,
@@ -981,7 +982,9 @@ async fn builtin_obligation_handler_reserves_requested_resources_and_releases_on
 #[tokio::test]
 async fn default_host_runtime_fails_closed_when_resource_ceiling_lacks_required_estimate() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(PanicDispatcher);
+    let dispatcher = Arc::new(TestDispatcher::responding(|_, _| {
+        panic!("dispatcher must not be called for unsupported resource-ceiling obligations")
+    }));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
         Arc::new(ObligatingAuthorizer::new(vec![
             Obligation::EnforceResourceCeiling {
@@ -1018,7 +1021,7 @@ async fn default_host_runtime_fails_closed_when_resource_ceiling_lacks_required_
 #[tokio::test]
 async fn default_host_runtime_dispatches_when_resource_ceiling_is_satisfied() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher);
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
         Arc::new(ObligatingAuthorizer::new(vec![
             Obligation::EnforceResourceCeiling {
@@ -1057,7 +1060,7 @@ async fn default_host_runtime_dispatches_when_resource_ceiling_is_satisfied() {
 #[tokio::test]
 async fn default_host_runtime_installs_configured_obligation_handler() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher);
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
         Arc::new(ObligatingAuthorizer::new(vec![Obligation::AuditBefore]));
     let audit = Arc::new(InMemoryAuditSink::new());
@@ -1112,46 +1115,21 @@ impl TrustAwareCapabilityDispatchAuthorizer for ObligatingAuthorizer {
     }
 }
 
-#[derive(Default)]
-struct RecordingDispatcher;
-
-struct PanicDispatcher;
-
-#[async_trait]
-impl CapabilityDispatcher for PanicDispatcher {
-    async fn dispatch_json(
-        &self,
-        _request: CapabilityDispatchRequest,
-    ) -> Result<CapabilityDispatchResult, DispatchError> {
-        panic!("dispatcher must not be called for unsupported resource-ceiling obligations")
-    }
-}
-
-#[async_trait]
-impl CapabilityDispatcher for RecordingDispatcher {
-    async fn dispatch_json(
-        &self,
-        request: CapabilityDispatchRequest,
-    ) -> Result<CapabilityDispatchResult, DispatchError> {
-        Ok(CapabilityDispatchResult {
-            capability_id: request.capability_id,
-            provider: ExtensionId::new("echo").unwrap(),
-            runtime: RuntimeKind::Wasm,
-            output: json!({"ok": true}),
-            display_preview: None,
-            usage: ResourceUsage::default(),
-            receipt: ResourceReceipt {
-                id: request
-                    .resource_reservation
-                    .as_ref()
-                    .map(|reservation| reservation.id)
-                    .unwrap_or_default(),
-                scope: request.scope,
-                status: ReservationStatus::Reconciled,
-                estimate: request.estimate,
-                actual: Some(ResourceUsage::default()),
-            },
-        })
+fn dispatch_result() -> CapabilityDispatchResult {
+    CapabilityDispatchResult {
+        capability_id: capability_id(),
+        provider: ExtensionId::new("echo").unwrap(),
+        runtime: RuntimeKind::Wasm,
+        output: json!({"ok": true}),
+        display_preview: None,
+        usage: ResourceUsage::default(),
+        receipt: ResourceReceipt {
+            id: ResourceReservationId::new(),
+            scope: ResourceScope::system(),
+            status: ReservationStatus::Reconciled,
+            estimate: ResourceEstimate::default(),
+            actual: Some(ResourceUsage::default()),
+        },
     }
 }
 
@@ -1315,6 +1293,13 @@ impl RuntimeCredentialAccountResolver for SourceScopedHandleResolver {
 }
 
 #[derive(Debug)]
+// TOCTOU domain-state fake, not an I/O fault — cannot move to
+// `ironclaw_filesystem::FaultInjecting`. The "present at preflight, absent at
+// lease" transition is coupled inside a single `handler.prepare()` call (the
+// delete fires between `metadata` and `lease_once`, with no external seam to
+// interleave), and it needs the second read to return `Ok(None)` — a
+// genuinely-absent secret yielding `UnknownSecret` — which a filesystem
+// backend fault (only ever an `Err`) cannot reproduce.
 struct SecretDisappearsAfterPreflight {
     inner: FilesystemSecretStore<InMemoryBackend>,
     metadata_calls: AtomicUsize,

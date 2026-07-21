@@ -129,7 +129,7 @@ fn slack_manifest_from_bundled_inventory() -> String {
     ironclaw_first_party_extensions::packages::bundled_packages()
         .into_iter()
         .find(|bundle| bundle.id == "slack")
-        .expect("Slack is in the bundled package inventory") // safety: test-only fixture uses the static bundled Slack inventory.
+        .expect("Slack is in the bundled package inventory") // safety: Slack is a compile-time bundled test fixture.
         .manifest_toml
         .into_owned()
 }
@@ -498,7 +498,7 @@ fn slack_gate_reply_classifier() -> Arc<InboundPayloadClassifier> {
 async fn configured_channel_config() -> Arc<ChannelConfigService> {
     let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
     let record = ExtensionManifestRecord::from_toml(
-        &slack_manifest_from_bundled_inventory(),
+        slack_manifest_from_bundled_inventory(),
         ManifestSource::HostBundled,
         &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"), // safety: default catalog is valid in tests.
         None,
@@ -613,7 +613,7 @@ async fn slack_test_extension_host() -> Arc<ironclaw_extension_host::ExtensionHo
         let host_ports = ironclaw_host_runtime::default_host_port_catalog().expect("host ports"); // safety: default catalog is valid in tests.
         let contracts = product_extension_host_api_contract_registry().expect("contracts"); // safety: default registry is valid in tests.
         ironclaw_extensions::ExtensionManifestRecord::from_toml(
-            &slack_manifest_from_bundled_inventory(),
+            slack_manifest_from_bundled_inventory(),
             ironclaw_extensions::ManifestSource::HostBundled,
             &host_ports,
             None,

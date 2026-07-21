@@ -27,12 +27,13 @@ use ironclaw_events::{
     InMemoryEventSink, ReadScope,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_filesystem::InMemoryBackend;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
-#[cfg(feature = "libsql")]
-use ironclaw_filesystem::ScopedFilesystem;
-use ironclaw_filesystem::{DiskFilesystem, RootFilesystem};
+use ironclaw_filesystem::{
+    DiskFilesystem, Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, RootFilesystem,
+    ScopedFilesystem,
+};
+use ironclaw_host_api::dispatch_test_support::TestDispatcher;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, BuiltinObligationServices, CapabilitySurfaceVersion,
@@ -49,8 +50,7 @@ use ironclaw_network::{
 use ironclaw_processes::{
     BackgroundFailureStage, BackgroundProcessManager, FilesystemProcessResultStore,
     FilesystemProcessStore, ProcessError, ProcessExecutionRequest, ProcessExecutionResult,
-    ProcessExecutor, ProcessResultRecord, ProcessResultStore, ProcessStart, ProcessStatus,
-    ProcessStore,
+    ProcessExecutor, ProcessResultStore, ProcessStart, ProcessStatus, ProcessStore,
 };
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits,
@@ -63,10 +63,7 @@ use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptExecutionRequest,
     ScriptExecutionResult, ScriptExecutor, ScriptRuntime, ScriptRuntimeConfig,
 };
-use ironclaw_secrets::{
-    FilesystemSecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
-    SecretStoreError,
-};
+use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustProvenance,
@@ -1035,7 +1032,7 @@ pub(crate) async fn stage_process_handoffs(
 
 pub(crate) struct SpawnObligationFixture {
     pub(crate) registry: Arc<ExtensionRegistry>,
-    pub(crate) dispatcher: Arc<NoopDispatcher>,
+    pub(crate) dispatcher: Arc<TestDispatcher>,
     pub(crate) authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
     pub(crate) handler: Arc<BuiltinObligationHandler>,
     pub(crate) process_manager: Arc<BackgroundProcessManager>,
@@ -1124,7 +1121,9 @@ where
     R: ProcessResultStore + 'static,
 {
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
-    let dispatcher = Arc::new(NoopDispatcher);
+    let dispatcher = Arc::new(TestDispatcher::responding(|_, _| {
+        panic!("spawn tests must not invoke the foreground dispatcher")
+    }));
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let obligation_services = BuiltinObligationServices::new(
@@ -1199,11 +1198,6 @@ where
     }
 }
 
-#[derive(Default)]
-pub(crate) struct FailingProcessResultStore {
-    pub(crate) attempts: std::sync::Mutex<Vec<&'static str>>,
-}
-
 #[derive(Debug)]
 pub(crate) struct FailingCleanupResourceGovernor;
 
@@ -1270,149 +1264,86 @@ impl ResourceGovernor for FailingCleanupResourceGovernor {
     }
 }
 
-impl FailingProcessResultStore {
-    pub(crate) fn attempts(&self) -> Vec<&'static str> {
-        self.attempts.lock().unwrap().clone()
-    }
+/// Real `FilesystemProcessResultStore` over a [`FaultInjecting`] backend armed
+/// to fail every result write, replacing the whole-trait
+/// `FailingProcessResultStore` fake. Both `complete` (first `put` =
+/// `write_output`) and `fail` (first `put` = `write_result`) hit the injected
+/// `FilesystemError::Backend` on their first backend write, which the store
+/// maps to `ProcessError::Filesystem`. Returns the store plus the fault handle
+/// so a test can observe the write attempt (`backend.count(WriteFile)`).
+pub(crate) fn result_store_failing_writes() -> (
+    Arc<FilesystemProcessResultStore<FaultInjecting<InMemoryBackend>>>,
+    Arc<FaultInjecting<InMemoryBackend>>,
+) {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()).with_fault(
+        Fault::on(FilesystemOperation::WriteFile).backend("injected process-result write failure"),
+    ));
+    let store = Arc::new(FilesystemProcessResultStore::new(scoped_processes_fs(
+        backend.clone(),
+    )));
+    (store, backend)
 }
 
-#[async_trait]
-impl ProcessResultStore for FailingProcessResultStore {
-    async fn complete(
-        &self,
-        _scope: &ResourceScope,
-        _process_id: ProcessId,
-        _output: serde_json::Value,
-    ) -> Result<ProcessResultRecord, ProcessError> {
-        self.attempts.lock().unwrap().push("complete");
-        Err(ProcessError::InvalidStoredRecord {
-            reason: "result complete failed".to_string(),
-        })
-    }
-
-    async fn fail(
-        &self,
-        _scope: &ResourceScope,
-        _process_id: ProcessId,
-        _error_kind: String,
-    ) -> Result<ProcessResultRecord, ProcessError> {
-        self.attempts.lock().unwrap().push("fail");
-        Err(ProcessError::InvalidStoredRecord {
-            reason: "result fail failed".to_string(),
-        })
-    }
-
-    async fn kill(
-        &self,
-        _scope: &ResourceScope,
-        _process_id: ProcessId,
-    ) -> Result<ProcessResultRecord, ProcessError> {
-        self.attempts.lock().unwrap().push("kill");
-        Err(ProcessError::InvalidStoredRecord {
-            reason: "result kill failed".to_string(),
-        })
-    }
-
-    async fn get(
-        &self,
-        _scope: &ResourceScope,
-        _process_id: ProcessId,
-    ) -> Result<Option<ProcessResultRecord>, ProcessError> {
-        Ok(None)
-    }
+/// Real `FilesystemProcessStore` over a [`FaultInjecting`] backend armed to
+/// fail the terminal status transition's write, replacing the whole-trait
+/// `FailingTerminalProcessStore` fake. `start`'s record write is the 1st
+/// backend write and succeeds; the terminal transition (`complete` or `fail`,
+/// whichever the manager issues for the executor outcome) is the 2nd write and
+/// is faulted, surfacing as `ProcessError::Filesystem`. `get` /
+/// `records_for_scope` still read the live `Running` record.
+pub(crate) fn terminal_failing_process_store() -> (
+    Arc<FilesystemProcessStore<FaultInjecting<InMemoryBackend>>>,
+    Arc<FaultInjecting<InMemoryBackend>>,
+) {
+    let backend = Arc::new(
+        FaultInjecting::new(InMemoryBackend::new()).with_fault(
+            Fault::on(FilesystemOperation::WriteFile)
+                .nth(2)
+                .backend("injected terminal transition write failure"),
+        ),
+    );
+    let store = Arc::new(FilesystemProcessStore::new(scoped_processes_fs(
+        backend.clone(),
+    )));
+    (store, backend)
 }
 
-pub(crate) struct FailingTerminalProcessStore {
-    pub(crate) inner: FilesystemProcessStore<InMemoryBackend>,
-    pub(crate) fail_complete: bool,
-    pub(crate) fail_fail: bool,
-    pub(crate) attempts: std::sync::Mutex<Vec<&'static str>>,
+/// A `ScopedFilesystem` over `backend` exposing the `/processes` mount — the
+/// fault-injecting analogue of
+/// `ironclaw_processes::in_memory_backed_processes_filesystem()`.
+fn scoped_processes_fs(
+    backend: Arc<FaultInjecting<InMemoryBackend>>,
+) -> Arc<ScopedFilesystem<FaultInjecting<InMemoryBackend>>> {
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/processes").unwrap(),
+        VirtualPath::new("/engine/processes").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
 }
 
-impl FailingTerminalProcessStore {
-    pub(crate) fn fail_complete() -> Self {
-        Self {
-            inner: ironclaw_processes::in_memory_backed_process_store(),
-            fail_complete: true,
-            fail_fail: false,
-            attempts: std::sync::Mutex::new(Vec::new()),
-        }
-    }
-
-    pub(crate) fn fail_fail() -> Self {
-        Self {
-            inner: ironclaw_processes::in_memory_backed_process_store(),
-            fail_complete: false,
-            fail_fail: true,
-            attempts: std::sync::Mutex::new(Vec::new()),
-        }
-    }
-
-    pub(crate) fn attempts(&self) -> Vec<&'static str> {
-        self.attempts.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl ProcessStore for FailingTerminalProcessStore {
-    async fn start(
-        &self,
-        start: ProcessStart,
-    ) -> Result<ironclaw_processes::ProcessRecord, ProcessError> {
-        self.inner.start(start).await
-    }
-
-    async fn complete(
-        &self,
-        scope: &ResourceScope,
-        process_id: ProcessId,
-    ) -> Result<ironclaw_processes::ProcessRecord, ProcessError> {
-        self.attempts.lock().unwrap().push("complete");
-        if self.fail_complete {
-            return Err(ProcessError::InvalidStoredRecord {
-                reason: "status complete failed".to_string(),
-            });
-        }
-        self.inner.complete(scope, process_id).await
-    }
-
-    async fn fail(
-        &self,
-        scope: &ResourceScope,
-        process_id: ProcessId,
-        error_kind: String,
-    ) -> Result<ironclaw_processes::ProcessRecord, ProcessError> {
-        self.attempts.lock().unwrap().push("fail");
-        if self.fail_fail {
-            return Err(ProcessError::InvalidStoredRecord {
-                reason: "status fail failed".to_string(),
-            });
-        }
-        self.inner.fail(scope, process_id, error_kind).await
-    }
-
-    async fn kill(
-        &self,
-        scope: &ResourceScope,
-        process_id: ProcessId,
-    ) -> Result<ironclaw_processes::ProcessRecord, ProcessError> {
-        self.inner.kill(scope, process_id).await
-    }
-
-    async fn get(
-        &self,
-        scope: &ResourceScope,
-        process_id: ProcessId,
-    ) -> Result<Option<ironclaw_processes::ProcessRecord>, ProcessError> {
-        self.inner.get(scope, process_id).await
-    }
-
-    async fn records_for_scope(
-        &self,
-        scope: &ResourceScope,
-    ) -> Result<Vec<ironclaw_processes::ProcessRecord>, ProcessError> {
-        self.inner.records_for_scope(scope).await
-    }
+/// Real `FilesystemSecretStore` over a [`FaultInjecting`] backend armed to fail
+/// every secret read, replacing the whole-trait, call-counting
+/// `CountingErrorSecretStore` fake. `metadata()` runs its genuine
+/// `read_secret` -> `get` path and the injected `FilesystemError::Backend` maps
+/// (`fs_to_secret_store_error`) to `SecretStoreError::StoreUnavailable` — the
+/// same erroring shape the fake hand-returned, now proven through the real
+/// store. Returns the store plus the fault handle, so a test can observe the
+/// read probes (`backend.count(ReadFile)`) instead of a bespoke counter.
+pub(crate) fn secret_store_failing_reads() -> (
+    Arc<FilesystemSecretStore<FaultInjecting<InMemoryBackend>>>,
+    Arc<FaultInjecting<InMemoryBackend>>,
+) {
+    let backend = Arc::new(
+        FaultInjecting::new(InMemoryBackend::new()).with_fault(
+            Fault::on(FilesystemOperation::ReadFile)
+                .path("secrets")
+                .backend("injected secret read failure"),
+        ),
+    );
+    let store = Arc::new(FilesystemSecretStore::ephemeral_over(backend.clone()));
+    (store, backend)
 }
 
 pub(crate) struct BackgroundExecutor {
@@ -1512,18 +1443,6 @@ impl ironclaw_processes::ProcessManager for FailingSpawnManager {
     }
 }
 
-pub(crate) struct NoopDispatcher;
-
-#[async_trait]
-impl CapabilityDispatcher for NoopDispatcher {
-    async fn dispatch_json(
-        &self,
-        _request: CapabilityDispatchRequest,
-    ) -> Result<CapabilityDispatchResult, DispatchError> {
-        panic!("spawn tests must not invoke the foreground dispatcher")
-    }
-}
-
 pub(crate) async fn wait_for_status(
     store: &dyn ProcessStore,
     scope: &ResourceScope,
@@ -1569,30 +1488,28 @@ pub(crate) async fn wait_for_sandbox_process_result(
     panic!("process sandbox executor did not complete process {process_id}");
 }
 
-pub(crate) async fn wait_for_result_store_attempt(
-    store: &FailingProcessResultStore,
-    attempt: &'static str,
-) {
+pub(crate) async fn wait_for_result_store_write(backend: &FaultInjecting<InMemoryBackend>) {
+    // The result store's terminal write (complete/fail) is faulted; the gated
+    // op is still recorded, so a single recorded WriteFile marks the attempt.
     for _ in 0..100 {
-        if store.attempts().contains(&attempt) {
+        if backend.count(FilesystemOperation::WriteFile) >= 1 {
             return;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    panic!("result store did not record {attempt} attempt");
+    panic!("result store did not attempt a write");
 }
 
-pub(crate) async fn wait_for_process_store_attempt(
-    store: &FailingTerminalProcessStore,
-    attempt: &'static str,
-) {
+pub(crate) async fn wait_for_terminal_transition_write(backend: &FaultInjecting<InMemoryBackend>) {
+    // `start`'s record write is the 1st backend write; the faulted terminal
+    // status transition is the 2nd.
     for _ in 0..100 {
-        if store.attempts().contains(&attempt) {
+        if backend.count(FilesystemOperation::WriteFile) >= 2 {
             return;
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    panic!("process store did not record {attempt} attempt");
+    panic!("process store did not attempt the terminal transition write");
 }
 
 pub(crate) async fn wait_for_no_reserved_processes(governor: &InMemoryResourceGovernor) {
@@ -2378,97 +2295,6 @@ audience = { scheme = "https", host_pattern = "api.example.com" }
 target = { type = "header", name = "x-api-key" }
 required = true
 "#;
-
-/// An always-erroring secret store that ALSO counts `metadata()` invocations, so a
-/// test can prove WHERE in the pipeline the store was probed. Every method still errors.
-#[derive(Default)]
-pub(crate) struct CountingErrorSecretStore {
-    pub(crate) metadata_calls: Arc<AtomicUsize>,
-}
-
-#[async_trait]
-impl SecretStore for CountingErrorSecretStore {
-    async fn put(
-        &self,
-        _scope: ResourceScope,
-        _handle: SecretHandle,
-        _material: SecretMaterial,
-        _expires_at: Option<ironclaw_host_api::Timestamp>,
-    ) -> Result<SecretMetadata, SecretStoreError> {
-        Err(SecretStoreError::StoreUnavailable {
-            reason: "simulated backend failure".to_string(),
-        })
-    }
-
-    async fn metadata(
-        &self,
-        _scope: &ResourceScope,
-        _handle: &SecretHandle,
-    ) -> Result<Option<SecretMetadata>, SecretStoreError> {
-        self.metadata_calls.fetch_add(1, Ordering::SeqCst);
-        Err(SecretStoreError::StoreUnavailable {
-            reason: "simulated backend failure".to_string(),
-        })
-    }
-
-    async fn metadata_for_scope(
-        &self,
-        _scope: &ResourceScope,
-    ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
-        Err(SecretStoreError::StoreUnavailable {
-            reason: "simulated backend failure".to_string(),
-        })
-    }
-
-    async fn delete(
-        &self,
-        _scope: &ResourceScope,
-        _handle: &SecretHandle,
-    ) -> Result<bool, SecretStoreError> {
-        Err(SecretStoreError::StoreUnavailable {
-            reason: "simulated backend failure".to_string(),
-        })
-    }
-
-    async fn lease_once(
-        &self,
-        _scope: &ResourceScope,
-        _handle: &SecretHandle,
-    ) -> Result<SecretLease, SecretStoreError> {
-        Err(SecretStoreError::StoreUnavailable {
-            reason: "simulated backend failure".to_string(),
-        })
-    }
-
-    async fn consume(
-        &self,
-        _scope: &ResourceScope,
-        _lease_id: SecretLeaseId,
-    ) -> Result<SecretMaterial, SecretStoreError> {
-        Err(SecretStoreError::StoreUnavailable {
-            reason: "simulated backend failure".to_string(),
-        })
-    }
-
-    async fn revoke(
-        &self,
-        _scope: &ResourceScope,
-        _lease_id: SecretLeaseId,
-    ) -> Result<SecretLease, SecretStoreError> {
-        Err(SecretStoreError::StoreUnavailable {
-            reason: "simulated backend failure".to_string(),
-        })
-    }
-
-    async fn leases_for_scope(
-        &self,
-        _scope: &ResourceScope,
-    ) -> Result<Vec<SecretLease>, SecretStoreError> {
-        Err(SecretStoreError::StoreUnavailable {
-            reason: "simulated backend failure".to_string(),
-        })
-    }
-}
 
 pub(crate) const SCRIPT_MANIFEST: &str = r#"
 id = "script"
