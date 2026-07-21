@@ -3,16 +3,18 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::{
     CasApply, CompositeRootFilesystem, ContentType, Entry, LibSqlRootFilesystem,
     PostgresRootFilesystem, RootFilesystem, ScopedFilesystem, cas_update,
 };
 use ironclaw_host_api::{
-    ActivityId, Blocked, CapabilityId, CapabilitySet, CorrelationId, Denial, DenyReason, DenyRef,
-    ExecutionContext, ExtensionId, FailureKind, GateRef, GateWaypoint, InvocationId, MountView,
-    Outcome, OutcomeRefs, ProcessRef, ProcessWaypoint, Resolution, ResourceEstimate, ResourceScope,
-    ResultPreviewMeta, ResultProgress, ResultRef, ResumeToken, RuntimeKind, SafeSummary,
-    ScopedPath, Suspension, TerminateHint, ToolVerdict, TrustClass,
+    ActivityId, Blocked, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilityId,
+    CapabilitySet, CorrelationId, Denial, DenyReason, DenyRef, ExecutionContext, ExtensionId,
+    FailureKind, GateRef, GateWaypoint, GrantConstraints, InvocationId, MountView, NetworkPolicy,
+    Outcome, OutcomeRefs, Principal, ProcessRef, ProcessWaypoint, Resolution, ResourceEstimate,
+    ResourceScope, ResultPreviewMeta, ResultProgress, ResultRef, ResumeToken, RuntimeKind,
+    SafeSummary, ScopedPath, Suspension, TerminateHint, ToolVerdict, TrustClass,
 };
 use ironclaw_host_runtime::{
     HostRuntime, RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
@@ -32,6 +34,7 @@ const PRODUCT_INGRESS_EXTENSION_ID: &str = "ironclaw_webui";
 pub(crate) enum RuntimeProductCapabilityInvoker {
     Available {
         host_runtime: Arc<dyn HostRuntime>,
+        registry: Arc<ExtensionRegistry>,
         results: ProductResultFilesystem,
     },
     Unavailable,
@@ -49,24 +52,30 @@ impl RuntimeProductCapabilityInvoker {
         let Some(host_runtime) = services.host_runtime.as_ref().map(Arc::clone) else {
             return Self::Unavailable;
         };
-        let results = if let Some(local) = &services.local_runtime {
-            ProductResultFilesystem::Composite(crate::wrap_scoped(Arc::clone(
-                &local.extension_filesystem,
-            )))
+        let (results, registry) = if let Some(local) = &services.local_runtime {
+            (
+                ProductResultFilesystem::Composite(crate::wrap_scoped(Arc::clone(
+                    &local.extension_filesystem,
+                ))),
+                Arc::clone(&local.extension_registry),
+            )
         } else if let Some(production) = &services.production_runtime {
             match production {
-                RebornProductionRuntimeServices::LibSql(graph) => {
-                    ProductResultFilesystem::LibSql(Arc::clone(&graph.scoped_filesystem))
-                }
-                RebornProductionRuntimeServices::Postgres(graph) => {
-                    ProductResultFilesystem::Postgres(Arc::clone(&graph.scoped_filesystem))
-                }
+                RebornProductionRuntimeServices::LibSql(graph) => (
+                    ProductResultFilesystem::LibSql(Arc::clone(&graph.scoped_filesystem)),
+                    Arc::clone(&graph.extension_registry),
+                ),
+                RebornProductionRuntimeServices::Postgres(graph) => (
+                    ProductResultFilesystem::Postgres(Arc::clone(&graph.scoped_filesystem)),
+                    Arc::clone(&graph.extension_registry),
+                ),
             }
         } else {
             return Self::Unavailable;
         };
         Self::Available {
             host_runtime,
+            registry,
             results,
         }
     }
@@ -83,12 +92,19 @@ impl ProductCapabilityInvoker for RuntimeProductCapabilityInvoker {
     ) -> Result<Resolution, RebornServicesError> {
         let Self::Available {
             host_runtime,
+            registry,
             results,
         } = self
         else {
             return Err(product_runtime_unavailable());
         };
-        let context = product_execution_context(&caller, activity_id)?;
+        // The origin-to-gate matrix is still provisional in today's kernel.
+        // Encode the direct user gesture as one exact, host-issued grant. The
+        // runtime independently re-resolves the descriptor and authorizes it,
+        // so a concurrent stronger replacement no longer fits this attenuated
+        // grant and fails closed.
+        let descriptor = registry.get_capability(&capability);
+        let context = product_execution_context(&caller, activity_id, descriptor)?;
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
         let requested_capability = capability.clone();
@@ -109,6 +125,7 @@ impl ProductCapabilityInvoker for RuntimeProductCapabilityInvoker {
 fn product_execution_context(
     caller: &WebUiAuthenticatedCaller,
     activity_id: ActivityId,
+    descriptor: Option<&CapabilityDescriptor>,
 ) -> Result<ExecutionContext, RebornServicesError> {
     let invocation_id = InvocationId::from_uuid(activity_id.as_uuid());
     let scope = ResourceScope {
@@ -120,6 +137,13 @@ fn product_execution_context(
         thread_id: None,
         invocation_id,
     };
+    let extension_id = ExtensionId::new(PRODUCT_INGRESS_EXTENSION_ID)
+        .map_err(RebornServicesError::internal_from)?;
+    let grants = descriptor
+        .map(|descriptor| CapabilitySet {
+            grants: vec![product_gesture_grant(descriptor, &extension_id)],
+        })
+        .unwrap_or_default();
     let context = ExecutionContext {
         invocation_id,
         correlation_id: CorrelationId::new(),
@@ -133,13 +157,12 @@ fn product_execution_context(
         mission_id: None,
         thread_id: None,
         run_id: None,
-        extension_id: ExtensionId::new(PRODUCT_INGRESS_EXTENSION_ID)
-            .map_err(RebornServicesError::internal_from)?,
+        extension_id,
         // Both are provisional input to the kernel. Resolve/authorize derives
         // the real lane and effective trust from the capability descriptor.
         runtime: RuntimeKind::FirstParty,
         trust: TrustClass::Sandbox,
-        grants: CapabilitySet::default(),
+        grants,
         mounts: MountView::default(),
         resource_scope: scope,
     };
@@ -147,6 +170,37 @@ fn product_execution_context(
         .validate()
         .map_err(RebornServicesError::internal_from)?;
     Ok(context)
+}
+
+fn product_gesture_grant(
+    descriptor: &CapabilityDescriptor,
+    product_ingress: &ExtensionId,
+) -> CapabilityGrant {
+    let mut secrets = Vec::new();
+    for credential in &descriptor.runtime_credentials {
+        if !secrets.contains(&credential.handle) {
+            secrets.push(credential.handle.clone());
+        }
+    }
+    CapabilityGrant {
+        id: CapabilityGrantId::new(),
+        capability: descriptor.id.clone(),
+        grantee: Principal::Extension(product_ingress.clone()),
+        issued_by: Principal::HostRuntime,
+        constraints: GrantConstraints {
+            allowed_effects: descriptor.effects.clone(),
+            mounts: MountView::default(),
+            network: NetworkPolicy {
+                allowed_targets: descriptor.network_targets.clone(),
+                deny_private_ip_ranges: true,
+                max_egress_bytes: None,
+            },
+            secrets,
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: Some(1),
+        },
+    }
 }
 
 async fn product_resolution(
