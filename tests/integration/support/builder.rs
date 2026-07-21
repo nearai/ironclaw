@@ -969,30 +969,46 @@ impl RebornIntegrationHarness {
             .as_ref()
             .ok_or("assert_gate_survives_reopen requires StorageMode::LibSql")?;
         let fresh_composite = reopen_fresh_libsql_composite(db_path).await?;
-        let fresh_turn_store = FilesystemTurnStateRowStore::new(scoped_turns_fs_composite(
-            fresh_composite,
-            &self._shared.canonical_binding,
-        )?);
-        let state = fresh_turn_store
-            .get_run_state(GetRunStateRequest {
-                scope: self.turn_scope.clone(),
-                run_id,
-            })
-            .await?;
-        if state.status != TurnStatus::BlockedApproval {
-            return Err(format!(
-                "expected BlockedApproval after reopen, got {:?}",
-                state.status
-            )
-            .into());
-        }
-        match state.gate_ref.as_ref().map(GateRef::as_str) {
-            Some(seen) if seen == expected_gate_ref.as_str() => Ok(()),
-            other => Err(format!(
-                "gate ref after reopen was {other:?}, expected {:?}",
-                expected_gate_ref.as_str()
-            )
-            .into()),
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            // The live store exposes its hot snapshot before a critical append's
+            // caller receives the durable ack. Rebuild this fresh row-store view
+            // on every attempt so an early Running read is not cached indefinitely.
+            let fresh_turn_store = FilesystemTurnStateRowStore::new(scoped_turns_fs_composite(
+                Arc::clone(&fresh_composite),
+                &self._shared.canonical_binding,
+            )?);
+            let state = fresh_turn_store
+                .get_run_state(GetRunStateRequest {
+                    scope: self.turn_scope.clone(),
+                    run_id,
+                })
+                .await?;
+            if state.status == TurnStatus::BlockedApproval {
+                return match state.gate_ref.as_ref().map(GateRef::as_str) {
+                    Some(seen) if seen == expected_gate_ref.as_str() => Ok(()),
+                    other => Err(format!(
+                        "gate ref after reopen was {other:?}, expected {:?}",
+                        expected_gate_ref.as_str()
+                    )
+                    .into()),
+                };
+            }
+            if state.status.is_terminal() || state.status.is_blocked() {
+                return Err(format!(
+                    "expected BlockedApproval after reopen, got {:?}",
+                    state.status
+                )
+                .into());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "timed out waiting for BlockedApproval after reopen; last status={:?}",
+                    state.status
+                )
+                .into());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
