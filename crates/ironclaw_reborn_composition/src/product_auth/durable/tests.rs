@@ -2081,17 +2081,17 @@ async fn filesystem_account_record_source_rejects_malformed_scan_records() {
     assert!(
         matches!(
             service.accounts_for_owner(&scope).await,
-            Err(AuthProductError::BackendUnavailable)
+            Err(AuthProductError::CorruptRecord)
         ),
-        "runtime owner scans should fail loudly on malformed account records"
+        "runtime owner scans should classify malformed account records as permanent corruption"
     );
 
     assert!(
         matches!(
             service.read_account(&scope, malformed_account_id).await,
-            Err(AuthProductError::BackendUnavailable)
+            Err(AuthProductError::CorruptRecord)
         ),
-        "exact account reads should remain strict"
+        "exact account reads should remain strict and non-retryable"
     );
 }
 
