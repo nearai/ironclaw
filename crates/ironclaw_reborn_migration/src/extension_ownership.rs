@@ -146,22 +146,23 @@ fn rewrite_installation_owners(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::{collections::BTreeSet, sync::Arc};
 
     #[cfg(feature = "libsql")]
-    use std::{path::Path, sync::Arc};
+    use std::path::Path;
 
     use chrono::Utc;
     use ironclaw_extensions::{
         ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
         ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
-        InstallationOwner, ManifestSource, VolatileExtensionInstallationStore,
+        FilesystemExtensionInstallationStore, InstallationOwner, ManifestSource,
     };
+    use ironclaw_filesystem::InMemoryBackend;
     #[cfg(feature = "libsql")]
     use ironclaw_filesystem::{LibSqlRootFilesystem, RootFilesystem, ScopedFilesystem};
     #[cfg(feature = "libsql")]
     use ironclaw_host_api::AgentId;
-    use ironclaw_host_api::{ExtensionId, HostPortCatalog, TenantId, UserId};
+    use ironclaw_host_api::{ExtensionId, HostPortCatalog, TenantId, UserId, VirtualPath};
     #[cfg(feature = "libsql")]
     use ironclaw_reborn_identity::{
         FilesystemRebornIdentityStore, RebornUserDirectory, RebornUserRole,
@@ -219,6 +220,17 @@ output_schema_ref = "schemas/read.output.json"
         .expect("manifest")
     }
 
+    async fn filesystem_store() -> FilesystemExtensionInstallationStore {
+        FilesystemExtensionInstallationStore::load_at(
+            Arc::new(InMemoryBackend::new()),
+            VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
+            HostPortCatalog::empty(),
+            ironclaw_extensions::HostApiContractRegistry::new(),
+        )
+        .await
+        .expect("filesystem store")
+    }
+
     #[test]
     fn rewrites_every_installation_to_the_complete_user_set() {
         let alice = UserId::new("alice").expect("alice");
@@ -244,7 +256,7 @@ output_schema_ref = "schemas/read.output.json"
 
     #[tokio::test]
     async fn dry_run_apply_and_rerun_are_safe_and_idempotent() {
-        let store = VolatileExtensionInstallationStore::default();
+        let store = filesystem_store().await;
         let alice = UserId::new("alice").expect("alice");
         let bob = UserId::new("bob").expect("bob");
         let bootstrap = UserId::new("bootstrap-operator").expect("bootstrap");

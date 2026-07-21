@@ -4,8 +4,7 @@
 //! (`available_extensions`, `bundled_skills`, `gsuite`), credential requirement
 //! and activation plumbing (`extension_activation_credentials`,
 //! `extension_credential_requirements`, `webui_extension_credentials`), the
-//! installation store and lifecycle command/capability stack
-//! (`extension_installation_store`, `extension_lifecycle`,
+//! lifecycle command/capability stack (`extension_lifecycle`,
 //! `extension_lifecycle_capabilities`, `extension_lifecycle_command`,
 //! `lifecycle`, `skill_learning`, `skill_listing`), and MCP discovery
 //! (`mcp`, `mcp_discovery`) behind one internal module. The crate root re-exports
@@ -17,7 +16,6 @@ pub(crate) mod bundled_skills;
 pub(crate) mod extension_activation_credentials;
 pub(crate) mod extension_bundle;
 pub(crate) mod extension_credential_requirements;
-pub(crate) mod extension_installation_store;
 pub(crate) mod extension_lifecycle;
 pub(crate) mod extension_lifecycle_capabilities;
 #[cfg(test)]

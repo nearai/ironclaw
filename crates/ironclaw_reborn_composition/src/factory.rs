@@ -34,7 +34,7 @@ use ironclaw_events::{DurableAuditLog, DurableEventLog};
 use ironclaw_events::{InMemoryDurableAuditLog, InMemoryDurableEventLog};
 use ironclaw_extensions::{
     ExtensionInstallationStore, ExtensionLifecycleService, ExtensionRegistry,
-    SharedExtensionRegistry,
+    FilesystemExtensionInstallationStore, SharedExtensionRegistry,
 };
 #[cfg(not(feature = "libsql"))]
 use ironclaw_filesystem::InMemoryBackend;
@@ -116,6 +116,7 @@ use crate::extension_host::available_extensions::{
     slack_bot_manifest_digest, slack_manifest_digest,
 };
 use crate::extension_host::extension_removal_cleanup::SlackPersonalConnectionCleanupAdapter;
+use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 use crate::extension_host::lifecycle::{
     RebornLocalLifecycleFacade, RebornLocalSkillManagementPort, build_local_skill_management_port,
 };
@@ -126,7 +127,6 @@ use crate::extension_host::{
         google_docs_manifest_digest, google_drive_manifest_digest, google_sheets_manifest_digest,
         google_slides_manifest_digest, notion_mcp_manifest_digest, web_access_manifest_digest,
     },
-    extension_installation_store::FilesystemExtensionInstallationStore,
     extension_lifecycle::{
         ActiveExtensionPublisher, ExtensionCredentialCleanup, RebornLocalExtensionManagementPort,
         restore_extension_lifecycle_state,
@@ -1949,10 +1949,13 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         })?,
     );
     let extension_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
+    let (extension_host_ports, extension_contracts) = extension_installation_manifest_context()?;
     let extension_installation_store: Arc<dyn ExtensionInstallationStore> = Arc::new(
         FilesystemExtensionInstallationStore::load_at(
             extension_filesystem.clone(),
             extension_installation_state_path,
+            extension_host_ports,
+            extension_contracts,
         )
         .await
         .map_err(|error| RebornBuildError::InvalidConfig {
@@ -2415,6 +2418,26 @@ where
     FilesystemTurnStateRowStore::new(filesystem).with_limits(limits)
 }
 
+fn extension_installation_manifest_context() -> Result<
+    (
+        ironclaw_host_api::HostPortCatalog,
+        ironclaw_extensions::HostApiContractRegistry,
+    ),
+    RebornBuildError,
+> {
+    let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("extension installation host port catalog invalid: {error}"),
+        }
+    })?;
+    let contracts = product_extension_host_api_contract_registry().map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("extension installation host API contracts invalid: {error}"),
+        }
+    })?;
+    Ok((host_ports, contracts))
+}
+
 fn local_dev_extension_installation_state_path(
     profile: RebornCompositionProfile,
     local_runtime_identity: Option<&RebornLocalRuntimeIdentity>,
@@ -2438,7 +2461,7 @@ fn local_dev_extension_installation_state_path(
         .map(|identity| identity.tenant_id.clone())
         .unwrap_or(default_tenant_id);
     VirtualPath::new(format!(
-        "/tenants/{}/system/extensions/.installations/state.json",
+        "/tenants/{}/system/extensions/.installations",
         tenant_id.as_str()
     ))
     .map_err(|error| RebornBuildError::InvalidConfig {
@@ -3318,10 +3341,10 @@ pub(crate) async fn open_local_dev_slack_host_state_filesystem_for_test(
 /// paralleling how `assert_reply_persists_after_reopen` opens a fresh libsql
 /// handle rather than reusing the live one. Reuses the production
 /// [`local_dev_project_filesystem`] mounts and [`FilesystemExtensionInstallationStore::default_state_path`]
-/// so the reopen reads the exact on-disk `/system/extensions` state the running
+/// so the reopen reads the exact on-disk `/system/extensions` rows the running
 /// harness wrote (mirrors the production install-store load in
 /// [`build_reborn_services`], above at the `extension_installation_store` binding).
-/// The store's virtual state path has no identity dependency for local-dev
+/// The store's virtual row root has no identity dependency for local-dev
 /// profiles, so no tenant/user context is needed. Tests only; zero bytes in
 /// production builds.
 #[cfg(feature = "test-support")]
@@ -3340,11 +3363,14 @@ pub(crate) async fn open_local_dev_extension_installation_store_for_test(
                 reason: format!("extension installation state path invalid: {error}"),
             }
         })?;
-    let store = FilesystemExtensionInstallationStore::load_at(filesystem, state_path)
-        .await
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("extension installation state could not be reopened: {error}"),
-        })?;
+    let (host_ports, contracts) = extension_installation_manifest_context()?;
+    let store = FilesystemExtensionInstallationStore::load_at(
+        filesystem, state_path, host_ports, contracts,
+    )
+    .await
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("extension installation state could not be reopened: {error}"),
+    })?;
     Ok(Arc::new(store))
 }
 
@@ -3369,7 +3395,7 @@ pub async fn extension_installation_store_for_migration(
 ) -> Result<Arc<dyn ExtensionInstallationStore>, RebornBuildError> {
     let state_path = match tenant_id {
         Some(tenant_id) => VirtualPath::new(format!(
-            "/tenants/{}/system/extensions/.installations/state.json",
+            "/tenants/{}/system/extensions/.installations",
             tenant_id.as_str()
         ))
         .map_err(|error| RebornBuildError::InvalidConfig {
@@ -3381,11 +3407,14 @@ pub async fn extension_installation_store_for_migration(
             }
         })?,
     };
-    let store = FilesystemExtensionInstallationStore::load_at(filesystem, state_path)
-        .await
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("extension installation state could not be loaded: {error}"),
-        })?;
+    let (host_ports, contracts) = extension_installation_manifest_context()?;
+    let store = FilesystemExtensionInstallationStore::load_at(
+        filesystem, state_path, host_ports, contracts,
+    )
+    .await
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("extension installation state could not be loaded: {error}"),
+    })?;
     Ok(Arc::new(store))
 }
 

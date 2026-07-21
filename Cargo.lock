@@ -4051,6 +4051,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "ironclaw_extensions",
+ "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_product_adapters",
  "serde",

@@ -765,18 +765,9 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
     // carry the canonical id, both private owners, fail-closed Disabled
     // activation, and the merged credential binding.
     let installation_doc =
-        reborn_entry_content(&dst, "%/system/extensions/.installations/state.json").await;
-    let installation_state: serde_json::Value =
-        serde_json::from_str(&installation_doc).expect("installation state JSON");
-    let installations = installation_state["installations"]
-        .as_array()
-        .expect("installation array");
-    assert_eq!(
-        installations.len(),
-        1,
-        "same-named source installs must canonicalize to one row"
-    );
-    let installation = &installations[0];
+        reborn_entry_content(&dst, "%/system/extensions/.installations/installations/%").await;
+    let installation: serde_json::Value =
+        serde_json::from_str(&installation_doc).expect("installation row JSON");
     assert_eq!(installation["installation_id"], "weather");
     assert_eq!(installation["extension_id"], "weather");
     assert_eq!(installation["activation_state"], "disabled");
@@ -801,8 +792,8 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
         "expected the migrated secret document on disk"
     );
     assert!(
-        reborn_entry_count(&dst, "%/system/extensions/.installations/state.json").await >= 1,
-        "expected the extension installation state document on disk"
+        reborn_entry_count(&dst, "%/system/extensions/.installations/installations/%").await >= 1,
+        "expected the extension installation row on disk"
     );
 
     // ── round-trip through the Reborn triggers repo ──
@@ -842,12 +833,12 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
         "re-run must upsert the same installation, not duplicate"
     );
     assert_eq!(
-        reborn_entry_count(&dst, "%/system/extensions/.installations/state.json").await,
+        reborn_entry_count(&dst, "%/system/extensions/.installations/installations/%").await,
         1,
-        "re-run must not write a second installation state document"
+        "re-run must not write a second installation row"
     );
     assert_eq!(
-        reborn_entry_content(&dst, "%/system/extensions/.installations/state.json").await,
+        reborn_entry_content(&dst, "%/system/extensions/.installations/installations/%").await,
         installation_doc,
         "re-run must preserve deterministic canonical extension state"
     );
@@ -869,14 +860,12 @@ async fn migrates_all_active_duplicate_users_as_enabled() {
 
     assert_eq!(report.stats.extensions, 1);
     let installation_doc =
-        reborn_entry_content(&dst, "%/system/extensions/.installations/state.json").await;
-    let state: serde_json::Value = serde_json::from_str(&installation_doc).unwrap();
-    let installations = state["installations"].as_array().unwrap();
-    assert_eq!(installations.len(), 1);
-    assert_eq!(installations[0]["activation_state"], "enabled");
-    assert_eq!(installations[0]["owner"]["kind"], "users");
+        reborn_entry_content(&dst, "%/system/extensions/.installations/installations/%").await;
+    let installation: serde_json::Value = serde_json::from_str(&installation_doc).unwrap();
+    assert_eq!(installation["activation_state"], "enabled");
+    assert_eq!(installation["owner"]["kind"], "users");
     assert_eq!(
-        installations[0]["owner"]["user_ids"],
+        installation["owner"]["user_ids"],
         serde_json::json!([USER, USER_BOB])
     );
 }
@@ -902,7 +891,7 @@ async fn migration_records_metadata_conflict_without_partial_extension() {
             && loss.detail.contains("no partial canonical installation")
     }));
     assert_eq!(
-        reborn_entry_count(&dst, "%/system/extensions/.installations/state.json").await,
+        reborn_entry_count(&dst, "%/system/extensions/.installations/installations/%").await,
         0,
         "metadata conflict must not write a partial canonical installation"
     );
@@ -927,11 +916,9 @@ async fn migration_merges_distinct_credential_bindings() {
     assert_eq!(report.stats.extensions, 1);
     assert_eq!(report.losses_in(Domain::Extension), 4);
     let installation_doc =
-        reborn_entry_content(&dst, "%/system/extensions/.installations/state.json").await;
-    let state: serde_json::Value = serde_json::from_str(&installation_doc).unwrap();
-    let bindings = state["installations"][0]["credential_bindings"]
-        .as_array()
-        .unwrap();
+        reborn_entry_content(&dst, "%/system/extensions/.installations/installations/%").await;
+    let installation: serde_json::Value = serde_json::from_str(&installation_doc).unwrap();
+    let bindings = installation["credential_bindings"].as_array().unwrap();
     assert_eq!(bindings.len(), 2);
     assert!(bindings.iter().any(|binding| {
         binding["credential_handle"] == "openai_api_key"
