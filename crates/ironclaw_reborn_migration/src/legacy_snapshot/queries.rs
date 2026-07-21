@@ -14,7 +14,6 @@ use uuid::Uuid;
 
 use super::connect::LegacyDb;
 use super::error::LegacyError;
-#[cfg(feature = "libsql")]
 use super::types::normalize_notify_user;
 use super::types::{
     AgentJobRecord, Conversation, ConversationMessage, MemoryDocument, NotifyConfig,
@@ -22,9 +21,7 @@ use super::types::{
 };
 use super::types::{Routine, RoutineAction};
 
-#[cfg(feature = "postgres")]
 use crate::source::is_missing_postgres_table_error;
-#[cfg(feature = "libsql")]
 use crate::source::is_missing_table_error;
 
 /// Explicit column list for the `routines` table — libSQL positional reads
@@ -32,7 +29,6 @@ use crate::source::is_missing_table_error;
 /// libSQL-only (see [`super::connect::ensure_schema_current`] for the
 /// independent, backend-agnostic expected-column list used to detect a stale
 /// source schema).
-#[cfg(feature = "libsql")]
 pub(crate) const ROUTINE_COLUMNS: &str = "\
     id, name, description, user_id, enabled, \
     trigger_type, trigger_config, action_type, action_config, \
@@ -48,9 +44,7 @@ impl LegacyDb {
         limit: i64,
     ) -> Result<Vec<Conversation>, LegacyError> {
         match self {
-            #[cfg(feature = "libsql")]
             LegacyDb::LibSql(db) => libsql_conversations(db, user_id, limit).await,
-            #[cfg(feature = "postgres")]
             LegacyDb::Postgres(pool) => postgres_conversations(pool, user_id, limit).await,
         }
     }
@@ -60,18 +54,14 @@ impl LegacyDb {
         conversation_id: Uuid,
     ) -> Result<Vec<ConversationMessage>, LegacyError> {
         match self {
-            #[cfg(feature = "libsql")]
             LegacyDb::LibSql(db) => libsql_conversation_messages(db, conversation_id).await,
-            #[cfg(feature = "postgres")]
             LegacyDb::Postgres(pool) => postgres_conversation_messages(pool, conversation_id).await,
         }
     }
 
     pub(crate) async fn list_all_routines(&self) -> Result<Vec<Routine>, LegacyError> {
         match self {
-            #[cfg(feature = "libsql")]
             LegacyDb::LibSql(db) => libsql_all_routines(db).await,
-            #[cfg(feature = "postgres")]
             LegacyDb::Postgres(pool) => postgres_all_routines(pool).await,
         }
     }
@@ -82,18 +72,14 @@ impl LegacyDb {
         agent_id: Option<Uuid>,
     ) -> Result<Vec<MemoryDocument>, LegacyError> {
         match self {
-            #[cfg(feature = "libsql")]
             LegacyDb::LibSql(db) => libsql_documents(db, user_id, agent_id).await,
-            #[cfg(feature = "postgres")]
             LegacyDb::Postgres(pool) => postgres_documents(pool, user_id, agent_id).await,
         }
     }
 
     pub(crate) async fn list_agent_jobs(&self) -> Result<Vec<AgentJobRecord>, LegacyError> {
         match self {
-            #[cfg(feature = "libsql")]
             LegacyDb::LibSql(db) => libsql_agent_jobs(db).await,
-            #[cfg(feature = "postgres")]
             LegacyDb::Postgres(pool) => postgres_agent_jobs(pool).await,
         }
     }
@@ -103,9 +89,7 @@ impl LegacyDb {
         user_id: &str,
     ) -> Result<Vec<UserIdentityRecord>, LegacyError> {
         match self {
-            #[cfg(feature = "libsql")]
             LegacyDb::LibSql(db) => libsql_identities_for_user(db, user_id).await,
-            #[cfg(feature = "postgres")]
             LegacyDb::Postgres(pool) => postgres_identities_for_user(pool, user_id).await,
         }
     }
@@ -115,9 +99,7 @@ impl LegacyDb {
         user_id: &str,
     ) -> Result<HashMap<String, serde_json::Value>, LegacyError> {
         match self {
-            #[cfg(feature = "libsql")]
             LegacyDb::LibSql(db) => libsql_all_settings(db, user_id).await,
-            #[cfg(feature = "postgres")]
             LegacyDb::Postgres(pool) => postgres_all_settings(pool, user_id).await,
         }
     }
@@ -125,12 +107,10 @@ impl LegacyDb {
 
 // ============================== libSQL ======================================
 
-#[cfg(feature = "libsql")]
 use crate::legacy_snapshot::libsql_helpers::{
     get_i64, get_json, get_opt_text, get_opt_ts, get_text, get_ts,
 };
 
-#[cfg(feature = "libsql")]
 async fn libsql_connect(
     db: &std::sync::Arc<libsql::Database>,
 ) -> Result<libsql::Connection, LegacyError> {
@@ -143,7 +123,6 @@ async fn libsql_connect(
     Ok(conn)
 }
 
-#[cfg(feature = "libsql")]
 async fn libsql_conversations(
     db: &std::sync::Arc<libsql::Database>,
     user_id: &str,
@@ -206,7 +185,6 @@ async fn libsql_conversations(
     Ok(results)
 }
 
-#[cfg(feature = "libsql")]
 async fn libsql_conversation_messages(
     db: &std::sync::Arc<libsql::Database>,
     conversation_id: Uuid,
@@ -241,7 +219,6 @@ async fn libsql_conversation_messages(
     Ok(messages)
 }
 
-#[cfg(feature = "libsql")]
 async fn libsql_all_routines(
     db: &std::sync::Arc<libsql::Database>,
 ) -> Result<Vec<Routine>, LegacyError> {
@@ -265,7 +242,6 @@ async fn libsql_all_routines(
     Ok(routines)
 }
 
-#[cfg(feature = "libsql")]
 fn libsql_row_to_routine(row: &libsql::Row) -> Result<Routine, LegacyError> {
     let trigger_type = get_text(row, 5);
     let trigger_config = get_json(row, 6);
@@ -308,7 +284,6 @@ fn libsql_row_to_routine(row: &libsql::Row) -> Result<Routine, LegacyError> {
     })
 }
 
-#[cfg(feature = "libsql")]
 async fn libsql_documents(
     db: &std::sync::Arc<libsql::Database>,
     user_id: &str,
@@ -350,7 +325,6 @@ async fn libsql_documents(
     Ok(docs)
 }
 
-#[cfg(feature = "libsql")]
 async fn libsql_agent_jobs(
     db: &std::sync::Arc<libsql::Database>,
 ) -> Result<Vec<AgentJobRecord>, LegacyError> {
@@ -393,7 +367,6 @@ async fn libsql_agent_jobs(
     Ok(jobs)
 }
 
-#[cfg(feature = "libsql")]
 async fn libsql_identities_for_user(
     db: &std::sync::Arc<libsql::Database>,
     user_id: &str,
@@ -424,7 +397,6 @@ async fn libsql_identities_for_user(
     Ok(result)
 }
 
-#[cfg(feature = "libsql")]
 fn libsql_row_to_identity(row: &libsql::Row) -> Result<UserIdentityRecord, LegacyError> {
     let id_str = get_text(row, 0);
     let id: Uuid = id_str
@@ -454,7 +426,6 @@ fn libsql_row_to_identity(row: &libsql::Row) -> Result<UserIdentityRecord, Legac
     })
 }
 
-#[cfg(feature = "libsql")]
 async fn libsql_all_settings(
     db: &std::sync::Arc<libsql::Database>,
     user_id: &str,
@@ -481,7 +452,6 @@ async fn libsql_all_settings(
 
 // ============================== PostgreSQL ==================================
 
-#[cfg(feature = "postgres")]
 async fn pg_client(
     pool: &deadpool_postgres::Pool,
 ) -> Result<deadpool_postgres::Client, LegacyError> {
@@ -490,7 +460,6 @@ async fn pg_client(
         .map_err(|e| LegacyError::Connect(e.to_string()))
 }
 
-#[cfg(feature = "postgres")]
 async fn postgres_conversations(
     pool: &deadpool_postgres::Pool,
     user_id: &str,
@@ -550,7 +519,6 @@ async fn postgres_conversations(
         .collect())
 }
 
-#[cfg(feature = "postgres")]
 async fn postgres_conversation_messages(
     pool: &deadpool_postgres::Pool,
     conversation_id: Uuid,
@@ -580,7 +548,6 @@ async fn postgres_conversation_messages(
         .collect())
 }
 
-#[cfg(feature = "postgres")]
 async fn postgres_all_routines(
     pool: &deadpool_postgres::Pool,
 ) -> Result<Vec<Routine>, LegacyError> {
@@ -592,7 +559,6 @@ async fn postgres_all_routines(
     rows.iter().map(postgres_row_to_routine).collect()
 }
 
-#[cfg(feature = "postgres")]
 fn postgres_row_to_routine(row: &tokio_postgres::Row) -> Result<Routine, LegacyError> {
     let trigger_type: String = row.get("trigger_type");
     let trigger_config: serde_json::Value = row.get("trigger_config");
@@ -635,7 +601,6 @@ fn postgres_row_to_routine(row: &tokio_postgres::Row) -> Result<Routine, LegacyE
     })
 }
 
-#[cfg(feature = "postgres")]
 async fn postgres_documents(
     pool: &deadpool_postgres::Pool,
     user_id: &str,
@@ -671,7 +636,6 @@ async fn postgres_documents(
         .collect())
 }
 
-#[cfg(feature = "postgres")]
 async fn postgres_agent_jobs(
     pool: &deadpool_postgres::Pool,
 ) -> Result<Vec<AgentJobRecord>, LegacyError> {
@@ -704,7 +668,6 @@ async fn postgres_agent_jobs(
         .collect())
 }
 
-#[cfg(feature = "postgres")]
 async fn postgres_identities_for_user(
     pool: &deadpool_postgres::Pool,
     user_id: &str,
@@ -742,7 +705,6 @@ async fn postgres_identities_for_user(
         .collect())
 }
 
-#[cfg(feature = "postgres")]
 async fn postgres_all_settings(
     pool: &deadpool_postgres::Pool,
     user_id: &str,

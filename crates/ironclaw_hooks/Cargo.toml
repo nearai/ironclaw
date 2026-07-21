@@ -23,13 +23,6 @@ description = "Reborn loop hook framework: trust-tiered points/kinds/decisions, 
 # as a `dev-dependency` feature for hook authors writing predicate tests outside
 # `ironclaw_runner`. Named `test-support` to match every other crate's dev seam.
 test-support = []
-# Durable PostgreSQL-backed PredicateStateBackend (module `postgres_backend`).
-# Off by default so the framework carries no DB dependency; folded in from the
-# former `ironclaw_hooks_postgres` crate.
-postgres = ["dep:deadpool-postgres", "dep:tokio-postgres", "rust_decimal/db-tokio-postgres"]
-# Durable libSQL-backed PredicateStateBackend (module `libsql_backend`). Off by
-# default; folded in from the former `ironclaw_hooks_libsql` crate.
-libsql = ["dep:libsql"]
 # Gates the heavy multi-host adversarial suite (folded in from the former
 # `ironclaw_hooks_parity` crate) so a bare `cargo test` stays fast and only the
 # deterministic parity matrix / per-backend contract suites run. Mirrors the
@@ -40,9 +33,9 @@ integration = []
 async-trait = "0.1"
 blake3 = "1"
 chrono = { version = "0.4", features = ["serde"] }
-deadpool-postgres = { version = "0.14", optional = true }
-libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
-tokio-postgres = { version = "0.7", optional = true, features = ["with-chrono-0_4"] }
+deadpool-postgres = "0.14"
+libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
 futures = "0.3"
 ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
@@ -50,7 +43,7 @@ ironclaw_prompt_envelope = { path = "../ironclaw_prompt_envelope" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 ironclaw_wasm_limiter = { path = "../ironclaw_wasm_limiter" }
 lru = "0.18"
-rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
+rust_decimal = { version = "1", features = ["serde", "serde-with-str", "db-tokio-postgres"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -66,19 +59,16 @@ toml = "1.1"
 wat = "1"
 
 # Durable-backend test suites folded in from the former
-# `ironclaw_hooks_{postgres,libsql}` / `ironclaw_hooks_parity` crates. Each is
-# gated with `required-features` so a bare `cargo test -p ironclaw_hooks` (no
-# DB features) does not try to build the DB-backed targets. The Postgres legs
-# additionally skip at runtime when no DB URL is reachable.
+# `ironclaw_hooks_{postgres,libsql}` / `ironclaw_hooks_parity` crates. The
+# Postgres legs skip at runtime when no DB URL is reachable.
 [[test]]
 name = "predicate_state_postgres_contract"
 path = "tests/predicate_state_postgres_contract.rs"
-required-features = ["postgres", "test-support"]
+required-features = ["test-support"]
 
 [[test]]
 name = "predicate_state_postgres_adversarial"
 path = "tests/predicate_state_postgres_adversarial.rs"
-required-features = ["postgres"]
 
 # libSQL contract suite keeps its hand-rolled serial runner (see the file's
 # `harness = false` rationale): each heavy case fills a key to the sample cap,
@@ -88,21 +78,19 @@ required-features = ["postgres"]
 name = "predicate_state_libsql_contract"
 path = "tests/predicate_state_libsql_contract.rs"
 harness = false
-required-features = ["libsql", "test-support"]
+required-features = ["test-support"]
 
-# Cross-backend parity matrix: the libSQL leg always runs; the Postgres leg is
-# additionally `#[cfg(feature = "postgres")]`-gated inside the file. Drives only
-# public backend types + the in-memory reference, so it needs no
-# `test-support`.
+# Cross-backend parity matrix: the libSQL leg always runs; the Postgres leg
+# skips at runtime when no DB URL is reachable. Drives only public backend
+# types + the in-memory reference, so it needs no `test-support`.
 [[test]]
 name = "parity_matrix"
 path = "tests/parity_matrix.rs"
-required-features = ["libsql"]
 
 [[test]]
 name = "multi_host_adversarial"
 path = "tests/multi_host_adversarial.rs"
-required-features = ["libsql", "integration"]
+required-features = ["integration"]
 
 [lints]
 workspace = true

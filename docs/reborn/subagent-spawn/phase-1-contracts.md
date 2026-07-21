@@ -2218,8 +2218,6 @@ Backend parity commands:
 
 ```bash
 cargo test -p ironclaw_runner subagent_goal_store_contract
-cargo test -p ironclaw_runner subagent_goal_store_contract --features libsql
-cargo test -p ironclaw_runner subagent_goal_store_contract --features postgres
 ```
 - restart/reopen: write a goal through the DB-backed store, drop/recreate the
   store over the same backend, then `get_goal` returns the same value

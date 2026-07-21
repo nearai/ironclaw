@@ -13,7 +13,8 @@
 //! DEFERRED: live-401 reactive re-auth arm — needs a credentialed capability
 //! backend test double, not yet available.
 //!
-//! All three tests gated on `any(feature = "libsql", feature = "postgres")`.
+//! These tests use the durable product-auth bundle compiled into the Reborn
+//! stack.
 
 #[allow(dead_code)]
 #[path = "../support/mod.rs"]
@@ -22,22 +23,16 @@ mod reborn_support;
 #[path = "../../support/mod.rs"]
 mod support;
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use chrono::{Duration, Utc};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_auth::{
     AuthProductScope, AuthSurface, CredentialAccountLookupRequest, CredentialAccountStatus,
 };
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn_composition::{
     CredentialRefreshSettings, test_support::build_google_oauth_product_auth_for_test,
 };
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use reborn_support::oauth_flow::connect_google_account;
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn test_scope() -> AuthProductScope {
     let resource = ResourceScope::local_default(
         UserId::new("auth-failure-test-user").unwrap(),
@@ -51,7 +46,6 @@ fn test_scope() -> AuthProductScope {
 
 /// `Revoked` is terminal; the read-back proves the status committed to the
 /// durable store, not just `update_status`'s in-memory return value.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn revoked_account_reads_back_revoked() {
     let bundle = build_google_oauth_product_auth_for_test();
@@ -112,7 +106,6 @@ async fn revoked_account_reads_back_revoked() {
 /// Egress count: 1 = initial exchange (200), 2 = sweep refresh (400
 /// invalid_grant). Verified via durable `get_account` read-back, guarding
 /// against "HTTP fired but account write dropped".
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn invalid_grant_sweep_marks_account_revoked() {
     let bundle = build_google_oauth_product_auth_for_test();
@@ -176,7 +169,6 @@ async fn invalid_grant_sweep_marks_account_revoked() {
 /// A credential-refresh sweep with a normal `200` egress MUST NOT mark the
 /// account `Revoked`; it stays `Configured` (tokens rotated), egress count 2
 /// (initial exchange + refresh).
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn normal_sweep_does_not_mark_account_revoked() {
     let bundle = build_google_oauth_product_auth_for_test();

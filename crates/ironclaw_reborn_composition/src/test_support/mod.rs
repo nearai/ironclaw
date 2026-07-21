@@ -87,14 +87,13 @@ pub use budget_gateway::{
 };
 #[cfg(feature = "test-support")]
 pub use durable::open_local_dev_extension_installation_store_for_test;
-#[cfg(all(feature = "test-support", feature = "libsql"))]
+#[cfg(feature = "test-support")]
 pub use durable::{
     open_local_dev_approval_request_store_for_test,
     open_local_dev_approval_settings_stores_for_test,
     open_local_dev_outbound_preferences_store_for_test, open_local_dev_trigger_repository_for_test,
 };
 pub use local_dev_boot::LOCAL_DEV_DB_FILENAME;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use local_dev_boot::build_secret_store_for_test;
 #[cfg(feature = "test-support")]
 pub use local_dev_boot::{
@@ -103,7 +102,6 @@ pub use local_dev_boot::{
 };
 #[cfg(feature = "test-support")]
 pub use local_dev_capability_io::staged_capability_io_for_test;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use oauth_product_auth::build_google_oauth_product_auth_for_test;
 pub use oauth_product_auth::{
     OAuthProductAuthTestBundle, ScriptedOAuthTokenEgress, build_oauth_product_auth_for_test,

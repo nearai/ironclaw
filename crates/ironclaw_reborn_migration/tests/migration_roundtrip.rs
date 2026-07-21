@@ -4,8 +4,6 @@
 //! the expected lossy items so nothing is silently dropped. A separate dry-run
 //! case asserts the report is produced with nothing written.
 //!
-//! Docker-free (libSQL on tempdirs). Gated `required-features = ["libsql"]`.
-//!
 //! Fixture seeding uses raw SQL against a frozen snapshot of the v1 schema
 //! (`fixtures/legacy_v1_schema.sql`, formerly `src/db/libsql_migrations.rs`)
 //! instead of the real v1 write path — `ironclaw_legacy` (`src/`) was deleted

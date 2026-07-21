@@ -445,10 +445,9 @@ The trigger system must expose `trigger_create`, `trigger_list`, `trigger_remove
 - `trigger_remove` is caller-scoped delete.
 - `trigger_pause` and `trigger_resume` are caller-scoped state transitions
   (`Scheduled` <-> `Paused`); the poller does not fire a paused trigger.
-- Local-dev builds compiled with `libsql` store trigger records in the
-  local-dev libSQL database (`reborn-local-dev.db`) through the same
-  `TriggerRepository` contract used by production libSQL. Local-dev builds
-  without `libsql` keep the existing in-memory repository behavior.
+- Local-dev builds store trigger records in the local-dev libSQL database
+  (`reborn-local-dev.db`) through the same `TriggerRepository` contract used
+  by production libSQL.
 - A scheduled-trigger fire resolves a dedicated `scheduled_trigger` run
   profile, not the interactive default. That profile's capability surface
   denies `trigger_create`, `trigger_remove`, `trigger_pause`, and

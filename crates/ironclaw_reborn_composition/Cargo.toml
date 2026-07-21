@@ -14,42 +14,25 @@ publish = false
 layer = "app"
 
 [features]
-# Composition assembles a *runtime*, and several of its parts have no
-# non-durable form: conversation bindings must survive a restart, admin
-# secret provisioning needs the secret-store crypto, and the
-# OpenAI-compatible mount refuses to serve non-durable bindings. Every
-# consumer and every shipped artifact already selects a backend, so the
-# default names one instead of declaring a build shape nothing uses.
-# `--no-default-features --features postgres` selects the other.
-default = ["libsql"]
 # Expose test-only helpers (mock LLM gateway, budget runtime accessors)
 # so integration tests in this crate's `tests/` directory and downstream
 # crates can drive `build_reborn_runtime` with a stub model gateway
 # (via `RebornRuntimeInput::with_model_gateway_override`) and inspect the
 # budget pipeline end-to-end. Enable with `cargo test --features
-# test-support` (plus whatever feature surface the test crate also
-# requires, e.g. `libsql`).
+# test-support`.
 test-support = [
     "ironclaw_channel_delivery/test-support",
     "ironclaw_host_runtime/test-support",
 ]
 # Expose the narrow `extension_installation_store_for_migration` accessor for
-# the v1→Reborn migration tool (`ironclaw_reborn_migration`). Ships zero bytes in
-# a default production binary; mirrors the `test-support` substrate seams.
+# the v1→Reborn migration tool (`ironclaw_reborn_migration`). Mirrors the
+# `test-support` substrate seams without enabling the broader test API.
 migration-support = []
-libsql = [
-    "dep:libsql",
-    "ironclaw_host_runtime/libsql",
-]
-postgres = [
-    "dep:deadpool-postgres",
-    "ironclaw_host_runtime/postgres",
-]
 [dependencies]
 async-trait = "0.1"
 base64 = "0.22"
 chrono = "0.4"
-deadpool-postgres = { version = "0.14", optional = true }
+deadpool-postgres = "0.14"
 futures = "0.3"
 ironclaw_auth = { path = "../ironclaw_auth" }
 ironclaw_channel_host = { path = "../ironclaw_channel_host" }
@@ -107,7 +90,7 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 # WebUI v2 route surface + static SPA bundle merged up into
 # `ironclaw_webui`; no longer a composition dependency.
 ironclaw_wasm_product_adapters = { path = "../ironclaw_wasm_product_adapters" }
-libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
+libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
 libc = "0.2"
 # axum + tower middleware stack used by the `webui_serve` module. Each
 # entry is feature-gated so non-beta builds carry no HTTP surface code.
@@ -188,11 +171,9 @@ tracing-test = "0.2"
 
 [[test]]
 name = "production_runtime_automations"
-required-features = ["libsql"]
 
 [[test]]
 name = "resource_governor_libsql_contract"
-required-features = ["libsql"]
 
 [build-dependencies]
 ironclaw_skills = { path = "../ironclaw_skills" }

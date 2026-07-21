@@ -295,7 +295,7 @@ and replay tests run hermetically in CI.
 
 ```bash
 scripts/ci/check-reborn-qa-fixtures.sh
-cargo test --test reborn_qa_recorded_behavior --features libsql
+cargo test --test reborn_qa_recorded_behavior
 ```
 
 ### Browser E2E

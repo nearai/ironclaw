@@ -36,14 +36,12 @@ use crate::options::MigrationOptions;
 /// The concrete Reborn backend the migration writes into. Both the KV substrate
 /// and the triggers DB share this one handle.
 pub(crate) enum Backend {
-    #[cfg(feature = "libsql")]
     LibSql {
         root: Arc<ironclaw_filesystem::LibSqlRootFilesystem>,
         /// Shared handle for the triggers repo, which uses the raw DB (not the
         /// KV substrate). `LibSqlRootFilesystem` does not re-expose it.
         db: Arc<libsql::Database>,
     },
-    #[cfg(feature = "postgres")]
     Postgres {
         root: Arc<ironclaw_filesystem::PostgresRootFilesystem>,
         pool: deadpool_postgres::Pool,
@@ -83,9 +81,7 @@ impl ExtensionOwnershipTarget {
     ) -> Result<Self, MigrationError> {
         let backend = open_backend(target).await?;
         let root_dyn: Arc<dyn RootFilesystem> = match &backend {
-            #[cfg(feature = "libsql")]
             Backend::LibSql { root, .. } => root.clone(),
-            #[cfg(feature = "postgres")]
             Backend::Postgres { root, .. } => root.clone(),
         };
         let extension_store =
@@ -98,9 +94,7 @@ impl ExtensionOwnershipTarget {
                 MigrationError::OpenTarget(format!("tenant extension installation store: {error}"))
             })?;
         let user_directory = match &backend {
-            #[cfg(feature = "libsql")]
             Backend::LibSql { root, .. } => build_user_directory(root.clone(), tenant_id.clone())?,
-            #[cfg(feature = "postgres")]
             Backend::Postgres { root, .. } => {
                 build_user_directory(root.clone(), tenant_id.clone())?
             }
@@ -123,9 +117,7 @@ impl RebornTarget {
 
         let backend = open_backend(&options.target).await?;
         let (thread_service, memory_backend, secret_store) = match &backend {
-            #[cfg(feature = "libsql")]
             Backend::LibSql { root, .. } => build_kv_services(root.clone(), crypto.clone())?,
-            #[cfg(feature = "postgres")]
             Backend::Postgres { root, .. } => build_kv_services(root.clone(), crypto.clone())?,
         };
         let trigger_repo = build_trigger_repo(&backend).await?;
@@ -133,9 +125,7 @@ impl RebornTarget {
         // Extension installation store is owned by composition; the migration
         // seam builds it over our root filesystem at the default state path.
         let root_dyn: Arc<dyn RootFilesystem> = match &backend {
-            #[cfg(feature = "libsql")]
             Backend::LibSql { root, .. } => root.clone(),
-            #[cfg(feature = "postgres")]
             Backend::Postgres { root, .. } => root.clone(),
         };
         let extension_store =
@@ -165,11 +155,9 @@ impl RebornTarget {
         let tenant = self.tenant_id.clone();
         let agent = self.agent_id.clone();
         match &self.backend {
-            #[cfg(feature = "libsql")]
             Backend::LibSql { root, .. } => {
                 build_identity_store(root.clone(), tenant, user_id, agent)
             }
-            #[cfg(feature = "postgres")]
             Backend::Postgres { root, .. } => {
                 build_identity_store(root.clone(), tenant, user_id, agent)
             }
@@ -308,7 +296,6 @@ async fn build_trigger_repo(
     backend: &Backend,
 ) -> Result<Arc<dyn TriggerRepository>, MigrationError> {
     match backend {
-        #[cfg(feature = "libsql")]
         Backend::LibSql { db, .. } => {
             let repo = ironclaw_triggers::LibSqlTriggerRepository::new(db.clone());
             repo.run_migrations()
@@ -317,7 +304,6 @@ async fn build_trigger_repo(
             let repo: Arc<dyn TriggerRepository> = Arc::new(repo);
             Ok(repo)
         }
-        #[cfg(feature = "postgres")]
         Backend::Postgres { pool, .. } => {
             let repo = ironclaw_triggers::PostgresTriggerRepository::new(pool.clone());
             repo.run_migrations()
@@ -331,7 +317,6 @@ async fn build_trigger_repo(
 
 async fn open_backend(target: &TargetStore) -> Result<Backend, MigrationError> {
     match target {
-        #[cfg(feature = "libsql")]
         TargetStore::LibSql { path } => {
             if let Some(parent) = path.parent() {
                 tokio::fs::create_dir_all(parent).await?;
@@ -348,11 +333,6 @@ async fn open_backend(target: &TargetStore) -> Result<Backend, MigrationError> {
                 .map_err(|e| MigrationError::OpenTarget(e.to_string()))?;
             Ok(Backend::LibSql { root, db })
         }
-        #[cfg(not(feature = "libsql"))]
-        TargetStore::LibSql { .. } => Err(MigrationError::OpenTarget(
-            "binary built without the libsql feature".into(),
-        )),
-        #[cfg(feature = "postgres")]
         TargetStore::Postgres { url } => {
             let pool = open_postgres_pool(url)?;
             let root = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(
@@ -363,17 +343,12 @@ async fn open_backend(target: &TargetStore) -> Result<Backend, MigrationError> {
                 .map_err(|e| MigrationError::OpenTarget(e.to_string()))?;
             Ok(Backend::Postgres { root, pool })
         }
-        #[cfg(not(feature = "postgres"))]
-        TargetStore::Postgres { .. } => Err(MigrationError::OpenTarget(
-            "binary built without the postgres feature".into(),
-        )),
     }
 }
 
 /// Build the Reborn target Postgres pool through the production composition
 /// helper so migrations inherit the same fail-closed remote-TLS policy without
 /// linking the legacy root crate.
-#[cfg(feature = "postgres")]
 fn open_postgres_pool(
     url: &secrecy::SecretString,
 ) -> Result<deadpool_postgres::Pool, MigrationError> {

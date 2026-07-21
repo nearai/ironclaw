@@ -20,12 +20,9 @@
 //! every table this reader touches (see [`super::queries`] and
 //! [`super::libsql_helpers`] for how the other tables degrade on drift).
 
-#[cfg(feature = "libsql")]
 use std::path::Path;
-#[cfg(feature = "libsql")]
 use std::sync::Arc;
 
-#[cfg(feature = "postgres")]
 use secrecy::SecretString;
 
 use super::error::LegacyError;
@@ -35,9 +32,7 @@ use crate::options::SourceDb;
 /// queries in [`super::queries`] need — not the full v1 `Database` trait
 /// surface.
 pub(crate) enum LegacyDb {
-    #[cfg(feature = "libsql")]
     LibSql(Arc<libsql::Database>),
-    #[cfg(feature = "postgres")]
     Postgres(deadpool_postgres::Pool),
 }
 
@@ -48,27 +43,21 @@ pub(crate) enum LegacyDb {
 /// `convert::identities`) needed no changes beyond their imports.
 #[derive(Default, Clone)]
 pub(crate) struct LegacyHandles {
-    #[cfg(feature = "postgres")]
     pub(crate) pg_pool: Option<deadpool_postgres::Pool>,
-    #[cfg(feature = "libsql")]
     pub(crate) libsql_db: Option<Arc<libsql::Database>>,
 }
 
 impl LegacyHandles {
-    #[cfg(feature = "libsql")]
     fn from_libsql(db: Arc<libsql::Database>) -> Self {
         Self {
             libsql_db: Some(db),
-            #[cfg(feature = "postgres")]
             pg_pool: None,
         }
     }
 
-    #[cfg(feature = "postgres")]
     fn from_postgres(pool: deadpool_postgres::Pool) -> Self {
         Self {
             pg_pool: Some(pool),
-            #[cfg(feature = "libsql")]
             libsql_db: None,
         }
     }
@@ -76,7 +65,6 @@ impl LegacyHandles {
 
 pub(crate) async fn connect(source: &SourceDb) -> Result<(LegacyDb, LegacyHandles), LegacyError> {
     match source {
-        #[cfg(feature = "libsql")]
         SourceDb::LibSql { path } => {
             let db = Arc::new(open_libsql(path).await?);
             let legacy_db = LegacyDb::LibSql(Arc::clone(&db));
@@ -84,11 +72,6 @@ pub(crate) async fn connect(source: &SourceDb) -> Result<(LegacyDb, LegacyHandle
             ensure_schema_current(&legacy_db).await?;
             Ok((legacy_db, handles))
         }
-        #[cfg(not(feature = "libsql"))]
-        SourceDb::LibSql { .. } => Err(LegacyError::Connect(
-            "libsql feature not enabled in this build".to_string(),
-        )),
-        #[cfg(feature = "postgres")]
         SourceDb::Postgres { url } => {
             let pool = open_postgres(url)?;
             // Cheap connectivity smoke test, mirroring `Store::new`.
@@ -101,14 +84,9 @@ pub(crate) async fn connect(source: &SourceDb) -> Result<(LegacyDb, LegacyHandle
             ensure_schema_current(&legacy_db).await?;
             Ok((legacy_db, handles))
         }
-        #[cfg(not(feature = "postgres"))]
-        SourceDb::Postgres { .. } => Err(LegacyError::Connect(
-            "postgres feature not enabled in this build".to_string(),
-        )),
     }
 }
 
-#[cfg(feature = "libsql")]
 async fn open_libsql(path: &Path) -> Result<libsql::Database, LegacyError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
@@ -127,7 +105,6 @@ async fn open_libsql(path: &Path) -> Result<libsql::Database, LegacyError> {
 /// side — so the source connection inherits the same fail-closed remote-TLS
 /// policy (reject `sslmode=disable` on any non-local host, upgrade `Prefer`
 /// to `Require`) without this crate hand-rolling a second TLS connector.
-#[cfg(feature = "postgres")]
 fn open_postgres(url: &SecretString) -> Result<deadpool_postgres::Pool, LegacyError> {
     ironclaw_reborn_composition::open_reborn_postgres_pool_with_max_size(url.clone(), 4)
         .map_err(|e| LegacyError::Connect(e.to_string()))
@@ -193,7 +170,6 @@ async fn ensure_schema_current(db: &LegacyDb) -> Result<(), LegacyError> {
 /// doesn't exist.
 async fn routines_columns(db: &LegacyDb) -> Result<Option<Vec<String>>, LegacyError> {
     match db {
-        #[cfg(feature = "libsql")]
         LegacyDb::LibSql(handle) => {
             let conn = handle
                 .connect()
@@ -217,7 +193,6 @@ async fn routines_columns(db: &LegacyDb) -> Result<Option<Vec<String>>, LegacyEr
                 Ok(Some(columns))
             }
         }
-        #[cfg(feature = "postgres")]
         LegacyDb::Postgres(pool) => {
             let client = pool
                 .get()

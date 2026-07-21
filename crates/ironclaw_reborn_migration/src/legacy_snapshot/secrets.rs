@@ -117,11 +117,9 @@ pub(crate) fn create_secrets_store(
     crypto: Arc<SecretsCrypto>,
     handles: &LegacyHandles,
 ) -> Option<LegacySecretsSource> {
-    #[cfg(feature = "libsql")]
     if let Some(db) = handles.libsql_db.as_ref() {
         return Some(LegacySecretsSource::LibSql(Arc::clone(db), crypto));
     }
-    #[cfg(feature = "postgres")]
     if let Some(pool) = handles.pg_pool.as_ref() {
         return Some(LegacySecretsSource::Postgres(pool.clone(), crypto));
     }
@@ -131,27 +129,21 @@ pub(crate) fn create_secrets_store(
 /// Frozen, read-only mirror of `ironclaw::secrets::SecretsStore` — only the
 /// `list`/`get`/`get_decrypted` methods `convert::secrets` calls.
 pub(crate) enum LegacySecretsSource {
-    #[cfg(feature = "libsql")]
     LibSql(Arc<libsql::Database>, Arc<SecretsCrypto>),
-    #[cfg(feature = "postgres")]
     Postgres(deadpool_postgres::Pool, Arc<SecretsCrypto>),
 }
 
 impl LegacySecretsSource {
     fn crypto(&self) -> &SecretsCrypto {
         match self {
-            #[cfg(feature = "libsql")]
             LegacySecretsSource::LibSql(_, crypto) => crypto,
-            #[cfg(feature = "postgres")]
             LegacySecretsSource::Postgres(_, crypto) => crypto,
         }
     }
 
     pub(crate) async fn list(&self, user_id: &str) -> Result<Vec<SecretRef>, SecretError> {
         match self {
-            #[cfg(feature = "libsql")]
             LegacySecretsSource::LibSql(db, _) => libsql_list(db, user_id).await,
-            #[cfg(feature = "postgres")]
             LegacySecretsSource::Postgres(pool, _) => postgres_list(pool, user_id).await,
         }
     }
@@ -159,9 +151,7 @@ impl LegacySecretsSource {
     pub(crate) async fn get(&self, user_id: &str, name: &str) -> Result<Secret, SecretError> {
         let name = name.to_lowercase();
         let secret = match self {
-            #[cfg(feature = "libsql")]
             LegacySecretsSource::LibSql(db, _) => libsql_get(db, user_id, &name).await?,
-            #[cfg(feature = "postgres")]
             LegacySecretsSource::Postgres(pool, _) => postgres_get(pool, user_id, &name).await?,
         };
         if let Some(expires_at) = secret.expires_at
@@ -186,7 +176,6 @@ impl LegacySecretsSource {
 const SECRET_COLUMNS: &str = "id, user_id, name, encrypted_value, key_salt, provider, expires_at, \
      last_used_at, usage_count, created_at, updated_at";
 
-#[cfg(feature = "libsql")]
 async fn libsql_connect(db: &Arc<libsql::Database>) -> Result<libsql::Connection, SecretError> {
     let conn = db
         .connect()
@@ -197,7 +186,6 @@ async fn libsql_connect(db: &Arc<libsql::Database>) -> Result<libsql::Connection
     Ok(conn)
 }
 
-#[cfg(feature = "libsql")]
 async fn libsql_list(
     db: &Arc<libsql::Database>,
     user_id: &str,
@@ -223,7 +211,6 @@ async fn libsql_list(
     Ok(refs)
 }
 
-#[cfg(feature = "libsql")]
 async fn libsql_get(
     db: &Arc<libsql::Database>,
     user_id: &str,
@@ -247,7 +234,6 @@ async fn libsql_get(
     }
 }
 
-#[cfg(feature = "libsql")]
 fn libsql_row_to_secret(row: &libsql::Row) -> Result<Secret, SecretError> {
     use super::libsql_helpers::parse_timestamp;
 
@@ -269,7 +255,6 @@ fn libsql_row_to_secret(row: &libsql::Row) -> Result<Secret, SecretError> {
     })
 }
 
-#[cfg(feature = "postgres")]
 async fn postgres_list(
     pool: &deadpool_postgres::Pool,
     user_id: &str,
@@ -293,7 +278,6 @@ async fn postgres_list(
         .collect())
 }
 
-#[cfg(feature = "postgres")]
 async fn postgres_get(
     pool: &deadpool_postgres::Pool,
     user_id: &str,
