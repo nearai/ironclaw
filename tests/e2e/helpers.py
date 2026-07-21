@@ -232,6 +232,8 @@ REBORN_V2_AUTH_TOKEN = "e2e-reborn-v2-bearer-token-0123456789abcdef"
 SEL_V2 = {
     "root":           "#v2-root",          # SPA mount point (index.html)
     "login_token":    "#v2-token",         # token input on the login/connect view
+    "session_check_error": "[data-testid='session-check-error']",
+    "session_check_retry": "[data-testid='session-check-retry']",
     "admin_new_user_button_name": "New user",
     "admin_create_form": "form",
     "admin_display_name_input": 'input[type="text"]',

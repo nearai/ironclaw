@@ -210,6 +210,66 @@ async def test_reborn_v2_serves_shell_and_gates_auth(reborn_v2_server, reborn_v2
         await anon_ctx.close()
 
 
+async def test_reborn_v2_session_check_failure_blocks_app_and_retries(
+    reborn_v2_server, reborn_v2_browser
+):
+    """A transient session failure keeps the bearer but never renders anonymous-scoped UI."""
+    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+    session_requests = 0
+
+    async def handle_session(route) -> None:
+        nonlocal session_requests
+        session_requests += 1
+        if session_requests == 1:
+            await route.fulfill(
+                status=503,
+                content_type="application/json",
+                body=json.dumps({"error": "temporarily_unavailable"}),
+            )
+            return
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "tenant_id": "reborn-v2-e2e",
+                    "user_id": USER_ID,
+                    "capabilities": {},
+                    "features": {"reborn_projects": False},
+                    "attachments": {
+                        "accept": ["text/plain"],
+                        "max_files_per_message": 4,
+                        "max_bytes_per_file": 1048576,
+                        "max_bytes_per_message": 4194304,
+                    },
+                }
+            ),
+        )
+
+    await page.route("**/api/webchat/v2/session", handle_session)
+
+    try:
+        await page.goto(f"{reborn_v2_server}/?token={REBORN_V2_AUTH_TOKEN}")
+
+        error = page.locator(SEL_V2["session_check_error"])
+        await expect(error).to_be_visible(timeout=15000)
+        await expect(error).to_contain_text("Couldn't verify your session")
+        await expect(page.locator(SEL_V2["chat_composer"])).to_have_count(0)
+        await expect(page.locator(SEL_V2["login_token"])).to_have_count(0)
+        assert await page.evaluate(
+            "() => sessionStorage.getItem('ironclaw_token')"
+        ) == REBORN_V2_AUTH_TOKEN
+        assert session_requests == 1
+
+        await page.locator(SEL_V2["session_check_retry"]).click()
+        await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(timeout=15000)
+        await expect(error).to_have_count(0)
+        assert session_requests >= 2
+    finally:
+        await context.close()
+
+
 async def test_reborn_v2_legacy_paths_redirect_to_root(
     reborn_v2_server, reborn_v2_browser
 ):
