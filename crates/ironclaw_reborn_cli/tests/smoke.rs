@@ -231,12 +231,12 @@ fn package_metadata_dist_features(manifest: &str) -> Vec<String> {
             continue;
         }
 
-        if let Some(value) = trimmed.strip_prefix("features") {
-            if let Some((_, value)) = value.split_once('=') {
-                array.push_str(value.trim());
-                if !value.contains(']') {
-                    collecting = true;
-                }
+        if let Some(value) = trimmed.strip_prefix("features")
+            && let Some((_, value)) = value.split_once('=')
+        {
+            array.push_str(value.trim());
+            if !value.contains(']') {
+                collecting = true;
             }
         }
     }
