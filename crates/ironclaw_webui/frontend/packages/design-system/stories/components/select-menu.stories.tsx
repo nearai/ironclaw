@@ -16,18 +16,30 @@ const meta = {
       },
     },
   },
+  argTypes: {
+    prefix: { control: "text" },
+    disabled: { control: "boolean" },
+    placeholder: { control: "text" },
+    align: { control: "select", options: ["left", "right"] },
+  },
+  args: { disabled: false },
 } satisfies Meta<typeof SelectMenu>;
 
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-function StatefulSelect(props: { prefix?: string }) {
+function StatefulSelect(props: {
+  prefix?: string;
+  disabled?: boolean;
+  placeholder?: string;
+  align?: "left" | "right";
+}) {
   const [value, setValue] = useState("all");
   return (
     <SelectMenu
+      {...props}
       value={value}
       onChange={setValue}
-      prefix={props.prefix}
       options={[
         { value: "all", label: "All statuses" },
         { value: "running", label: "Running", tone: "info" },
@@ -40,9 +52,10 @@ function StatefulSelect(props: { prefix?: string }) {
 }
 
 export const Default: Story = {
-  render: () => <StatefulSelect />,
+  render: (args) => <StatefulSelect {...(args as Record<string, unknown>)} />,
 };
 
 export const WithPrefix: Story = {
-  render: () => <StatefulSelect prefix="Status" />,
+  args: { prefix: "Status" },
+  render: (args) => <StatefulSelect {...(args as Record<string, unknown>)} />,
 };

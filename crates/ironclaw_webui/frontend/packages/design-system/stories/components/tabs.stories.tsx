@@ -15,6 +15,10 @@ const meta = {
       },
     },
   },
+  argTypes: {
+    bordered: { control: "boolean" },
+  },
+  args: { bordered: false },
 } satisfies Meta<typeof Tabs>;
 
 export default meta;
@@ -43,5 +47,10 @@ function TabsDemo({ bordered }: { bordered?: boolean }) {
   );
 }
 
-export const Default: Story = { render: () => <TabsDemo /> };
-export const Bordered: Story = { render: () => <TabsDemo bordered /> };
+export const Default: Story = {
+  render: (args) => <TabsDemo bordered={args.bordered} />,
+};
+export const Bordered: Story = {
+  args: { bordered: true },
+  render: (args) => <TabsDemo bordered={args.bordered} />,
+};

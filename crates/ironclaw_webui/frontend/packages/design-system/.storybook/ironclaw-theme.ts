@@ -14,7 +14,18 @@ const FONT_MONO =
 export const ironclawTheme = create({
   base: "light",
 
-  brandTitle: "IronClaw Design System",
+  // Storybook renders brandTitle as HTML inside the sidebar heading link:
+  // helmet logo on the left, two-line wordmark matching the logo height.
+  brandTitle: `
+    <div style="display:flex;align-items:center;gap:10px;">
+      <img src="./ironclaw-logo.jpg" alt="IronClaw" width="34" height="34"
+           style="border-radius:8px;display:block;" />
+      <span style="display:flex;flex-direction:column;justify-content:center;line-height:1.2;text-align:left;">
+        <span style="font-size:16px;font-weight:600;letter-spacing:-0.01em;color:#090909;">IronClaw</span>
+        <span style="font-size:12px;font-weight:400;opacity:0.5;color:#090909;">Design system</span>
+      </span>
+    </div>
+  `,
   brandUrl: "https://ironclaw-design-system-demo.vercel.app/playground",
   brandTarget: "_blank",
 

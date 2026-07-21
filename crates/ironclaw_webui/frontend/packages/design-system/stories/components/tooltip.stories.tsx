@@ -23,12 +23,35 @@ const meta = {
       },
     },
   },
+  argTypes: {
+    content: { control: "text" },
+    side: { control: "select", options: ["top", "right", "bottom", "left"] },
+    align: { control: "select", options: ["start", "center", "end"] },
+  },
+  args: { content: "Run this automation now", side: "top", align: "center" },
 } satisfies Meta<typeof Tooltip>;
 
 export default meta;
-type Story = StoryObj;
 
-export const Default: Story = {
+type TooltipArgs = {
+  content?: React.ReactNode;
+  side?: "top" | "right" | "bottom" | "left";
+  align?: "start" | "center" | "end";
+};
+
+export const Default: StoryObj = {
+  render: (args: TooltipArgs) => (
+    <div className="p-16">
+      <Tooltip content={args.content} side={args.side} align={args.align}>
+        <Button variant="secondary" size="icon" aria-label="Run now">
+          <Icon name="play" className="h-4 w-4" />
+        </Button>
+      </Tooltip>
+    </div>
+  ),
+};
+
+export const Placements: StoryObj = {
   render: () => (
     <div className="flex items-center gap-3 p-12">
       <Tooltip content="Run this automation now">

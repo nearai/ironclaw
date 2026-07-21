@@ -18,15 +18,23 @@ const meta = {
           "scale from center, quicker exit) and sits on `--v2-shadow-modal`. " +
           "`ConfirmDialog` is the packaged destructive-action pattern.",
       },
+      // The Modal deliberately omits a portal (SSR consumers), so its
+      // fixed overlay is clipped by the inline docs canvas. Render docs
+      // stories in a real iframe viewport instead.
+      story: { inline: false, iframeHeight: 460 },
     },
   },
+  argTypes: {
+    size: { control: "select", options: ["sm", "md", "lg", "xl", "full"] },
+  },
+  args: { size: "md" },
 } satisfies Meta<typeof Modal>;
 
 export default meta;
 type Story = StoryObj;
 
 function ModalDemo({ size }: { size?: "sm" | "md" | "lg" | "xl" | "full" }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(true);
   return (
     <>
       <Button variant="secondary" onClick={() => setOpen(true)}>
@@ -53,12 +61,14 @@ function ModalDemo({ size }: { size?: "sm" | "md" | "lg" | "xl" | "full" }) {
 }
 
 export const Default: Story = {
-  render: () => <ModalDemo />,
+  render: (args: { size?: "sm" | "md" | "lg" | "xl" | "full" }) => (
+    <ModalDemo size={args.size} />
+  ),
 };
 
 export const Confirm: Story = {
   render: function ConfirmStory() {
-    const [open, setOpen] = useState(false);
+    const [open, setOpen] = useState(true);
     return (
       <>
         <Button variant="danger" onClick={() => setOpen(true)}>
