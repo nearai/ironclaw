@@ -509,7 +509,7 @@ where
         Arc::new(ProjectScopedAttachmentLander::new(Arc::clone(&filesystem))),
         Arc::new(ProjectScopedFilesystemReader::with_max_read_bytes(
             filesystem,
-            ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64,
+            ironclaw_attachments::DEFAULT_MAX_ATTACHMENT_BYTES as u64,
         )),
     )
 }

@@ -5048,6 +5048,37 @@ async fn runtime_attachment_ports_are_shared_and_round_trip_workspace_bytes() {
 
     assert_eq!(read_back.bytes, b"attachment-mount-bytes".to_vec());
 
+    // Sharing this reader with channel delivery must not lower the existing
+    // WebUI workspace-file ceiling to the narrower 5 MiB channel budget.
+    let webui_sized_bytes = vec![
+        b'w';
+        ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS
+            .max_file_bytes
+            .saturating_add(1)
+    ];
+    let webui_refs = ironclaw_product_workflow::InboundAttachmentLander::land(
+        webui_lander.as_ref(),
+        &thread_scope,
+        "msg-webui-sized-attachment",
+        vec![ironclaw_attachments::InboundAttachment {
+            id: "att-webui-sized".to_string(),
+            mime_type: "application/octet-stream".to_string(),
+            filename: Some("webui-sized.bin".to_string()),
+            bytes: webui_sized_bytes.clone(),
+        }],
+    )
+    .await
+    .expect("landing a file above the channel limit but below the WebUI limit succeeds");
+    let webui_storage_key = webui_refs[0]
+        .storage_key
+        .as_deref()
+        .expect("landed WebUI-sized attachment carries a storage_key");
+    let webui_read_back = webui_reader
+        .read_file(&thread_scope, webui_storage_key)
+        .await
+        .expect("shared reader preserves the existing WebUI file-size limit");
+    assert_eq!(webui_read_back.bytes, webui_sized_bytes);
+
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
