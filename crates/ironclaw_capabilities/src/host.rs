@@ -9,8 +9,7 @@ use ironclaw_host_api::{
     CapabilityDispatcher, CapabilityGrantId, CapabilityId, Decision, DenyReason, DenyRef,
     DispatchError, EffectiveRuntimePolicy, ExecutionContext, GateRef, GateWaypoint, Invocation,
     InvocationFingerprint, InvocationId, InvocationOrigin, Obligation, PermissionMode, ProcessId,
-    ProductKind, ResourceEstimate, ResourceReservation, ResourceReservationId, ResourceScope,
-    RuntimeLane,
+    ProductKind, ResourceEstimate, ResourceScope, RuntimeLane, Timestamp,
 };
 use ironclaw_processes::{ProcessManager, ProcessStart};
 use ironclaw_run_state::{
@@ -485,6 +484,10 @@ where
     /// permission mode forbids persistent approval or no candidate grant flips the
     /// decision, leaving `authorize_context` untouched.
     ///
+    /// Returns the adopted grant's `constraints.expires_at` (a frozen fact the
+    /// seal's deadline is derived from), or `None` when no grant is adopted or the
+    /// adopted grant has no expiry.
+    ///
     /// This adds a second authorizer invocation per candidate grant (the re-auth
     /// probe), exactly as the host_runtime implementation did; the loop is bounded
     /// to the grants the port returns.
@@ -496,14 +499,14 @@ where
         estimate: &ResourceEstimate,
         trust_decision: &TrustDecision,
         action: PolicyAction,
-    ) {
+    ) -> Option<Timestamp> {
         if !permission_mode_allows_persistent_approval(descriptor.default_permission) {
             debug!(
                 capability_id = %capability_id,
                 permission = ?descriptor.default_permission,
                 "persistent approval skipped for manifest policy"
             );
-            return;
+            return None;
         }
         let grants = self
             .policy_facts
@@ -543,10 +546,12 @@ where
                     capability_id = %capability_id,
                     "persistent approval policy matched; injecting scoped grant"
                 );
+                let adopted_expiry = grant.constraints.expires_at;
                 authorize_context.grants.grants.push(grant);
-                break;
+                return adopted_expiry;
             }
         }
+        None
     }
 
     async fn authorize(
@@ -660,15 +665,16 @@ where
         let mut authorize_context = request.context.clone();
         authorize_context.trust = trust_decision.effective_trust.class();
 
-        self.apply_persistent_approval(
-            &mut authorize_context,
-            descriptor,
-            &request.capability_id,
-            &request.estimate,
-            &trust_decision,
-            PolicyAction::Dispatch,
-        )
-        .await;
+        let frozen_deadline = self
+            .apply_persistent_approval(
+                &mut authorize_context,
+                descriptor,
+                &request.capability_id,
+                &request.estimate,
+                &trust_decision,
+                PolicyAction::Dispatch,
+            )
+            .await;
 
         match self
             .authorizer
@@ -724,6 +730,7 @@ where
                     &request.input,
                     descriptor,
                     &obligation_outcome,
+                    frozen_deadline,
                 );
                 Ok(AuthorizeFold::Authorized(Box::new(AuthorizedFold {
                     result,
@@ -951,6 +958,8 @@ where
     /// `context.resource_scope` — every caller's `scope` local is exactly that
     /// value (`request.context.resource_scope.clone()`), so passing it separately
     /// would only duplicate it.
+    // arch-exempt: too_many_args, seals independent frozen facts from three call sites (invoke/spawn/resume) with differing sources, so no single request/context bundle unifies them; arg list shrinks as later slices route dispatch through the witness, plan #6175
+    #[allow(clippy::too_many_arguments)]
     fn seal_authorization(
         &self,
         context: &ExecutionContext,
@@ -959,6 +968,7 @@ where
         input: &serde_json::Value,
         descriptor: &CapabilityDescriptor,
         obligation_outcome: &CapabilityObligationOutcome,
+        frozen_deadline: Option<Timestamp>,
     ) -> Option<AuthorizeResult> {
         // Actor is sealed at the membrane; NO fallback to `user_id`. Absent on
         // untrusted/system contexts, where the witness is simply not minted.
@@ -995,21 +1005,14 @@ where
             parent_process_id: context.parent_process_id,
         };
         let mounts = obligation_outcome.mounts.clone().unwrap_or_default();
-        let reservation = obligation_outcome
-            .resource_reservation
-            .clone()
-            // PROVISIONAL (Slice C): `authorize()` will reserve the estimate
-            // itself; until then the dispatcher still reserves when the request
-            // carries `None`, so this synthesized reservation lives only on the
-            // (not-yet-dispatch-routed) witness.
-            .unwrap_or_else(|| ResourceReservation {
-                id: ResourceReservationId::new(),
-                scope: scope.clone(),
-                estimate: estimate.clone(),
-            });
-        // PROVISIONAL (Slice C): a fixed 5-minute validity window until the
-        // deadline is derived from the shortest-lived frozen fact (§5.3.2).
-        let deadline = chrono::Utc::now() + chrono::Duration::minutes(5);
+        // The real reservation the fold's `ReserveResources` obligation produced
+        // (the estimate is already reserved in-fold), or `None` when the
+        // capability declares no resource obligation. No synthesized placeholder.
+        let reservation = obligation_outcome.resource_reservation.clone();
+        // Deadline from the shortest-lived frozen fact (the caller pre-min's its
+        // candidates into `frozen_deadline`), or a bounded default TTL. See
+        // [`witness_deadline`].
+        let deadline = witness_deadline([frozen_deadline]);
         Some(AuthorizeResult::Authorized(Box::new(Authorized::seal(
             self.authorization_grant(),
             invocation,
@@ -2123,15 +2126,16 @@ where
         let mut authorize_context = request.context.clone();
         authorize_context.trust = trust_decision.effective_trust.class();
 
-        self.apply_persistent_approval(
-            &mut authorize_context,
-            descriptor,
-            &request.capability_id,
-            &request.estimate,
-            &trust_decision,
-            PolicyAction::SpawnCapability,
-        )
-        .await;
+        let frozen_deadline = self
+            .apply_persistent_approval(
+                &mut authorize_context,
+                descriptor,
+                &request.capability_id,
+                &request.estimate,
+                &trust_decision,
+                PolicyAction::SpawnCapability,
+            )
+            .await;
 
         match self
             .authorizer
@@ -2176,6 +2180,7 @@ where
                     &request.input,
                     descriptor,
                     &obligation_outcome,
+                    frozen_deadline,
                 );
                 Ok(AuthorizeFold::Authorized(Box::new(AuthorizedFold {
                     result,
@@ -2385,17 +2390,31 @@ where
         // would otherwise be re-authorized grant-less and denied. Excluded for
         // `resume_json` (`PendingClaim`), which always carries a fresh approval
         // lease and never had persistent-approval applied — preserving behavior.
+        let mut adopted_grant_expiry = None;
         if !matches!(params.lease_state, ResumedLeaseState::PendingClaim(_)) {
-            self.apply_persistent_approval(
-                &mut authorize_context,
-                params.descriptor,
-                &params.capability_id,
-                &params.estimate,
-                &trust_decision,
-                PolicyAction::Dispatch,
-            )
-            .await;
+            adopted_grant_expiry = self
+                .apply_persistent_approval(
+                    &mut authorize_context,
+                    params.descriptor,
+                    &params.capability_id,
+                    &params.estimate,
+                    &trust_decision,
+                    PolicyAction::Dispatch,
+                )
+                .await;
         }
+        // The claimed approval lease's expiry is a reachable frozen fact only for
+        // an `AlreadyClaimed` lease (which carries the full grant); `PendingClaim`
+        // holds only the grant id and `NoPriorLease` none. Combined with any
+        // adopted persistent-grant expiry, the seal takes the shortest-lived.
+        let claimed_lease_expiry = match &params.lease_state {
+            ResumedLeaseState::AlreadyClaimed(_, lease) => lease.grant.constraints.expires_at,
+            ResumedLeaseState::PendingClaim(_) | ResumedLeaseState::NoPriorLease => None,
+        };
+        let frozen_deadline = [adopted_grant_expiry, claimed_lease_expiry]
+            .into_iter()
+            .flatten()
+            .min();
 
         match self
             .authorizer
@@ -2426,6 +2445,7 @@ where
                     &params.input,
                     params.descriptor,
                     &provisional_outcome,
+                    frozen_deadline,
                 );
                 Ok(AuthorizeFold::Authorized(Box::new(AuthorizedFold {
                     result,
@@ -2867,6 +2887,30 @@ where
 /// `permission_mode_allows_persistent_approval`: `Allow` and `Ask` are eligible;
 /// `Deny` is not. Modes requiring mandatory per-invocation consent must use a
 /// gate that does not offer persistent approval.
+/// Bounded default validity window for the sealed witness when the authorization
+/// froze no shorter-lived fact. Keeps no-frozen-fact capabilities on the prior
+/// fixed window; a frozen fact, when present, always shortens this.
+const WITNESS_DEFAULT_TTL: chrono::Duration = chrono::Duration::minutes(5);
+
+/// Derive the sealed witness deadline from the shortest-lived frozen fact so a
+/// held witness cannot outlive the facts that justified it (§5.3.2): take the
+/// earliest of the candidate expiries, falling back to [`WITNESS_DEFAULT_TTL`]
+/// from now when none is present. Candidate expiries today are the adopted
+/// persistent-grant expiry (invoke/spawn) and the claimed approval lease's expiry
+/// (resume). Credential-lease expiry integration is future — the credential
+/// presence port returns presence, not lease expiry — so it is not a candidate
+/// yet; do not block on it.
+fn witness_deadline<I>(candidate_expiries: I) -> Timestamp
+where
+    I: IntoIterator<Item = Option<Timestamp>>,
+{
+    candidate_expiries
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or_else(|| chrono::Utc::now() + WITNESS_DEFAULT_TTL)
+}
+
 fn permission_mode_allows_persistent_approval(permission: PermissionMode) -> bool {
     matches!(permission, PermissionMode::Allow | PermissionMode::Ask)
 }
@@ -3330,6 +3374,51 @@ mod tests {
         }
     }
 
+    // Returns a single persistent grant carrying `expiry`. With `AllowAuthorizer`
+    // the persistent-approval probe adopts it, so its `expires_at` becomes the
+    // witness's shortest-lived frozen fact.
+    struct GrantWithExpiryPolicyFacts {
+        expiry: Timestamp,
+    }
+
+    #[async_trait::async_trait]
+    impl HostPolicyFacts for GrantWithExpiryPolicyFacts {
+        async fn credential_presence(
+            &self,
+            _capability_id: &CapabilityId,
+            _scope: &ResourceScope,
+        ) -> CredentialPresence {
+            CredentialPresence::Satisfied
+        }
+
+        async fn persistent_grants(
+            &self,
+            capability_id: &CapabilityId,
+            context: &ExecutionContext,
+            _action: crate::ports::PolicyAction,
+        ) -> Vec<ironclaw_host_api::CapabilityGrant> {
+            use ironclaw_host_api::{
+                CapabilityGrant, CapabilityGrantId, GrantConstraints, MountView, NetworkPolicy,
+                Principal,
+            };
+            vec![CapabilityGrant {
+                id: CapabilityGrantId::new(),
+                capability: capability_id.clone(),
+                grantee: Principal::User(context.resource_scope.user_id.clone()),
+                issued_by: Principal::HostRuntime,
+                constraints: GrantConstraints {
+                    allowed_effects: Vec::new(),
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: Some(self.expiry),
+                    max_invocations: None,
+                },
+            }]
+        }
+    }
+
     // `authorize()` never dispatches; this satisfies the `CapabilityHost` type
     // parameter without pulling in the integration-tier recording dispatcher.
     struct UnusedDispatcher;
@@ -3454,7 +3543,10 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
 
     // The Allow decision seals an `Authorized` whose lane is resolved from the
     // descriptor (echo is a WASM extension) and whose invocation carries the
-    // exact capability/actor/input the request named.
+    // exact capability/actor/input the request named. Echo declares no resource
+    // obligation and no persistent grant is adopted, so the witness carries no
+    // reservation (`None`, never a synthesized placeholder) and its deadline is
+    // the bounded default TTL (§5.3.2).
     #[tokio::test]
     async fn authorize_allow_path_seals_authorized_with_lane_and_invocation() {
         use ironclaw_host_api::UserId;
@@ -3475,7 +3567,9 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
         );
 
         let request = allow_request();
+        let before = chrono::Utc::now();
         let fold = host.authorize(&request).await.unwrap();
+        let after = chrono::Utc::now();
 
         let AuthorizeFold::Authorized(fold) = fold else {
             panic!("expected an allowed authorization");
@@ -3494,5 +3588,68 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
             Actor::Sealed(UserId::new("actor").unwrap())
         );
         assert_eq!(invocation.input, serde_json::json!({"message": "hi"}));
+        // No resource obligation → no reservation on the witness.
+        assert!(
+            authorized.reservation().is_none(),
+            "echo declares no resource obligation; the witness must carry no reservation"
+        );
+        // No frozen fact → the bounded default TTL from authorize-time.
+        assert!(authorized.deadline() >= before + WITNESS_DEFAULT_TTL);
+        assert!(authorized.deadline() <= after + WITNESS_DEFAULT_TTL);
+    }
+
+    // When a persistent grant carrying an `expires_at` is adopted in the fold, the
+    // witness deadline is that expiry (the shortest-lived frozen fact), not the
+    // default TTL.
+    #[tokio::test]
+    async fn authorize_seals_witness_deadline_from_adopted_grant_expiry() {
+        let expiry = chrono::DateTime::from_timestamp(2_000_000_000, 0).unwrap();
+        let registry = echo_registry();
+        let dispatcher = UnusedDispatcher;
+        let authorizer = AllowAuthorizer;
+        let trust_policy = StaticTrustPolicy;
+        let runtime_policy = permissive_runtime_policy();
+        let policy_facts = GrantWithExpiryPolicyFacts { expiry };
+        let host = CapabilityHost::new(
+            &registry,
+            &dispatcher,
+            &authorizer,
+            &trust_policy,
+            &runtime_policy,
+            &policy_facts,
+        );
+
+        let request = allow_request();
+        let fold = host.authorize(&request).await.unwrap();
+
+        let AuthorizeFold::Authorized(fold) = fold else {
+            panic!("expected an allowed authorization");
+        };
+        let Some(AuthorizeResult::Authorized(authorized)) = &fold.result else {
+            panic!("allow path must mint an Authorized witness");
+        };
+        assert_eq!(
+            authorized.deadline(),
+            expiry,
+            "adopted persistent-grant expiry is the shortest-lived frozen fact"
+        );
+    }
+
+    #[test]
+    fn witness_deadline_takes_earliest_candidate_else_default_ttl() {
+        let earlier = chrono::DateTime::from_timestamp(1_000, 0).unwrap();
+        let later = chrono::DateTime::from_timestamp(2_000, 0).unwrap();
+        // Shortest-lived candidate wins; `None` candidates are ignored.
+        assert_eq!(
+            witness_deadline([Some(later), None, Some(earlier)]),
+            earlier
+        );
+        assert_eq!(witness_deadline([Some(earlier)]), earlier);
+        // No frozen fact → bounded default TTL from now.
+        let before = chrono::Utc::now();
+        let fallback = witness_deadline([None, None]);
+        let after = chrono::Utc::now();
+        assert!(fallback >= before + WITNESS_DEFAULT_TTL);
+        assert!(fallback <= after + WITNESS_DEFAULT_TTL);
     }
 }
