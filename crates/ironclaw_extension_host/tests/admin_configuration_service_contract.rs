@@ -142,6 +142,71 @@ async fn blank_secret_preserves_the_previous_revision_handle() {
 }
 
 #[tokio::test]
+async fn runtime_resolvers_follow_descriptor_kinds_and_return_effective_values() {
+    let (service, _) = service();
+    let scope = sample_scope("tenant-a", "operator-a");
+    service
+        .replace(
+            &scope,
+            &group_id(),
+            &idempotency_key("save-1"),
+            0,
+            submitted("client-a", "super-secret"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        service
+            .non_secret_value(
+                &scope,
+                &group_id(),
+                &SecretHandle::new("client_id").unwrap(),
+            )
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("client-a"),
+    );
+    let secret = service
+        .secret_material(
+            &scope,
+            &group_id(),
+            &SecretHandle::new("client_secret").unwrap(),
+        )
+        .await
+        .unwrap()
+        .expect("configured secret resolves");
+    assert_eq!(
+        secrecy::ExposeSecret::expose_secret(&secret),
+        "super-secret",
+    );
+
+    assert_eq!(
+        service
+            .secret_material(
+                &scope,
+                &group_id(),
+                &SecretHandle::new("client_id").unwrap(),
+            )
+            .await
+            .unwrap_err(),
+        AdminConfigurationServiceError::UnknownField,
+    );
+    assert_eq!(
+        service
+            .non_secret_value(
+                &scope,
+                &group_id(),
+                &SecretHandle::new("client_secret").unwrap(),
+            )
+            .await
+            .unwrap_err(),
+        AdminConfigurationServiceError::UnknownField,
+    );
+}
+
+#[tokio::test]
 async fn exact_replay_does_not_stage_again_after_a_later_revision() {
     let (service, secrets) = service();
     let scope = sample_scope("tenant-a", "operator-a");

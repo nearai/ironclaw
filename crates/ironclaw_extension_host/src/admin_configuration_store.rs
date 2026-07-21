@@ -240,14 +240,14 @@ impl StoredAdminConfigurationRecord {
 /// as absent rather than disclosing another tenant's state.
 pub struct FilesystemAdminConfigurationStore<F>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + ?Sized,
 {
     filesystem: Arc<ScopedFilesystem<F>>,
 }
 
 impl<F> FilesystemAdminConfigurationStore<F>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + ?Sized,
 {
     pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self { filesystem }

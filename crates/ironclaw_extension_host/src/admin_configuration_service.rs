@@ -87,8 +87,8 @@ pub enum AdminConfigurationServiceError {
 /// configuration semantics are shared by every manifest descriptor.
 pub struct AdminConfigurationService<F, S>
 where
-    F: RootFilesystem,
-    S: SecretStore,
+    F: RootFilesystem + ?Sized,
+    S: SecretStore + ?Sized,
 {
     store: FilesystemAdminConfigurationStore<F>,
     secrets: Arc<S>,
@@ -97,8 +97,8 @@ where
 
 impl<F, S> AdminConfigurationService<F, S>
 where
-    F: RootFilesystem,
-    S: SecretStore,
+    F: RootFilesystem + ?Sized,
+    S: SecretStore + ?Sized,
 {
     pub fn new(
         store: FilesystemAdminConfigurationStore<F>,
@@ -163,6 +163,84 @@ where
             .map_err(map_store_error)?;
         let commit = record.as_ref().map(commit_from_record);
         Ok(render_group(descriptor, commit.as_ref()))
+    }
+
+    /// Resolve one non-secret value for a runtime consumer. The manifest
+    /// descriptor remains authoritative for both the group and field kind;
+    /// callers cannot use this as a generic record reader.
+    pub async fn non_secret_value(
+        &self,
+        scope: &ResourceScope,
+        group_id: &AdminConfigurationGroupId,
+        handle: &SecretHandle,
+    ) -> Result<Option<String>, AdminConfigurationServiceError> {
+        let descriptor = self
+            .descriptors
+            .get(group_id)
+            .ok_or(AdminConfigurationServiceError::UnknownGroup)?;
+        let field = descriptor
+            .fields
+            .iter()
+            .find(|field| &field.handle == handle)
+            .ok_or(AdminConfigurationServiceError::UnknownField)?;
+        if field.secret {
+            return Err(AdminConfigurationServiceError::UnknownField);
+        }
+        let record = self
+            .store
+            .get(scope, group_id)
+            .await
+            .map_err(map_store_error)?;
+        Ok(record
+            .and_then(|record| record.values.get(handle).cloned())
+            .and_then(|value| match value {
+                AdminConfigurationValueRef::Inline(value) => Some(value),
+                AdminConfigurationValueRef::Secret(_) => None,
+            }))
+    }
+
+    /// Consume one secret value for a trusted runtime consumer. Secret bytes
+    /// stay behind the existing one-shot lease boundary and are never returned
+    /// by the operator query projection.
+    pub async fn secret_material(
+        &self,
+        scope: &ResourceScope,
+        group_id: &AdminConfigurationGroupId,
+        handle: &SecretHandle,
+    ) -> Result<Option<SecretMaterial>, AdminConfigurationServiceError> {
+        let descriptor = self
+            .descriptors
+            .get(group_id)
+            .ok_or(AdminConfigurationServiceError::UnknownGroup)?;
+        let field = descriptor
+            .fields
+            .iter()
+            .find(|field| &field.handle == handle)
+            .ok_or(AdminConfigurationServiceError::UnknownField)?;
+        if !field.secret {
+            return Err(AdminConfigurationServiceError::UnknownField);
+        }
+        let record = self
+            .store
+            .get(scope, group_id)
+            .await
+            .map_err(map_store_error)?;
+        let Some(AdminConfigurationValueRef::Secret(stored_handle)) =
+            record.and_then(|record| record.values.get(handle).cloned())
+        else {
+            return Ok(None);
+        };
+        let shared_scope = scope.tenant_shared_managed_scope();
+        let lease = self
+            .secrets
+            .lease_once(&shared_scope, &stored_handle)
+            .await
+            .map_err(|_| AdminConfigurationServiceError::Unavailable)?;
+        self.secrets
+            .consume(&shared_scope, lease.id)
+            .await
+            .map(Some)
+            .map_err(|_| AdminConfigurationServiceError::Unavailable)
     }
 
     /// Replace one group using client-owned concurrency and retry identities.
