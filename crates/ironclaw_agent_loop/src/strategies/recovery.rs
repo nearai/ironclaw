@@ -150,6 +150,20 @@ pub(crate) enum ModelErrorClass {
     Unavailable,
     /// Model gateway failed internally without safe caller detail.
     Internal,
+    /// The model request no longer matches the host's current state (stale
+    /// capability surface version, mismatched or missing prompt bundle).
+    /// Model-fixable by rebuild: an iteration-scoped retry re-derives the
+    /// surface and prompt bundle.
+    StaleRequest,
+    /// The host rejected the model call as unauthorized. Terminal with a
+    /// precise credentials category; never silently retried.
+    Unauthorized,
+    /// The host rejected the model stage's checkpoint interaction. Terminal
+    /// with the precise `checkpoint_rejected` category.
+    CheckpointRejected,
+    /// The host could not persist transcript output for the model stage.
+    /// Terminal with the precise `transcript_write_failed` category.
+    TranscriptWriteFailed,
 }
 
 /// Strategy decision plus the new `recovery_state` slot value.
@@ -211,6 +225,12 @@ pub(crate) enum RetryScope {
 ///   (5xx storms) routinely outlast a couple of quick retries; a long-running
 ///   agentic turn must ride them out rather than discard all prior work.
 /// - Retries `ContextOverflow` at iteration scope with `ShrinkContext`.
+/// - Retries `StaleRequest` at iteration scope (rebuilding the capability
+///   surface and prompt bundle) up to [`Self::max_attempts_per_class`] times,
+///   then aborts the run with the precise `model_stale_request` category.
+/// - Aborts immediately on `Unauthorized`, `CheckpointRejected`, and
+///   `TranscriptWriteFailed` — precise, user-actionable terminal categories
+///   that must never be silently retried.
 #[derive(Debug, Clone, Copy)]
 pub struct DefaultRecoveryStrategy {
     /// Max retries per error class before giving up. Default `2`.
@@ -284,10 +304,35 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
     ) -> RecoveryOutcome {
         let kind = model_error_to_failure_kind(err.class);
         match err.class {
-            ModelErrorClass::ContentFiltered => RecoveryOutcome::Abort {
+            // Terminal without retry: content filtering needs a changed
+            // request; unauthorized/checkpoint/transcript kinds carry precise
+            // user-actionable categories and must not be silently retried.
+            ModelErrorClass::ContentFiltered
+            | ModelErrorClass::Unauthorized
+            | ModelErrorClass::CheckpointRejected
+            | ModelErrorClass::TranscriptWriteFailed => RecoveryOutcome::Abort {
                 recovery: state.recovery_state.cleared_attempts(),
                 failure_kind: kind,
             },
+            ModelErrorClass::StaleRequest => {
+                let Some(attempt_class) = model_retry_attempt_class(err.class) else {
+                    return RecoveryOutcome::Abort {
+                        recovery: state.recovery_state.cleared_attempts(),
+                        failure_kind: LoopFailureKind::DriverBug,
+                    };
+                };
+                // Iteration scope so the executor rebuilds the capability
+                // surface and prompt bundle — the stale input — before the
+                // next model call. No backoff: the rebuild itself is the fix.
+                retry_or_abort(
+                    state,
+                    attempt_class,
+                    self.max_attempts_per_class,
+                    kind,
+                    RetryScope::Iteration,
+                    |_| None,
+                )
+            }
             ModelErrorClass::ContextOverflow => {
                 let Some(attempt_class) = model_retry_attempt_class(err.class) else {
                     return RecoveryOutcome::Abort {
@@ -438,7 +483,11 @@ fn model_retry_attempt_class(class: ModelErrorClass) -> Option<RecoveryAttemptCl
         ModelErrorClass::InvalidOutput => Some(RecoveryAttemptClass::ModelInvalidOutput),
         ModelErrorClass::Unavailable => Some(RecoveryAttemptClass::ModelUnavailable),
         ModelErrorClass::Internal => Some(RecoveryAttemptClass::ModelInternal),
-        ModelErrorClass::ContentFiltered => None,
+        ModelErrorClass::StaleRequest => Some(RecoveryAttemptClass::ModelStaleRequest),
+        ModelErrorClass::ContentFiltered
+        | ModelErrorClass::Unauthorized
+        | ModelErrorClass::CheckpointRejected
+        | ModelErrorClass::TranscriptWriteFailed => None,
     }
 }
 
@@ -463,8 +512,12 @@ pub(crate) fn model_error_to_failure_kind(class: ModelErrorClass) -> LoopFailure
         | ModelErrorClass::ContextOverflow
         | ModelErrorClass::ContentFiltered
         | ModelErrorClass::Unavailable
-        | ModelErrorClass::Internal => LoopFailureKind::ModelError,
+        | ModelErrorClass::Internal
+        | ModelErrorClass::StaleRequest
+        | ModelErrorClass::Unauthorized => LoopFailureKind::ModelError,
         ModelErrorClass::InvalidOutput => LoopFailureKind::InvalidModelOutput,
+        ModelErrorClass::CheckpointRejected => LoopFailureKind::CheckpointRejected,
+        ModelErrorClass::TranscriptWriteFailed => LoopFailureKind::TranscriptWriteFailed,
     }
 }
 
@@ -624,6 +677,13 @@ mod tests {
             (ModelErrorClass::ContentFiltered, "content_filtered"),
             (ModelErrorClass::Unavailable, "unavailable"),
             (ModelErrorClass::Internal, "internal"),
+            (ModelErrorClass::StaleRequest, "stale_request"),
+            (ModelErrorClass::Unauthorized, "unauthorized"),
+            (ModelErrorClass::CheckpointRejected, "checkpoint_rejected"),
+            (
+                ModelErrorClass::TranscriptWriteFailed,
+                "transcript_write_failed",
+            ),
         ] {
             let value = serde_json::to_value(variant).expect("serialize");
             assert_eq!(value, serde_json::json!(wire));
@@ -1149,6 +1209,73 @@ mod tests {
                     matches!(outcome, RecoveryOutcome::Abort { .. }),
                     "{class:?} past the availability budget should abort, got {outcome:?}"
                 );
+            }
+        }
+
+        #[tokio::test]
+        async fn model_stale_request_retries_at_iteration_scope_then_aborts_at_budget() {
+            let strategy = DefaultRecoveryStrategy::default();
+
+            let state = state_with_no_attempts();
+            let outcome = strategy
+                .on_model_error(&state, &model_err(ModelErrorClass::StaleRequest))
+                .await;
+            match outcome {
+                RecoveryOutcome::Retry {
+                    recovery,
+                    scope,
+                    alter,
+                } => {
+                    assert_eq!(
+                        recovery.attempts_for(RecoveryAttemptClass::ModelStaleRequest),
+                        1
+                    );
+                    assert_eq!(
+                        scope,
+                        RetryScope::Iteration,
+                        "stale requests must rebuild the iteration (surface + prompt bundle)"
+                    );
+                    assert_eq!(alter, None);
+                }
+                other => panic!("expected stale-request iteration retry, got {other:?}"),
+            }
+
+            let state = state_with_attempts_for(2, RecoveryAttemptClass::ModelStaleRequest);
+            let outcome = strategy
+                .on_model_error(&state, &model_err(ModelErrorClass::StaleRequest))
+                .await;
+            assert!(matches!(
+                outcome,
+                RecoveryOutcome::Abort {
+                    failure_kind: LoopFailureKind::ModelError,
+                    ..
+                }
+            ));
+        }
+
+        #[tokio::test]
+        async fn model_precise_terminal_classes_abort_immediately() {
+            let strategy = DefaultRecoveryStrategy::default();
+
+            for (class, expected_kind) in [
+                (ModelErrorClass::Unauthorized, LoopFailureKind::ModelError),
+                (
+                    ModelErrorClass::CheckpointRejected,
+                    LoopFailureKind::CheckpointRejected,
+                ),
+                (
+                    ModelErrorClass::TranscriptWriteFailed,
+                    LoopFailureKind::TranscriptWriteFailed,
+                ),
+            ] {
+                let state = state_with_no_attempts();
+                let outcome = strategy.on_model_error(&state, &model_err(class)).await;
+                match outcome {
+                    RecoveryOutcome::Abort { failure_kind, .. } => {
+                        assert_eq!(failure_kind, expected_kind, "failure kind for {class:?}");
+                    }
+                    other => panic!("{class:?} must abort immediately, got {other:?}"),
+                }
             }
         }
 

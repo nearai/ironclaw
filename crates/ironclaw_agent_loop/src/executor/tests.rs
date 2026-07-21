@@ -3374,6 +3374,170 @@ async fn model_budget_accounting_failure_preserves_kind_without_model_retry() {
     );
 }
 
+/// Model-path stale-request kinds are model-fixable-by-rebuild: an
+/// iteration-scoped retry rebuilds the capability surface and prompt bundle,
+/// so a surface refreshed mid-iteration no longer hard-borks the run
+/// invisible to the model. Audit §6.1/§7,
+/// `docs/plans/2026-06-28-reborn-error-recoverability-audit.md`.
+#[tokio::test]
+async fn model_stale_request_kinds_retry_iteration_with_fresh_bundle_and_complete() {
+    for kind in [
+        AgentLoopHostErrorKind::StaleSurface,
+        AgentLoopHostErrorKind::InvalidInvocation,
+        AgentLoopHostErrorKind::Invalid,
+    ] {
+        let host =
+            MockHost::new(vec![reply_response()]).with_model_errors(vec![AgentLoopHostError::new(
+                kind,
+                "model request does not match the host-built prompt bundle",
+            )]);
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let exit = executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("model-path {kind:?} must be recoverable, got hard error {error:?}")
+            });
+
+        assert!(
+            matches!(exit, LoopExit::Completed(_)),
+            "{kind:?} should complete after an iteration retry, got {exit:?}"
+        );
+        assert_eq!(
+            host.model_requests().len(),
+            2,
+            "{kind:?} should retry the model call exactly once"
+        );
+        assert_eq!(
+            host.prompt_requests().len(),
+            2,
+            "{kind:?} iteration retry must rebuild the host prompt bundle"
+        );
+    }
+}
+
+/// When the stale-request retry budget is exhausted the run fails gracefully
+/// with the precise `model_stale_request` category — not a terminal
+/// `HostUnavailableWithDiagnostics` that collapses to a generic
+/// model-unavailable failure.
+#[tokio::test]
+async fn model_stale_request_exhaustion_fails_with_stale_request_category() {
+    let stale = || {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::StaleSurface,
+            "model request surface version does not match the host-built prompt bundle",
+        )
+    };
+    let host = MockHost::new(Vec::new()).with_model_errors(vec![stale(), stale(), stale()]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("stale-request exhaustion must fail gracefully, not hard-bork");
+
+    match exit {
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::ModelError);
+            let summary = failed.safe_summary.expect("stale-request failure summary");
+            assert_eq!(summary.category(), "model_stale_request");
+        }
+        other => panic!("expected stale-request failed exit, got {other:?}"),
+    }
+    assert_eq!(
+        host.model_requests().len(),
+        3,
+        "stale-request retries are bounded by the per-class budget"
+    );
+}
+
+/// A model-path `Unauthorized` host error terminates immediately with the
+/// pinned, user-actionable `model_credentials_unavailable` category (fix the
+/// key/permissions) instead of a generic model-unavailable failure, and is
+/// never silently retried.
+#[tokio::test]
+async fn model_unauthorized_fails_with_credentials_category_without_retry() {
+    let host = MockHost::new(Vec::new()).with_model_errors(vec![
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unauthorized,
+            "model access was unauthorized",
+        )
+        .with_detail("HTTP 401 from provider"),
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("unauthorized model errors must fail gracefully with a precise category");
+
+    match exit {
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::ModelError);
+            let summary = failed.safe_summary.expect("unauthorized failure summary");
+            assert_eq!(summary.category(), "model_credentials_unavailable");
+            assert_eq!(summary.detail(), Some("HTTP 401 from provider"));
+        }
+        other => panic!("expected unauthorized failed exit, got {other:?}"),
+    }
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "unauthorized model errors must not be silently retried"
+    );
+}
+
+/// Model-path checkpoint/transcript host error kinds terminate with their
+/// precise failure kinds and categories instead of the generic host-stage
+/// unavailability collapse.
+#[tokio::test]
+async fn model_checkpoint_and_transcript_kinds_fail_with_precise_categories() {
+    for (kind, expected_failure_kind, expected_category) in [
+        (
+            AgentLoopHostErrorKind::CheckpointRejected,
+            LoopFailureKind::CheckpointRejected,
+            "checkpoint_rejected",
+        ),
+        (
+            AgentLoopHostErrorKind::TranscriptWriteFailed,
+            LoopFailureKind::TranscriptWriteFailed,
+            "transcript_write_failed",
+        ),
+    ] {
+        let host = MockHost::new(Vec::new()).with_model_errors(vec![AgentLoopHostError::new(
+            kind,
+            "model stage host persistence failed",
+        )]);
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let exit = executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("model-path {kind:?} must fail gracefully, got hard error {error:?}")
+            });
+
+        match exit {
+            LoopExit::Failed(failed) => {
+                assert_eq!(failed.reason_kind, expected_failure_kind, "kind for {kind:?}");
+                let summary = failed.safe_summary.expect("failure summary");
+                assert_eq!(summary.category(), expected_category, "category for {kind:?}");
+            }
+            other => panic!("expected {kind:?} failed exit, got {other:?}"),
+        }
+        assert_eq!(
+            host.model_requests().len(),
+            1,
+            "{kind:?} model errors must not be silently retried"
+        );
+    }
+}
+
 #[tokio::test]
 async fn model_invalid_output_failed_exit_carries_safe_summary_detail() {
     let host = MockHost::new(Vec::new()).with_model_errors(vec![

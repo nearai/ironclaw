@@ -43,7 +43,7 @@ mod provider_validation;
 mod surface_snapshot;
 
 use self::provider_input::{
-    normalize_provider_arguments, prepare_provider_arguments,
+    ProviderArgumentError, normalize_provider_arguments, prepare_provider_arguments,
     prepare_provider_arguments_with_detail, schema_contains_external_ref,
 };
 use self::provider_validation::{
@@ -2416,17 +2416,22 @@ impl HostRuntimeLoopCapabilityPort {
                 let runtime_input =
                     match host_runtime_input_for_capability(&request.capability_id, input) {
                         Ok(runtime_input) => runtime_input,
-                        Err(error) if error.kind == AgentLoopHostErrorKind::InvalidInvocation => {
+                        Err(error)
+                            if error.error.kind == AgentLoopHostErrorKind::InvalidInvocation =>
+                        {
                             // A malformed/invalid model-supplied process sandbox plan is a
                             // model-fixable error, not a host fault: surface it as a
                             // model-visible tool error so the agent can correct the
                             // arguments instead of ending the run. `host_runtime_input_for_capability`
                             // only returns `InvalidInvocation` for the sandbox-plan parse/validation
                             // case; its host-internal serialization failure keeps its `Internal` Err.
+                            // The attached diagnostic carries the sanitized cause (which
+                            // field, what rule) so the model knows what to fix.
+                            let host_error = *error.error;
                             let result = Ok(GatedResolution::bare(resolution::failed(
                                 CapabilityFailureKind::InvalidInput,
-                                error.safe_summary,
-                                None,
+                                host_error.safe_summary,
+                                error.detail,
                             )));
                             guard.commit();
                             self.record_loop_completed(
@@ -2436,7 +2441,7 @@ impl HostRuntimeLoopCapabilityPort {
                             )?;
                             return result;
                         }
-                        Err(error) => return Err(error),
+                        Err(error) => return Err(*error.error),
                     };
                 (runtime_input, capability.estimate.clone())
             }
@@ -2786,18 +2791,18 @@ async fn dispatch_runtime_capability_auth_resume(
 fn host_runtime_input_for_capability(
     capability_id: &CapabilityId,
     input: serde_json::Value,
-) -> Result<serde_json::Value, AgentLoopHostError> {
+) -> Result<serde_json::Value, ProviderArgumentError> {
     if is_process_sandbox_capability(capability_id) {
-        let plan = serde_json::from_value::<SandboxProcessPlan>(input).map_err(|_| {
-            AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
+        let plan = serde_json::from_value::<SandboxProcessPlan>(input).map_err(|error| {
+            sandbox_plan_input_error(
                 "process sandbox capability input must be a SandboxProcessPlan",
+                &error.to_string(),
             )
         })?;
-        let plan = ValidatedSandboxProcessPlan::new(plan).map_err(|_| {
-            AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
+        let plan = ValidatedSandboxProcessPlan::new(plan).map_err(|error| {
+            sandbox_plan_input_error(
                 "process sandbox capability input failed SandboxProcessPlan validation",
+                &error.to_string(),
             )
         })?;
         return serde_json::to_value(plan.into_plan()).map_err(|error| {
@@ -2809,9 +2814,54 @@ fn host_runtime_input_for_capability(
                 safe_summary,
                 error,
             )
+            .into()
         });
     }
     Ok(input)
+}
+
+/// A model-fixable sandbox-plan parse/validation rejection: the fixed
+/// host-authored summary plus a model-visible diagnostic carrying the actual
+/// cause (which field, what rule), so the model can correct the plan instead of
+/// retrying blind. The cause text is sanitized to satisfy the `SafeSummary`
+/// redaction contract the diagnostic is squeezed through at the host_api
+/// boundary — otherwise a delimiter (serde's backticks, a mount path) would
+/// silently degrade the whole diagnostic to the placeholder.
+fn sandbox_plan_input_error(summary: &'static str, cause: &str) -> ProviderArgumentError {
+    ProviderArgumentError {
+        error: Box::new(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            summary,
+        )),
+        detail: safe_sandbox_plan_cause(cause)
+            .map(|text| CapabilityFailureDetail::Diagnostic { text }),
+    }
+}
+
+/// Rewrite a plan parse/validation cause into `SafeSummary`-compatible text:
+/// backticks become quotes (serde field names stay readable), other banned
+/// payload/path delimiters and control characters become spaces, and the result
+/// is bounded. Returns `None` when nothing legible remains.
+fn safe_sandbox_plan_cause(raw: &str) -> Option<String> {
+    const MAX_BYTES: usize = 400;
+    let sanitized: String = raw
+        .chars()
+        .map(|character| match character {
+            '`' => '\'',
+            '{' | '}' | '[' | ']' | '<' | '>' | '/' | '\\' => ' ',
+            character if character == '\0' || character.is_control() => ' ',
+            character => character,
+        })
+        .collect();
+    let mut text = sanitized.trim().to_string();
+    if text.len() > MAX_BYTES {
+        let mut end = MAX_BYTES;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    if text.is_empty() { None } else { Some(text) }
 }
 
 fn is_process_sandbox_capability(capability_id: &CapabilityId) -> bool {
@@ -8114,6 +8164,20 @@ mod tests {
         match outcome {
             Resolution::Done(o) => {
                 assert_eq!(o.verdict.error_kind(), Some(&FailureKind::InvalidInput));
+                // The model must learn WHAT is wrong (which field, what rule) so
+                // it can correct the plan — not just that "validation failed".
+                let diagnostic = o
+                    .verdict
+                    .diagnostic()
+                    .expect("plan validation rejection must carry a model-visible diagnostic");
+                match diagnostic {
+                    ModelFailureDiagnostic::Diagnostic { text } => assert!(
+                        text.as_str().contains("run command must not be empty"),
+                        "diagnostic must name the offending field and rule, got: {}",
+                        text.as_str()
+                    ),
+                    other => panic!("expected a free-text diagnostic, got {other:?}"),
+                }
             }
             other => panic!("expected Failed(InvalidInput), got {other:?}"),
         }
@@ -8177,6 +8241,21 @@ mod tests {
         match outcome {
             Resolution::Done(o) => {
                 assert_eq!(o.verdict.error_kind(), Some(&FailureKind::InvalidInput));
+                // The serde cause ("missing field `run`", sanitized to satisfy
+                // the SafeSummary delimiter contract) must reach the model so it
+                // can fix the plan shape on retry.
+                let diagnostic = o
+                    .verdict
+                    .diagnostic()
+                    .expect("malformed plan rejection must carry a model-visible diagnostic");
+                match diagnostic {
+                    ModelFailureDiagnostic::Diagnostic { text } => assert!(
+                        text.as_str().contains("missing field 'run'"),
+                        "diagnostic must carry the sanitized parse cause, got: {}",
+                        text.as_str()
+                    ),
+                    other => panic!("expected a free-text diagnostic, got {other:?}"),
+                }
             }
             other => panic!("expected Failed(InvalidInput), got {other:?}"),
         }

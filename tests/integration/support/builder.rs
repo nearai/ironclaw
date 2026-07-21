@@ -61,7 +61,7 @@ use super::http_matcher::ScriptedHttpResponse;
 use super::planned_runtime_parts_shape::DefaultPlannedRuntimePartsShape;
 use super::process::ScriptedProcessResult;
 use super::reply::RebornScriptedReply;
-use super::scripted_provider::ParkingModelGate;
+use super::scripted_provider::{ErrLlmKind, ParkingModelGate};
 use super::session_thread::RebornThreadHarness;
 use super::test_adapter::RebornTestIngress;
 use crate::support::trace_llm::TraceLlm;
@@ -119,10 +119,10 @@ pub struct RebornIntegrationHarnessBuilder {
     /// E-GATEWAY: when set, the model call parks until released, enabling a
     /// mid-turn cancel test. Threaded into the degenerate one-thread group.
     park_gate: Option<ParkingModelGate>,
-    /// E-GATEWAY (C-ERRORS): when `true`, the model call always fails with a
-    /// fixed non-retryable `LlmError`. Threaded into the degenerate one-thread
-    /// group. See [`RebornThreadBuilder::fail_model`].
-    fail_model: bool,
+    /// E-GATEWAY (C-ERRORS): when set, the model call always fails with the
+    /// selected fixed non-retryable `LlmError`. Threaded into the degenerate
+    /// one-thread group. See [`RebornThreadBuilder::fail_model`].
+    fail_model: Option<ErrLlmKind>,
     /// C-TRACECAP seam: install an in-memory `TurnEventSink` when `true`.
     turn_event_sink: bool,
     /// Force `ToolDisclosureMode::Bridged` into the underlying group's ONE
@@ -228,7 +228,16 @@ impl RebornIntegrationHarnessBuilder {
     /// `LlmError` (E-GATEWAY seam, C-ERRORS). See
     /// [`RebornThreadBuilder::fail_model`](super::group::RebornThreadBuilder::fail_model).
     pub fn fail_model(mut self) -> Self {
-        self.fail_model = true;
+        self.fail_model = Some(ErrLlmKind::ContextLength);
+        self
+    }
+
+    /// Credentials arm of [`Self::fail_model`]: the model call always fails
+    /// with non-retryable `LlmError::AuthFailed`, driving the pinned
+    /// `model_credentials_unavailable` failure category through the real
+    /// provider-error mapping (E-GATEWAY seam, C-ERRORS).
+    pub fn fail_model_auth(mut self) -> Self {
+        self.fail_model = Some(ErrLlmKind::AuthFailed);
         self
     }
 
@@ -631,7 +640,7 @@ impl RebornIntegrationHarness {
             safety_context: None,
             shell_mode: ShellMode::default(),
             park_gate: None,
-            fail_model: false,
+            fail_model: None,
             turn_event_sink: false,
             tool_disclosure: None,
             budget_accounting: false,
