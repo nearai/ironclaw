@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert a downloaded Reborn run artifact into a reviewable LLM trace candidate."""
+"""Convert a downloaded Reborn run or thread artifact into a trace candidate."""
 
 from __future__ import annotations
 
@@ -11,12 +11,13 @@ from collections import OrderedDict
 from typing import Any
 
 SCHEMA = "ironclaw.run_artifact.v1"
+THREAD_SCHEMA = "ironclaw.thread_artifact.v1"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Convert a redacted run artifact into an LLM trace candidate. "
+            "Convert a redacted run or thread artifact into an LLM trace candidate. "
             "Review assertions and external-service determinism before committing."
         )
     )
@@ -34,21 +35,20 @@ def load_artifact(path: pathlib.Path) -> dict[str, Any]:
         artifact = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"could not read artifact {path}: {error}") from error
-    if artifact.get("schema") != SCHEMA:
+    if artifact.get("schema") not in {SCHEMA, THREAD_SCHEMA}:
         raise ValueError(f"unsupported artifact schema: {artifact.get('schema')!r}")
     if artifact.get("redaction", {}).get("pipeline") != "deterministic-trace-redactor-v1":
         raise ValueError("artifact does not declare the required deterministic redaction pipeline")
     messages = artifact.get("messages")
     if not isinstance(messages, list) or not messages:
-        raise ValueError("artifact has no run messages")
+        raise ValueError("artifact has no replayable messages")
     return artifact
 
 
-def trace_candidate(artifact: dict[str, Any], model_override: str | None) -> dict[str, Any]:
-    messages = sorted(artifact["messages"], key=lambda item: item.get("sequence", 0))
+def build_turn(messages: list[dict[str, Any]]) -> tuple[dict[str, Any], list[str]]:
     user = next((item for item in messages if item.get("kind") == "user"), None)
     if not user or not str(user.get("content", "")).strip():
-        raise ValueError("artifact has no replayable user message")
+        raise ValueError("artifact turn has no replayable user message")
 
     tool_groups: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
     for message in messages:
@@ -121,9 +121,8 @@ def trace_candidate(artifact: dict[str, Any], model_override: str | None) -> dic
         raise ValueError("artifact ends with tool results but no finalized assistant response")
 
     if not steps:
-        raise ValueError("artifact has neither tool calls nor a finalized assistant response")
+        raise ValueError("artifact turn has neither tool calls nor a finalized assistant response")
 
-    model_name = model_override or (captured_models[0] if captured_models else "reborn-qa-import")
     tools = list(
         OrderedDict.fromkeys(
             call["name"]
@@ -131,26 +130,118 @@ def trace_candidate(artifact: dict[str, Any], model_override: str | None) -> dic
             for call in step["response"].get("tool_calls", [])
         )
     )
-    return {
-        "_review": {
-            "status": "candidate",
-            "source_schema": SCHEMA,
-            "source_run_id": artifact.get("run", {}).get("run_id"),
-            "logs_complete": artifact.get("logs", {}).get("complete", False),
-            "required_actions": [
-                "Add scenario-specific expects and caller-level end-state assertions.",
-                "Review every redaction placeholder for acceptable fixture fidelity.",
-                "Record or mock external HTTP/service exchanges before enabling hermetic CI replay.",
-            ],
+    return (
+        {
+            "user_input": user["content"],
+            "steps": steps,
+            "expects": {"tools_used": tools} if tools else {},
         },
+        captured_models,
+    )
+
+
+def artifact_turns(
+    artifact: dict[str, Any],
+) -> tuple[list[list[dict[str, Any]]], list[dict[str, Any]]]:
+    messages = sorted(artifact["messages"], key=lambda item: item.get("sequence", 0))
+    if artifact.get("schema") == SCHEMA:
+        return [messages], []
+
+    grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
+    skipped_unscoped: list[dict[str, Any]] = []
+    for message in messages:
+        run_id = str(message.get("run_id") or "").strip()
+        if (
+            not run_id
+            and message.get("kind") == "user"
+            and message.get("status") == "accepted"
+        ):
+            skipped_unscoped.append(
+                {
+                    "sequence": message.get("sequence"),
+                    "kind": message.get("kind"),
+                    "status": message.get("status"),
+                }
+            )
+            continue
+        # Persisted submitted messages carry their run id. Keep an explicit
+        # fallback group so malformed/manual artifacts fail review rather than
+        # silently merging unscoped records into a neighboring run.
+        key = run_id or f"unscoped:{message.get('sequence', len(grouped))}"
+        grouped.setdefault(key, []).append(message)
+    return list(grouped.values()), skipped_unscoped
+
+
+def trace_candidate(artifact: dict[str, Any], model_override: str | None) -> dict[str, Any]:
+    turns: list[dict[str, Any]] = []
+    captured_models: list[str] = []
+    skipped_incomplete_runs: list[dict[str, Any]] = []
+    message_groups, skipped_unscoped = artifact_turns(artifact)
+    if not message_groups:
+        raise ValueError("thread artifact has no complete run-scoped replayable turns")
+    for messages in message_groups:
+        user = next(
+            (
+                message
+                for message in messages
+                if message.get("kind") == "user"
+                and str(message.get("content", "")).strip()
+            ),
+            None,
+        )
+        has_assistant_response = any(
+            message.get("kind") == "assistant"
+            and message.get("status") == "finalized"
+            and str(message.get("content", "")).strip()
+            for message in messages
+        )
+        if artifact.get("schema") == THREAD_SCHEMA and user and not has_assistant_response:
+            skipped_incomplete_runs.append(
+                {
+                    "run_id": messages[0].get("run_id"),
+                    "sequence": user.get("sequence"),
+                    "reason": "run has no finalized assistant response",
+                }
+            )
+            continue
+        turn, turn_models = build_turn(messages)
+        turns.append(turn)
+        captured_models.extend(turn_models)
+    if not turns:
+        raise ValueError("thread artifact has no complete run-scoped replayable turns")
+
+    model_name = model_override or (captured_models[0] if captured_models else "reborn-qa-import")
+    required_actions = [
+        "Add scenario-specific expects and caller-level end-state assertions.",
+        "Review every redaction placeholder for acceptable fixture fidelity.",
+        "Record or mock external HTTP/service exchanges before enabling hermetic CI replay.",
+    ]
+    if skipped_unscoped:
+        required_actions.insert(
+            0,
+            "Review skipped_unscoped_messages from accepted submissions that never received a run ID.",
+        )
+    if skipped_incomplete_runs:
+        required_actions.insert(
+            0,
+            "Review skipped_incomplete_runs that had no finalized assistant response.",
+        )
+    review = {
+        "status": "candidate",
+        "source_schema": artifact.get("schema"),
+        "source_run_id": artifact.get("run", {}).get("run_id"),
+        "source_thread_id": artifact.get("thread_id"),
+        "logs_complete": artifact.get("logs", {}).get("complete", False),
+        "required_actions": required_actions,
+    }
+    if skipped_unscoped:
+        review["skipped_unscoped_messages"] = skipped_unscoped
+    if skipped_incomplete_runs:
+        review["skipped_incomplete_runs"] = skipped_incomplete_runs
+    return {
+        "_review": review,
         "model_name": model_name,
-        "turns": [
-            {
-                "user_input": user["content"],
-                "steps": steps,
-                "expects": {"tools_used": tools} if tools else {},
-            }
-        ],
+        "turns": turns,
     }
 
 

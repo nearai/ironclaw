@@ -1451,6 +1451,8 @@ registerPack("en", {
   "chat.generatedImageUnavailable": "Generated image unavailable in history payload",
   "chat.messageAttachmentAlt": "Message attachment",
   "chat.copyMessage": "Copy message",
+  "chat.downloadRunArtifact": "Download this run",
+  "chat.downloadThreadArtifact": "Download full thread",
   "chat.retryMessage": "Retry message",
   "chat.history.loadFailed": "Failed to load conversation history.",
   "chat.finishPairingBeforeSend": "Finish connecting the channel before sending another message.",

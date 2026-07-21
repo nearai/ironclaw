@@ -62,13 +62,15 @@ use ironclaw_product_workflow::{
     RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
     RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
     RebornStreamEventsRequest, RebornStreamEventsResponse, RebornStreamEventsSubscription,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery,
-    RunArtifactLogs, RunArtifactRedaction, SetActiveLlmRequest, UpsertLlmProviderRequest,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, rejecting_reborn_services_error,
+    RebornSubmitTurnResponse, RebornThreadArtifact, RebornThreadArtifactRequest,
+    RebornTimelineRequest, RebornTimelineResponse, RebornUpdateMemberRoleRequest,
+    RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery, RunArtifactLogs,
+    RunArtifactRedaction, SetActiveLlmRequest, THREAD_ARTIFACT_SCHEMA, THREAD_ARTIFACT_VIEW,
+    UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
+    WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
+    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    rejecting_reborn_services_error,
 };
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
@@ -713,6 +715,32 @@ impl RebornServicesApi for StubServices {
                         RebornOperatorArea::Logs,
                     ))
                     .expect("operator logs payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == THREAD_ARTIFACT_VIEW.id => {
+                let request: RebornThreadArtifactRequest =
+                    serde_json::from_value(query.params).expect("thread artifact params");
+                let artifact = RebornThreadArtifact {
+                    schema: THREAD_ARTIFACT_SCHEMA.to_string(),
+                    generated_at: Utc::now(),
+                    thread_id: request.thread_id,
+                    messages: Vec::new(),
+                    logs: RunArtifactLogs {
+                        source: "test".to_string(),
+                        available: true,
+                        complete: false,
+                        truncated: false,
+                        unavailable_reason: None,
+                        entries: Vec::new(),
+                    },
+                    redaction: RunArtifactRedaction {
+                        pipeline: "deterministic-trace-redactor-v1".to_string(),
+                        applied: false,
+                    },
+                };
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(artifact).expect("thread artifact payload"),
                     next_cursor: None,
                 })
             }
@@ -1981,6 +2009,36 @@ async fn get_run_artifact_threads_path_and_run_path_into_request() {
         serde_json::from_value(queries[0].params.clone()).expect("artifact params");
     assert_eq!(request.thread_id, "thread-x");
     assert_eq!(request.run_id, run_id);
+}
+
+#[tokio::test]
+async fn get_thread_artifact_threads_path_into_request() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/artifact")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let payload: Value = serde_json::from_slice(&body).expect("artifact json");
+    assert_eq!(payload["schema"], THREAD_ARTIFACT_SCHEMA);
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id, THREAD_ARTIFACT_VIEW.id);
+    let request: RebornThreadArtifactRequest =
+        serde_json::from_value(queries[0].params.clone()).expect("artifact params");
+    assert_eq!(request.thread_id, "thread-x");
 }
 
 // The attachment-bytes route carries three path segments and returns raw

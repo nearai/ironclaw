@@ -34,6 +34,7 @@
 //! the persisted record body.
 
 mod message_lookup_index;
+mod message_read;
 mod message_sequence_index;
 mod thread_index;
 
@@ -67,6 +68,7 @@ use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
     AppendFinalizedAssistantMessageRequest, AppendToolResultReferenceRequest,
+    BoundedThreadMessageSnapshot, BoundedThreadMessages, BoundedThreadMessagesRequest,
     CapabilityDisplayPreviewEnvelope, ContextMessage, ContextMessages, ContextWindow,
     CreateSummaryArtifactRequest, DeleteToolResultRecordRequest, EnsureThreadRequest,
     LatestThreadMessageRequest, ListThreadsForScopeRequest, ListThreadsForScopeResponse,
@@ -80,6 +82,7 @@ use crate::{
     UpdateToolResultRecordRequest, UpdateToolResultReferenceRequest,
 };
 use message_lookup_index::MessageLookupIndexStore;
+use message_read::{MessageReadBudget, MessageReadResult};
 use message_sequence_index::{MessageSequenceIndexStore, message_sequence_index_entry_for_message};
 use thread_index::ThreadIndexRecord;
 
@@ -695,93 +698,12 @@ where
         scope: &ThreadScope,
         thread_id: &ThreadId,
     ) -> Result<Vec<ThreadMessageRecord>, SessionThreadError> {
-        let root = messages_root(scope, thread_id)?;
-        let mut messages = Vec::new();
-        let mut offset = 0_u64;
-
-        loop {
-            let entries = match self
-                .filesystem
-                .query(
-                    &scope.to_resource_scope(),
-                    &root,
-                    &Filter::All,
-                    Page::new(offset, Page::MAX_LIMIT),
-                )
-                .await
-            {
-                Ok(entries) => entries,
-                Err(FilesystemError::Unsupported {
-                    operation: FilesystemOperation::Query,
-                    ..
-                }) => {
-                    return self
-                        .list_thread_messages_by_directory(scope, thread_id)
-                        .await;
-                }
-                Err(error) => return Err(error.into()),
-            };
-            let entry_count = entries.len();
-
-            for versioned in entries {
-                if !versioned.path.as_str().ends_with(".json") {
-                    continue;
-                }
-                let record = deserialize::<ThreadMessageRecord>(&versioned.entry.body)?;
-                if &record.thread_id == thread_id {
-                    messages.push(record);
-                }
-            }
-
-            if entry_count < Page::MAX_LIMIT as usize {
-                break;
-            }
-            offset = offset.saturating_add(entry_count as u64);
+        match self.read_thread_messages(scope, thread_id, None).await? {
+            MessageReadResult::Complete(messages) => Ok(messages),
+            MessageReadResult::LimitExceeded => Err(SessionThreadError::Backend(
+                "unbounded thread message read unexpectedly exceeded a budget".to_string(),
+            )),
         }
-
-        self.merge_message_append_events(scope, thread_id, &mut messages)
-            .await?;
-        messages.sort_by_key(|message| message.sequence);
-        Ok(messages)
-    }
-
-    async fn list_thread_messages_by_directory(
-        &self,
-        scope: &ThreadScope,
-        thread_id: &ThreadId,
-    ) -> Result<Vec<ThreadMessageRecord>, SessionThreadError> {
-        let root = messages_root(scope, thread_id)?;
-        let entries = match self
-            .filesystem
-            .list_dir(&scope.to_resource_scope(), &root)
-            .await
-        {
-            Ok(entries) => entries,
-            Err(error) if is_not_found(&error) => return Ok(Vec::new()),
-            Err(error) => return Err(error.into()),
-        };
-        let mut messages = Vec::new();
-        for entry in entries {
-            if !entry.name.ends_with(".json") {
-                continue;
-            }
-            let child = join_scoped(&root, &entry.name)?;
-            let Some(versioned) = self
-                .filesystem
-                .get(&scope.to_resource_scope(), &child)
-                .await?
-            else {
-                continue;
-            };
-            let record = deserialize::<ThreadMessageRecord>(&versioned.entry.body)?;
-            if &record.thread_id == thread_id {
-                messages.push(record);
-            }
-        }
-        self.merge_message_append_events(scope, thread_id, &mut messages)
-            .await?;
-        messages.sort_by_key(|message| message.sequence);
-        Ok(messages)
     }
 
     async fn find_assistant_message_by_run(
@@ -2540,6 +2462,51 @@ where
             summary_artifacts: history_summary_artifacts(&messages, summaries),
             messages: history_messages(&messages),
         })
+    }
+
+    async fn list_thread_messages_bounded(
+        &self,
+        request: BoundedThreadMessagesRequest,
+    ) -> Result<BoundedThreadMessages, SessionThreadError> {
+        let thread = self
+            .read_thread_versioned(&request.scope, &request.thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: request.thread_id.clone(),
+            })?
+            .0;
+        let messages = match self
+            .read_thread_messages(
+                &request.scope,
+                &request.thread_id,
+                Some(MessageReadBudget::new(
+                    request.max_messages,
+                    request.max_bytes,
+                )),
+            )
+            .await?
+        {
+            MessageReadResult::Complete(messages) => messages,
+            MessageReadResult::LimitExceeded => {
+                return Ok(BoundedThreadMessages::LimitExceeded);
+            }
+        };
+        let message_ids = messages
+            .iter()
+            .map(|message| message.message_id)
+            .collect::<Vec<_>>();
+        Ok(BoundedThreadMessages::Complete(Box::new(
+            BoundedThreadMessageSnapshot {
+                history: ThreadMessageRange {
+                    thread: self.thread_record_with_index_overlay(thread).await?,
+                    messages: messages.iter().map(history_message).collect(),
+                },
+                context: ContextMessages {
+                    thread_id: request.thread_id,
+                    messages: context_messages_by_id(&messages, &message_ids),
+                },
+            },
+        )))
     }
 
     async fn list_thread_messages_range(
