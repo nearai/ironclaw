@@ -10,9 +10,10 @@ use ironclaw_product_adapters::{
     ProtocolHttpEgressError,
 };
 use ironclaw_product_workflow::{AttachmentMaterializationError, InboundAttachmentMaterializer};
-use ironclaw_slack_v2_adapter::{SLACK_API_HOST, SLACK_FILES_HOST, SLACK_V2_ADAPTER_ID};
+use ironclaw_slack_v2_adapter::{
+    SLACK_API_HOST, SLACK_FILES_HOST, SLACK_V2_ADAPTER_ID, confined_slack_file_path,
+};
 use serde::Deserialize;
-use url::Url;
 
 /// Materializes Slack file descriptors through mediated provider egress.
 pub struct SlackAttachmentMaterializer {
@@ -88,7 +89,12 @@ impl InboundAttachmentMaterializer for SlackAttachmentMaterializer {
                         "Slack attachment has no downloadable URL",
                     )
                 })?;
-            let path = confined_download_path(&private_url)?;
+            let path = confined_slack_file_path(&private_url).map_err(|error| {
+                tracing::debug!(%error, "Slack returned an unconfined attachment URL");
+                AttachmentMaterializationError::permanent(
+                    "Slack attachment URL escaped the allowed file host",
+                )
+            })?;
             let response = self
                 .egress
                 .send(
@@ -140,30 +146,6 @@ fn request(
         AttachmentMaterializationError::permanent("Slack attachment path is invalid")
     })?;
     Ok(EgressRequest::new(host, method, path).with_credential_handle(Some(credential_handle)))
-}
-
-fn confined_download_path(raw: &str) -> Result<String, AttachmentMaterializationError> {
-    let parsed = Url::parse(raw).map_err(|error| {
-        tracing::debug!(%error, "Slack returned an invalid attachment URL");
-        AttachmentMaterializationError::permanent("Slack returned an invalid attachment URL")
-    })?;
-    if parsed.scheme() != "https"
-        || parsed.host_str() != Some(SLACK_FILES_HOST)
-        || parsed.username() != ""
-        || parsed.password().is_some()
-        || parsed.port().is_some()
-        || parsed.fragment().is_some()
-    {
-        return Err(AttachmentMaterializationError::permanent(
-            "Slack attachment URL escaped the allowed file host",
-        ));
-    }
-    let mut path = parsed.path().to_string();
-    if let Some(query) = parsed.query() {
-        path.push('?');
-        path.push_str(query);
-    }
-    Ok(path)
 }
 
 fn preflight(
@@ -224,28 +206,4 @@ struct SlackFileInfoResponse {
 struct SlackFileInfo {
     url_private: Option<String>,
     url_private_download: Option<String>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn slack_private_download_url_is_exact_host_confined() {
-        assert_eq!(
-            confined_download_path("https://files.slack.com/files-pri/T-F/report.pdf?pub_secret=x")
-                .expect("exact Slack file host"),
-            "/files-pri/T-F/report.pdf?pub_secret=x"
-        );
-        for url in [
-            "http://files.slack.com/files-pri/report.pdf",
-            "https://files.slack.com.evil.example/report.pdf",
-            "https://user@files.slack.com/report.pdf",
-        ] {
-            assert!(
-                confined_download_path(url).is_err(),
-                "{url} must be rejected"
-            );
-        }
-    }
 }

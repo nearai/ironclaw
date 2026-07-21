@@ -209,7 +209,7 @@ git commit -m "feat: materialize channel attachments in workflow"
   `WorkspaceFile = MaterializedFile<ScopedPath>`, default
   `ProductAdapter::render_outbound_with_attachments`,
   `EgressRequest::with_response_body_limit`, and
-  `ProductOutboundDeliveryRequest.attachments`.
+  `prepare_and_render_product_outbound_with_attachments`.
 - Consumes: existing `ProductOutboundEnvelope`, `ProtocolHttpEgress`, and
   `OutboundDeliverySink`.
 

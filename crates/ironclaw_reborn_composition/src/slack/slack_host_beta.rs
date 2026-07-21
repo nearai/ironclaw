@@ -1389,7 +1389,9 @@ mod tests {
     use ironclaw_resources::InMemoryResourceGovernor;
     use ironclaw_secrets::FilesystemSecretStore;
     use ironclaw_slack_v2_adapter::SLACK_USER_ACTOR_KIND;
-    use ironclaw_threads::{ListThreadsForScopeRequest, ThreadHistoryRequest, ThreadScope};
+    use ironclaw_threads::{
+        ListThreadsForScopeRequest, MessageKind, MessageStatus, ThreadHistoryRequest, ThreadScope,
+    };
     use ironclaw_triggers::TriggerRunHistoryStatus;
     use ironclaw_turns::{
         GetRunStateRequest, ReplyTargetBindingRef, TurnCoordinator, TurnRunId, TurnScope,
@@ -1905,12 +1907,12 @@ mod tests {
             drain.drain().await;
         }
 
-        let history = wait_for_slack_thread_history(&runtime).await;
-        let accepted_message = history
-            .messages
-            .iter()
-            .find(|message| message.content.as_deref() == Some("Please review these notes"))
-            .expect("attachment-bearing Slack message is accepted");
+        let (_history, accepted_message) = wait_for_unique_slack_message(
+            &runtime,
+            Some(UserId::new(USER).expect("user")),
+            "Please review these notes",
+        )
+        .await;
         assert_eq!(accepted_message.attachments.len(), 1);
         let attachment = &accepted_message.attachments[0];
         assert_eq!(attachment.id, "F-JOURNEY");
@@ -1942,26 +1944,82 @@ mod tests {
         assert_eq!(landed.bytes, b"journey attachment bytes");
 
         let requests = egress.requests();
-        assert!(
-            requests
-                .iter()
-                .any(|request| request.url.contains("/api/files.info?file=F-JOURNEY"))
-        );
-        assert!(requests.iter().any(|request| {
-            request
-                .url
-                .ends_with("/files-pri/T0HOST-F-JOURNEY/journey-notes.txt")
-                && request.method == NetworkMethod::Get
-        }));
+        let files_info = requests
+            .iter()
+            .filter(|request| {
+                request.url == "https://slack.com/api/files.info?file=F-JOURNEY"
+                    && request.method == NetworkMethod::Get
+            })
+            .collect::<Vec<_>>();
+        let download = requests
+            .iter()
+            .filter(|request| {
+                request.url
+                    == "https://files.slack.com/files-pri/T0HOST-F-JOURNEY/journey-notes.txt"
+                    && request.method == NetworkMethod::Get
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(files_info.len(), 1, "one exact Slack files.info lookup");
+        assert_eq!(download.len(), 1, "one exact private file download");
+        assert_header_exact(files_info[0], "authorization", "Bearer xoxb-host-token");
+        assert_header_exact(download[0], "authorization", "Bearer xoxb-host-token");
         let final_reply = wait_for_slack_post_message(&egress, "ok").await;
         assert_eq!(final_reply["channel"], "D0HOST");
+        assert_eq!(egress.post_message_bodies_with_text("ok").len(), 1);
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn build_slack_host_beta_rejects_unconfined_file_url_before_provider_download() {
+        let egress = Arc::new(RecordingRuntimeHttpEgress::with_files_info_download_url(
+            "https://evil.example/files-pri/stolen.txt",
+        ));
+        let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
+            host_egress_port_for_test(Arc::clone(&egress)),
+        )))
+        .await;
+        let mounts =
+            build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
+        bind_slack_oauth_user(&mounts).await;
+
+        assert_eq!(
+            post_signed_slack_event_status(&mounts.events, &dm_file_share_event_body()).await,
+            StatusCode::BAD_REQUEST
+        );
+        if let Some(drain) = mounts.events.drain.as_ref() {
+            drain.drain().await;
+        }
+
+        assert_no_slack_threads_for_owner(&runtime, Some(UserId::new(USER).expect("user"))).await;
+        let requests = egress.requests();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.url.contains("/api/files.info?file=F-JOURNEY"))
+                .count(),
+            1,
+            "the caller path may perform only the authenticated metadata lookup"
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| {
+                    request.url.contains("files.slack.com")
+                        || request.url.contains("evil.example")
+                        || request.url.contains("/api/chat.postMessage")
+                })
+                .count(),
+            0,
+            "an unconfined URL must not cause a download or turn-delivery provider side effect"
+        );
 
         runtime.shutdown().await.expect("runtime shuts down");
     }
 
     #[tokio::test]
     async fn build_slack_host_beta_delivers_workspace_file_through_native_upload_sequence() {
-        let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+        let egress = Arc::new(RecordingRuntimeHttpEgress::strict_attachment_exchange());
         let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
             host_egress_port_for_test(Arc::clone(&egress)),
         )))
@@ -2013,7 +2071,37 @@ mod tests {
         assert_eq!(final_reply["text"], "Here is /workspace/report.txt");
         wait_for_slack_upload_completion(&egress).await;
 
+        let (history, durable_final_reply) = wait_for_unique_slack_message(
+            &runtime,
+            Some(UserId::new(USER).expect("user")),
+            "Here is /workspace/report.txt",
+        )
+        .await;
+        assert_eq!(durable_final_reply.kind, MessageKind::Assistant);
+        assert_eq!(durable_final_reply.status, MessageStatus::Finalized);
+        assert_eq!(
+            history
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.kind == MessageKind::Assistant
+                        && message.status == MessageStatus::Finalized
+                        && message.content.as_deref() == Some("Here is /workspace/report.txt")
+                })
+                .count(),
+            1
+        );
+
         let requests = egress.requests();
+        let final_posts = requests
+            .iter()
+            .filter(|request| {
+                request.url == "https://slack.com/api/chat.postMessage"
+                    && serde_json::from_slice::<serde_json::Value>(&request.body)
+                        .ok()
+                        .is_some_and(|body| body["text"] == "Here is /workspace/report.txt")
+            })
+            .collect::<Vec<_>>();
         let get_upload = requests
             .iter()
             .filter(|request| request.url.contains("/api/files.getUploadURLExternal"))
@@ -2026,17 +2114,30 @@ mod tests {
             .iter()
             .filter(|request| request.url.contains("/api/files.completeUploadExternal"))
             .collect::<Vec<_>>();
+        assert_eq!(final_posts.len(), 1, "one final chat.postMessage");
         assert_eq!(get_upload.len(), 1, "one upload URL request");
         assert_eq!(byte_upload.len(), 1, "one file-byte upload");
         assert_eq!(complete.len(), 1, "one upload completion");
         assert_eq!(get_upload[0].method, NetworkMethod::Post);
         assert_eq!(
+            get_upload[0].url,
+            "https://slack.com/api/files.getUploadURLExternal"
+        );
+        assert_eq!(
             String::from_utf8_lossy(&get_upload[0].body),
             "filename=report.txt&length=18"
         );
         assert_eq!(byte_upload[0].method, NetworkMethod::Post);
+        assert_eq!(
+            byte_upload[0].url,
+            "https://files.slack.com/upload/v1/F-UPLOAD"
+        );
         assert_eq!(byte_upload[0].body, b"slack report bytes");
         assert_eq!(complete[0].method, NetworkMethod::Post);
+        assert_eq!(
+            complete[0].url,
+            "https://slack.com/api/files.completeUploadExternal"
+        );
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&complete[0].body)
                 .expect("complete upload JSON"),
@@ -2047,6 +2148,17 @@ mod tests {
             })
         );
 
+        assert_slack_attachment_request_security(
+            final_posts[0],
+            get_upload[0],
+            byte_upload[0],
+            complete[0],
+        );
+
+        let final_post_position = requests
+            .iter()
+            .position(|request| std::ptr::eq(request, final_posts[0]))
+            .expect("final chat.postMessage position");
         let get_position = requests
             .iter()
             .position(|request| request.url.contains("/api/files.getUploadURLExternal"))
@@ -2059,7 +2171,11 @@ mod tests {
             .iter()
             .position(|request| request.url.contains("/api/files.completeUploadExternal"))
             .expect("complete upload position");
-        assert!(get_position < byte_position && byte_position < complete_position);
+        assert!(
+            final_post_position < get_position
+                && get_position < byte_position
+                && byte_position < complete_position
+        );
 
         runtime.shutdown().await.expect("runtime shuts down");
     }
@@ -2091,15 +2207,38 @@ mod tests {
             drain.drain().await;
         }
 
-        let history = wait_for_slack_thread_history(&runtime).await;
+        let (history, accepted_message) = wait_for_unique_slack_message(
+            &runtime,
+            Some(UserId::new(USER).expect("user")),
+            "Please review these notes",
+        )
+        .await;
+        assert_eq!(accepted_message.attachments.len(), 1);
+        let accepted_run_id = accepted_message
+            .turn_run_id
+            .as_deref()
+            .expect("accepted Slack message carries one run id");
         assert_eq!(
             history
                 .messages
                 .iter()
-                .filter(|message| message.content.as_deref() == Some("Please review these notes"))
+                .filter_map(|message| message.turn_run_id.as_deref())
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([accepted_run_id]),
+            "provider redelivery must create exactly one run in the accepted thread"
+        );
+        assert_eq!(
+            history
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.kind == MessageKind::Assistant
+                        && message.status == MessageStatus::Finalized
+                        && message.content.as_deref() == Some("ok")
+                })
                 .count(),
             1,
-            "provider redelivery must create one attachment-bearing message"
+            "provider redelivery must create one finalized reply"
         );
         let requests = egress.requests();
         assert_eq!(
@@ -2122,6 +2261,7 @@ mod tests {
         );
         let final_reply = wait_for_slack_post_message(&egress, "ok").await;
         assert_eq!(final_reply["channel"], "D0HOST");
+        assert_eq!(egress.post_message_bodies_with_text("ok").len(), 1);
 
         runtime.shutdown().await.expect("runtime shuts down");
     }
@@ -3902,6 +4042,63 @@ mod tests {
         }
     }
 
+    async fn wait_for_unique_slack_message(
+        runtime: &RebornRuntime,
+        owner_user_id: Option<UserId>,
+        expected_content: &str,
+    ) -> (
+        ironclaw_threads::ThreadHistory,
+        ironclaw_threads::ThreadMessageRecord,
+    ) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let thread_service = runtime.webui_thread_service();
+        let scope = ThreadScope {
+            tenant_id: TenantId::new(TENANT).expect("tenant"),
+            agent_id: AgentId::new(AGENT).expect("agent"),
+            project_id: Some(ProjectId::new(PROJECT).expect("project")),
+            owner_user_id,
+            mission_id: None,
+        };
+        loop {
+            let threads = thread_service
+                .list_threads_for_scope(ListThreadsForScopeRequest {
+                    scope: scope.clone(),
+                    limit: Some(100),
+                    cursor: None,
+                })
+                .await
+                .expect("list Slack-created threads");
+            let mut matches = Vec::new();
+            for thread in threads.threads {
+                let history = thread_service
+                    .list_thread_history(ThreadHistoryRequest {
+                        scope: scope.clone(),
+                        thread_id: thread.thread_id,
+                    })
+                    .await
+                    .expect("read Slack-created thread history");
+                for message in history
+                    .messages
+                    .iter()
+                    .filter(|message| message.content.as_deref() == Some(expected_content))
+                {
+                    matches.push((history.clone(), message.clone()));
+                }
+            }
+            match matches.len() {
+                0 => {}
+                1 => return matches.pop().expect("one Slack message match"),
+                count => panic!(
+                    "expected one Slack message containing {expected_content:?}, found {count} across the owner's threads"
+                ),
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("Slack timelines never contained {expected_content:?}");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     async fn slack_message_count_with_text(
         runtime: &RebornRuntime,
         owner_user_id: Option<UserId>,
@@ -4318,15 +4515,86 @@ mod tests {
         }
     }
 
+    fn header_values<'a>(request: &'a NetworkHttpRequest, name: &str) -> Vec<&'a str> {
+        request
+            .headers
+            .iter()
+            .filter(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+            .collect()
+    }
+
+    fn assert_header_exact(request: &NetworkHttpRequest, name: &str, value: &str) {
+        assert_eq!(
+            header_values(request, name),
+            vec![value],
+            "unexpected {name} header for {}",
+            request.url
+        );
+    }
+
+    fn assert_no_header(request: &NetworkHttpRequest, name: &str) {
+        assert!(
+            header_values(request, name).is_empty(),
+            "{name} must be absent for {}",
+            request.url
+        );
+    }
+
+    fn assert_slack_attachment_request_security(
+        final_post: &NetworkHttpRequest,
+        get_upload: &NetworkHttpRequest,
+        byte_upload: &NetworkHttpRequest,
+        complete: &NetworkHttpRequest,
+    ) {
+        assert_header_exact(final_post, "authorization", "Bearer xoxb-host-token");
+        assert_header_exact(final_post, "content-type", "application/json");
+        assert_header_exact(get_upload, "authorization", "Bearer xoxb-host-token");
+        assert_header_exact(
+            get_upload,
+            "content-type",
+            "application/x-www-form-urlencoded",
+        );
+        assert_no_header(byte_upload, "authorization");
+        assert_header_exact(byte_upload, "content-type", "application/octet-stream");
+        assert_header_exact(complete, "authorization", "Bearer xoxb-host-token");
+        assert_header_exact(complete, "content-type", "application/json");
+    }
+
+    fn assert_strict_attachment_request(request: &NetworkHttpRequest) {
+        assert_eq!(request.method, NetworkMethod::Post, "unexpected method");
+        match request.url.as_str() {
+            "https://slack.com/api/conversations.open"
+            | "https://slack.com/api/chat.postMessage"
+            | "https://slack.com/api/files.completeUploadExternal" => {
+                assert_header_exact(request, "authorization", "Bearer xoxb-host-token");
+                assert_header_exact(request, "content-type", "application/json");
+            }
+            "https://slack.com/api/files.getUploadURLExternal" => {
+                assert_header_exact(request, "authorization", "Bearer xoxb-host-token");
+                assert_header_exact(request, "content-type", "application/x-www-form-urlencoded");
+            }
+            "https://files.slack.com/upload/v1/F-UPLOAD" => {
+                assert_no_header(request, "authorization");
+                assert_header_exact(request, "content-type", "application/octet-stream");
+            }
+            unexpected => panic!("unexpected strict Slack attachment request {unexpected}"),
+        }
+    }
+
     #[derive(Default)]
     struct RecordingRuntimeHttpEgress {
         requests: std::sync::Mutex<Vec<NetworkHttpRequest>>,
         /// While set, every files.info request returns this status.
         files_info_failure_status: std::sync::Mutex<Option<u16>>,
+        /// Provider-issued download URL returned by files.info.
+        files_info_download_url: Option<String>,
         /// If set, returned for ALL conversations.open calls.
         conversations_open_response: Option<(u16, Vec<u8>)>,
         /// If set, conversations.open succeeds this many times then fails.
         conversations_open_fail_after: Option<usize>,
+        /// Fail loudly when the attachment journey emits an unexpected wire shape.
+        strict_attachment_exchange: bool,
     }
 
     #[async_trait]
@@ -4335,6 +4603,9 @@ mod tests {
             &self,
             request: NetworkHttpRequest,
         ) -> Result<NetworkHttpResponse, NetworkHttpError> {
+            if self.strict_attachment_exchange {
+                assert_strict_attachment_request(&request);
+            }
             let (status, response) = if request.url.contains("/api/files.info") {
                 match *self
                     .files_info_failure_status
@@ -4345,11 +4616,20 @@ mod tests {
                         status,
                         br#"{"ok":false,"error":"scripted_files_info_failure"}"#.to_vec(),
                     ),
-                    None => (
-                        200,
-                        br#"{"ok":true,"file":{"url_private_download":"https://files.slack.com/files-pri/T0HOST-F-JOURNEY/journey-notes.txt"}}"#
-                            .to_vec(),
-                    ),
+                    None => {
+                        let download_url = self.files_info_download_url.as_deref().unwrap_or(
+                            "https://files.slack.com/files-pri/T0HOST-F-JOURNEY/journey-notes.txt",
+                        );
+                        (
+                            200,
+                            serde_json::json!({
+                                "ok": true,
+                                "file": {"url_private_download": download_url}
+                            })
+                            .to_string()
+                            .into_bytes(),
+                        )
+                    }
                 }
             } else if request
                 .url
@@ -4482,12 +4762,28 @@ mod tests {
     }
 
     impl RecordingRuntimeHttpEgress {
+        fn strict_attachment_exchange() -> Self {
+            Self {
+                strict_attachment_exchange: true,
+                ..Self::default()
+            }
+        }
+
+        fn with_files_info_download_url(url: &str) -> Self {
+            Self {
+                files_info_download_url: Some(url.to_string()),
+                ..Self::default()
+            }
+        }
+
         fn conversations_open_response(status: u16, body: &[u8]) -> Self {
             Self {
                 requests: std::sync::Mutex::new(Vec::new()),
                 files_info_failure_status: std::sync::Mutex::new(None),
+                files_info_download_url: None,
                 conversations_open_response: Some((status, body.to_vec())),
                 conversations_open_fail_after: None,
+                strict_attachment_exchange: false,
             }
         }
 

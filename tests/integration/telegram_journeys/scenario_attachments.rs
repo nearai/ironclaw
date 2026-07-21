@@ -28,7 +28,7 @@ async fn telegram_document_downloads_into_workspace_before_the_turn_runs() {
         .expect("attachment-bearing turn produces its reply");
 
     let (_timeline, accepted_message) = stack
-        .wait_for_timeline_message("Please review the attached report")
+        .wait_for_unique_timeline_message("Please review the attached report")
         .await
         .expect("attachment-bearing message is durable");
     assert_eq!(accepted_message.kind, MessageKind::User);
@@ -98,7 +98,7 @@ async fn telegram_transient_attachment_download_retries_before_webhook_ack() {
         .expect("provider redelivery produces the attachment-bearing reply");
 
     let (timeline, accepted_message) = stack
-        .wait_for_timeline_message("Please review the attached report")
+        .wait_for_unique_timeline_message("Please review the attached report")
         .await
         .expect("retried attachment-bearing message is durable");
     let matching_messages = timeline
@@ -124,6 +124,16 @@ async fn telegram_transient_attachment_download_retries_before_webhook_ack() {
         .turn_run_id
         .as_deref()
         .expect("accepted provider message carries one run id");
+    let durable_run_ids = timeline
+        .messages
+        .iter()
+        .filter_map(|message| message.turn_run_id.as_deref())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        durable_run_ids,
+        std::collections::BTreeSet::from([run_id]),
+        "provider redelivery must produce exactly one run in the accepted thread"
+    );
     let run = stack
         .webui
         .api
@@ -203,7 +213,7 @@ async fn telegram_workspace_file_reply_sends_native_document() {
         .await
         .expect("first channel turn creates the conversation");
     let (_timeline, first_message) = stack
-        .wait_for_timeline_message("prepare a report")
+        .wait_for_unique_timeline_message("prepare a report")
         .await
         .expect("first channel turn is durable");
     stack
@@ -233,10 +243,15 @@ async fn telegram_workspace_file_reply_sends_native_document() {
     );
     let document = &document_requests[0];
     assert_eq!(document.method, NetworkMethod::Post);
-    let multipart = String::from_utf8_lossy(&document.body);
-    assert!(multipart.contains("name=\"chat_id\"\r\n\r\n555\r\n"));
-    assert!(multipart.contains("filename=\"report.txt\""));
-    assert!(multipart.contains("telegram report bytes"));
+    validate_single_document_multipart(
+        document,
+        "555",
+        &[("reply_to_message_id", "3")],
+        "report.txt",
+        "text/plain",
+        b"telegram report bytes",
+    )
+    .expect("Telegram document multipart is exact and unambiguous");
     assert_eq!(
         stack
             .network
@@ -246,7 +261,7 @@ async fn telegram_workspace_file_reply_sends_native_document() {
     );
 
     let (_timeline, final_reply) = stack
-        .wait_for_timeline_message("Here is /workspace/report.txt")
+        .wait_for_unique_timeline_message("Here is /workspace/report.txt")
         .await
         .expect("workspace-bearing final reply is durable");
     assert_eq!(final_reply.kind, MessageKind::Assistant);

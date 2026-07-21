@@ -159,6 +159,133 @@ pub(crate) fn bytes_response(status: u16, body: Vec<u8>) -> NetworkHttpResponse 
     }
 }
 
+/// Validate one native Telegram document by reconstructing the only accepted
+/// multipart encoding from its declared boundary and comparing the complete
+/// byte body. This catches duplicate fields, malformed framing, extra bytes,
+/// and payload corruption without introducing a general multipart parser into
+/// the integration harness.
+pub(crate) fn validate_single_document_multipart(
+    request: &NetworkHttpRequest,
+    expected_chat_id: &str,
+    expected_routing_fields: &[(&str, &str)],
+    expected_filename: &str,
+    expected_content_type: &str,
+    expected_bytes: &[u8],
+) -> Result<(), String> {
+    let content_types = request
+        .headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        .map(|(_, value)| value.as_str())
+        .collect::<Vec<_>>();
+    let [content_type] = content_types.as_slice() else {
+        return Err(format!(
+            "expected exactly one content-type header, found {}",
+            content_types.len()
+        ));
+    };
+    let boundary = content_type
+        .strip_prefix("multipart/form-data; boundary=")
+        .filter(|boundary| !boundary.is_empty())
+        .ok_or_else(|| format!("invalid multipart content type {content_type:?}"))?;
+    if boundary.bytes().any(|byte| byte <= b' ' || byte >= 0x7f) {
+        return Err("multipart boundary contains invalid bytes".to_string());
+    }
+
+    validate_single_document_body(
+        &request.body,
+        boundary,
+        expected_chat_id,
+        expected_routing_fields,
+        expected_filename,
+        expected_content_type,
+        expected_bytes,
+    )
+}
+
+fn validate_single_document_body(
+    actual: &[u8],
+    boundary: &str,
+    expected_chat_id: &str,
+    expected_routing_fields: &[(&str, &str)],
+    expected_filename: &str,
+    expected_content_type: &str,
+    expected_bytes: &[u8],
+) -> Result<(), String> {
+    let mut expected = Vec::new();
+    push_expected_text_part(&mut expected, boundary, "chat_id", expected_chat_id);
+    for &(name, value) in expected_routing_fields {
+        if !matches!(name, "message_thread_id" | "reply_to_message_id")
+            || value.is_empty()
+            || !value.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(format!("invalid expected Telegram routing field {name:?}"));
+        }
+        push_expected_text_part(&mut expected, boundary, name, value);
+    }
+    expected.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"document\"; filename=\"{expected_filename}\"\r\nContent-Type: {expected_content_type}\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    expected.extend_from_slice(expected_bytes);
+    expected.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    if actual != expected {
+        return Err("Telegram document multipart did not exactly match the canonical body".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod multipart_validation_tests {
+    use super::validate_single_document_body;
+
+    fn validate(actual: &[u8]) -> Result<(), String> {
+        validate_single_document_body(
+            actual,
+            "test-boundary",
+            "555",
+            &[],
+            "report.txt",
+            "text/plain",
+            b"exact bytes",
+        )
+    }
+
+    fn valid_body() -> Vec<u8> {
+        b"--test-boundary\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n555\r\n--test-boundary\r\nContent-Disposition: form-data; name=\"document\"; filename=\"report.txt\"\r\nContent-Type: text/plain\r\n\r\nexact bytes\r\n--test-boundary--\r\n".to_vec()
+    }
+
+    #[test]
+    fn exact_multipart_rejects_duplicate_part() {
+        let mut body = valid_body();
+        body.extend_from_slice(&valid_body());
+        assert!(validate(&body).is_err());
+    }
+
+    #[test]
+    fn exact_multipart_rejects_corrupt_file_bytes() {
+        let mut body = valid_body();
+        let payload_start = body
+            .windows(b"exact bytes".len())
+            .position(|window| window == b"exact bytes")
+            .expect("test payload");
+        body[payload_start] = b'X';
+        assert!(validate(&body).is_err());
+    }
+}
+
+fn push_expected_text_part(body: &mut Vec<u8>, boundary: &str, name: &str, value: &str) {
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+        )
+        .as_bytes(),
+    );
+}
+
 #[async_trait]
 impl NetworkHttpEgress for ScriptedTelegramNetwork {
     async fn execute(
@@ -497,7 +624,7 @@ impl JourneyStack {
     /// contains the requested durable message. This is the same caller-scoped
     /// read seam the browser uses; the journey never reaches into a thread
     /// store directly.
-    pub(crate) async fn wait_for_timeline_message(
+    pub(crate) async fn wait_for_unique_timeline_message(
         &self,
         expected_content: &str,
     ) -> Result<
@@ -511,9 +638,13 @@ impl JourneyStack {
             let threads = self
                 .webui
                 .api
-                .list_threads(self.caller.clone(), WebUiListThreadsRequest::default())
+                .list_threads(
+                    self.caller.clone(),
+                    WebUiListThreadsRequest::default().set_limit(100),
+                )
                 .await
                 .map_err(|error| format!("list Telegram-created threads failed: {error}"))?;
+            let mut matches = Vec::new();
             for thread in threads.threads {
                 let timeline = self
                     .webui
@@ -524,19 +655,32 @@ impl JourneyStack {
                     )
                     .await
                     .map_err(|error| format!("read Telegram thread timeline failed: {error}"))?;
-                if let Some(message) = timeline
+                for message in timeline
                     .messages
                     .iter()
-                    .find(|message| message.content.as_deref() == Some(expected_content))
+                    .filter(|message| message.content.as_deref() == Some(expected_content))
                     .cloned()
                 {
-                    return Ok((timeline, message));
+                    matches.push((timeline.clone(), message));
+                }
+            }
+            match matches.len() {
+                0 => {}
+                1 => {
+                    return matches
+                        .pop()
+                        .ok_or_else(|| "unique match disappeared".to_string());
+                }
+                count => {
+                    return Err(format!(
+                        "expected one Telegram timeline message containing {expected_content:?}, found {count} across the caller's threads"
+                    ));
                 }
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         Err(format!(
-            "Telegram timeline never contained {expected_content:?}"
+            "Telegram timelines never contained {expected_content:?}"
         ))
     }
 
