@@ -778,7 +778,9 @@ impl RebornBinaryE2EHarness {
             )
         };
         let turns_scoped_fs = scoped_turns_fs(turn_backend, &binding)?;
-        let turn_store = Arc::new(FilesystemTurnStateRowStore::new(Arc::clone(&turns_scoped_fs)));
+        let turn_store = Arc::new(FilesystemTurnStateRowStore::new(Arc::clone(
+            &turns_scoped_fs,
+        )));
         let checkpoint_state_store = in_memory_checkpoint_state_store();
         let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
         let milestone_sink =
