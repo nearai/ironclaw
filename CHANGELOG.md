@@ -9,13 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.0-rc.1] - 2026-07-20
 
-First release candidate of the rearchitected IronClaw, internally called
-**Reborn**. This is not an increment on the 0.29.x line — it is a ground-up
-rebuild of the agent runtime, storage, extension host, and web UI.
+First release candidate of a rearchitected IronClaw. This is not an increment
+on the 0.29.x line — it is a ground-up rebuild of the agent runtime, storage,
+extension host, and web UI.
 
-**The `ironclaw` binary is now the Reborn CLI.** The v1 monolith now builds as
-the `ironclaw-legacy` binary and is no longer published; 1.0.0-rc.1 publishes
-the Reborn `ironclaw` binary only.
+**The `ironclaw` binary is now the rearchitected CLI.** The v1 monolith now
+builds as the `ironclaw-legacy` binary and is no longer published; 1.0.0-rc.1
+publishes the new `ironclaw` binary only.
 
 ### This is not an in-place upgrade from 0.29.x
 
@@ -59,8 +59,8 @@ it at a v1 data directory.
 - `ironclaw channels list`, `hooks list`, and `logs` appear in `--help` but
   return an explicit "not implemented yet" error.
 - `mcp`, `memory`, `pairing`, `import`, and `login` subcommands from v1 have no
-  Reborn equivalent; MCP servers and memory are reached through extensions and
-  the WebUI instead.
+  equivalent in this release; MCP servers and memory are reached through
+  extensions and the WebUI instead.
 - `onboard --import-history` parses but does nothing.
 - `skills` is list-only from the CLI.
 - `extension` and `skills` work out of the box: `ironclaw onboard` defaults to
