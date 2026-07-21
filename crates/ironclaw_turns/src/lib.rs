@@ -104,9 +104,8 @@ pub use run_profile::{
 pub use scope::{TurnActor, TurnScope};
 pub use status::{
     AdmissionRejection, AdmissionRejectionReason, BlockedReason, GateKind,
-    ModelInvalidOutputDetailReason,
-    SanitizedCancelReason, SanitizedFailure, TurnActiveRunRefState, TurnCapacityResource,
-    TurnError, TurnErrorCategory, TurnRunProfile, TurnRunState, TurnStatus,
+    ModelInvalidOutputDetailReason, SanitizedCancelReason, SanitizedFailure, TurnActiveRunRefState,
+    TurnCapacityResource, TurnError, TurnErrorCategory, TurnRunProfile, TurnRunState, TurnStatus,
     is_recoverability_critical,
 };
 pub use store::{

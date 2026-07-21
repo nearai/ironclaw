@@ -1279,7 +1279,11 @@ async fn instruction_bundle_rejects_untrusted_skill_host_path_and_secret_value()
         "Use Authorization: Bearer ghp_secretvalue123",
     ] {
         let error = InstructionBundleBuilder::new(context.clone())
-            .build(skill_instruction_request(body, "GitHub skill", SkillTrustLevel::Installed))
+            .build(skill_instruction_request(
+                body,
+                "GitHub skill",
+                SkillTrustLevel::Installed,
+            ))
             .unwrap_err();
         assert_eq!(
             error.kind,

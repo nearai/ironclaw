@@ -6,9 +6,8 @@ use serde::{Deserialize, Serialize, de};
 
 use crate::{
     BlockedReason, CapabilityActivityId, GateKind, GateRef, LoopDiagnosticRef, LoopExitId,
-    LoopGateRef,
-    LoopMessageRef, LoopResultRef, ResolvedRunProfile, SanitizedFailure, TurnCheckpointId,
-    TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
+    LoopGateRef, LoopMessageRef, LoopResultRef, ResolvedRunProfile, SanitizedFailure,
+    TurnCheckpointId, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
     run_profile::{LoopCheckpointKind, LoopCheckpointStateRef},
     runner::{
         ApplyValidatedLoopExitRequest, ClaimedTurnRun, TurnRunTransitionPort, TurnRunnerOutcome,
