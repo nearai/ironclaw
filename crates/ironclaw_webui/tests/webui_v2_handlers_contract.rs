@@ -28,11 +28,11 @@ use ironclaw_product_adapters::{
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 use ironclaw_product_workflow::{
-    FsMount, LifecyclePackageRef, LifecyclePhase, LlmActiveSelection, LlmConfigSnapshot,
-    LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, ProjectFsEntry,
-    ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW,
-    RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAddMemberRequest,
-    RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
+    FsMount, LOGS_VIEW, LifecyclePackageRef, LifecyclePhase, LlmActiveSelection, LlmConfigSnapshot,
+    LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, OPERATOR_LOGS_VIEW,
+    ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RUN_ARTIFACT_SCHEMA,
+    RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse, RebornAccountTracesResponse,
+    RebornAddMemberRequest, RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationSource, RebornAutomationState,
     RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
@@ -629,46 +629,95 @@ impl RebornServicesApi for StubServices {
         query: RebornViewQuery,
     ) -> Result<RebornViewPage, RebornServicesError> {
         self.view_queries.lock().expect("lock").push(query.clone());
-        let request: RebornRunArtifactRequest =
-            serde_json::from_value(query.params).expect("artifact params");
-        let run_id = TurnRunId::parse(&request.run_id).expect("test run id");
-        let artifact = RebornRunArtifact {
-            schema: RUN_ARTIFACT_SCHEMA.to_string(),
-            generated_at: Utc::now(),
-            thread_id: request.thread_id,
-            run: RebornGetRunStateResponse {
-                turn_id: "turn-artifact".to_string(),
-                run_id,
-                status: TurnStatus::Completed,
-                event_cursor: EventCursor(1),
-                accepted_message_ref: AcceptedMessageRef::new("msg:artifact").expect("message ref"),
-                resolved_run_profile_id: "default".to_string(),
-                resolved_run_profile_version: 1,
-                received_at: Utc::now(),
-                checkpoint_id: None,
-                gate_ref: None,
-                failure: None,
-                usage: None,
-                cost: None,
-            },
-            messages: Vec::new(),
-            logs: RunArtifactLogs {
-                source: "test".to_string(),
-                available: true,
-                complete: false,
-                truncated: false,
-                unavailable_reason: None,
-                entries: Vec::new(),
-            },
-            redaction: RunArtifactRedaction {
-                pipeline: "deterministic-trace-redactor-v1".to_string(),
-                applied: false,
-            },
-        };
-        Ok(RebornViewPage {
-            payload: serde_json::to_value(artifact).expect("artifact payload"),
-            next_cursor: None,
-        })
+        match query.view_id.as_str() {
+            id if id == RUN_ARTIFACT_VIEW.id => {
+                let request: RebornRunArtifactRequest =
+                    serde_json::from_value(query.params).expect("artifact params");
+                let run_id = TurnRunId::parse(&request.run_id).expect("test run id");
+                let artifact = RebornRunArtifact {
+                    schema: RUN_ARTIFACT_SCHEMA.to_string(),
+                    generated_at: Utc::now(),
+                    thread_id: request.thread_id,
+                    run: RebornGetRunStateResponse {
+                        turn_id: "turn-artifact".to_string(),
+                        run_id,
+                        status: TurnStatus::Completed,
+                        event_cursor: EventCursor(1),
+                        accepted_message_ref: AcceptedMessageRef::new("msg:artifact")
+                            .expect("message ref"),
+                        resolved_run_profile_id: "default".to_string(),
+                        resolved_run_profile_version: 1,
+                        received_at: Utc::now(),
+                        checkpoint_id: None,
+                        gate_ref: None,
+                        failure: None,
+                        usage: None,
+                        cost: None,
+                    },
+                    messages: Vec::new(),
+                    logs: RunArtifactLogs {
+                        source: "test".to_string(),
+                        available: true,
+                        complete: false,
+                        truncated: false,
+                        unavailable_reason: None,
+                        entries: Vec::new(),
+                    },
+                    redaction: RunArtifactRedaction {
+                        pipeline: "deterministic-trace-redactor-v1".to_string(),
+                        applied: false,
+                    },
+                };
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(artifact).expect("artifact payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == LOGS_VIEW.id => {
+                let mut request: RebornLogQueryRequest =
+                    serde_json::from_value(query.params).expect("logs params");
+                request.cursor = query.cursor.or(request.cursor);
+                if request.tail && request.follow {
+                    return Err(RebornServicesError {
+                        code: RebornServicesErrorCode::InvalidRequest,
+                        kind: RebornServicesErrorKind::Validation,
+                        status_code: 400,
+                        retryable: false,
+                        field: Some("follow".to_string()),
+                        validation_code: Some(WebUiInboundValidationCode::InvalidValue),
+                    });
+                }
+                self.query_logs_calls.lock().expect("lock").push(request);
+                let response = RebornLogQueryResponse {
+                    source: "test".to_string(),
+                    entries: Vec::new(),
+                    next_cursor: None,
+                    tail_supported: true,
+                    follow_supported: true,
+                };
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(response).expect("logs payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == OPERATOR_LOGS_VIEW.id => {
+                let mut request: RebornOperatorLogsQuery =
+                    serde_json::from_value(query.params).expect("operator logs params");
+                request.cursor = query.cursor.or(request.cursor);
+                self.query_operator_logs_calls
+                    .lock()
+                    .expect("lock")
+                    .push(request);
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(operator_command_response(
+                        RebornOperatorArea::Logs,
+                    ))
+                    .expect("operator logs payload"),
+                    next_cursor: None,
+                })
+            }
+            _ => Err(rejecting_reborn_services_error()),
+        }
     }
 
     async fn list_fs_mounts(
@@ -1248,44 +1297,6 @@ impl RebornServicesApi for StubServices {
         Ok(operator_config_diagnostic_command_plane_response(
             RebornOperatorArea::Status,
         ))
-    }
-
-    async fn query_logs(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornLogQueryRequest,
-    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
-        if request.tail && request.follow {
-            return Err(RebornServicesError {
-                code: RebornServicesErrorCode::InvalidRequest,
-                kind: RebornServicesErrorKind::Validation,
-                status_code: 400,
-                retryable: false,
-                field: Some("follow".to_string()),
-                validation_code: Some(WebUiInboundValidationCode::InvalidValue),
-            });
-        }
-
-        self.query_logs_calls.lock().expect("lock").push(request);
-        Ok(RebornLogQueryResponse {
-            source: "test".to_string(),
-            entries: Vec::new(),
-            next_cursor: None,
-            tail_supported: true,
-            follow_supported: true,
-        })
-    }
-
-    async fn query_operator_logs(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        query: RebornOperatorLogsQuery,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
-        self.query_operator_logs_calls
-            .lock()
-            .expect("lock")
-            .push(query);
-        Ok(operator_command_response(RebornOperatorArea::Logs))
     }
 
     async fn run_operator_service_lifecycle(

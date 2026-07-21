@@ -37,7 +37,7 @@ use ironclaw_product_workflow::{
     AuthInteractionDecision, AuthInteractionService, AutomationListRequest, AutomationName,
     AutomationProductFacade, CodexLoginStart, ExtensionCredentialSetupService,
     ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, FilesystemBrowseReader,
-    FsMount, InboundAttachmentLander, InboundAttachmentReader,
+    FsMount, InboundAttachmentLander, InboundAttachmentReader, LOGS_VIEW,
     LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
     LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
     LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
@@ -47,7 +47,7 @@ use ironclaw_product_workflow::{
     ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse, LlmActiveSelection,
     LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
     LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, OperatorLogsService,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_LOGS_VIEW, OperatorLogsService,
     OperatorServiceLifecycleService, OperatorStatusService, OutboundPreferencesProductFacade,
     PendingApprovalInteractionView, ProductAgentBoundCaller, ProductWorkflowError, ProjectCaller,
     ProjectFsEntry, ProjectFsError, ProjectFsFile, ProjectFsStat, ProjectService,
@@ -60,11 +60,11 @@ use ironclaw_product_workflow::{
     RebornGetProjectRequest, RebornGetRunStateRequest, RebornListMembersRequest,
     RebornListMembersResponse, RebornListProjectsRequest, RebornListProjectsResponse,
     RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigSetRequest,
-    RebornOperatorLogsQuery, RebornOperatorSetupRequest, RebornOperatorSetupStatus,
-    RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
-    RebornOperatorStatusState, RebornOperatorSurfaceStatus, RebornOperatorToolCatalog,
-    RebornOperatorToolInfo, RebornOutboundDeliveryModality,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigSetRequest, RebornOperatorLogsQuery, RebornOperatorSetupRequest,
+    RebornOperatorSetupStatus, RebornOperatorStatusCheck, RebornOperatorStatusResponse,
+    RebornOperatorStatusSeverity, RebornOperatorStatusState, RebornOperatorSurfaceStatus,
+    RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
@@ -6439,6 +6439,46 @@ impl OperatorLogsService for RecordingOperatorLogsService {
 
 struct CrateRootLifecycleBackend;
 
+async fn query_logs_view(
+    services: &RebornServices,
+    caller: WebUiAuthenticatedCaller,
+    mut request: RebornLogQueryRequest,
+) -> Result<RebornLogQueryResponse, RebornServicesError> {
+    let cursor = request.cursor.take();
+    let page = services
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: LOGS_VIEW.id.to_string(),
+                params: serde_json::to_value(request)
+                    .map_err(RebornServicesError::internal_from)?,
+                cursor,
+            },
+        )
+        .await?;
+    serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
+}
+
+async fn query_operator_logs_view(
+    services: &RebornServices,
+    caller: WebUiAuthenticatedCaller,
+    mut request: RebornOperatorLogsQuery,
+) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+    let cursor = request.cursor.take();
+    let page = services
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: OPERATOR_LOGS_VIEW.id.to_string(),
+                params: serde_json::to_value(request)
+                    .map_err(RebornServicesError::internal_from)?,
+                cursor,
+            },
+        )
+        .await?;
+    serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
+}
+
 #[async_trait]
 impl OperatorServiceLifecycleService for CrateRootLifecycleBackend {
     async fn control_service(
@@ -6469,26 +6509,26 @@ async fn query_operator_logs_bounds_query_before_logs_service() {
     let oversized_thread_id = format!("{}é", "thread-".repeat(80));
     let oversized_run_id = format!("{}é", "run-".repeat(100));
     let boundary_source = format!("{}é", "s".repeat(254));
-    let response = services
-        .query_operator_logs(
-            caller(),
-            RebornOperatorLogsQuery {
-                limit: Some(u32::MAX),
-                cursor: Some(oversized_cursor),
-                level: Some(RebornLogLevel::Warn),
-                target: Some(oversized_target),
-                thread_id: Some(oversized_thread_id),
-                run_id: Some(oversized_run_id),
-                turn_id: Some("turn-1".to_string()),
-                tool_call_id: Some("tool-call-1".to_string()),
-                tool_name: Some("shell".to_string()),
-                source: Some(boundary_source),
-                tail: true,
-                follow: false,
-            },
-        )
-        .await
-        .expect("operator logs query");
+    let response = query_operator_logs_view(
+        &services,
+        caller(),
+        RebornOperatorLogsQuery {
+            limit: Some(u32::MAX),
+            cursor: Some(oversized_cursor),
+            level: Some(RebornLogLevel::Warn),
+            target: Some(oversized_target),
+            thread_id: Some(oversized_thread_id),
+            run_id: Some(oversized_run_id),
+            turn_id: Some("turn-1".to_string()),
+            tool_call_id: Some("tool-call-1".to_string()),
+            tool_name: Some("shell".to_string()),
+            source: Some(boundary_source),
+            tail: true,
+            follow: false,
+        },
+    )
+    .await
+    .expect("operator logs query");
 
     assert_eq!(response.status, RebornOperatorSurfaceStatus::Available);
     let requests = operator_logs.requests();
@@ -6523,26 +6563,26 @@ async fn query_operator_logs_forwards_follow_mode_to_logs_service() {
     )
     .with_operator_logs_service(operator_logs.clone());
 
-    services
-        .query_operator_logs(
-            caller(),
-            RebornOperatorLogsQuery {
-                limit: Some(25),
-                cursor: Some("after:7".to_string()),
-                level: Some(RebornLogLevel::Info),
-                target: Some("ironclaw".to_string()),
-                thread_id: None,
-                run_id: None,
-                turn_id: None,
-                tool_call_id: None,
-                tool_name: None,
-                source: None,
-                tail: false,
-                follow: true,
-            },
-        )
-        .await
-        .expect("operator logs follow query");
+    query_operator_logs_view(
+        &services,
+        caller(),
+        RebornOperatorLogsQuery {
+            limit: Some(25),
+            cursor: Some("after:7".to_string()),
+            level: Some(RebornLogLevel::Info),
+            target: Some("ironclaw".to_string()),
+            thread_id: None,
+            run_id: None,
+            turn_id: None,
+            tool_call_id: None,
+            tool_name: None,
+            source: None,
+            tail: false,
+            follow: true,
+        },
+    )
+    .await
+    .expect("operator logs follow query");
 
     let requests = operator_logs.requests();
     assert_eq!(requests.len(), 1);
@@ -6563,26 +6603,26 @@ async fn query_operator_logs_rejects_ambiguous_tail_follow_modes() {
     )
     .with_operator_logs_service(operator_logs.clone());
 
-    let err = services
-        .query_operator_logs(
-            caller(),
-            RebornOperatorLogsQuery {
-                limit: None,
-                cursor: None,
-                level: None,
-                target: None,
-                thread_id: None,
-                run_id: None,
-                turn_id: None,
-                tool_call_id: None,
-                tool_name: None,
-                source: None,
-                tail: true,
-                follow: true,
-            },
-        )
-        .await
-        .expect_err("tail and follow cannot be combined");
+    let err = query_operator_logs_view(
+        &services,
+        caller(),
+        RebornOperatorLogsQuery {
+            limit: None,
+            cursor: None,
+            level: None,
+            target: None,
+            thread_id: None,
+            run_id: None,
+            turn_id: None,
+            tool_call_id: None,
+            tool_name: None,
+            source: None,
+            tail: true,
+            follow: true,
+        },
+    )
+    .await
+    .expect_err("tail and follow cannot be combined");
 
     assert_eq!(err.kind, RebornServicesErrorKind::Validation);
     assert_eq!(err.status_code, 400);
@@ -6603,8 +6643,7 @@ async fn query_logs_requires_thread_scope() {
     )
     .with_operator_logs_service(operator_logs.clone());
 
-    let err = services
-        .query_logs(caller(), RebornLogQueryRequest::default())
+    let err = query_logs_view(&services, caller(), RebornLogQueryRequest::default())
         .await
         .expect_err("public logs require a thread scope");
 
@@ -6627,16 +6666,16 @@ async fn query_logs_rejects_ambiguous_tail_follow_modes() {
     )
     .with_operator_logs_service(operator_logs.clone());
 
-    let err = services
-        .query_logs(
-            caller(),
-            RebornLogQueryRequest::default()
-                .set_thread_id("thread-alpha")
-                .set_tail(true)
-                .set_follow(true),
-        )
-        .await
-        .expect_err("tail and follow cannot be combined");
+    let err = query_logs_view(
+        &services,
+        caller(),
+        RebornLogQueryRequest::default()
+            .set_thread_id("thread-alpha")
+            .set_tail(true)
+            .set_follow(true),
+    )
+    .await
+    .expect_err("tail and follow cannot be combined");
 
     assert_eq!(err.kind, RebornServicesErrorKind::Validation);
     assert_eq!(err.status_code, 400);
@@ -6659,19 +6698,19 @@ async fn query_logs_forwards_owned_thread_scope_to_logs_service() {
 
     setup_owned_thread(&services, caller(), "thread-alpha").await;
 
-    services
-        .query_logs(
-            caller(),
-            RebornLogQueryRequest::default()
-                .set_limit(25)
-                .set_cursor("after:7")
-                .set_level(RebornLogLevel::Info)
-                .set_target("ironclaw")
-                .set_thread_id("thread-alpha")
-                .set_follow(true),
-        )
-        .await
-        .expect("owned thread logs query");
+    query_logs_view(
+        &services,
+        caller(),
+        RebornLogQueryRequest::default()
+            .set_limit(25)
+            .set_cursor("after:7")
+            .set_level(RebornLogLevel::Info)
+            .set_target("ironclaw")
+            .set_thread_id("thread-alpha")
+            .set_follow(true),
+    )
+    .await
+    .expect("owned thread logs query");
 
     let requests = operator_logs.requests();
     assert_eq!(requests.len(), 1);
@@ -6695,15 +6734,15 @@ async fn query_logs_rejects_thread_owned_by_another_caller() {
 
     setup_owned_thread(&services, caller_for_user("user-bob"), "thread-bob").await;
 
-    let err = services
-        .query_logs(
-            caller(),
-            RebornLogQueryRequest::default()
-                .set_limit(25)
-                .set_thread_id("thread-bob"),
-        )
-        .await
-        .expect_err("foreign thread logs are not caller-visible");
+    let err = query_logs_view(
+        &services,
+        caller(),
+        RebornLogQueryRequest::default()
+            .set_limit(25)
+            .set_thread_id("thread-bob"),
+    )
+    .await
+    .expect_err("foreign thread logs are not caller-visible");
 
     assert_eq!(err.status_code, 404);
     assert_eq!(err.kind, RebornServicesErrorKind::NotFound);

@@ -8,10 +8,10 @@
 //! `RebornServicesApi` method set so any *new* method fails CI and the migration
 //! stops the bleeding before it starts.
 //!
-//! This test freezes the legacy `RebornServicesApi` method set plus the one
-//! generic `query` read conduit designated by the target architecture
-//! (`crates/ironclaw_product_workflow/src/reborn_services.rs`) as a set-membership
-//! allowlist (§10: compare set membership, never a count) and fails on any change:
+//! This test freezes the `RebornServicesApi` method set after the first view
+//! migration replaced the two dedicated log-query methods with the generic
+//! `query` read conduit. The allowlist therefore shrank by one method overall;
+//! it did not grow to admit the conduit. It fails on any subsequent change:
 //!
 //! - a **new** trait method (not in [`FROZEN_REBORN_SERVICES_METHODS`]) fails —
 //!   the feature belongs in a capability/view descriptor, not a new facade method;
@@ -141,8 +141,6 @@ const FROZEN_REBORN_SERVICES_METHODS: &[&str] = &[
     "validate_operator_config",
     "get_operator_diagnostics",
     "get_operator_status",
-    "query_logs",
-    "query_operator_logs",
     "run_operator_service_lifecycle",
     // --- admin users + per-user secrets ---
     "list_admin_users",

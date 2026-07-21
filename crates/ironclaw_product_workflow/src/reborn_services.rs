@@ -75,6 +75,7 @@ mod extensions;
 mod fs_browse;
 mod lifecycle_setup;
 mod llm_config;
+mod log_views;
 mod project_fs;
 mod projects;
 mod run_artifact;
@@ -117,6 +118,7 @@ pub use llm_config::{
     NearAiWalletLoginRequest, NearAiWalletLoginResult, SetActiveLlmRequest,
     UpsertLlmProviderRequest,
 };
+pub use log_views::{LOGS_VIEW, OPERATOR_LOGS_VIEW};
 pub use project_fs::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
     ProjectFsStat, RebornProjectFsListRequest, RebornProjectFsListResponse,
@@ -2545,24 +2547,6 @@ pub trait RebornServicesApi: Send + Sync {
         ))
     }
 
-    async fn query_logs(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        query: RebornLogQueryRequest,
-    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
-        let _ = (caller, query);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn query_operator_logs(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        query: RebornOperatorLogsQuery,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
-        let _ = (caller, query);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
     async fn run_operator_service_lifecycle(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -3933,6 +3917,35 @@ impl RebornServicesApi for RebornServices {
         query: RebornViewQuery,
     ) -> Result<RebornViewPage, RebornServicesError> {
         match query.view_id.as_str() {
+            id if id == LOGS_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(RebornServicesError::internal_from)?;
+                let response = self.build_logs_view(caller, request, query.cursor).await?;
+                let next_cursor = response.next_cursor.clone();
+                let payload =
+                    serde_json::to_value(response).map_err(RebornServicesError::internal_from)?;
+                Ok(RebornViewPage {
+                    payload,
+                    next_cursor,
+                })
+            }
+            id if id == OPERATOR_LOGS_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(RebornServicesError::internal_from)?;
+                let response = self
+                    .build_operator_logs_view(caller, request, query.cursor)
+                    .await?;
+                let next_cursor = response
+                    .logs
+                    .as_ref()
+                    .and_then(|logs| logs.next_cursor.clone());
+                let payload =
+                    serde_json::to_value(response).map_err(RebornServicesError::internal_from)?;
+                Ok(RebornViewPage {
+                    payload,
+                    next_cursor,
+                })
+            }
             id if id == RUN_ARTIFACT_VIEW.id => {
                 let request = serde_json::from_value(query.params)
                     .map_err(RebornServicesError::internal_from)?;
@@ -4969,49 +4982,6 @@ impl RebornServicesApi for RebornServices {
             message: "operator status is available".to_string(),
             operator_status: Some(status),
             logs: None,
-            service_lifecycle: None,
-            diagnostics: Vec::new(),
-        })
-    }
-
-    async fn query_logs(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        query: RebornLogQueryRequest,
-    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
-        validate_log_query_modes(query.tail, query.follow)?;
-
-        let request = bounded_log_query(query);
-        let thread_id = request.thread_id.clone().ok_or_else(|| {
-            RebornServicesError::validation(WebUiInboundValidationError::new(
-                "thread_id",
-                WebUiInboundValidationCode::MissingField,
-            ))
-        })?;
-        let thread_id = parse_thread_id_field("thread_id", thread_id)?;
-        let actor = caller.actor();
-        let scope = caller.turn_scope(thread_id);
-        self.resolve_thread_access_for_caller(caller.clone(), scope, &actor)
-            .await?;
-
-        self.operator_logs.query_logs(caller, request).await
-    }
-
-    async fn query_operator_logs(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        query: RebornOperatorLogsQuery,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
-        validate_log_query_modes(query.tail, query.follow)?;
-
-        let request = bounded_operator_logs_query(query);
-        let logs = self.operator_logs.query_logs(caller, request).await?;
-        Ok(RebornOperatorCommandPlaneResponse {
-            area: RebornOperatorArea::Logs,
-            status: RebornOperatorSurfaceStatus::Available,
-            message: "operator logs query completed".to_string(),
-            operator_status: None,
-            logs: Some(logs),
             service_lifecycle: None,
             diagnostics: Vec::new(),
         })
