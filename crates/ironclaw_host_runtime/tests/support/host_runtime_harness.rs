@@ -1664,6 +1664,7 @@ pub(crate) fn execution_context_without_grants() -> ExecutionContext {
 pub(crate) fn execution_context_without_grants_for_scope(scope: ResourceScope) -> ExecutionContext {
     let context = ExecutionContext {
         run_id: None,
+        origin: None,
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
@@ -1717,6 +1718,7 @@ pub(crate) fn execution_context_with_effect_grants_for_scope(
 ) -> ExecutionContext {
     let context = ExecutionContext {
         run_id: None,
+        origin: None,
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,

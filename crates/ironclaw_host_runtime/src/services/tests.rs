@@ -606,6 +606,7 @@ async fn host_runtime_services_with_security_audit_sink_records_leak_block() {
     };
     let context = ExecutionContext {
         run_id: None,
+        origin: None,
         invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,

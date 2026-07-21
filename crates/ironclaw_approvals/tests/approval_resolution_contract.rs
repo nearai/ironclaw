@@ -950,6 +950,7 @@ fn execution_context(grants: CapabilitySet) -> ExecutionContext {
     let resource_scope = sample_scope(invocation_id, "tenant1", "user1");
     ExecutionContext {
         run_id: None,
+        origin: None,
         invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,

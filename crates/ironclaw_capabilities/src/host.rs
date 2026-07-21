@@ -9,8 +9,7 @@ use ironclaw_host_api::{
     CapabilityDispatchResult, CapabilityDispatcher, CapabilityGrantId, CapabilityId, Decision,
     DenyReason, DenyRef, DispatchError, EffectiveRuntimePolicy, ExecutionContext, GateRef,
     GateWaypoint, Invocation, InvocationFingerprint, InvocationId, InvocationOrigin, Obligation,
-    PermissionMode, ProcessId, ProductKind, ResourceEstimate, ResourceScope, RuntimeLane,
-    Timestamp,
+    PermissionMode, ProcessId, ResourceEstimate, ResourceScope, RuntimeLane, Timestamp,
 };
 use ironclaw_processes::{ProcessManager, ProcessStart};
 use ironclaw_run_state::{
@@ -183,14 +182,16 @@ enum AuthorizeFold {
 
 /// Payload of [`AuthorizeFold::Authorized`] — the allowed-dispatch side-band.
 ///
-/// `result` is `Some(AuthorizeResult::Authorized(..))` when the invocation is
-/// *seal-able* — it carries a membrane-sealed actor AND resolves to an untrusted
-/// [`RuntimeLane`] — and `None` otherwise. A `None` witness does not regress
-/// dispatch: this slice mints the witness as a forward-looking seal artifact but
-/// still builds dispatch from `obligation_outcome`, so an actor-less or
-/// host-internal invocation dispatches exactly as it does today. The hard
-/// actor/lane requirement lands when the membrane guarantees them and dispatch
-/// routes through the witness (§9, later slice).
+/// `result` is `Some(AuthorizeResult::Authorized(..))` for every allowed,
+/// dispatchable invocation: the actor is always resolved (`Actor::System` for an
+/// actor-less/host-internal context) and the origin is the real ingress fact, so
+/// the seal no longer skips actor-less invocations. `result` is `None` only when
+/// the descriptor resolves to no untrusted [`RuntimeLane`] (a host-internal
+/// `System` runtime is not dispatched to a lane). A `None` witness does not
+/// regress dispatch: this slice mints the witness as a forward-looking seal
+/// artifact but still builds dispatch from `obligation_outcome`, so a lane-less
+/// invocation dispatches exactly as it does today. The hard witness-routed
+/// dispatch requirement lands in a later slice (§9).
 struct AuthorizedFold {
     result: Option<AuthorizeResult>,
     obligations: Vec<Obligation>,
@@ -969,17 +970,23 @@ where
     }
 
     /// Mint the sealed [`Authorized`] witness for an allowed invoke, spawn, or
-    /// resume, or `None` when the invocation is not yet seal-able
-    /// (arch-simplification §5.3.2).
+    /// resume (arch-simplification §5.3.2).
     ///
-    /// Returns `None` — leaving today's dispatch/spawn path unchanged — when a
-    /// fact the seal requires is absent: no membrane-sealed `actor`, or a
-    /// host-internal `System` runtime that maps to no untrusted [`RuntimeLane`].
-    /// This slice mints the witness as a forward-looking seal artifact (it does
-    /// not yet gate dispatch), so an un-seal-able invocation must not regress.
-    /// Every field marked `PROVISIONAL (Slice C)` is a placeholder a later slice
-    /// makes authoritative once the loop membrane seals it and `dispatch()`
-    /// consumes the witness.
+    /// `actor` and `origin` are now always resolvable, so the witness is minted
+    /// for **every** dispatchable invocation: an actor-less/host-internal context
+    /// seals [`Actor::System`] (never a stand-in user, never a skipped seal), and
+    /// `origin` is sealed from the ingress-stamped [`ExecutionContext::origin`]
+    /// (authoritative, §5.2.1), falling back to reconstructing
+    /// [`InvocationOrigin::LoopRun`] from `run_id` for the loop path. There is no
+    /// `"provisional"` placeholder — every production ingress stamps its true
+    /// origin (the loop via `run_id`/`LoopRun`).
+    ///
+    /// Returns `None` only when the descriptor's runtime maps to no untrusted
+    /// [`RuntimeLane`] (a host-internal `System` runtime is not dispatched to a
+    /// lane at all), or, defensively, when a context carries neither an `origin`
+    /// nor a `run_id` — a shape no production ingress produces. This slice mints
+    /// the witness as a forward-looking seal artifact (it does not yet gate
+    /// dispatch), so the lane-less `None` must not regress today's path.
     ///
     /// Shared by the invoke, spawn, and resume authorize folds so the same six
     /// frozen facts seal every path (§9 step 2). `scope` is derived from
@@ -998,21 +1005,26 @@ where
         obligation_outcome: &CapabilityObligationOutcome,
         frozen_deadline: Option<Timestamp>,
     ) -> Option<AuthorizeResult> {
-        // Actor is sealed at the membrane; NO fallback to `user_id`. Absent on
-        // untrusted/system contexts, where the witness is simply not minted.
-        let actor = context.authenticated_actor_user_id.clone()?;
+        // Actor is sealed at the membrane; NO fallback to `user_id`. An
+        // actor-less (system service / one-shot) context seals `Actor::System`
+        // as its own class — never a stand-in user, and never a skipped seal.
+        let actor = match context.authenticated_actor_user_id.clone() {
+            Some(user_id) => Actor::Sealed(user_id),
+            None => Actor::System,
+        };
         // Lane resolved from the descriptor's runtime kind; `System` runtimes
         // have no untrusted execution lane (`None`) and are not sealed here.
         let lane = RuntimeLane::from_runtime_kind(descriptor.runtime)?;
         let scope = &context.resource_scope;
-        let origin = match context.run_id {
-            Some(run_id) => InvocationOrigin::LoopRun(run_id),
-            // PROVISIONAL (Slice C): a non-loop invocation's true origin
-            // (Product vs Automation, §5.2.1) is not yet threaded to the kernel.
-            // Only a non-`LoopRun` origin is needed so `run_id` reconstructs to
-            // `None`; the concrete origin lands with the origin→gate matrix.
-            None => InvocationOrigin::Product(ProductKind::new("provisional").ok()?),
-        };
+        // Origin is the ingress-stamped authority fact (§5.2.1). The loop path
+        // also carries `run_id`, so a context that stamped only `run_id` still
+        // reconstructs `LoopRun` (transitional compat). No `"provisional"`
+        // fallback: a context that carries neither is not a real production
+        // ingress, so it is not sealed here (Option `?`, not a placeholder).
+        let origin = context
+            .origin
+            .clone()
+            .or_else(|| context.run_id.map(InvocationOrigin::LoopRun))?;
         let invocation = Invocation {
             activity_id: ActivityId::from_uuid(context.invocation_id.as_uuid()),
             capability: capability_id.clone(),
@@ -1021,11 +1033,9 @@ where
             // ownership of the request `input`.
             input: input.clone(),
             scope: scope.clone(),
-            // Actor-less contexts already early-returned above (`?` on the
-            // `authenticated_actor_user_id` bind), so a witness is minted only for
-            // a sealed human here; `Actor::System` is produced later, once the
-            // fold routes actor-less contexts through `authorize()`.
-            actor: Actor::Sealed(actor),
+            // Resolved above: `Actor::Sealed` for a membrane-sealed human,
+            // `Actor::System` for an actor-less/host-internal context.
+            actor,
             origin,
             estimate: estimate.clone(),
             correlation_id: context.correlation_id,
@@ -3693,8 +3703,12 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
             MountView::default(),
         )
         .unwrap();
-        // A membrane-sealed actor is what makes the invocation seal-able.
+        // A membrane-sealed actor and a real ingress origin are what make the
+        // invocation seal-able. This models a direct product-surface action.
         context.authenticated_actor_user_id = Some(UserId::new("actor").unwrap());
+        context.origin = Some(ironclaw_host_api::InvocationOrigin::Product(
+            ironclaw_host_api::ProductKind::new("settings").unwrap(),
+        ));
         CapabilityInvocationRequest {
             context,
             capability_id: CapabilityId::new("echo.say").unwrap(),
@@ -3799,6 +3813,14 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
             invocation.actor,
             Actor::Sealed(UserId::new("actor").unwrap())
         );
+        // Origin is the real ingress fact (`Product`), never a `"provisional"`
+        // placeholder.
+        assert_eq!(
+            invocation.origin,
+            ironclaw_host_api::InvocationOrigin::Product(
+                ironclaw_host_api::ProductKind::new("settings").unwrap()
+            )
+        );
         assert_eq!(invocation.input, serde_json::json!({"message": "hi"}));
         // No resource obligation → no reservation on the witness.
         assert!(
@@ -3851,6 +3873,106 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
             expiry,
             "adopted persistent-grant expiry is the shortest-lived frozen fact"
         );
+    }
+
+    // Every allowed, dispatchable invocation now seals a witness with a real
+    // actor and origin — no more actor-less `None` witness, no `"provisional"`
+    // origin. Covers three ingress shapes through the production `authorize`
+    // caller:
+    //   (a) an actor-less/system-internal context → `Actor::System` (the `?`
+    //       early-return that skipped minting is gone);
+    //   (b) a loop context that stamped only `run_id` → `LoopRun` reconstructed;
+    //   (c) an `Automation` ingress → `Automation` sealed verbatim.
+    #[tokio::test]
+    async fn authorize_seals_system_actor_and_real_origin_across_ingresses() {
+        use ironclaw_host_api::{InvocationOrigin, ProductKind, RoutineId, RunId, UserId};
+
+        let registry = echo_registry();
+        let dispatcher = UnusedDispatcher;
+        let authorizer = AllowAuthorizer;
+        let trust_policy = StaticTrustPolicy;
+        let runtime_policy = permissive_runtime_policy();
+        let policy_facts = SatisfiedPolicyFacts;
+        let host = CapabilityHost::new(
+            &registry,
+            &dispatcher,
+            &authorizer,
+            &trust_policy,
+            &runtime_policy,
+            &policy_facts,
+        );
+
+        // One ingress shape per case, driven through the production `authorize`.
+        struct Case {
+            actor_override: Option<UserId>,
+            origin: Option<InvocationOrigin>,
+            run_id: Option<RunId>,
+            expected_actor: Actor,
+            expected_origin: InvocationOrigin,
+        }
+
+        let loop_run = RunId::new();
+        let cases = vec![
+            // (a) actor-less product ingress → System actor, Product origin.
+            Case {
+                actor_override: None,
+                origin: Some(InvocationOrigin::Product(
+                    ProductKind::new("settings").unwrap(),
+                )),
+                run_id: None,
+                expected_actor: Actor::System,
+                expected_origin: InvocationOrigin::Product(ProductKind::new("settings").unwrap()),
+            },
+            // (b) loop path stamped only run_id → LoopRun reconstructed via compat.
+            Case {
+                actor_override: Some(UserId::new("actor").unwrap()),
+                origin: None,
+                run_id: Some(loop_run),
+                expected_actor: Actor::Sealed(UserId::new("actor").unwrap()),
+                expected_origin: InvocationOrigin::LoopRun(loop_run),
+            },
+            // (c) automation/heartbeat ingress → Automation sealed verbatim.
+            Case {
+                actor_override: None,
+                origin: Some(InvocationOrigin::Automation(
+                    RoutineId::new("heartbeat").unwrap(),
+                )),
+                run_id: None,
+                expected_actor: Actor::System,
+                expected_origin: InvocationOrigin::Automation(RoutineId::new("heartbeat").unwrap()),
+            },
+        ];
+
+        for Case {
+            actor_override,
+            origin,
+            run_id,
+            expected_actor,
+            expected_origin,
+        } in cases
+        {
+            let mut request = allow_request();
+            request.context.authenticated_actor_user_id = actor_override;
+            request.context.origin = origin;
+            request.context.run_id = run_id;
+
+            let fold = host.authorize(&request).await.unwrap();
+            let AuthorizeFold::Authorized(fold) = fold else {
+                panic!("expected an allowed authorization for {expected_origin:?}");
+            };
+            let Some(AuthorizeResult::Authorized(authorized)) = &fold.result else {
+                panic!("every allowed invocation must mint a witness ({expected_origin:?})");
+            };
+            let invocation = authorized.invocation();
+            assert_eq!(
+                invocation.actor, expected_actor,
+                "actor mismatch for {expected_origin:?}"
+            );
+            assert_eq!(
+                invocation.origin, expected_origin,
+                "origin mismatch for {expected_origin:?}"
+            );
+        }
     }
 
     #[test]
