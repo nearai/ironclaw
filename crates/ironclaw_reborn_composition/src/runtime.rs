@@ -109,7 +109,9 @@ use crate::builtin_capability_policy::{BuiltinCapabilityPolicy, builtin_capabili
 use crate::deployment::{DeploymentConfig, RuntimeSubstrate, TrafficPolicy};
 use crate::factory::{ComposedTurnStateStore, builtin_extension_registry};
 #[cfg(any(test, feature = "test-support"))]
-use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
+use crate::outbound::outbound_preferences::{
+    OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner,
+};
 use crate::outbound::{
     MutableOutboundDeliveryTargetRegistry, OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
     OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome,
@@ -123,7 +125,9 @@ use ironclaw_filesystem::CompositeRootFilesystem;
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone)]
 struct StaticOutboundDeliveryTargetProvider {
-    entry: OutboundDeliveryTargetEntry,
+    summary: RebornOutboundDeliveryTargetSummary,
+    capabilities: RebornOutboundDeliveryTargetCapabilities,
+    reply_target_binding_ref: ReplyTargetBindingRef,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -131,9 +135,18 @@ struct StaticOutboundDeliveryTargetProvider {
 impl OutboundDeliveryTargetProvider for StaticOutboundDeliveryTargetProvider {
     async fn list_outbound_delivery_targets(
         &self,
-        _caller: &WebUiAuthenticatedCaller,
+        caller: &WebUiAuthenticatedCaller,
     ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
-        Ok(vec![self.entry.clone()])
+        // Static test/QA fixture available to whichever caller asks: it claims
+        // the querying caller as owner so it always survives the registry's
+        // caller-scoping filter. Real providers derive the owner from the
+        // resolved resource instead.
+        Ok(vec![OutboundDeliveryTargetEntry {
+            summary: self.summary.clone(),
+            capabilities: self.capabilities.clone(),
+            reply_target_binding_ref: self.reply_target_binding_ref.clone(),
+            owner: OutboundDeliveryTargetOwner::for_caller(caller),
+        }])
     }
 }
 #[cfg(any(test, feature = "test-support"))]
@@ -1870,15 +1883,13 @@ impl RebornRuntime {
         self.register_outbound_delivery_target_provider(
             provider_key,
             Arc::new(StaticOutboundDeliveryTargetProvider {
-                entry: OutboundDeliveryTargetEntry {
-                    summary,
-                    capabilities: RebornOutboundDeliveryTargetCapabilities {
-                        final_replies: true,
-                        gate_prompts: false,
-                        auth_prompts: false,
-                    },
-                    reply_target_binding_ref,
+                summary,
+                capabilities: RebornOutboundDeliveryTargetCapabilities {
+                    final_replies: true,
+                    gate_prompts: false,
+                    auth_prompts: false,
                 },
+                reply_target_binding_ref,
             }),
         )
         .map(|_| ())
