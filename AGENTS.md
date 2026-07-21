@@ -189,6 +189,12 @@ warnings surfaced by that command.
 Read the testing skill/rule for backend, recorded-model, browser, and live-canary
 tiers. Do not assume every tier ran merely because required PR checks are green.
 
+Agents opening or updating a pull request must preserve and complete the
+`Test Strategy` section from `.github/pull_request_template.md`. Every test tier
+must include evidence or `Not applicable: <reason>`; do not present the pull
+request as ready while fields are blank. Select tiers using
+`docs/internal/testing-playbook.md` rather than running every tier by default.
+
 ## Change discipline
 
 - Keep changes scoped and preserve unrelated work in dirty worktrees.
