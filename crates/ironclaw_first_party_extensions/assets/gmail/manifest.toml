@@ -89,6 +89,7 @@ prompt_doc_ref = "prompts/gmail/trash_message.md"
 
 [[capabilities]]
 id = "gmail.fetch_message_summaries"
+tags = ["context_compact"]
 description = "Fetch compact Gmail message summaries for triage and inbox context."
 effects = ["dispatch_capability", "network", "use_secret"]
 default_permission = "allow"

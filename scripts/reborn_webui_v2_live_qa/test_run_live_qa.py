@@ -7604,10 +7604,24 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             r"(?ms)^\s+include:\n(?P<matrix>.*?)^\s+env:", match.group("body")
         )
         self.assertIsNotNone(matrix_match, "live QA shard matrix missing")
+        entries = re.findall(
+            r"(?ms)^\s+- shard_id: (?P<shard_id>\S+)\n(?P<body>.*?)(?=^\s+- shard_id:|\Z)",
+            matrix_match.group("matrix"),
+        )
+        benchmark_shards = {
+            shard_id: body
+            for shard_id, body in entries
+            if shard_id.startswith("qa-context-compact-")
+        }
         self.assertEqual(
-            matrix_match.group("matrix").count("dispatch_only: true"),
-            2,
-            "only the compact Google A/B arms should be dispatch-only",
+            set(benchmark_shards),
+            {"qa-context-compact-disabled", "qa-context-compact-enabled"},
+        )
+        self.assertTrue(
+            all(
+                re.search(r"(?m)^\s+dispatch_only: true\s*$", body)
+                for body in benchmark_shards.values()
+            )
         )
         self.assertIn(
             "Shard is dispatch_only; skipping on schedule.",

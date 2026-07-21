@@ -39,6 +39,7 @@ required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
 id = "google-drive.find_files_compact"
+tags = ["context_compact"]
 description = "Search or list Drive files with compact metadata for context-efficient file discovery."
 effects = ["dispatch_capability", "network", "use_secret"]
 runtime_credentials = [
@@ -53,6 +54,7 @@ required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
 id = "google-drive.recent_files"
+tags = ["context_compact"]
 description = "List recently modified Drive files with compact metadata."
 effects = ["dispatch_capability", "network", "use_secret"]
 runtime_credentials = [

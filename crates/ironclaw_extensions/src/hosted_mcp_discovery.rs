@@ -183,6 +183,7 @@ fn discovered_capability_manifest(
 
     Ok(CapabilityManifest {
         id: capability_id,
+        tags: Vec::new(),
         implements: Vec::new(),
         description: if tool.description.trim().is_empty() {
             format!("Invoke hosted MCP tool {}", tool.name)

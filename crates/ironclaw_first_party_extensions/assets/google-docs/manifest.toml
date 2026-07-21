@@ -67,6 +67,7 @@ required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
 id = "google-docs.read_excerpt"
+tags = ["context_compact"]
 description = "Read a bounded Google Docs excerpt with optional heading outline."
 effects = ["dispatch_capability", "network", "use_secret"]
 runtime_credentials = [

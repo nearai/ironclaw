@@ -68,6 +68,57 @@ class CompactGoogleBenchmarkReportTests(unittest.TestCase):
         self.assertEqual(set(arms["enabled"]), {"benchmark_google_email_digest"})
         self.assertTrue(arms["enabled"]["benchmark_google_email_digest"]["success"])
 
+    def test_load_results_skips_non_object_payloads(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            enabled = root / "qa-context-compact-enabled"
+            enabled.mkdir(parents=True)
+            (enabled / "results.json").write_text("null")
+
+            arms = load_results(root)
+
+        self.assertEqual(arms, {"disabled": {}, "enabled": {}})
+
+    def test_malformed_metrics_are_normalized_without_becoming_successful(self):
+        arms = {
+            "disabled": {
+                "benchmark_google_email_digest": {
+                    "success": "false",
+                    "latency_ms": "not-a-number",
+                    "details": {"run_metrics": {"google_tool_call_count": "four"}},
+                }
+            },
+            "enabled": {},
+        }
+
+        report, _ = build_report(arms)
+
+        self.assertEqual(report["comparable_cases"], 0)
+        self.assertFalse(report["rows"][0]["disabled_success"])
+        self.assertEqual(report["rows"][0]["disabled_google_calls"], 0)
+        self.assertEqual(report["rows"][0]["latency_delta_ms"], 0)
+
+    def test_non_finite_metrics_are_normalized(self):
+        result_with_non_finite_metrics = result(
+            calls=1,
+            compact=0,
+            input_tokens=10,
+            latency_ms=10,
+        )
+        result_with_non_finite_metrics["latency_ms"] = float("nan")
+        result_with_non_finite_metrics["details"]["run_metrics"][
+            "google_tool_call_count"
+        ] = float("inf")
+        arms = {
+            "disabled": {"benchmark_google_email_digest": result_with_non_finite_metrics},
+            "enabled": {},
+        }
+
+        report, _ = build_report(arms)
+
+        self.assertEqual(report["rows"][0]["disabled_google_calls"], 0)
+        self.assertEqual(report["rows"][0]["latency_delta_ms"], 0)
+
     def test_reports_call_token_and_latency_deltas(self):
         names = [
             "email_digest",

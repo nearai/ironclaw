@@ -57,8 +57,8 @@ pub enum GoogleDriveAction {
         order_by: Option<String>,
         /// Search corpus: "user" (personal, default), "drive" (specific shared drive),
         /// "domain" (org-wide), "allDrives" (everything accessible).
-        #[serde(default = "default_corpora")]
-        corpora: String,
+        #[serde(default = "default_compact_corpora")]
+        corpora: CompactDriveCorpus,
         /// Shared drive ID (required when corpora is "drive").
         #[serde(default)]
         drive_id: Option<String>,
@@ -74,8 +74,8 @@ pub enum GoogleDriveAction {
         page_size: u32,
         /// Search corpus: "user" (personal, default), "drive" (specific shared drive),
         /// "domain" (org-wide), "allDrives" (everything accessible).
-        #[serde(default = "default_corpora")]
-        corpora: String,
+        #[serde(default = "default_compact_corpora")]
+        corpora: CompactDriveCorpus,
         /// Shared drive ID (required when corpora is "drive").
         #[serde(default)]
         drive_id: Option<String>,
@@ -208,6 +208,33 @@ fn default_compact_page_size() -> u32 {
 
 fn default_corpora() -> String {
     "user".to_string()
+}
+
+fn default_compact_corpora() -> CompactDriveCorpus {
+    CompactDriveCorpus::User
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+pub enum CompactDriveCorpus {
+    #[serde(rename = "user")]
+    User,
+    #[serde(rename = "domain")]
+    Domain,
+    #[serde(rename = "drive")]
+    Drive,
+    #[serde(rename = "allDrives")]
+    AllDrives,
+}
+
+impl CompactDriveCorpus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Domain => "domain",
+            Self::Drive => "drive",
+            Self::AllDrives => "allDrives",
+        }
+    }
 }
 
 fn default_mime_type() -> String {

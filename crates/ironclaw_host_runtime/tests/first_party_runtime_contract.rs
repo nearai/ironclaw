@@ -670,6 +670,7 @@ fn first_party_registry_with_effects(effects: Vec<EffectKind>) -> ExtensionRegis
             host_apis: Vec::new(),
             capabilities: vec![CapabilityManifest {
                 id: capability_id(),
+                tags: Vec::new(),
                 implements: Vec::new(),
                 description: "Reports host status".to_string(),
                 effects,

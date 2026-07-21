@@ -350,6 +350,36 @@ async fn calendar_daily_brief_gmail_failures_match_the_output_schema() {
     assert_eq!(body["partialFailures"][0]["messageId"], "msg-1");
 }
 
+#[test]
+fn sheets_preview_output_contract_is_strict_and_matches_serialized_result() {
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../assets/google-sheets/schemas/google-sheets/preview.output.v1.json"
+    ))
+    .unwrap();
+    let validator = jsonschema::validator_for(&schema).expect("preview schema compiles");
+    let output = json!({
+        "spreadsheet_id": "sheet-1",
+        "title": "Quarterly plan",
+        "url": "https://docs.google.com/spreadsheets/d/sheet-1/edit",
+        "sheet_name": "Summary",
+        "range": "Summary!A1:B3",
+        "row_count_estimate": 100,
+        "column_count_estimate": 8,
+        "headers": ["Owner", "Status"],
+        "rows": [["Ada", "Done"], ["Grace", null]],
+        "sampled_row_count": 2,
+        "sampled_column_count": 2
+    });
+
+    assert!(validator.is_valid(&output));
+    let mut unexpected = output.clone();
+    unexpected["unexpected"] = json!(true);
+    assert!(!validator.is_valid(&unexpected));
+    let mut missing = output;
+    missing.as_object_mut().unwrap().remove("spreadsheet_id");
+    assert!(!validator.is_valid(&missing));
+}
+
 #[tokio::test]
 async fn gmail_message_summaries_borrows_one_credential_for_parallel_metadata_requests() {
     let scope = scope();

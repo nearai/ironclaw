@@ -234,6 +234,7 @@ Rules:
 - Domain contract handlers own section pattern validation, cardinality, typed section schema validation, and catalog/read-model projection.
 - Domain contract handlers must not treat manifest `trust` / `descriptor_trust_default` as effective runtime authority. Effective trust and grants come from composition-owned trust policy evaluation, not self-declared manifest metadata.
 - Model-visible capability-provider sections must carry enough cold metadata to project an LLM-facing tool descriptor: stable capability ID, human description, input schema ref, output schema ref, effects, permission default, and visibility. `prompt_doc_ref` is optional lazy help metadata, not part of the mandatory per-turn surface.
+- Capability `tags` are optional, validated declarative metadata for composition-owned grouping and rollout policy. Tags do not grant authority or change execution semantics by themselves.
 - The LLM consumes the projected hot capability surface, not the raw manifest section. Catalog publication resolves schema refs into compact per-turn tool descriptors and resolves `prompt_doc_ref` only when one is declared.
 - Unknown `host_api.id` values fail closed.
 - Repeating the same `host_api.id` is allowed only when that contract declares multi-instance support.

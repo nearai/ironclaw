@@ -848,7 +848,9 @@ fn resource_id_after_marker(url: &str, marker: &str) -> Option<String> {
 fn query_param(url: &str, key: &str) -> Option<String> {
     let query = url.split_once('?')?.1;
     for pair in query.split('&') {
-        let (candidate, value) = pair.split_once('=')?;
+        let Some((candidate, value)) = pair.split_once('=') else {
+            continue;
+        };
         if candidate == key {
             return non_empty_id(value);
         }
@@ -1123,6 +1125,10 @@ mod tests {
         );
         assert_eq!(
             google_resource_id("https://drive.google.com/open?id=file-456&usp=drive_link"),
+            Some("file-456".to_string())
+        );
+        assert_eq!(
+            google_resource_id("https://drive.google.com/open?authuser&id=file-456"),
             Some("file-456".to_string())
         );
     }

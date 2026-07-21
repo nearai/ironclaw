@@ -128,6 +128,7 @@ prompt_doc_ref = "prompts/google-calendar/set_reminder.md"
 
 [[capabilities]]
 id = "google-calendar.agenda"
+tags = ["context_compact"]
 description = "Return a compact Google Calendar agenda for today, tomorrow, this week, or an upcoming window."
 effects = ["dispatch_capability", "network", "use_secret"]
 default_permission = "allow"
@@ -141,6 +142,7 @@ prompt_doc_ref = "prompts/google-calendar/agenda.md"
 
 [[capabilities]]
 id = "google-calendar.daily_brief"
+tags = ["context_compact"]
 description = "Return a compact daily brief with agenda events and Gmail attention summaries."
 effects = ["dispatch_capability", "network", "use_secret"]
 default_permission = "allow"
@@ -155,6 +157,7 @@ prompt_doc_ref = "prompts/google-calendar/daily_brief.md"
 
 [[capabilities]]
 id = "google-calendar.meeting_prep"
+tags = ["context_compact"]
 description = "Return compact prep context for the next matching Google Calendar meeting."
 effects = ["dispatch_capability", "network", "use_secret"]
 default_permission = "allow"

@@ -368,6 +368,7 @@ impl Default for HostApiContractRegistry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityDeclV2 {
     pub id: CapabilityId,
+    pub tags: Vec<String>,
     pub implements: Vec<CapabilityProfileId>,
     pub description: String,
     pub effects: Vec<EffectKind>,
@@ -882,6 +883,19 @@ impl CapabilityDeclV2 {
         host_port_catalog: &HostPortCatalog,
     ) -> Result<Self, ManifestV2Error> {
         let id = CapabilityId::new(raw.id)?;
+        let mut tags_seen = BTreeSet::new();
+        for tag in &raw.tags {
+            if tag.is_empty() || tag.trim() != tag {
+                return Err(ManifestV2Error::Invalid {
+                    reason: format!("capability {id} declares invalid tag"),
+                });
+            }
+            if !tags_seen.insert(tag) {
+                return Err(ManifestV2Error::Invalid {
+                    reason: format!("capability {id} declares duplicate tag {tag}"),
+                });
+            }
+        }
         // Provider-prefix check without an intermediate `format!` allocation:
         // capability id must be `<extension_id>.<...>` (the dot is required so
         // `foo.bar` cannot squat `foo`'s namespace via `foobar.baz`).
@@ -1057,6 +1071,7 @@ impl CapabilityDeclV2 {
 
         Ok(Self {
             id,
+            tags: raw.tags,
             implements,
             description: raw.description,
             effects: raw.effects,
@@ -1591,6 +1606,8 @@ impl RawRuntimeV2 {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawCapabilityV2 {
     id: String,
+    #[serde(default)]
+    tags: Vec<String>,
     #[serde(default)]
     implements: Vec<String>,
     description: String,

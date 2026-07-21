@@ -80,16 +80,7 @@ const GMAIL_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/gmail/manifest.toml");
 pub(crate) const COMPACT_GOOGLE_CAPABILITIES_ENABLED_ENV: &str =
     "IRONCLAW_COMPACT_GOOGLE_CAPABILITIES_ENABLED";
-const COMPACT_GOOGLE_CAPABILITY_IDS: [&str; 8] = [
-    "gmail.fetch_message_summaries",
-    "google-calendar.agenda",
-    "google-calendar.daily_brief",
-    "google-calendar.meeting_prep",
-    "google-docs.read_excerpt",
-    "google-drive.find_files_compact",
-    "google-drive.recent_files",
-    "google-sheets.preview",
-];
+const COMPACT_GOOGLE_CAPABILITY_TAG: &str = "context_compact";
 const NOTION_MCP_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/notion-mcp/manifest.toml");
 const WEB_ACCESS_MANIFEST: &str =
@@ -667,9 +658,13 @@ fn google_manifest_for_compact_capabilities(
         .ok_or_else(|| map_binding_error("bundled Google manifest lacks capabilities"))?;
     capabilities.retain(|capability| {
         capability
-            .get("id")
-            .and_then(Value::as_str)
-            .is_none_or(|id| !COMPACT_GOOGLE_CAPABILITY_IDS.contains(&id))
+            .get("tags")
+            .and_then(Value::as_array)
+            .is_none_or(|tags| {
+                !tags
+                    .iter()
+                    .any(|tag| tag.as_str() == Some(COMPACT_GOOGLE_CAPABILITY_TAG))
+            })
     });
     toml::to_string(&manifest).map_err(|error| {
         map_binding_error(format!(
@@ -1530,7 +1525,7 @@ fn google_drive_assets() -> Vec<AvailableExtensionAsset> {
 }
 
 fn google_sheets_assets() -> Vec<AvailableExtensionAsset> {
-    google_wasm_assets!(
+    let mut assets = google_wasm_assets!(
         "google-sheets",
         GOOGLE_SHEETS_MANIFEST,
         "google_sheets_tool.wasm",
@@ -1549,7 +1544,14 @@ fn google_sheets_assets() -> Vec<AvailableExtensionAsset> {
             "rename_sheet",
             "format_cells"
         ]
-    )
+    );
+    assets.push(bytes_asset(
+        "schemas/google-sheets/preview.output.v1.json",
+        include_bytes!(
+            "../../../ironclaw_first_party_extensions/assets/google-sheets/schemas/google-sheets/preview.output.v1.json"
+        ),
+    ));
+    assets
 }
 
 fn slack_assets() -> Vec<AvailableExtensionAsset> {
@@ -1985,40 +1987,31 @@ mod tests {
 
     #[test]
     fn disabled_compact_google_capabilities_preserve_legacy_manifest_tools() {
-        for (manifest, compact_ids, legacy_id) in [
-            (
-                GMAIL_MANIFEST,
-                &["gmail.fetch_message_summaries"][..],
-                "gmail.list_messages",
-            ),
-            (
-                GOOGLE_CALENDAR_MANIFEST,
-                &[
-                    "google-calendar.agenda",
-                    "google-calendar.daily_brief",
-                    "google-calendar.meeting_prep",
-                ][..],
-                "google-calendar.list_events",
-            ),
-            (
-                GOOGLE_DOCS_MANIFEST,
-                &["google-docs.read_excerpt"][..],
-                "google-docs.read_content",
-            ),
-            (
-                GOOGLE_DRIVE_MANIFEST,
-                &[
-                    "google-drive.find_files_compact",
-                    "google-drive.recent_files",
-                ][..],
-                "google-drive.list_files",
-            ),
-            (
-                GOOGLE_SHEETS_MANIFEST,
-                &["google-sheets.preview"][..],
-                "google-sheets.read_values",
-            ),
+        for (manifest, legacy_id) in [
+            (GMAIL_MANIFEST, "gmail.list_messages"),
+            (GOOGLE_CALENDAR_MANIFEST, "google-calendar.list_events"),
+            (GOOGLE_DOCS_MANIFEST, "google-docs.read_content"),
+            (GOOGLE_DRIVE_MANIFEST, "google-drive.list_files"),
+            (GOOGLE_SHEETS_MANIFEST, "google-sheets.read_values"),
         ] {
+            let original: Value = toml::from_str(manifest).expect("bundled manifest parses");
+            let compact_ids = original["capabilities"]
+                .as_array()
+                .expect("capabilities")
+                .iter()
+                .filter(|capability| {
+                    capability
+                        .get("tags")
+                        .and_then(Value::as_array)
+                        .is_some_and(|tags| {
+                            tags.iter()
+                                .any(|tag| tag.as_str() == Some(COMPACT_GOOGLE_CAPABILITY_TAG))
+                        })
+                })
+                .filter_map(|capability| capability["id"].as_str())
+                .collect::<Vec<_>>();
+            assert!(!compact_ids.is_empty(), "manifest must tag compact tools");
+
             let filtered = google_manifest_for_compact_capabilities(manifest, false)
                 .expect("Google manifest filters");
             let parsed: Value = toml::from_str(&filtered).expect("filtered manifest parses");
@@ -2030,8 +2023,11 @@ mod tests {
                 .collect::<HashSet<_>>();
 
             assert!(ids.contains(legacy_id), "legacy capability {legacy_id}");
-            for compact_id in compact_ids {
-                assert!(!ids.contains(compact_id), "compact capability {compact_id}");
+            for compact_id in &compact_ids {
+                assert!(
+                    !ids.contains(*compact_id),
+                    "compact capability {compact_id}"
+                );
             }
         }
     }

@@ -501,6 +501,7 @@ mod tests {
                         hooks: Vec::new(),
                         capabilities: vec![ironclaw_extensions::CapabilityManifest {
                             id: CapabilityId::new(capability_id).unwrap(),
+                            tags: Vec::new(),
                             implements: Vec::new(),
                             description: "Search".to_string(),
                             effects: vec![

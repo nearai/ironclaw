@@ -646,18 +646,40 @@ async fn reborn_e2e_gate_host_http_borrows_staged_handoffs_until_abort() {
         .await
         .expect("abort should revoke staged invocation handoffs");
 
+    let policy_only_outcome = obligation_handler
+        .prepare(ironclaw_capabilities::CapabilityObligationRequest {
+            phase: ironclaw_capabilities::CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &[Obligation::ApplyNetworkPolicy {
+                policy: staged_policy.clone(),
+            }],
+        })
+        .await
+        .expect("network policy should be restaged without the secret");
+
     let after_abort = service
         .execute(request)
         .await
         .expect_err("aborted invocation handoffs must not be reusable");
     assert!(matches!(
         after_abort,
-        RuntimeHttpEgressError::Network {
-            reason,
-            request_bytes: 0,
-            response_bytes: 0,
-        } if reason == "network_policy_missing"
+        RuntimeHttpEgressError::Credential { .. }
     ));
+    obligation_handler
+        .abort(ironclaw_capabilities::CapabilityObligationAbortRequest {
+            phase: ironclaw_capabilities::CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &[Obligation::ApplyNetworkPolicy {
+                policy: staged_policy,
+            }],
+            outcome: &policy_only_outcome,
+        })
+        .await
+        .expect("restaged policy should be revoked during test cleanup");
     assert_eq!(
         network_recorder.lock().unwrap().len(),
         2,

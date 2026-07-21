@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,8 @@ def load_results(artifacts_dir: Path) -> dict[str, dict[str, dict[str, Any]]]:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
+        if not isinstance(payload, dict):
+            continue
         for result in payload.get("results") or []:
             if not isinstance(result, dict):
                 continue
@@ -38,11 +41,19 @@ def load_results(artifacts_dir: Path) -> dict[str, dict[str, dict[str, Any]]]:
     return arms
 
 
+def _integer(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    return int(value) if isinstance(value, float) and math.isfinite(value) else 0
+
+
 def _metric(result: dict[str, Any], key: str) -> int:
     details = result.get("details") or {}
     metrics = details.get("run_metrics") or {} if isinstance(details, dict) else {}
     value = metrics.get(key, 0) if isinstance(metrics, dict) else 0
-    return int(value) if isinstance(value, (int, float)) else 0
+    return _integer(value)
 
 
 def _tokens(result: dict[str, Any], key: str) -> int:
@@ -50,7 +61,7 @@ def _tokens(result: dict[str, Any], key: str) -> int:
     metrics = details.get("run_metrics") or {} if isinstance(details, dict) else {}
     usage = metrics.get("usage") or {} if isinstance(metrics, dict) else {}
     value = usage.get(key, 0) if isinstance(usage, dict) else 0
-    return int(value) if isinstance(value, (int, float)) else 0
+    return _integer(value)
 
 
 def build_report(
@@ -67,8 +78,8 @@ def build_report(
         rows.append(
             {
                 "case": case,
-                "disabled_success": bool(control.get("success")),
-                "enabled_success": bool(treatment.get("success")),
+                "disabled_success": control.get("success") is True,
+                "enabled_success": treatment.get("success") is True,
                 "disabled_google_calls": control_calls,
                 "enabled_google_calls": treatment_calls,
                 "google_calls_saved": saved,
@@ -81,8 +92,8 @@ def build_report(
                 - _tokens(control, "input_tokens"),
                 "output_token_delta": _tokens(treatment, "output_tokens")
                 - _tokens(control, "output_tokens"),
-                "latency_delta_ms": int(treatment.get("latency_ms") or 0)
-                - int(control.get("latency_ms") or 0),
+                "latency_delta_ms": _integer(treatment.get("latency_ms"))
+                - _integer(control.get("latency_ms")),
             }
         )
 

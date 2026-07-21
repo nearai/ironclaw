@@ -67,6 +67,7 @@ required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
 id = "google-sheets.preview"
+tags = ["context_compact"]
 description = "Preview a bounded sheet range with headers and sample rows."
 effects = ["dispatch_capability", "network", "use_secret"]
 runtime_credentials = [
@@ -75,7 +76,7 @@ runtime_credentials = [
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-sheets/preview.input.v1.json"
-output_schema_ref = "schemas/google-sheets/raw_output.v1.json"
+output_schema_ref = "schemas/google-sheets/preview.output.v1.json"
 prompt_doc_ref = "prompts/google-sheets/preview.md"
 required_host_ports = ["host.runtime.http_egress"]
 

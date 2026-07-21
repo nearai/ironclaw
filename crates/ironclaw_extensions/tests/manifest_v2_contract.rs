@@ -72,6 +72,20 @@ fn parses_minimum_valid_v2_manifest_for_installed_third_party_extension() {
     assert_eq!(cap.visibility, CapabilityVisibility::Model);
     assert_eq!(cap.default_permission, PermissionMode::Allow);
     assert!(cap.prompt_doc_ref.is_none());
+    assert!(cap.tags.is_empty());
+}
+
+#[test]
+fn parses_capability_tags_as_declarative_metadata() {
+    let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo").replace(
+        r#"description = "Echoes input""#,
+        r#"description = "Echoes input"
+tags = ["context_compact"]"#,
+    );
+    let manifest =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap();
+
+    assert_eq!(manifest.capabilities[0].tags, ["context_compact"]);
 }
 
 #[test]

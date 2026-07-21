@@ -39,7 +39,7 @@
 mod api;
 mod types;
 
-use types::{GoogleDriveAction, ToolContext};
+use types::{CompactDriveCorpus, GoogleDriveAction, ToolContext};
 
 wit_bindgen::generate!({
     world: "sandboxed-tool",
@@ -129,7 +129,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
                 query.as_deref(),
                 page_size,
                 order_by.as_deref(),
-                &corpora,
+                corpora.as_str(),
                 drive_id.as_deref(),
                 page_token.as_deref(),
             )?;
@@ -144,7 +144,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
         } => {
             let result = api::recent_files(
                 page_size,
-                &corpora,
+                corpora.as_str(),
                 drive_id.as_deref(),
                 page_token.as_deref(),
             )?;
@@ -291,11 +291,11 @@ fn params_with_action(params: &str, action: &str) -> Result<serde_json::Value, S
     Ok(params)
 }
 
-fn validate_compact_list_scope(corpora: &str, drive_id: Option<&str>) -> Result<(), String> {
-    if !matches!(corpora, "user" | "domain" | "drive" | "allDrives") {
-        return Err("invalid corpora".to_string());
-    }
-    if corpora == "drive" && drive_id.is_none_or(str::is_empty) {
+fn validate_compact_list_scope(
+    corpora: CompactDriveCorpus,
+    drive_id: Option<&str>,
+) -> Result<(), String> {
+    if corpora == CompactDriveCorpus::Drive && drive_id.is_none_or(str::is_empty) {
         return Err("drive_id is required when corpora is drive".to_string());
     }
     Ok(())
@@ -308,7 +308,7 @@ fn validate_action(action: &GoogleDriveAction) -> Result<(), String> {
         }
         | GoogleDriveAction::RecentFiles {
             corpora, drive_id, ..
-        } => validate_compact_list_scope(corpora, drive_id.as_deref()),
+        } => validate_compact_list_scope(*corpora, drive_id.as_deref()),
         _ => Ok(()),
     }
 }
@@ -326,7 +326,7 @@ mod tests {
             let context = serde_json::json!({"capability_id": capability_id}).to_string();
             let error = execute_inner(r#"{"corpora":"invalid"}"#, Some(&context)).unwrap_err();
 
-            assert_eq!(error, "invalid corpora");
+            assert!(error.starts_with("Invalid parameters:"), "{error}");
         }
     }
 
@@ -345,7 +345,22 @@ mod tests {
 
     #[test]
     fn compact_list_scope_allows_personal_corpus_without_drive_id() {
-        assert_eq!(validate_compact_list_scope("user", None), Ok(()));
+        assert_eq!(validate_compact_list_scope(CompactDriveCorpus::User, None), Ok(()));
+    }
+
+    #[test]
+    fn compact_corpus_preserves_historical_all_drives_wire_value() {
+        let params = params_with_action(r#"{"corpora":"allDrives"}"#, "find_files_compact")
+            .unwrap();
+        let action: GoogleDriveAction = serde_json::from_value(params).unwrap();
+
+        assert!(matches!(
+            action,
+            GoogleDriveAction::FindFilesCompact {
+                corpora: CompactDriveCorpus::AllDrives,
+                ..
+            }
+        ));
     }
 }
 

@@ -204,6 +204,7 @@ fn capability_manifest(
 ) -> Result<CapabilityManifest, ExtensionError> {
     Ok(CapabilityManifest {
         id: CapabilityId::new(capability.id)?,
+        tags: Vec::new(),
         implements: Vec::new(),
         description: capability.description.to_string(),
         effects: capability.effects.to_vec(),
