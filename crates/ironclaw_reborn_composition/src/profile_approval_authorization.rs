@@ -293,6 +293,13 @@ async fn require_approval_for_profile_policy(
         origin.as_ref(),
         descriptor.origin_gate_matrix.as_ref(),
     );
+    let (origin_denied, origin_requires_approval, origin_forces_approval) = match origin_requirement
+    {
+        OriginGateRequirement::Deny => (true, false, false),
+        OriginGateRequirement::GateHardFloor => (false, false, true),
+        OriginGateRequirement::GateSoft => (false, true, false),
+        OriginGateRequirement::None => (false, false, false),
+    };
 
     // A `Forbidden` origin is denied regardless of any class-B grant/lease and
     // regardless of the Minimal (yolo) bypass — the origin may not invoke this
@@ -303,7 +310,7 @@ async fn require_approval_for_profile_policy(
     // production capability declares `Forbidden` for the live `LoopRun` origin,
     // and product/automation origins have no live producer, so this deny path is
     // unreachable in production today (fail-closed for the future).
-    if matches!(origin_requirement, OriginGateRequirement::Deny) {
+    if origin_denied {
         tracing::debug!(
             capability = descriptor.id.as_str(),
             origin = origin.as_ref().map(InvocationOrigin::kind),
@@ -321,8 +328,7 @@ async fn require_approval_for_profile_policy(
     // Minimal bypass. The matrix's HARD-FLOOR (`AskAlways`) contribution is NOT
     // folded here — it composes with `effects_force_approval` at step 3, ahead
     // of class-B (see below), so an always-allow/auto-approve cannot bypass it.
-    let profile_requires_approval = effect_based_intrinsic_gate
-        || matches!(origin_requirement, OriginGateRequirement::GateSoft);
+    let profile_requires_approval = effect_based_intrinsic_gate || origin_requires_approval;
 
     let require_approval = || Decision::RequireApproval {
         request: approval_request(context, descriptor, estimate, action_kind),
@@ -357,9 +363,7 @@ async fn require_approval_for_profile_policy(
     //    beats class-B auto-approve/always-allow (steps 6/7/8 below) and is
     //    satisfied only by the one-shot approval lease checked in step 2 — the
     //    same semantics as `effects_force_approval`.
-    if gate_policy.effects_force_approval(&gate_effects)
-        || matches!(origin_requirement, OriginGateRequirement::GateHardFloor)
-    {
+    if gate_policy.effects_force_approval(&gate_effects) || origin_forces_approval {
         return require_approval();
     }
     // 4. Explicit per-tool `ask_each_time` → always gate fresh invocations,

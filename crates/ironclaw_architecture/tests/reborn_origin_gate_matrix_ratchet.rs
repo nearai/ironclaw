@@ -71,7 +71,9 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ironclaw_host_api::{CapabilityId, UNGATED_LOOP_RUN_CAPABILITIES};
+use ironclaw_host_api::{
+    CapabilityId, OriginGateMatrix, OriginGatePolicy, UNGATED_LOOP_RUN_CAPABILITIES,
+};
 
 /// The reviewed S5 seed of builtins the model may invoke UNGATED (§5.2.1/§10).
 /// Any drift from this list is a reviewed diff — see the module header. Adding an
@@ -226,7 +228,7 @@ fn extension_toml_capabilities_declare_wellformed_origin_gate_matrix() {
                 .and_then(toml::Value::as_str)
                 .unwrap_or("<capability with no id>");
 
-            let Some(toml::Value::Table(matrix)) = capability.get("origin_gate_matrix") else {
+            let Some(matrix_value) = capability.get("origin_gate_matrix") else {
                 violations.push(format!(
                     "{} :: {id}: capability declares no origin_gate_matrix (§5.2.1 invariant 1)",
                     path.display()
@@ -234,22 +236,31 @@ fn extension_toml_capabilities_declare_wellformed_origin_gate_matrix() {
                 continue;
             };
 
-            for column in ["loop_run", "automation"] {
-                if matrix.get(column).and_then(toml::Value::as_str) == Some("consent_sufficient") {
+            let matrix: OriginGateMatrix = match matrix_value.clone().try_into() {
+                Ok(matrix) => matrix,
+                Err(err) => {
                     violations.push(format!(
-                        "{id}: consent_sufficient is Product-only (§5.2.1) — not valid on the \
-                         {column} column"
+                        "{} :: {id}: invalid origin_gate_matrix structure or policy: {err}",
+                        path.display()
                     ));
+                    continue;
                 }
+            };
+
+            if matrix.loop_run == OriginGatePolicy::ConsentSufficient {
+                violations.push(format!(
+                    "{id}: consent_sufficient is Product-only (§5.2.1) — not valid on the \
+                     loop_run column"
+                ));
+            }
+            if matrix.automation == OriginGatePolicy::ConsentSufficient {
+                violations.push(format!(
+                    "{id}: consent_sufficient is Product-only (§5.2.1) — not valid on the \
+                     automation column"
+                ));
             }
 
-            let Some(loop_run) = matrix.get("loop_run").and_then(toml::Value::as_str) else {
-                violations.push(format!(
-                    "{id}: origin_gate_matrix declares no loop_run policy"
-                ));
-                continue;
-            };
-            if loop_run == "ungated" && !allowlist.contains(id) {
+            if matrix.loop_run == OriginGatePolicy::Ungated && !allowlist.contains(id) {
                 violations.push(format!(
                     "{id}: loop_run = \"ungated\" but id is NOT in the reviewed \
                      UNGATED_LOOP_RUN_CAPABILITIES allowlist — a hand-authored typo would \
