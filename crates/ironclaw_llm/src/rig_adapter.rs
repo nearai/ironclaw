@@ -1,3 +1,4 @@
+// arch-exempt: large_file, Rig provider bridge keeps streaming and non-streaming conversions co-located until provider adapter decomposition, plan #6175
 //! Generic adapter that bridges rig-core's `CompletionModel` trait to IronClaw's `LlmProvider`.
 //!
 //! This lets us use any rig-core provider (OpenAI, Anthropic, Ollama, etc.) as an
@@ -5,9 +6,10 @@
 
 use crate::config::CacheRetention;
 use async_trait::async_trait;
+use futures::StreamExt;
 use rig::OneOrMany;
 use rig::completion::{
-    AssistantContent, CompletionModel, CompletionRequest as RigRequest,
+    AssistantContent, CompletionModel, CompletionRequest as RigRequest, GetTokenUsage,
     ToolDefinition as RigToolDefinition, Usage as RigUsage,
 };
 use rig::message::{
@@ -15,6 +17,7 @@ use rig::message::{
     ToolChoice as RigToolChoice, ToolFunction, ToolResult as RigToolResult, ToolResultContent,
     UserContent,
 };
+use rig::streaming::{StreamedAssistantContent, StreamingCompletionResponse};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::Serialize;
@@ -24,11 +27,10 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::str::FromStr;
 
-use crate::costs;
 use crate::error::LlmError;
 use crate::provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider,
-    ReasoningDetail as IronReasoningDetail, ReasoningDetails as IronReasoningDetails,
+    ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, FinishReason,
+    LlmProvider, ReasoningDetail as IronReasoningDetail, ReasoningDetails as IronReasoningDetails,
     ToolCall as IronToolCall, ToolCompletionRequest, ToolCompletionResponse,
     ToolDefinition as IronToolDefinition, strip_unsupported_completion_params,
     strip_unsupported_tool_params,
@@ -36,6 +38,7 @@ use crate::provider::{
 use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 #[cfg(test)]
 use crate::tool_schema::{normalize_schema_strict, serialize_json_capped};
+use ironclaw_common::llm_costs as costs;
 
 /// Adapter that wraps a rig-core `CompletionModel` and implements `LlmProvider`.
 pub struct RigAdapter<M: CompletionModel> {
@@ -319,6 +322,52 @@ impl<M: CompletionModel> RigAdapter<M> {
     /// Strip unsupported fields from a `ToolCompletionRequest` in place.
     fn strip_unsupported_tool_params(&self, req: &mut ToolCompletionRequest) {
         strip_unsupported_tool_params(&self.unsupported_params, req);
+    }
+
+    async fn drain_streaming_response(
+        &self,
+        mut stream: StreamingCompletionResponse<M::StreamingResponse>,
+        sink: std::sync::Arc<dyn CompletionStreamSink>,
+    ) -> Result<DrainedStreamingResponse, LlmError> {
+        let mut streamed_reasoning = StreamedReasoningAccumulator::default();
+        while let Some(chunk) = stream.next().await {
+            match chunk.map_err(|e| map_rig_error(&self.model_name, e))? {
+                StreamedAssistantContent::Text(text) if !text.text.is_empty() => {
+                    sink.text_delta(text.text).await;
+                }
+                StreamedAssistantContent::Reasoning(reasoning) => {
+                    streamed_reasoning.push_reasoning(&reasoning);
+                }
+                StreamedAssistantContent::ReasoningDelta { id, reasoning } => {
+                    streamed_reasoning.push_delta(id, reasoning);
+                }
+                _ => {}
+            }
+        }
+
+        let usage = stream
+            .response
+            .as_ref()
+            .and_then(GetTokenUsage::token_usage)
+            .unwrap_or_default();
+        let cache_creation_input_tokens = stream
+            .response
+            .as_ref()
+            .map(extract_cache_creation)
+            .unwrap_or(0);
+        let (text, tool_calls, finish, reasoning, reasoning_details) =
+            extract_response(&stream.choice, &usage);
+        let (streamed_reasoning, streamed_reasoning_details) = streamed_reasoning.finish();
+
+        Ok(DrainedStreamingResponse {
+            text,
+            tool_calls,
+            finish,
+            reasoning: reasoning.or(streamed_reasoning),
+            reasoning_details: reasoning_details.or(streamed_reasoning_details),
+            usage,
+            cache_creation_input_tokens,
+        })
     }
 }
 
@@ -759,6 +808,63 @@ fn extract_response(
     (text, tool_calls, finish, reasoning, typed_reasoning)
 }
 
+#[derive(Default)]
+struct StreamedReasoningAccumulator {
+    parts: Vec<String>,
+    details: Vec<IronReasoningDetail>,
+    id: Option<String>,
+}
+
+impl StreamedReasoningAccumulator {
+    fn push_reasoning(&mut self, reasoning: &rig::message::Reasoning) {
+        if self.id.is_none() {
+            self.id = reasoning.id.clone();
+        }
+        if let Some(details) = rig_reasoning_to_iron(reasoning) {
+            if let Some(display_text) = details.display_text() {
+                self.parts.push(display_text);
+            }
+            self.details.extend(details.content);
+        }
+    }
+
+    fn push_delta(&mut self, id: Option<String>, reasoning: String) {
+        if self.id.is_none() {
+            self.id = id;
+        }
+        if !reasoning.trim().is_empty() {
+            self.parts.push(reasoning);
+        }
+    }
+
+    fn finish(self) -> (Option<String>, Option<IronReasoningDetails>) {
+        let reasoning = if self.parts.is_empty() {
+            None
+        } else {
+            Some(self.parts.join("\n"))
+        };
+        let details = if self.details.is_empty() {
+            None
+        } else {
+            Some(IronReasoningDetails {
+                id: self.id,
+                content: self.details,
+            })
+        };
+        (reasoning, details)
+    }
+}
+
+struct DrainedStreamingResponse {
+    text: Option<String>,
+    tool_calls: Vec<IronToolCall>,
+    finish: FinishReason,
+    reasoning: Option<String>,
+    reasoning_details: Option<IronReasoningDetails>,
+    usage: RigUsage,
+    cache_creation_input_tokens: u32,
+}
+
 /// Saturate u64 to u32 for token counts.
 fn saturate_u32(val: u64) -> u32 {
     val.min(u32::MAX as u64) as u32
@@ -993,6 +1099,62 @@ where
         Ok(resp)
     }
 
+    async fn complete_streaming(
+        &self,
+        mut request: CompletionRequest,
+        sink: std::sync::Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        let model_override = request.take_model_override();
+
+        self.strip_unsupported_completion_params(&mut request);
+
+        let mut messages = request.messages;
+        crate::provider::sanitize_tool_messages(&mut messages);
+        let (preamble, history) = convert_messages(&messages);
+
+        let mut rig_req = build_rig_request(
+            preamble,
+            history,
+            Vec::new(),
+            None,
+            request.temperature,
+            request.max_tokens,
+            self.cache_retention,
+        )?;
+
+        merge_additional_params(&mut rig_req, self.default_additional_params.as_ref());
+        inject_model_override(&mut rig_req, model_override.as_deref());
+
+        let stream = self
+            .model
+            .stream(rig_req)
+            .await
+            .map_err(|e| map_rig_error(&self.model_name, e))?;
+        let drained = self.drain_streaming_response(stream, sink).await?;
+
+        let resp = CompletionResponse {
+            content: drained.text.unwrap_or_default(),
+            input_tokens: saturate_u32(drained.usage.input_tokens),
+            output_tokens: saturate_u32(drained.usage.output_tokens),
+            finish_reason: drained.finish,
+            reasoning: drained.reasoning,
+            cache_read_input_tokens: saturate_u32(drained.usage.cached_input_tokens),
+            cache_creation_input_tokens: drained.cache_creation_input_tokens,
+        };
+
+        if resp.cache_read_input_tokens > 0 {
+            tracing::debug!(
+                model = %self.model_name,
+                input = resp.input_tokens,
+                output = resp.output_tokens,
+                cache_read = resp.cache_read_input_tokens,
+                "prompt cache hit",
+            );
+        }
+
+        Ok(resp)
+    }
+
     async fn complete_with_tools(
         &self,
         mut request: ToolCompletionRequest,
@@ -1065,6 +1227,88 @@ where
             cache_creation_input_tokens: extract_cache_creation(&response.raw_response),
             reasoning,
             reasoning_details,
+        };
+
+        if resp.cache_read_input_tokens > 0 {
+            tracing::debug!(
+                model = %self.model_name,
+                input = resp.input_tokens,
+                output = resp.output_tokens,
+                cache_read = resp.cache_read_input_tokens,
+                "prompt cache hit",
+            );
+        }
+
+        Ok(resp)
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        mut request: ToolCompletionRequest,
+        sink: std::sync::Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        let model_override = request.take_model_override();
+
+        self.strip_unsupported_tool_params(&mut request);
+
+        let known_tool_names: HashSet<String> =
+            request.tools.iter().map(|t| t.name.clone()).collect();
+
+        let mut messages = request.messages;
+        crate::provider::sanitize_tool_messages(&mut messages);
+        let (preamble, history) = convert_messages(&messages);
+        let tools = convert_tools(&request.tools);
+        let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
+
+        let mut rig_req = build_rig_request(
+            preamble,
+            history,
+            tools,
+            tool_choice,
+            request.temperature,
+            request.max_tokens,
+            self.cache_retention,
+        )?;
+
+        merge_additional_params(&mut rig_req, self.default_additional_params.as_ref());
+        inject_model_override(&mut rig_req, model_override.as_deref());
+
+        let stream = self
+            .model
+            .stream(rig_req)
+            .await
+            .map_err(|e| map_rig_error(&self.model_name, e))?;
+        let mut drained = self.drain_streaming_response(stream, sink).await?;
+
+        // Normalize tool call names: some proxies prepend "proxy_" prefixes.
+        for tc in &mut drained.tool_calls {
+            let normalized = normalize_tool_name(&tc.name, &known_tool_names);
+            if normalized != tc.name {
+                tracing::debug!(
+                    original = %tc.name,
+                    normalized = %normalized,
+                    "Normalized tool call name from provider",
+                );
+                tc.name = normalized;
+            }
+        }
+
+        crate::tool_schema::strip_unset_optional_fields(
+            &mut drained.tool_calls,
+            &request.tools,
+            crate::tool_schema::PlaceholderStrippingMode::NullOnly,
+        );
+
+        let resp = ToolCompletionResponse {
+            content: drained.text,
+            tool_calls: drained.tool_calls,
+            input_tokens: saturate_u32(drained.usage.input_tokens),
+            output_tokens: saturate_u32(drained.usage.output_tokens),
+            finish_reason: drained.finish,
+            cache_read_input_tokens: saturate_u32(drained.usage.cached_input_tokens),
+            cache_creation_input_tokens: drained.cache_creation_input_tokens,
+            reasoning: drained.reasoning,
+            reasoning_details: drained.reasoning_details,
         };
 
         if resp.cache_read_input_tokens > 0 {
@@ -1178,7 +1422,9 @@ fn normalize_tool_name(name: &str, known_tools: &HashSet<String>) -> String {
 mod tests {
     use super::*;
     use rig::completion::CompletionError;
-    use rig::streaming::StreamingCompletionResponse;
+    use rig::streaming::{RawStreamingChoice, RawStreamingToolCall, StreamingCompletionResponse};
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
 
     #[test]
     fn map_rig_error_auth_401_unauthorized() {
@@ -1368,6 +1614,133 @@ mod tests {
                 "stream unsupported".to_string(),
             ))
         }
+    }
+
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    struct StubStreamingResponse {
+        input_tokens: u64,
+        output_tokens: u64,
+    }
+
+    impl GetTokenUsage for StubStreamingResponse {
+        fn token_usage(&self) -> Option<RigUsage> {
+            Some(RigUsage {
+                input_tokens: self.input_tokens,
+                output_tokens: self.output_tokens,
+                total_tokens: self.input_tokens + self.output_tokens,
+                cached_input_tokens: 0,
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct StreamingOnlyCompletionModel;
+
+    impl CompletionModel for StreamingOnlyCompletionModel {
+        type Response = serde_json::Value;
+        type StreamingResponse = StubStreamingResponse;
+        type Client = ();
+
+        fn make(_client: &Self::Client, _model: impl Into<String>) -> Self {
+            Self
+        }
+
+        async fn completion(
+            &self,
+            _request: RigRequest,
+        ) -> Result<rig::completion::CompletionResponse<Self::Response>, CompletionError> {
+            Err(CompletionError::ProviderError(
+                "non-streaming path must not be used".to_string(),
+            ))
+        }
+
+        async fn stream(
+            &self,
+            _request: RigRequest,
+        ) -> Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError> {
+            let stream = futures::stream::iter(vec![
+                Ok(RawStreamingChoice::Message("Hel".to_string())),
+                Ok(RawStreamingChoice::ReasoningDelta {
+                    id: Some("rsn-stream".to_string()),
+                    reasoning: "thinking".to_string(),
+                }),
+                Ok(RawStreamingChoice::Message("lo".to_string())),
+                Ok(RawStreamingChoice::ToolCall(RawStreamingToolCall::new(
+                    "call-1".to_string(),
+                    "search".to_string(),
+                    serde_json::json!({"query": "ironclaw"}),
+                ))),
+                Ok(RawStreamingChoice::FinalResponse(StubStreamingResponse {
+                    input_tokens: 3,
+                    output_tokens: 4,
+                })),
+            ]);
+            Ok(StreamingCompletionResponse::stream(Box::pin(stream)))
+        }
+    }
+
+    struct RecordingCompletionStreamSink {
+        sender: mpsc::UnboundedSender<String>,
+    }
+
+    #[async_trait]
+    impl CompletionStreamSink for RecordingCompletionStreamSink {
+        async fn text_delta(&self, delta: String) {
+            let _ = self.sender.send(delta);
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_streaming_preserves_reasoning_deltas() {
+        let adapter = RigAdapter::new(StreamingOnlyCompletionModel, "streaming-only");
+        let request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+        let (delta_tx, mut delta_rx) = mpsc::unbounded_channel();
+        let sink = Arc::new(RecordingCompletionStreamSink { sender: delta_tx });
+
+        let response = adapter
+            .complete_streaming(request, sink)
+            .await
+            .expect("streaming completion succeeds");
+
+        assert_eq!(delta_rx.try_recv().expect("first delta"), "Hel");
+        assert_eq!(delta_rx.try_recv().expect("second delta"), "lo");
+        assert_eq!(response.content, "Hello");
+        assert_eq!(response.reasoning.as_deref(), Some("thinking"));
+        assert_eq!(response.input_tokens, 3);
+        assert_eq!(response.output_tokens, 4);
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_streaming_uses_rig_stream_and_emits_deltas() {
+        let adapter = RigAdapter::new(StreamingOnlyCompletionModel, "streaming-only");
+        let request = ToolCompletionRequest::new(
+            vec![ChatMessage::user("search")],
+            vec![IronToolDefinition {
+                name: "search".to_string(),
+                description: "Search the index".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                }),
+            }],
+        );
+        let (delta_tx, mut delta_rx) = mpsc::unbounded_channel();
+        let sink = Arc::new(RecordingCompletionStreamSink { sender: delta_tx });
+
+        let response = adapter
+            .complete_with_tools_streaming(request, sink)
+            .await
+            .expect("streaming completion succeeds");
+
+        assert_eq!(delta_rx.try_recv().expect("first delta"), "Hel");
+        assert_eq!(delta_rx.try_recv().expect("second delta"), "lo");
+        assert_eq!(response.content.as_deref(), Some("Hello"));
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].name, "search");
+        assert_eq!(response.reasoning.as_deref(), Some("thinking"));
+        assert_eq!(response.input_tokens, 3);
+        assert_eq!(response.output_tokens, 4);
     }
 
     #[test]

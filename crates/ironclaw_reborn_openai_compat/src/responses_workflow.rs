@@ -1387,7 +1387,7 @@ fn responses_user_message_payload(
         vec![],
         ProductTriggerReason::DirectChat,
     )?
-    .with_requested_model(crate::model_validation::requested_model_hint(
+    .with_requested_model(ironclaw_common::model_selection::requested_model_hint(
         &request.model,
     ));
     // The builder attaches the model hint after `new`'s validation, so bound the

@@ -8,8 +8,7 @@ use ironclaw_extensions::{
     ExtensionManifestRef, InstallationOwner, MANIFEST_SCHEMA_VERSION,
 };
 use ironclaw_filesystem::{
-    BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemOperation,
-    InMemoryBackend, RecordVersion, RootFilesystem, VersionedEntry,
+    Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, RootFilesystem,
 };
 use ironclaw_host_api::{HostPortCatalog, SecretHandle};
 
@@ -58,7 +57,10 @@ async fn load_at_treats_not_found_as_empty_state() {
 
 #[tokio::test]
 async fn load_at_sanitizes_filesystem_read_errors() {
-    let filesystem: Arc<dyn RootFilesystem> = Arc::new(ReadFailureFilesystem::new());
+    let filesystem: Arc<dyn RootFilesystem> = Arc::new(
+        FaultInjecting::new(InMemoryBackend::new())
+            .with_fault(Fault::on(FilesystemOperation::ReadFile).backend("raw backend detail")),
+    );
     let state_path = VirtualPath::new("/tenants/acme/system/extensions/.installations/state.json")
         .expect("valid state path");
 
@@ -150,6 +152,108 @@ prompt_doc_ref = "prompts/gmail/echo.md"
             .await
             .expect("installation read")
             .is_some()
+    );
+}
+
+fn gmail_manifest() -> ExtensionManifestRecord {
+    ExtensionManifestRecord::from_toml(
+        format!(
+            r#"
+schema_version = "{schema}"
+id = "gmail"
+name = "Gmail"
+version = "0.1.0"
+description = "test"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/gmail.wasm"
+
+[[capabilities]]
+id = "gmail.echo"
+description = "Echoes input"
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/gmail/echo.input.v1.json"
+output_schema_ref = "schemas/gmail/echo.output.v1.json"
+prompt_doc_ref = "prompts/gmail/echo.md"
+"#,
+            schema = MANIFEST_SCHEMA_VERSION,
+        ),
+        ManifestSource::HostBundled,
+        &HostPortCatalog::empty(),
+        None,
+    )
+    .expect("valid manifest")
+}
+
+fn gmail_installation(installation_id: &ExtensionInstallationId) -> ExtensionInstallation {
+    let extension_id = ExtensionId::new("gmail").expect("valid extension id");
+    ExtensionInstallation::new(
+        installation_id.clone(),
+        extension_id.clone(),
+        ExtensionActivationState::Installed,
+        ExtensionManifestRef::new(extension_id, None),
+        Vec::new(),
+        Utc::now(),
+        InstallationOwner::Tenant,
+    )
+    .expect("valid installation")
+}
+
+#[tokio::test]
+async fn stale_store_write_fails_instead_of_clobbering_concurrent_snapshot() {
+    let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+    let state_path = VirtualPath::new("/tenants/acme/system/extensions/.installations/state.json")
+        .expect("valid state path");
+    let installation_id =
+        ExtensionInstallationId::new("gmail".to_string()).expect("valid installation id");
+
+    // "Process" one persists an installation; "process" two loads the same
+    // snapshot afterwards, so both hold the same on-disk baseline.
+    let first =
+        FilesystemExtensionInstallationStore::load_at(Arc::clone(&filesystem), state_path.clone())
+            .await
+            .expect("first store loads");
+    first
+        .upsert_manifest_and_installation(gmail_manifest(), gmail_installation(&installation_id))
+        .await
+        .expect("first process persists installation");
+    let second =
+        FilesystemExtensionInstallationStore::load_at(Arc::clone(&filesystem), state_path.clone())
+            .await
+            .expect("second store loads");
+
+    // The first process advances the snapshot again...
+    first
+        .set_activation_state(&installation_id, ExtensionActivationState::Enabled)
+        .await
+        .expect("first process enables installation");
+
+    // ...so the second process's next full-snapshot rewrite is stale and must
+    // fail loudly instead of silently reverting the first process's write.
+    let error = second
+        .set_activation_state(&installation_id, ExtensionActivationState::Disabled)
+        .await
+        .expect_err("stale snapshot write must not clobber a concurrent writer");
+    assert!(
+        matches!(error, ExtensionInstallationError::StoreUnavailable { .. }),
+        "expected the retryable store-unavailable class, got {error:?}"
+    );
+
+    let reloaded = FilesystemExtensionInstallationStore::load_at(filesystem, state_path)
+        .await
+        .expect("store reloads");
+    assert_eq!(
+        reloaded
+            .get_installation(&installation_id)
+            .await
+            .expect("installation read")
+            .expect("installation present")
+            .activation_state(),
+        ExtensionActivationState::Enabled,
+        "the concurrent writer's snapshot survives the stale write attempt"
     );
 }
 
@@ -344,7 +448,7 @@ async fn load_at_rejects_credential_conflicts_without_rewriting_state() {
 
 #[tokio::test]
 async fn load_at_returns_rewrite_failure_without_exposing_normalized_store() {
-    let backend = Arc::new(InMemoryBackend::new());
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
     let seed_filesystem: Arc<dyn RootFilesystem> = backend.clone();
     let state_path = test_state_path();
     let original = seed_state(
@@ -366,9 +470,14 @@ async fn load_at_returns_rewrite_failure_without_exposing_normalized_store() {
         ],
     )
     .await;
-    let failing_filesystem: Arc<dyn RootFilesystem> = Arc::new(WriteFailureFilesystem {
-        inner: backend.clone(),
-    });
+    // Arm the write fault only after seeding, so the store's canonical rewrite
+    // during load fails at the backend and flows through the real store's
+    // `FilesystemError -> ExtensionInstallationError` mapping.
+    backend.add_fault(
+        Fault::on(FilesystemOperation::WriteFile)
+            .backend("injected extension installation write failure"),
+    );
+    let failing_filesystem: Arc<dyn RootFilesystem> = backend.clone();
 
     let error =
         match FilesystemExtensionInstallationStore::load_at(failing_filesystem, state_path.clone())
@@ -377,9 +486,11 @@ async fn load_at_returns_rewrite_failure_without_exposing_normalized_store() {
             Ok(_) => panic!("canonical rewrite failure must fail closed"),
             Err(error) => error,
         };
+    // #4091: an IO failure during the canonical rewrite is retryable backend
+    // trouble, not a malformed snapshot.
     assert_eq!(
         error,
-        ExtensionInstallationError::InvalidInstallation {
+        ExtensionInstallationError::StoreUnavailable {
             reason: "failed to load extension installation state".to_string(),
         }
     );
@@ -580,90 +691,66 @@ fn stored_installation_with_bindings(
     .unwrap()
 }
 
-struct WriteFailureFilesystem {
-    inner: Arc<InMemoryBackend>,
-}
+#[tokio::test]
+async fn failed_snapshot_write_rolls_back_the_in_memory_mutation_so_retry_converges() {
+    let filesystem = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let state_path = test_state_path();
+    let store = FilesystemExtensionInstallationStore::load_at(
+        Arc::clone(&filesystem) as Arc<dyn RootFilesystem>,
+        state_path.clone(),
+    )
+    .await
+    .expect("store loads");
+    let installation_id =
+        ExtensionInstallationId::new("gmail".to_string()).expect("valid installation id");
+    store
+        .upsert_manifest_and_installation(gmail_manifest(), gmail_installation(&installation_id))
+        .await
+        .expect("seed installation");
 
-#[async_trait]
-impl RootFilesystem for WriteFailureFilesystem {
-    fn capabilities(&self) -> BackendCapabilities {
-        self.inner.capabilities()
-    }
-
-    async fn put(
-        &self,
-        path: &VirtualPath,
-        _entry: Entry,
-        _cas: CasExpectation,
-    ) -> Result<RecordVersion, FilesystemError> {
-        Err(FilesystemError::Backend {
-            path: path.clone(),
-            operation: FilesystemOperation::WriteFile,
-            reason: "injected extension installation write failure".to_string(),
-        })
-    }
-
-    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
-        self.inner.get(path).await
-    }
-
-    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.inner.list_dir(path).await
-    }
-
-    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        self.inner.stat(path).await
-    }
-
-    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        self.inner.delete(path).await
-    }
-}
-
-struct ReadFailureFilesystem {
-    inner: InMemoryBackend,
-}
-
-impl ReadFailureFilesystem {
-    fn new() -> Self {
-        Self {
-            inner: InMemoryBackend::new(),
-        }
-    }
-}
-
-#[async_trait]
-impl RootFilesystem for ReadFailureFilesystem {
-    fn capabilities(&self) -> BackendCapabilities {
-        self.inner.capabilities()
-    }
-
-    async fn put(
-        &self,
-        path: &VirtualPath,
-        entry: Entry,
-        cas: CasExpectation,
-    ) -> Result<RecordVersion, FilesystemError> {
-        self.inner.put(path, entry, cas).await
-    }
-
-    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
-        Err(FilesystemError::Backend {
-            path: path.clone(),
-            operation: FilesystemOperation::ReadFile,
-            reason: "raw backend detail".to_string(),
-        })
-    }
-
-    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.inner.list_dir(path).await
-    }
-
-    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        self.inner.stat(path).await
-    }
-
-    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        self.inner.delete(path).await
-    }
+    // One-shot: fault the next write (the delete's snapshot rewrite) only; the
+    // retry's write passes through so the delete converges. `nth(1)` on a freshly
+    // added fault fires on the first matching write after arming, then is spent.
+    filesystem.add_fault(
+        Fault::on(FilesystemOperation::WriteFile)
+            .nth(1)
+            .backend("injected one-shot write failure"),
+    );
+    let error = store
+        .delete_installation(&installation_id)
+        .await
+        .expect_err("failed snapshot write surfaces");
+    assert!(
+        matches!(error, ExtensionInstallationError::StoreUnavailable { .. }),
+        "a write outage is the retryable store class, got {error:?}"
+    );
+    // The in-memory view matches disk again: the row is still present...
+    assert!(
+        store
+            .get_installation(&installation_id)
+            .await
+            .expect("post-failure lookup")
+            .is_some(),
+        "the in-memory delete must be rolled back when its snapshot write fails"
+    );
+    // ...so retrying the SAME delete converges instead of replaying against
+    // already-mutated state and misreading a transient IO failure as a
+    // malformed request.
+    store
+        .delete_installation(&installation_id)
+        .await
+        .expect("retry of the same delete converges");
+    let reloaded = FilesystemExtensionInstallationStore::load_at(
+        Arc::clone(&filesystem) as Arc<dyn RootFilesystem>,
+        state_path,
+    )
+    .await
+    .expect("store reloads");
+    assert!(
+        reloaded
+            .get_installation(&installation_id)
+            .await
+            .expect("reload lookup")
+            .is_none()
+    );
 }

@@ -90,7 +90,7 @@ const FILESYSTEM_CAS_RETRIES: usize = 8;
 
 /// [`RecordKind`] discriminants for the four record types persisted by this
 /// service. Setting `entry.kind` makes writes record-shaped so
-/// [`LocalFilesystem`] (which rejects record-shaped puts) triggers the
+/// [`DiskFilesystem`] (which rejects record-shaped puts) triggers the
 /// fail-closed path on the CAS gate instead of accepting a byte-only first
 /// write without CAS enforcement.
 const SESSION_THREAD_KIND: &str = "session_thread";
@@ -3377,7 +3377,7 @@ fn summary_covers_redacted_or_deleted_content(
 // `FilesystemError::VersionMismatch` — that's correct and matches
 // `cas_update`'s contract. The `Unsupported` → `CasExpectation::Any`
 // fallback below only triggers on byte-only backends (e.g.
-// `LocalFilesystem`), which production does not mount for these
+// `DiskFilesystem`), which production does not mount for these
 // stores; it is not protected by any lock map. Migrating these
 // single-record RMWs onto `cas_update` (fail-closed on a non-CAS
 // backend) is a tracked, deferred follow-up sibling to the

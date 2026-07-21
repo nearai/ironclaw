@@ -2,7 +2,7 @@
 
 The legacy Playwright suite has mature shared fixtures in ``conftest.py`` for
 the ``ironclaw`` gateway. Reborn WebUI v2 is a different product surface: it
-boots ``ironclaw-reborn serve``, serves the React SPA under ``/v2/``, and uses
+boots ``ironclaw serve``, serves the React SPA at the root path, and uses
 ``/api/webchat/v2/*`` endpoints. Keep that setup here so browser and served API
 scenarios exercise the real Reborn binary without duplicating process plumbing.
 """
@@ -115,7 +115,7 @@ async def start_reborn_webui_v2_server(
     log_prefix: str = "reborn-v2",
     extra_env: dict[str, str] | None = None,
 ) -> tuple[object, str]:
-    """Start ``ironclaw-reborn serve`` and return ``(process, base_url)``."""
+    """Start ``ironclaw serve`` and return ``(process, base_url)``."""
     reborn_home = home_dir / "reborn-home"
     reborn_home.mkdir(parents=True, exist_ok=True)
     write_config_toml(
@@ -196,6 +196,16 @@ async def close_reborn_server(proc) -> None:
             await stop_process(proc, sig=signal.SIGTERM, timeout=5)
 
 
+async def kill_reborn_server(proc) -> None:
+    """Hard-kill (SIGKILL) the reborn process, skipping graceful shutdown entirely.
+
+    Used by durability scenarios that need to prove on-disk state survives an
+    unclean process death, as opposed to `close_reborn_server`'s SIGINT/SIGTERM path.
+    """
+    if proc is not None and proc.returncode is None:
+        await stop_process(proc, sig=signal.SIGKILL, timeout=5)
+
+
 async def enable_reborn_global_auto_approve(base_url: str) -> None:
     """Enable the Tools settings global auto-approve switch for this test user."""
     async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
@@ -209,7 +219,7 @@ async def enable_reborn_global_auto_approve(base_url: str) -> None:
 
 @pytest.fixture(scope="module")
 async def reborn_v2_server(ironclaw_reborn_binary, mock_llm_server, tmp_path_factory):
-    """Start ``ironclaw-reborn serve`` with the default local-dev profile."""
+    """Start ``ironclaw serve`` with the default local-dev profile."""
     home_dir = tmp_path_factory.mktemp("ironclaw-reborn-v2-home")
     proc, base_url = await start_reborn_webui_v2_server(
         ironclaw_reborn_binary=ironclaw_reborn_binary,
@@ -225,7 +235,7 @@ async def reborn_v2_server(ironclaw_reborn_binary, mock_llm_server, tmp_path_fac
 
 @pytest.fixture(scope="module")
 async def reborn_v2_yolo_server(ironclaw_reborn_binary, mock_llm_server, tmp_path_factory):
-    """Start ``ironclaw-reborn serve`` with auto-approval local-dev-yolo profile."""
+    """Start ``ironclaw serve`` with auto-approval local-dev-yolo profile."""
     home_dir = tmp_path_factory.mktemp("ironclaw-reborn-v2-yolo-home")
     proc, base_url = await start_reborn_webui_v2_server(
         ironclaw_reborn_binary=ironclaw_reborn_binary,
@@ -271,7 +281,13 @@ async def reborn_v2_private_installs_yolo_server(
 async def reborn_v2_restartable_server(
     ironclaw_reborn_binary, mock_llm_server, tmp_path_factory
 ):
-    """Start/stop Reborn against one persistent home directory."""
+    """Start/stop Reborn against one persistent home directory.
+
+    `stop(hard=True)` SIGKILLs the process instead of shutting it down
+    gracefully, for durability scenarios that need to prove on-disk state
+    survives an unclean death — the caller can read the killed PID off
+    `state["proc"].pid` beforehand for a post-kill leak check.
+    """
     home_dir = tmp_path_factory.mktemp("ironclaw-reborn-v2-restartable-home")
     state = {"proc": None, "base_url": None}
 
@@ -287,8 +303,11 @@ async def reborn_v2_restartable_server(
         state["base_url"] = base_url
         return base_url
 
-    async def stop() -> None:
-        await close_reborn_server(state["proc"])
+    async def stop(*, hard: bool = False) -> None:
+        if hard:
+            await kill_reborn_server(state["proc"])
+        else:
+            await close_reborn_server(state["proc"])
         state["proc"] = None
 
     await start()
@@ -392,7 +411,7 @@ async def reborn_v2_vision_page(reborn_v2_vision_server, reborn_v2_browser):
     await context.close()
 
 
-async def open_reborn_v2_page(page, base_url: str, path: str = "/v2/") -> None:
+async def open_reborn_v2_page(page, base_url: str, path: str = "/") -> None:
     separator = "&" if "?" in path else "?"
     await page.goto(f"{base_url}{path}{separator}token={REBORN_V2_AUTH_TOKEN}")
     await page.wait_for_selector(SEL_V2["chat_composer"], timeout=15000)

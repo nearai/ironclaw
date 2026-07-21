@@ -10,11 +10,11 @@
 
 use std::sync::Arc;
 
-use ironclaw::secrets::{SecretsCrypto, create_secrets_store};
 use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle};
 use ironclaw_secrets::SecretMaterial;
 
 use crate::error::MigrationError;
+use crate::legacy_snapshot::secrets::{LegacySecretsSource, SecretsCrypto, create_secrets_store};
 use crate::options::MigrationOptions;
 use crate::report::{Domain, LossReason, MigrationReport};
 use crate::source::V1Source;
@@ -76,7 +76,7 @@ pub(crate) async fn run(
             })?;
         for secret_ref in refs {
             migrate_one(
-                &*v1_store,
+                &v1_store,
                 secret_store.as_ref(),
                 tgt,
                 options,
@@ -95,7 +95,7 @@ pub(crate) async fn run(
 // per-secret context struct, plan v1-migration
 #[allow(clippy::too_many_arguments)]
 async fn migrate_one(
-    v1_store: &(dyn ironclaw::secrets::SecretsStore + Send + Sync),
+    v1_store: &LegacySecretsSource,
     secret_store: &dyn ironclaw_secrets::SecretStore,
     tgt: &RebornTarget,
     options: &MigrationOptions,

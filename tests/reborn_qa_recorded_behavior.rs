@@ -15,6 +15,26 @@
 //!        -- --ignored --test-threads=1 --nocapture
 //!    ```
 //!
+//!    When `ANTHROPIC_API_KEY` is unset the recorder takes the NEAR AI path
+//!    (`NEARAI_API_KEY`). Its default model `deepseek-ai/DeepSeek-V4-Flash`
+//!    loops on multi-step tasks and dies `Failed(driver_protocol_violation)`;
+//!    override it with a strong model served through NEAR AI, e.g.:
+//!
+//!    ```bash
+//!    IRONCLAW_REBORN_QA_CREDENTIAL_SOURCE_USER=me \
+//!    IRONCLAW_QA_RECORD_MODEL=anthropic/claude-sonnet-4-6 \
+//!    RUST_MIN_STACK=67108864 \
+//!      cargo test --test reborn_qa_recorded_behavior record_investigate_ci_job \
+//!        -- --ignored --test-threads=1 --nocapture
+//!    ```
+//!
+//!    Two of those are non-obvious on a DB-backed local-dev store: the stored
+//!    product-auth accounts live under `user_id = "me"` (not the `reborn-cli`
+//!    default), so `IRONCLAW_REBORN_QA_CREDENTIAL_SOURCE_USER=me` is required or
+//!    credential import fails with "Visible accounts: <none>"; and the recorder
+//!    builds two runtimes plus a live turn, whose combined debug async frame
+//!    overflows the default test-thread stack without a larger `RUST_MIN_STACK`.
+//!
 //!    Fixtures that exercise auth-gated Google integrations import the
 //!    configured Google product-auth account from the local Reborn store.
 //!    By default the source is `$IRONCLAW_REBORN_HOME/local-dev` (or
@@ -117,6 +137,27 @@ const CONNECT_GMAIL: QaPhrase = QaPhrase {
     fixture: "connect_gmail",
     phrase: "connect to Gmail",
 };
+// A github task with no credential seeded: the agent should onboard the github
+// extension (install + activate) and reach the auth gate. Deterministic and
+// state-independent — no live PR or CI run involved.
+const GITHUB_NOTIFICATIONS: QaPhrase = QaPhrase {
+    fixture: "github_notifications",
+    phrase: "Check my GitHub notifications and give me a short summary of what needs my attention.",
+};
+
+// Investigate one specific, already-completed GitHub Actions job. The job URL is
+// pinned to an immutable historical run (conclusion is frozen `failure`) whose
+// failure is self-contained in the log (a cargo dependency-resolution conflict),
+// so the scenario needs no repository access and does not depend on any open
+// PR's live CI state.
+const INVESTIGATE_CI_JOB: QaPhrase = QaPhrase {
+    fixture: "investigate_ci_job",
+    phrase: "Use the github extension to read the logs of this failing GitHub Actions job, then \
+             explain in a few sentences what caused it to fail (the reason is in the job's log \
+             output): \
+             https://github.com/nearai/holonear/actions/runs/29182450888/job/86622570037 . Do not \
+             clone the repository, run shell commands, or edit any files.",
+};
 
 const SLACK_CHANNEL_MEMBERSHIP_FIXTURE: &str = "slack_channel_membership";
 const SLACK_RECENT_MESSAGE_FIXTURE: &str = "slack_recent_message";
@@ -144,6 +185,8 @@ recorder_test!(record_web_status_check, WEB_STATUS_CHECK);
 recorder_test!(record_web_release_summary, WEB_RELEASE_SUMMARY);
 recorder_test!(record_web_hn_search, WEB_HN_SEARCH);
 recorder_test!(record_connect_gmail, CONNECT_GMAIL);
+recorder_test!(record_github_notifications, GITHUB_NOTIFICATIONS);
+recorder_test!(record_investigate_ci_job, INVESTIGATE_CI_JOB);
 
 // --- Tier 2: fixture contracts (hermetic) -----------------------------------
 
@@ -333,6 +376,56 @@ async fn contract_connect_gmail_routes_through_extension_tools() {
     let gmail = load_qa_trace(CONNECT_GMAIL.fixture);
     assert_tool_called_with(&gmail, "builtin.extension_install", &["gmail"]);
     assert_tool_called_with(&gmail, "builtin.extension_activate", &["gmail"]);
+}
+
+#[tokio::test]
+async fn contract_github_notifications_onboards_the_github_extension() {
+    // A github task with no credential seeded routes through extension
+    // onboarding rather than failing outright.
+    let trace = load_qa_trace(GITHUB_NOTIFICATIONS.fixture);
+    assert_tool_called_with(&trace, "builtin.extension_install", &["github"]);
+    assert_tool_called_with(&trace, "builtin.extension_activate", &["github"]);
+}
+
+#[tokio::test]
+async fn contract_investigate_ci_job_reads_the_pinned_job_logs() {
+    let trace = load_qa_trace(INVESTIGATE_CI_JOB.fixture);
+    // Investigation routes through the first-party GitHub extension...
+    assert_tool_called_with(&trace, "builtin.extension_activate", &["github"]);
+    // ...and reads the pinned failing job's logs via the new capability (host
+    // follows GitHub's 302 -> blob-storage redirect, stripping the
+    // api.github.com Bearer token on the cross-host hop). The plain-text log is
+    // delivered to the model as a string (see the wasm_execution output-decode
+    // coercion) rather than failing the call.
+    assert_tool_called_with(&trace, "github.get_job_logs", &["86622570037"]);
+    // Read-only investigation: it must not commit a change to any repo.
+    assert_tool_not_called(&trace, "github.create_or_update_file");
+    // The root-cause explanation lands in a non-empty final assistant reply.
+    let reply = final_text_reply(&trace).expect("investigation phrase should finalize a reply");
+    assert!(
+        !reply.is_empty(),
+        "investigation reply explaining the failure should be non-empty"
+    );
+}
+
+#[test]
+fn canonical_tool_name_folds_provider_escape_to_dot() {
+    // NEAR-AI-recorded extension calls escape the dot; the direct-Anthropic path
+    // keeps it. Both must canonicalize to one capability-style name.
+    assert_eq!(
+        canonical_recorded_tool_name("github__get_job_logs"),
+        "github.get_job_logs"
+    );
+    assert_eq!(
+        canonical_recorded_tool_name("builtin__extension_activate"),
+        "builtin.extension_activate"
+    );
+    // Already-dotted names and inner underscores are preserved.
+    assert_eq!(canonical_recorded_tool_name("slack.whoami"), "slack.whoami");
+    assert_eq!(
+        canonical_recorded_tool_name("builtin__get_file_content"),
+        "builtin.get_file_content"
+    );
 }
 
 #[tokio::test]

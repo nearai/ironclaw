@@ -21,9 +21,7 @@ use ironclaw_product_adapters::{
     AuthPromptChallengeKind, CapabilityActivityStatusView, ProductGateKind,
     ProductOutboundEnvelope, ProductOutboundPayload, ProductProjectionItem,
 };
-use ironclaw_run_state::{
-    ApprovalRecord, ApprovalRequestStore, InMemoryApprovalRequestStore, RunStateError,
-};
+use ironclaw_run_state::{ApprovalRecord, ApprovalRequestStore, RunStateError};
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor as TurnEventCursor,
     GateRef, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,

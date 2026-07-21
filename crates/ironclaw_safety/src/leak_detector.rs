@@ -293,6 +293,28 @@ impl LeakDetector {
             .unwrap_or_else(|| content.to_string()))
     }
 
+    /// Redact every detected secret VALUE in `content`, preserving the
+    /// surrounding descriptive text.
+    ///
+    /// Unlike [`Self::scan_and_clean`], this never returns an error: a
+    /// `Block`-severity match is redacted in place rather than blocking the
+    /// whole string, and lower-severity (`Redact`/`Warn`) matches are redacted
+    /// too. Intended for the model-visible error `detail` channel, where the
+    /// descriptive cause (paths, status codes, schema refs) must survive so the
+    /// model can retry or explain, but no secret value may reach the model.
+    ///
+    /// Returns the redacted string and whether any redaction was applied.
+    pub fn redact_all_secrets(&self, content: &str) -> (String, bool) {
+        let result = self.scan(content);
+        if result.matches.is_empty() {
+            return (content.to_string(), false);
+        }
+        // `apply_redactions` coalesces overlapping/adjacent ranges itself, so a
+        // single value always redacts to one `[REDACTED]`.
+        let ranges: Vec<Range<usize>> = result.matches.iter().map(|m| m.location.clone()).collect();
+        (apply_redactions(content, &ranges), true)
+    }
+
     /// Scan an outbound HTTP request for potential secret leakage.
     ///
     /// This MUST be called before executing any HTTP request from WASM
@@ -368,10 +390,36 @@ fn mask_secret(secret: &str) -> String {
 }
 
 /// Apply redaction ranges to content.
+/// Sort and coalesce match ranges so overlapping or adjacent spans of one
+/// secret (different patterns matching the same value, e.g. `bearer_token` and
+/// `bare_jwt` over one `Bearer <jwt>`) collapse into a single disjoint range.
+fn merge_ranges(ranges: &[Range<usize>]) -> Vec<Range<usize>> {
+    let mut ranges: Vec<Range<usize>> = ranges.to_vec();
+    ranges.sort_by_key(|range| range.start);
+    let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => {
+                if range.end > last.end {
+                    last.end = range.end;
+                }
+            }
+            _ => merged.push(range),
+        }
+    }
+    merged
+}
+
 fn apply_redactions(content: &str, ranges: &[Range<usize>]) -> String {
     if ranges.is_empty() {
         return content.to_string();
     }
+
+    // Coalesce first: callers pass raw per-pattern ranges that can overlap, and
+    // emitting one `[REDACTED]` per raw range double-redacts a single secret
+    // (e.g. `Bearer eyJ…` -> `[REDACTED][REDACTED]`). Merging here keeps every
+    // caller correct without each having to pre-merge.
+    let ranges = merge_ranges(ranges);
 
     let mut result = String::with_capacity(content.len());
     let mut last_end = 0;
@@ -506,6 +554,15 @@ fn default_patterns() -> Vec<LeakPattern> {
             regex: Regex::new(r"SG\.[a-zA-Z0-9_-]{22}\.[a-zA-Z0-9_-]{43}").unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::High,
             action: LeakAction::Block,
+        },
+        // Bare JSON Web Tokens. Keep every segment bounded away from ordinary
+        // dotted identifiers while accepting base64url without padding.
+        LeakPattern {
+            name: "bare_jwt".to_string(),
+            regex: Regex::new(r"\b[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\b")
+                .unwrap(), // safety: hardcoded literal
+            severity: LeakSeverity::High,
+            action: LeakAction::Redact,
         },
         // Bearer tokens (redact instead of block, might be intentional)
         LeakPattern {
@@ -720,6 +777,80 @@ mod tests {
         let result = detector.scan_and_clean(content);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), content);
+    }
+
+    #[test]
+    fn redact_all_secrets_masks_block_severity_without_dropping_cause() {
+        // The model-visible detail channel must keep the descriptive cause
+        // (path, status code) while masking every secret value — even
+        // Block-severity tokens that `scan_and_clean` would refuse outright.
+        let detector = LeakDetector::new();
+        let content = concat!(
+            "auth failed at /workspace/config using ghp",
+            "_012345678901234567890123456789012345",
+            " \
+             and AKIAIOSFODNN7EXAMPLE (HTTP 401)"
+        );
+
+        let (redacted, changed) = detector.redact_all_secrets(content);
+
+        assert!(
+            changed,
+            "a leak was present, so redaction must report a change"
+        );
+        assert!(
+            !redacted.contains(concat!("ghp", "_012345678901234567890123456789012345", "")),
+            "github token must be redacted: {redacted}"
+        );
+        assert!(
+            !redacted.contains("AKIAIOSFODNN7EXAMPLE"),
+            "aws access key must be redacted: {redacted}"
+        );
+        // Descriptive cause survives so the model can act on it.
+        assert!(
+            redacted.contains("/workspace/config"),
+            "path must survive: {redacted}"
+        );
+        assert!(
+            redacted.contains("HTTP 401"),
+            "status code must survive: {redacted}"
+        );
+        assert!(redacted.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_all_secrets_leaves_clean_text_untouched() {
+        let detector = LeakDetector::new();
+        let content = "read_file failed at /workspace/x (HTTP 404)";
+
+        let (redacted, changed) = detector.redact_all_secrets(content);
+
+        assert!(!changed);
+        assert_eq!(redacted, content);
+    }
+
+    #[test]
+    fn redact_all_secrets_masks_bare_jwt() {
+        let detector = LeakDetector::new();
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123";
+
+        let (redacted, changed) = detector.redact_all_secrets(jwt);
+
+        assert!(changed);
+        assert_eq!(redacted, "[REDACTED]");
+    }
+
+    #[test]
+    fn redact_all_secrets_merges_overlapping_matches() {
+        let detector = LeakDetector::new();
+        let token = "abcdefghijklmnopqrstuvwxyz123456";
+        let content = format!("Authorization: Bearer {token}");
+
+        let (redacted, changed) = detector.redact_all_secrets(&content);
+
+        assert!(changed);
+        assert_eq!(redacted, "[REDACTED]");
+        assert_eq!(redacted.matches("[REDACTED]").count(), 1);
     }
 
     #[test]
@@ -1070,7 +1201,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "openai_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1088,7 +1219,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "high_entropy_hex pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1106,7 +1237,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "bearer_token pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1124,7 +1255,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "authorization pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1142,7 +1273,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "anthropic_api_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1160,7 +1291,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "aws_access_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1178,7 +1309,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "github_token pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1196,7 +1327,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "github_fine_grained_pat pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1214,7 +1345,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "stripe_api_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1232,7 +1363,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "nearai_session pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1250,7 +1381,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "pem_private_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1268,7 +1399,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "ssh_private_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1286,7 +1417,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "google_api_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1304,7 +1435,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "slack_token pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1322,7 +1453,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "twilio_api_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1340,7 +1471,7 @@ mod tests {
             let _result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "sendgrid_api_key pattern took {}ms on 100KB near-miss",
                 elapsed.as_millis()
             );
@@ -1356,7 +1487,7 @@ mod tests {
             let result = detector.scan(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "full scan took {}ms on 100KB clean text",
                 elapsed.as_millis()
             );

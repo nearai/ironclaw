@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical process-store test repoint to FilesystemProcess*Store<InMemoryBackend> helpers + output-externalization/tenant-isolation reconciliation (arch-simplification §4.3), plan #6168
 use std::{
     collections::HashMap,
     sync::{
@@ -10,8 +11,8 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_filesystem::{
-    CasExpectation, DirEntry, Entry, FileStat, FilesystemError, FilesystemOperation,
-    InMemoryBackend, LocalFilesystem, RecordVersion, RootFilesystem, ScopedFilesystem,
+    DiskFilesystem, Fault, FaultInjecting, FilesystemError, FilesystemOperation, InMemoryBackend,
+    RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::*;
 use ironclaw_processes::*;
@@ -23,7 +24,7 @@ use tokio::{sync::Notify, time::timeout};
 
 #[tokio::test]
 async fn in_memory_process_store_starts_capability_process_record() {
-    let store = InMemoryProcessStore::new();
+    let store = in_memory_process_store();
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
@@ -47,7 +48,7 @@ async fn in_memory_process_store_starts_capability_process_record() {
 
 #[tokio::test]
 async fn in_memory_process_store_rejects_duplicate_process_id_in_same_resource_scope() {
-    let store = InMemoryProcessStore::new();
+    let store = in_memory_process_store();
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
@@ -71,36 +72,30 @@ async fn in_memory_process_store_rejects_duplicate_process_id_in_same_resource_s
     ));
 }
 
+/// Sub-scope isolation that lives in the **path** (agent/project/mission/thread):
+/// a record started under one project is invisible to another project on the
+/// same tenant/user mount. Tenant/user isolation lives in the `MountView`
+/// instead — a single fixed mount can't reproduce it (arch-simplification §4.3:
+/// the store no longer hand-keys the full scope tuple; tenant/user come from the
+/// mount) — and is covered by
+/// `filesystem_process_store_isolates_two_tenants_with_same_user_project_ids`.
 #[tokio::test]
 async fn process_store_hides_records_from_other_resource_scopes() {
-    let store = InMemoryProcessStore::new();
+    let store = in_memory_process_store();
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
-    let tenant_a = sample_scope(invocation_id, "tenant1", "user1");
-    let tenant_b = sample_scope(invocation_id, "tenant2", "user1");
-    let user_b = sample_scope(invocation_id, "tenant1", "user2");
+    let scope_a = sample_scope(invocation_id, "tenant1", "user1");
     let project_b = sample_scope_with_project(invocation_id, "tenant1", "user1", "project2");
     store
-        .start(process_start(process_id, invocation_id, tenant_a.clone()))
+        .start(process_start(process_id, invocation_id, scope_a.clone()))
         .await
         .unwrap();
 
-    assert!(store.get(&tenant_b, process_id).await.unwrap().is_none());
-    assert!(store.get(&user_b, process_id).await.unwrap().is_none());
     assert!(store.get(&project_b, process_id).await.unwrap().is_none());
-    assert_eq!(
-        store.records_for_scope(&tenant_b).await.unwrap(),
-        Vec::new()
-    );
-    assert_eq!(store.records_for_scope(&user_b).await.unwrap(), Vec::new());
     assert_eq!(
         store.records_for_scope(&project_b).await.unwrap(),
         Vec::new()
     );
-    assert!(matches!(
-        store.kill(&tenant_b, process_id).await.unwrap_err(),
-        ProcessError::UnknownProcess { .. }
-    ));
     assert!(matches!(
         store.kill(&project_b, process_id).await.unwrap_err(),
         ProcessError::UnknownProcess { .. }
@@ -109,7 +104,7 @@ async fn process_store_hides_records_from_other_resource_scopes() {
 
 #[tokio::test]
 async fn process_store_hides_records_from_other_agents() {
-    let store = InMemoryProcessStore::new();
+    let store = in_memory_process_store();
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let agent_a = sample_scope_with_agent(invocation_id, "tenant1", "user1", Some("agent-a"));
@@ -129,7 +124,7 @@ async fn process_store_hides_records_from_other_agents() {
 
 #[tokio::test]
 async fn process_result_store_hides_records_from_other_resource_scopes() {
-    let store = InMemoryProcessResultStore::new();
+    let store = in_memory_process_result_store();
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let agent_a = sample_scope_with_agent(invocation_id, "tenant1", "user1", Some("agent-a"));
@@ -161,7 +156,7 @@ async fn process_result_store_hides_records_from_other_resource_scopes() {
 
 #[tokio::test]
 async fn process_store_rejects_terminal_status_overwrite() {
-    let store = InMemoryProcessStore::new();
+    let store = in_memory_process_store();
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
@@ -189,7 +184,7 @@ async fn process_store_rejects_terminal_status_overwrite() {
 
 #[tokio::test]
 async fn background_process_manager_marks_process_completed_after_executor_success() {
-    let store = Arc::new(InMemoryProcessStore::new());
+    let store = Arc::new(in_memory_process_store());
     let executor = Arc::new(CountingExecutor::success());
     let manager = BackgroundProcessManager::new(store.clone(), executor.clone());
     let invocation_id = InvocationId::new();
@@ -208,8 +203,8 @@ async fn background_process_manager_marks_process_completed_after_executor_succe
 
 #[tokio::test]
 async fn background_process_manager_stores_success_output_result() {
-    let store = Arc::new(InMemoryProcessStore::new());
-    let result_store = Arc::new(InMemoryProcessResultStore::new());
+    let store = Arc::new(in_memory_process_store());
+    let result_store = Arc::new(in_memory_process_result_store());
     let executor = Arc::new(CountingExecutor::success());
     let manager = BackgroundProcessManager::new(store.clone(), executor)
         .with_result_store(result_store.clone());
@@ -230,8 +225,14 @@ async fn background_process_manager_stores_success_output_result() {
     assert_eq!(result.process_id, process_id);
     assert_eq!(result.scope, scope);
     assert_eq!(result.status, ProcessStatus::Completed);
-    assert_eq!(result.output, Some(serde_json::json!({"ok": true})));
-    assert_eq!(result.output_ref, None);
+    // The filesystem store externalizes output behind `output_ref` (§4.3 — the
+    // InMemory store inlined it); read the bytes through the host, not the record.
+    assert_eq!(result.output, None);
+    assert!(result.output_ref.is_some());
+    assert_eq!(
+        host.output(&scope, process_id).await.unwrap(),
+        Some(serde_json::json!({"ok": true}))
+    );
     assert_eq!(result.error_kind, None);
 }
 
@@ -239,7 +240,7 @@ async fn background_process_manager_stores_success_output_result() {
 async fn process_stores_sanitize_failure_error_kind_before_persistence() {
     let scope = sample_scope(InvocationId::new(), "tenant1", "user1");
     let process_id = ProcessId::new();
-    let lifecycle_store = InMemoryProcessStore::new();
+    let lifecycle_store = in_memory_process_store();
     lifecycle_store
         .start(process_start(
             process_id,
@@ -259,7 +260,7 @@ async fn process_stores_sanitize_failure_error_kind_before_persistence() {
         .unwrap();
     assert_eq!(failed.error_kind.as_deref(), Some("Unclassified"));
 
-    let result_store = InMemoryProcessResultStore::new();
+    let result_store = in_memory_process_result_store();
     let result = result_store
         .fail(
             &scope,
@@ -273,8 +274,8 @@ async fn process_stores_sanitize_failure_error_kind_before_persistence() {
 
 #[tokio::test]
 async fn background_process_manager_stores_failure_error_result() {
-    let store = Arc::new(InMemoryProcessStore::new());
-    let result_store = Arc::new(InMemoryProcessResultStore::new());
+    let store = Arc::new(in_memory_process_store());
+    let result_store = Arc::new(in_memory_process_result_store());
     let manager = BackgroundProcessManager::new(
         store.clone(),
         Arc::new(CountingExecutor::failure("runtime_dispatch")),
@@ -301,8 +302,8 @@ async fn background_process_manager_stores_failure_error_result() {
 #[tokio::test]
 async fn background_process_manager_reports_result_store_complete_failure_and_keeps_running_status()
 {
-    let store = Arc::new(InMemoryProcessStore::new());
-    let result_store = Arc::new(FailingProcessResultStore::default());
+    let store = Arc::new(in_memory_process_store());
+    let (result_store, backend) = result_store_failing_all_writes();
     let captured = Arc::new(Mutex::new(Vec::<(BackgroundFailureStage, ProcessId)>::new()));
     let handler_captured = Arc::clone(&captured);
     let executor = Arc::new(CountingExecutor::success());
@@ -343,7 +344,11 @@ async fn background_process_manager_reports_result_store_complete_failure_and_ke
         BackgroundFailureStage::ResultStoreComplete
     );
     assert_eq!(captured_failures[0].1, process_id);
-    assert_eq!(result_store.failures(), vec!["complete"]);
+    // The real store attempted its first (output) write and surfaced the
+    // injected backend fault; the manager reported it as a complete-stage
+    // failure. The former fake recorded a `"complete"` method-name string —
+    // the real store proves the same failure through its production write path.
+    assert_eq!(backend.count(FilesystemOperation::WriteFile), 1);
 
     // Lifecycle status must remain Running because result-first ordering
     // means status is not promoted when the result write fails.
@@ -353,7 +358,7 @@ async fn background_process_manager_reports_result_store_complete_failure_and_ke
 
 #[tokio::test]
 async fn background_process_manager_marks_process_failed_after_executor_error() {
-    let store = Arc::new(InMemoryProcessStore::new());
+    let store = Arc::new(in_memory_process_store());
     let executor = Arc::new(CountingExecutor::failure("runtime_dispatch"));
     let manager = BackgroundProcessManager::new(store.clone(), executor);
     let invocation_id = InvocationId::new();
@@ -380,7 +385,7 @@ async fn background_process_manager_marks_process_failed_after_executor_error() 
 
 #[tokio::test]
 async fn background_process_manager_does_not_overwrite_killed_process_on_late_success() {
-    let store = Arc::new(InMemoryProcessStore::new());
+    let store = Arc::new(in_memory_process_store());
     let executor = Arc::new(CountingExecutor::delayed_success(Duration::from_millis(25)));
     let manager = BackgroundProcessManager::new(store.clone(), executor);
     let invocation_id = InvocationId::new();
@@ -402,7 +407,7 @@ async fn background_process_manager_does_not_overwrite_killed_process_on_late_su
 
 #[tokio::test]
 async fn process_host_kill_signals_background_executor_cancellation() {
-    let store = Arc::new(InMemoryProcessStore::new());
+    let store = Arc::new(in_memory_process_store());
     let cancellation_registry = Arc::new(ProcessCancellationRegistry::new());
     let executor = Arc::new(CancellationAwareExecutor::default());
     let manager = BackgroundProcessManager::new(store.clone(), executor.clone())
@@ -443,9 +448,13 @@ async fn process_host_kill_signals_background_executor_cancellation() {
     );
 }
 
+/// A kill issued under a *different scope* (here a different project — path-scoped
+/// isolation on a single mount) must not reach the owner's process or signal its
+/// cancellation token. Cross-*tenant* isolation is mount-structural and covered
+/// by `filesystem_process_store_isolates_two_tenants_*` (arch-simplification §4.3).
 #[tokio::test]
-async fn process_host_kill_does_not_cancel_other_tenant_process() {
-    let store = Arc::new(InMemoryProcessStore::new());
+async fn process_host_kill_does_not_cancel_other_scope_process() {
+    let store = Arc::new(in_memory_process_store());
     let cancellation_registry = Arc::new(ProcessCancellationRegistry::new());
     let executor = Arc::new(CancellationAwareExecutor::default());
     let manager = BackgroundProcessManager::new(store.clone(), executor.clone())
@@ -456,7 +465,7 @@ async fn process_host_kill_does_not_cancel_other_tenant_process() {
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let owner_scope = sample_scope(invocation_id, "tenant1", "user1");
-    let other_scope = sample_scope(invocation_id, "tenant2", "user1");
+    let other_scope = sample_scope_with_project(invocation_id, "tenant1", "user1", "project2");
 
     manager
         .spawn(process_start(
@@ -473,7 +482,7 @@ async fn process_host_kill_does_not_cancel_other_tenant_process() {
         timeout(Duration::from_millis(30), executor.wait_for_cancellation())
             .await
             .is_err(),
-        "cross-tenant kill must not signal the owner's cancellation token"
+        "wrong-scope kill must not signal the owner's cancellation token"
     );
     assert_eq!(
         store
@@ -541,7 +550,7 @@ async fn filesystem_process_store_rejects_terminal_status_overwrite() {
 #[tokio::test]
 async fn eventing_process_store_emits_started_and_killed_events() {
     let events = Arc::new(InMemoryEventSink::new());
-    let store = EventingProcessStore::new(InMemoryProcessStore::new(), events.clone());
+    let store = EventingProcessStore::new(in_memory_process_store(), events.clone());
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
@@ -567,7 +576,7 @@ async fn eventing_process_store_emits_started_and_killed_events() {
 async fn background_process_manager_emits_completed_and_failed_events() {
     let success_events = Arc::new(InMemoryEventSink::new());
     let success_store = Arc::new(EventingProcessStore::new(
-        InMemoryProcessStore::new(),
+        in_memory_process_store(),
         success_events.clone(),
     ));
     let success_manager =
@@ -600,7 +609,7 @@ async fn background_process_manager_emits_completed_and_failed_events() {
 
     let failure_events = Arc::new(InMemoryEventSink::new());
     let failure_store = Arc::new(EventingProcessStore::new(
-        InMemoryProcessStore::new(),
+        in_memory_process_store(),
         failure_events.clone(),
     ));
     let failure_manager = BackgroundProcessManager::new(
@@ -642,7 +651,7 @@ async fn background_process_manager_emits_completed_and_failed_events() {
 async fn background_process_manager_does_not_emit_completed_after_kill() {
     let events = Arc::new(InMemoryEventSink::new());
     let store = Arc::new(EventingProcessStore::new(
-        InMemoryProcessStore::new(),
+        in_memory_process_store(),
         events.clone(),
     ));
     let executor = Arc::new(CountingExecutor::delayed_success(Duration::from_millis(25)));
@@ -675,7 +684,7 @@ async fn background_process_manager_does_not_emit_completed_after_kill() {
 #[tokio::test]
 async fn resource_managed_store_reserves_and_records_reservation_id() {
     let governor = Arc::new(InMemoryResourceGovernor::new());
-    let store = ResourceManagedProcessStore::new(InMemoryProcessStore::new(), governor.clone());
+    let store = ResourceManagedProcessStore::new(in_memory_process_store(), governor.clone());
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
@@ -713,7 +722,7 @@ async fn resource_managed_store_denies_before_process_record_creation() {
             ResourceLimits::default().set_max_process_count(1),
         )
         .unwrap();
-    let store = ResourceManagedProcessStore::new(InMemoryProcessStore::new(), governor.clone());
+    let store = ResourceManagedProcessStore::new(in_memory_process_store(), governor.clone());
 
     let exceeding_estimate = ResourceEstimate::default()
         .set_process_count(2)
@@ -744,7 +753,7 @@ async fn resource_managed_store_denies_before_process_record_creation() {
 #[tokio::test]
 async fn resource_managed_store_rejects_caller_supplied_reservation_id() {
     let governor = Arc::new(InMemoryResourceGovernor::new());
-    let store = ResourceManagedProcessStore::new(InMemoryProcessStore::new(), governor.clone());
+    let store = ResourceManagedProcessStore::new(in_memory_process_store(), governor.clone());
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
@@ -805,7 +814,7 @@ async fn resource_managed_store_releases_when_inner_store_drops_reservation_id()
 async fn resource_managed_store_preserves_mismatch_when_reconcile_cleanup_fails() {
     let governor = Arc::new(ReconcileFailingGovernor::default());
     let store =
-        ResourceManagedProcessStore::new(CompletionReservationDroppingStore::default(), governor);
+        ResourceManagedProcessStore::new(CompletionReservationDroppingStore::new(), governor);
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
@@ -832,7 +841,7 @@ async fn resource_managed_store_preserves_mismatch_when_reconcile_cleanup_fails(
 #[tokio::test]
 async fn resource_managed_store_preserves_original_error_when_cleanup_fails() {
     let governor = Arc::new(ReleaseFailingGovernor::default());
-    let inner = InMemoryProcessStore::new();
+    let inner = in_memory_process_store();
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
@@ -862,7 +871,7 @@ async fn resource_managed_store_preserves_original_error_when_cleanup_fails() {
 #[tokio::test]
 async fn resource_managed_store_releases_reservation_when_inner_start_fails() {
     let governor = Arc::new(InMemoryResourceGovernor::new());
-    let inner = InMemoryProcessStore::new();
+    let inner = in_memory_process_store();
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
@@ -912,7 +921,7 @@ async fn resource_managed_store_reconciles_on_complete_and_releases_on_failure_o
     let completion_usage = ResourceUsage::default()
         .set_process_count(1)
         .set_output_tokens(7);
-    let store = ResourceManagedProcessStore::new(InMemoryProcessStore::new(), governor.clone())
+    let store = ResourceManagedProcessStore::new(in_memory_process_store(), governor.clone())
         .with_completion_usage(completion_usage);
     let complete_invocation_id = InvocationId::new();
     let complete_process_id = ProcessId::new();
@@ -975,7 +984,7 @@ async fn resource_managed_store_reconciles_on_complete_and_releases_on_failure_o
 async fn background_process_manager_releases_process_reservation_after_executor_panic() {
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let store = Arc::new(ResourceManagedProcessStore::new(
-        InMemoryProcessStore::new(),
+        in_memory_process_store(),
         governor.clone(),
     ));
     let manager = BackgroundProcessManager::new(store.clone(), Arc::new(PanicExecutor));
@@ -1013,7 +1022,7 @@ async fn background_process_manager_releases_process_reservation_after_executor_
 async fn background_process_manager_cleans_up_process_resource_reservations() {
     let success_governor = Arc::new(InMemoryResourceGovernor::new());
     let success_store = Arc::new(
-        ResourceManagedProcessStore::new(InMemoryProcessStore::new(), success_governor.clone())
+        ResourceManagedProcessStore::new(in_memory_process_store(), success_governor.clone())
             .with_completion_usage(ResourceUsage::default().set_process_count(1)),
     );
     let success_manager =
@@ -1046,7 +1055,7 @@ async fn background_process_manager_cleans_up_process_resource_reservations() {
 
     let failure_governor = Arc::new(InMemoryResourceGovernor::new());
     let failure_store = Arc::new(ResourceManagedProcessStore::new(
-        InMemoryProcessStore::new(),
+        in_memory_process_store(),
         failure_governor.clone(),
     ));
     let failure_manager = BackgroundProcessManager::new(
@@ -1084,7 +1093,7 @@ async fn background_process_manager_cleans_up_process_resource_reservations() {
 async fn background_process_manager_releases_process_reservation_after_kill_before_late_success() {
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let store = Arc::new(ResourceManagedProcessStore::new(
-        InMemoryProcessStore::new(),
+        in_memory_process_store(),
         governor.clone(),
     ));
     let executor = Arc::new(CountingExecutor::delayed_success(Duration::from_millis(25)));
@@ -1118,7 +1127,7 @@ async fn background_process_manager_releases_process_reservation_after_kill_befo
 async fn process_host_cooperative_kill_releases_process_reservation() {
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let store = Arc::new(ResourceManagedProcessStore::new(
-        InMemoryProcessStore::new(),
+        in_memory_process_store(),
         governor.clone(),
     ));
     let cancellation_registry = Arc::new(ProcessCancellationRegistry::new());
@@ -1160,8 +1169,8 @@ async fn process_host_cooperative_kill_releases_process_reservation() {
 
 #[tokio::test]
 async fn process_host_kill_records_killed_result_without_output() {
-    let store = Arc::new(InMemoryProcessStore::new());
-    let result_store = Arc::new(InMemoryProcessResultStore::new());
+    let store = Arc::new(in_memory_process_store());
+    let result_store = Arc::new(in_memory_process_result_store());
     let cancellation_registry = Arc::new(ProcessCancellationRegistry::new());
     let executor = Arc::new(CancellationAwareExecutor::default());
     let manager = BackgroundProcessManager::new(store.clone(), executor.clone())
@@ -1194,7 +1203,7 @@ async fn process_host_kill_records_killed_result_without_output() {
 
 #[tokio::test]
 async fn process_host_await_result_returns_unavailable_when_terminal_result_is_missing() {
-    let store = InMemoryProcessStore::new();
+    let store = in_memory_process_store();
     let result_store = Arc::new(DroppingProcessResultStore);
     let host = ProcessHost::new(&store)
         .with_result_store(result_store)
@@ -1224,8 +1233,8 @@ async fn process_host_await_result_returns_unavailable_when_terminal_result_is_m
 
 #[tokio::test]
 async fn process_host_await_result_waits_for_background_success() {
-    let store = Arc::new(InMemoryProcessStore::new());
-    let result_store = Arc::new(InMemoryProcessResultStore::new());
+    let store = Arc::new(in_memory_process_store());
+    let result_store = Arc::new(in_memory_process_result_store());
     let manager = BackgroundProcessManager::new(
         store.clone(),
         Arc::new(CountingExecutor::delayed_success(Duration::from_millis(25))),
@@ -1245,8 +1254,9 @@ async fn process_host_await_result_waits_for_background_success() {
 
     let result = host.await_result(&scope, process_id).await.unwrap();
     assert_eq!(result.status, ProcessStatus::Completed);
-    assert_eq!(result.output, Some(serde_json::json!({"ok": true})));
-    assert_eq!(result.output_ref, None);
+    // Filesystem store externalizes output behind `output_ref` (§4.3).
+    assert_eq!(result.output, None);
+    assert!(result.output_ref.is_some());
     assert_eq!(
         host.output(&scope, process_id).await.unwrap(),
         Some(serde_json::json!({"ok": true}))
@@ -1255,16 +1265,16 @@ async fn process_host_await_result_waits_for_background_success() {
 
 #[tokio::test]
 async fn process_result_lookup_is_resource_scope_scoped() {
-    let store = Arc::new(InMemoryProcessStore::new());
-    let result_store = Arc::new(InMemoryProcessResultStore::new());
+    let store = Arc::new(in_memory_process_store());
+    let result_store = Arc::new(in_memory_process_result_store());
     let manager =
         BackgroundProcessManager::new(store.clone(), Arc::new(CountingExecutor::success()))
             .with_result_store(result_store.clone());
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let owner_scope = sample_scope(invocation_id, "tenant1", "user1");
-    let other_tenant = sample_scope(invocation_id, "tenant2", "user1");
-    let other_user = sample_scope(invocation_id, "tenant1", "user2");
+    // A different project is path-isolated on a single mount; cross-tenant/user
+    // isolation is mount-structural (covered by the two-tenant filesystem test).
     let other_project = sample_scope_with_project(invocation_id, "tenant1", "user1", "project2");
     let host = ProcessHost::new(store.as_ref()).with_result_store(result_store.clone());
 
@@ -1289,18 +1299,6 @@ async fn process_result_lookup_is_resource_scope_scoped() {
             .await
             .unwrap()
             .is_some()
-    );
-    assert!(
-        host.result(&other_tenant, process_id)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        host.result(&other_user, process_id)
-            .await
-            .unwrap()
-            .is_none()
     );
     assert!(
         host.result(&other_project, process_id)
@@ -1376,7 +1374,7 @@ async fn filesystem_process_result_store_persists_under_resource_scope() {
 #[tokio::test]
 async fn background_process_manager_stores_filesystem_output_ref() {
     let fs = engine_filesystem();
-    let store = Arc::new(InMemoryProcessStore::new());
+    let store = Arc::new(in_memory_process_store());
     let result_store = Arc::new(FilesystemProcessResultStore::from_arc(fs));
     let manager =
         BackgroundProcessManager::new(store.clone(), Arc::new(CountingExecutor::success()))
@@ -1405,10 +1403,8 @@ async fn background_process_manager_stores_filesystem_output_ref() {
 
 #[tokio::test]
 async fn filesystem_process_store_preserves_typed_backend_errors_that_mention_not_found() {
-    let fs = scoped_processes_filesystem(
-        Arc::new(BackendErrorFilesystem),
-        &default_mount_target_string(),
-    );
+    let fs =
+        scoped_processes_filesystem(backend_error_filesystem(), &default_mount_target_string());
     let store = FilesystemProcessStore::new(fs);
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
@@ -1426,10 +1422,8 @@ async fn filesystem_process_store_preserves_typed_backend_errors_that_mention_no
 
 #[tokio::test]
 async fn filesystem_process_result_store_preserves_typed_backend_write_errors() {
-    let fs = scoped_processes_filesystem(
-        Arc::new(BackendErrorFilesystem),
-        &default_mount_target_string(),
-    );
+    let fs =
+        scoped_processes_filesystem(backend_error_filesystem(), &default_mount_target_string());
     let store = FilesystemProcessResultStore::new(fs);
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
@@ -1844,6 +1838,7 @@ type ForgedProcessKey = (TenantId, UserId, ProcessId);
 
 type ForgedProcessRecords = Arc<Mutex<HashMap<ForgedProcessKey, ProcessRecord>>>;
 
+// domain-state fake, not an I/O fault — cannot move to ironclaw_filesystem::FaultInjecting
 #[derive(Clone, Default)]
 struct ForgedProcessStore {
     records: ForgedProcessRecords,
@@ -1956,9 +1951,17 @@ impl ProcessStore for ForgedProcessStore {
     }
 }
 
-#[derive(Default)]
+// domain-state fake, not an I/O fault — cannot move to ironclaw_filesystem::FaultInjecting
 struct CompletionReservationDroppingStore {
-    inner: InMemoryProcessStore,
+    inner: FilesystemProcessStore<InMemoryBackend>,
+}
+
+impl CompletionReservationDroppingStore {
+    fn new() -> Self {
+        Self {
+            inner: in_memory_process_store(),
+        }
+    }
 }
 
 #[async_trait]
@@ -2120,57 +2123,22 @@ impl ResourceGovernor for ReconcileFailingGovernor {
     }
 }
 
-struct BackendErrorFilesystem;
-
-#[async_trait]
-impl RootFilesystem for BackendErrorFilesystem {
-    async fn put(
-        &self,
-        path: &VirtualPath,
-        _entry: Entry,
-        _cas: CasExpectation,
-    ) -> Result<RecordVersion, FilesystemError> {
-        Err(backend_error(path, FilesystemOperation::WriteFile))
-    }
-
-    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
-        Err(backend_error(path, FilesystemOperation::ReadFile))
-    }
-
-    async fn write_file(&self, path: &VirtualPath, _bytes: &[u8]) -> Result<(), FilesystemError> {
-        Err(backend_error(path, FilesystemOperation::WriteFile))
-    }
-
-    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        Err(backend_error(path, FilesystemOperation::ListDir))
-    }
-
-    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        Err(backend_error(path, FilesystemOperation::Stat))
-    }
-
-    // After the PR #3666 fix that breaks the put/write_file recursion, the
-    // trait's default `get` is `Unsupported`. A test backend that wants to
-    // fault-inject through the unified read path has to override `get`
-    // explicitly — same shape that `LocalFilesystem` adopts in its native
-    // impl. Mirroring the same fault here keeps the consumer test
-    // exercising the "backend error mentions not_found" propagation.
-    async fn get(
-        &self,
-        path: &VirtualPath,
-    ) -> Result<Option<ironclaw_filesystem::VersionedEntry>, FilesystemError> {
-        Err(backend_error(path, FilesystemOperation::ReadFile))
-    }
+/// A [`FaultInjecting`] backend armed to fail every read and write with a
+/// backend error whose reason mentions "database index not found" — the
+/// real-backend-fault replacement for the former hand-rolled
+/// `impl RootFilesystem for BackendErrorFilesystem` fault fake (which
+/// `ironclaw_filesystem`'s CLAUDE.md forbids). The store now runs its genuine
+/// `FilesystemError -> ProcessError` mapping over the injected fault.
+fn backend_error_filesystem() -> Arc<FaultInjecting<InMemoryBackend>> {
+    const REASON: &str = "database index not found while backend is unavailable";
+    Arc::new(
+        FaultInjecting::new(InMemoryBackend::new())
+            .with_fault(Fault::on(FilesystemOperation::ReadFile).backend(REASON))
+            .with_fault(Fault::on(FilesystemOperation::WriteFile).backend(REASON)),
+    )
 }
 
-fn backend_error(path: &VirtualPath, operation: FilesystemOperation) -> FilesystemError {
-    FilesystemError::Backend {
-        path: path.clone(),
-        operation,
-        reason: "database index not found while backend is unavailable".to_string(),
-    }
-}
-
+// domain-state fake, not an I/O fault — cannot move to ironclaw_filesystem::FaultInjecting
 struct ReservationDroppingStore;
 
 #[async_trait]
@@ -2339,61 +2307,29 @@ impl ProcessExecutor for CountingExecutor {
     }
 }
 
+// domain-state fake, not an I/O fault — cannot move to ironclaw_filesystem::FaultInjecting
 struct DroppingProcessResultStore;
 
-#[derive(Default)]
-struct FailingProcessResultStore {
-    failures: Mutex<Vec<&'static str>>,
-}
-
-impl FailingProcessResultStore {
-    fn failures(&self) -> Vec<&'static str> {
-        self.failures.lock().unwrap().clone()
-    }
-
-    fn record(&self, kind: &'static str) {
-        self.failures.lock().unwrap().push(kind);
-    }
-}
-
-#[async_trait]
-impl ProcessResultStore for FailingProcessResultStore {
-    async fn complete(
-        &self,
-        _scope: &ResourceScope,
-        _process_id: ProcessId,
-        _output: serde_json::Value,
-    ) -> Result<ProcessResultRecord, ProcessError> {
-        self.record("complete");
-        Err(ProcessError::ProcessResultStoreUnavailable)
-    }
-
-    async fn fail(
-        &self,
-        _scope: &ResourceScope,
-        _process_id: ProcessId,
-        _error_kind: String,
-    ) -> Result<ProcessResultRecord, ProcessError> {
-        self.record("fail");
-        Err(ProcessError::ProcessResultStoreUnavailable)
-    }
-
-    async fn kill(
-        &self,
-        _scope: &ResourceScope,
-        _process_id: ProcessId,
-    ) -> Result<ProcessResultRecord, ProcessError> {
-        self.record("kill");
-        Err(ProcessError::ProcessResultStoreUnavailable)
-    }
-
-    async fn get(
-        &self,
-        _scope: &ResourceScope,
-        _process_id: ProcessId,
-    ) -> Result<Option<ProcessResultRecord>, ProcessError> {
-        Ok(None)
-    }
+/// The real `FilesystemProcessResultStore` over a [`FaultInjecting`] backend
+/// armed to fail every write. Replaces the former whole-trait
+/// `FailingProcessResultStore` fake: the store now runs its genuine path
+/// building and `FilesystemError -> ProcessError` mapping under the injected
+/// backend fault, so the background manager's complete-stage failure handling
+/// is proven against the production store instead of a hand-rolled stand-in
+/// that returned `ProcessResultStoreUnavailable` (a variant the
+/// filesystem-backed store never produces for an I/O fault). Returns the store
+/// plus the fault handle for asserting backend traffic.
+fn result_store_failing_all_writes() -> (
+    Arc<FilesystemProcessResultStore<FaultInjecting<InMemoryBackend>>>,
+    Arc<FaultInjecting<InMemoryBackend>>,
+) {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()).with_fault(
+        Fault::on(FilesystemOperation::WriteFile).backend("injected result store write failure"),
+    ));
+    let store = Arc::new(FilesystemProcessResultStore::new(
+        scoped_processes_filesystem(backend.clone(), &default_mount_target_string()),
+    ));
+    (store, backend)
 }
 
 #[async_trait]
@@ -2598,6 +2534,27 @@ fn default_mount_target_string() -> String {
     format!("/engine/tenants/{DEFAULT_TEST_MOUNT_TENANT}/users/{DEFAULT_TEST_MOUNT_USER}/processes")
 }
 
+/// The production `FilesystemProcessStore` over a fresh in-memory backend — the
+/// drop-in for the deleted `InMemoryProcessStore` (arch-simplification §4.3).
+/// Single fixed `/processes` mount: isolates by agent/project/mission/thread
+/// (encoded in the path) but not tenant/user (mount-scoped); cross-tenant
+/// isolation is exercised by `filesystem_process_store_isolates_two_tenants_*`.
+fn in_memory_process_store() -> FilesystemProcessStore<InMemoryBackend> {
+    FilesystemProcessStore::new(scoped_processes_filesystem(
+        Arc::new(InMemoryBackend::new()),
+        &default_mount_target_string(),
+    ))
+}
+
+/// The production `FilesystemProcessResultStore` over a fresh in-memory backend
+/// — the drop-in for the deleted `InMemoryProcessResultStore`.
+fn in_memory_process_result_store() -> FilesystemProcessResultStore<InMemoryBackend> {
+    FilesystemProcessResultStore::new(scoped_processes_filesystem(
+        Arc::new(InMemoryBackend::new()),
+        &default_mount_target_string(),
+    ))
+}
+
 fn stored_process_output_path(scope: &ResourceScope, process_id: ProcessId) -> VirtualPath {
     VirtualPath::new(format!(
         "{}/outputs/{process_id}/output.json",
@@ -2627,14 +2584,14 @@ fn stored_process_owner_root(scope: &ResourceScope) -> String {
     base
 }
 
-/// Build a `Arc<ScopedFilesystem<LocalFilesystem>>` over a fresh tempdir
+/// Build a `Arc<ScopedFilesystem<DiskFilesystem>>` over a fresh tempdir
 /// mounted at `/engine`, with the `/processes` alias resolving to the
 /// default tenant1/user1 target. Tests that need a different mount
 /// target (e.g. cross-tenant isolation tests) construct a
 /// `ScopedFilesystem` directly with their own `MountView`.
-fn engine_filesystem() -> Arc<ScopedFilesystem<LocalFilesystem>> {
+fn engine_filesystem() -> Arc<ScopedFilesystem<DiskFilesystem>> {
     let storage = tempfile::tempdir().unwrap().keep();
-    let mut fs = LocalFilesystem::new();
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/engine").unwrap(),
         HostPath::from_path_buf(storage),

@@ -16,11 +16,11 @@ use support::*;
 #[tokio::test]
 async fn capability_host_blocks_spawn_for_approval_without_starting_process() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let process_manager = RecordingProcessManager::default();
-    let run_state = InMemoryRunStateStore::new();
-    let approval_requests = InMemoryApprovalRequestStore::new();
-    let host = CapabilityHost::new(&registry, &dispatcher, &SpawnApprovalAuthorizer)
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
+    let host = capability_host(&registry, &dispatcher, &SpawnApprovalAuthorizer)
         .with_process_manager(&process_manager)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
@@ -36,7 +36,6 @@ async fn capability_host_blocks_spawn_for_approval_without_starting_process() {
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -45,7 +44,7 @@ async fn capability_host_blocks_spawn_for_approval_without_starting_process() {
         err,
         CapabilityInvocationError::AuthorizationRequiresApproval { .. }
     ));
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
     assert!(!process_manager.has_start());
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(run.status, RunStatus::BlockedApproval);
@@ -100,11 +99,11 @@ output_schema_ref = "schemas/shell.output.v1.json"
     .unwrap();
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let process_manager = RecordingProcessManager::default();
-    let run_state = InMemoryRunStateStore::new();
-    let approval_requests = InMemoryApprovalRequestStore::new();
-    let host = CapabilityHost::new(&registry, &dispatcher, &ShellSpawnApprovalAuthorizer)
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
+    let host = capability_host(&registry, &dispatcher, &ShellSpawnApprovalAuthorizer)
         .with_process_manager(&process_manager)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
@@ -122,7 +121,6 @@ output_schema_ref = "schemas/shell.output.v1.json"
             capability_id,
             estimate: ResourceEstimate::default(),
             input,
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -163,12 +161,12 @@ output_schema_ref = "schemas/shell.output.v1.json"
 #[tokio::test]
 async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let process_manager = RecordingProcessManager::default();
-    let run_state = InMemoryRunStateStore::new();
-    let approval_requests = InMemoryApprovalRequestStore::new();
-    let leases = InMemoryCapabilityLeaseStore::new();
-    let block_host = CapabilityHost::new(&registry, &dispatcher, &SpawnApprovalAuthorizer)
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
+    let leases = in_memory_backed_capability_lease_store();
+    let block_host = capability_host(&registry, &dispatcher, &SpawnApprovalAuthorizer)
         .with_process_manager(&process_manager)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
@@ -185,7 +183,6 @@ async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -217,7 +214,7 @@ async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
         .unwrap();
 
     let resume_authorizer = GrantAuthorizer::new();
-    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer)
+    let resume_host = capability_host(&registry, &dispatcher, &resume_authorizer)
         .with_process_manager(&process_manager)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
@@ -231,7 +228,6 @@ async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -242,7 +238,7 @@ async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
             ..
         }
     ));
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
     assert!(!process_manager.has_start());
     assert_eq!(
         run_state
@@ -265,12 +261,11 @@ async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
             capability_id: capability_id(),
             estimate,
             input,
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap();
 
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
     let start = process_manager.take_start();
     assert_eq!(start.scope, context.resource_scope);
     assert_eq!(
@@ -299,11 +294,16 @@ async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
 #[tokio::test]
 async fn capability_host_denies_spawn_when_trust_ceiling_omits_spawn_effect() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let process_manager = RecordingProcessManager::default();
     let authorizer = GrantAuthorizer::new();
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
-        .with_process_manager(&process_manager);
+    // The kernel computes trust in-fold (§5.3.2/§9); inject a trust policy whose
+    // authority ceiling omits the SpawnProcess effect so the trust-aware
+    // authorizer denies the spawn on the trust ceiling.
+    let trust_policy = FixedTrustPolicy::with_effects(vec![EffectKind::DispatchCapability]);
+    let host =
+        capability_host_with_trust_policy(&registry, &dispatcher, &authorizer, &trust_policy)
+            .with_process_manager(&process_manager);
     let context = execution_context(CapabilitySet {
         grants: vec![spawn_grant()],
     });
@@ -314,7 +314,6 @@ async fn capability_host_denies_spawn_when_trust_ceiling_omits_spawn_effect() {
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "blocked spawn"}),
-            trust_decision: trust_decision_with_effects(vec![EffectKind::DispatchCapability]),
         })
         .await
         .unwrap_err();
@@ -326,18 +325,18 @@ async fn capability_host_denies_spawn_when_trust_ceiling_omits_spawn_effect() {
             ..
         }
     ));
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
     assert!(!process_manager.has_start());
 }
 
 #[tokio::test]
 async fn capability_host_returns_spawn_result_when_run_completion_fails_after_spawn() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let process_manager = RecordingProcessManager::default();
     let run_state = FailCompleteRunStateStore::new();
     let authorizer = SpawnAuthorizer;
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+    let host = capability_host(&registry, &dispatcher, &authorizer)
         .with_process_manager(&process_manager)
         .with_run_state(&run_state);
     let context = execution_context(CapabilitySet {
@@ -350,12 +349,11 @@ async fn capability_host_returns_spawn_result_when_run_completion_fails_after_sp
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "background"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap();
 
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
     let start = process_manager.take_start();
     assert_eq!(result.process.process_id, start.process_id);
 }
@@ -363,11 +361,11 @@ async fn capability_host_returns_spawn_result_when_run_completion_fails_after_sp
 #[tokio::test]
 async fn capability_host_spawns_authorized_process_without_dispatching_inline() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let process_manager = RecordingProcessManager::default();
     let authorizer = SpawnAuthorizer;
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
-        .with_process_manager(&process_manager);
+    let host =
+        capability_host(&registry, &dispatcher, &authorizer).with_process_manager(&process_manager);
     let context = execution_context(CapabilitySet {
         grants: vec![dispatch_grant()],
     });
@@ -378,12 +376,11 @@ async fn capability_host_spawns_authorized_process_without_dispatching_inline() 
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "background"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap();
 
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
     let start = process_manager.take_start();
     assert_eq!(start.scope, context.resource_scope);
     assert_eq!(start.capability_id, capability_id());
@@ -416,13 +413,13 @@ impl RecordingProcessManager {
 }
 
 struct FailCompleteRunStateStore {
-    inner: InMemoryRunStateStore,
+    inner: ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>,
 }
 
 impl FailCompleteRunStateStore {
     fn new() -> Self {
         Self {
-            inner: InMemoryRunStateStore::new(),
+            inner: ironclaw_run_state::in_memory_backed_run_state_store(),
         }
     }
 }

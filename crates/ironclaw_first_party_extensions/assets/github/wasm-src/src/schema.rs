@@ -88,6 +88,7 @@ const GITHUB_SCHEMAS: &[&str] = &[
     include_str!("../../schemas/github/trigger_workflow.input.v1.json"),
     include_str!("../../schemas/github/get_workflow_runs.input.v1.json"),
     include_str!("../../schemas/github/get_workflow_run_jobs.input.v1.json"),
+    include_str!("../../schemas/github/get_job_logs.input.v1.json"),
     include_str!("../../schemas/github/get_workflow_run_artifacts.input.v1.json"),
     include_str!("../../schemas/github/rerun_failed_workflow_run_jobs.input.v1.json"),
     include_str!("../../schemas/github/rerun_workflow_job.input.v1.json"),

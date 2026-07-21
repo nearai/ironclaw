@@ -1,8 +1,9 @@
+// arch-exempt: large_file, mechanical LocalFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
 use ironclaw_capabilities::{
     CapabilityObligationHandler, CapabilityObligationPhase, CapabilityObligationRequest,
 };
 use ironclaw_events::InMemoryAuditSink;
-use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     AgentId, CapabilityHostHttpRequest, CapabilityId, CapabilitySet, CredentialStageError,
     ExecutionContext, ExtensionId, InvocationId, MountAlias, MountGrant, MountPermissions,
@@ -28,7 +29,7 @@ use ironclaw_network::{
 };
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_scripts::ScriptRuntimeHttpAdapter;
-use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
+use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
 use ironclaw_wasm::{
     WasmHostHttp, WasmHttpRequest, WasmRuntimeHttpAdapter, WasmStagedRuntimeCredential,
     WasmStagedRuntimeCredentials,
@@ -351,7 +352,7 @@ async fn host_http_egress_consumes_secret_staged_by_builtin_obligation_handler()
         },
     });
     let network_recorder = network.requests.clone();
-    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
     let services = BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
         secret_store.clone(),
@@ -1737,10 +1738,17 @@ async fn host_http_egress_forwards_timeout_to_network() {
 }
 
 #[tokio::test]
-async fn host_http_egress_with_reqwest_transport_returns_redirect_without_following() {
-    let (url, server) = single_response_server(
-        "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:9/followed\r\nContent-Length: 0\r\n\r\n",
-    );
+async fn host_http_egress_with_reqwest_transport_follows_redirect_host_mediated() {
+    // Redirect following is host-mediated: the reqwest client is pinned to
+    // `Policy::none()`, so the host egress (not the HTTP client) follows each
+    // hop, re-authorizing the destination against the caller's network policy.
+    // `github.get_job_logs` depends on this — GitHub 302-redirects the logs
+    // endpoint to a short-lived blob-storage URL that the host must follow.
+    let (final_url, final_server) =
+        single_response_server("HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nfollowed!");
+    let (start_url, redirect_server) = single_response_server_owned(format!(
+        "HTTP/1.1 302 Found\r\nLocation: {final_url}\r\nContent-Length: 0\r\n\r\n"
+    ));
     let network =
         PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::new(Duration::from_secs(2)));
     let service = request_policy_staging_egress(network);
@@ -1751,7 +1759,7 @@ async fn host_http_egress_with_reqwest_transport_returns_redirect_without_follow
             scope: sample_scope(),
             capability_id: sample_capability_id(),
             method: NetworkMethod::Get,
-            url,
+            url: start_url,
             headers: vec![],
             body: Vec::new(),
             network_policy: local_http_policy(),
@@ -1761,17 +1769,54 @@ async fn host_http_egress_with_reqwest_transport_returns_redirect_without_follow
             timeout_ms: None,
         })
         .await
-        .expect("redirect responses should be returned to the caller, not followed");
-    server.join().unwrap();
+        .expect("host egress should follow the redirect to the allowed host");
+    redirect_server.join().unwrap();
+    final_server.join().unwrap();
 
-    assert_eq!(response.status, 302);
-    assert_eq!(
-        response
-            .headers
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("location"))
-            .map(|(_, value)| value.as_str()),
-        Some("http://127.0.0.1:9/followed")
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, b"followed!");
+}
+
+#[tokio::test]
+async fn host_http_egress_blocks_redirect_to_policy_denied_host() {
+    // SSRF guarantee: a redirect `Location` pointing at a host the caller's
+    // network policy does not allow is re-authorized and rejected before any
+    // connection to it — the untrusted redirect target is never reached.
+    // `local_http_policy` only allows `127.0.0.1`, so a redirect to `10.0.0.1`
+    // is denied on the second hop.
+    let (start_url, redirect_server) = single_response_server_owned(
+        "HTTP/1.1 302 Found\r\nLocation: http://10.0.0.1/blocked\r\nContent-Length: 0\r\n\r\n"
+            .to_string(),
+    );
+    let network =
+        PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::new(Duration::from_secs(2)));
+    let service = request_policy_staging_egress(network);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Get,
+            url: start_url,
+            headers: vec![],
+            body: Vec::new(),
+            network_policy: local_http_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(1024),
+            save_body_to: None,
+            timeout_ms: None,
+        })
+        .await
+        .expect_err("a redirect to a policy-denied host must not be followed");
+    redirect_server.join().unwrap();
+
+    assert!(
+        matches!(
+            &error,
+            RuntimeHttpEgressError::Network { reason, .. } if reason == "policy_denied"
+        ),
+        "expected policy_denied, got {error:?}"
     );
 }
 
@@ -3641,7 +3686,7 @@ async fn host_http_egress_fails_closed_when_real_scoped_filesystem_write_fails()
         },
     });
     let temp = tempdir().unwrap();
-    let mut root = LocalFilesystem::new();
+    let mut root = DiskFilesystem::new();
     root.mount_local(
         VirtualPath::new("/projects/workspace").unwrap(),
         ironclaw_host_api::HostPath::from_path_buf(temp.path().to_path_buf()),
@@ -4642,7 +4687,7 @@ fn block_on_test_runtime<T>(future: impl std::future::Future<Output = T>) -> T {
 fn test_obligation_services() -> BuiltinObligationServices {
     BuiltinObligationServices::new(
         Arc::new(InMemoryAuditSink::new()),
-        Arc::new(InMemorySecretStore::new()),
+        Arc::new(FilesystemSecretStore::ephemeral()),
         Arc::new(InMemoryResourceGovernor::new()),
     )
 }
@@ -4900,6 +4945,10 @@ fn local_http_policy() -> NetworkPolicy {
 }
 
 fn single_response_server(response: &'static str) -> (String, std::thread::JoinHandle<()>) {
+    single_response_server_owned(response.to_string())
+}
+
+fn single_response_server_owned(response: String) -> (String, std::thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let handle = std::thread::spawn(move || {

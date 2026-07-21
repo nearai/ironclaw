@@ -153,7 +153,7 @@ mod platform {
     const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
 
     /// Store the master key in the macOS Keychain.
-    pub async fn store_master_key(key: &[u8]) -> Result<(), SecretError> {
+    pub(super) async fn store_master_key(key: &[u8]) -> Result<(), SecretError> {
         // Convert to hex for storage (keychain prefers strings)
         let key_hex: String = key.iter().map(|b| format!("{:02x}", b)).collect();
 
@@ -162,7 +162,7 @@ mod platform {
     }
 
     /// Retrieve the master key from the macOS Keychain.
-    pub async fn get_master_key() -> Result<Vec<u8>, SecretError> {
+    pub(super) async fn get_master_key() -> Result<Vec<u8>, SecretError> {
         let password = get_generic_password(SERVICE_NAME, MASTER_KEY_ACCOUNT).map_err(|error| {
             if error.code() == ERR_SEC_ITEM_NOT_FOUND {
                 SecretError::NotFound("master key".to_string())
@@ -179,14 +179,14 @@ mod platform {
     }
 
     /// Delete the master key from the macOS Keychain.
-    pub async fn delete_master_key() -> Result<(), SecretError> {
+    pub(super) async fn delete_master_key() -> Result<(), SecretError> {
         delete_generic_password(SERVICE_NAME, MASTER_KEY_ACCOUNT).map_err(|e| {
             SecretError::KeychainError(format!("failed to delete from keychain: {}", e))
         })
     }
 
     /// Check if a master key exists in the keychain.
-    pub async fn has_master_key() -> bool {
+    pub(super) async fn has_master_key() -> bool {
         get_generic_password(SERVICE_NAME, MASTER_KEY_ACCOUNT).is_ok()
     }
 }
@@ -202,7 +202,7 @@ mod platform {
     use super::*;
 
     /// Store the master key in the Linux secret service (GNOME Keyring, KWallet).
-    pub async fn store_master_key(key: &[u8]) -> Result<(), SecretError> {
+    pub(super) async fn store_master_key(key: &[u8]) -> Result<(), SecretError> {
         let ss = SecretService::connect(EncryptionType::Dh)
             .await
             .map_err(|e| {
@@ -241,7 +241,7 @@ mod platform {
     }
 
     /// Retrieve the master key from the Linux secret service.
-    pub async fn get_master_key() -> Result<Vec<u8>, SecretError> {
+    pub(super) async fn get_master_key() -> Result<Vec<u8>, SecretError> {
         let ss = SecretService::connect(EncryptionType::Dh)
             .await
             .map_err(|e| {
@@ -282,7 +282,7 @@ mod platform {
     }
 
     /// Delete the master key from the Linux secret service.
-    pub async fn delete_master_key() -> Result<(), SecretError> {
+    pub(super) async fn delete_master_key() -> Result<(), SecretError> {
         let ss = SecretService::connect(EncryptionType::Dh)
             .await
             .map_err(|e| {
@@ -308,7 +308,7 @@ mod platform {
     }
 
     /// Check if a master key exists in the secret service.
-    pub async fn has_master_key() -> bool {
+    pub(super) async fn has_master_key() -> bool {
         let ss = match SecretService::connect(EncryptionType::Dh).await {
             Ok(ss) => ss,
             Err(_) => return false,
@@ -338,29 +338,70 @@ mod platform {
 mod platform {
     use super::*;
 
-    pub async fn store_master_key(_key: &[u8]) -> Result<(), SecretError> {
+    pub(super) async fn store_master_key(_key: &[u8]) -> Result<(), SecretError> {
         Err(SecretError::KeychainError(
             "keychain not supported on this platform. use SECRETS_MASTER_KEY env var.".to_string(),
         ))
     }
 
-    pub async fn get_master_key() -> Result<Vec<u8>, SecretError> {
+    pub(super) async fn get_master_key() -> Result<Vec<u8>, SecretError> {
         Err(SecretError::NotFound("master key".to_string()))
     }
 
-    pub async fn delete_master_key() -> Result<(), SecretError> {
+    pub(super) async fn delete_master_key() -> Result<(), SecretError> {
         Err(SecretError::KeychainError(
             "keychain not supported on this platform".to_string(),
         ))
     }
 
-    pub async fn has_master_key() -> bool {
+    pub(super) async fn has_master_key() -> bool {
         false
     }
 }
 
-// Re-export platform-specific functions
-pub use platform::{delete_master_key, get_master_key, has_master_key, store_master_key};
+/// Whether OS-keychain access should be suppressed.
+///
+/// - why: real keychain pops a macOS auth dialog / blocks on a locked Linux
+///   Secret Service, which derails `cargo test`
+/// - triggers: `cfg!(test)` (this crate's unit tests) OR
+///   `IRONCLAW_DISABLE_OS_KEYCHAIN` env (integration/e2e/CI, and the
+///   compiled binary under test, which links the non-`cfg(test)` lib)
+/// - effect: lookups report "no key present", writes fail closed — callers
+///   fall through to their next key source as if the keychain were empty
+fn os_keychain_suppressed() -> bool {
+    cfg!(test) || std::env::var_os("IRONCLAW_DISABLE_OS_KEYCHAIN").is_some()
+}
+
+const SUPPRESSED_MESSAGE: &str =
+    "OS keychain access suppressed (cfg!(test) or IRONCLAW_DISABLE_OS_KEYCHAIN)";
+
+pub async fn get_master_key() -> Result<Vec<u8>, SecretError> {
+    if os_keychain_suppressed() {
+        return Err(SecretError::NotFound("master key".to_string()));
+    }
+    platform::get_master_key().await
+}
+
+pub async fn has_master_key() -> bool {
+    if os_keychain_suppressed() {
+        return false;
+    }
+    platform::has_master_key().await
+}
+
+pub async fn store_master_key(key: &[u8]) -> Result<(), SecretError> {
+    if os_keychain_suppressed() {
+        return Err(SecretError::KeychainError(SUPPRESSED_MESSAGE.to_string()));
+    }
+    platform::store_master_key(key).await
+}
+
+pub async fn delete_master_key() -> Result<(), SecretError> {
+    if os_keychain_suppressed() {
+        return Err(SecretError::KeychainError(SUPPRESSED_MESSAGE.to_string()));
+    }
+    platform::delete_master_key().await
+}
 
 /// Parse a hex string to bytes.
 fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, SecretError> {
@@ -559,6 +600,31 @@ mod tests {
         assert!(matches!(
             resolve_master_key_from_sources(None, Ok(Some(vec![0xab; 31]))),
             Err(SecretError::InvalidMasterKey)
+        ));
+    }
+
+    static IRONCLAW_DISABLE_OS_KEYCHAIN_LOCK: Mutex<()> = Mutex::const_new(());
+
+    // edge: pins the explicit-env-var suppression path (cfg!(test) already
+    // covers this crate's own unit tests) — protects a compiled binary under
+    // test from popping a real OS keychain prompt.
+    #[tokio::test]
+    async fn suppressed_keychain_lookup_and_write_never_touch_the_platform_module() {
+        let _guard = IRONCLAW_DISABLE_OS_KEYCHAIN_LOCK.lock().await;
+        let _env = EnvVarGuard::set("IRONCLAW_DISABLE_OS_KEYCHAIN", "1");
+
+        assert!(matches!(
+            get_master_key().await,
+            Err(SecretError::NotFound(_))
+        ));
+        assert!(matches!(
+            store_master_key(&[0xab; 32]).await,
+            Err(SecretError::KeychainError(_))
+        ));
+        assert!(!has_master_key().await);
+        assert!(matches!(
+            delete_master_key().await,
+            Err(SecretError::KeychainError(_))
         ));
     }
 }

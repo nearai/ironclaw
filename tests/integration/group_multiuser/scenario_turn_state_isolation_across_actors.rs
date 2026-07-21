@@ -1,5 +1,5 @@
 //! C-MULTIUSER scenario: per-actor TURN/RUN-STATE isolation on the shared
-//! `FilesystemTurnStateStore`. Unlike the thread/memory/approval stores, the
+//! `FilesystemTurnStateRowStore`. Unlike the thread/memory/approval stores, the
 //! group's turn_store is built with a construction-time-fixed mount view
 //! (`owner_turn_state_filesystem` in `ironclaw_reborn_composition::factory`,
 //! mirroring production's `HostedSingleTenant`/local-dev composition), so ALL

@@ -4,50 +4,83 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, ProviderToolName, RuntimeKind};
+use ironclaw_host_api::{CapabilityId, ProviderToolName, Resolution, ResolutionBatch, RuntimeKind};
 use ironclaw_loop_host::{LoopCapabilityInputResolver, LoopCapabilityResultWriter};
 use ironclaw_turns::{
     CapabilityActivityId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-        CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDescriptorView,
-        CapabilityInputRef, CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
-        ConcurrencyHint, LoopCapabilityPort, LoopRunContext, ProviderToolCall,
-        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
-        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
+        CapabilityInvocation, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort,
+        LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReplay,
+        ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
 };
 
-pub(super) fn wrap_local_dev_synthetic_capabilities(
+// Synthetic decorator now also carries the host-private replay-payload store it
+// reconstitutes a synthetic approval-gate resume's input from.
+// arch-exempt: too_many_args, synthetic decorator carries the replay-payload store (§5.3 Stage 2a-i), plan #6175
+#[allow(clippy::too_many_arguments)]
+pub(super) fn wrap_synthetic_capabilities(
     inner: Arc<dyn LoopCapabilityPort>,
-    capabilities: Vec<LocalDevSyntheticCapability>,
+    capabilities: Vec<SyntheticCapability>,
     run_context: LoopRunContext,
+    fallback_user_id: ironclaw_host_api::UserId,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
+    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
 ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
     if capabilities.is_empty() {
         return Ok(inner);
     }
-    Ok(Arc::new(LocalDevSyntheticCapabilityPort::new(
+    Ok(Arc::new(SyntheticCapabilityPort::new(
         inner,
         capabilities,
         run_context,
+        fallback_user_id,
         input_resolver,
         result_writer,
         trajectory_observer,
+        replay_payload_store,
     )?))
 }
 
-pub(super) struct LocalDevSyntheticCapability {
-    descriptor: LocalDevSyntheticCapabilityDescriptor,
-    handler: Arc<dyn LocalDevSyntheticCapabilityHandler>,
+/// Recover the original `InvocationId` a synthetic approval-gate resume token
+/// encodes, so the replay-payload store can be keyed by it on resume.
+fn invocation_id_from_resume_token(
+    resume_token: &ironclaw_turns::run_profile::CapabilityResumeToken,
+) -> Result<ironclaw_host_api::InvocationId, AgentLoopHostError> {
+    ironclaw_host_api::InvocationId::parse(resume_token.as_str()).map_err(|error| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            format!("synthetic capability resume token is invalid: {error}"),
+        )
+    })
 }
 
-impl LocalDevSyntheticCapability {
+/// Map a replay-payload store failure to a fail-closed host error; the bound
+/// cause is logged server-side and never surfaced to the model.
+fn replay_payload_store_error(
+    error: ironclaw_capabilities::ReplayPayloadStoreError,
+) -> AgentLoopHostError {
+    tracing::warn!(error = %error, "failed to load synthetic capability replay payload");
+    AgentLoopHostError::new(
+        AgentLoopHostErrorKind::Unavailable,
+        "failed to access capability replay payload",
+    )
+}
+
+pub(super) struct SyntheticCapability {
+    descriptor: SyntheticCapabilityDescriptor,
+    handler: Arc<dyn SyntheticCapabilityHandler>,
+}
+
+impl SyntheticCapability {
     pub(super) fn new(
-        descriptor: LocalDevSyntheticCapabilityDescriptor,
-        handler: Arc<dyn LocalDevSyntheticCapabilityHandler>,
+        descriptor: SyntheticCapabilityDescriptor,
+        handler: Arc<dyn SyntheticCapabilityHandler>,
     ) -> Self {
         Self {
             descriptor,
@@ -56,7 +89,7 @@ impl LocalDevSyntheticCapability {
     }
 }
 
-pub(super) struct LocalDevSyntheticCapabilityDescriptor {
+pub(super) struct SyntheticCapabilityDescriptor {
     capability_id: CapabilityId,
     provider_tool_name: ProviderToolName,
     description: String,
@@ -64,7 +97,7 @@ pub(super) struct LocalDevSyntheticCapabilityDescriptor {
     parameters_schema: serde_json::Value,
 }
 
-impl LocalDevSyntheticCapabilityDescriptor {
+impl SyntheticCapabilityDescriptor {
     pub(super) fn new(
         capability_id: &str,
         provider_tool_name: &str,
@@ -113,7 +146,7 @@ impl LocalDevSyntheticCapabilityDescriptor {
     }
 }
 
-pub(super) struct LocalDevSyntheticCapabilityInvocation {
+pub(super) struct SyntheticCapabilityInvocation {
     pub(super) run_context: LoopRunContext,
     pub(super) request: CapabilityInvocation,
     pub(super) input: serde_json::Value,
@@ -121,7 +154,7 @@ pub(super) struct LocalDevSyntheticCapabilityInvocation {
 }
 
 #[async_trait]
-pub(super) trait LocalDevSyntheticCapabilityHandler: Send + Sync {
+pub(super) trait SyntheticCapabilityHandler: Send + Sync {
     fn validate_provider_arguments(
         &self,
         arguments: &serde_json::Value,
@@ -129,16 +162,17 @@ pub(super) trait LocalDevSyntheticCapabilityHandler: Send + Sync {
 
     async fn invoke(
         &self,
-        invocation: LocalDevSyntheticCapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError>;
+        invocation: SyntheticCapabilityInvocation,
+    ) -> Result<Resolution, AgentLoopHostError>;
 }
 
-struct LocalDevSyntheticCapabilityPort {
+struct SyntheticCapabilityPort {
     inner: Arc<dyn LoopCapabilityPort>,
     run_context: LoopRunContext,
+    fallback_user_id: ironclaw_host_api::UserId,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
-    capabilities_by_id: HashMap<CapabilityId, LocalDevSyntheticCapability>,
+    capabilities_by_id: HashMap<CapabilityId, SyntheticCapability>,
     capability_ids_by_provider_tool_name: HashMap<ProviderToolName, CapabilityId>,
     current_surface_version: StdMutex<Option<CapabilitySurfaceVersion>>,
     provider_tool_call_registrations:
@@ -146,8 +180,13 @@ struct LocalDevSyntheticCapabilityPort {
     /// Synthetic calls resolve input + write the result here, bypassing the
     /// inner `HostRuntimeLoopCapabilityPort` input hook. Hold the observer so we
     /// can emit `on_capability_input` ourselves — otherwise consumers see the
-    /// result event (from `LocalDevCapabilityIo`) with no matching input.
+    /// result event (from `StagedCapabilityIo`) with no matching input.
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
+    /// Host-private replay-payload store: a synthetic capability that raised its
+    /// own approval gate reconstitutes {input} from here on resume, keyed by the
+    /// invocation id in the resume token (§5.3 Stage 2a-i), instead of reading raw
+    /// tool args off the loop-facing resume DTO.
+    replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
 }
 
 struct SyntheticProviderToolCallRegistration {
@@ -155,14 +194,20 @@ struct SyntheticProviderToolCallRegistration {
     capability_id: CapabilityId,
 }
 
-impl LocalDevSyntheticCapabilityPort {
+impl SyntheticCapabilityPort {
+    // Decorator now also carries the fallback user id + host-private
+    // replay-payload store for synthetic approval-gate resume reconstitution.
+    // arch-exempt: too_many_args, synthetic decorator carries the replay-payload store (§5.3 Stage 2a-i), plan #6175
+    #[allow(clippy::too_many_arguments)]
     fn new(
         inner: Arc<dyn LoopCapabilityPort>,
-        capabilities: Vec<LocalDevSyntheticCapability>,
+        capabilities: Vec<SyntheticCapability>,
         run_context: LoopRunContext,
+        fallback_user_id: ironclaw_host_api::UserId,
         input_resolver: Arc<dyn LoopCapabilityInputResolver>,
         result_writer: Arc<dyn LoopCapabilityResultWriter>,
         trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
+        replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
     ) -> Result<Self, AgentLoopHostError> {
         let mut capabilities_by_id = HashMap::new();
         let mut capability_ids_by_provider_tool_name = HashMap::new();
@@ -185,6 +230,7 @@ impl LocalDevSyntheticCapabilityPort {
         Ok(Self {
             inner,
             run_context,
+            fallback_user_id,
             input_resolver,
             result_writer,
             capabilities_by_id,
@@ -192,6 +238,7 @@ impl LocalDevSyntheticCapabilityPort {
             current_surface_version: StdMutex::new(None),
             provider_tool_call_registrations: StdMutex::new(HashMap::new()),
             trajectory_observer,
+            replay_payload_store,
         })
     }
 
@@ -216,7 +263,7 @@ impl LocalDevSyntheticCapabilityPort {
     fn synthetic_provider_call(
         &self,
         tool_call: &ProviderToolCall,
-    ) -> Option<(&CapabilityId, &LocalDevSyntheticCapability)> {
+    ) -> Option<(&CapabilityId, &SyntheticCapability)> {
         self.capability_ids_by_provider_tool_name
             .get(&tool_call.name)
             .and_then(|capability_id| self.capabilities_by_id.get_key_value(capability_id))
@@ -329,7 +376,7 @@ impl LocalDevSyntheticCapabilityPort {
 }
 
 #[async_trait]
-impl LoopCapabilityPort for LocalDevSyntheticCapabilityPort {
+impl LoopCapabilityPort for SyntheticCapabilityPort {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         let mut definitions = self.inner.tool_definitions()?;
         if self
@@ -443,7 +490,7 @@ impl LoopCapabilityPort for LocalDevSyntheticCapabilityPort {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         let Some(capability) = self.capabilities_by_id.get(&request.capability_id) else {
             return self.inner.invoke_capability(request).await;
         };
@@ -471,7 +518,29 @@ impl LoopCapabilityPort for LocalDevSyntheticCapabilityPort {
             request.activity_id,
         )?;
         let input = match request.approval_resume.as_ref() {
-            Some(resume) => resume.input.clone(),
+            // Approval resume: raw input no longer rides the loop-facing resume
+            // DTO (§5.3 Stage 2a-i). Reconstitute it from the host-private
+            // replay-payload store the synthetic gate raise persisted, keyed by
+            // the invocation id in the resume token. Fail CLOSED on a miss —
+            // never dispatch a resume with empty/re-resolved input.
+            Some(resume) => {
+                let invocation_id = invocation_id_from_resume_token(&resume.resume_token)?;
+                let replay_scope = super::local_dev_resource_scope_for_run(
+                    &self.run_context,
+                    &self.fallback_user_id,
+                );
+                self.replay_payload_store
+                    .load(&replay_scope, invocation_id)
+                    .await
+                    .map_err(replay_payload_store_error)?
+                    .ok_or_else(|| {
+                        AgentLoopHostError::new(
+                            AgentLoopHostErrorKind::Unavailable,
+                            "synthetic capability resume replay payload is unavailable",
+                        )
+                    })?
+                    .input
+            }
             None => {
                 self.input_resolver
                     .resolve_capability_input(&self.run_context, &request.input_ref)
@@ -479,7 +548,7 @@ impl LoopCapabilityPort for LocalDevSyntheticCapabilityPort {
             }
         };
         // The inner port's input hook is bypassed for synthetic capabilities, so
-        // emit the input event here — otherwise `LocalDevCapabilityIo` would stage
+        // emit the input event here — otherwise `StagedCapabilityIo` would stage
         // a result with no matching input and consumers would see an unpaired
         // event missing the tool arguments. Best-effort + panic-isolated, matching
         // the other observer call sites.
@@ -498,8 +567,9 @@ impl LoopCapabilityPort for LocalDevSyntheticCapabilityPort {
                 );
             }
         }
+        // Synthetic handlers emit the host `Resolution` directly (§5.3 Stage 2b).
         handler
-            .invoke(LocalDevSyntheticCapabilityInvocation {
+            .invoke(SyntheticCapabilityInvocation {
                 run_context: self.run_context.clone(),
                 request,
                 input,
@@ -511,20 +581,22 @@ impl LoopCapabilityPort for LocalDevSyntheticCapabilityPort {
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-        let mut outcomes = Vec::new();
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
+        let mut resolutions = Vec::new();
         let mut stopped_on_suspension = false;
         for invocation in request.invocations {
-            let outcome = self.invoke_capability(invocation).await?;
-            let is_suspension = outcome.is_suspension();
-            outcomes.push(outcome);
-            if request.stop_on_first_suspension && is_suspension {
+            let resolution = self.invoke_capability(invocation).await?;
+            // `parks()` is the batch-stop predicate (gates + suspensions), the
+            // Resolution-side successor to `CapabilityOutcome::is_suspension`.
+            let parks = resolution.parks();
+            resolutions.push(resolution);
+            if request.stop_on_first_suspension && parks {
                 stopped_on_suspension = true;
                 break;
             }
         }
-        Ok(CapabilityBatchOutcome {
-            outcomes,
+        Ok(ResolutionBatch {
+            resolutions,
             stopped_on_suspension,
         })
     }
@@ -538,6 +610,7 @@ mod tests {
     use ironclaw_loop_host::{
         CapabilityResultWrite, CapabilityWriteResult, EmptyLoopCapabilityPort,
     };
+    use ironclaw_turns::run_profile::resolution;
     use ironclaw_turns::{
         LoopResultRef, RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId,
         TurnScope,
@@ -608,7 +681,7 @@ mod tests {
     struct TestSyntheticHandler;
 
     #[async_trait]
-    impl LocalDevSyntheticCapabilityHandler for TestSyntheticHandler {
+    impl SyntheticCapabilityHandler for TestSyntheticHandler {
         fn validate_provider_arguments(
             &self,
             _arguments: &serde_json::Value,
@@ -618,8 +691,8 @@ mod tests {
 
         async fn invoke(
             &self,
-            _invocation: LocalDevSyntheticCapabilityInvocation,
-        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+            _invocation: SyntheticCapabilityInvocation,
+        ) -> Result<Resolution, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Internal,
                 "test handler should not be invoked",
@@ -632,7 +705,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl LocalDevSyntheticCapabilityHandler for CountingSyntheticHandler {
+    impl SyntheticCapabilityHandler for CountingSyntheticHandler {
         fn validate_provider_arguments(
             &self,
             _arguments: &serde_json::Value,
@@ -642,20 +715,17 @@ mod tests {
 
         async fn invoke(
             &self,
-            _invocation: LocalDevSyntheticCapabilityInvocation,
-        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+            _invocation: SyntheticCapabilityInvocation,
+        ) -> Result<Resolution, AgentLoopHostError> {
             self.invocations.fetch_add(1, Ordering::SeqCst);
-            Ok(CapabilityOutcome::Completed(
-                ironclaw_turns::run_profile::CapabilityResultMessage {
-                    result_ref: LoopResultRef::new("result:synthetic-handler")
-                        .expect("valid result ref"),
-                    safe_summary: "synthetic handler completed".to_string(),
-                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-                    terminate_hint: false,
-                    byte_len: 0,
-                    output_digest: None,
-                    model_observation: None,
-                },
+            Ok(resolution::completed(
+                LoopResultRef::new("result:synthetic-handler").expect("valid result ref"),
+                "synthetic handler completed".to_string(),
+                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                false,
+                0,
+                None,
+                None,
             ))
         }
     }
@@ -678,16 +748,16 @@ mod tests {
         )
     }
 
-    async fn synthetic_port() -> LocalDevSyntheticCapabilityPort {
+    async fn synthetic_port() -> SyntheticCapabilityPort {
         synthetic_port_with_io(Arc::new(TestSyntheticHandler), Arc::new(NoopResultWriter)).await
     }
 
     async fn synthetic_port_with_io(
-        handler: Arc<dyn LocalDevSyntheticCapabilityHandler>,
+        handler: Arc<dyn SyntheticCapabilityHandler>,
         result_writer: Arc<dyn LoopCapabilityResultWriter>,
-    ) -> LocalDevSyntheticCapabilityPort {
-        let capability = LocalDevSyntheticCapability::new(
-            LocalDevSyntheticCapabilityDescriptor::new(
+    ) -> SyntheticCapabilityPort {
+        let capability = SyntheticCapability::new(
+            SyntheticCapabilityDescriptor::new(
                 TEST_CAPABILITY_ID,
                 TEST_PROVIDER_TOOL_NAME,
                 "Synthetic test capability",
@@ -697,10 +767,11 @@ mod tests {
             .expect("descriptor"),
             handler,
         );
-        let port = LocalDevSyntheticCapabilityPort::new(
+        let port = SyntheticCapabilityPort::new(
             Arc::new(EmptyLoopCapabilityPort),
             vec![capability],
             run_context().await,
+            ironclaw_host_api::UserId::new("user-synthetic-test").expect("user id"),
             Arc::new(FixedInputResolver {
                 input_ref: CapabilityInputRef::new("input:synthetic-provider-call")
                     .expect("input ref"),
@@ -708,6 +779,9 @@ mod tests {
             }),
             result_writer,
             None,
+            Arc::new(ironclaw_capabilities::FilesystemReplayPayloadStore::new(
+                crate::wrap_scoped(Arc::new(ironclaw_filesystem::InMemoryBackend::new())),
+            )),
         )
         .expect("synthetic port");
         port.visible_capabilities(VisibleCapabilityRequest {})

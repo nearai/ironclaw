@@ -3,14 +3,47 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, AuthorizationCodeHash, CredentialAccountLabel,
     OAuthAuthorizationCode, PkceVerifierHash, PkceVerifierSecret,
 };
+use ironclaw_filesystem::{Fault, FaultInjecting, FilesystemOperation, InMemoryBackend};
 use ironclaw_host_api::{
     InvocationId, RuntimeHttpEgressError, RuntimeHttpEgressResponse, TenantId, UserId,
 };
-use ironclaw_secrets::{
-    InMemorySecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata,
-    SecretStoreError,
-};
+use ironclaw_secrets::FilesystemSecretStore;
 use std::sync::Mutex;
+
+/// The real `FilesystemSecretStore` over a plain recording [`FaultInjecting`]
+/// backend. Replaces the former whole-trait `RecordingSecretStore` observer
+/// fake: the store now runs its genuine encryption / CAS write / query path and
+/// tests assert on the backend traffic it produced instead of a bespoke
+/// `Mutex<Vec<_>>` inside a fake. Returns the store (passed as
+/// `Arc<dyn SecretStore>`) plus the fault handle for asserting backend ops.
+fn recording_secret_store() -> (
+    Arc<FilesystemSecretStore<FaultInjecting<InMemoryBackend>>>,
+    Arc<FaultInjecting<InMemoryBackend>>,
+) {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let store = Arc::new(FilesystemSecretStore::ephemeral_over(backend.clone()));
+    (store, backend)
+}
+
+/// The real store over a [`FaultInjecting`] backend armed to fail every secret
+/// write whose path carries `access` (the access-token handle). Replaces the
+/// former `RecordingSecretStore::failing_access_put` fake: the injected backend
+/// fault flows through the store's real `FilesystemError -> SecretStoreError`
+/// mapping, which the provider client surfaces as `BackendUnavailable`.
+fn secret_store_failing_access_put() -> (
+    Arc<FilesystemSecretStore<FaultInjecting<InMemoryBackend>>>,
+    Arc<FaultInjecting<InMemoryBackend>>,
+) {
+    let backend = Arc::new(
+        FaultInjecting::new(InMemoryBackend::new()).with_fault(
+            Fault::on(FilesystemOperation::WriteFile)
+                .path("access")
+                .backend("access write failed"),
+        ),
+    );
+    let store = Arc::new(FilesystemSecretStore::ephemeral_over(backend.clone()));
+    (store, backend)
+}
 
 #[test]
 fn authorization_code_body_adds_provider_resource_only_when_configured() {
@@ -48,11 +81,11 @@ async fn token_sink_preserves_refresh_token_when_access_write_fails() {
     // refresh handle and the rotated refresh token is valid. Deleting it would
     // turn a transient storage hiccup into a permanently unrecoverable credential
     // (forced re-auth). The next refresh attempt re-reads the stored refresh token.
-    let store = Arc::new(RecordingSecretStore::failing_access_put());
+    let (store, backend) = secret_store_failing_access_put();
     let client = HostOAuthProviderClient::new(
         notion_spec(),
         Arc::new(NoopEgress),
-        store.clone(),
+        store,
         Arc::new(NoopObligationHandler),
         OAuthClientId::new("client-id").unwrap(),
         OAuthRedirectUri::new("https://app.example/callback").unwrap(),
@@ -76,8 +109,9 @@ async fn token_sink_preserves_refresh_token_when_access_write_fails() {
         result.expect_err("access write failure").code(),
         ironclaw_auth::AuthErrorCode::BackendUnavailable
     );
-    assert!(
-        store.deleted_handles().is_empty(),
+    assert_eq!(
+        backend.count(FilesystemOperation::Delete),
+        0,
         "refresh token must NOT be deleted when access write fails (preserves recoverability)"
     );
 }
@@ -88,11 +122,11 @@ async fn google_exchange_fails_closed_when_response_omits_scope() {
         br#"{"access_token":"access-token","refresh_token":"refresh-token","expires_in":3600}"#
             .to_vec(),
     ));
-    let store = Arc::new(RecordingSecretStore::recording());
+    let (store, backend) = recording_secret_store();
     let client = HostOAuthProviderClient::new(
         google_spec(),
         egress,
-        store.clone(),
+        store,
         Arc::new(NoopObligationHandler),
         OAuthClientId::new("google-client").unwrap(),
         OAuthRedirectUri::new("https://app.example/callback").unwrap(),
@@ -111,7 +145,7 @@ async fn google_exchange_fails_closed_when_response_omits_scope() {
         error.code(),
         ironclaw_auth::AuthErrorCode::TokenExchangeFailed
     );
-    assert!(store.put_handles().is_empty());
+    assert_eq!(backend.count(FilesystemOperation::WriteFile), 0);
 }
 
 #[tokio::test]
@@ -129,7 +163,7 @@ async fn fallback_to_requested_stores_requested_scopes_when_provider_omits_scope
     let client = HostOAuthProviderClient::new(
         notion_spec(),
         egress,
-        Arc::new(RecordingSecretStore::recording()),
+        Arc::new(FilesystemSecretStore::ephemeral()),
         Arc::new(NoopObligationHandler),
         OAuthClientId::new("notion-client").unwrap(),
         OAuthRedirectUri::new("https://app.example/callback").unwrap(),
@@ -161,7 +195,7 @@ async fn exchange_maps_provider_5xx_to_retryable_backend_unavailable() {
     let client = HostOAuthProviderClient::new(
         google_spec(),
         egress,
-        Arc::new(RecordingSecretStore::recording()),
+        Arc::new(FilesystemSecretStore::ephemeral()),
         Arc::new(NoopObligationHandler),
         OAuthClientId::new("google-client").unwrap(),
         OAuthRedirectUri::new("https://app.example/callback").unwrap(),
@@ -193,7 +227,7 @@ async fn exchange_maps_malformed_200_body_to_token_exchange_failed() {
     let client = HostOAuthProviderClient::new(
         google_spec(),
         egress,
-        Arc::new(RecordingSecretStore::recording()),
+        Arc::new(FilesystemSecretStore::ephemeral()),
         Arc::new(NoopObligationHandler),
         OAuthClientId::new("google-client").unwrap(),
         OAuthRedirectUri::new("https://app.example/callback").unwrap(),
@@ -223,7 +257,7 @@ async fn exchange_request_includes_client_secret_and_derived_network_policy_host
     let client = HostOAuthProviderClient::new(
         google_spec(),
         egress.clone(),
-        Arc::new(RecordingSecretStore::recording()),
+        Arc::new(FilesystemSecretStore::ephemeral()),
         obligations.clone(),
         OAuthClientId::new("google-client").unwrap(),
         OAuthRedirectUri::new("https://app.example/callback").unwrap(),
@@ -271,7 +305,7 @@ async fn exchange_uses_dynamic_client_material_and_binds_refresh_secret() {
     let client = HostOAuthProviderClient::new_with_client_material(
         notion_spec(),
         egress.clone(),
-        Arc::new(InMemorySecretStore::new()),
+        Arc::new(FilesystemSecretStore::ephemeral()),
         Arc::new(NoopObligationHandler),
         material_source.clone(),
     )
@@ -304,7 +338,7 @@ async fn refresh_request_uses_stored_refresh_token_and_preserves_scope_fallback(
             br#"{"access_token":"new-access-token","refresh_token":"new-refresh-token","expires_in":3600}"#
                 .to_vec(),
         ));
-    let store = Arc::new(InMemorySecretStore::new());
+    let store = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = sample_scope();
     let refresh_secret = SecretHandle::new("google-refresh-input").unwrap();
     store
@@ -407,7 +441,6 @@ fn fake_digest(value: &str) -> String {
 }
 
 #[test]
-#[cfg(feature = "slack-v2-host-beta")]
 fn slack_authed_user_token_response_extracts_user_token_and_scopes() {
     use secrecy::ExposeSecret;
     let body = br#"{"ok":true,"access_token":"xoxb-bot-token","app_id":"A123","team":{"id":"T123"},"enterprise":{"id":"E123"},"authed_user":{"id":"U1","access_token":"xoxp-user-token","scope":"search:read,users:read","token_type":"user"}}"#;
@@ -427,7 +460,6 @@ fn slack_authed_user_token_response_extracts_user_token_and_scopes() {
 }
 
 #[test]
-#[cfg(feature = "slack-v2-host-beta")]
 fn slack_token_response_rejects_ok_false() {
     let body = br#"{"ok":false,"error":"invalid_code"}"#;
     let error = parse_token_response(body, TokenResponseShape::SlackAuthedUser)
@@ -439,7 +471,6 @@ fn slack_token_response_rejects_ok_false() {
 }
 
 #[test]
-#[cfg(feature = "slack-v2-host-beta")]
 fn slack_token_response_rejects_missing_authed_user() {
     let body = br#"{"ok":true,"access_token":"xoxb-bot-only"}"#;
     let error = parse_token_response(body, TokenResponseShape::SlackAuthedUser)
@@ -483,137 +514,6 @@ fn sample_scope() -> ResourceScope {
         mission_id: None,
         thread_id: None,
         invocation_id: InvocationId::new(),
-    }
-}
-
-struct RecordingSecretStore {
-    puts: Mutex<Vec<String>>,
-    deleted: Mutex<Vec<String>>,
-    fail_refresh_put: bool,
-    fail_access_put: bool,
-}
-
-impl RecordingSecretStore {
-    fn recording() -> Self {
-        Self {
-            puts: Mutex::new(Vec::new()),
-            deleted: Mutex::new(Vec::new()),
-            fail_refresh_put: false,
-            fail_access_put: false,
-        }
-    }
-
-    fn failing_access_put() -> Self {
-        Self {
-            puts: Mutex::new(Vec::new()),
-            deleted: Mutex::new(Vec::new()),
-            fail_refresh_put: false,
-            fail_access_put: true,
-        }
-    }
-
-    fn deleted_handles(&self) -> Vec<String> {
-        self.deleted.lock().unwrap().clone()
-    }
-
-    fn put_handles(&self) -> Vec<String> {
-        self.puts.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl SecretStore for RecordingSecretStore {
-    async fn put(
-        &self,
-        scope: ResourceScope,
-        handle: SecretHandle,
-        _material: SecretMaterial,
-        _expires_at: Option<ironclaw_host_api::Timestamp>,
-    ) -> Result<SecretMetadata, SecretStoreError> {
-        let handle_string = handle.as_str().to_string();
-        self.puts.lock().unwrap().push(handle_string.clone());
-        if self.fail_access_put && handle_string.contains("access") {
-            return Err(SecretStoreError::StoreUnavailable {
-                reason: "access write failed".to_string(),
-            });
-        }
-        if self.fail_refresh_put && handle_string.contains("refresh") {
-            return Err(SecretStoreError::StoreUnavailable {
-                reason: "refresh write failed".to_string(),
-            });
-        }
-        Ok(SecretMetadata {
-            scope,
-            handle,
-            expires_at: None,
-        })
-    }
-
-    async fn metadata(
-        &self,
-        _scope: &ResourceScope,
-        _handle: &SecretHandle,
-    ) -> Result<Option<SecretMetadata>, SecretStoreError> {
-        Ok(None)
-    }
-
-    async fn metadata_for_scope(
-        &self,
-        _scope: &ResourceScope,
-    ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
-        Ok(Vec::new())
-    }
-
-    async fn delete(
-        &self,
-        _scope: &ResourceScope,
-        handle: &SecretHandle,
-    ) -> Result<bool, SecretStoreError> {
-        self.deleted
-            .lock()
-            .unwrap()
-            .push(handle.as_str().to_string());
-        Ok(true)
-    }
-
-    async fn lease_once(
-        &self,
-        scope: &ResourceScope,
-        handle: &SecretHandle,
-    ) -> Result<SecretLease, SecretStoreError> {
-        Err(SecretStoreError::UnknownSecret {
-            scope: Box::new(scope.clone()),
-            handle: handle.clone(),
-        })
-    }
-
-    async fn consume(
-        &self,
-        scope: &ResourceScope,
-        lease_id: SecretLeaseId,
-    ) -> Result<SecretMaterial, SecretStoreError> {
-        Err(SecretStoreError::UnknownLease {
-            scope: Box::new(scope.clone()),
-            lease_id,
-        })
-    }
-
-    async fn revoke(
-        &self,
-        scope: &ResourceScope,
-        lease_id: SecretLeaseId,
-    ) -> Result<SecretLease, SecretStoreError> {
-        Err(SecretStoreError::UnknownLease {
-            scope: Box::new(scope.clone()),
-            lease_id,
-        })
-    }
-
-    async fn leases_for_scope(
-        &self,
-        _scope: &ResourceScope,
-    ) -> Result<Vec<SecretLease>, SecretStoreError> {
-        Ok(Vec::new())
     }
 }
 
@@ -830,7 +730,7 @@ async fn refresh_invalid_grant_maps_to_invalid_grant_error() {
         br#"{"error":"invalid_grant","error_description":"Token has been expired or revoked."}"#
             .to_vec(),
     ));
-    let store = Arc::new(InMemorySecretStore::new());
+    let store = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = sample_scope();
     let refresh_secret = SecretHandle::new("google-refresh-revoked").unwrap();
     store
@@ -881,7 +781,7 @@ async fn refresh_5xx_is_transient_and_does_not_classify_as_invalid_grant() {
         500,
         br#"{"error":"server_error"}"#.to_vec(),
     ));
-    let store = Arc::new(InMemorySecretStore::new());
+    let store = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = sample_scope();
     let refresh_secret = SecretHandle::new("google-refresh-5xx").unwrap();
     store
@@ -927,7 +827,7 @@ async fn refresh_error_body_token_string_does_not_appear_in_error_debug() {
     let body =
         br#"{"error":"invalid_grant","error_description":"Token eyJhbGciOiJSUzI1Ni_FAKE has been revoked."}"#;
     let egress = Arc::new(RecordingEgress::with_status(400, body.to_vec()));
-    let store = Arc::new(InMemorySecretStore::new());
+    let store = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = sample_scope();
     let refresh_secret = SecretHandle::new("google-refresh-redact-test").unwrap();
     store

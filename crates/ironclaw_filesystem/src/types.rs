@@ -267,7 +267,7 @@ impl BackendId {
 /// Coarse class of backend implementation behind a virtual mount.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackendKind {
-    LocalFilesystem,
+    DiskFilesystem,
     DatabaseFilesystem,
     MemoryDocuments,
     ObjectStore,

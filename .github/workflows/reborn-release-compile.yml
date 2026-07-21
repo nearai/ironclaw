@@ -1,0 +1,194 @@
+name: Reborn Release Binary Compile
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit SHA or ref to compile
+        required: false
+        type: string
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # #6160 owns this compile contract. Keep it independent from cargo-dist and
+  # Docker changes so this workflow does not depend on the #6122 migration.
+  # Keep the production LLM provider explicit even though Cargo defaults also
+  # enable it today, so a future default-feature change cannot weaken releases.
+  REBORN_RELEASE_FEATURES: libsql,postgres
+
+jobs:
+  compile:
+    name: ironclaw (Reborn, ${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      # Run every target so one release attempt reports the complete platform matrix.
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            binary: ironclaw
+            musl: false
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-22.04
+            binary: ironclaw
+            musl: true
+            cc_env: CC_x86_64_unknown_linux_musl=musl-gcc
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            binary: ironclaw
+            musl: false
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            binary: ironclaw
+            musl: true
+            cc_env: CC_aarch64_unknown_linux_musl=musl-gcc
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            binary: ironclaw
+            musl: false
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            binary: ironclaw
+            musl: false
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2022
+            binary: ironclaw.exe
+            musl: false
+    steps:
+      - name: Enable Windows long paths
+        if: runner.os == 'Windows'
+        run: git config --global core.longpaths true
+
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Install Rust target
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # The CLI embeds the WebChat v2 frontend during compilation, which requires Node/pnpm.
+      - name: Install Node.js for the embedded WebUI
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+        with:
+          node-version: "22"
+
+      - name: Enable pnpm
+        run: corepack enable pnpm
+
+      - name: Install musl toolchain
+        if: matrix.musl
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools binutils file
+
+      - name: Configure musl C compiler
+        if: matrix.musl
+        shell: bash
+        env:
+          CC_ENV: ${{ matrix.cc_env }}
+        run: |
+          echo "$CC_ENV" >> "$GITHUB_ENV"
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: reborn-release-${{ matrix.target }}
+
+      - id: build
+        name: Compile ironclaw
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          cargo build --locked --profile dist \
+            --package ironclaw \
+            --bin ironclaw \
+            --target "$TARGET" \
+            --features "$REBORN_RELEASE_FEATURES"
+
+      # Rust's musl targets provide a self-contained static CRT. Do not set the
+      # final Rust linker to musl-gcc: Ubuntu 22's wrapper mishandles x86_64
+      # static PIE and can leave an otherwise-static binary with a PT_INTERP.
+      - id: linkage
+        name: Verify musl portability
+        if: matrix.musl
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          BINARY: ${{ matrix.binary }}
+        run: |
+          binary_path="target/$TARGET/dist/$BINARY"
+          program_headers="$(readelf --program-headers --wide "$binary_path")"
+          dynamic_tags="$(readelf --dynamic --wide "$binary_path")"
+
+          if grep -Eq '^[[:space:]]*INTERP[[:space:]]' <<< "$program_headers"; then
+            echo "::error::$TARGET must not require a musl program interpreter"
+            echo "$program_headers"
+            exit 1
+          fi
+
+          if grep -q '(NEEDED)' <<< "$dynamic_tags"; then
+            echo "::error::$TARGET must not contain dynamic library dependencies"
+            echo "$dynamic_tags"
+            exit 1
+          fi
+
+          file "$binary_path"
+
+      - id: smoke
+        name: Smoke compiled binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          BINARY: ${{ matrix.binary }}
+        run: |
+          binary_path="target/$TARGET/dist/$BINARY"
+          "$binary_path" --version
+          "$binary_path" --help > /dev/null
+          "$binary_path" profile list --json > /dev/null
+
+      # These are preflight evidence only. The reborn-compile-* prefix keeps the
+      # existing release host's artifacts-* download pattern from publishing them.
+      - id: upload
+        name: Upload compile evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: reborn-compile-${{ matrix.target }}
+          path: "target/${{ matrix.target }}/dist/${{ matrix.binary }}"
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Summarize compile result
+        if: always()
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          RUNNER: ${{ matrix.runner }}
+          BINARY: ${{ matrix.binary }}
+          BUILD_RESULT: ${{ steps.build.outcome || 'not-run' }}
+          LINKAGE_RESULT: ${{ steps.linkage.outcome || 'not-run' }}
+          SMOKE_RESULT: ${{ steps.smoke.outcome || 'not-run' }}
+          UPLOAD_RESULT: ${{ steps.upload.outcome || 'not-run' }}
+        run: |
+          {
+            echo "### ironclaw (Reborn) compile"
+            echo
+            echo "- Target: \`$TARGET\`"
+            echo "- Runner: \`$RUNNER\`"
+            echo "- Features: \`$REBORN_RELEASE_FEATURES\`"
+            echo "- Binary: \`target/$TARGET/dist/$BINARY\`"
+            echo "- Build result: \`$BUILD_RESULT\`"
+            echo "- musl portability: \`$LINKAGE_RESULT\`"
+            echo "- Native CLI smoke: \`$SMOKE_RESULT\`"
+            echo "- Preflight evidence upload: \`$UPLOAD_RESULT\`"
+          } >> "$GITHUB_STEP_SUMMARY"

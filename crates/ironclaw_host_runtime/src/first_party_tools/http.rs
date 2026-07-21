@@ -577,7 +577,7 @@ mod tests {
 
     use crate::{
         BuiltinFirstPartyTools, FirstPartyCapabilityHandler, FirstPartyCapabilityRequest,
-        InvocationServices, LocalHostProcessPort, ToolCallHttpEgress,
+        HostProcessPort, InvocationServices, ToolCallHttpEgress,
     };
 
     use super::{HTTP_SAVE_CAPABILITY_ID, SAVE_RESPONSE_BODY_LIMIT_EXCEEDED_SUMMARY};
@@ -648,6 +648,7 @@ mod tests {
         FirstPartyCapabilityRequest {
             capability_id: CapabilityId::new(HTTP_SAVE_CAPABILITY_ID).unwrap(),
             scope: sample_scope(),
+            run_id: None,
             authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default(),
             mounts: Some(workspace_mount()),
@@ -656,7 +657,8 @@ mod tests {
                 runtime_http_egress: Some(runtime_http_egress),
                 tool_call_http_egress: Some(Arc::new(PanickingToolCallHttpEgress)),
                 runtime_secret_material_stager: None,
-                process: Arc::new(LocalHostProcessPort::new()),
+                process: Arc::new(HostProcessPort::new()),
+                post_edit_check: None,
                 secret_store: None,
                 audit_sink: None,
                 unsafe_raw_diagnostics_allowed: false,

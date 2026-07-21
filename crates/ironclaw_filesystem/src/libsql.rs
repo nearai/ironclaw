@@ -6,12 +6,12 @@ use ironclaw_host_api::VirtualPath;
 
 use crate::backend::EventRecord;
 use crate::db::{
-    child_path_like_pattern, direct_children, directory_append_error, directory_write_error,
-    escape_like_literal, escape_like_with_trailing_wildcard, infrastructure_libsql_error,
-    is_not_found, libsql_db_error, not_found, page_offset_to_i64, record_version_from_i64,
-    record_version_to_i64, sql_index_name, system_time_from_unix_seconds, virtual_path_prefixes,
+    child_path_like_pattern, descendant_path_range, direct_children, directory_append_error,
+    directory_write_error, escape_like_literal, escape_like_with_trailing_wildcard,
+    infrastructure_libsql_error, is_not_found, libsql_db_error, not_found, page_offset_to_i64,
+    record_version_from_i64, record_version_to_i64, sql_index_name, system_time_from_unix_seconds,
+    virtual_path_prefixes,
 };
-#[cfg(feature = "libsql")]
 use crate::libsql_pool::{LibSqlPool, PooledLibSqlConnection, build_libsql_pool};
 use crate::vector::{cosine_similarity, decode_embedding_blob};
 use crate::{
@@ -19,14 +19,18 @@ use crate::{
     FileType, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind, IndexSpec,
     IndexValue, Page, RecordKind, RecordVersion, RootFilesystem, SeqNo, VersionedEntry,
 };
-
-#[cfg(feature = "libsql")]
 /// libSQL-backed [`RootFilesystem`] storing file contents by virtual path.
 pub struct LibSqlRootFilesystem {
     pool: LibSqlPool,
 }
-
-#[cfg(feature = "libsql")]
+const LIBSQL_CHILD_ENTRIES_SQL: &str = "SELECT path, length(contents), is_dir \
+    FROM root_filesystem_entries \
+    WHERE path >= ?1 AND path < ?2 \
+    ORDER BY path";
+const LIBSQL_HAS_CHILD_ENTRY_SQL: &str = "SELECT 1 \
+    FROM root_filesystem_entries \
+    WHERE path >= ?1 AND path < ?2 \
+    LIMIT 1";
 impl LibSqlRootFilesystem {
     pub fn new(db: Arc<libsql::Database>) -> Self {
         Self {
@@ -111,8 +115,6 @@ impl LibSqlRootFilesystem {
         })
     }
 }
-
-#[cfg(feature = "libsql")]
 #[async_trait]
 impl RootFilesystem for LibSqlRootFilesystem {
     fn capabilities(&self) -> BackendCapabilities {
@@ -1097,8 +1099,6 @@ impl RootFilesystem for LibSqlRootFilesystem {
         }
     }
 }
-
-#[cfg(feature = "libsql")]
 async fn put_libsql_inner(
     conn: &libsql::Connection,
     path: &VirtualPath,
@@ -1233,8 +1233,6 @@ async fn put_libsql_inner(
         }
     }
 }
-
-#[cfg(feature = "libsql")]
 async fn create_dir_all_libsql_inner(
     conn: &libsql::Connection,
     path: &VirtualPath,
@@ -1276,8 +1274,6 @@ async fn create_dir_all_libsql_inner(
     }
     Ok(())
 }
-
-#[cfg(feature = "libsql")]
 async fn exact_entry_libsql(
     conn: &libsql::Connection,
     path: &VirtualPath,
@@ -1315,17 +1311,15 @@ async fn exact_entry_libsql(
         system_time_from_unix_seconds(updated_at_epoch),
     )))
 }
-
-#[cfg(feature = "libsql")]
 async fn has_child_entry_libsql(
     conn: &libsql::Connection,
     parent: &VirtualPath,
 ) -> Result<bool, FilesystemError> {
-    let pattern = child_path_like_pattern(parent);
+    let (prefix_lower, prefix_upper) = descendant_path_range(parent);
     let mut rows = conn
         .query(
-            "SELECT 1 FROM root_filesystem_entries WHERE path LIKE ?1 ESCAPE '!' LIMIT 1",
-            libsql::params![pattern],
+            LIBSQL_HAS_CHILD_ENTRY_SQL,
+            libsql::params![prefix_lower, prefix_upper],
         )
         .await
         .map_err(|error| libsql_db_error(parent.clone(), FilesystemOperation::Stat, error))?;
@@ -1335,8 +1329,6 @@ async fn has_child_entry_libsql(
         .map_err(|error| libsql_db_error(parent.clone(), FilesystemOperation::Stat, error))?
         .is_some())
 }
-
-#[cfg(feature = "libsql")]
 async fn current_version_libsql(
     conn: &libsql::Connection,
     path: &VirtualPath,
@@ -1367,7 +1359,6 @@ async fn current_version_libsql(
 /// Running both statements on the same connection inside the same
 /// transaction is what makes the classification atomic: nothing else can
 /// delete-then-recreate the row between the DELETE and the diagnosis read.
-#[cfg(feature = "libsql")]
 async fn delete_if_version_libsql_inner(
     conn: &libsql::Connection,
     path: &VirtualPath,
@@ -1400,7 +1391,6 @@ async fn delete_if_version_libsql_inner(
 
 /// Body of `run_migrations` extracted so the outer caller can wrap the
 /// whole sequence in BEGIN IMMEDIATE / COMMIT with one rollback path.
-#[cfg(feature = "libsql")]
 async fn run_libsql_migrations_inner(conn: &libsql::Connection) -> Result<(), FilesystemError> {
     conn.execute_batch(LIBSQL_ROOT_FILESYSTEM_SCHEMA)
         .await
@@ -1412,8 +1402,6 @@ async fn run_libsql_migrations_inner(conn: &libsql::Connection) -> Result<(), Fi
     ensure_libsql_sequences_table(conn).await?;
     Ok(())
 }
-
-#[cfg(feature = "libsql")]
 async fn ensure_libsql_root_is_dir_column(
     conn: &libsql::Connection,
 ) -> Result<(), FilesystemError> {
@@ -1440,8 +1428,6 @@ async fn ensure_libsql_root_is_dir_column(
     .map_err(|error| infrastructure_libsql_error(FilesystemOperation::CreateDirAll, error))?;
     Ok(())
 }
-
-#[cfg(feature = "libsql")]
 impl LibSqlRootFilesystem {
     async fn exact_entry(
         &self,
@@ -1488,11 +1474,11 @@ impl LibSqlRootFilesystem {
         operation: FilesystemOperation,
     ) -> Result<Vec<(VirtualPath, u64, FileType)>, FilesystemError> {
         let conn = self.connect().await?;
-        let pattern = child_path_like_pattern(parent);
+        let (prefix_lower, prefix_upper) = descendant_path_range(parent);
         let mut rows = conn
             .query(
-                "SELECT path, length(contents), is_dir FROM root_filesystem_entries WHERE path LIKE ?1 ESCAPE '!' ORDER BY path",
-                libsql::params![pattern],
+                LIBSQL_CHILD_ENTRIES_SQL,
+                libsql::params![prefix_lower, prefix_upper],
             )
             .await
             .map_err(|error| libsql_db_error(parent.clone(), operation, error))?;
@@ -1528,19 +1514,7 @@ impl LibSqlRootFilesystem {
 
     async fn has_child_entry(&self, parent: &VirtualPath) -> Result<bool, FilesystemError> {
         let conn = self.connect().await?;
-        let pattern = child_path_like_pattern(parent);
-        let mut rows = conn
-            .query(
-                "SELECT 1 FROM root_filesystem_entries WHERE path LIKE ?1 ESCAPE '!' LIMIT 1",
-                libsql::params![pattern],
-            )
-            .await
-            .map_err(|error| libsql_db_error(parent.clone(), FilesystemOperation::Stat, error))?;
-        Ok(rows
-            .next()
-            .await
-            .map_err(|error| libsql_db_error(parent.clone(), FilesystemOperation::Stat, error))?
-            .is_some())
+        has_child_entry_libsql(&conn, parent).await
     }
 
     /// Resolve every FTS index name covering `path` whose first key is
@@ -1726,8 +1700,6 @@ impl LibSqlRootFilesystem {
         Ok(out)
     }
 }
-
-#[cfg(feature = "libsql")]
 fn build_entry(
     path: &VirtualPath,
     body: Vec<u8>,
@@ -1755,8 +1727,6 @@ fn build_entry(
         indexed,
     })
 }
-
-#[cfg(feature = "libsql")]
 async fn ensure_libsql_records_columns(conn: &libsql::Connection) -> Result<(), FilesystemError> {
     add_column_if_missing(
         conn,
@@ -1784,32 +1754,24 @@ async fn ensure_libsql_records_columns(conn: &libsql::Connection) -> Result<(), 
     .await?;
     Ok(())
 }
-
-#[cfg(feature = "libsql")]
 async fn ensure_libsql_index_specs_table(conn: &libsql::Connection) -> Result<(), FilesystemError> {
     conn.execute_batch(LIBSQL_INDEX_SPECS_SCHEMA)
         .await
         .map_err(|error| infrastructure_libsql_error(FilesystemOperation::EnsureIndex, error))?;
     Ok(())
 }
-
-#[cfg(feature = "libsql")]
 async fn ensure_libsql_events_table(conn: &libsql::Connection) -> Result<(), FilesystemError> {
     conn.execute_batch(LIBSQL_EVENTS_SCHEMA)
         .await
         .map_err(|error| infrastructure_libsql_error(FilesystemOperation::Append, error))?;
     Ok(())
 }
-
-#[cfg(feature = "libsql")]
 async fn ensure_libsql_sequences_table(conn: &libsql::Connection) -> Result<(), FilesystemError> {
     conn.execute_batch(LIBSQL_SEQUENCES_SCHEMA)
         .await
         .map_err(|error| infrastructure_libsql_error(FilesystemOperation::ReserveSeq, error))?;
     Ok(())
 }
-
-#[cfg(feature = "libsql")]
 fn seq_no_from_i64(
     path: &VirtualPath,
     raw: i64,
@@ -1833,7 +1795,6 @@ fn seq_no_from_i64(
 /// produces a non-empty fragment — `Filter::All` becomes the literal
 /// `TRUE`, empty `And` becomes `TRUE`, empty `Or` becomes `FALSE`. This
 /// matches the in-memory backend's `all`/`any` semantics.
-#[cfg(feature = "libsql")]
 fn translate_filter(
     path: &VirtualPath,
     filter: &Filter,
@@ -1933,8 +1894,6 @@ fn translate_filter(
         }
     }
 }
-
-#[cfg(feature = "libsql")]
 fn translate_compound(
     path: &VirtualPath,
     children: &[Filter],
@@ -1961,8 +1920,6 @@ fn translate_compound(
     out.push(')');
     Ok(())
 }
-
-#[cfg(feature = "libsql")]
 fn collect_fts_keys(filter: &Filter, out: &mut Vec<String>) {
     match filter {
         Filter::Fts { key, .. } => {
@@ -1983,7 +1940,6 @@ fn collect_fts_keys(filter: &Filter, out: &mut Vec<String>) {
 /// All ancestor paths of `path`, **most specific first**, ending at `/`.
 /// Used to find an FTS index declared on a higher prefix that should still
 /// cover descendant queries.
-#[cfg(feature = "libsql")]
 fn ancestor_prefixes(path: &str) -> Vec<String> {
     let mut out = vec![path.trim_end_matches('/').to_string()];
     let mut cur = path.trim_end_matches('/').to_string();
@@ -1997,8 +1953,6 @@ fn ancestor_prefixes(path: &str) -> Vec<String> {
     }
     out
 }
-
-#[cfg(feature = "libsql")]
 fn bind_index_value(
     path: &VirtualPath,
     value: &IndexValue,
@@ -2028,7 +1982,6 @@ fn bind_index_value(
 /// JSON booleans rather than `"boolean"`, so the bool guard checks for
 /// either. A prior version emitted `= 'integer'` for `IndexValue::Bool`,
 /// which never matched a stored boolean and silently dropped every row.
-#[cfg(feature = "libsql")]
 fn index_value_json_type_guard(key: &IndexKey, value: &IndexValue) -> String {
     let key = key.as_str();
     match value {
@@ -2042,8 +1995,6 @@ fn index_value_json_type_guard(key: &IndexKey, value: &IndexValue) -> String {
         IndexValue::Bytes(_) => format!("json_type(indexed, '$.{key}') = 'text'"),
     }
 }
-
-#[cfg(feature = "libsql")]
 async fn add_column_if_missing(
     conn: &libsql::Connection,
     column: &str,
@@ -2069,8 +2020,6 @@ async fn add_column_if_missing(
         .map_err(|error| infrastructure_libsql_error(FilesystemOperation::CreateDirAll, error))?;
     Ok(())
 }
-
-#[cfg(feature = "libsql")]
 const LIBSQL_ROOT_FILESYSTEM_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS root_filesystem_entries (
     path TEXT PRIMARY KEY,
@@ -2082,8 +2031,6 @@ CREATE TABLE IF NOT EXISTS root_filesystem_entries (
 -- The PRIMARY KEY on `path` already provides a unique index for equality
 -- lookups, so no separate index is created.
 "#;
-
-#[cfg(feature = "libsql")]
 const LIBSQL_INDEX_SPECS_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS root_filesystem_index_specs (
     prefix TEXT NOT NULL,
@@ -2093,8 +2040,6 @@ CREATE TABLE IF NOT EXISTS root_filesystem_index_specs (
     PRIMARY KEY (prefix, name)
 );
 "#;
-
-#[cfg(feature = "libsql")]
 const LIBSQL_EVENTS_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS root_filesystem_events (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2105,8 +2050,6 @@ CREATE TABLE IF NOT EXISTS root_filesystem_events (
 CREATE INDEX IF NOT EXISTS idx_root_filesystem_events_path_seq
     ON root_filesystem_events(path, seq);
 "#;
-
-#[cfg(feature = "libsql")]
 const LIBSQL_SEQUENCES_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS root_filesystem_sequences (
     path TEXT PRIMARY KEY,
@@ -2137,6 +2080,51 @@ mod tests {
         let fs = LibSqlRootFilesystem::new(db);
         fs.run_migrations().await.unwrap();
         (fs, dir)
+    }
+
+    #[tokio::test]
+    async fn child_entries_query_uses_the_path_index_for_descendant_ranges() {
+        let (fs, _dir) = fresh_backend().await;
+        let parent = VirtualPath::new("/tenants/tenant/users/user/secrets/product-auth").unwrap();
+        let (prefix_lower, prefix_upper) = descendant_path_range(&parent);
+        assert_eq!(
+            prefix_lower,
+            "/tenants/tenant/users/user/secrets/product-auth/"
+        );
+        assert_eq!(
+            prefix_upper,
+            "/tenants/tenant/users/user/secrets/product-auth0"
+        );
+        let conn = fs.connect().await.unwrap();
+        for query in [LIBSQL_CHILD_ENTRIES_SQL, LIBSQL_HAS_CHILD_ENTRY_SQL] {
+            let explain_sql = format!("EXPLAIN QUERY PLAN {query}");
+            let mut rows = conn
+                .query(
+                    &explain_sql,
+                    libsql::params![prefix_lower.clone(), prefix_upper.clone()],
+                )
+                .await
+                .unwrap();
+            let mut details = Vec::new();
+            while let Some(row) = rows.next().await.unwrap() {
+                details.push(row.get::<String>(3).unwrap());
+            }
+
+            assert!(
+                details.iter().any(|detail| {
+                    detail.contains("SEARCH root_filesystem_entries USING")
+                        && detail.contains("path>?")
+                        && detail.contains("path<?")
+                }),
+                "descendant lookup must seek through the path index, plan: {details:?}"
+            );
+            assert!(
+                details
+                    .iter()
+                    .all(|detail| !detail.contains("SCAN root_filesystem_entries")),
+                "descendant lookup must not scan the complete path index, plan: {details:?}"
+            );
+        }
     }
 
     /// Drive the phase-2 materialize step directly with a synthesised

@@ -1,6 +1,6 @@
 //! Loop capability decorator for client-supplied ("external") tools.
 //!
-//! Mirrors [`super::synthetic_capability::LocalDevSyntheticCapabilityPort`] but,
+//! Mirrors [`super::synthetic_capability::SyntheticCapabilityPort`] but,
 //! instead of executing a synthetic capability, it *parks* the run and returns
 //! control to the API client. The caller tool definitions come from the
 //! per-run [`ExternalToolCatalog`] (registered by the OpenAI-compatible
@@ -23,18 +23,20 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityId, InvocationId, ProviderToolName, RuntimeKind};
+use ironclaw_host_api::{
+    CapabilityId, InvocationId, ProviderToolName, Resolution, ResolutionBatch, RuntimeKind,
+    Suspension,
+};
 use ironclaw_loop_host::{
     CapabilityResultWrite, DurablePersistence, LoopCapabilityInputResolver,
     LoopCapabilityResultWriter,
 };
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityBatchOutcome,
-    CapabilityCallCandidate, CapabilityInvocation, CapabilityOutcome, CapabilityProgress,
-    CapabilityResultMessage, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort,
-    LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReplay,
-    ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
-    VisibleCapabilitySurface,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityCallCandidate,
+    CapabilityInvocation, CapabilityProgress, CapabilitySurfaceVersion, ConcurrencyHint,
+    LoopCapabilityPort, LoopRunContext, ProviderToolCall, ProviderToolCallCapabilityIds,
+    ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
 };
 use ironclaw_turns::{ExternalToolCatalog, PendingExternalCall};
 use ironclaw_turns::{LoopGateRef, TurnRunId};
@@ -44,7 +46,7 @@ use ironclaw_turns::{LoopGateRef, TurnRunId};
 /// no external-tool capability could ever apply — the decorator itself is cheap
 /// and fetches specs lazily at surface-resolution time, so it is always safe to
 /// install.
-pub(super) fn wrap_local_dev_external_tools(
+pub(super) fn wrap_external_tools(
     inner: Arc<dyn LoopCapabilityPort>,
     run_context: LoopRunContext,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
@@ -180,7 +182,7 @@ impl ExternalToolCapabilityPort {
     async fn complete_or_park(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         if request.surface_version != self.surface_version()? {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::StaleSurface,
@@ -220,21 +222,22 @@ impl ExternalToolCapabilityPort {
                 .complete_call_for_input_ref(self.run_id, &input_ref)
                 .await
                 .map_err(catalog_error)?;
-            return Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
-                result_ref: write.result_ref,
-                safe_summary: "external tool output".to_string(),
-                progress: CapabilityProgress::MadeProgress,
-                terminate_hint: false,
-                byte_len: write.byte_len,
-                output_digest: write.output_digest,
-                model_observation: write.model_observation,
-            }));
+            return Ok(resolution::completed(
+                write.result_ref,
+                "external tool output".to_string(),
+                CapabilityProgress::MadeProgress,
+                false,
+                write.byte_len,
+                write.output_digest,
+                write.model_observation,
+            ));
         }
         // No output yet → park and return control to the API client.
-        Ok(CapabilityOutcome::ExternalToolPending {
-            gate_ref: external_tool_gate_ref(&call_id)?,
-            safe_summary: "awaiting client tool output".to_string(),
-        })
+        Ok(resolution::external_tool_pending(
+            external_tool_gate_ref(&call_id)?,
+            "awaiting client tool output".to_string(),
+        )
+        .resolution)
     }
 }
 
@@ -413,32 +416,39 @@ impl LoopCapabilityPort for ExternalToolCapabilityPort {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         if !self.owns_capability(&request.capability_id) {
             return self.inner.invoke_capability(request).await;
         }
+        // `complete_or_park` emits the host `Resolution` directly (§5.3 Stage 2b).
         self.complete_or_park(request).await
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-        let mut outcomes = Vec::new();
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
+        let mut resolutions = Vec::new();
         let mut stopped_on_suspension = false;
         for invocation in request.invocations {
-            let outcome = self.invoke_capability(invocation).await?;
-            let is_suspension = outcome.is_suspension();
-            let is_external_tool_pending =
-                matches!(&outcome, CapabilityOutcome::ExternalToolPending { .. });
-            outcomes.push(outcome);
-            if is_suspension && (request.stop_on_first_suspension || is_external_tool_pending) {
+            let resolution = self.invoke_capability(invocation).await?;
+            // `parks()` is the batch-stop predicate (gates + suspensions), the
+            // Resolution-side successor to `CapabilityOutcome::is_suspension`. An
+            // external-tool park still forces a stop even when the caller did not
+            // ask to stop on first suspension.
+            let parks = resolution.parks();
+            let is_external_tool_pending = matches!(
+                &resolution,
+                Resolution::Suspended(Suspension::ExternalTool(_))
+            );
+            resolutions.push(resolution);
+            if parks && (request.stop_on_first_suspension || is_external_tool_pending) {
                 stopped_on_suspension = true;
                 break;
             }
         }
-        Ok(CapabilityBatchOutcome {
-            outcomes,
+        Ok(ResolutionBatch {
+            resolutions,
             stopped_on_suspension,
         })
     }
@@ -522,7 +532,7 @@ mod tests {
         async fn invoke_capability(
             &self,
             _request: CapabilityInvocation,
-        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        ) -> Result<Resolution, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
                 "test inner port does not execute capabilities",
@@ -532,7 +542,7 @@ mod tests {
         async fn invoke_capability_batch(
             &self,
             _request: CapabilityBatchInvocation,
-        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        ) -> Result<ResolutionBatch, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
                 "test inner port does not execute capability batches",
@@ -838,7 +848,7 @@ mod tests {
             .expect("register external tools");
         let catalog: Arc<dyn ExternalToolCatalog> = catalog;
         (
-            wrap_local_dev_external_tools(
+            wrap_external_tools(
                 Arc::new(EmptyInnerPort),
                 run_context.clone(),
                 Arc::new(TestInputResolver),
@@ -854,7 +864,7 @@ mod tests {
     ) -> (Arc<dyn LoopCapabilityPort>, LoopRunContext) {
         let run_context = run_context().await;
         (
-            wrap_local_dev_external_tools(
+            wrap_external_tools(
                 Arc::new(EmptyInnerPort),
                 run_context.clone(),
                 Arc::new(TestInputResolver),
@@ -985,7 +995,7 @@ mod tests {
             .register(run_context.run_id, vec![external_tool_spec("get_weather")])
             .await
             .expect("register external tool");
-        let port = wrap_local_dev_external_tools(
+        let port = wrap_external_tools(
             Arc::new(EmptyInnerPort),
             run_context.clone(),
             Arc::new(TestInputResolver),

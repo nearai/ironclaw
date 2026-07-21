@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical LocalFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
 use std::{
     collections::{BTreeMap, HashMap},
     io::Write,
@@ -17,7 +18,7 @@ use ironclaw_events::InMemoryAuditSink;
 use ironclaw_extensions::ExtensionRegistry;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
-use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, RootFilesystem};
+use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem};
 use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -53,7 +54,7 @@ use ironclaw_network::{
     NetworkResolver, NetworkTransportRequest, NetworkUsage, PolicyNetworkHttpEgress,
 };
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
-use ironclaw_secrets::InMemorySecretStore;
+use ironclaw_secrets::FilesystemSecretStore;
 use ironclaw_triggers::{
     ClaimDueFireRequest, ClearActiveFireRequest, FireAcceptedRequest, InMemoryTriggerRepository,
     MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, MissingTriggerActiveRunLookup, TriggerError,
@@ -2422,7 +2423,6 @@ async fn builtin_rejects_oversized_inputs_before_dispatch() {
             capability_id(JSON_CAPABILITY_ID),
             ResourceEstimate::default(),
             json!({"operation": "validate", "data": "x".repeat(1_048_577)}),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -2441,7 +2441,6 @@ async fn builtin_rejects_oversized_outputs_before_return() {
             capability_id(JSON_CAPABILITY_ID),
             ResourceEstimate::default(),
             json!({"operation": "stringify", "data": {"items": vec!["xxxxxxxx"; 80_000]}}),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -3281,7 +3280,6 @@ async fn builtin_shell_invokes_copied_shell_core_through_host_runtime() {
             capability_id(SHELL_CAPABILITY_ID),
             ResourceEstimate::default(),
             json!({"command": "echo hello reborn"}),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -3870,7 +3868,6 @@ async fn builtin_json_rejects_v1_tool_output_stash_refs_without_leaking_input() 
                 "operation": "parse",
                 "source_tool_call_id": "call_RAW_SECRET_sk-provider-secret"
             }),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -4277,7 +4274,7 @@ async fn builtin_http_save_uses_strict_host_egress_when_tool_call_port_exists() 
     );
     let runtime = HostRuntimeServices::new(
         Arc::new(registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -6030,8 +6027,7 @@ async fn builtin_skill_install_url_path_accounts_wall_clock_time() {
             ),
             capability_id(SKILL_INSTALL_CAPABILITY_ID),
             ResourceEstimate::default(),
-            json!({"url": "https://raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/slow-helper/SKILL.md"}),
-            trust_decision(),
+            json!({"url": "https://raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/slow-helper/SKILL.md"})
         ))
         .await
         .unwrap();
@@ -6077,7 +6073,6 @@ async fn builtin_http_runtime_policy_denial_stops_before_egress() {
             capability_id(HTTP_CAPABILITY_ID),
             ResourceEstimate::default(),
             json!({"url": "https://api.example.test/v1/items"}),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -6087,12 +6082,14 @@ async fn builtin_http_runtime_policy_denial_stops_before_egress() {
     };
     assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
     assert_eq!(failure.capability_id, capability_id(HTTP_CAPABILITY_ID));
+    // Message is now the sanitized `DenyReason::PolicyDenied` form the kernel
+    // produces (see #6386): it conveys a policy denial and must not leak the
+    // internal `NetworkMode::` planner enum token.
+    let message = failure.message.as_deref().unwrap_or_default();
+    assert!(message.contains("denied"), "unexpected message: {message}");
     assert!(
-        failure
-            .message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("NetworkMode::Deny")
+        !message.contains("NetworkMode::"),
+        "message leaked internal planner enum token: {message}"
     );
     assert!(egress.requests().is_empty());
 }
@@ -6546,7 +6543,13 @@ async fn builtin_http_uses_tool_call_port_for_model_visible_partial_response() {
 }
 
 #[tokio::test]
-async fn builtin_http_returns_redirects_without_following_private_location() {
+async fn builtin_http_blocks_redirect_to_private_location() {
+    // #6140: redirect following is host-mediated and re-authorizes every hop.
+    // A 302 whose `Location` points at the link-local metadata address
+    // (169.254.169.254) is followed but denied by the private-IP policy at the
+    // second hop — before any request reaches it, so the SSRF target is never
+    // contacted. (Previously the egress did not follow and surfaced the raw 302;
+    // the SSRF outcome is preserved, now as an explicit block.)
     let transport = RecordingTransport::ok(NetworkHttpResponse {
         status: 302,
         headers: vec![(
@@ -6563,16 +6566,18 @@ async fn builtin_http_returns_redirects_without_following_private_location() {
     );
     let runtime = runtime_with_host_http_egress(network);
 
-    let output = invoke_with_context(
+    let error = invoke_with_context(
         &runtime,
         HTTP_CAPABILITY_ID,
         json!({"url": "https://api.example.test/v1/items"}),
         execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
     )
     .await
-    .unwrap();
+    .unwrap_err();
 
-    assert_eq!(output["status"], json!(302));
+    assert_eq!(error, RuntimeFailureKind::PolicyDenied);
+    // Only the initial request was attempted; the redirect's link-local target
+    // was rejected at re-authorization, never contacted.
     let recorded = requests.lock().unwrap();
     assert_eq!(recorded.len(), 1);
     assert_eq!(recorded[0].url, "https://api.example.test/v1/items");
@@ -7367,6 +7372,14 @@ async fn builtin_coding_blocks_relative_workspace_protected_paths() {
     let runtime = runtime_with_filesystem(filesystem);
     let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
 
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "./README.md"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
     let root_readme_write = invoke_with_context(
         &runtime,
         WRITE_FILE_CAPABILITY_ID,
@@ -7815,6 +7828,15 @@ async fn builtin_apply_patch_matches_exact_unique_and_replace_all_behavior() {
     let runtime = runtime_with_filesystem(filesystem);
     let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
 
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/code.rs"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
     let duplicate = invoke_with_context(
         &runtime,
         APPLY_PATCH_CAPABILITY_ID,
@@ -7857,13 +7879,46 @@ async fn builtin_apply_patch_matches_exact_unique_and_replace_all_behavior() {
 }
 
 #[tokio::test]
-async fn builtin_apply_patch_accepts_unique_match_without_prior_read() {
+async fn builtin_apply_patch_requires_prior_read_of_existing_file() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(temp.path().join("code.rs"), "old\n").unwrap();
 
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
     let runtime = runtime_with_filesystem(filesystem);
     let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    // Read-before-edit guard: an unread file cannot be patched, and the
+    // rejection tells the model how to recover.
+    let failure = invoke_failure_with_context(
+        &runtime,
+        APPLY_PATCH_CAPABILITY_ID,
+        json!({"path": "/workspace/code.rs", "old_string": "old", "new_string": "new"}),
+        context.clone(),
+    )
+    .await;
+    assert_eq!(failure.kind, RuntimeFailureKind::OperationFailed);
+    assert_eq!(
+        failure.message.as_deref(),
+        Some(
+            "apply_patch failed for path workspace code.rs: read it in full with read_file before \
+             editing it. Ranged reads (offset or limit) and default reads truncated at the line \
+             or byte cap do not count as having seen the whole file; a file too large to read in \
+             full cannot be edited with this tool"
+        )
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("code.rs")).unwrap(),
+        "old\n"
+    );
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/code.rs"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
 
     let patched = invoke_with_context(
         &runtime,
@@ -7930,15 +7985,29 @@ async fn builtin_apply_patch_rejects_when_old_string_is_no_longer_present() {
 
     std::fs::write(temp.path().join("code.rs"), "changed\n").unwrap();
 
-    let missing = invoke_with_context(
+    // Read the current content so the failure exercises the match path, not
+    // the read-before-edit guard.
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/code.rs"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let missing = invoke_failure_with_context(
         &runtime,
         APPLY_PATCH_CAPABILITY_ID,
         json!({"path": "/workspace/code.rs", "old_string": "old", "new_string": "new"}),
         context,
     )
-    .await
-    .unwrap_err();
-    assert_eq!(missing, RuntimeFailureKind::OperationFailed);
+    .await;
+    assert_eq!(missing.kind, RuntimeFailureKind::OperationFailed);
+    assert_eq!(
+        missing.message.as_deref(),
+        Some("apply_patch failed for path workspace code.rs: old_string matched 0 times")
+    );
 }
 
 #[tokio::test]
@@ -7969,7 +8038,6 @@ async fn builtin_missing_grant_denies_before_handler_dispatch() {
             capability_id(ECHO_CAPABILITY_ID),
             ResourceEstimate::default(),
             json!({"message":"must not run"}),
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -8008,7 +8076,6 @@ async fn invoke_with_context<R: HostRuntime + ?Sized>(
             capability_id(capability),
             ResourceEstimate::default(),
             input,
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -8031,7 +8098,6 @@ async fn invoke_failure_with_context<R: HostRuntime + ?Sized>(
             capability_id(capability),
             ResourceEstimate::default(),
             input,
-            trust_decision(),
         ))
         .await
         .unwrap();
@@ -8080,7 +8146,7 @@ fn failure_input_issue<'a>(
 }
 
 fn runtime() -> impl HostRuntime {
-    runtime_with_filesystem(LocalFilesystem::new())
+    runtime_with_filesystem(DiskFilesystem::new())
 }
 
 fn runtime_with_filesystem<F>(filesystem: F) -> impl HostRuntime
@@ -8106,7 +8172,7 @@ where
 
 fn runtime_with_trigger_repository(repository: Arc<dyn TriggerRepository>) -> impl HostRuntime {
     runtime_with_filesystem_policy_and_trigger_repository(
-        LocalFilesystem::new(),
+        DiskFilesystem::new(),
         local_dev_policy(),
         repository,
     )
@@ -8118,7 +8184,7 @@ fn runtime_with_trigger_repository_and_create_hook(
 ) -> impl HostRuntime {
     HostRuntimeServices::new(
         Arc::new(registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -8149,7 +8215,7 @@ fn runtime_with_trigger_repository_and_clock(
 ) -> impl HostRuntime {
     HostRuntimeServices::new(
         Arc::new(registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -8879,7 +8945,7 @@ where
 {
     HostRuntimeServices::new(
         Arc::new(registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -8905,7 +8971,7 @@ where
 {
     HostRuntimeServices::new(
         Arc::new(registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -8925,7 +8991,7 @@ where
 fn runtime_with_policy(policy: EffectiveRuntimePolicy) -> impl HostRuntime {
     HostRuntimeServices::new(
         Arc::new(registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -8990,7 +9056,7 @@ where
 {
     HostRuntimeServices::new(
         Arc::new(registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -9014,7 +9080,7 @@ where
 {
     HostRuntimeServices::new(
         Arc::new(registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         governor,
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -9034,7 +9100,7 @@ where
 {
     HostRuntimeServices::new(
         Arc::new(registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -9054,13 +9120,13 @@ where
 {
     HostRuntimeServices::new(
         Arc::new(registry()),
-        Arc::new(LocalFilesystem::new()),
+        Arc::new(DiskFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_secret_store(Arc::new(InMemorySecretStore::new()))
+    .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))
     .with_first_party_capabilities(Arc::new(
         builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
     ))
@@ -9123,8 +9189,8 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
     ]
 }
 
-fn mounted_filesystem(path: &Path, permissions: MountPermissions) -> (LocalFilesystem, MountView) {
-    let mut filesystem = LocalFilesystem::new();
+fn mounted_filesystem(path: &Path, permissions: MountPermissions) -> (DiskFilesystem, MountView) {
+    let mut filesystem = DiskFilesystem::new();
     filesystem
         .mount_local(
             VirtualPath::new("/projects/coding-pack").unwrap(),
@@ -9162,8 +9228,8 @@ fn memory_mounts(permissions: MountPermissions) -> MountView {
     .unwrap()
 }
 
-fn mounted_skill_filesystem(path: &Path) -> (LocalFilesystem, MountView) {
-    let mut filesystem = LocalFilesystem::new();
+fn mounted_skill_filesystem(path: &Path) -> (DiskFilesystem, MountView) {
+    let mut filesystem = DiskFilesystem::new();
     filesystem
         .mount_local(
             VirtualPath::new("/projects/skills").unwrap(),
@@ -9182,8 +9248,8 @@ fn mounted_skill_filesystem(path: &Path) -> (LocalFilesystem, MountView) {
 fn mounted_host_filesystem(
     path: &Path,
     permissions: MountPermissions,
-) -> (LocalFilesystem, MountView) {
-    let mut filesystem = LocalFilesystem::new();
+) -> (DiskFilesystem, MountView) {
+    let mut filesystem = DiskFilesystem::new();
     filesystem
         .mount_local(
             VirtualPath::new("/projects/host").unwrap(),

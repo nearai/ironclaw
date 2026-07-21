@@ -19,6 +19,7 @@ use super::{
     prompt_text::{PromptTextSurface, validate_model_safe_text, validate_prompt_text},
     runtime_context::LoopRuntimeContext,
     skill_snippet_model_message_ref,
+    snippet_ref::{sanitize_ref_suffix, stable_skill_snippet_display_hash},
 };
 
 const CAPABILITY_SURFACE_USAGE_POLICY: &str =
@@ -307,7 +308,7 @@ impl InstructionBundleBuilder {
                 skill_context.push(PromptSkillContextMetadata {
                     ordinal: skill_ordinal,
                     source_name: metadata.source_name.clone(),
-                    trust_level: metadata.trust_level.clone(),
+                    trust_level: metadata.trust_level,
                 });
                 skill_ordinal += 1;
             } else {
@@ -514,7 +515,7 @@ fn snippet_model_content_surface(
     snippet: &LoopContextSnippet,
 ) -> PromptTextSurface {
     match (section, snippet.metadata.as_ref()) {
-        ("skill", Some(metadata)) if metadata.trust_level == SkillTrustLevel::Trusted.as_str() => {
+        ("skill", Some(metadata)) if metadata.trust_level == SkillTrustLevel::Trusted => {
             PromptTextSurface::TrustedSkillInstruction
         }
         _ => PromptTextSurface::GenericModelContent,
@@ -880,45 +881,12 @@ fn validate_context_ref(value: String, label: &'static str) -> Result<String, Ag
     Ok(value)
 }
 
-fn sanitize_ref_suffix(value: &str) -> String {
-    let mut suffix = String::with_capacity(value.len().min(96));
-    for character in value.chars() {
-        if character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.') {
-            suffix.push(character);
-        } else {
-            suffix.push('.');
-        }
-        if suffix.len() >= 96 {
-            break;
-        }
-    }
-    let suffix = suffix.trim_matches('.');
-    if suffix.is_empty() {
-        "context".to_string()
-    } else {
-        suffix.to_string()
-    }
-}
-
 fn stable_ref_hash(section: &str, source_ref: &str, safe_summary: &str, ordinal: usize) -> u64 {
-    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x00000100000001B3;
-    let mut hash = FNV_OFFSET;
-    for bytes in [
-        section.as_bytes(),
-        &[0xFF],
-        source_ref.as_bytes(),
-        &[0xFF],
-        safe_summary.as_bytes(),
-        &[0xFF],
-        ordinal.to_string().as_bytes(),
-    ] {
-        for &byte in bytes {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(FNV_PRIME);
-        }
-    }
-    hash
+    // Preserves the legacy between-fields FNV-1a layout (0xFF separators between
+    // the four ordered fields) that this ref used before centralization, so
+    // model-visible refs do not rotate.
+    let ordinal = ordinal.to_string();
+    stable_skill_snippet_display_hash([section, source_ref, safe_summary, ordinal.as_str()])
 }
 
 fn feed_field(digest: &mut Sha256, label: &[u8], value: &[u8]) {

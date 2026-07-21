@@ -18,7 +18,6 @@ pub mod circuit_breaker;
 pub(crate) mod codex_auth;
 mod codex_chatgpt;
 pub mod config;
-pub mod costs;
 pub mod error;
 pub mod failover;
 pub(crate) mod gemini_oauth;
@@ -50,7 +49,7 @@ pub mod tool_schema;
 pub mod transcription;
 mod url_check;
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 
 #[cfg(test)]

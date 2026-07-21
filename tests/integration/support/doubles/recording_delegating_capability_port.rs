@@ -3,10 +3,11 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use ironclaw_host_api::{Resolution, ResolutionBatch};
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityCallCandidate,
-    CapabilityInvocation, CapabilityOutcome, LoopCapabilityPort, ProviderToolCall,
-    ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    AgentLoopHostError, CapabilityBatchInvocation, CapabilityCallCandidate, CapabilityInvocation,
+    LoopCapabilityPort, ProviderToolCall, ProviderToolDefinition, VisibleCapabilityRequest,
+    VisibleCapabilitySurface,
 };
 
 pub(crate) struct RecordingDelegatingCapabilityPort {
@@ -44,7 +45,7 @@ impl LoopCapabilityPort for RecordingDelegatingCapabilityPort {
     async fn invoke_capability(
         &self,
         request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+    ) -> Result<Resolution, AgentLoopHostError> {
         self.invocations.lock().unwrap().push(request.clone());
         self.inner.invoke_capability(request).await
     }
@@ -52,7 +53,7 @@ impl LoopCapabilityPort for RecordingDelegatingCapabilityPort {
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
         self.invocations
             .lock()
             .unwrap()

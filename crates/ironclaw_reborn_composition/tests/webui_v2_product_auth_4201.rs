@@ -6,8 +6,6 @@
 //! caller path (auth layer + body limit + rate limit + handler +
 //! `RebornProductAuthServices`) is exercised, not just the facade helpers.
 
-#![cfg(feature = "webui-v2-beta")]
-
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -36,9 +34,9 @@ use ironclaw_product_workflow::{
     WebUiSetupExtensionRequest, rejecting_reborn_services_error,
 };
 use ironclaw_reborn_composition::{
-    RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness,
-    RebornWebuiBundle, WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app,
+    RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness, RebornWebuiBundle,
 };
+use ironclaw_webui::{WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 

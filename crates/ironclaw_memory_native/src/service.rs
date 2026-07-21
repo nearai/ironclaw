@@ -682,37 +682,28 @@ fn truncate_to_char_boundary(value: &str, max_bytes: usize) -> &str {
 }
 
 fn validate_loop_safe_summary(value: String) -> Option<String> {
-    if value.is_empty()
-        || value.len() > MAX_SAFE_SUMMARY_BYTES
-        || value
-            .chars()
-            .any(|character| character == '\0' || character.is_control())
-        || value.chars().any(|character| {
-            matches!(
-                character,
-                '{' | '}' | '[' | ']' | '`' | '<' | '>' | '/' | '\\'
-            )
-        })
-    {
-        return None;
-    }
+    // Delegate the shared redaction core — length bound, control-char ban,
+    // payload/path delimiter ban, credential-marker denylist, and secret-like
+    // token detector — to the single canonical `ironclaw_host_api::SafeSummary`
+    // definition. The canonical detector covers every prefix the former local
+    // `sk-`-only check knew plus more, and its boundary scan also catches
+    // separator-joined keys (`memo_sk-…`) the old `_`/`.`-splitting tokenizer
+    // caught — so delegation never weakens memory-snippet secret rejection.
+    let value = ironclaw_host_api::SafeSummary::new(value)
+        .ok()?
+        .into_inner();
 
+    // Memory-snippet-specific extra bans: the memory context must not surface
+    // descriptive runtime/error vocabulary that the capability-outcome summary
+    // channel intentionally allows. Kept local so this validator stays no weaker
+    // than before delegation.
     let lower = value.to_ascii_lowercase();
     for forbidden in [
-        "access token",
-        "api key",
-        "api_key",
-        "apikey",
-        "authorization:",
-        "bearer ",
         "host path",
         "invalid api key",
         "invalid_api_key",
-        "password",
-        "passwd",
         "provider error",
         "raw runtime",
-        "secret",
         "stack trace",
         "tool input",
         "tool_input",
@@ -721,12 +712,6 @@ fn validate_loop_safe_summary(value: String) -> Option<String> {
         if lower.contains(forbidden) {
             return None;
         }
-    }
-    if lower
-        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
-        .any(|token| token.starts_with("sk-"))
-    {
-        return None;
     }
     Some(value)
 }
@@ -789,6 +774,30 @@ mod tests {
     fn sanitize_rejects_sensitive_markers() {
         let raw = "the api key is exposed";
         assert!(sanitize_snippet_text(raw).is_none());
+    }
+
+    /// Secret-like tokens must be dropped by the delegated canonical detector:
+    /// the `sk-` shape the former local check caught, a prefix only the
+    /// canonical list knows (`ghp_`), an AWS-shaped key, and — the delegation
+    /// regression — a key hidden behind a `_`/`.`-joined leading word, which
+    /// the old local tokenizer caught by splitting on those separators. Drives
+    /// `sanitize_snippet_text` → `validate_loop_safe_summary` →
+    /// `ironclaw_host_api::SafeSummary`.
+    #[test]
+    fn sanitize_rejects_secret_like_tokens_including_separator_joined() {
+        for raw in [
+            "token sk-abc123def456 found",
+            "ghp_0123456789abcdef noted",
+            "AKIA0123456789ABCDEF in use",
+            "memo_sk-abc123 saved",
+            "memo.sk-abc123 saved",
+            "backup.ghp_0123456789abcdef kept",
+        ] {
+            assert!(
+                sanitize_snippet_text(raw).is_none(),
+                "secret-like snippet must be dropped: {raw:?}"
+            );
+        }
     }
 
     /// A prompt-injection-like snippet must be dropped. The instruction-hijack

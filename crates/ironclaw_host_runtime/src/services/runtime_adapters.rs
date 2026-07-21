@@ -14,10 +14,10 @@ use super::{
     McpError, McpExecutionRequest, McpExecutor, McpInvocation, NetworkObligationPolicyStore,
     PlannerError, PreparedWitTool, ResourceGovernor, ResourceReservationId, ResourceScope,
     RootFilesystem, RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult,
-    RuntimeDispatchErrorKind, RuntimeKind, ScriptError, ScriptExecutionRequest, ScriptExecutor,
-    ScriptInvocation, SharedRuntimeHttpEgress, WasmError, WasmRuntimeCredentialProvider,
-    WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder, WitToolHost, WitToolRuntime,
-    WitToolRuntimeConfig, plan_capability, runtime_http_egress,
+    RuntimeDispatchErrorKind, RuntimeExecutor, RuntimeKind, RuntimeLane, ScriptError,
+    ScriptExecutionRequest, ScriptExecutor, ScriptInvocation, SharedRuntimeHttpEgress, WasmError,
+    WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder, WitToolHost,
+    WitToolRuntime, WitToolRuntimeConfig, plan_capability, runtime_http_egress,
 };
 use crate::{
     FirstPartyCapabilityError,
@@ -148,7 +148,11 @@ where
                         .as_ref()
                         .map(|reservation| reservation.id),
                 );
-                dispatch_error_for_runtime(request.descriptor.runtime, planner_error_kind(&error))
+                dispatch_error_for_runtime(
+                    request.descriptor.runtime,
+                    planner_error_kind(&error),
+                    Some(error.to_string()),
+                )
             })?;
         self.invocation_services
             .resolve(InvocationServicesResolutionRequest {
@@ -164,11 +168,134 @@ where
                         .as_ref()
                         .map(|reservation| reservation.id),
                 );
-                dispatch_error_for_runtime(request.descriptor.runtime, error.kind())
+                dispatch_error_for_runtime(
+                    request.descriptor.runtime,
+                    error.kind(),
+                    Some(error.to_string()),
+                )
             })?;
 
         self.inner.dispatch_json(request).await
     }
+}
+
+/// Closed runtime-lane router: the host-runtime-side [`RuntimeExecutor`] the
+/// dispatcher monomorphizes over (arch-simplification §4.2, `dyn`→enum collapse
+/// of the capability hot path). Each configured lane is a field; adding a
+/// [`RuntimeLane`] variant is a compile error until the two exhaustive matches
+/// below handle it (the §4.2 safety property).
+///
+/// Lanes are `Option` because composition wires them conditionally on which
+/// runtimes are configured — exactly as the prior per-lane registry populated
+/// only the configured `RuntimeKind`s. The dispatcher checks
+/// [`RuntimeExecutor::supports_lane`] before selecting a runtime, so an
+/// unconfigured lane fails closed with `MissingRuntimeBackend` and no
+/// reservation.
+pub(super) struct RuntimeLaneExecutor {
+    first_party: Option<FirstPartyRuntimeAdapter>,
+    wasm: Option<ServiceResolvedRuntimeAdapter<WasmRuntimeAdapter>>,
+    mcp: Option<ServiceResolvedRuntimeAdapter<McpRuntimeAdapter>>,
+    process: Option<ServiceResolvedRuntimeAdapter<ScriptRuntimeAdapter>>,
+}
+
+impl RuntimeLaneExecutor {
+    pub(super) fn new(
+        first_party: Option<FirstPartyRuntimeAdapter>,
+        wasm: Option<ServiceResolvedRuntimeAdapter<WasmRuntimeAdapter>>,
+        mcp: Option<ServiceResolvedRuntimeAdapter<McpRuntimeAdapter>>,
+        process: Option<ServiceResolvedRuntimeAdapter<ScriptRuntimeAdapter>>,
+    ) -> Self {
+        Self {
+            first_party,
+            wasm,
+            mcp,
+            process,
+        }
+    }
+}
+
+#[async_trait]
+impl<F, G> RuntimeExecutor<F, G> for RuntimeLaneExecutor
+where
+    F: RootFilesystem,
+    G: ResourceGovernor,
+{
+    fn supports_lane(&self, lane: RuntimeLane) -> bool {
+        match lane {
+            RuntimeLane::FirstParty => self.first_party.is_some(),
+            RuntimeLane::Wasm => self.wasm.is_some(),
+            RuntimeLane::Mcp => self.mcp.is_some(),
+            RuntimeLane::Process => self.process.is_some(),
+        }
+    }
+
+    // Hand-desugared (no `async fn`): the router RETURNS the lane adapter's
+    // already-boxed `#[async_trait]` future instead of wrapping it in a future
+    // of its own. The former `dyn RuntimeAdapter` registry contributed exactly
+    // one boxed future here; an `async fn` router would stack a second one on
+    // top of it, and the Reborn trace suite runs close enough to the 2 MiB
+    // test-thread stack limit that the extra layer overflowed it in CI
+    // (`reborn_trace_skill_management_first_party_tools_parity`). Zero-depth
+    // forwarding restores exact structural parity with the dyn registry while
+    // keeping the closed lane set.
+    #[allow(clippy::type_complexity)]
+    fn dispatch_json<'life0, 'life1, 'async_trait>(
+        &'life0 self,
+        lane: RuntimeLane,
+        request: RuntimeAdapterRequest<'life1, F, G>,
+    ) -> core::pin::Pin<
+        Box<
+            dyn core::future::Future<Output = Result<RuntimeAdapterResult, DispatchError>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        Self: 'async_trait,
+    {
+        match lane {
+            RuntimeLane::FirstParty => match self.first_party.as_ref() {
+                Some(adapter) => adapter.dispatch_json(request),
+                None => Box::pin(fail_unconfigured_lane(request)),
+            },
+            RuntimeLane::Wasm => match self.wasm.as_ref() {
+                Some(adapter) => adapter.dispatch_json(request),
+                None => Box::pin(fail_unconfigured_lane(request)),
+            },
+            RuntimeLane::Mcp => match self.mcp.as_ref() {
+                Some(adapter) => adapter.dispatch_json(request),
+                None => Box::pin(fail_unconfigured_lane(request)),
+            },
+            RuntimeLane::Process => match self.process.as_ref() {
+                Some(adapter) => adapter.dispatch_json(request),
+                None => Box::pin(fail_unconfigured_lane(request)),
+            },
+        }
+    }
+}
+
+/// Fail closed for an unconfigured lane. The dispatcher gates dispatch with
+/// `supports_lane`, so this arm is defensive; it still releases any prepared
+/// reservation rather than leaking it.
+async fn fail_unconfigured_lane<F, G>(
+    request: RuntimeAdapterRequest<'_, F, G>,
+) -> Result<RuntimeAdapterResult, DispatchError>
+where
+    F: RootFilesystem,
+    G: ResourceGovernor,
+{
+    release_adapter_reservation(
+        request.governor,
+        request
+            .resource_reservation
+            .as_ref()
+            .map(|reservation| reservation.id),
+    );
+    Err(DispatchError::MissingRuntimeBackend {
+        runtime: request.descriptor.runtime,
+    })
 }
 
 #[derive(Clone)]
@@ -210,6 +337,7 @@ where
             )
             .map_err(|error| DispatchError::Script {
                 kind: script_error_kind(&error),
+                model_visible_cause: Some(error.to_string()),
             })?;
 
         Ok(RuntimeAdapterResult {
@@ -270,6 +398,7 @@ where
                 },
                 error => DispatchError::Mcp {
                     kind: mcp_error_kind(&error),
+                    model_visible_cause: Some(error.to_string()),
                 },
             })?;
 
@@ -378,7 +507,7 @@ where
                 );
                 DispatchError::FirstParty {
                     kind,
-                    safe_summary: None,
+                    safe_summary: Some(error.to_string()),
                     detail: None,
                 }
             })?;
@@ -422,7 +551,7 @@ where
                 );
                 DispatchError::FirstParty {
                     kind: error.kind(),
-                    safe_summary: None,
+                    safe_summary: Some(error.to_string()),
                     detail: None,
                 }
             })?;
@@ -503,6 +632,7 @@ where
             capability_id: request.capability_id.clone(),
             scope: request.scope.clone(),
             authenticated_actor_user_id: request.authenticated_actor_user_id,
+            run_id: request.run_id,
             estimate: request.estimate,
             mounts: request.mounts,
             services,
@@ -738,9 +868,9 @@ impl WasmRuntimeAdapter {
     fn prepared_guard(
         &self,
     ) -> Result<MutexGuard<'_, HashMap<String, Arc<PreparedWitTool>>>, DispatchError> {
-        self.prepared.lock().map_err(|_| DispatchError::Wasm {
+        self.prepared.lock().map_err(|error| DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Executor,
-            safe_summary: None,
+            model_visible_cause: Some(error.to_string()),
         })
     }
 
@@ -781,9 +911,9 @@ where
         let module_path = match &request.package.manifest.runtime {
             ExtensionRuntime::Wasm { module } => module
                 .resolve_under(&request.package.root)
-                .map_err(|_| DispatchError::Wasm {
+                .map_err(|error| DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::Manifest,
-                    safe_summary: None,
+                    model_visible_cause: Some(error.to_string()),
                 })?,
             other => {
                 return Err(DispatchError::Wasm {
@@ -792,7 +922,7 @@ where
                     } else {
                         RuntimeDispatchErrorKind::ExtensionRuntimeMismatch
                     },
-                    safe_summary: None,
+                    model_visible_cause: None,
                 });
             }
         };
@@ -807,9 +937,9 @@ where
             .filesystem
             .read_file(&module_path)
             .await
-            .map_err(|_| DispatchError::Wasm {
+            .map_err(|error| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::FilesystemDenied,
-                safe_summary: None,
+                model_visible_cause: Some(error.to_string()),
             })?;
         let prepared = Arc::new(
             run_wasm_prepare_blocking(
@@ -820,7 +950,7 @@ where
             .await
             .map_err(|error| DispatchError::Wasm {
                 kind: wasm_error_kind(&error),
-                safe_summary: None,
+                model_visible_cause: Some(error.to_string()),
             })?,
         );
         let prepared = {
@@ -880,17 +1010,24 @@ where
 fn dispatch_error_for_runtime(
     runtime: RuntimeKind,
     kind: RuntimeDispatchErrorKind,
+    cause: Option<String>,
 ) -> DispatchError {
     match runtime {
-        RuntimeKind::Mcp => DispatchError::Mcp { kind },
-        RuntimeKind::Script => DispatchError::Script { kind },
+        RuntimeKind::Mcp => DispatchError::Mcp {
+            kind,
+            model_visible_cause: cause,
+        },
+        RuntimeKind::Script => DispatchError::Script {
+            kind,
+            model_visible_cause: cause,
+        },
         RuntimeKind::Wasm => DispatchError::Wasm {
             kind,
-            safe_summary: None,
+            model_visible_cause: cause,
         },
         RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::FirstParty {
             kind,
-            safe_summary: None,
+            safe_summary: cause,
             detail: None,
         },
     }

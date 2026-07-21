@@ -20,7 +20,7 @@ pub use slots::{
     ReplyAdmissionRejectionReason, ReplyAdmissionStrategyState, StopStrategyState,
 };
 
-use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId, ResourceEstimate};
+use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId};
 use ironclaw_turns::{
     LoopGateRef, LoopMessageRef, LoopResultRef,
     run_profile::{
@@ -151,8 +151,6 @@ pub struct PendingApprovalResume {
     pub effective_capability_ids: Vec<CapabilityId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_replay: Option<ProviderToolCallReplay>,
-    pub input: serde_json::Value,
-    pub estimate: ResourceEstimate,
     /// Set when the user denied this approval gate. The loop surfaces a
     /// model-visible failure for the parked call instead of re-dispatching.
     /// See the field-name note on `PendingAuthResume::disposition`.
@@ -175,8 +173,6 @@ impl PendingApprovalResume {
             resume_token: self.resume_token.clone(),
             correlation_id: self.correlation_id,
             input_ref: self.input_ref.clone(),
-            input: self.input.clone(),
-            estimate: self.estimate.clone(),
         }
     }
 }
@@ -185,9 +181,12 @@ impl PendingApprovalResume {
 ///
 /// Auth re-dispatch reuses the original invocation identifier when a
 /// `resume_token` is available, so any fingerprinted approval lease whose scope
-/// embeds that identifier can still be matched and claimed. Auth gates also
-/// checkpoint the runtime input replay when available because staged input refs
-/// may be consumed by the first dispatch or scoped to a prior loop run.
+/// embeds that identifier can still be matched and claimed. The runtime input a
+/// re-dispatch needs (staged input refs may be consumed by the first dispatch or
+/// scoped to a prior loop run) is no longer checkpointed here: the host persists
+/// it in the host-private replay-payload store at the fresh gate raise and
+/// reconstitutes it on resume, keyed by the invocation id in `resume_token`
+/// (arch-simplification §5.3 Stage 2a-i).
 ///
 /// The `prior_approval` field collapses the two formerly-independent
 /// `approval_request_id`/`correlation_id` options into a typed all-or-none
@@ -195,7 +194,7 @@ impl PendingApprovalResume {
 ///
 /// When `disposition` is `Some(Denied)`, the executor surfaces a model-visible
 /// gate-declined failure for the parked call and SKIPS re-dispatch; in that
-/// case `resume_token` and `replay` are unused.
+/// case `resume_token` is unused.
 ///
 /// Field-name note: each pending-resume type scopes `disposition` to ONE
 /// parked gate (auth or approval), so the short name is unambiguous within
@@ -225,12 +224,14 @@ pub struct PendingAuthResume {
     /// invocation had previously passed a one-shot approval gate.
     /// `approval_request_id` and `correlation_id` are always set as a pair;
     /// see [`AuthResumeApprovalIdentity`].
+    ///
+    /// Raw runtime input no longer rides the checkpoint: the host persists it in
+    /// the host-private replay-payload store at the fresh gate raise and
+    /// reconstitutes it on resume, keyed by the invocation id in `resume_token`
+    /// (arch-simplification §5.3 Stage 2a-i). This removes the charter-violating
+    /// raw-tool-args-in-state exposure (see this crate's `CLAUDE.md`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prior_approval: Option<AuthResumeApprovalIdentity>,
-    /// Runtime input captured when the auth gate blocked. This avoids resolving
-    /// a consumed or cross-run input ref after the user completes auth.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replay: Option<ironclaw_turns::run_profile::CapabilityAuthResumeReplay>,
     /// Set when the user denied this auth gate. The loop surfaces a
     /// model-visible failure for the parked call instead of re-dispatching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -863,8 +864,6 @@ mod tests {
             input_ref: CapabilityInputRef::new("input:source-approval").unwrap(),
             effective_capability_ids: vec![],
             provider_replay: None,
-            input: json!({ "k": "v" }),
-            estimate: ResourceEstimate::default(),
             disposition: None,
         });
         state.pending_auth_resume = Some(PendingAuthResume {
@@ -877,7 +876,6 @@ mod tests {
             resume_token: None,
             activity_id: CapabilityActivityId::new(),
             prior_approval: None,
-            replay: None,
             disposition: None,
         });
 
@@ -1049,7 +1047,6 @@ mod tests {
             resume_token: None,
             activity_id: CapabilityActivityId::new(),
             prior_approval: None,
-            replay: None,
             disposition: None,
         });
         let payload = encode_payload(&state);
@@ -1080,7 +1077,6 @@ mod tests {
             resume_token: None,
             activity_id: CapabilityActivityId::new(),
             prior_approval: None,
-            replay: None,
             disposition: Some(GateResumeDisposition::Denied),
         });
         let payload = encode_payload(&state);
@@ -1181,10 +1177,6 @@ mod tests {
                 approval_request_id,
                 correlation_id,
             }),
-            replay: Some(ironclaw_turns::run_profile::CapabilityAuthResumeReplay {
-                input: serde_json::json!({"query": "is:unread"}),
-                estimate: ResourceEstimate::default(),
-            }),
             disposition: None,
         });
 
@@ -1216,11 +1208,6 @@ mod tests {
             pa.correlation_id, correlation_id,
             "prior_approval.correlation_id must survive checkpoint encode/decode"
         );
-        assert_eq!(
-            pending.replay.as_ref().map(|replay| &replay.input),
-            Some(&serde_json::json!({"query": "is:unread"})),
-            "replay input must survive checkpoint encode/decode"
-        );
     }
 
     #[test]
@@ -1229,7 +1216,7 @@ mod tests {
         // The `Some(Denied)` disposition stamped on `pending_approval_resume` before the
         // capability stage must survive the checkpoint encode/decode cycle so that a
         // resumed run still sees the approval denial.
-        use ironclaw_host_api::{ApprovalRequestId, CorrelationId, ResourceEstimate};
+        use ironclaw_host_api::{ApprovalRequestId, CorrelationId};
         use ironclaw_turns::run_profile::CapabilityResumeToken;
 
         let context = test_run_context();
@@ -1250,8 +1237,6 @@ mod tests {
             input_ref: CapabilityInputRef::new("input:approval-denied").expect("valid input ref"),
             effective_capability_ids: vec![],
             provider_replay: None,
-            input: serde_json::json!({"extension_id": "slack"}),
-            estimate: ResourceEstimate::default(),
             disposition: Some(GateResumeDisposition::Denied),
         });
         let payload = encode_payload(&state);

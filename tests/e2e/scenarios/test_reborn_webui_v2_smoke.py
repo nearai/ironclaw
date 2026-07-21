@@ -1,20 +1,20 @@
 """Dedicated Reborn WebChat v2 smoke E2E.
 
 This proves the *new* Reborn surface end-to-end: the `ironclaw-reborn serve`
-binary (built with the `webui-v2-beta` feature) boots, serves the React SPA
-under `/v2/`, authenticates a bearer caller, and runs one text turn through the
+binary boots, serves the React SPA
+at `/`, authenticates a bearer caller, and runs one text turn through the
 `/api/webchat/v2/*` endpoints against the deterministic mock LLM.
 
 This is intentionally small and complements the Rust composition tests
-(`crates/ironclaw_reborn_composition/tests/webui_v2_e2e.rs`), which drive the
+(`crates/ironclaw_reborn_composition/tests/webui_v2_serve.rs`), which drive the
 same router in-process via `tower::ServiceExt::oneshot` with no real TCP
 listener or browser. It also differs from `test_reborn_gateway_smoke.py`, which
 exercises the legacy `ironclaw` web channel (`/api/chat/*`) under ENGINE_V2 —
 NOT the `ironclaw-reborn` binary or the v2 webUI.
 
 Wiring confirmed manually before this test existed:
-- The v2 SPA + `serve` subcommand are gated behind `webui-v2-beta` (transitively
-  enables `libsql`); the binary is `ironclaw-reborn`.
+- The v2 SPA + `serve` subcommand are compiled in unconditionally; the binary
+  is `ironclaw-reborn`.
 - LLM is selected via `$IRONCLAW_REBORN_HOME/config.toml` `[llm.default]`; the
   built-in `openai` provider (OpenAI `/v1/chat/completions`) is pointed at the
   mock with a `base_url` override and `api_key_env`.
@@ -186,13 +186,15 @@ async def _install_fake_v2_event_source(page) -> None:
 
 
 async def test_reborn_v2_serves_shell_and_gates_auth(reborn_v2_server, reborn_v2_browser):
-    """The SPA renders the authed shell with a token, and the login view without one."""
+    """The root-mounted SPA renders the authed shell and anonymous login view."""
     # With a valid token the authenticated chat shell renders.
     authed_ctx = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     authed_page = await authed_ctx.new_page()
     try:
-        await authed_page.goto(f"{reborn_v2_server}/v2/?token={REBORN_V2_AUTH_TOKEN}")
+        await authed_page.goto(f"{reborn_v2_server}/?token={REBORN_V2_AUTH_TOKEN}")
         await expect(authed_page.locator(SEL_V2["chat_composer"])).to_be_visible(timeout=15000)
+        await authed_page.wait_for_url(re.compile(r".*/chat(?:[?#].*)?$"), timeout=15000)
+        assert urlparse(authed_page.url).path == "/chat"
     finally:
         await authed_ctx.close()
 
@@ -200,10 +202,53 @@ async def test_reborn_v2_serves_shell_and_gates_auth(reborn_v2_server, reborn_v2
     anon_ctx = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     anon_page = await anon_ctx.new_page()
     try:
-        await anon_page.goto(f"{reborn_v2_server}/v2/")
+        await anon_page.goto(f"{reborn_v2_server}/")
         await expect(anon_page.locator(SEL_V2["login_token"])).to_be_visible(timeout=15000)
+        await anon_page.wait_for_url(re.compile(r".*/login(?:[?#].*)?$"), timeout=15000)
+        assert urlparse(anon_page.url).path == "/login"
     finally:
         await anon_ctx.close()
+
+
+async def test_reborn_v2_legacy_paths_redirect_to_root(
+    reborn_v2_server, reborn_v2_browser
+):
+    """Legacy `/v2` bookmarks redirect to canonical root paths without losing query data."""
+    async with httpx.AsyncClient(follow_redirects=False) as client:
+        for source, target in [
+            ("/v2", "/"),
+            ("/v2/", "/"),
+            ("/v2?login_ticket=ticket%2B1", "/?login_ticket=ticket%2B1"),
+            (
+                "/v2/settings/skills?token=old%2Btoken&tab=installed",
+                "/settings/skills?token=old%2Btoken&tab=installed",
+            ),
+        ]:
+            response = await client.get(f"{reborn_v2_server}{source}")
+            assert response.status_code == 307, source
+            assert response.headers.get("location") == target, source
+
+    # Follow a real legacy deep link in Chromium. The token shim removes only
+    # the credential query parameter; unrelated query data and the deep route
+    # must survive the server redirect and React Router bootstrap.
+    context = await reborn_v2_browser.new_context(
+        viewport={"width": 1280, "height": 720}
+    )
+    page = await context.new_page()
+    try:
+        await page.goto(
+            f"{reborn_v2_server}/v2/settings/skills"
+            f"?token={REBORN_V2_AUTH_TOKEN}&source=compat"
+        )
+        toggle = page.get_by_role(
+            "button", name=re.compile(r"^Default: (On|Off)$")
+        ).first
+        await expect(toggle).to_be_visible(timeout=15000)
+        parsed = urlparse(page.url)
+        assert parsed.path == "/settings/skills"
+        assert parse_qs(parsed.query) == {"source": ["compat"]}
+    finally:
+        await context.close()
 
 
 async def test_reborn_v2_light_theme_semantic_colors_have_readable_contrast(
@@ -243,7 +288,7 @@ async def test_reborn_v2_light_theme_semantic_colors_have_readable_contrast(
 
     origin = await reborn_v2_page.evaluate("location.origin")
     await reborn_v2_page.goto(
-        f"{origin}/v2/extensions/registry?token={REBORN_V2_AUTH_TOKEN}"
+        f"{origin}/extensions/registry?token={REBORN_V2_AUTH_TOKEN}"
     )
     install_button = reborn_v2_page.get_by_role("button", name="Install").first
     await expect(install_button).to_be_visible(timeout=15000)
@@ -280,7 +325,7 @@ async def test_reborn_v2_light_theme_semantic_colors_have_readable_contrast(
     )
 
     await reborn_v2_page.goto(
-        f"{origin}/v2/settings/skills?token={REBORN_V2_AUTH_TOKEN}"
+        f"{origin}/settings/skills?token={REBORN_V2_AUTH_TOKEN}"
     )
     toggle_name = re.compile(r"^Default: (On|Off)$")
     toggle = reborn_v2_page.get_by_role("button", name=toggle_name).first
@@ -301,6 +346,115 @@ async def test_reborn_v2_light_theme_semantic_colors_have_readable_contrast(
             await expect(
                 reborn_v2_page.get_by_role("button", name=original_label).first
             ).to_be_visible(timeout=15000)
+
+
+async def test_reborn_v2_appearance_theme_selection_persists(reborn_v2_page):
+    """Appearance controls update the live theme and preserve it across reloads."""
+    origin = await reborn_v2_page.evaluate("location.origin")
+    await reborn_v2_page.goto(
+        f"{origin}/v2/settings/appearance?token={REBORN_V2_AUTH_TOKEN}"
+    )
+
+    light_option = reborn_v2_page.locator(SEL_V2["appearance_theme_light"])
+    dark_option = reborn_v2_page.locator(SEL_V2["appearance_theme_dark"])
+    await expect(light_option).to_be_visible(timeout=15000)
+    await expect(dark_option).to_be_visible(timeout=15000)
+
+    await dark_option.click()
+    await expect(dark_option).to_be_checked()
+    await expect(reborn_v2_page.locator("html")).to_have_attribute(
+        "data-theme", "dark"
+    )
+    await reborn_v2_page.wait_for_function(
+        'localStorage.getItem("ironclaw:v2-theme") === "dark"'
+    )
+
+    await reborn_v2_page.reload()
+    dark_option = reborn_v2_page.locator(SEL_V2["appearance_theme_dark"])
+    await expect(dark_option).to_be_checked(timeout=15000)
+    await expect(reborn_v2_page.locator("html")).to_have_attribute(
+        "data-theme", "dark"
+    )
+
+    # Native radios provide the expected arrow-key selection and roving focus.
+    await dark_option.press("ArrowLeft")
+    light_option = reborn_v2_page.locator(SEL_V2["appearance_theme_light"])
+    await expect(light_option).to_be_checked()
+    await expect(reborn_v2_page.locator("html")).to_have_attribute(
+        "data-theme", "light"
+    )
+    await reborn_v2_page.wait_for_function(
+        'localStorage.getItem("ironclaw:v2-theme") === "light"'
+    )
+
+    await reborn_v2_page.reload()
+    light_option = reborn_v2_page.locator(SEL_V2["appearance_theme_light"])
+    await expect(light_option).to_be_checked(timeout=15000)
+    await expect(reborn_v2_page.locator("html")).to_have_attribute(
+        "data-theme", "light"
+    )
+
+
+async def test_reborn_v2_settings_import_rejects_unsupported_payloads(
+    reborn_v2_page,
+):
+    """Unsupported imports show one localized error and do not refresh settings."""
+    settings_reads = 0
+
+    def count_settings_reads(request) -> None:
+        nonlocal settings_reads
+        if (
+            request.method == "GET"
+            and urlparse(request.url).path == "/api/webchat/v2/settings/tools"
+        ):
+            settings_reads += 1
+
+    reborn_v2_page.on("request", count_settings_reads)
+    await reborn_v2_page.keyboard.press("Control+K")
+    command_palette = reborn_v2_page.get_by_role(
+        "dialog", name=SEL_V2["command_palette_dialog_name"]
+    )
+    await expect(command_palette).to_be_visible()
+    await command_palette.get_by_role(
+        "button", name=SEL_V2["command_palette_go_settings_name"]
+    ).click()
+    await reborn_v2_page.wait_for_url(
+        re.compile(r".*/settings(?:[?#].*)?$")
+    )
+    file_input = reborn_v2_page.locator(SEL_V2["settings_import_file"])
+    await expect(file_input).to_have_count(1, timeout=15000)
+    await reborn_v2_page.wait_for_timeout(250)
+    initial_settings_reads = settings_reads
+
+    for filename, settings in [
+        ("empty-settings.json", {}),
+        ("unsupported-settings.json", {"agent.model": "example-model"}),
+    ]:
+        await file_input.set_input_files(
+            {
+                "name": filename,
+                "mimeType": "application/json",
+                "buffer": json.dumps({"settings": settings}).encode(),
+            }
+        )
+        status = reborn_v2_page.get_by_role("status").filter(
+            has_text="No supported settings found in the selected file"
+        )
+        await expect(status).to_have_count(1)
+        await expect(status).to_have_text(
+            "No supported settings found in the selected file"
+        )
+        await expect(
+            reborn_v2_page.get_by_text("Settings imported", exact=True)
+        ).to_have_count(0)
+        await expect(
+            reborn_v2_page.get_by_text(re.compile(r"^Import failed:"))
+        ).to_have_count(0)
+
+    await reborn_v2_page.wait_for_timeout(250)
+    assert settings_reads == initial_settings_reads, (
+        "failed settings imports unexpectedly invalidated the settings query"
+    )
 
 
 async def test_reborn_v2_text_turn_persists(reborn_v2_server):
@@ -363,7 +517,7 @@ async def test_reborn_v2_ui_enter_submits_initial_and_follow_up_messages(
 async def test_reborn_v2_automation_rename_persists_from_ui(
     reborn_v2_server, reborn_v2_browser
 ):
-    """Creating an automation through chat can be renamed from /v2/automations."""
+    """Creating an automation through chat can be renamed from /automations."""
     label = f"ui-{uuid.uuid4().hex[:8]}"
     original_name = f"E2E rename original {label}"
     renamed_name = f"E2E rename updated {label}"
@@ -386,7 +540,7 @@ async def test_reborn_v2_automation_rename_persists_from_ui(
     context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
     try:
-        await page.goto(f"{reborn_v2_server}/v2/automations?token={REBORN_V2_AUTH_TOKEN}")
+        await page.goto(f"{reborn_v2_server}/automations?token={REBORN_V2_AUTH_TOKEN}")
         row_selector = SEL_V2["automation_row_for"].format(id=automation_id)
         row = page.locator(row_selector)
         await expect(row).to_be_visible(timeout=15000)
@@ -422,6 +576,135 @@ async def test_reborn_v2_automation_rename_persists_from_ui(
     async with httpx.AsyncClient(headers=headers) as client:
         renamed = await _wait_for_automation_named(client, reborn_v2_server, renamed_name)
         assert renamed["automation_id"] == automation_id
+
+
+async def test_reborn_v2_automation_action_error_toast_is_safe_dismissible_and_cleared_on_retry(
+    reborn_v2_server, reborn_v2_page
+):
+    """Automation mutation toasts stay visible, private, and clear on retry."""
+    automation_id = "11111111-2222-3333-4444-555555555555"
+    automation_name = "Safe action error regression"
+    raw_error = "postgres failed: secret_internal_automation_table"
+    attempt_count = 0
+    mutation_requests: list[tuple[str, str]] = []
+    console_messages: list[str] = []
+    retry_started = asyncio.Event()
+    release_retry = asyncio.Event()
+    retry_completed = asyncio.Event()
+
+    page = reborn_v2_page
+    page.on("console", lambda message: console_messages.append(message.text))
+
+    async def handle_automations(route) -> None:
+        nonlocal attempt_count
+        if route.request.method == "GET":
+            await route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "scheduler_enabled": True,
+                        "automations": [
+                            {
+                                "automation_id": automation_id,
+                                "name": automation_name,
+                                "source": {
+                                    "type": "schedule",
+                                    "cron": "0 9 * * *",
+                                    "timezone": "UTC",
+                                },
+                                "state": "active",
+                                "next_run_at": "2026-07-18T09:00:00Z",
+                                "recent_runs": [],
+                            }
+                        ],
+                    }
+                ),
+            )
+            return
+
+        mutation_requests.append(
+            (route.request.method, urlparse(route.request.url).path)
+        )
+        attempt_count += 1
+        if attempt_count <= 2:
+            await route.fulfill(
+                status=500,
+                content_type="text/plain",
+                body=raw_error,
+            )
+            return
+
+        retry_started.set()
+        await release_retry.wait()
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"updated": True}),
+        )
+        retry_completed.set()
+
+    await page.route("**/api/webchat/v2/automations**", handle_automations)
+    row_selector = SEL_V2["automation_row_for"].format(id=automation_id)
+    error_toast = page.locator(SEL_V2["toast"]).filter(
+        has_text="Unable to update the automation. Please try again."
+    )
+
+    async def submit_rename(name: str) -> None:
+        row = page.locator(row_selector)
+        await expect(row).to_be_visible(timeout=15000)
+        await row.locator(
+            SEL_V2["automation_name_button_for"].format(id=automation_id)
+        ).click()
+        await page.locator(SEL_V2["automation_rename_button"]).click()
+        rename_input = page.locator(SEL_V2["automation_rename_input"])
+        await rename_input.fill(name)
+        await page.locator(SEL_V2["automation_rename_save"]).click()
+
+    try:
+        await page.goto(f"{reborn_v2_server}/automations?token={REBORN_V2_AUTH_TOKEN}")
+
+        await submit_rename("First failed rename")
+        await expect(error_toast).to_be_visible(timeout=10000)
+        await expect(error_toast).to_have_text(
+            "Unable to update the automation. Please try again."
+        )
+        await expect(error_toast).not_to_contain_text(raw_error)
+        assert not any(raw_error in message for message in console_messages)
+        await error_toast.get_by_role("button", name="Dismiss").click()
+        await expect(error_toast).to_have_count(0, timeout=3000)
+
+        pause_button = page.get_by_role(
+            "button", name=f"Pause: {automation_name}", exact=True
+        )
+        await pause_button.click()
+        await expect(error_toast).to_be_visible(timeout=10000)
+        assert not any(raw_error in message for message in console_messages)
+
+        await pause_button.click()
+        await asyncio.wait_for(retry_started.wait(), timeout=10)
+        await expect(error_toast).to_have_count(0)
+
+        release_retry.set()
+        await asyncio.wait_for(retry_completed.wait(), timeout=10)
+        await expect(error_toast).to_have_count(0)
+        assert not any(raw_error in message for message in console_messages)
+        assert mutation_requests == [
+            (
+                "POST",
+                f"/api/webchat/v2/automations/{automation_id}",
+            ),
+            (
+                "POST",
+                f"/api/webchat/v2/automations/{automation_id}/pause",
+            ),
+            (
+                "POST",
+                f"/api/webchat/v2/automations/{automation_id}/pause",
+            ),
+        ]
+    finally:
+        release_retry.set()
 
 
 async def test_reborn_v2_automation_failed_run_actions_are_clickable(
@@ -556,7 +839,7 @@ async def test_reborn_v2_automation_failed_run_actions_are_clickable(
         )
 
     try:
-        await page.goto(f"{reborn_v2_server}/v2/automations?token={REBORN_V2_AUTH_TOKEN}")
+        await page.goto(f"{reborn_v2_server}/automations?token={REBORN_V2_AUTH_TOKEN}")
         await select_automation()
 
         open_run = page.locator(SEL_V2["automation_run_open"]).first
@@ -565,14 +848,14 @@ async def test_reborn_v2_automation_failed_run_actions_are_clickable(
         await expect(logs).to_be_enabled()
 
         await open_run.click()
-        await page.wait_for_url(f"**/v2/chat/{thread_id}", timeout=10000)
+        await page.wait_for_url(f"**/chat/{thread_id}", timeout=10000)
 
-        await page.goto(f"{reborn_v2_server}/v2/automations?token={REBORN_V2_AUTH_TOKEN}")
+        await page.goto(f"{reborn_v2_server}/automations?token={REBORN_V2_AUTH_TOKEN}")
         await select_automation()
         await page.locator(SEL_V2["automation_run_logs"]).first.click()
         await asyncio.wait_for(logs_requested.wait(), timeout=10)
 
-        assert "/v2/logs" in page.url
+        assert "/logs" in page.url
         first_query = requested_log_queries[0]
         assert first_query.get("thread_id") == [thread_id], first_query
         assert first_query.get("run_id") == [run_id], first_query
@@ -670,7 +953,7 @@ async def test_reborn_v2_disconnected_run_shows_status_and_stops_typing(
     await page.route(f"**/api/webchat/v2/threads/{thread_id}/messages", handle_send)
 
     try:
-        await page.goto(f"{reborn_v2_server}/v2/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}")
+        await page.goto(f"{reborn_v2_server}/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}")
         composer = page.locator(SEL_V2["chat_composer"])
         await expect(composer).to_be_visible(timeout=15000)
         connection_status = page.locator(SEL_V2["connection_status"])
@@ -804,7 +1087,7 @@ async def test_reborn_v2_approval_gate_blocks_composer_send(
     await page.route(f"**/api/webchat/v2/threads/{thread_id}/messages", handle_send)
 
     try:
-        await page.goto(f"{reborn_v2_server}/v2/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}")
+        await page.goto(f"{reborn_v2_server}/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}")
         await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(timeout=15000)
         await expect(page.locator(SEL_V2["msg_user"]).first).to_contain_text(
             "trigger approval", timeout=15000
@@ -939,7 +1222,7 @@ async def test_reborn_v2_unscoped_activity_stays_with_previous_reply(
     await page.route(f"**/api/webchat/v2/threads/{thread_id}/messages", handle_send)
 
     try:
-        await page.goto(f"{reborn_v2_server}/v2/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}")
+        await page.goto(f"{reborn_v2_server}/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}")
         composer = page.locator(SEL_V2["chat_composer"])
         await expect(composer).to_be_visible(timeout=15000)
 
@@ -1139,7 +1422,7 @@ async def test_reborn_v2_logs_page_passes_scope_to_api_and_renders_context(
 
     await reborn_v2_page.route("**/api/webchat/v2/operator/logs**", handle_operator_logs)
     await reborn_v2_page.goto(
-        f"{reborn_v2_server}/v2/logs"
+        f"{reborn_v2_server}/logs"
         "?thread_id=thread-ui&run_id=run-ui&tool_call_id=tool-call-ui&source=slack"
     )
 
@@ -1255,7 +1538,7 @@ async def test_reborn_v2_logs_deep_link_loads_scoped_conversation_on_first_open(
 
     try:
         await page.goto(
-            f"{reborn_v2_server}/v2/logs"
+            f"{reborn_v2_server}/logs"
             "?thread_id=thread-direct&run_id=run-direct"
             f"&token={REBORN_V2_AUTH_TOKEN}"
         )
@@ -1334,7 +1617,7 @@ async def test_reborn_v2_thread_delete_uses_shared_confirmation_dialog(
 
     reborn_v2_page.on("dialog", dismiss_native_dialog)
     await reborn_v2_page.goto(
-        f"{reborn_v2_server}/v2/chat?token={REBORN_V2_AUTH_TOKEN}"
+        f"{reborn_v2_server}/chat?token={REBORN_V2_AUTH_TOKEN}"
     )
     delete_button = reborn_v2_page.locator(
         SEL_V2["thread_delete_for"].format(id=thread_id)
@@ -1394,7 +1677,7 @@ async def test_reborn_v2_ui_delete_removes_sidebar_thread_without_refetch(
             refetch_finished.set()
 
     try:
-        await page.goto(f"{reborn_v2_server}/v2/?token={REBORN_V2_AUTH_TOKEN}")
+        await page.goto(f"{reborn_v2_server}/?token={REBORN_V2_AUTH_TOKEN}")
         await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(timeout=15000)
 
         keep_button = page.locator(SEL_V2["thread_delete_for"].format(id=keep_id))
@@ -1457,6 +1740,158 @@ async def test_reborn_v2_timeline_pagination(reborn_v2_server):
         assert page1_seq.isdisjoint(page2_seq), (
             f"paged messages must not overlap: page1={page1_seq} page2={page2_seq}"
         )
+
+
+async def test_reborn_v2_loading_older_messages_preserves_viewport(
+    reborn_v2_server, reborn_v2_browser
+):
+    """Prepending a timeline page keeps the previously visible message anchored."""
+    thread_id = "thread-history-scroll-anchor"
+    first_current_sequence = 21
+    context = await reborn_v2_browser.new_context(
+        viewport={"width": 1280, "height": 720}
+    )
+    page = await context.new_page()
+    await _install_fake_v2_event_source(page)
+
+    async def fulfill_json(route, body) -> None:
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(body),
+        )
+
+    async def handle_session(route) -> None:
+        await fulfill_json(
+            route,
+            {
+                "tenant_id": "reborn-v2-e2e",
+                "user_id": USER_ID,
+                "capabilities": {},
+                "features": {"reborn_projects": False},
+                "attachments": {
+                    "accept": ["text/plain"],
+                    "max_files_per_message": 4,
+                    "max_bytes_per_file": 1048576,
+                    "max_bytes_per_message": 4194304,
+                },
+            },
+        )
+
+    async def handle_threads(route) -> None:
+        await fulfill_json(
+            route,
+            {
+                "threads": [
+                    {
+                        "thread_id": thread_id,
+                        "title": "History scroll anchor regression",
+                        "created_at": "2026-07-20T00:00:00Z",
+                        "updated_at": "2026-07-20T00:00:00Z",
+                    }
+                ],
+                "next_cursor": None,
+            },
+        )
+
+    def timeline_message(sequence: int) -> dict:
+        prefix = (
+            "Current anchor message"
+            if sequence == first_current_sequence
+            else "Timeline message"
+        )
+        return {
+            "message_id": f"history-{sequence}",
+            "kind": "user",
+            "content": f"{prefix} {sequence}",
+            "sequence": sequence,
+            "status": "accepted",
+            "created_at": f"2026-07-20T00:{sequence:02d}:00Z",
+        }
+
+    async def handle_timeline(route) -> None:
+        query = parse_qs(urlparse(route.request.url).query)
+        if query.get("cursor"):
+            await fulfill_json(
+                route,
+                {
+                    "messages": [timeline_message(i) for i in range(1, 21)],
+                    "next_cursor": None,
+                },
+            )
+            return
+        await fulfill_json(
+            route,
+            {
+                "messages": [timeline_message(i) for i in range(21, 41)],
+                "next_cursor": json.dumps(
+                    {"before_message_sequence": first_current_sequence}
+                ),
+            },
+        )
+
+    await page.route("**/api/webchat/v2/session", handle_session)
+    await page.route("**/api/webchat/v2/threads", handle_threads)
+    await page.route(
+        f"**/api/webchat/v2/threads/{thread_id}/timeline**", handle_timeline
+    )
+
+    try:
+        await page.goto(
+            f"{reborn_v2_server}/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        viewport = page.locator(SEL_V2["message_list_scroll"])
+        anchor = page.locator(SEL_V2["msg_user"]).filter(
+            has_text=f"Current anchor message {first_current_sequence}"
+        )
+        await expect(anchor).to_be_visible(timeout=15000)
+        await expect(
+            page.locator(SEL_V2["message_list_load_older"])
+        ).to_be_attached()
+
+        before_top = await page.evaluate(
+            """({ viewportSelector, loadSelector, anchorText }) => {
+              const viewport = document.querySelector(viewportSelector);
+              const loadButton = document.querySelector(loadSelector);
+              const anchor = Array.from(
+                document.querySelectorAll('[data-testid="msg-user"]')
+              ).find((node) => node.textContent.includes(anchorText));
+              if (!viewport || !loadButton || !anchor) {
+                throw new Error('history scroll fixture did not render');
+              }
+              viewport.scrollTop = 0;
+              const top = anchor.getBoundingClientRect().top
+                - viewport.getBoundingClientRect().top;
+              loadButton.click();
+              return top;
+            }""",
+            {
+                "viewportSelector": SEL_V2["message_list_scroll"],
+                "loadSelector": SEL_V2["message_list_load_older"],
+                "anchorText": f"Current anchor message {first_current_sequence}",
+            },
+        )
+
+        await expect(page.get_by_text("Timeline message 1", exact=True)).to_be_visible(
+            timeout=10000
+        )
+        after_top = await anchor.evaluate(
+            """(node, viewportSelector) => {
+              const viewport = document.querySelector(viewportSelector);
+              if (!viewport) throw new Error('message viewport disappeared');
+              return node.getBoundingClientRect().top
+                - viewport.getBoundingClientRect().top;
+            }""",
+            SEL_V2["message_list_scroll"],
+        )
+
+        assert abs(after_top - before_top) <= 2, (
+            "the previously visible message moved after history prepend: "
+            f"before={before_top}, after={after_top}"
+        )
+        assert await viewport.evaluate("node => node.scrollTop") > 0
+    finally:
+        await context.close()
 
 
 async def test_reborn_v2_sse_streams_run_lifecycle(reborn_v2_server):

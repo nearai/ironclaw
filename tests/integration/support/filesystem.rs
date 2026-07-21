@@ -7,8 +7,9 @@ use ironclaw_product_workflow::ResolvedBinding;
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{
-    BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError, Filter,
-    IndexSpec, LocalFilesystem, Page, RecordVersion, RootFilesystem, VersionedEntry,
+    BackendCapabilities, CasExpectation, DirEntry, DiskFilesystem, Entry, EventRecord, FileStat,
+    FilesystemError, Filter, IndexSpec, Page, RecordVersion, RootFilesystem, SeqNo, StorageTxn,
+    VersionedEntry,
 };
 use ironclaw_host_api::{HostPath, VirtualPath};
 
@@ -41,8 +42,8 @@ pub fn turns_scope_path(root_prefix: &str, binding: &ResolvedBinding) -> String 
     }
 }
 
-pub fn local_filesystem(root: &Path) -> Result<LocalFilesystem, FilesystemError> {
-    let mut fs = LocalFilesystem::new();
+pub fn local_filesystem(root: &Path) -> Result<DiskFilesystem, FilesystemError> {
+    let mut fs = DiskFilesystem::new();
     fs.mount_local(
         VirtualPath::new("/engine").expect("valid test virtual path"),
         HostPath::from_path_buf(root.to_path_buf()),
@@ -147,5 +148,64 @@ where
 
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         self.inner.delete(path).await
+    }
+
+    // Forward the CAS-delete / transaction / event-log (append/tail) surface to
+    // the inner backend. This wrapper only special-cases blob `put` (to block a
+    // single write); everything else is a transparent pass-through. These
+    // methods default to `Unsupported` on the trait, so a wrapper that dropped
+    // them would hide the inner backend's journal support — which the row-store
+    // turn state depends on (delta journal append/tail).
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        self.inner.delete_if_version(path, expected_version).await
+    }
+
+    async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
+        self.inner.begin(path).await
+    }
+
+    async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
+        self.inner.append(path, payload).await
+    }
+
+    async fn append_batch(
+        &self,
+        path: &VirtualPath,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<SeqNo>, FilesystemError> {
+        self.inner.append_batch(path, payloads).await
+    }
+
+    async fn tail(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+    ) -> Result<Vec<EventRecord>, FilesystemError> {
+        self.inner.tail(path, from).await
+    }
+
+    async fn tail_bounded(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+        max_records: usize,
+    ) -> Result<Vec<EventRecord>, FilesystemError> {
+        self.inner.tail_bounded(path, from, max_records).await
+    }
+
+    async fn head_seq(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+    ) -> Result<Option<SeqNo>, FilesystemError> {
+        self.inner.head_seq(path, from).await
+    }
+
+    async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        self.inner.reserve_sequence(path).await
     }
 }

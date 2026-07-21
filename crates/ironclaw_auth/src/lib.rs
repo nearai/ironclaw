@@ -21,9 +21,11 @@ mod loopback_oauth;
 pub mod oauth;
 mod provider;
 mod scope;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 pub use cleanup::{
-    OAuthCompletionCompensationOutcome, OAuthCompletionCompensationRequest,
+    CanceledCleanupFlow, OAuthCompletionCompensationOutcome, OAuthCompletionCompensationRequest,
     OAuthExchangeCleanupRequest, SecretCleanupAction, SecretCleanupQuarantine,
     SecretCleanupQuarantineReason, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
 };
@@ -49,6 +51,7 @@ pub use flow::{
     CredentialSelectionInput, ManualTokenCompletionInput, NewAuthFlow, OAuthCallbackClaimRequest,
     OAuthCallbackFailureInput, OAuthCallbackInput, ProviderCallbackOutcome, TurnGateAuthFlowQuery,
     credential_status_for_completed_flow, flow_matches_durable_owner, flow_matches_turn_gate_query,
+    flow_shares_setup_owner_root, is_setup_class_continuation,
 };
 pub use ids::{
     AuthFlowId, AuthGateRef, AuthInteractionId, AuthProviderId, AuthSessionId,

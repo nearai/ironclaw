@@ -18,12 +18,16 @@ use ironclaw_event_streams::{
     SubscriberCapabilities, keep_alive_item,
 };
 use ironclaw_events::{EventCursor, EventStreamKey, ReadScope};
-use ironclaw_host_api::{
-    CapabilityId, ExtensionId, InvocationId, MissionId, ProjectId, RuntimeKind, TenantId, ThreadId,
-    UserId,
+use ironclaw_filesystem::{
+    Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, ScopedFilesystem,
 };
+use ironclaw_host_api::{
+    CapabilityId, ExtensionId, InvocationId, MissionId, MountAlias, MountGrant, MountPermissions,
+    MountView, ProjectId, RuntimeKind, TenantId, ThreadId, UserId, VirtualPath,
+};
+use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
 use ironclaw_outbound::{
-    AdvanceSubscriptionCursorRequest, InMemoryOutboundStateStore, LoadSubscriptionCursorRequest,
+    AdvanceSubscriptionCursorRequest, FilesystemOutboundStateStore, LoadSubscriptionCursorRequest,
     OutboundDeliveryAttempt, OutboundError, OutboundPushKind, OutboundPushPlan,
     OutboundPushTargetRequest, OutboundStateStore, ProjectionSubscriptionRecord,
     ProjectionUpdateRef, ThreadNotificationPolicy, ThreadNotificationTarget,

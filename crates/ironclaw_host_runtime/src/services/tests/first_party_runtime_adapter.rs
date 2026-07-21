@@ -22,13 +22,13 @@ async fn first_party_handler_receives_authenticated_actor_distinct_from_subject_
     let adapter = FirstPartyRuntimeAdapter::from_registry(
         registry,
         Arc::new(LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(DiskFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
-    let filesystem = LocalFilesystem::new();
+    let filesystem = DiskFilesystem::new();
     let governor = InMemoryResourceGovernor::new();
     let mut scope = sample_scope();
     scope.user_id = UserId::new("shared-subject").expect("valid subject user id");
@@ -42,6 +42,7 @@ async fn first_party_handler_receives_authenticated_actor_distinct_from_subject_
 
     adapter
         .dispatch_json(RuntimeAdapterRequest {
+            run_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -103,13 +104,13 @@ async fn first_party_adapter_maps_handler_auth_required_to_dispatch_auth_require
     let adapter = FirstPartyRuntimeAdapter::from_registry(
         registry,
         Arc::new(LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(DiskFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
-    let filesystem = LocalFilesystem::new();
+    let filesystem = DiskFilesystem::new();
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let package = test_package(WASM_MANIFEST, "test-wasm");
@@ -122,6 +123,7 @@ async fn first_party_adapter_maps_handler_auth_required_to_dispatch_auth_require
 
     let result = adapter
         .dispatch_json(RuntimeAdapterRequest {
+            run_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -165,13 +167,13 @@ async fn first_party_adapter_releases_reservation_when_handler_returns_auth_requ
     let adapter = FirstPartyRuntimeAdapter::from_registry(
         registry,
         Arc::new(LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(DiskFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
-    let filesystem = LocalFilesystem::new();
+    let filesystem = DiskFilesystem::new();
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
@@ -185,6 +187,7 @@ async fn first_party_adapter_releases_reservation_when_handler_returns_auth_requ
 
     let result = adapter
         .dispatch_json(RuntimeAdapterRequest {
+            run_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -221,13 +224,13 @@ async fn first_party_adapter_forwards_required_secrets_from_auth_required_handle
     let adapter = FirstPartyRuntimeAdapter::from_registry(
         registry,
         Arc::new(LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(DiskFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
-    let filesystem = LocalFilesystem::new();
+    let filesystem = DiskFilesystem::new();
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let package = test_package(WASM_MANIFEST, "test-wasm");
@@ -240,6 +243,7 @@ async fn first_party_adapter_forwards_required_secrets_from_auth_required_handle
 
     let result = adapter
         .dispatch_json(RuntimeAdapterRequest {
+            run_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -285,13 +289,13 @@ async fn first_party_adapter_forwards_credential_requirements_from_auth_required
     let adapter = FirstPartyRuntimeAdapter::from_registry(
         registry,
         Arc::new(LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(DiskFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
-    let filesystem = LocalFilesystem::new();
+    let filesystem = DiskFilesystem::new();
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let package = test_package(WASM_MANIFEST, "test-wasm");
@@ -304,6 +308,7 @@ async fn first_party_adapter_forwards_credential_requirements_from_auth_required
 
     let result = adapter
         .dispatch_json(RuntimeAdapterRequest {
+            run_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -340,13 +345,13 @@ async fn first_party_adapter_maps_panicking_handler_to_backend() {
     let adapter = FirstPartyRuntimeAdapter::from_registry(
         registry,
         Arc::new(LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(DiskFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
-    let filesystem = LocalFilesystem::new();
+    let filesystem = DiskFilesystem::new();
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
@@ -360,6 +365,7 @@ async fn first_party_adapter_maps_panicking_handler_to_backend() {
 
     let result = adapter
         .dispatch_json(RuntimeAdapterRequest {
+            run_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -526,13 +532,13 @@ async fn first_party_adapter_releases_reservation_when_reconcile_fails_after_suc
     let adapter = FirstPartyRuntimeAdapter::from_registry(
         registry,
         Arc::new(LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(DiskFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
-    let filesystem = LocalFilesystem::new();
+    let filesystem = DiskFilesystem::new();
     let governor = ReconcileFailingGovernor::new();
     let scope = sample_scope();
     let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
@@ -546,6 +552,7 @@ async fn first_party_adapter_releases_reservation_when_reconcile_fails_after_suc
 
     let result = adapter
         .dispatch_json(RuntimeAdapterRequest {
+            run_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -625,13 +632,13 @@ async fn first_party_adapter_releases_reservation_when_dispatch_future_is_cancel
     let adapter = FirstPartyRuntimeAdapter::from_registry(
         registry,
         Arc::new(LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(DiskFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
-    let filesystem = LocalFilesystem::new();
+    let filesystem = DiskFilesystem::new();
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
@@ -646,6 +653,7 @@ async fn first_party_adapter_releases_reservation_when_dispatch_future_is_cancel
     let estimate = ResourceEstimate::default().set_output_bytes(128);
 
     let dispatch = adapter.dispatch_json(RuntimeAdapterRequest {
+        run_id: None,
         package: &package,
         descriptor: &descriptor,
         filesystem: &filesystem,
@@ -738,13 +746,13 @@ async fn first_party_adapter_preserves_handler_error_when_account_failed_reconci
     let adapter = FirstPartyRuntimeAdapter::from_registry(
         registry,
         Arc::new(LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
+            Arc::new(DiskFilesystem::new()),
             None,
-            Arc::new(LocalHostProcessPort::new()),
+            Arc::new(HostProcessPort::new()),
             None,
         )),
     );
-    let filesystem = LocalFilesystem::new();
+    let filesystem = DiskFilesystem::new();
     let governor = ReconcileFailingGovernor::new();
     let scope = sample_scope();
     let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
@@ -758,6 +766,7 @@ async fn first_party_adapter_preserves_handler_error_when_account_failed_reconci
 
     let result = adapter
         .dispatch_json(RuntimeAdapterRequest {
+            run_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,

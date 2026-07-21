@@ -18,6 +18,20 @@ mod sanitizer;
 pub mod sensitive_paths;
 mod validator;
 
+/// Wall-clock budget (ms) for the ReDoS / catastrophic-backtracking regression
+/// guards in the safety-crate test suites.
+///
+/// The adversarial tests feed ~100 KB near-miss payloads to a regex scan and
+/// assert it finishes quickly. The bound exists to catch *catastrophic*
+/// backtracking — which blows up to seconds or hangs outright — not micro-perf
+/// drift, so it is deliberately generous. A normal linear scan finishes in well
+/// under 1 ms, but under `cargo llvm-cov` instrumentation on shared CI runners
+/// the same scan can take ~100 ms (a hard 100 ms bound flaked on exactly this).
+/// A 2 s budget keeps a large margin below any real ReDoS while tolerating that
+/// instrumentation and scheduling overhead.
+#[cfg(test)]
+pub(crate) const REDOS_SCAN_BUDGET_MS: u128 = 2000;
+
 pub use credential_detect::{
     http_parts_contain_manual_credentials, params_contain_manual_credentials,
 };

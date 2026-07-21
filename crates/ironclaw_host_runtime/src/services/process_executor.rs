@@ -215,6 +215,9 @@ impl ProcessExecutor for RuntimeDispatchProcessExecutor {
         let result = self
             .dispatcher
             .dispatch_json(CapabilityDispatchRequest {
+                // Spawned processes are long-running and outlive loop runs, so
+                // they carry no run-scoped identity.
+                run_id: None,
                 capability_id: request.capability_id,
                 scope: request.scope,
                 authenticated_actor_user_id: request.authenticated_actor_user_id,
@@ -251,6 +254,7 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
+    use ironclaw_host_api::dispatch_test_support::TestDispatcher;
     use ironclaw_host_api::{
         AgentId, CapabilityDispatchResult, CapabilityId, DispatchError, ExtensionId, InvocationId,
         MountView, ProcessId, ProjectId, ReservationStatus, ResourceEstimate, ResourceReceipt,
@@ -298,75 +302,21 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
-    struct CancellingDispatcher {
-        cancellation: ProcessCancellationToken,
-    }
-
-    #[derive(Clone, Default)]
-    struct RecordingCapabilityDispatcher {
-        calls: Arc<Mutex<Vec<CapabilityDispatchRequest>>>,
-    }
-
-    impl RecordingCapabilityDispatcher {
-        fn calls(&self) -> Vec<CapabilityDispatchRequest> {
-            self.calls
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone()
-        }
-    }
-
-    #[async_trait]
-    impl CapabilityDispatcher for RecordingCapabilityDispatcher {
-        async fn dispatch_json(
-            &self,
-            request: CapabilityDispatchRequest,
-        ) -> Result<CapabilityDispatchResult, DispatchError> {
-            self.calls
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(request.clone());
-            Ok(CapabilityDispatchResult {
-                capability_id: request.capability_id,
-                provider: ExtensionId::new("demo").unwrap(),
-                runtime: RuntimeKind::Script,
-                output: json!({"ok": true}),
-                display_preview: None,
-                usage: ResourceUsage::default(),
-                receipt: ResourceReceipt {
-                    id: ResourceReservationId::new(),
-                    scope: request.scope,
-                    status: ReservationStatus::Reconciled,
-                    estimate: ResourceEstimate::default(),
-                    actual: Some(ResourceUsage::default()),
-                },
-            })
-        }
-    }
-
-    #[async_trait]
-    impl CapabilityDispatcher for CancellingDispatcher {
-        async fn dispatch_json(
-            &self,
-            request: CapabilityDispatchRequest,
-        ) -> Result<CapabilityDispatchResult, DispatchError> {
-            self.cancellation.cancel();
-            Ok(CapabilityDispatchResult {
-                capability_id: request.capability_id,
-                provider: ExtensionId::new("demo").unwrap(),
-                runtime: RuntimeKind::Script,
-                output: json!({"ok": true}),
-                display_preview: None,
-                usage: ResourceUsage::default(),
-                receipt: ResourceReceipt {
-                    id: ResourceReservationId::new(),
-                    scope: request.scope,
-                    status: ReservationStatus::Reconciled,
-                    estimate: ResourceEstimate::default(),
-                    actual: Some(ResourceUsage::default()),
-                },
-            })
+    fn dispatch_result() -> CapabilityDispatchResult {
+        CapabilityDispatchResult {
+            capability_id: CapabilityId::new("demo.background").unwrap(),
+            provider: ExtensionId::new("demo").unwrap(),
+            runtime: RuntimeKind::Script,
+            output: json!({"ok": true}),
+            display_preview: None,
+            usage: ResourceUsage::default(),
+            receipt: ResourceReceipt {
+                id: ResourceReservationId::new(),
+                scope: ResourceScope::system(),
+                status: ReservationStatus::Reconciled,
+                estimate: ResourceEstimate::default(),
+                actual: Some(ResourceUsage::default()),
+            },
         }
     }
 
@@ -472,9 +422,11 @@ mod tests {
     async fn runtime_dispatch_executor_returns_cancelled_after_dispatch() {
         // safety: test executor call is an in-memory process executor call, not a DB write.
         let cancellation = ProcessCancellationToken::new();
-        let dispatcher = Arc::new(CancellingDispatcher {
-            cancellation: cancellation.clone(),
-        });
+        let signal = cancellation.clone();
+        let dispatcher = Arc::new(TestDispatcher::responding(move |_, _| {
+            signal.cancel();
+            Ok(dispatch_result())
+        }));
         let executor = RuntimeDispatchProcessExecutor::new(dispatcher);
         let mut request = sample_process_request("demo.background", RuntimeKind::Script);
         request.cancellation = cancellation;
@@ -487,7 +439,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_dispatch_executor_preserves_authenticated_actor() {
         // safety: test dispatcher call is in-memory and does not execute an external capability.
-        let dispatcher = Arc::new(RecordingCapabilityDispatcher::default());
+        let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
         let executor = RuntimeDispatchProcessExecutor::new(dispatcher.clone());
         let mut request = sample_process_request("demo.background", RuntimeKind::Script);
         let actor = UserId::new("slack-alice").unwrap();
@@ -497,7 +449,7 @@ mod tests {
 
         executor.execute(request).await.unwrap();
 
-        let calls = dispatcher.calls();
+        let calls = dispatcher.recorded();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].authenticated_actor_user_id, Some(actor));
         assert_eq!(calls[0].scope, expected_scope);
@@ -547,19 +499,21 @@ mod tests {
             (
                 DispatchError::Script {
                     kind: RuntimeDispatchErrorKind::Resource,
+                    model_visible_cause: None,
                 },
                 "resource",
             ),
             (
                 DispatchError::Mcp {
                     kind: RuntimeDispatchErrorKind::NetworkDenied,
+                    model_visible_cause: None,
                 },
                 "network_denied",
             ),
             (
                 DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::OutputDecode,
-                    safe_summary: None,
+                    model_visible_cause: None,
                 },
                 "output_decode",
             ),

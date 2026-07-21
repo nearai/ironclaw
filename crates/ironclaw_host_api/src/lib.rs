@@ -34,23 +34,37 @@
 pub mod action;
 pub mod approval;
 pub mod audit;
+pub mod authorized;
 pub mod capability;
 pub mod capability_profile;
 pub mod decision;
 pub mod dispatch;
+#[cfg(feature = "test-support")]
+pub mod dispatch_test_support;
 mod dotted_id;
 pub mod error;
+pub mod failure;
+pub mod gate_record;
 pub mod host_port;
+pub mod host_remediation;
 pub mod http;
 pub mod ids;
 pub mod ingress;
+pub mod invocation;
+pub mod lane;
 pub mod mount;
 pub mod path;
+pub mod resolution;
 pub mod resource;
+pub mod result_meta;
 pub mod runtime;
 pub mod runtime_policy;
+pub mod safe_summary;
 pub mod scope;
 pub mod trust;
+
+mod credential_redaction;
+pub mod model_result_preview;
 
 // Flat re-exports are intentional: downstream Reborn service crates consume
 // `ironclaw_host_api` as a contract prelude, while module docs remain the
@@ -58,20 +72,30 @@ pub mod trust;
 pub use action::*;
 pub use approval::*;
 pub use audit::*;
+pub use authorized::*;
 pub use capability::*;
 pub use capability_profile::*;
 pub use decision::*;
 pub use dispatch::*;
 pub use error::*;
+pub use failure::*;
+pub use gate_record::*;
 pub use host_port::*;
+pub use host_remediation::*;
 pub use http::*;
 pub use ids::*;
 pub use ingress::*;
+pub use invocation::*;
+pub use lane::*;
+pub use model_result_preview::*;
 pub use mount::*;
 pub use path::*;
+pub use resolution::*;
 pub use resource::*;
+pub use result_meta::*;
 pub use runtime::*;
 pub use runtime_policy::*;
+pub use safe_summary::*;
 pub use scope::*;
 pub use trust::*;
 

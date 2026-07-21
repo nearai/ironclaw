@@ -9,20 +9,19 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Instant,
 };
 
 use async_trait::async_trait;
+use ironclaw_common::llm_costs::{default_cost, model_cost};
 use ironclaw_host_api::{CapabilityId, ProviderToolName, sha256_digest_token};
 use ironclaw_llm::{
     ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, ContentPart,
     FinishReason, ImageUrl, LlmError, LlmProvider, Role, ToolCall, ToolCompletionRequest,
     ToolCompletionResponse, ToolDefinition, clean_response, contains_codex_text_tool_call_syntax,
-    costs::{default_cost, model_cost},
-    recover_codex_text_tool_calls_from_tool_names,
-    vision_models::is_vision_model,
+    recover_codex_text_tool_calls_from_tool_names, vision_models::is_vision_model,
 };
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
@@ -60,6 +59,7 @@ use prompt_cache_activity::{
 
 use crate::{
     failure_categories::MODEL_CREDITS_EXHAUSTED_REASON_KIND,
+    model_gateway_error_mapping::host_error_to_model_gateway_error,
     model_routes::{
         ModelRoute, ModelRouteError, ModelRouteErrorKind, ModelRouteProviderKey,
         ModelRouteResolver, ModelSelectionMode, ModelSlot, ResolvedModelRouteSnapshot,
@@ -137,9 +137,9 @@ impl LlmModelProfilePolicy {
     }
 
     /// Build a [`StaticModelCostTable`] mapping every allowed `ModelProfileId`
-    /// to its per-token price via [`ironclaw_llm::costs::model_cost`].
+    /// to its per-token price via [`ironclaw_common::llm_costs::model_cost`].
     /// Profiles whose `model_override` is unknown to the LLM cost table
-    /// fall back to [`ironclaw_llm::costs::default_cost`] (roughly GPT-4o
+    /// fall back to [`ironclaw_common::llm_costs::default_cost`] (roughly GPT-4o
     /// pricing) so the accountant always reconciles to a non-zero spend
     /// for an unknown provider — fail-safe, not silent.
     pub fn build_cost_table(&self) -> StaticModelCostTable {
@@ -408,7 +408,7 @@ where
             request
                 .resolved_model_route
                 .as_ref()
-                .map(|snapshot| snapshot.model_id.as_str()),
+                .map(|snapshot| snapshot.model_id()),
         )?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
@@ -451,7 +451,7 @@ where
             request
                 .resolved_model_route
                 .as_ref()
-                .map(|snapshot| snapshot.model_id.as_str()),
+                .map(|snapshot| snapshot.model_id()),
         )?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
@@ -494,7 +494,7 @@ where
             request
                 .resolved_model_route
                 .as_ref()
-                .map(|snapshot| snapshot.model_id.as_str()),
+                .map(|snapshot| snapshot.model_id()),
         )?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
@@ -542,7 +542,7 @@ where
             request
                 .resolved_model_route
                 .as_ref()
-                .map(|snapshot| snapshot.model_id.as_str()),
+                .map(|snapshot| snapshot.model_id()),
         )?;
         let model_profile_id = request.model_profile_id.clone();
         let run_id = request.run_id;
@@ -878,8 +878,11 @@ where
         slot: ModelSlot,
         snapshot: &HostManagedModelRouteSnapshot,
     ) -> Result<ModelSelectionMode, HostManagedModelError> {
-        let route = ModelRoute::new(snapshot.provider_id.clone(), snapshot.model_id.clone())
-            .map_err(map_model_route_error)?;
+        let route = ModelRoute::new(
+            snapshot.provider_id().to_string(),
+            snapshot.model_id().to_string(),
+        )
+        .map_err(map_model_route_error)?;
         self.route_resolver
             .validate_model_route(slot, &route)
             .map_err(map_model_route_error)
@@ -931,12 +934,15 @@ fn snapshot_from_host_request(
     snapshot: &HostManagedModelRouteSnapshot,
     policy_mode: ModelSelectionMode,
 ) -> Result<ResolvedModelRouteSnapshot, HostManagedModelError> {
-    let route = ModelRoute::new(snapshot.provider_id.clone(), snapshot.model_id.clone())
-        .map_err(map_model_route_error)?;
+    let route = ModelRoute::new(
+        snapshot.provider_id().to_string(),
+        snapshot.model_id().to_string(),
+    )
+    .map_err(map_model_route_error)?;
     let key = ModelRouteProviderKey::new(
         route,
-        snapshot.config_version.clone(),
-        snapshot.auth_version.clone(),
+        snapshot.config_version().to_string(),
+        snapshot.auth_version().to_string(),
     )
     .map_err(map_model_route_error)?;
     Ok(ResolvedModelRouteSnapshot::with_provider_key(
@@ -1003,30 +1009,27 @@ fn map_model_route_error(error: ModelRouteError) -> HostManagedModelError {
     }
 }
 
-fn host_error_to_model_gateway_error(error: AgentLoopHostError) -> LoopModelGatewayError {
-    let diagnostic_ref = error.diagnostic_ref;
-    let reason_kind = error.reason_kind;
-    let gate_ref = error.gate_ref;
-    let mut converted = match LoopModelGatewayError::new(error.kind, error.safe_summary) {
-        Ok(error) => error,
-        Err(_) => LoopModelGatewayError {
-            kind: error.kind,
-            safe_summary: LoopSafeSummary::model_gateway_failed(),
-            reason_kind: None,
-            gate_ref: None,
-            diagnostic_ref: None,
-        },
-    };
-    if let Some(reason_kind) = reason_kind {
-        converted = converted.with_reason_kind(reason_kind);
+#[cfg(test)]
+mod phase_one_error_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_host_summary_falls_back_and_preserves_cause_as_detail() {
+        let raw = "provider failed at /tmp/{response} using api_key=secret-value";
+        let converted = host_error_to_model_gateway_error(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            raw,
+        ));
+
+        assert_eq!(converted.safe_summary.as_str(), "model gateway failed");
+        let detail = converted
+            .detail
+            .as_deref()
+            .expect("raw cause should survive");
+        assert!(detail.contains("provider failed at /tmp/{response}"));
+        assert!(!detail.contains("secret-value"));
+        assert!(detail.contains("[redacted]"));
     }
-    if let Some(gate_ref) = gate_ref {
-        converted = converted.with_gate_ref(gate_ref);
-    }
-    if let Some(diagnostic_ref) = diagnostic_ref {
-        converted = converted.with_diagnostic_ref(diagnostic_ref);
-    }
-    converted
 }
 
 fn request_model_override<P>(
@@ -1111,6 +1114,7 @@ fn validate_replay_identity_text(
 struct ProviderStreamSink {
     inner: Arc<dyn HostManagedModelStreamSink>,
     accumulated_text: Mutex<String>,
+    replace_on_next_delta: AtomicBool,
 }
 
 impl ProviderStreamSink {
@@ -1118,6 +1122,7 @@ impl ProviderStreamSink {
         Self {
             inner,
             accumulated_text: Mutex::new(String::new()),
+            replace_on_next_delta: AtomicBool::new(false),
         }
     }
 }
@@ -1133,10 +1138,35 @@ impl CompletionStreamSink for ProviderStreamSink {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
+            if self.replace_on_next_delta.swap(false, Ordering::SeqCst) {
+                guard.clear();
+            }
             guard.push_str(&delta);
             sanitize_model_visible_text(guard.clone())
         };
         self.inner.safe_text_update(safe_text).await;
+    }
+
+    fn supports_text_replacement(&self) -> bool {
+        true
+    }
+
+    async fn replace_on_next_text_delta(&self) {
+        self.replace_on_next_delta.store(true, Ordering::SeqCst);
+    }
+
+    async fn finish_text_replacement(&self) {
+        if !self.replace_on_next_delta.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        {
+            let mut guard = match self.accumulated_text.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.clear();
+        }
+        self.inner.safe_text_update(String::new()).await;
     }
 }
 
@@ -2026,8 +2056,14 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
         | AgentLoopHostErrorKind::Internal => HostManagedModelErrorKind::Unavailable,
     };
     let mut converted = HostManagedModelError::safe(kind, error.safe_summary);
+    if let Some(reason_kind) = error.reason_kind {
+        converted = converted.with_reason_kind(reason_kind);
+    }
     if let Some(gate_ref) = error.gate_ref {
         converted = converted.with_gate_ref(gate_ref);
+    }
+    if let Some(detail) = error.detail {
+        converted = converted.with_detail(detail);
     }
     converted
 }
@@ -2036,10 +2072,16 @@ fn map_provider_tool_output_error(error: AgentLoopHostError) -> HostManagedModel
     match error.kind {
         AgentLoopHostErrorKind::Invalid
         | AgentLoopHostErrorKind::InvalidInvocation
-        | AgentLoopHostErrorKind::InvalidOutput => HostManagedModelError::safe(
-            HostManagedModelErrorKind::InvalidOutput,
-            error.safe_summary,
-        ),
+        | AgentLoopHostErrorKind::InvalidOutput => {
+            let mut converted = HostManagedModelError::safe(
+                HostManagedModelErrorKind::InvalidOutput,
+                error.safe_summary,
+            );
+            if let Some(detail) = error.detail {
+                converted = converted.with_detail(detail);
+            }
+            converted
+        }
         _ => map_capability_host_error(error),
     }
 }
@@ -2529,6 +2571,72 @@ fn is_credit_exhaustion_error(error: &LlmError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct RecordingSafeTextSink {
+        updates: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl HostManagedModelStreamSink for RecordingSafeTextSink {
+        async fn safe_text_update(&self, safe_text: String) {
+            self.updates
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(safe_text);
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_stream_sink_replaces_partial_attempt_on_first_new_delta() {
+        let inner = Arc::new(RecordingSafeTextSink::default());
+        let sink = ProviderStreamSink::new(inner.clone());
+
+        sink.text_delta("partial".to_string()).await;
+        sink.replace_on_next_text_delta().await;
+
+        // Replacement is deferred so the UI keeps showing the old draft while
+        // the provider retry is waiting for its first byte.
+        assert_eq!(
+            inner
+                .updates
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_slice(),
+            ["partial"]
+        );
+
+        sink.text_delta("Hel".to_string()).await;
+        sink.text_delta("lo".to_string()).await;
+
+        assert_eq!(
+            inner
+                .updates
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_slice(),
+            ["partial", "Hel", "Hello"]
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_stream_sink_clears_partial_for_textless_replacement() {
+        let inner = Arc::new(RecordingSafeTextSink::default());
+        let sink = ProviderStreamSink::new(inner.clone());
+
+        sink.text_delta("partial".to_string()).await;
+        sink.replace_on_next_text_delta().await;
+        sink.finish_text_replacement().await;
+
+        assert_eq!(
+            inner
+                .updates
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_slice(),
+            ["partial", ""]
+        );
+    }
 
     fn request_failed(reason: &str) -> LlmError {
         LlmError::RequestFailed {

@@ -5,13 +5,241 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+use std::sync::LazyLock;
+
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::*;
+use ironclaw_capabilities::{CapabilityHost, CredentialPresence, HostPolicyFacts, PolicyAction};
 use ironclaw_extensions::*;
+use ironclaw_host_api::runtime_policy::{
+    ApprovalPolicy, AuditMode, DeploymentMode, FilesystemBackendKind, NetworkMode,
+    ProcessBackendKind, RuntimeProfile, SecretMode,
+};
 use ironclaw_host_api::*;
-use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+use ironclaw_trust::{
+    AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustError, TrustPolicy,
+    TrustPolicyInput, TrustProvenance,
+};
 use serde_json::json;
+
+/// Trust policy double supplying the kernel's in-fold `evaluate_trust`
+/// (§5.3.2/§9). It always returns the fixed `user_trusted` [`trust_decision`],
+/// so kernel trust-eval succeeds for the test packages and existing test
+/// outcomes are unchanged (the authorizer doubles ignore the decision anyway).
+struct StaticTrustPolicy;
+
+impl TrustPolicy for StaticTrustPolicy {
+    fn evaluate(&self, _input: &TrustPolicyInput) -> Result<TrustDecision, TrustError> {
+        Ok(trust_decision())
+    }
+}
+
+static DEFAULT_TRUST_POLICY: LazyLock<StaticTrustPolicy> = LazyLock::new(|| StaticTrustPolicy);
+
+/// Permissive runtime policy so the in-fold planner (`plan_capability`) never
+/// denies the test capabilities. Field shape mirrors
+/// `ironclaw_runtime_policy::planner` tests.
+static DEFAULT_RUNTIME_POLICY: LazyLock<EffectiveRuntimePolicy> =
+    LazyLock::new(|| EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::LocalDev,
+        resolved_profile: RuntimeProfile::LocalDev,
+        filesystem_backend: FilesystemBackendKind::HostWorkspace,
+        process_backend: ProcessBackendKind::LocalHost,
+        network_mode: NetworkMode::DirectLogged,
+        secret_mode: SecretMode::ScrubbedEnv,
+        approval_policy: ApprovalPolicy::AskDestructive,
+        audit_mode: AuditMode::LocalMinimal,
+    });
+
+/// Permissive `HostPolicyFacts` double: every credential is present and no
+/// persistent grants exist, so the kernel's in-fold credential pre-flight
+/// (§5.3.2/§9) never fires and existing test outcomes are unchanged.
+pub struct PermissiveHostPolicyFacts;
+
+#[async_trait]
+impl HostPolicyFacts for PermissiveHostPolicyFacts {
+    async fn credential_presence(
+        &self,
+        _capability_id: &CapabilityId,
+        _scope: &ResourceScope,
+    ) -> CredentialPresence {
+        CredentialPresence::Satisfied
+    }
+
+    async fn persistent_grants(
+        &self,
+        _capability_id: &CapabilityId,
+        _context: &ExecutionContext,
+        _action: PolicyAction,
+    ) -> Vec<CapabilityGrant> {
+        Vec::new()
+    }
+}
+
+static DEFAULT_POLICY_FACTS: LazyLock<PermissiveHostPolicyFacts> =
+    LazyLock::new(|| PermissiveHostPolicyFacts);
+
+/// `HostPolicyFacts` double whose credential pre-flight always reports a missing
+/// credential (one required secret + one requirement). Drives the
+/// credential-before-approval regression: the kernel must return
+/// `AuthorizationRequiresAuth` before the authorizer's approval decision.
+pub struct MissingCredentialPolicyFacts;
+
+#[async_trait]
+impl HostPolicyFacts for MissingCredentialPolicyFacts {
+    async fn credential_presence(
+        &self,
+        _capability_id: &CapabilityId,
+        _scope: &ResourceScope,
+    ) -> CredentialPresence {
+        CredentialPresence::Missing {
+            required_secrets: vec![SecretHandle::new("test_missing_token").unwrap()],
+            requirements: vec![RuntimeCredentialAuthRequirement {
+                provider: RuntimeCredentialAccountProviderId::new("test_provider").unwrap(),
+                setup: RuntimeCredentialAccountSetup::ManualToken,
+                requester_extension: ExtensionId::new("caller").unwrap(),
+                provider_scopes: Vec::new(),
+            }],
+        }
+    }
+
+    async fn persistent_grants(
+        &self,
+        _capability_id: &CapabilityId,
+        _context: &ExecutionContext,
+        _action: PolicyAction,
+    ) -> Vec<CapabilityGrant> {
+        Vec::new()
+    }
+}
+
+/// `HostPolicyFacts` double whose `persistent_grants` returns exactly one
+/// caller-supplied candidate grant (credential pre-flight satisfied). Drives the
+/// persistent-approval regression: the kernel's `authorize()` fold must adopt the
+/// grant that flips the authorizer to `Allow`, dispatching without an approval
+/// gate.
+pub struct PersistentGrantPolicyFacts {
+    grant: CapabilityGrant,
+}
+
+impl PersistentGrantPolicyFacts {
+    pub fn new(grant: CapabilityGrant) -> Self {
+        Self { grant }
+    }
+}
+
+#[async_trait]
+impl HostPolicyFacts for PersistentGrantPolicyFacts {
+    async fn credential_presence(
+        &self,
+        _capability_id: &CapabilityId,
+        _scope: &ResourceScope,
+    ) -> CredentialPresence {
+        CredentialPresence::Satisfied
+    }
+
+    async fn persistent_grants(
+        &self,
+        _capability_id: &CapabilityId,
+        _context: &ExecutionContext,
+        _action: PolicyAction,
+    ) -> Vec<CapabilityGrant> {
+        vec![self.grant.clone()]
+    }
+}
+
+/// Central constructor for `CapabilityHost` in tests.
+///
+/// Every test builds its host through this helper instead of calling
+/// `CapabilityHost::new` inline, so a change to the kernel's construction
+/// signature (e.g. the §5.3.2 milestone adding the trust-policy / runtime-policy
+/// inputs) touches this one place rather than ~130 call sites. The trust-policy
+/// and runtime-policy defaults are supplied here as `&'static` permissive values.
+pub fn capability_host<'a, D>(
+    registry: &'a ExtensionRegistry,
+    dispatcher: &'a D,
+    authorizer: &'a dyn TrustAwareCapabilityDispatchAuthorizer,
+) -> CapabilityHost<'a, D>
+where
+    D: CapabilityDispatcher + ?Sized,
+{
+    CapabilityHost::new(
+        registry,
+        dispatcher,
+        authorizer,
+        &*DEFAULT_TRUST_POLICY,
+        &DEFAULT_RUNTIME_POLICY,
+        &*DEFAULT_POLICY_FACTS,
+    )
+}
+
+/// `capability_host` variant that injects a caller-supplied [`HostPolicyFacts`]
+/// double (trust and runtime policy stay the permissive defaults). Use when a
+/// test needs the kernel's in-fold credential pre-flight to fire — e.g. the
+/// credential-before-approval regression with [`MissingCredentialPolicyFacts`].
+pub fn capability_host_with_policy_facts<'a, D>(
+    registry: &'a ExtensionRegistry,
+    dispatcher: &'a D,
+    authorizer: &'a dyn TrustAwareCapabilityDispatchAuthorizer,
+    policy_facts: &'a dyn HostPolicyFacts,
+) -> CapabilityHost<'a, D>
+where
+    D: CapabilityDispatcher + ?Sized,
+{
+    CapabilityHost::new(
+        registry,
+        dispatcher,
+        authorizer,
+        &*DEFAULT_TRUST_POLICY,
+        &DEFAULT_RUNTIME_POLICY,
+        policy_facts,
+    )
+}
+
+/// Trust policy double returning a caller-chosen fixed decision, for tests that
+/// exercise the kernel's in-fold trust ceiling (§5.3.2/§9) — e.g. a decision
+/// whose authority ceiling omits an effect, so a trust-aware authorizer denies.
+pub struct FixedTrustPolicy {
+    decision: TrustDecision,
+}
+
+impl FixedTrustPolicy {
+    pub fn with_effects(allowed_effects: Vec<EffectKind>) -> Self {
+        Self {
+            decision: trust_decision_with_effects(allowed_effects),
+        }
+    }
+}
+
+impl TrustPolicy for FixedTrustPolicy {
+    fn evaluate(&self, _input: &TrustPolicyInput) -> Result<TrustDecision, TrustError> {
+        Ok(self.decision.clone())
+    }
+}
+
+/// `capability_host` variant that injects a caller-supplied trust policy (the
+/// runtime policy stays the permissive default). Use only when a test needs a
+/// non-default kernel trust ceiling; otherwise use [`capability_host`].
+pub fn capability_host_with_trust_policy<'a, D>(
+    registry: &'a ExtensionRegistry,
+    dispatcher: &'a D,
+    authorizer: &'a dyn TrustAwareCapabilityDispatchAuthorizer,
+    trust_policy: &'a dyn TrustPolicy,
+) -> CapabilityHost<'a, D>
+where
+    D: CapabilityDispatcher + ?Sized,
+{
+    CapabilityHost::new(
+        registry,
+        dispatcher,
+        authorizer,
+        trust_policy,
+        &DEFAULT_RUNTIME_POLICY,
+        &*DEFAULT_POLICY_FACTS,
+    )
+}
 
 #[derive(Default)]
 pub struct RecordingDispatcher {
@@ -67,6 +295,47 @@ impl CapabilityDispatcher for RecordingDispatcher {
             },
         })
     }
+}
+
+// The shared `CapabilityDispatcher` double. Re-exported so every test file that
+// does `use support::*` gets it without importing the feature-gated module path.
+pub use ironclaw_host_api::dispatch_test_support::TestDispatcher;
+
+/// The standard success dispatch result, echoing the request's capability id,
+/// scope, and estimate — the exact shape the retired hand-rolled
+/// `RecordingDispatcher` returned.
+pub fn ok_dispatch_result(request: &CapabilityDispatchRequest) -> CapabilityDispatchResult {
+    dispatch_result_with_output(request, json!({"ok": true}))
+}
+
+/// Like [`ok_dispatch_result`] but with a caller-supplied output payload — the
+/// replacement for the retired `OutputDispatcher`.
+pub fn dispatch_result_with_output(
+    request: &CapabilityDispatchRequest,
+    output: serde_json::Value,
+) -> CapabilityDispatchResult {
+    CapabilityDispatchResult {
+        capability_id: request.capability_id.clone(),
+        provider: extension_id(),
+        runtime: RuntimeKind::Wasm,
+        output,
+        display_preview: None,
+        usage: ResourceUsage::default(),
+        receipt: ResourceReceipt {
+            id: ResourceReservationId::new(),
+            scope: request.scope.clone(),
+            status: ReservationStatus::Reconciled,
+            estimate: request.estimate.clone(),
+            actual: Some(ResourceUsage::default()),
+        },
+    }
+}
+
+/// Drop-in replacement for the retired `RecordingDispatcher`: records every
+/// dispatched request and returns the standard success result. Assert on it via
+/// `.recorded()` / `.call_count()` / `.last_request()`.
+pub fn recording_dispatcher() -> TestDispatcher {
+    TestDispatcher::responding(|request, _| Ok(ok_dispatch_result(request)))
 }
 
 pub struct ApprovalAuthorizer;
@@ -250,6 +519,16 @@ pub fn capability_id() -> CapabilityId {
     CapabilityId::new("echo.say").unwrap()
 }
 
+/// A second, known-and-plannable echo-family capability. Used by the
+/// capability-id-mismatch resume tests to trigger a mismatch with a capability
+/// that EXISTS in the registry (and passes `plan_capability`), so the run-state
+/// mismatch check fires — instead of an unknown id, which now short-circuits to
+/// `UnknownCapability` in `resume_preflight` (existence-first, matching
+/// host_runtime's deleted pre-authorization; see the resume-preflight change).
+pub fn other_capability_id() -> CapabilityId {
+    CapabilityId::new("echo.other").unwrap()
+}
+
 pub fn github_comment_capability_id() -> CapabilityId {
     CapabilityId::new("github.comment_issue").unwrap()
 }
@@ -273,6 +552,15 @@ module = "echo.wasm"
 [[capabilities]]
 id = "echo.say"
 description = "Echoes input"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "host_internal"
+input_schema_ref = "schemas/echo/say.input.v1.json"
+output_schema_ref = "schemas/echo/say.output.v1.json"
+
+[[capabilities]]
+id = "echo.other"
+description = "A second echo capability, distinct from echo.say"
 effects = ["dispatch_capability"]
 default_permission = "allow"
 visibility = "host_internal"

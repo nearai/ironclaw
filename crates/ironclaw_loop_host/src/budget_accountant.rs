@@ -139,7 +139,7 @@ impl GovernorBackedAccountant {
             gate_expires_after: chrono::Duration::hours(24),
             default_cost: ModelCost {
                 // ~GPT-4o pricing as the safe non-zero default. Matches
-                // `ironclaw_llm::costs::default_cost` so a model profile
+                // `ironclaw_common::llm_costs::default_cost` so a model profile
                 // missing from the table is treated as a paid call, not
                 // a free one.
                 input_per_token: Decimal::from_f64(0.0000025).unwrap_or(Decimal::ZERO),

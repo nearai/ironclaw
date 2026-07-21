@@ -26,7 +26,7 @@ fn manager_with_source(
             Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
             Arc::clone(&update_source),
             Arc::new(NoExposureProjectionRedactionValidator),
-            Arc::new(InMemoryOutboundStateStore::default()),
+            Arc::new(in_memory_backed_outbound_state_store()),
         ),
         update_source,
     }
@@ -43,7 +43,7 @@ async fn assert_second_subscription_denied_by_admission(
         Arc::new(InMemoryProjectionStreamAdmissionPolicy::new(limits)),
         Arc::new(InMemoryProjectionUpdateSource::new(8)),
         Arc::new(NoExposureProjectionRedactionValidator),
-        Arc::new(InMemoryOutboundStateStore::default()),
+        Arc::new(in_memory_backed_outbound_state_store()),
     );
 
     let _first = manager
@@ -645,11 +645,50 @@ impl ProjectionRedactionValidator for CountingRedactionValidator {
     }
 }
 
+/// The production [`FilesystemOutboundStateStore`] over a [`FaultInjecting`]
+/// in-memory backend armed to fail every policy read with a backend fault.
+/// Replaces the former `FailingOutboundStore { kind: Backend }`: the store now
+/// runs its real `get_json` read and genuine `FilesystemError::Backend ->
+/// OutboundError::Backend` mapping (`map_fs_error`) under the injected fault, so
+/// the consuming tests exercise the production store's I/O-fault path instead of
+/// a hand-rolled trait stand-in. `plan_push_targets` loads the thread
+/// notification policy through `ScopedFilesystem::get`, so a `ReadFile` fault
+/// surfaces as `OutboundError::Backend`.
+fn outbound_store_failing_backend_reads()
+-> Arc<FilesystemOutboundStateStore<FaultInjecting<InMemoryBackend>>> {
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()).with_fault(
+        Fault::on(FilesystemOperation::ReadFile).backend("injected outbound backend failure"),
+    ));
+    // Mirror the `/outbound` mount `ironclaw_outbound::test_support`'s in-memory
+    // helper uses, but over the fault-injecting backend.
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/outbound").expect("static valid mount alias"),
+        VirtualPath::new("/engine/outbound").expect("static valid virtual path"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("static valid outbound mount view");
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts));
+    // The `disallowed_methods` lint reserves `FilesystemOutboundStateStore::new`
+    // for composition's owned construction site; this fault-injection test seam
+    // is the sanctioned use, matching `ironclaw_outbound::test_support`.
+    #[allow(clippy::disallowed_methods)]
+    Arc::new(FilesystemOutboundStateStore::new(scoped))
+}
+
+/// Injects the non-filesystem [`OutboundError`] variants the real
+/// `FilesystemOutboundStateStore` can never emit from a backend fault
+/// (`AccessDenied`, caller-bug `InvalidRequest`, `PreferenceTargetMissing` — its
+/// `OutboundStateStore` impl only ever maps a filesystem error to `Backend` /
+/// `CasConflict` / `Serialization`). These lock the manager's
+/// `map_outbound_error` classification of domain errors, not an I/O fault, so —
+/// per the fault-migration spec's KEEP rule — they stay a hand-rolled fake
+/// rather than moving to `ironclaw_filesystem::FaultInjecting`. The `Backend`
+/// variant was migrated to the real store above
+/// (`outbound_store_failing_backend_reads`).
 #[derive(Clone, Copy)]
 enum FailingOutboundKind {
     AccessDenied,
     InvalidRequest,
-    Backend,
     PreferenceTargetMissing,
 }
 
@@ -664,7 +703,6 @@ impl FailingOutboundStore {
             FailingOutboundKind::InvalidRequest => OutboundError::InvalidRequest {
                 reason: "bad request",
             },
-            FailingOutboundKind::Backend => OutboundError::Backend,
             FailingOutboundKind::PreferenceTargetMissing => {
                 OutboundError::PreferenceTargetMissing { kind: "approval" }
             }

@@ -71,7 +71,7 @@ pub(crate) async fn qa_smoke_tools() -> HarnessResult<HostRuntimeCapabilityHarne
             br#"{"accepted":true,"source":"qa-smoke"}"#.to_vec(),
         )),
         // qa_smoke_tools exercises real process execution (SpawnProcess effect);
-        // leave the default LocalHostProcessPort in place.
+        // leave the default HostProcessPort in place.
         None,
     )?;
     let mounts = qa_smoke_mounts()?;
@@ -86,6 +86,7 @@ pub(crate) async fn qa_smoke_tools() -> HarnessResult<HostRuntimeCapabilityHarne
     Ok(HostRuntimeCapabilityHarness {
         runtime: Mutex::new(runtime),
         approval_parts: None,
+        gate_record_store: super::super::fresh_in_memory_gate_record_store(),
         auto_approve_settings: None,
         pending_approval_scopes: Arc::new(Mutex::new(HashMap::new())),
         io: Mutex::new(io),

@@ -20,16 +20,20 @@ pub mod app_loop_family;
 mod context_shadow;
 pub mod driver_registry;
 pub mod failure_categories;
+pub mod failure_lane;
+pub mod failure_summary;
 pub mod hook_gate_refs;
-#[cfg(any(
-    feature = "webui-user-store",
-    feature = "filesystem-local-trigger-access"
-))]
-pub mod local_trigger_access;
+pub mod retry_disposition;
+
+// Run-failure classification/summarization over `failure_categories` (moved from
+// ironclaw_reborn_composition; they classify runner-owned categories). Re-exported
+// at the crate root so intra-cluster `crate::FailureLane` refs resolve and
+// composition can re-export them through its facade for the CLI.
 pub mod loop_driver_host;
 pub mod loop_exit_applier;
 pub mod milestone_events;
 mod model_failure_mapping;
+mod model_gateway_error_mapping;
 pub mod model_routes;
 pub mod planned_driver;
 pub mod planned_driver_factory;
@@ -44,7 +48,4 @@ pub mod turn_run_executor;
 pub mod turn_runner;
 pub mod turn_scheduler;
 
-#[cfg(feature = "root-llm-provider")]
 pub mod model_gateway;
-#[cfg(feature = "libsql-secrets")]
-pub mod secrets;

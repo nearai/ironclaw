@@ -11,20 +11,20 @@
 #   4. Tool parameters logged without redaction (secret leaks)
 #   5. Multi-step DB operations without transaction wrapping
 #   6. .unwrap(), .expect(), assert!() in production code (panics)
-#   7. Gateway/CLI handlers bypassing ToolDispatcher (must go through tools)
-#   8. CredentialName referenced in web-layer code (wrong identity at boundary)
-#   9. SSE broadcast emitted outside the engine→AppEvent projection bridge
 #  10. Newly-added pub fn/type/struct/enum/trait with zero callers (dead/speculative API)
 #  11. Architecture sprawl smoke alarms without arch-exempt tracking plan
-#  12. Unscoped SSE broadcast in multi-tenant-reachable code
+#  13. Composition mass ratchet — blocks growth of ironclaw_reborn_composition's
+#      share of production crate code past the committed budget (runs only when
+#      composition or the gate is staged). See scripts/ci/check-composition-budget.sh.
 #
-# Also runs check-i18n-parity.sh when crates/ironclaw_gateway/static/i18n/*.js
-# files are staged, to ensure every language pack has the same key set.
+# (Checks 7–9 and 12 — the v1 gateway DISPATCH / CREDNAME / SSE-projection /
+#  multi-tenant-broadcast checks, plus the gateway i18n-parity and JS-syntax
+#  runs — were removed under Tier B when the `src/channels/web/` tree and
+#  `crates/ironclaw_gateway` were deleted. Reborn WebUI JS/i18n is validated by
+#  the frontend's own tooling; the dispatch/projection invariants are enforced
+#  in the product/composition crates and by `cargo test -p ironclaw_architecture`.)
 #
 # Suppress individual lines with an inline "// safety: <reason>" comment.
-# For check #7, use "// dispatch-exempt: <reason>" instead.
-# For check #8, use "// web-identity-exempt: <reason>" instead.
-# For check #9, use "// projection-exempt: <category>, <detail>" instead.
 # For check #10, use "// pub-api-exempt: <reason>" instead.
 # For check #11, use "// arch-exempt: <category>, <reason>, plan #NNNN" instead.
 
@@ -56,22 +56,39 @@ resolve_base_ref() {
     exit 1
 }
 
-# i18n parity: when any language pack changes, all languages must stay in sync.
-# Run before the .rs-focused checks so it fires even when no .rs files change.
+# Record whether there are staged changes (used throughout below). The v1
+# gateway i18n-parity and gateway-JS-syntax blocks that used to run here were
+# removed under Tier B along with `crates/ironclaw_gateway` — Reborn WebUI
+# i18n and JS are validated by the frontend's own `pnpm lint`/`pnpm test`
+# (the `webui-v2-js-lint` CI job).
 if git diff --cached --quiet 2>/dev/null; then
     HAS_STAGED_CHANGES=0
-    I18N_CHANGED=$(git diff --name-only -- 'crates/ironclaw_gateway/static/i18n/*.js' 2>/dev/null || true)
-    GATEWAY_APP_JS_CHANGED=$(git diff --name-only -- 'crates/ironclaw_gateway/static/js/' 2>/dev/null || true)
 else
     HAS_STAGED_CHANGES=1
-    I18N_CHANGED=$(git diff --cached --name-only -- 'crates/ironclaw_gateway/static/i18n/*.js' 2>/dev/null || true)
-    GATEWAY_APP_JS_CHANGED=$(git diff --cached --name-only -- 'crates/ironclaw_gateway/static/js/' 2>/dev/null || true)
 fi
-if [ -n "$I18N_CHANGED" ]; then
-    # Resolve script location even when invoked via a symlink (the
-    # pre-commit hook is typically a symlink at .git/hooks/pre-commit
-    # pointing to this file in scripts/). Walk symlinks until we find the
-    # real path, then use its parent directory.
+
+# Composition mass ratchet: block commits that push ironclaw_reborn_composition's
+# share of production crate code past the committed ceiling
+# (scripts/ci/composition-budget.toml). Triggers on ANY staged crates/**.rs change
+# (composition growth OR another crate shrinking both lift the share — the metric
+# is a ratio) or a change to the gate itself.
+#
+# LIMITATION: the gate measures the WORKING TREE, not the staged index, so an
+# unstaged edit can mask a staged breach or cause a false block. This hook is a
+# fast local advisory; CI (.github/workflows/code_style.yml) runs the gate on the
+# actual merge commit and is the authoritative check.
+if [ "$HAS_STAGED_CHANGES" -eq 1 ]; then
+    COMPOSITION_STAGED=$(git diff --cached --name-only -- \
+        'crates/**/*.rs' \
+        'scripts/ci/composition-budget.toml' \
+        'scripts/ci/check-composition-budget.sh' 2>/dev/null || true)
+else
+    COMPOSITION_STAGED=$(git diff --name-only -- \
+        'crates/**/*.rs' \
+        'scripts/ci/composition-budget.toml' \
+        'scripts/ci/check-composition-budget.sh' 2>/dev/null || true)
+fi
+if [ -n "$COMPOSITION_STAGED" ]; then
     SOURCE="${BASH_SOURCE[0]:-$0}"
     while [ -L "$SOURCE" ]; do
         LINK_TARGET="$(readlink "$SOURCE")"
@@ -80,54 +97,12 @@ if [ -n "$I18N_CHANGED" ]; then
             *)  SOURCE="$(cd "$(dirname "$SOURCE")" && pwd)/$LINK_TARGET" ;;
         esac
     done
-    SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
-    if ! "$SCRIPT_DIR/check-i18n-parity.sh"; then
+    PCS_SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+    if ! "$PCS_SCRIPT_DIR/ci/check-composition-budget.sh"; then
         echo ""
-        echo "Commit blocked: i18n parity check failed."
-        echo "Every key added to en.js must also be added to all other language files (zh-CN.js, ko.js, ...)."
-        echo "Placeholder tokens like {name} must match across all languages."
-        echo "To bypass: git commit --no-verify"
-        exit 1
-    fi
-fi
-
-# Gateway frontend JS must parse cleanly; a syntax error in any split
-# module leaves the auth shell visible and prevents bootstrap from running.
-# The monolithic `app.js` was split into per-surface/per-concern modules
-# under `static/js/` that are concatenated at compile time into a single
-# `APP_JS` constant (see `crates/ironclaw_gateway/src/assets.rs`). Cuts
-# land on top-level symbol boundaries, so each file is self-parseable —
-# a per-file `node --check` is sufficient.
-if [ -n "$GATEWAY_APP_JS_CHANGED" ]; then
-    if ! command -v node >/dev/null 2>&1; then
-        echo ""
-        echo "Commit blocked: Node.js is required to validate gateway JS syntax."
-        echo "Install Node.js and rerun the commit, or bypass with git commit --no-verify"
-        exit 1
-    fi
-
-    GATEWAY_JS_TMP=$(mktemp "${TMPDIR:-/tmp}/gateway-js.XXXXXX.js")
-    trap 'rm -f "${TEST_BOUNDARIES_FILE:-}" "${GATEWAY_JS_TMP:-}"' EXIT
-    FAILED=0
-    while IFS= read -r f; do
-        [ -z "$f" ] && continue
-        # Only validate files still present (skip deletes).
-        if [ "$HAS_STAGED_CHANGES" -eq 1 ]; then
-            git show ":$f" > "$GATEWAY_JS_TMP" 2>/dev/null || continue
-        else
-            [ -f "$f" ] || continue
-            cp "$f" "$GATEWAY_JS_TMP"
-        fi
-        if ! node --check "$GATEWAY_JS_TMP" >/dev/null 2>&1; then
-            echo "  ✗ syntax error: $f"
-            FAILED=1
-        fi
-    done <<<"$GATEWAY_APP_JS_CHANGED"
-
-    if [ "$FAILED" -eq 1 ]; then
-        echo ""
-        echo "Commit blocked: one or more gateway JS modules failed syntax validation."
-        echo "Fix the parse error(s) above or bypass with git commit --no-verify"
+        echo "Commit blocked: composition mass budget exceeded (see above)."
+        echo "Carve behavior out of ironclaw_reborn_composition, or raise the ceiling in"
+        echo "scripts/ci/composition-budget.toml with a rationale. Bypass: git commit --no-verify"
         exit 1
     fi
 fi
@@ -359,104 +334,10 @@ if echo "$PROD_DIFF" | grep -nE '^\+' \
         | head -5 | sed 's/^/    /'
 fi
 
-# 7. Gateway/CLI handlers bypassing ToolDispatcher.
-#    Channel handlers and CLI commands must route mutations through
-#    `ToolDispatcher::dispatch()` so every UI/CLI-initiated action gets the
-#    same audit trail and safety pipeline as agent-initiated tool calls.
-#    See `.claude/rules/tools.md` "Everything Goes Through Tools".
-#
-#    The check looks at .rs files under src/channels/web/handlers/ and
-#    src/cli/ for newly-added lines that touch direct manager fields on the
-#    gateway state. Suppress with "// dispatch-exempt: <reason>".
-DISPATCH_DIFF=$(git diff --cached -U0 -- 'src/channels/web/handlers/*.rs' 'src/cli/*.rs' 2>/dev/null || true)
-if [ -z "$DISPATCH_DIFF" ]; then
-    DISPATCH_DIFF=$(git diff "$(resolve_base_ref)" -U0 -- 'src/channels/web/handlers/*.rs' 'src/cli/*.rs' 2>/dev/null || true)
-fi
-if [ -n "$DISPATCH_DIFF" ]; then
-    DISPATCH_HITS=$(echo "$DISPATCH_DIFF" | grep -nE '^\+' \
-        | grep -E 'state\.(store|workspace|workspace_pool|extension_manager|skill_registry|session_manager)\.' \
-        | grep -vE '// dispatch-exempt:|// safety:|:\+\+\+ ' \
-        | head -5 || true)
-    if [ -n "$DISPATCH_HITS" ]; then
-        warn "DISPATCH" "Handler directly touches state.{store,workspace,extension_manager,skill_registry,session_manager}. Route through ToolDispatcher::dispatch() instead. See .claude/rules/tools.md."
-        echo "$DISPATCH_HITS" | sed 's/^/    /'
-    fi
-fi
-
-# 8. CredentialName referenced in web-layer code.
-#    CredentialName is a backend/secrets-store identity. Web routes and
-#    web DTOs take ExtensionName; the dispatcher and auth_manager resolve
-#    credential identity from the extension name server-side. An explicit
-#    `CredentialName` reference in src/channels/web/** (except inside
-#    `#[cfg(test)] mod tests` blocks) means the wrong identity is reaching
-#    the web boundary. See src/channels/web/CLAUDE.md "Identity types at
-#    the web boundary" and .claude/rules/types.md.
-#
-#    Suppress with "// web-identity-exempt: <reason>" when the reference
-#    is genuinely reading an already-typed value off a backend struct
-#    (e.g., destructuring `ResumeKind::Authentication` to log the name).
-WEB_IDENTITY_DIFF=$(git diff --cached -U0 -- 'src/channels/web/*.rs' 'src/channels/web/**/*.rs' 2>/dev/null || true)
-if [ -z "$WEB_IDENTITY_DIFF" ]; then
-    WEB_IDENTITY_DIFF=$(git diff "$(resolve_base_ref)" -U0 -- 'src/channels/web/*.rs' 'src/channels/web/**/*.rs' 2>/dev/null || true)
-fi
-if [ -n "$WEB_IDENTITY_DIFF" ]; then
-    # Strip lines inside `#[cfg(test)] mod tests` blocks using the same
-    # precomputed boundaries used for other prod-only checks.
-    WEB_IDENTITY_PROD=$(printf '%s\n' "$WEB_IDENTITY_DIFF" | strip_test_mod_lines)
-    # `(^|[^[:alnum:]_])CredentialName([^[:alnum:]_]|$)` is a portable
-    # word boundary; `grep -E`'s `\b` is a GNU extension and is not
-    # recognised by BSD grep.
-    WEB_IDENTITY_HITS=$(echo "$WEB_IDENTITY_PROD" | grep -nE '^\+' \
-        | grep -E '(^|[^[:alnum:]_])CredentialName([^[:alnum:]_]|$)' \
-        | grep -vE '// web-identity-exempt:|// safety:|:\+\+\+ ' \
-        | head -5 || true)
-    if [ -n "$WEB_IDENTITY_HITS" ]; then
-        warn "CREDNAME" "\`CredentialName\` referenced in src/channels/web/** — web code takes \`ExtensionName\`; credential identity stays backend-side. Push the mapping into bridge::auth_manager or annotate with '// web-identity-exempt: <reason>'."
-        echo "$WEB_IDENTITY_HITS" | sed 's/^/    /'
-    fi
-fi
-
-# 9. SSE `AppEvent` broadcast outside the engine→AppEvent projection bridge.
-#    Every `AppEvent` that hits the SSE/WS stream should project from a typed
-#    source log (`ironclaw_engine::EventKind`, `JobEvent`, channel-lifecycle)
-#    or belong to the documented transport-only allowlist. Direct
-#    `sse.broadcast(...)` / `sse.broadcast_for_user(...)` calls from tools,
-#    handlers, or extension managers drift the UI stream out of alignment
-#    with the replayable source, which is the root cause of the state
-#    desync class tracked by #2792. See `.claude/rules/gateway-events.md`.
-#
-#    Annotation format: `// projection-exempt: <category>, <detail>` — the
-#    category names the source log (`bridge dispatcher`, `channel-lifecycle`,
-#    `sandbox JobEvent`, `legacy v1 auth`) or the transport-only allowlist
-#    (`transport-only, heartbeat`). The comma is required — an unnamed
-#    `// projection-exempt: legacy` does not suppress the check.
-#
-#    Two match patterns:
-#    1. `*.broadcast_for_user(...)` on any receiver — `broadcast_for_user`
-#       is unique to `SseManager` (see `src/channels/web/platform/sse.rs`),
-#       so matching the method name alone catches both same-line
-#       receivers (`state.sse.broadcast_for_user(...)`) and rustfmt
-#       wraps (`state\n    .sse\n    .broadcast_for_user(...)`) without
-#       risk of false positives from other types.
-#    2. `<word-boundary>sse.broadcast(...)` — the single-name `.broadcast(`
-#       on its own line can be the `Channel` trait method, so this arm
-#       is deliberately narrower and anchors on an `sse` receiver.
-#       `(^|[^[:alnum:]_])sse\.` is a portable boundary; `grep -E`'s
-#       `\b` is a GNU extension and is not recognised by BSD grep, so
-#       we avoid it here.
-#    Suppression regex requires a non-empty detail after the comma:
-#    `[^,]+,[[:space:]]*[^[:space:]]` — `// projection-exempt: foo,`
-#    (empty detail) does NOT exempt; `// projection-exempt: foo, bar`
-#    does. This matches the documented contract in
-#    `.claude/rules/gateway-events.md`.
-PROJECTION_HITS=$(echo "$DIFF_OUTPUT_NO_TESTS" | grep -nE '^\+' \
-    | grep -E '(\.broadcast_for_user|(^|[^[:alnum:]_])sse\.broadcast)[[:space:]]*\(' \
-    | grep -vE '// projection-exempt: [^,]+,[[:space:]]*[^[:space:]]|// safety:|:\+\+\+ ' \
-    | head -5 || true)
-if [ -n "$PROJECTION_HITS" ]; then
-    warn "PROJECTION" "Direct SSE broadcast outside the engine→AppEvent bridge. Route through \`thread_event_to_app_events\` in \`src/bridge/router.rs\` (project from a typed source log) or annotate with '// projection-exempt: <category>, <detail>'. See .claude/rules/gateway-events.md."
-    echo "$PROJECTION_HITS" | sed 's/^/    /'
-fi
+# (Checks 7–9 — the v1 gateway DISPATCH / CREDNAME / SSE-PROJECTION checks,
+#  all keyed on the deleted `src/channels/web/` tree — were removed under
+#  Tier B. The Reborn equivalents are enforced in the product/composition
+#  crates and by `cargo test -p ironclaw_architecture`.)
 
 # 10. Dead/speculative public API: newly-added `pub fn`/`pub type`/`pub struct`/
 #     `pub enum`/`pub trait` whose identifier appears exactly once in the whole
@@ -633,7 +514,7 @@ LARGE_FILE_EXEMPT_RE=$(arch_exempt_re "large_file")
 LARGE_FILE_HITS=""
 for f in $CHANGED_FILES; do
     case "$f" in
-        src/*.rs|crates/*.rs) ;;
+        crates/*.rs) ;;
         *) continue ;;
     esac
     [ -f "$f" ] || continue
@@ -652,53 +533,14 @@ if [ -n "$LARGE_FILE_HITS" ]; then
     printf '%s' "$LARGE_FILE_HITS" | head -5
 fi
 
-# 12. Cross-tenant safety: an UNSCOPED `sse.broadcast(...)` call (i.e. not
-#     `broadcast_for_user`) delivers the event to every connected
-#     subscriber, regardless of which user owns the underlying state.
-#     In multi-tenant deployments that pattern leaks tool calls, log
-#     lines, and onboarding state across tenants — see the cross-tenant
-#     thread visibility incident and the `dispatch_status_event` fix.
-#
-#     A new `sse.broadcast(...)` line is acceptable only if it is one
-#     of:
-#       (a) Transport-only (heartbeat / stream_chunk) — the canonical
-#           projection-exempt category that already documents the
-#           empty-payload allowlist.
-#       (b) Annotated with `// multi-tenant-safe: <reason>` on the same
-#           line, naming the structural reason the event cannot leak
-#           tenant-bound state (e.g. "single-tenant fallback inside an
-#           explicit multi_tenant_mode=false branch").
-#     Otherwise prefer `broadcast_for_user(uid, ...)` with a known
-#     `user_id` derived from the source-log payload.
-#
-#     This check runs only on `src/**` and `crates/**` — `tests/**` and
-#     `#[cfg(test)]` blocks were already filtered out upstream.
-#     Marker matching: `//.*multi-tenant-safe: <non-whitespace>` — the
-#     `//.*` prefix anchors the marker to a Rust comment but allows
-#     additional annotations on the same line (e.g. when `// projection-
-#     exempt: ...; multi-tenant-safe: ...` carry both markers in one
-#     trailing comment because Rust line comments cannot be nested).
-MT_BROADCAST_HITS=$(echo "$DIFF_OUTPUT_NO_TESTS" | grep -nE '^\+' \
-    | grep -E '(^|[^[:alnum:]_])sse\.broadcast[[:space:]]*\(' \
-    | grep -vE '\.broadcast_for_user' \
-    | grep -vE '// projection-exempt: transport-only,[[:space:]]*[^[:space:]]' \
-    | grep -vE '//.*multi-tenant-safe: [^[:space:]]' \
-    | grep -vE '// safety:|:\+\+\+ ' \
-    | head -5 || true)
-if [ -n "$MT_BROADCAST_HITS" ]; then
-    warn "MULTITENANT" "Unscoped \`sse.broadcast(...)\` in code reachable in multi-tenant mode. Switch to \`broadcast_for_user(&user_id, ...)\` or annotate with '// multi-tenant-safe: <reason>'. See \`dispatch_status_event\` in \`src/channels/web/mod.rs\` and the cross-tenant thread visibility incident."
-    echo "$MT_BROADCAST_HITS" | sed 's/^/    /'
-fi
+# (Check 12 — the unscoped-`sse.broadcast(...)` multi-tenant leak check keyed
+#  on the deleted v1 gateway SSE manager — was removed under Tier B.)
 
 if [ "$WARNINGS" -gt 0 ]; then
     echo ""
     echo "Found $WARNINGS potential issue(s). Fix them or add '// safety: <reason>' to suppress."
-    echo "(For DISPATCH warnings, use '// dispatch-exempt: <reason>' instead.)"
-    echo "(For CREDNAME warnings, use '// web-identity-exempt: <reason>' instead.)"
-    echo "(For PROJECTION warnings, use '// projection-exempt: <category>, <detail>' instead.)"
     echo "(For PUBAPI warnings, use '// pub-api-exempt: <reason>' instead.)"
     echo "(For ARCH-SPRAWL warnings, use '// arch-exempt: <category>, <reason>, plan #NNNN' instead.)"
-    echo "(For MULTITENANT warnings, use '// multi-tenant-safe: <reason>' instead.)"
     echo ""
     exit 1
 fi

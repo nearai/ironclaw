@@ -5,7 +5,7 @@ argument-hint: <event_name> [description]
 model: opus
 ---
 
-> **v1-maintenance only.** This scaffolds into the legacy `src/` gateway. Per the repo's reborn-first rule, use it only to maintain existing v1 behavior — new user-visible events belong Reborn-side (projection/SSE frame via `ironclaw_webui_v2` + the event-stream substrate; start from the `reborn-feature` skill).
+> **v1-maintenance only.** This scaffolds into the legacy `src/` gateway. Per the repo's reborn-first rule, use it only to maintain existing v1 behavior — new user-visible events belong Reborn-side (projection/SSE frame via `ironclaw_webui` + the event-stream substrate; start from the `reborn-feature` skill).
 
 Add a new SSE event called `$ARGUMENTS` to the IronClaw web gateway. This involves changes across 5 files in a specific order. Follow each step exactly.
 

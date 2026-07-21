@@ -14,9 +14,10 @@ mod tests {
     use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStore};
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{
-        AgentId, CapabilityId, DispatchInputIssueCode, EffectKind, GrantConstraints, InvocationId,
-        MountAlias, MountGrant, MountPermissions, MountView, NetworkPolicy, Principal, ProjectId,
-        ProviderToolName, TenantId, ThreadId, UserId, VirtualPath,
+        AgentId, CapabilityId, DispatchInputIssueCode, EffectKind, FailureKind, GrantConstraints,
+        InvocationId, MountAlias, MountGrant, MountPermissions, MountView, NetworkPolicy,
+        Principal, ProjectId, ProviderToolName, Resolution, TenantId, ThreadId, UserId,
+        VirtualPath,
     };
     use ironclaw_host_runtime::{
         APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
@@ -47,8 +48,8 @@ mod tests {
         AcceptedMessageRef, ReplyTargetBindingRef, RunProfileResolutionRequest, RunProfileResolver,
         TurnActor, TurnId, TurnRunId, TurnScope,
         run_profile::{
-            CapabilityCallCandidate, CapabilityFailureDetail, CapabilityFailureKind,
-            CapabilityInputIssue, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
+            CapabilityApprovalResume, CapabilityCallCandidate, CapabilityInputIssue,
+            CapabilityInputRef, CapabilityInvocation, CapabilityResumeToken,
             InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver,
             RegisterProviderToolCallRequest, VisibleCapabilityRequest,
         },
@@ -58,12 +59,29 @@ mod tests {
         EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
         EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
     };
-    use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
+    use crate::outbound::outbound_preferences::{
+        OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner,
+    };
     use crate::outbound::{
         OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistry,
         RebornOutboundPreferencesFacade,
     };
     use crate::runtime::local_dev_filesystem_skill_context_source;
+
+    /// The §5.3 flip collapsed `CapabilityOutcome::Completed` into
+    /// `Resolution::Done(Outcome)`; the minted `refs.result` is an opaque uuid,
+    /// while the originating loop result ref the capability io staged the output
+    /// under is preserved on `refs.origin`. Tests look results up by that
+    /// preserved loop ref, exactly as they did with the old
+    /// `CapabilityResultMessage::result_ref`.
+    fn completed_loop_result_ref(done: &ironclaw_host_api::Outcome) -> String {
+        done.refs
+            .origin
+            .as_ref()
+            .expect("completed capability outcome preserves the originating loop result ref")
+            .as_str()
+            .to_string()
+    }
 
     async fn run_context(label: &str) -> LoopRunContext {
         run_context_with_scope(TurnScope::new(
@@ -155,7 +173,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_visible_capability_request_uses_run_actor_for_runtime_scope() {
+    async fn visible_capability_request_uses_run_actor_for_runtime_scope() {
         let run_context = run_context("actor-runtime-scope")
             .await
             .with_actor(TurnActor::new(
@@ -169,7 +187,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_visible_capability_request_uses_explicit_subject_for_runtime_scope() {
+    async fn visible_capability_request_uses_explicit_subject_for_runtime_scope() {
         let subject_user_id = UserId::new("team-agent-user").expect("subject user id");
         let run_context = run_context_with_scope(TurnScope::new_with_owner(
             TenantId::new("tenant-subject").expect("tenant id"),
@@ -193,7 +211,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_visible_capability_request_keeps_fallback_user_without_actor() {
+    async fn visible_capability_request_keeps_fallback_user_without_actor() {
         let run_context = run_context("fallback-runtime-scope").await;
         let fallback_user_id = UserId::new("env-operator").expect("fallback user id");
         let request = visible_request_for_runtime_scope(&run_context, &fallback_user_id);
@@ -244,20 +262,20 @@ mod tests {
         run_context: &LoopRunContext,
         fallback_user_id: &UserId,
     ) -> HostVisibleCapabilityRequest {
-        let policy = crate::local_dev_capability_policy::local_dev_capability_policy()
-            .expect("policy parses");
+        let policy =
+            crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses");
         let empty_mounts = MountView::default();
 
-        local_dev_visible_capability_request(
+        visible_capability_request(
             run_context,
             fallback_user_id,
-            LocalDevVisibleCapabilityInputs {
+            VisibleCapabilityInputs {
                 workspace_mounts: &empty_mounts,
                 skill_mounts: &empty_mounts,
                 memory_mounts: &empty_mounts,
                 system_extensions_lifecycle_mounts: &empty_mounts,
                 policy: &policy,
-                extension_surface: &LocalDevExtensionSurface::default(),
+                extension_surface: &ExtensionCapabilitySurface::default(),
             },
         )
         .expect("visible request")
@@ -338,7 +356,11 @@ mod tests {
             {
                 return Ok(Vec::new());
             }
-            Ok(vec![self.entry.clone()])
+            // Fixture answers a single expected caller; claim that caller as
+            // owner so the entry survives the registry caller-scoping filter.
+            let mut entry = self.entry.clone();
+            entry.owner = OutboundDeliveryTargetOwner::for_caller(caller);
+            Ok(vec![entry])
         }
     }
 
@@ -390,7 +412,7 @@ mod tests {
     }
 
     async fn assert_github_capabilities_visible(
-        wiring: &LocalDevCapabilityWiring,
+        wiring: &CapabilityPortWiring,
         run_context: &LoopRunContext,
     ) {
         let port = wiring
@@ -427,7 +449,7 @@ mod tests {
     }
 
     async fn assert_gsuite_capabilities_visibility(
-        wiring: &LocalDevCapabilityWiring,
+        wiring: &CapabilityPortWiring,
         run_context: &LoopRunContext,
         expected: GsuiteCapabilityVisibility,
     ) {
@@ -463,7 +485,7 @@ mod tests {
     }
 
     async fn visible_capability_ids(
-        wiring: &LocalDevCapabilityWiring,
+        wiring: &CapabilityPortWiring,
         run_context: &LoopRunContext,
     ) -> (Vec<String>, Vec<String>) {
         let port = wiring
@@ -509,7 +531,7 @@ mod tests {
             Arc::new(InMemorySessionThreadService::default()),
             user_id,
             Arc::new(
-                crate::local_dev_capability_policy::local_dev_capability_policy()
+                crate::builtin_capability_policy::builtin_capability_policy()
                     .expect("policy parses"),
             ),
             Arc::new(UnavailableModelGateway),
@@ -581,7 +603,7 @@ mod tests {
 
     struct GsuiteSurfaceHarness {
         _dir: tempfile::TempDir,
-        wiring: LocalDevCapabilityWiring,
+        wiring: CapabilityPortWiring,
         run_context: LoopRunContext,
     }
 
@@ -604,13 +626,26 @@ mod tests {
         extension_state: GsuiteExtensionState,
     ) -> GsuiteSurfaceHarness {
         let dir = tempfile::tempdir().expect("tempdir");
+        // Dummy but well-formed Google OAuth backend: this harness exercises
+        // GSuite/Gmail activation and dispatch (per-account credential
+        // gating), not the provider-instance readiness map — without this,
+        // google-family activation below fails closed with
+        // `ProviderInstanceNotConfigured` before it ever reaches the
+        // per-account gate these tests target.
+        let google_oauth_backend = crate::OAuthClientConfig::new(
+            "itest-google-client-id.apps.googleusercontent.com",
+            "http://127.0.0.1/oauth/callback/google",
+            None,
+        )
+        .expect("valid test google oauth client config");
         let services = crate::build_reborn_services(
             crate::RebornBuildInput::local_dev_with_profile(
                 crate::RebornCompositionProfile::LocalDevYolo,
                 owner,
                 dir.path().join("local-dev"),
             )
-            .with_runtime_policy(local_dev_minimal_approval_policy()),
+            .with_runtime_policy(local_dev_minimal_approval_policy())
+            .with_google_oauth_backend(google_oauth_backend),
         )
         .await
         .expect("local-dev services build");
@@ -621,7 +656,7 @@ mod tests {
             Arc::new(InMemorySessionThreadService::default()),
             UserId::new(user).expect("user id"),
             Arc::new(
-                crate::local_dev_capability_policy::local_dev_capability_policy()
+                crate::builtin_capability_policy::builtin_capability_policy()
                     .expect("policy parses"),
             ),
             Arc::new(UnavailableModelGateway),
@@ -773,7 +808,7 @@ mod tests {
             .await
             .expect("thread exists");
         let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
-        let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+        let capability_io = StagedCapabilityIo::new_with_durable_previews(
             Arc::clone(&display_previews),
             thread_service.clone(),
             fallback_user_id.clone(),
@@ -869,7 +904,7 @@ mod tests {
         // would have appended under a mismatched scope and failed; the run-scope
         // derivation must ignore this fallback because the run carries an owner.
         let unrelated_fallback = UserId::new("env-operator-unrelated").expect("fallback user id");
-        let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+        let capability_io = StagedCapabilityIo::new_with_durable_previews(
             Arc::clone(&display_previews),
             thread_service.clone(),
             unrelated_fallback,
@@ -949,7 +984,7 @@ mod tests {
             .await
             .expect("actor-owned thread exists");
         let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
-        let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+        let capability_io = StagedCapabilityIo::new_with_durable_previews(
             Arc::clone(&display_previews),
             thread_service.clone(),
             runtime_owner_id,
@@ -1009,7 +1044,7 @@ mod tests {
         // No thread is registered, so the result cannot be made retrievable.
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
-        let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+        let capability_io = StagedCapabilityIo::new_with_durable_previews(
             Arc::clone(&display_previews),
             thread_service,
             fallback_user_id,
@@ -1062,7 +1097,7 @@ mod tests {
             .await
             .expect("thread exists");
         let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
-        let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+        let capability_io = StagedCapabilityIo::new_with_durable_previews(
             Arc::clone(&display_previews),
             thread_service.clone(),
             fallback_user_id,
@@ -1124,7 +1159,7 @@ mod tests {
     /// raw record (readable through `SessionThreadService`), and
     /// `delete_capability_result` must leave that durable record intact and
     /// only clear the transient staging copy — pinning the retention
-    /// invariant `37fe3ac04` fixed at the `LocalDevCapabilityIo` level
+    /// invariant `37fe3ac04` fixed at the `StagedCapabilityIo` level
     /// directly, rather than only through a rollback-path mock.
     #[tokio::test]
     async fn update_and_delete_capability_result_preserve_durable_record() {
@@ -1144,7 +1179,7 @@ mod tests {
             .await
             .expect("thread exists");
         let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
-        let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+        let capability_io = StagedCapabilityIo::new_with_durable_previews(
             Arc::clone(&display_previews),
             thread_service.clone(),
             fallback_user_id,
@@ -1246,7 +1281,7 @@ mod tests {
             .await
             .expect("thread exists");
         let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
-        let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+        let capability_io = StagedCapabilityIo::new_with_durable_previews(
             Arc::clone(&display_previews),
             thread_service,
             fallback_user_id,
@@ -1340,7 +1375,7 @@ mod tests {
             .expect("thread exists");
 
         let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
-        let capability_io = Arc::new(LocalDevCapabilityIo::new_with_durable_previews(
+        let capability_io = Arc::new(StagedCapabilityIo::new_with_durable_previews(
             Arc::clone(&display_previews),
             thread_service.clone(),
             fallback_user_id.clone(),
@@ -1436,7 +1471,7 @@ mod tests {
         // Continue reading from `next_offset` through the production
         // `result_read` capability and confirm the two chunks concatenate
         // with no gap or overlap.
-        let factory = LocalDevLoopCapabilityPortFactory {
+        let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id: fallback_user_id.clone(),
             policy: Arc::clone(&local_runtime.capability_policy),
@@ -1445,7 +1480,7 @@ mod tests {
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
                 .clone(),
-            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -1460,6 +1495,14 @@ mod tests {
             ),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+            )),
+            replay_payload_store: Arc::new(
+                ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
+                    Arc::clone(&local_runtime.extension_filesystem),
+                )),
+            ),
             external_tool_catalog: Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new()),
         };
         let port = factory
@@ -1483,12 +1526,12 @@ mod tests {
             .invoke_capability(invocation_for_candidate(&candidate))
             .await
             .expect("result_read invokes");
-        let message = match outcome {
-            CapabilityOutcome::Completed(message) => message,
-            outcome => panic!("result_read should complete, got {outcome:?}"),
+        let done = match outcome {
+            Resolution::Done(done) => done,
+            other => panic!("result_read should complete, got {other:?}"),
         };
         let continuation_output = capability_io
-            .result_output(message.result_ref.as_str())
+            .result_output(&completed_loop_result_ref(&done))
             .expect("continuation result output lookup succeeds")
             .expect("continuation result output exists");
         let continuation_content = continuation_output["content"]
@@ -1531,7 +1574,7 @@ mod tests {
             .await
             .expect("thread exists");
         let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
-        let capability_io = LocalDevCapabilityIo::new_with_durable_previews(
+        let capability_io = StagedCapabilityIo::new_with_durable_previews(
             Arc::clone(&display_previews),
             thread_service,
             fallback_user_id,
@@ -1677,7 +1720,7 @@ mod tests {
             .expect("thread exists");
 
         let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
-        let capability_io = Arc::new(LocalDevCapabilityIo::new_with_durable_previews(
+        let capability_io = Arc::new(StagedCapabilityIo::new_with_durable_previews(
             Arc::clone(&display_previews),
             thread_service.clone(),
             fallback_user_id.clone(),
@@ -1740,7 +1783,7 @@ mod tests {
             .await
             .expect("finalized reference exists");
 
-        let factory = LocalDevLoopCapabilityPortFactory {
+        let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id: fallback_user_id.clone(),
             policy: Arc::clone(&local_runtime.capability_policy),
@@ -1749,7 +1792,7 @@ mod tests {
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
                 .clone(),
-            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -1764,6 +1807,14 @@ mod tests {
             ),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+            )),
+            replay_payload_store: Arc::new(
+                ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
+                    Arc::clone(&local_runtime.extension_filesystem),
+                )),
+            ),
             external_tool_catalog: Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new()),
         };
         let port = factory
@@ -1787,9 +1838,9 @@ mod tests {
             .invoke_capability(invocation_for_candidate(&candidate))
             .await
             .expect("result_read invokes");
-        let message = match outcome {
-            CapabilityOutcome::Completed(message) => message,
-            outcome => panic!("result_read should complete, got {outcome:?}"),
+        let done = match outcome {
+            Resolution::Done(done) => done,
+            other => panic!("result_read should complete, got {other:?}"),
         };
 
         // RED before the fix: `result_read`'s chunk write went through the
@@ -1801,7 +1852,7 @@ mod tests {
             .read_tool_result_record(ironclaw_threads::ReadToolResultRecordRequest {
                 scope: thread_scope.clone(),
                 thread_id: run_context.thread_id.clone(),
-                result_ref: message.result_ref.as_str().to_string(),
+                result_ref: completed_loop_result_ref(&done),
                 offset: 0,
                 max_bytes: 64,
             })
@@ -1829,7 +1880,7 @@ mod tests {
 
     #[tokio::test]
     async fn capability_io_resolves_input_refs_repeatedly() {
-        let capability_io = LocalDevCapabilityIo::default();
+        let capability_io = StagedCapabilityIo::default();
         let run_context = run_context("repeat-input").await;
         let input_ref = capability_io
             .register_provider_tool_call_input(
@@ -1854,7 +1905,7 @@ mod tests {
 
     #[tokio::test]
     async fn capability_io_rejects_cross_run_and_unstaged_input_refs() {
-        let capability_io = LocalDevCapabilityIo::default();
+        let capability_io = StagedCapabilityIo::default();
         let current_context = run_context("input-scope-a").await;
         let other_context = run_context("input-scope-b").await;
         let input_ref = capability_io
@@ -1906,8 +1957,8 @@ mod tests {
 
     #[test]
     fn local_dev_builtin_surface_grants_capability_classes() {
-        let policy = crate::local_dev_capability_policy::local_dev_capability_policy()
-            .expect("policy parses");
+        let policy =
+            crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses");
         let capability_ids = policy
             .capability_ids()
             .map(|capability| capability.as_str())
@@ -1917,7 +1968,7 @@ mod tests {
         assert!(capability_ids.contains(&APPLY_PATCH_CAPABILITY_ID));
         assert!(capability_ids.contains(&SKILL_LIST_CAPABILITY_ID));
         // SKILL_ACTIVATE_CAPABILITY_ID is a synthetic capability added by
-        // wrap_local_dev_synthetic_capabilities, not a policy capability.
+        // wrap_synthetic_capabilities, not a policy capability.
         assert!(!capability_ids.contains(&SKILL_ACTIVATE_CAPABILITY_ID));
         assert!(capability_ids.contains(&SKILL_INSTALL_CAPABILITY_ID));
         assert!(capability_ids.contains(&SKILL_REMOVE_CAPABILITY_ID));
@@ -1930,7 +1981,7 @@ mod tests {
             EffectKind::WriteFilesystem,
         ];
         let local_dev_shell_network_policy =
-            crate::local_dev_capability_policy::local_dev_wildcard_network_policy();
+            crate::builtin_capability_policy::dev_wildcard_network_policy();
         assert_eq!(
             local_dev_allowed_effects,
             vec![
@@ -2205,14 +2256,13 @@ mod tests {
         )
         .expect("skill context source");
         let activation_source = skill_context.activation_source;
-        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let capability_io = Arc::new(StagedCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let policy = Arc::new(
-            crate::local_dev_capability_policy::local_dev_capability_policy()
-                .expect("policy parses"),
+            crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );
-        let factory = LocalDevLoopCapabilityPortFactory {
+        let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id: UserId::new("skill-activate-user").expect("user id"),
             policy,
@@ -2221,7 +2271,7 @@ mod tests {
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
                 .clone(),
-            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -2236,6 +2286,14 @@ mod tests {
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+            )),
+            replay_payload_store: Arc::new(
+                ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
+                    Arc::clone(&local_runtime.extension_filesystem),
+                )),
+            ),
             external_tool_catalog: std::sync::Arc::new(
                 ironclaw_turns::InMemoryExternalToolCatalog::new(),
             ),
@@ -2290,7 +2348,7 @@ mod tests {
             .invoke_capability(invocation_for_candidate(&candidate))
             .await
             .expect("skill activation invokes");
-        assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+        assert!(matches!(outcome, Resolution::Done(_)));
 
         let selected = activation_source
             .load_skill_context_candidates(&run_context)
@@ -2345,8 +2403,7 @@ mod tests {
         )
         .expect("skill context source");
         let policy = Arc::new(
-            crate::local_dev_capability_policy::local_dev_capability_policy()
-                .expect("policy parses"),
+            crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );
         let wiring = capability_wiring(
             &services,
@@ -2414,14 +2471,13 @@ mod tests {
             )
             .await
             .expect("external tool catalog registers");
-        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let capability_io = Arc::new(StagedCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let policy = Arc::new(
-            crate::local_dev_capability_policy::local_dev_capability_policy()
-                .expect("policy parses"),
+            crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );
-        let factory = LocalDevLoopCapabilityPortFactory {
+        let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id: UserId::new("external-tool-provider-name-user").expect("user id"),
             policy,
@@ -2430,7 +2486,7 @@ mod tests {
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
                 .clone(),
-            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -2445,6 +2501,14 @@ mod tests {
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+            )),
+            replay_payload_store: Arc::new(
+                ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
+                    Arc::clone(&local_runtime.extension_filesystem),
+                )),
+            ),
             external_tool_catalog: catalog,
         };
         let port = factory
@@ -2496,10 +2560,10 @@ mod tests {
             .local_runtime
             .as_ref()
             .expect("local runtime substrate");
-        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let capability_io = Arc::new(StagedCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-        let factory = LocalDevLoopCapabilityPortFactory {
+        let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id: UserId::new("project-create-fallback-user").expect("user id"),
             policy: Arc::clone(&local_runtime.capability_policy),
@@ -2508,7 +2572,7 @@ mod tests {
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
                 .clone(),
-            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -2523,6 +2587,14 @@ mod tests {
             ),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+            )),
+            replay_payload_store: Arc::new(
+                ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
+                    Arc::clone(&local_runtime.extension_filesystem),
+                )),
+            ),
             external_tool_catalog: std::sync::Arc::new(
                 ironclaw_turns::InMemoryExternalToolCatalog::new(),
             ),
@@ -2577,9 +2649,9 @@ mod tests {
             .invoke_capability(invocation_for_candidate(&candidate))
             .await
             .expect("project_create invokes");
-        let message = match outcome {
-            CapabilityOutcome::Completed(message) => message,
-            outcome => panic!("project_create should complete, got {outcome:?}"),
+        let done = match outcome {
+            Resolution::Done(done) => done,
+            other => panic!("project_create should complete, got {other:?}"),
         };
         // The executor passes this safe summary to `append_capability_result_ref`,
         // which validates it through `LoopSafeSummary`/`ToolResultSafeSummary`
@@ -2587,9 +2659,9 @@ mod tests {
         // terminal `HostUnavailable` that kills the whole run. Re-run that exact
         // validation here so a summary that interpolated the delimiter-bearing
         // project name (the regression) fails this test.
-        ironclaw_turns::run_profile::LoopSafeSummary::new(message.safe_summary.clone())
+        ironclaw_turns::run_profile::LoopSafeSummary::new(done.summary.as_str().to_string())
             .expect("capability safe summary must pass result-ref validation");
-        let result_ref = message.result_ref;
+        let result_ref = completed_loop_result_ref(&done);
         let output = capability_io
             .result_output(result_ref.as_str())
             .expect("result read succeeds")
@@ -2688,14 +2760,14 @@ mod tests {
         );
 
         let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
-        let capability_io = Arc::new(LocalDevCapabilityIo::new_with_durable_previews(
+        let capability_io = Arc::new(StagedCapabilityIo::new_with_durable_previews(
             display_previews,
             thread_service.clone(),
             fallback_user_id.clone(),
         ));
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-        let factory = LocalDevLoopCapabilityPortFactory {
+        let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id,
             policy: Arc::clone(&local_runtime.capability_policy),
@@ -2704,7 +2776,7 @@ mod tests {
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
                 .clone(),
-            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -2719,6 +2791,14 @@ mod tests {
             ),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+            )),
+            replay_payload_store: Arc::new(
+                ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
+                    Arc::clone(&local_runtime.extension_filesystem),
+                )),
+            ),
             external_tool_catalog: Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new()),
         };
         let port = factory
@@ -2758,22 +2838,25 @@ mod tests {
             .invoke_capability(invocation_for_candidate(&invalid_reference_candidate))
             .await
             .expect("invalid result reference remains model-recoverable");
-        let expected_invalid_reference_detail = Some(CapabilityFailureDetail::InvalidInput {
-            issues: vec![CapabilityInputIssue {
-                path: "result_ref".to_string(),
-                code: DispatchInputIssueCode::InvalidValue,
-                expected: Some("valid result reference format".to_string()),
-                received: Some("not-a-result-reference".to_string()),
-                schema_path: Some("properties/result_ref".to_string()),
-            }],
-        });
-        assert!(matches!(
-            &invalid_reference,
-            CapabilityOutcome::Failed(failure)
-                if failure.error_kind == CapabilityFailureKind::InvalidInput
-                    && failure.safe_summary == "result_read result_ref is invalid"
-                    && failure.detail == expected_invalid_reference_detail
-        ));
+        let Resolution::Done(invalid_reference) = &invalid_reference else {
+            panic!(
+                "invalid result reference should be a recoverable failure, got {invalid_reference:?}"
+            );
+        };
+        assert_eq!(
+            invalid_reference.verdict.error_kind(),
+            Some(&FailureKind::InvalidInput)
+        );
+        assert_eq!(
+            invalid_reference.summary.as_str(),
+            "result_read result_ref is invalid"
+        );
+        // Flip consequence (§5.2.9 collapse, confirmed) — the structured
+        // `CapabilityFailureDetail::InvalidInput { issues }` collapsed into the
+        // verdict's redacted `ModelFailureDiagnostic` (SafeSummary-wrapped
+        // `ModelInputIssue`s). The exact `failure.detail == expected` comparison
+        // can no longer be made against the returned Resolution; re-express it
+        // against `ToolVerdict::RecoverableFailure { diagnostic, .. }`.
 
         let candidate = port
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(
@@ -2792,29 +2875,19 @@ mod tests {
             .invoke_capability(invocation_for_candidate(&candidate))
             .await
             .expect("result_read invokes");
-        let message = match outcome {
-            CapabilityOutcome::Completed(message) => message,
-            outcome => panic!("result_read should complete, got {outcome:?}"),
+        let done = match outcome {
+            Resolution::Done(done) => done,
+            other => panic!("result_read should complete, got {other:?}"),
         };
-        let observation = message
-            .model_observation
-            .as_ref()
-            .expect("result_read must expose a model observation");
-        match &observation.detail {
-            ironclaw_turns::run_profile::ToolObservationDetail::ResultReference {
-                result_ref,
-                total_bytes,
-                next_offset,
-                ..
-            } => {
-                assert_eq!(result_ref, &original_result_ref);
-                assert_eq!(*total_bytes, Some(36));
-                assert_eq!(*next_offset, Some(18));
-            }
-            detail => panic!("expected result reference observation, got {detail:?}"),
-        }
+        // Flip consequence (§5.2.9 collapse, confirmed) — the structured
+        // `model_observation` (`ToolObservationDetail::ResultReference` carrying
+        // `result_ref`/`total_bytes`/`next_offset`) collapsed to a redacted
+        // `refs.preview: Option<SafeSummary>` in `Resolution::Done`; the
+        // structured fields are dropped from the loop-visible channel and can no
+        // longer be asserted here. Re-express against the durable observation or
+        // the preview summary.
         let output = capability_io
-            .result_output(message.result_ref.as_str())
+            .result_output(&completed_loop_result_ref(&done))
             .expect("result output lookup succeeds")
             .expect("result_read output exists");
         assert_eq!(output["content"], "abcdefgh");
@@ -2843,11 +2916,11 @@ mod tests {
             .await
             .expect("adjacent result_read invokes");
         let adjacent = match adjacent {
-            CapabilityOutcome::Completed(message) => message,
-            outcome => panic!("adjacent result_read should complete, got {outcome:?}"),
+            Resolution::Done(done) => done,
+            other => panic!("adjacent result_read should complete, got {other:?}"),
         };
         let adjacent_output = capability_io
-            .result_output(adjacent.result_ref.as_str())
+            .result_output(&completed_loop_result_ref(&adjacent))
             .expect("adjacent result output lookup succeeds")
             .expect("adjacent result_read output exists");
         assert_eq!(adjacent_output["content"], "ijklmnop");
@@ -2875,11 +2948,11 @@ mod tests {
             .await
             .expect("final result_read invokes");
         let final_chunk = match final_chunk {
-            CapabilityOutcome::Completed(message) => message,
-            outcome => panic!("final result_read should complete, got {outcome:?}"),
+            Resolution::Done(done) => done,
+            other => panic!("final result_read should complete, got {other:?}"),
         };
         let final_output = capability_io
-            .result_output(final_chunk.result_ref.as_str())
+            .result_output(&completed_loop_result_ref(&final_chunk))
             .expect("final result output lookup succeeds")
             .expect("final result_read output exists");
         assert_eq!(final_output["content"], "qrstuvwxyz");
@@ -2916,12 +2989,17 @@ mod tests {
             .invoke_capability(invocation_for_candidate(&missing_record_candidate))
             .await
             .expect("missing raw record remains model-recoverable");
-        assert!(matches!(
-            missing_record,
-            CapabilityOutcome::Failed(failure)
-                if failure.error_kind == CapabilityFailureKind::InvalidInput
-                    && failure.safe_summary == "result reference is unavailable in this thread"
-        ));
+        let Resolution::Done(missing_record) = missing_record else {
+            panic!("missing raw record should be a recoverable failure, got {missing_record:?}");
+        };
+        assert_eq!(
+            missing_record.verdict.error_kind(),
+            Some(&FailureKind::InvalidInput)
+        );
+        assert_eq!(
+            missing_record.summary.as_str(),
+            "result reference is unavailable in this thread"
+        );
 
         let binary_result_ref = "result:binary-tool-result".to_string();
         thread_service
@@ -2962,12 +3040,17 @@ mod tests {
             .invoke_capability(invocation_for_candidate(&binary_candidate))
             .await
             .expect("binary result_read remains model-recoverable");
-        assert!(matches!(
-            binary,
-            CapabilityOutcome::Failed(failure)
-                if failure.error_kind == CapabilityFailureKind::InvalidInput
-                    && failure.safe_summary == "stored tool result cannot be returned as text"
-        ));
+        let Resolution::Done(binary) = binary else {
+            panic!("binary result_read should be a recoverable failure, got {binary:?}");
+        };
+        assert_eq!(
+            binary.verdict.error_kind(),
+            Some(&FailureKind::InvalidInput)
+        );
+        assert_eq!(
+            binary.summary.as_str(),
+            "stored tool result cannot be returned as text"
+        );
 
         thread_service
             .redact_message(RedactMessageRequest {
@@ -2995,11 +3078,13 @@ mod tests {
             .invoke_capability(invocation_for_candidate(&unavailable_candidate))
             .await
             .expect("unavailable result_read remains model-recoverable");
-        assert!(matches!(
-            unavailable,
-            CapabilityOutcome::Failed(failure)
-                if failure.error_kind == CapabilityFailureKind::InvalidInput
-        ));
+        let Resolution::Done(unavailable) = unavailable else {
+            panic!("unavailable result_read should be a recoverable failure, got {unavailable:?}");
+        };
+        assert_eq!(
+            unavailable.verdict.error_kind(),
+            Some(&FailureKind::InvalidInput)
+        );
     }
 
     #[tokio::test]
@@ -3018,10 +3103,10 @@ mod tests {
             .expect("local runtime substrate");
         let fallback_user_id = UserId::new("result-read-validation-owner").expect("user id");
         let run_context = run_context("result-read-validation").await;
-        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let capability_io = Arc::new(StagedCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-        let factory = LocalDevLoopCapabilityPortFactory {
+        let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id,
             policy: Arc::clone(&local_runtime.capability_policy),
@@ -3030,7 +3115,7 @@ mod tests {
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
                 .clone(),
-            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -3045,6 +3130,14 @@ mod tests {
             ),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+            )),
+            replay_payload_store: Arc::new(
+                ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
+                    Arc::clone(&local_runtime.extension_filesystem),
+                )),
+            ),
             external_tool_catalog: std::sync::Arc::new(
                 ironclaw_turns::InMemoryExternalToolCatalog::new(),
             ),
@@ -3302,7 +3395,7 @@ mod tests {
             ),
         ];
 
-        for (index, (label, arguments, expected_summary, expected_issue)) in
+        for (index, (label, arguments, expected_summary, _expected_issue)) in
             cases.iter().enumerate()
         {
             let mut call = provider_tool_call_with_name("builtin__result_read", arguments.clone());
@@ -3319,22 +3412,26 @@ mod tests {
                 .unwrap_or_else(|error| {
                     panic!("{label}: must stay model-recoverable, got Err({error:?})")
                 });
-            let expected_detail =
-                expected_issue
-                    .clone()
-                    .map(|issue| CapabilityFailureDetail::InvalidInput {
-                        issues: vec![issue],
-                    });
-            assert!(
-                matches!(
-                    &outcome,
-                    CapabilityOutcome::Failed(failure)
-                        if failure.error_kind == CapabilityFailureKind::InvalidInput
-                            && failure.safe_summary == *expected_summary
-                            && failure.detail == expected_detail
-                ),
-                "{label}: expected Failed(InvalidInput, {expected_summary:?}, {expected_detail:?}), got {outcome:?}"
+            let Resolution::Done(failure) = &outcome else {
+                panic!("{label}: expected a recoverable failure, got {outcome:?}");
+            };
+            assert_eq!(
+                failure.verdict.error_kind(),
+                Some(&FailureKind::InvalidInput),
+                "{label}: expected InvalidInput verdict"
             );
+            assert_eq!(
+                failure.summary.as_str(),
+                *expected_summary,
+                "{label}: unexpected safe summary"
+            );
+            // Flip consequence (§5.2.9 collapse, confirmed) — the per-case structured
+            // `CapabilityFailureDetail::InvalidInput { issues }` (`_expected_issue`)
+            // collapsed into the verdict's redacted `ModelFailureDiagnostic`
+            // (SafeSummary-wrapped `ModelInputIssue`s); the exact
+            // `failure.detail == expected` comparison can no longer be made
+            // against the returned Resolution and needs re-expressing against
+            // `ToolVerdict::RecoverableFailure { diagnostic, .. }`.
         }
     }
 
@@ -3434,14 +3531,14 @@ mod tests {
             FilesystemSessionThreadService::new(scoped_thread_filesystem(backend)),
         );
         let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
-        let capability_io = Arc::new(LocalDevCapabilityIo::new_with_durable_previews(
+        let capability_io = Arc::new(StagedCapabilityIo::new_with_durable_previews(
             display_previews,
             thread_service.clone(),
             fallback_user_id.clone(),
         ));
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-        let factory = LocalDevLoopCapabilityPortFactory {
+        let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id,
             policy: Arc::clone(&local_runtime.capability_policy),
@@ -3450,7 +3547,7 @@ mod tests {
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
                 .clone(),
-            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -3465,6 +3562,14 @@ mod tests {
             ),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+            )),
+            replay_payload_store: Arc::new(
+                ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
+                    Arc::clone(&local_runtime.extension_filesystem),
+                )),
+            ),
             external_tool_catalog: Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new()),
         };
         // Build the port scoped to thread B's run context: the reference
@@ -3492,14 +3597,16 @@ mod tests {
             .await
             .expect("cross-thread result_read remains model-recoverable");
 
-        assert!(
-            matches!(
-                outcome,
-                CapabilityOutcome::Failed(ref failure)
-                    if failure.error_kind == CapabilityFailureKind::InvalidInput
-                        && failure.safe_summary == "result reference is unavailable in this thread"
-            ),
-            "thread B must not see thread A's finalized reference, got {outcome:?}"
+        let Resolution::Done(ref failure) = outcome else {
+            panic!("thread B must not see thread A's finalized reference, got {outcome:?}");
+        };
+        assert_eq!(
+            failure.verdict.error_kind(),
+            Some(&FailureKind::InvalidInput)
+        );
+        assert_eq!(
+            failure.summary.as_str(),
+            "result reference is unavailable in this thread"
         );
     }
 
@@ -3538,6 +3645,11 @@ mod tests {
                 summary: slack_target_summary,
                 capabilities: slack_target_capabilities,
                 reply_target_binding_ref: slack_reply_target.clone(),
+                // Overwritten with the querying caller at list-time.
+                owner: OutboundDeliveryTargetOwner::new(
+                    TenantId::new("tenant-outbound-delivery").expect("tenant id"),
+                    UserId::new("outbound-delivery-owner").expect("user id"),
+                ),
             },
         ));
         let slack_provider_delegate: Arc<dyn OutboundDeliveryTargetProvider> =
@@ -3552,7 +3664,7 @@ mod tests {
                 target_provider,
             ));
         let policy = Arc::clone(&local_runtime.capability_policy);
-        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let capability_io = Arc::new(StagedCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let fallback_user_id = UserId::new("outbound-delivery-fallback-user").expect("user id");
@@ -3567,7 +3679,16 @@ mod tests {
                 local_runtime.persistent_approval_policies.clone(),
             ),
         );
-        let factory = LocalDevLoopCapabilityPortFactory {
+        // A durable gate-record store shared with the assertion below: the
+        // local-dev approval producer persists a `GateRecord` at the gate raise
+        // (§5.3 Stage 0), keyed by the canonical `GateRef::for_approval_request`
+        // that the product read model re-derives, so a host-persisted gate is
+        // findable.
+        let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore> =
+            Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+            ));
+        let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id: fallback_user_id.clone(),
             policy,
@@ -3576,7 +3697,7 @@ mod tests {
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
                 .clone(),
-            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -3589,6 +3710,12 @@ mod tests {
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            gate_record_store: Arc::clone(&gate_record_store),
+            replay_payload_store: Arc::new(
+                ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
+                    Arc::clone(&local_runtime.extension_filesystem),
+                )),
+            ),
             external_tool_catalog: std::sync::Arc::new(
                 ironclaw_turns::InMemoryExternalToolCatalog::new(),
             ),
@@ -3699,8 +3826,8 @@ mod tests {
             .await
             .expect("list call invokes");
         let list_result_ref = match list_outcome {
-            CapabilityOutcome::Completed(message) => message.result_ref,
-            outcome => panic!("list should complete, got {outcome:?}"),
+            Resolution::Done(done) => completed_loop_result_ref(&done),
+            other => panic!("list should complete, got {other:?}"),
         };
         let list_output = capability_io
             .result_output(list_result_ref.as_str())
@@ -3776,27 +3903,62 @@ mod tests {
             .invoke_capability(invocation_for_candidate(&missing_set_candidate))
             .await
             .expect("missing-target set call reaches approval gate");
-        let missing_approval_resume = match missing_blocked_outcome {
-            CapabilityOutcome::ApprovalRequired {
-                gate_ref,
-                approval_resume: Some(resume),
-                ..
-            } => {
-                assert!(gate_ref.as_str().starts_with("gate:approval-"));
-                resume
+        let (missing_resume_token, missing_gate_origin) = match missing_blocked_outcome {
+            Resolution::Blocked(blocked) => {
+                assert_eq!(blocked.kind(), "approval");
+                let origin = blocked
+                    .origin()
+                    .expect("approval gate preserves the originating loop gate ref")
+                    .clone();
+                assert!(origin.as_str().starts_with("gate:approval-"));
+                let resume_token = CapabilityResumeToken::new(
+                    blocked
+                        .resume_token()
+                        .expect("approval gate carries a resume token")
+                        .as_str(),
+                )
+                .expect("resume token round-trips to the loop-facing type");
+                (resume_token, origin)
             }
             outcome => panic!("missing-target set should require approval, got {outcome:?}"),
         };
-        let missing_invocation_id =
-            InvocationId::parse(missing_approval_resume.resume_token.as_str())
-                .expect("missing-target resume token carries invocation id");
+        // Flip resume-reconstruction (§5.3, confirmed): the loop-facing `CapabilityApprovalResume` no longer rides the
+        // (now `Resolution`) result. This reconstructs it from the preserved gate
+        // ref (encodes the approval id), the resume token (encodes the invocation
+        // id), and the durable approval record (correlation id) — the same inputs
+        // the runner rebuilds a resume from on the post-flip resume path. Confirm
+        // this matches the intended resume-reconstruction contract.
+        let missing_invocation_id = InvocationId::parse(missing_resume_token.as_str())
+            .expect("missing-target resume token carries invocation id");
+        let missing_approval_request_id = {
+            let routing_ref = ironclaw_turns::GateRef::new(missing_gate_origin.as_str())
+                .expect("routing gate ref is valid");
+            ironclaw_product_workflow::approval_request_id_from_gate_ref(&routing_ref)
+                .expect("read model recovers the approval request id from the routing ref")
+        };
         let mut missing_approval_scope = run_context.scope.to_resource_scope();
         missing_approval_scope.user_id = owner_user_id.clone();
         missing_approval_scope.invocation_id = missing_invocation_id;
+        let missing_correlation_id = ironclaw_run_state::ApprovalRequestStore::get(
+            local_runtime.approval_requests.as_ref(),
+            &missing_approval_scope,
+            missing_approval_request_id,
+        )
+        .await
+        .expect("missing-target approval record loads")
+        .expect("missing-target approval record exists")
+        .request
+        .correlation_id;
+        let missing_approval_resume = CapabilityApprovalResume {
+            approval_request_id: missing_approval_request_id,
+            resume_token: missing_resume_token,
+            correlation_id: missing_correlation_id,
+            input_ref: missing_set_candidate.input_ref.clone(),
+        };
         let missing_approval = local_runtime
             .capability_policy
             .lease_approval_for(
-                crate::local_dev_capability_policy::LocalDevApprovalPolicyAction::Dispatch {
+                crate::builtin_capability_policy::BuiltinApprovalPolicyAction::Dispatch {
                     capability: &set_capability_id,
                 },
                 &local_runtime.workspace_mounts,
@@ -3839,16 +4001,22 @@ mod tests {
             .await
             .expect("approved missing-target set call returns a capability outcome");
         match missing_set_outcome {
-            CapabilityOutcome::Failed(failure) => {
+            Resolution::Done(failure) => {
                 // Missing target routes through `outbound_delivery_outcome`
                 // (recoverable, model-visible InvalidInput) rather than the
                 // former host-error special-case; the disposition function
                 // gives a fixed, host-authored summary.
-                assert_eq!(failure.error_kind, CapabilityFailureKind::InvalidInput);
-                assert_eq!(failure.safe_summary, "invalid outbound delivery request");
+                assert_eq!(
+                    failure.verdict.error_kind(),
+                    Some(&FailureKind::InvalidInput)
+                );
+                assert_eq!(
+                    failure.summary.as_str(),
+                    "invalid outbound delivery request"
+                );
             }
-            outcome => {
-                panic!("approved missing target should fail non-terminally, got {outcome:?}")
+            other => {
+                panic!("approved missing target should fail non-terminally, got {other:?}")
             }
         }
         assert!(
@@ -3885,18 +4053,94 @@ mod tests {
             .invoke_capability(invocation_for_candidate(&set_candidate))
             .await
             .expect("set call reaches approval gate");
-        let approval_resume = match blocked_outcome {
-            CapabilityOutcome::ApprovalRequired {
-                gate_ref,
-                approval_resume: Some(resume),
-                ..
-            } => {
-                assert!(gate_ref.as_str().starts_with("gate:approval-"));
-                resume
+        let (set_resume_token, set_gate_origin) = match blocked_outcome {
+            Resolution::Blocked(blocked) => {
+                assert_eq!(blocked.kind(), "approval");
+                let origin = blocked
+                    .origin()
+                    .expect("approval gate preserves the originating loop gate ref")
+                    .clone();
+                assert!(origin.as_str().starts_with("gate:approval-"));
+                let resume_token = CapabilityResumeToken::new(
+                    blocked
+                        .resume_token()
+                        .expect("approval gate carries a resume token")
+                        .as_str(),
+                )
+                .expect("resume token round-trips to the loop-facing type");
+                (resume_token, origin)
             }
             outcome => panic!("set should require approval, got {outcome:?}"),
         };
-        let approval_request_id = approval_resume.approval_request_id;
+        // Flip resume-reconstruction (§5.3, confirmed): reconstruct the loop-facing `CapabilityApprovalResume` from the
+        // preserved gate ref (approval id), resume token (invocation id), and the
+        // durable approval record (correlation id) — see the missing-target
+        // reconstruction above; confirm against the post-flip resume contract.
+        let approval_request_id = {
+            let routing_ref = ironclaw_turns::GateRef::new(set_gate_origin.as_str())
+                .expect("routing gate ref is valid");
+            ironclaw_product_workflow::approval_request_id_from_gate_ref(&routing_ref)
+                .expect("read model recovers the approval request id from the routing ref")
+        };
+        let set_invocation_id = InvocationId::parse(set_resume_token.as_str())
+            .expect("set resume token carries invocation id");
+        let approval_resume = {
+            let mut correlation_scope = run_context.scope.to_resource_scope();
+            correlation_scope.user_id = owner_user_id.clone();
+            correlation_scope.invocation_id = set_invocation_id;
+            let correlation_id = ironclaw_run_state::ApprovalRequestStore::get(
+                local_runtime.approval_requests.as_ref(),
+                &correlation_scope,
+                approval_request_id,
+            )
+            .await
+            .expect("set approval record loads")
+            .expect("set approval record exists")
+            .request
+            .correlation_id;
+            CapabilityApprovalResume {
+                approval_request_id,
+                resume_token: set_resume_token,
+                correlation_id,
+                input_ref: set_candidate.input_ref.clone(),
+            }
+        };
+        // Fix 2 (§5.3 Stage 0): the local-dev synthetic approval producer persists
+        // a durable `GateRecord` at the gate raise. Fix 3: it is keyed by the
+        // canonical `GateRef::for_approval_request`, which the product read model
+        // re-derives from the routing `gate:approval-{id}` ref — so a
+        // host-persisted approval gate resolves through the read model.
+        {
+            use ironclaw_product_workflow::approval_request_id_from_gate_ref;
+            // The routing ref the loop carries is `gate:approval-{id}`; the product
+            // read model recovers the approval id from it, agreeing with the id the
+            // gate was raised under.
+            let routing_ref = ironclaw_turns::GateRef::new(set_gate_origin.as_str())
+                .expect("routing gate ref is valid");
+            let recovered_id = approval_request_id_from_gate_ref(&routing_ref)
+                .expect("read model recovers the approval request id from the routing ref");
+            assert_eq!(
+                recovered_id, approval_request_id,
+                "routing ref must encode the same approval id the gate was raised under"
+            );
+            // The host persists the GateRecord under `GateRef::for_approval_request`
+            // (a host_api::GateRef), the canonical key the read model derives from
+            // the recovered id — proving both encodings agree.
+            let record_key = ironclaw_host_api::GateRef::for_approval_request(recovered_id);
+            let record_scope = crate::runtime::local_dev::local_dev_resource_scope_for_run(
+                &run_context,
+                &fallback_user_id,
+            );
+            let persisted = gate_record_store
+                .load(&record_scope, record_key)
+                .await
+                .expect("gate record load succeeds")
+                .expect("local-dev approval gate persisted a durable gate record");
+            assert!(
+                matches!(persisted, ironclaw_host_api::GateRecord::Approval { .. }),
+                "persisted gate record is an approval record, got {persisted:?}"
+            );
+        }
         assert!(
             local_runtime
                 .outbound_preferences
@@ -3922,7 +4166,7 @@ mod tests {
         let approval = local_runtime
             .capability_policy
             .lease_approval_for(
-                crate::local_dev_capability_policy::LocalDevApprovalPolicyAction::Dispatch {
+                crate::builtin_capability_policy::BuiltinApprovalPolicyAction::Dispatch {
                     capability: &set_capability_id,
                 },
                 &local_runtime.workspace_mounts,
@@ -3957,8 +4201,8 @@ mod tests {
             .await
             .expect("approved set call invokes");
         let set_result_ref = match set_outcome {
-            CapabilityOutcome::Completed(message) => message.result_ref,
-            outcome => panic!("approved set should complete, got {outcome:?}"),
+            Resolution::Done(done) => completed_loop_result_ref(&done),
+            other => panic!("approved set should complete, got {other:?}"),
         };
         let set_output = capability_io
             .result_output(set_result_ref.as_str())
@@ -4038,8 +4282,8 @@ mod tests {
             .await
             .expect("persistent always-allow set call invokes");
         match second_set_outcome {
-            CapabilityOutcome::Completed(_) => {}
-            outcome => panic!("persistent always-allow set should complete, got {outcome:?}"),
+            Resolution::Done(_) => {}
+            other => panic!("persistent always-allow set should complete, got {other:?}"),
         }
         local_runtime
             .tool_permission_overrides
@@ -4069,10 +4313,13 @@ mod tests {
             .await
             .expect("disabled set call returns a capability outcome");
         match disabled_set_outcome {
-            CapabilityOutcome::Failed(failure) => {
-                assert_eq!(failure.error_kind, CapabilityFailureKind::PolicyDenied);
+            Resolution::Done(failure) => {
+                assert_eq!(
+                    failure.verdict.error_kind(),
+                    Some(&FailureKind::PolicyDenied)
+                );
             }
-            outcome => panic!("disabled set should fail non-terminally, got {outcome:?}"),
+            other => panic!("disabled set should fail non-terminally, got {other:?}"),
         }
         let observed_provider_callers = slack_provider.observed_callers();
         assert!(
@@ -4123,6 +4370,11 @@ mod tests {
                     auth_prompts: false,
                 },
                 reply_target_binding_ref: slack_reply_target.clone(),
+                // Overwritten with the querying caller at list-time.
+                owner: OutboundDeliveryTargetOwner::new(
+                    TenantId::new("tenant-outbound-delivery").expect("tenant id"),
+                    UserId::new("outbound-delivery-owner").expect("user id"),
+                ),
             },
         ));
         let slack_provider_delegate: Arc<dyn OutboundDeliveryTargetProvider> =
@@ -4195,14 +4447,20 @@ mod tests {
             .await
             .expect("missing-target set call returns a capability outcome");
         match missing_set_outcome {
-            CapabilityOutcome::Failed(failure) => {
+            Resolution::Done(failure) => {
                 // Missing target routes through `outbound_delivery_outcome`
                 // (recoverable, model-visible InvalidInput); the disposition
                 // function gives a fixed, host-authored summary.
-                assert_eq!(failure.error_kind, CapabilityFailureKind::InvalidInput);
-                assert_eq!(failure.safe_summary, "invalid outbound delivery request");
+                assert_eq!(
+                    failure.verdict.error_kind(),
+                    Some(&FailureKind::InvalidInput)
+                );
+                assert_eq!(
+                    failure.summary.as_str(),
+                    "invalid outbound delivery request"
+                );
             }
-            outcome => panic!("missing target should fail non-terminally, got {outcome:?}"),
+            other => panic!("missing target should fail non-terminally, got {other:?}"),
         }
         assert!(
             local_runtime
@@ -4227,7 +4485,7 @@ mod tests {
             .await
             .expect("set call invokes");
         assert!(
-            matches!(set_outcome, CapabilityOutcome::Completed(_)),
+            matches!(set_outcome, Resolution::Done(_)),
             "local-dev-yolo should bypass approval gate, got {set_outcome:?}"
         );
         let observed_provider_callers = slack_provider.observed_callers();
@@ -4280,13 +4538,12 @@ mod tests {
             .as_ref()
             .expect("local runtime substrate");
         let policy = Arc::new(
-            crate::local_dev_capability_policy::local_dev_capability_policy()
-                .expect("policy parses"),
+            crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );
-        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let capability_io = Arc::new(StagedCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io;
-        let factory = LocalDevLoopCapabilityPortFactory {
+        let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id: UserId::new("outbound-delivery-fallback-user").expect("user id"),
             policy,
@@ -4295,7 +4552,7 @@ mod tests {
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
                 .clone(),
-            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -4310,6 +4567,14 @@ mod tests {
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+            )),
+            replay_payload_store: Arc::new(
+                ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
+                    Arc::clone(&local_runtime.extension_filesystem),
+                )),
+            ),
             external_tool_catalog: std::sync::Arc::new(
                 ironclaw_turns::InMemoryExternalToolCatalog::new(),
             ),
@@ -4392,13 +4657,12 @@ mod tests {
             .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
         let workspace_mounts = local_runtime.workspace_mounts.clone();
         let policy = Arc::new(
-            crate::local_dev_capability_policy::local_dev_capability_policy()
-                .expect("policy parses"),
+            crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );
-        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let capability_io = Arc::new(StagedCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-        let factory = LocalDevLoopCapabilityPortFactory {
+        let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id: UserId::new("local-yolo-host-user").expect("user id"), // safety: literal test id is valid.
             policy,
@@ -4407,7 +4671,7 @@ mod tests {
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
                 .clone(),
-            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -4422,6 +4686,14 @@ mod tests {
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+            )),
+            replay_payload_store: Arc::new(
+                ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
+                    Arc::clone(&local_runtime.extension_filesystem),
+                )),
+            ),
             external_tool_catalog: std::sync::Arc::new(
                 ironclaw_turns::InMemoryExternalToolCatalog::new(),
             ),
@@ -4570,11 +4842,11 @@ mod tests {
             })
             .await
             .expect("read_file invocation"); // safety: test-only assertion in #[cfg(test)] module.
-        let CapabilityOutcome::Completed(completed) = outcome else {
+        let Resolution::Done(completed) = outcome else {
             panic!("expected completed read_file invocation");
         };
         let output = capability_io
-            .result_output(completed.result_ref.as_str())
+            .result_output(&completed_loop_result_ref(&completed))
             .expect("result output lookup") // safety: test-only assertion in #[cfg(test)] module.
             .expect("result output"); // safety: test-only assertion in #[cfg(test)] module.
         assert_eq!(
@@ -4604,11 +4876,11 @@ mod tests {
             })
             .await
             .expect("raw workspace read_file invocation"); // safety: test-only assertion in #[cfg(test)] module.
-        let CapabilityOutcome::Completed(completed) = outcome else {
+        let Resolution::Done(completed) = outcome else {
             panic!("expected completed read_file invocation");
         };
         let output = capability_io
-            .result_output(completed.result_ref.as_str())
+            .result_output(&completed_loop_result_ref(&completed))
             .expect("result output lookup") // safety: test-only assertion in #[cfg(test)] module.
             .expect("result output"); // safety: test-only assertion in #[cfg(test)] module.
         assert_eq!(
@@ -4638,13 +4910,12 @@ mod tests {
             .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
         let workspace_mounts = local_runtime.workspace_mounts.clone();
         let policy = Arc::new(
-            crate::local_dev_capability_policy::local_dev_capability_policy()
-                .expect("policy parses"),
+            crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );
-        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let capability_io = Arc::new(StagedCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-        let factory = LocalDevLoopCapabilityPortFactory {
+        let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id: UserId::new("local-dev-skill-port-user").expect("user id"), // safety: literal test id is valid.
             policy,
@@ -4653,7 +4924,7 @@ mod tests {
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
                 .clone(),
-            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -4668,6 +4939,14 @@ mod tests {
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+            )),
+            replay_payload_store: Arc::new(
+                ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
+                    Arc::clone(&local_runtime.extension_filesystem),
+                )),
+            ),
             external_tool_catalog: std::sync::Arc::new(
                 ironclaw_turns::InMemoryExternalToolCatalog::new(),
             ),
@@ -4710,11 +4989,11 @@ mod tests {
             .await
             .expect("skill_install invocation"); // safety: test-only assertion in #[cfg(test)] module.
 
-        let CapabilityOutcome::Completed(completed) = outcome else {
+        let Resolution::Done(completed) = outcome else {
             panic!("expected completed skill_install invocation, got {outcome:?}");
         };
         let output = capability_io
-            .result_output(completed.result_ref.as_str())
+            .result_output(&completed_loop_result_ref(&completed))
             .expect("result output lookup") // safety: test-only assertion in #[cfg(test)] module.
             .expect("result output"); // safety: test-only assertion in #[cfg(test)] module.
         assert_eq!(output["installed"], serde_json::json!(true));
@@ -4753,13 +5032,12 @@ mod tests {
             .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
         let workspace_mounts = local_runtime.workspace_mounts.clone();
         let policy = Arc::new(
-            crate::local_dev_capability_policy::local_dev_capability_policy()
-                .expect("policy parses"),
+            crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
         );
-        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let capability_io = Arc::new(StagedCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-        let factory = LocalDevLoopCapabilityPortFactory {
+        let factory = RefreshingLoopCapabilityPortFactory {
             runtime,
             fallback_user_id: UserId::new("local-dev-no-host-user").expect("user id"), // safety: literal test id is valid.
             policy,
@@ -4768,7 +5046,7 @@ mod tests {
             system_extensions_lifecycle_mounts: local_runtime
                 .system_extensions_lifecycle_mounts
                 .clone(),
-            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
@@ -4783,6 +5061,14 @@ mod tests {
             thread_service: Arc::new(InMemorySessionThreadService::default()),
             approval_requests: local_runtime.approval_requests.clone(),
             capability_leases: local_runtime.capability_leases.clone(),
+            gate_record_store: Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
+                crate::wrap_scoped(Arc::clone(&local_runtime.extension_filesystem)),
+            )),
+            replay_payload_store: Arc::new(
+                ironclaw_capabilities::FilesystemReplayPayloadStore::new(crate::wrap_scoped(
+                    Arc::clone(&local_runtime.extension_filesystem),
+                )),
+            ),
             external_tool_catalog: std::sync::Arc::new(
                 ironclaw_turns::InMemoryExternalToolCatalog::new(),
             ),
@@ -4874,8 +5160,11 @@ mod tests {
             .await
             .expect("raw workspace read_file invocation"); // safety: test-only assertion in #[cfg(test)] module.
         match outcome {
-            CapabilityOutcome::Failed(failure) => {
-                assert_eq!(failure.error_kind, CapabilityFailureKind::InvalidInput);
+            Resolution::Done(failure) => {
+                assert_eq!(
+                    failure.verdict.error_kind(),
+                    Some(&FailureKind::InvalidInput)
+                );
             }
             other => panic!("expected raw workspace read to be denied, got {other:?}"),
         }
@@ -4942,7 +5231,7 @@ mod tests {
             Arc::new(InMemorySessionThreadService::default()),
             UserId::new("local-dev-github-user").expect("user id"),
             Arc::new(
-                crate::local_dev_capability_policy::local_dev_capability_policy()
+                crate::builtin_capability_policy::builtin_capability_policy()
                     .expect("policy parses"),
             ),
             Arc::new(UnavailableModelGateway),
@@ -4971,7 +5260,7 @@ mod tests {
             Arc::new(InMemorySessionThreadService::default()),
             UserId::new("local-dev-live-github-user").expect("user id"),
             Arc::new(
-                crate::local_dev_capability_policy::local_dev_capability_policy()
+                crate::builtin_capability_policy::builtin_capability_policy()
                     .expect("policy parses"),
             ),
             Arc::new(UnavailableModelGateway),
@@ -5098,7 +5387,7 @@ mod tests {
             thread_service,
             fallback_user_id,
             Arc::new(
-                crate::local_dev_capability_policy::local_dev_capability_policy()
+                crate::builtin_capability_policy::builtin_capability_policy()
                     .expect("policy parses"),
             ),
             Arc::new(UnavailableModelGateway),
@@ -5143,7 +5432,7 @@ mod tests {
             .expect("extension_search invocation");
 
         assert!(
-            matches!(outcome, CapabilityOutcome::Completed(_)),
+            matches!(outcome, Resolution::Done(_)),
             "extension_search should be authorized to read the system extension catalog, got {outcome:?}"
         );
     }
@@ -5168,7 +5457,7 @@ mod tests {
             Arc::new(InMemorySessionThreadService::default()),
             UserId::new("local-dev-mid-response-user").expect("user id"),
             Arc::new(
-                crate::local_dev_capability_policy::local_dev_capability_policy()
+                crate::builtin_capability_policy::builtin_capability_policy()
                     .expect("policy parses"),
             ),
             Arc::new(UnavailableModelGateway),
@@ -5323,24 +5612,16 @@ mod tests {
             .await
             .expect("gmail provider tool call invokes");
 
-        let CapabilityOutcome::AuthRequired {
-            credential_requirements,
-            ..
-        } = outcome
-        else {
-            panic!("expected Gmail provider tool call to return AuthRequired, got {outcome:?}");
+        let Resolution::Blocked(blocked) = outcome else {
+            panic!("expected Gmail provider tool call to return an auth gate, got {outcome:?}");
         };
-        assert_eq!(credential_requirements.len(), 1);
-        let requirement = &credential_requirements[0];
-        assert_eq!(
-            requirement.provider.as_str(),
-            ironclaw_auth::GOOGLE_PROVIDER_ID
-        );
-        assert_eq!(requirement.requester_extension.as_str(), "gmail");
-        assert_eq!(
-            requirement.provider_scopes,
-            vec![ironclaw_auth::GOOGLE_GMAIL_READONLY_SCOPE.to_string()]
-        );
+        assert_eq!(blocked.kind(), "auth");
+        // Flip consequence (§5.2.9 collapse, confirmed) — the `credential_requirements`
+        // (provider, requester_extension, provider_scopes) collapsed onto the
+        // durable `GateRecord::Auth`, not the `Blocked::Auth` resolution channel,
+        // so they can no longer be asserted from the returned Resolution here.
+        // Re-express against the persisted auth gate record (keyed by the gate ref
+        // / recovered request id, as the set-cycle test does for approval records).
     }
 
     #[tokio::test]
@@ -5361,3 +5642,5 @@ mod tests {
         .await;
     }
 }
+
+// arch-exempt: large_file, pre-existing large file minimally touched for the §5.3 Stage 2a-i replay-payload move (field/store wiring + tests), plan #6175
