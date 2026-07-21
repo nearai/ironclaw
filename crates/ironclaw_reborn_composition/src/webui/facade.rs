@@ -399,10 +399,12 @@ pub(crate) fn build_webui_services_with_connectable_channels(
                 .with_scheduler_enabled(services.readiness.workers.trigger_poller),
         ));
     }
-    // First-class projects + membership (ACL). The local-dev graph builds the
-    // access-controlled facade once; production wiring is a follow-up.
-    if let Some(local_runtime) = &services.local_runtime {
-        api = api.with_project_service(Arc::clone(&local_runtime.project_service));
+    // First-class projects + membership (ACL). Built once per runtime over the
+    // scoped substrate — local-dev from `local_runtime`, production-shaped from
+    // the production store graph — via the shared `reborn_project_service`
+    // accessor so both build paths wire the same access-controlled facade.
+    if let Some(project_service) = runtime.reborn_project_service() {
+        api = api.with_project_service(project_service);
     }
     if let Some(local_runtime) = &services.local_runtime {
         api = api.with_outbound_preferences_facade(Arc::new(RebornOutboundPreferencesFacade::new(

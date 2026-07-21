@@ -1696,16 +1696,62 @@ impl RebornRuntime {
     }
 
     /// Admin per-user secret provisioner over the host-owned secret substrate,
-    /// scoped to an arbitrary target user (not the runtime owner). `None` when
-    /// no filesystem secret store was built. See `admin_secrets.rs`.
+    /// scoped to an arbitrary target user (not the runtime owner). `None` only
+    /// when no durable secret store was built (a no-storage local build).
+    /// Production-shaped builds source it from the production store graph.
+    /// See `admin_secrets.rs`.
     pub(crate) fn reborn_admin_secret_provisioner(
         &self,
     ) -> Option<Arc<dyn crate::admin_secrets::AdminSecretProvisioner>> {
-        self.services
-            .local_runtime
-            .as_ref()?
-            .admin_secret_provisioner
-            .clone()
+        if let Some(local) = self.services.local_runtime.as_ref() {
+            return local.admin_secret_provisioner.clone();
+        }
+        // Production-shaped substrate: the provisioner was built over the raw
+        // production root + the runtime's own crypto in `build_backend_production`.
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        {
+            if let Some(production) = self.services.production_runtime.as_ref() {
+                return Some(match production {
+                    #[cfg(feature = "libsql")]
+                    crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
+                        Arc::clone(&graph.admin_secret_provisioner)
+                    }
+                    #[cfg(feature = "postgres")]
+                    crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
+                        Arc::clone(&graph.admin_secret_provisioner)
+                    }
+                });
+            }
+        }
+        None
+    }
+
+    /// First-class projects + membership (ACL) facade over the host-owned scoped
+    /// substrate, backing the WebUI project surface. `None` only when the runtime
+    /// has no durable substrate at all (neither a local-runtime nor a production
+    /// store graph). Production-shaped builds source it from the production graph.
+    pub(crate) fn reborn_project_service(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_product_workflow::ProjectService>> {
+        if let Some(local) = self.services.local_runtime.as_ref() {
+            return Some(Arc::clone(&local.project_service));
+        }
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        {
+            if let Some(production) = self.services.production_runtime.as_ref() {
+                return Some(match production {
+                    #[cfg(feature = "libsql")]
+                    crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
+                        Arc::clone(&graph.project_service)
+                    }
+                    #[cfg(feature = "postgres")]
+                    crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
+                        Arc::clone(&graph.project_service)
+                    }
+                });
+            }
+        }
+        None
     }
 
     /// The admin API-token minter supplied via
