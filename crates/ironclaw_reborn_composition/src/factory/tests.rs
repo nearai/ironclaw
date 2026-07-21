@@ -399,6 +399,15 @@ async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornRuntime
         )
         .expect("mount failing backend");
     Arc::new(RebornRuntimeSubstrate {
+        scoped_filesystem: Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(failing_root),
+            MountView::new(vec![MountGrant::new(
+                MountAlias::new("/conversations").expect("mount alias"),
+                VirtualPath::new("/conversations").expect("virtual path"),
+                MountPermissions::read_write_list_delete(),
+            )])
+            .expect("mount view"),
+        )),
         extension_lifecycle_surface_context: base_runtime
             .extension_lifecycle_surface_context
             .clone(),
@@ -441,18 +450,8 @@ async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornRuntime
         workspace_filesystem: Arc::clone(&base_runtime.workspace_filesystem),
         host_state_filesystem: Arc::clone(&base_runtime.host_state_filesystem),
         telegram_host_state_filesystem: Arc::clone(&base_runtime.telegram_host_state_filesystem),
-        identity_filesystem: Arc::clone(&base_runtime.identity_filesystem),
         admin_secret_provisioner: base_runtime.admin_secret_provisioner.clone(),
         identity_substrate_db: base_runtime.identity_substrate_db.clone(),
-        subagent_goal_filesystem: Arc::new(ScopedFilesystem::with_fixed_view(
-            Arc::new(failing_root),
-            MountView::new(vec![MountGrant::new(
-                MountAlias::new("/conversations").expect("mount alias"),
-                VirtualPath::new("/conversations").expect("virtual path"),
-                MountPermissions::read_write_list_delete(),
-            )])
-            .expect("mount view"),
-        )),
         extension_filesystem: Arc::clone(&base_runtime.extension_filesystem),
         workspace_mounts: base_runtime.workspace_mounts.clone(),
         local_dev_storage_root: base_runtime.local_dev_storage_root.clone(),

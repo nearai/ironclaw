@@ -204,9 +204,6 @@ impl ironclaw_network::NetworkHttpEgress for TestNetworkHttpEgress {
     }
 }
 
-// One turn-state store, backend-injected over the composite root filesystem.
-pub(crate) type ComposedTurnStateStore = FilesystemTurnStateRowStore<CompositeRootFilesystem>;
-
 type ComposedResourceGovernor = FilesystemResourceGovernor<CompositeRootFilesystem>;
 
 type ComposedRunStateStore = FilesystemRunStateStore<CompositeRootFilesystem>;
@@ -882,6 +879,7 @@ pub struct RebornApprovalTestParts {
 }
 
 pub(crate) struct RebornRuntimeSubstrate {
+    pub(crate) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     pub(crate) extension_lifecycle_surface_context: LifecycleProductSurfaceContext,
     pub(crate) owner_user_id: UserId,
     pub(crate) approval_requests: Arc<ComposedApprovalRequestStore>,
@@ -899,7 +897,7 @@ pub(crate) struct RebornRuntimeSubstrate {
     pub(crate) persistent_approval_policies: Arc<ComposedPersistentApprovalPolicyStore>,
     pub(crate) tool_permission_overrides: Arc<ComposedToolPermissionOverrideStore>,
     pub(crate) auto_approve_settings: Arc<ComposedAutoApproveSettingStore>,
-    pub(crate) turn_state: Arc<ComposedTurnStateStore>,
+    pub(crate) turn_state: Arc<FilesystemTurnStateRowStore<CompositeRootFilesystem>>,
     pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
     /// Facade-shaped handle (not the raw `ProjectRepository`): composition
     /// modules wire the access-controlled service, never the substrate repo.
@@ -927,12 +925,6 @@ pub(crate) struct RebornRuntimeSubstrate {
     pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStore>,
     pub(crate) loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
-    /// Scoped filesystem backing the canonical Reborn identity store, so it
-    /// rides the host `RootFilesystem` abstraction like every other durable
-    /// Reborn store rather than a raw DB handle. Only the WebUI v2 SSO surface
-    /// reads it today, hence `dead_code` when that feature is off.
-    #[allow(dead_code)]
-    pub(crate) identity_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     /// Admin per-user secret provisioner (target-user-scoped secret store over
     /// the shared root + crypto). `None` when no filesystem secret store was
     /// built. Read only by the WebUI v2 admin surface.
@@ -941,7 +933,7 @@ pub(crate) struct RebornRuntimeSubstrate {
     /// Raw libSQL substrate handle backing `reborn-local-dev.db`. Carried ONLY
     /// for the one-time legacy WebUI `user_identities` fold (a substrate-level
     /// read that belongs in this host layer, not the identity crate); the
-    /// steady-state identity store goes through `identity_filesystem` above.
+    /// steady-state identity store goes through `scoped_filesystem` above.
     #[allow(dead_code)]
     pub(crate) identity_substrate_db: Option<Arc<libsql::Database>>,
     /// Resource governor handle used by the budget accountant. Kept here
@@ -1005,7 +997,6 @@ pub(crate) struct RebornRuntimeSubstrate {
     /// durable Telegram setup/pairing/binding/DM-target stores plus the
     /// telegram-scoped idempotency ledger and conversation-binding store.
     pub(crate) telegram_host_state_filesystem: Arc<ScopedFilesystem<dyn RootFilesystem>>,
-    pub(crate) subagent_goal_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     /// Tenant-scoped root filesystem used for third-party extension hook
     /// discovery (`/system/extensions/<tenant>`). The runtime derives the
     /// discovery root from the authenticated tenant id; this is the same
@@ -1213,7 +1204,7 @@ impl RebornRuntimeSubstrate {
     pub(crate) async fn durable_trigger_conversation_services(
         &self,
     ) -> Result<RebornFilesystemConversationServices, InboundTurnError> {
-        let filesystem = Arc::clone(&self.subagent_goal_filesystem);
+        let filesystem = Arc::clone(&self.scoped_filesystem);
         self.trigger_conversation_services
             .get_or_try_init(|| async move {
                 RebornFilesystemConversationServices::new(filesystem).await
@@ -1228,7 +1219,7 @@ struct RebornStoreGraph {
     approval_requests: Arc<ComposedApprovalRequestStore>,
     capability_leases: Arc<ComposedCapabilityLeaseStore>,
     persistent_approval_policies: Arc<ComposedPersistentApprovalPolicyStore>,
-    turn_state: Arc<ComposedTurnStateStore>,
+    turn_state: Arc<FilesystemTurnStateRowStore<CompositeRootFilesystem>>,
     local_runtime: Arc<RebornRuntimeSubstrate>,
     resource_governor: Arc<ComposedResourceGovernor>,
     process_services: ComposedProcessServices,
@@ -2476,6 +2467,7 @@ async fn build_local_runtime_store_graph(
         build_local_skill_management_port(owner_user_id.clone(), Arc::clone(&filesystem))?;
     let outbound_stores = local_dev_outbound_store(Arc::clone(&filesystem));
     let local_runtime = Arc::new(RebornRuntimeSubstrate {
+        scoped_filesystem: Arc::clone(&scoped_filesystem),
         extension_lifecycle_surface_context,
         owner_user_id: owner_user_id.clone(),
         approval_requests: Arc::clone(&approval_requests),
@@ -2519,8 +2511,6 @@ async fn build_local_runtime_store_graph(
         workspace_filesystem,
         host_state_filesystem,
         telegram_host_state_filesystem,
-        subagent_goal_filesystem: Arc::clone(&scoped_filesystem),
-        identity_filesystem: Arc::clone(&scoped_filesystem),
         // Set later in `build_local_runtime`, once the secret-store crypto
         // exists, via `Arc::get_mut` on this services value.
         admin_secret_provisioner: None,

@@ -80,12 +80,12 @@ use ironclaw_threads::{
     SessionThreadService, ThreadHistoryRequest, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
-    LoopGateRef, ReplyTargetBindingRef, RunProfileResolutionRequest, SanitizedCancelReason,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
-    TurnEventProjectionSource, TurnId, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord,
-    TurnRunState, TurnRunWake, TurnScope, TurnSpawnTreeStateStore, TurnStateStoreLimits,
-    TurnStatus,
+    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, FilesystemTurnStateRowStore,
+    GetRunStateRequest, IdempotencyKey, LoopGateRef, ReplyTargetBindingRef,
+    RunProfileResolutionRequest, SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest,
+    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnEventProjectionSource, TurnId,
+    TurnPersistenceSnapshot, TurnRunId, TurnRunRecord, TurnRunState, TurnRunWake, TurnScope,
+    TurnSpawnTreeStateStore, TurnStateStoreLimits, TurnStatus,
     events::EventCursor,
     run_profile::{LoopHostMilestoneSink, LoopRunContext},
 };
@@ -102,7 +102,7 @@ use self::latency::{trace_runtime_latency_error, trace_runtime_latency_ok};
 use self::runtime_turn_scheduler::RuntimeTurnScheduler;
 use crate::builtin_capability_policy::{BuiltinCapabilityPolicy, builtin_capability_policy};
 use crate::deployment::{DeploymentConfig, TrafficPolicy};
-use crate::factory::{ComposedTurnStateStore, builtin_extension_registry};
+use crate::factory::builtin_extension_registry;
 #[cfg(any(test, feature = "test-support"))]
 use crate::outbound::outbound_preferences::{
     OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner,
@@ -200,6 +200,7 @@ impl HostUserProfileSource for MemoryBackedUserProfileSourceAdapter {
 struct RuntimeStoreParts<'a> {
     local_runtime: Option<&'a crate::factory::RebornRuntimeSubstrate>,
     turn_state_store: Arc<dyn RuntimeTurnStateStore>,
+    turn_state_flush: Arc<dyn TurnStateFlush>,
     checkpoint_state_store: Arc<dyn ironclaw_turns::CheckpointStateStore>,
     loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
     thread_service: Arc<dyn SessionThreadService>,
@@ -211,13 +212,12 @@ struct RuntimeStoreParts<'a> {
     subagent_goal_store: Arc<dyn RuntimeSubagentGoalStore>,
     /// §3 replacement for `subagent_gate_store`: built here (not later, once
     /// `capability_result_writer` becomes available) because `F` (the
-    /// filesystem backend generic) is only nameable inside
-    /// `local_runtime_parts`/`production_runtime_parts` — by the time the
-    /// shared caller destructures `RuntimeStoreParts`, everything is already
-    /// type-erased. The resolver's result writer isn't ready yet at this
-    /// point either, so it's bound later via
-    /// `AwaitEdgeSettler::bind_result_writer` (a deferred-binding trait
-    /// method mirroring `bind_coordinator`).
+    /// filesystem backend generic) is only nameable while the configured graph
+    /// is being destructured. By the time the shared caller consumes
+    /// `RuntimeStoreParts`, everything is type-erased. The resolver's result
+    /// writer isn't ready yet at this point either, so it's bound later via
+    /// `AwaitEdgeSettler::bind_result_writer` (a deferred-binding trait method
+    /// mirroring `bind_coordinator`).
     subagent_await_edge_writer: Arc<dyn AwaitEdgeWriter>,
     subagent_await_edge_settler: Arc<dyn AwaitEdgeSettler>,
     subagent_await_edge_evidence: Arc<dyn AwaitDependentRunEvidenceStore>,
@@ -230,16 +230,31 @@ struct RuntimeStoreParts<'a> {
     turn_run_snapshot_source: Arc<dyn TurnRunSnapshotSource>,
 }
 
+#[async_trait::async_trait]
+trait TurnStateFlush: Send + Sync {
+    async fn drain_turn_state(&self) -> Result<(), TurnError>;
+}
+
+#[async_trait::async_trait]
+impl<F> TurnStateFlush for FilesystemTurnStateRowStore<F>
+where
+    F: RootFilesystem + Send + Sync + 'static,
+{
+    async fn drain_turn_state(&self) -> Result<(), TurnError> {
+        self.drain().await
+    }
+}
+
 fn local_runtime_parts(
     local_runtime: &crate::factory::RebornRuntimeSubstrate,
 ) -> RuntimeStoreParts<'_> {
     let subagent_goal_store = Arc::new(FilesystemSubagentGoalStore::new(Arc::clone(
-        &local_runtime.subagent_goal_filesystem,
+        &local_runtime.scoped_filesystem,
     ))) as Arc<dyn RuntimeSubagentGoalStore>;
 
     let (subagent_await_edge_writer, subagent_await_edge_settler, subagent_await_edge_evidence) = {
         let store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::clone(
-            &local_runtime.subagent_goal_filesystem,
+            &local_runtime.scoped_filesystem,
         )));
         let resolver = Arc::new(AwaitEdgeResolver::new_unbound_deferred_result_writer(
             Arc::clone(&store),
@@ -262,6 +277,7 @@ fn local_runtime_parts(
     RuntimeStoreParts {
         local_runtime: Some(local_runtime),
         turn_state_store: Arc::clone(&local_runtime.turn_state) as Arc<dyn RuntimeTurnStateStore>,
+        turn_state_flush: Arc::clone(&local_runtime.turn_state) as Arc<dyn TurnStateFlush>,
         checkpoint_state_store: Arc::clone(&local_runtime.checkpoint_state_store),
         loop_checkpoint_store: Arc::clone(&local_runtime.loop_checkpoint_store),
         thread_service: Arc::clone(&local_runtime.thread_service),
@@ -307,6 +323,7 @@ where
     RuntimeStoreParts {
         local_runtime: None,
         turn_state_store: Arc::clone(&graph.turn_state) as Arc<dyn RuntimeTurnStateStore>,
+        turn_state_flush: Arc::clone(&graph.turn_state) as Arc<dyn TurnStateFlush>,
         checkpoint_state_store: Arc::clone(&graph.checkpoint_state_store),
         loop_checkpoint_store: Arc::clone(&graph.turn_state)
             as Arc<dyn ironclaw_turns::LoopCheckpointStore>,
@@ -571,12 +588,11 @@ pub(crate) const TELEGRAM_TRIGGER_POST_SUBMIT_HOOK_KEY: &str = "telegram-host-be
 pub struct RebornRuntime {
     services: RebornServices,
     turn_coordinator: Arc<dyn TurnCoordinator>,
-    /// Turn-state row store, kept so graceful `shutdown` can drain the
+    /// Turn-state row-store flusher, kept so graceful `shutdown` can drain the
     /// write-behind durable tail (awaiting the acks of non-critical transitions
     /// that committed at memory speed) so a planned restart recovers in-flight
     /// turns, not just the synchronously-durable gate-park/terminal/new-run ones.
-    /// `None` when no local runtime is wired (e.g. production-parts launches).
-    turn_state_flush: Option<Arc<ComposedTurnStateStore>>,
+    turn_state_flush: Arc<dyn TurnStateFlush>,
     turn_tree_store: Arc<dyn TurnSpawnTreeStateStore>,
     thread_service: Arc<dyn SessionThreadService>,
     thread_scope: ThreadScope,
@@ -931,7 +947,7 @@ fn poller_user_directory(
 ) -> Option<Arc<dyn ironclaw_reborn_identity::RebornUserDirectory>> {
     if let Some(local) = local_runtime {
         let store = ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
-            Arc::clone(&local.identity_filesystem),
+            Arc::clone(&local.scoped_filesystem),
             tenant_id.clone(),
             actor_user_id.clone(),
             agent_id.clone(),
@@ -950,7 +966,7 @@ fn poller_user_directory(
 }
 
 struct SnapshotApprovalTurnRunLocator {
-    /// A trait object (not the concrete `ComposedTurnStateStore`) so a
+    /// A trait object (not a concrete row-store type) so a
     /// caller can substitute a different turn-state store's snapshot view —
     /// see `turn_run_snapshot::TurnRunSnapshotSource` and
     /// `build_approval_interaction_service_with_turn_run_source`.
@@ -1556,7 +1572,7 @@ impl RebornRuntime {
         // (same substrate boundary as every other durable store), scoped by the
         // runtime-owner caller identity, and run the one-time legacy libSQL fold.
         if let Some(local) = self.services.local_runtime.as_ref() {
-            let store = self.identity_store_over(Arc::clone(&local.identity_filesystem));
+            let store = self.identity_store_over(Arc::clone(&local.scoped_filesystem));
             // One-time legacy fold: the pre-#4381 WebUI store wrote `user_identities`
             // rows into the same libSQL substrate. Reading that SQL table is a
             // substrate-level concern, so it lives here in the host layer (not the
@@ -1605,7 +1621,7 @@ impl RebornRuntime {
     ) -> Option<Arc<dyn ironclaw_reborn_identity::RebornUserDirectory>> {
         if let Some(local) = self.services.local_runtime.as_ref() {
             return Some(
-                Arc::new(self.identity_store_over(Arc::clone(&local.identity_filesystem)))
+                Arc::new(self.identity_store_over(Arc::clone(&local.scoped_filesystem)))
                     as Arc<dyn ironclaw_reborn_identity::RebornUserDirectory>,
             );
         }
@@ -2589,9 +2605,7 @@ impl RebornRuntime {
         // gate-park/terminal/new-run ones. Best-effort: a drain failure means the
         // flusher latched degraded mid-shutdown; log it so the operator sees the
         // un-drained tail rather than failing the clean exit path.
-        if let Some(turn_state) = &self.turn_state_flush
-            && let Err(error) = turn_state.drain().await
-        {
+        if let Err(error) = self.turn_state_flush.drain_turn_state().await {
             tracing::warn!(
                 %error,
                 "turn-state WriteBehind drain failed during graceful shutdown; the un-acked \
@@ -3243,6 +3257,7 @@ pub async fn build_reborn_runtime(
     let RuntimeStoreParts {
         local_runtime,
         turn_state_store,
+        turn_state_flush,
         checkpoint_state_store,
         loop_checkpoint_store,
         thread_service,
@@ -4152,11 +4167,6 @@ pub async fn build_reborn_runtime(
         )
     });
 
-    // Row-store handle for the graceful-shutdown write-behind drain (see the
-    // field doc). `local_runtime` is `Option<&…>` (`Copy`), so mapping it here
-    // doesn't disturb its later use.
-    let turn_state_flush = local_runtime.map(|lr| Arc::clone(&lr.turn_state));
-
     // Apply the effective LLM config (config.toml/env selection + any stored
     // key) to the placeholder gateway exactly once, via the same live-reload
     // path the settings UI uses (see `webui_llm_reload_trigger`). Failure
@@ -4218,12 +4228,10 @@ pub async fn build_reborn_runtime(
 
 /// Thin wrapper over
 /// `build_webui_auth_interaction_service_with_turn_run_source` using
-/// `turn_state_store` (production always passes `local_runtime.turn_state`)
-/// as the turn-run snapshot source — production behavior is unchanged by the
-/// seam below.
+/// `turn_state_store` as the turn-run snapshot source.
 fn build_webui_auth_interaction_service(
     product_auth: Option<&RebornProductAuthServices>,
-    turn_state_store: Arc<ComposedTurnStateStore>,
+    turn_state_store: Arc<FilesystemTurnStateRowStore<CompositeRootFilesystem>>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
 ) -> Arc<dyn AuthInteractionService> {
     build_webui_auth_interaction_service_with_turn_run_source(
@@ -4235,7 +4243,7 @@ fn build_webui_auth_interaction_service(
 
 /// Identical to [`build_webui_auth_interaction_service`] except
 /// the auth read model reads `turn_run_source` instead of a hardcoded
-/// `ComposedTurnStateStore`. See
+/// concrete row-store type. See
 /// `build_approval_interaction_service_with_turn_run_source`'s doc
 /// for why this seam exists.
 fn build_webui_auth_interaction_service_with_turn_run_source(
