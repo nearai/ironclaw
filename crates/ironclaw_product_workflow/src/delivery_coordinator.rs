@@ -3,7 +3,7 @@
 //!
 //! Sending a message decomposes into two halves: **semantics and
 //! reliability** (target resolution, authorization, attempt persistence,
-//! retry, crash recovery, drain — identical for every channel, owned here,
+//! retry, crash recovery — identical for every channel, owned here,
 //! once) and **vendor mechanics** (rendering, splitting, API selection,
 //! error mapping — owned by each extension's
 //! [`ChannelAdapter::deliver`](ironclaw_product_adapters::ChannelAdapter)).

@@ -671,10 +671,10 @@ Rules — kept short on purpose:
 
 ## 7. Channel outbound (OUT)
 
-- [x] OUT-1 Every outbound intent (final reply, progress, gate prompt, auth
-  prompt, failure, connect-required, working, cleanup, triggered delivery)
-  enters the one coordinator; a grep/architecture check finds no direct
-  product send path. — The nine `DeliveryIntent`s split policy-class
+- [x] OUT-1 Every outbound intent (final reply, gate prompt, auth prompt,
+  failure, connect-required, working, cleanup, triggered delivery) enters the
+  one coordinator; a grep/architecture check finds no direct product send
+  path. — The eight `DeliveryIntent`s split policy-class
   (`deliver`) / notice-class (`deliver_notice`) with cross-class calls
   rejected (`coordinator_notice_rejects_policy_class_intents`,
   `coordinator_deliver_rejects_notice_class_intents`,
@@ -700,7 +700,7 @@ Rules — kept short on purpose:
   (`outbound_delivery_contract.rs`); `ironclaw_outbound::service` records the
   initial attempt as `Prepared`. Integration: `assert_delivered_attempt`
   (`tests/integration/extension_delivery.rs`) pins that no attempt is left
-  mid-lifecycle after drain.
+  mid-lifecycle after delivery completes.
 - [x] OUT-4 The coordinator is the sole delivery-state writer; adapters
   receive no store; production construction rejects a no-op sink. —
   `ChannelAdapter::deliver(envelope, &dyn RestrictedEgress)` receives no
@@ -711,14 +711,14 @@ Rules — kept short on purpose:
   (`crates/ironclaw_reborn_composition/src/factory.rs`). There is deliberately
   no no-op-sink constructor (`delivery_coordinator.rs` doc), so the guarantee
   is structural rather than a dedicated test.
-- [x] OUT-5 Retry/backoff, dedupe, single-flight, and shutdown drain are
-  generic and tested with a scripted adapter. —
+- [x] OUT-5 Retry/backoff and run-notice dedupe are generic; the coordinator
+  owns its per-delivery single-flight guard. There is no external coordinator
+  shutdown/drain surface. —
   `coordinator_retries_fully_retryable_reports_then_delivers` (bounded
   retry, zero-backoff policy injection),
-  `coordinator_rejects_new_deliveries_while_draining` +
-  `coordinator_notice_rejected_while_draining` (drain), busy-hint FIFO
-  dedupe rows in `run_delivery_contract.rs`; the per-delivery-id
-  single-flight guard (`in_flight` set, both paths) is structural — every
+  busy-hint FIFO dedupe rows in `run_delivery_contract.rs`; the
+  per-delivery-id single-flight guard (`in_flight` set, both paths) is
+  structural — every
   prepared attempt mints a fresh delivery id, so double-entry is
   unreachable through the public API; the guard defends future
   resume/re-drive paths.
