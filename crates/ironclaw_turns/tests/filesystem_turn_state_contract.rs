@@ -3549,3 +3549,96 @@ async fn filesystem_turn_state_events_backfill_reprojects_preexisting_rows() {
         "the durable re-projection must persist across a row-store reopen"
     );
 }
+
+/// Write a pre-upgrade **tombstone** event row (materialized shape with a null
+/// `value` and no `indexed` projection) — the on-disk residue of a pruned event
+/// that the one-time backfill must read, recognize as a tombstone, and skip
+/// (never re-project, never surface) without failing or stalling the migration.
+async fn write_events_tombstone_row(
+    scoped: &ScopedFilesystem<CompositeRootFilesystem>,
+    cursor: u64,
+) {
+    let path = ScopedPath::new(format!("/turns/rows/v1/events/{cursor:020}.json")).unwrap();
+    let entry = Entry::bytes(br#"{"journal_seq":1,"value":null}"#.to_vec())
+        .with_content_type(ContentType::json());
+    scoped
+        .put(
+            &ResourceScope::system(),
+            &path,
+            entry,
+            CasExpectation::Absent,
+        )
+        .await
+        .expect("write tombstone event row");
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_events_backfill_skips_tombstones_and_reprojects_live_rows() {
+    // Regression for the durable-read backfill over a tombstone-inclusive events
+    // collection (#6390): the events collection retains a durable tombstone for
+    // every pruned event, so the one-time backfill scans a set NOT bounded by
+    // the live-event count. It must re-project every live pre-upgrade row (now
+    // at bounded concurrency, not serially), skip tombstones without surfacing
+    // or failing on them, and still write the completion marker so a reopen does
+    // not repeat the work.
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let scope = turn_scope("thread-events-backfill-tombstones");
+    let other = turn_scope("thread-events-backfill-other");
+
+    // Live pre-upgrade rows for the target scope, interleaved (by cursor) with
+    // tombstones and another scope's rows across the shared cursor space.
+    let mut live_run_ids = Vec::new();
+    for cursor in 1..=20u64 {
+        match cursor % 4 {
+            0 => write_events_tombstone_row(&scoped, cursor).await,
+            1 => {
+                let run_id = TurnRunId::new();
+                live_run_ids.push(run_id);
+                write_unprojected_event_row(&scoped, &raw_submitted_event(&scope, cursor, run_id))
+                    .await;
+            }
+            _ => {
+                write_unprojected_event_row(
+                    &scoped,
+                    &raw_submitted_event(&other, cursor, TurnRunId::new()),
+                )
+                .await;
+            }
+        }
+    }
+
+    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let page = store
+        .read_turn_events_after(&scope, None, None, 100)
+        .await
+        .unwrap();
+
+    for run_id in &live_run_ids {
+        assert!(
+            page.entries.iter().any(|event| event.run_id == *run_id),
+            "backfill must re-project every live pre-upgrade row for the target scope"
+        );
+    }
+    assert!(
+        page.entries.iter().all(|event| event.scope == scope),
+        "tombstones and other scopes' rows must never surface in the scoped query"
+    );
+
+    // The completion marker is written even over a tombstone-heavy collection,
+    // so a reopen serves from the index without re-running the backfill scan.
+    let marker = scoped
+        .get(
+            &ResourceScope::system(),
+            &ScopedPath::new("/turns/rows/v1/meta/events-index.json").unwrap(),
+        )
+        .await
+        .unwrap()
+        .expect("backfill completion marker present");
+    let marker: serde_json::Value = serde_json::from_slice(&marker.entry.body).unwrap();
+    assert_eq!(
+        marker.get("backfilled").and_then(|value| value.as_bool()),
+        Some(true),
+        "backfill must record completion even when the events collection is tombstone-heavy"
+    );
+}

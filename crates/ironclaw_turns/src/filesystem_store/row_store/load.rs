@@ -512,54 +512,65 @@ where
             Err(error) => return Err(fs_error(error)),
         };
         let scope_key = events_index::scope_index_key()?;
-        let mut reprojected = 0usize;
-        for entry in entries {
-            if entry.file_type != FileType::File {
-                continue;
-            }
-            let Some(key) = entry.name.strip_suffix(".json") else {
-                continue;
-            };
-            let path = row_path(RowCollection::Events.as_str(), key)?;
-            let Some(versioned) = self
-                .filesystem
-                .get(&ResourceScope::system(), &path)
-                .await
-                .map_err(fs_error)?
-            else {
-                continue;
-            };
-            if versioned.entry.indexed.contains_key(&scope_key) {
-                continue; // already projected (written after the upgrade)
-            }
-            let Some(event) = deserialize_materialized_row::<TurnLifecycleEvent>(
-                &versioned.entry.body,
-                RowCollection::Events.as_str(),
-            )?
-            else {
-                continue; // tombstone — no projection needed
-            };
-            let mut new_entry =
-                Entry::bytes(versioned.entry.body.clone()).with_content_type(ContentType::json());
-            new_entry.indexed = events_index::event_indexed_projection(&event)?;
-            match self
-                .filesystem
-                .put(
-                    &ResourceScope::system(),
-                    &path,
-                    new_entry,
-                    CasExpectation::Version(versioned.version),
-                )
-                .await
-            {
-                Ok(_) => reprojected += 1,
-                // A concurrent materialize rewrote the row (with its own
-                // projection) or deleted it; either way our backfill is moot.
-                Err(FilesystemError::VersionMismatch { .. })
-                | Err(FilesystemError::NotFound { .. }) => {}
-                Err(error) => return Err(fs_error(error)),
-            }
-        }
+        let paths = entries
+            .into_iter()
+            .filter(|entry| entry.file_type == FileType::File)
+            .filter_map(|entry| entry.name.strip_suffix(".json").map(ToString::to_string))
+            .map(|key| row_path(RowCollection::Events.as_str(), &key))
+            .collect::<Result<Vec<_>, _>>()?;
+        // Re-project at the same bounded fan-out the row-collection read path
+        // uses (`ROW_COLLECTION_READ_CONCURRENCY`): each row is an independent
+        // CAS put, so ordering is irrelevant, and the one-time migration no
+        // longer stalls serially over a large (tombstone-inclusive) events
+        // collection where a per-row `get` latency would otherwise accumulate.
+        let scope_key = &scope_key;
+        let reprojected: usize = stream::iter(paths)
+            .map(|path| async move {
+                let Some(versioned) = self
+                    .filesystem
+                    .get(&ResourceScope::system(), &path)
+                    .await
+                    .map_err(fs_error)?
+                else {
+                    return Ok::<usize, TurnError>(0);
+                };
+                if versioned.entry.indexed.contains_key(scope_key) {
+                    return Ok(0); // already projected (written after the upgrade)
+                }
+                let Some(event) = deserialize_materialized_row::<TurnLifecycleEvent>(
+                    &versioned.entry.body,
+                    RowCollection::Events.as_str(),
+                )?
+                else {
+                    return Ok(0); // tombstone — no projection needed
+                };
+                let mut new_entry = Entry::bytes(versioned.entry.body.clone())
+                    .with_content_type(ContentType::json());
+                new_entry.indexed = events_index::event_indexed_projection(&event)?;
+                match self
+                    .filesystem
+                    .put(
+                        &ResourceScope::system(),
+                        &path,
+                        new_entry,
+                        CasExpectation::Version(versioned.version),
+                    )
+                    .await
+                {
+                    Ok(_) => Ok(1),
+                    // A concurrent materialize rewrote the row (with its own
+                    // projection) or deleted it; either way our backfill is moot.
+                    Err(FilesystemError::VersionMismatch { .. })
+                    | Err(FilesystemError::NotFound { .. }) => Ok(0),
+                    Err(error) => Err(fs_error(error)),
+                }
+            })
+            .buffer_unordered(ROW_COLLECTION_READ_CONCURRENCY)
+            .try_fold(
+                0usize,
+                |acc, reprojected| async move { Ok(acc + reprojected) },
+            )
+            .await?;
         if reprojected > 0 {
             tracing::debug!(
                 reprojected,
