@@ -46,7 +46,6 @@ case "${package}" in
     printf '%s\n' "--features test-support"
     ;;
   ironclaw_runner)
-    printf '%s\n' "--features libsql-restart-tests"
     ;;
   ironclaw_reborn_event_store)
     ;;
