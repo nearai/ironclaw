@@ -20,6 +20,10 @@ fn agent_loop_metadata() -> HashMap<String, String> {
 }
 
 fn completed_text_sse() -> String {
+    let delta = serde_json::json!({
+        "type": "response.output_text.delta",
+        "delta": "done",
+    });
     let completed = serde_json::json!({
         "type": "response.completed",
         "response": {
@@ -39,7 +43,7 @@ fn completed_text_sse() -> String {
             "usage": {"input_tokens": 1, "output_tokens": 1},
         },
     });
-    format!("data: {completed}\n\n")
+    format!("data: {delta}\n\ndata: {completed}\n\n")
 }
 
 #[tokio::test]
@@ -99,6 +103,10 @@ async fn loopback_session_matches_normalized_function_call_before_suffix() {
     let response = provider.complete_with_tools(first).await.unwrap();
     let first_body = requests.recv().await.unwrap();
     assert!(first_body.get("previous_response_id").is_none());
+    assert_eq!(
+        first_body["input"],
+        serde_json::Value::Array(normalized_input(&[ChatMessage::user("search for rust")]))
+    );
 
     let tool_result = ChatMessage::tool_result("call_search", "search", "found rust");
     let mut second = ToolCompletionRequest::new(
@@ -160,6 +168,55 @@ async fn account_change_clears_enabled_response_sessions() {
     assert_eq!(plan.input, full);
 }
 
+#[tokio::test]
+async fn failed_follow_up_resets_cursor_and_next_request_replays_full() {
+    let (base_url, mut requests) = test_server::spawn_with_statuses(vec![
+        (200, completed_text_sse()),
+        (500, "provider failed".to_string()),
+        (200, completed_text_sse()),
+    ])
+    .await;
+    let provider = provider_with_session_capability(&base_url);
+    let first_messages = vec![ChatMessage::user("first")];
+    let mut first = CompletionRequest::new(first_messages.clone());
+    first.metadata = agent_loop_metadata();
+
+    let first_response = provider.complete(first).await.unwrap();
+    let first_body = requests.recv().await.unwrap();
+    assert!(first_body.get("previous_response_id").is_none());
+    assert_eq!(
+        first_body["input"],
+        serde_json::Value::Array(normalized_input(&first_messages))
+    );
+
+    let follow_up_messages = vec![
+        ChatMessage::user("first"),
+        ChatMessage::assistant(first_response.content),
+        ChatMessage::user("second"),
+    ];
+    let mut failed_follow_up = CompletionRequest::new(follow_up_messages.clone());
+    failed_follow_up.metadata = agent_loop_metadata();
+    provider.complete(failed_follow_up).await.unwrap_err();
+
+    let failed_body = requests.recv().await.unwrap();
+    assert_eq!(failed_body["previous_response_id"], "resp_after_tool");
+    assert_eq!(
+        failed_body["input"],
+        serde_json::Value::Array(normalized_input(&[ChatMessage::user("second")]))
+    );
+
+    let mut retry = CompletionRequest::new(follow_up_messages.clone());
+    retry.metadata = agent_loop_metadata();
+    provider.complete(retry).await.unwrap();
+
+    let retry_body = requests.recv().await.unwrap();
+    assert!(retry_body.get("previous_response_id").is_none());
+    assert_eq!(
+        retry_body["input"],
+        serde_json::Value::Array(normalized_input(&follow_up_messages))
+    );
+}
+
 mod test_server {
     use serde_json::Value;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -167,18 +224,24 @@ mod test_server {
     use tokio::sync::mpsc;
 
     pub(super) async fn spawn(responses: Vec<String>) -> (String, mpsc::Receiver<Value>) {
+        spawn_with_statuses(responses.into_iter().map(|body| (200, body)).collect()).await
+    }
+
+    pub(super) async fn spawn_with_statuses(
+        responses: Vec<(u16, String)>,
+    ) -> (String, mpsc::Receiver<Value>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (requests_tx, requests_rx) = mpsc::channel(responses.len());
         tokio::spawn(async move {
-            for body in responses {
+            for (status, body) in responses {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 requests_tx
                     .send(read_body(&mut socket).await)
                     .await
                     .unwrap();
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status} Test\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                     body.len()
                 );
                 socket.write_all(response.as_bytes()).await.unwrap();
