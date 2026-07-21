@@ -5929,7 +5929,7 @@ async fn text_only_host_stage_checkpoint_payload_returns_ref_usable_by_checkpoin
     let state_ref = host_dyn
         .stage_checkpoint_payload(StageCheckpointPayloadRequest {
             kind: LoopCheckpointKind::BeforeSideEffect,
-            schema_id: fixture.context.checkpoint_schema_id.as_str().to_string(),
+            schema_id: fixture.context.checkpoint_schema_id.clone(),
             payload: b"durable resume bytes".to_vec(),
         })
         .await
@@ -6018,7 +6018,8 @@ async fn text_only_host_stage_checkpoint_payload_rejects_foreign_schema_id() {
     let error = host_dyn
         .stage_checkpoint_payload(StageCheckpointPayloadRequest {
             kind: LoopCheckpointKind::BeforeModel,
-            schema_id: "some_other_schema_v1".to_string(),
+            schema_id: ironclaw_turns::run_profile::CheckpointSchemaId::new("some_other_schema_v1")
+                .expect("valid"),
             payload: b"payload bytes".to_vec(),
         })
         .await

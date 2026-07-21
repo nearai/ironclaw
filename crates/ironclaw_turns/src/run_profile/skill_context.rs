@@ -41,11 +41,11 @@ use thiserror::Error;
 
 use crate::LoopMessageRef;
 
-use super::snippet_ref::stable_skill_snippet_display_hash;
 use super::{
     AgentLoopHostError, AgentLoopHostErrorKind, LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES,
     LOOP_CONTEXT_TOTAL_MODEL_CONTENT_MAX_BYTES, LoopContextSnippet, LoopContextSnippetMetadata,
 };
+use crate::run_profile::snippet_ref::{sanitize_ref_suffix, stable_skill_snippet_display_hash};
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -572,26 +572,6 @@ fn skill_snippet_safe_summary(name: &str, safe_description: &str) -> String {
         .collect()
 }
 
-fn sanitize_ref_suffix(value: &str) -> String {
-    let mut suffix = String::with_capacity(value.len().min(96));
-    for character in value.chars() {
-        if character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.') {
-            suffix.push(character);
-        } else {
-            suffix.push('.');
-        }
-        if suffix.len() >= 96 {
-            break;
-        }
-    }
-    let suffix = suffix.trim_matches('.');
-    if suffix.is_empty() {
-        "context".to_string()
-    } else {
-        suffix.to_string()
-    }
-}
-
 fn validate_snapshot(snapshot: &SkillRunSnapshot) -> Result<(), SkillContextError> {
     if snapshot.snapshot_version.is_empty() {
         return Err(SkillContextError::TrustDataMissing);
@@ -808,44 +788,22 @@ fn checked_context_total_bytes(
 /// Uses a SHA-256 digest over length-prefixed field data. The digest is collision-resistant
 /// for consistency checks, but is not an authenticity proof or authorization decision.
 fn compute_snapshot_version(sorted_entries: &[InstalledSkillSnapshot]) -> String {
-    let mut digest = Sha256::new();
-
-    for entry in sorted_entries {
-        feed_digest_field(&mut digest, entry.name.as_bytes());
-        feed_digest_field(
-            &mut digest,
-            match entry.trust {
-                SkillTrustLevel::Installed => b"installed",
-                SkillTrustLevel::Trusted => b"trusted",
-            },
-        );
-        feed_digest_field(
-            &mut digest,
-            match entry.visibility {
-                SkillVisibility::Visible => b"visible",
-                SkillVisibility::Hidden => b"hidden",
-                SkillVisibility::Denied => b"denied",
-            },
-        );
-        feed_digest_field(&mut digest, entry.activation_state.as_str().as_bytes());
-        match entry.prompt_content {
-            Some(ref content) => {
-                digest.update([1]);
-                feed_digest_field(&mut digest, content.as_bytes());
-            }
-            None => digest.update([0]),
-        }
-        feed_digest_field(&mut digest, entry.safe_description.as_bytes());
-        feed_digest_field(&mut digest, entry.ordering_key.as_bytes());
-        digest.update([0xFE]);
-    }
-
-    format!("sha256:{}", hex::encode(digest.finalize()))
+    compute_snapshot_version_inner(sorted_entries, true)
 }
 
 /// Compute the pre-activation-state snapshot version for persisted snapshots
 /// serialized before progressive skill disclosure was introduced.
 fn compute_legacy_snapshot_version(sorted_entries: &[InstalledSkillSnapshot]) -> String {
+    compute_snapshot_version_inner(sorted_entries, false)
+}
+
+/// Shared snapshot-version digest. The current and legacy versions differ only
+/// in whether `activation_state` is fed (progressive skill disclosure added it),
+/// so the byte stream — and thus every historical digest — is preserved exactly.
+fn compute_snapshot_version_inner(
+    sorted_entries: &[InstalledSkillSnapshot],
+    include_activation_state: bool,
+) -> String {
     let mut digest = Sha256::new();
 
     for entry in sorted_entries {
@@ -865,6 +823,9 @@ fn compute_legacy_snapshot_version(sorted_entries: &[InstalledSkillSnapshot]) ->
                 SkillVisibility::Denied => b"denied",
             },
         );
+        if include_activation_state {
+            feed_digest_field(&mut digest, entry.activation_state.as_str().as_bytes());
+        }
         match entry.prompt_content {
             Some(ref content) => {
                 digest.update([1]);
