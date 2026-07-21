@@ -2519,12 +2519,6 @@ mod tests {
         );
     }
 
-    /// The same DeferredBusy blocked-approval scenario driven through the
-    /// TELEGRAM protocol at the [`ChannelDeliveryProtocol`] seam: the observer
-    /// machinery is adapter-generic, so with `TelegramDeliveryProtocol` (and
-    /// telegram's adapter/egress) injected, the "waiting on a pending
-    /// approval" notice lands in the sender's Telegram DM as a `sendMessage`
-    /// call carrying the opaque bot-token handle — instead of the silence the
     /// DeferredBusy ack + non-UserMessage payload → no post (resolution payloads
     /// already have their own feedback path and must stay silent here).
     #[tokio::test]
