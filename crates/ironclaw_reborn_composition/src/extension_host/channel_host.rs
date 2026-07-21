@@ -42,7 +42,7 @@ use ironclaw_product_adapters::{
 };
 use ironclaw_product_workflow::{
     ApprovalInteractionService, ApprovalPromptContextSource, AuthInteractionService,
-    BlockedAuthFlowCancel, BlockedAuthPromptSource, ConversationBindingService,
+    BlockedAuthFlowCanceller, BlockedAuthPromptSource, ConversationBindingService,
     DefaultInboundTurnService, DefaultProductWorkflow, DeliveryCoordinator, IdempotencyLedger,
     PreferenceTargetCodec, ProductActorUserResolutionRequest, ProductActorUserResolver,
     ProductConversationSubjectRouteResolver, ProductInstallationKey, ProductInstallationScope,
@@ -242,7 +242,7 @@ pub(crate) struct ChannelHostDeliveryDeps {
     pub(crate) communication_preferences: Arc<dyn CommunicationPreferenceRepository>,
     pub(crate) approval_context: Option<Arc<dyn ApprovalPromptContextSource>>,
     pub(crate) blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
-    pub(crate) auth_flow_cancel: Option<Arc<dyn BlockedAuthFlowCancel>>,
+    pub(crate) auth_flow_cancel: Option<Arc<dyn BlockedAuthFlowCanceller>>,
     pub(crate) settings: RunDeliverySettings,
 }
 

@@ -83,11 +83,15 @@ impl ChannelEgressCredentialsPort for SecretStoreChannelEgressCredentials {
     }
 }
 
-/// Beta-era credential bridging: channel hosts whose credentials predate the
-/// extension-config store register a port here; resolution consults bridges
-/// first and falls back to the scoped secret store. A §11 compatibility
-/// surface — removed when the per-vendor setup storage migrates (P6).
+/// Wraps the generic scoped-store credentials port with a registration seam
+/// that integration proofs use to inject a static `(extension, handle) →
+/// material` mapping ahead of the store — standing in for `[channel.config]`
+/// secret storage until the configure surface lands (P6/H). The registration
+/// mechanism (`bridges` + [`register`](Self::register)) is `test-support`
+/// only; a production build never registers a bridge and resolves straight
+/// through `fallback`.
 pub(crate) struct BridgedChannelEgressCredentials {
+    #[cfg(feature = "test-support")]
     bridges: std::sync::RwLock<Vec<Arc<dyn ChannelEgressCredentialsPort>>>,
     fallback: Arc<dyn ChannelEgressCredentialsPort>,
 }
@@ -95,11 +99,13 @@ pub(crate) struct BridgedChannelEgressCredentials {
 impl BridgedChannelEgressCredentials {
     pub(crate) fn new(fallback: Arc<dyn ChannelEgressCredentialsPort>) -> Self {
         Self {
+            #[cfg(feature = "test-support")]
             bridges: std::sync::RwLock::new(Vec::new()),
             fallback,
         }
     }
 
+    #[cfg(feature = "test-support")]
     pub(crate) fn register(&self, bridge: Arc<dyn ChannelEgressCredentialsPort>) {
         self.bridges
             .write()
@@ -116,17 +122,20 @@ impl ChannelEgressCredentialsPort for BridgedChannelEgressCredentials {
         installation_id: &str,
         handle: &SecretHandle,
     ) -> Result<Option<SecretMaterial>, ChannelEgressCredentialError> {
-        let bridges: Vec<Arc<dyn ChannelEgressCredentialsPort>> = self
-            .bridges
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        for bridge in bridges {
-            if let Some(material) = bridge
-                .channel_secret(extension_id, installation_id, handle)
-                .await?
-            {
-                return Ok(Some(material));
+        #[cfg(feature = "test-support")]
+        {
+            let bridges: Vec<Arc<dyn ChannelEgressCredentialsPort>> = self
+                .bridges
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            for bridge in bridges {
+                if let Some(material) = bridge
+                    .channel_secret(extension_id, installation_id, handle)
+                    .await?
+                {
+                    return Ok(Some(material));
+                }
             }
         }
         self.fallback

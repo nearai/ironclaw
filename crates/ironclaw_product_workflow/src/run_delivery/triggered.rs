@@ -634,6 +634,7 @@ async fn triggered_notification_for_state(
                             scope,
                             run_id,
                             gate_ref: gate_ref.as_str(),
+                            invocation_id: None,
                             body: "Authentication required to continue this automation."
                                 .to_string(),
                             credential_requirements: &state.credential_requirements,

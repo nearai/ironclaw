@@ -41,9 +41,11 @@ impl OutboundDeliveryTargetOwner {
         Self { tenant_id, user_id }
     }
 
-    /// The owner scope for the authenticated caller. Static test fixtures that
-    /// intentionally answer whichever caller asks claim ownership this way;
-    /// real providers derive the owner from the resolved resource instead.
+    /// The owner scope for the authenticated caller. Only static test fixtures
+    /// that intentionally answer whichever caller asks claim ownership this way
+    /// (real providers derive the owner from the resolved resource), so this is
+    /// a test-only constructor.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn for_caller(caller: &WebUiAuthenticatedCaller) -> Self {
         Self {
             tenant_id: caller.tenant_id.clone(),

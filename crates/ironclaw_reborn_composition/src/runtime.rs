@@ -3952,14 +3952,7 @@ pub async fn build_reborn_runtime(
         let auth_flow_cancel = services
             .product_auth
             .as_ref()
-            .and_then(|product_auth| product_auth.as_blocked_auth_flow_canceller())
-            .map(|canceller| {
-                Arc::new(
-                    crate::extension_host::run_delivery_ports::ProductAuthBlockedAuthFlowCancel::new(
-                        canceller,
-                    ),
-                ) as Arc<dyn ironclaw_product_workflow::BlockedAuthFlowCancel>
-            });
+            .and_then(|product_auth| product_auth.as_blocked_auth_flow_canceller());
         services.start_channel_host_assembly(crate::factory::ChannelHostAssemblyWiring {
             thread_service: Arc::clone(&thread_service),
             turn_coordinator: Arc::clone(&planned_turn_coordinator),

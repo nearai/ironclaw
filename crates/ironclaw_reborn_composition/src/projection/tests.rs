@@ -37,7 +37,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
 
-use crate::AuthChallengeView;
+use ironclaw_product_workflow::AuthChallengeView;
 
 mod cursor_validation;
 mod display_preview;

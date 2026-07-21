@@ -11,16 +11,12 @@ use async_trait::async_trait;
 use ironclaw_host_api::UserId;
 use ironclaw_product_adapters::{ApprovalPromptContextView, AuthPromptView, ProductAdapterError};
 use ironclaw_product_workflow::{
-    ApprovalPromptContextSource, BlockedAuthFlowCancel, BlockedAuthPromptSource,
+    ApprovalPromptContextSource, AuthChallengeProvider, BlockedAuthPromptSource,
 };
 use ironclaw_run_state::ApprovalRequestStore;
-use ironclaw_turns::{GateRef, TurnRunId, TurnScope};
+use ironclaw_turns::{GateRef, TurnScope};
 
-use crate::product_auth::api::auth_prompt::{
-    BlockedAuthPromptRequest as ProductAuthBlockedAuthPromptRequest,
-    auth_prompt_view_for_blocked_auth,
-};
-use crate::{AuthChallengeProvider, BlockedAuthFlowCanceller};
+use ironclaw_product_workflow::auth_prompt_view_for_blocked_auth;
 
 /// Approval-gate context over the shared projection read model — the same
 /// source the WebUI gate projection renders from.
@@ -69,43 +65,6 @@ impl BlockedAuthPromptSource for ProductAuthBlockedAuthPromptSource {
         &self,
         request: ironclaw_product_workflow::BlockedAuthPromptRequest<'_>,
     ) -> Result<AuthPromptView, ProductAdapterError> {
-        auth_prompt_view_for_blocked_auth(ProductAuthBlockedAuthPromptRequest {
-            fallback_owner_user_id: request.fallback_owner_user_id,
-            scope: request.scope,
-            run_id: request.run_id,
-            gate_ref: request.gate_ref,
-            invocation_id: None,
-            body: request.body,
-            credential_requirements: request.credential_requirements,
-            auth_challenges: self.auth_challenges.as_deref(),
-        })
-        .await
-    }
-}
-
-/// Bridges the generic flow-cancel port onto the product-auth canceller.
-pub(crate) struct ProductAuthBlockedAuthFlowCancel {
-    canceller: Arc<dyn BlockedAuthFlowCanceller>,
-}
-
-impl ProductAuthBlockedAuthFlowCancel {
-    pub(crate) fn new(canceller: Arc<dyn BlockedAuthFlowCanceller>) -> Self {
-        Self { canceller }
-    }
-}
-
-#[async_trait]
-impl BlockedAuthFlowCancel for ProductAuthBlockedAuthFlowCancel {
-    async fn cancel_blocked_auth_flow(
-        &self,
-        scope: &TurnScope,
-        owner_user_id: &UserId,
-        run_id: TurnRunId,
-        gate_ref: &str,
-    ) -> Result<(), String> {
-        self.canceller
-            .cancel_blocked_auth_flow(scope, owner_user_id, run_id, gate_ref)
-            .await
-            .map_err(|error| error.to_string())
+        auth_prompt_view_for_blocked_auth(request, self.auth_challenges.as_deref()).await
     }
 }

@@ -6,7 +6,7 @@ use ironclaw_host_api::{AgentId, ProjectId, UserId};
 use ironclaw_product_adapters::AuthPromptChallengeKind;
 use ironclaw_turns::{TurnRunId, TurnScope};
 
-use crate::{AuthChallengeProvider, AuthChallengeView};
+use ironclaw_product_workflow::{AuthChallengeProvider, AuthChallengeView};
 
 use super::{AGENT, AUTH_GATE, PROJECT, TENANT, USER};
 

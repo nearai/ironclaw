@@ -186,20 +186,19 @@ have no manifest in this tree. Nothing to verify.
 
 ### Flow-lifecycle + engine-hardening items (flip only on a passing test)
 
-- [x] **A1 · Supersede-on-start.** BUILT + TESTED (folded onto the rollup). New generic
-  `AuthFlowManager::cancel_superseded_setup_flows` (default no-op; overridden by the durable store +
-  the in-memory fake) called at the shared `start_setup_oauth_flow`
-  (`crates/ironclaw_reborn_composition/src/product_auth/api/auth.rs`) before `create_flow`,
-  cancelling any prior non-terminal `SetupOnly` flow for the owner+provider. **Rollup mechanism
-  differs from main:** main reused `lifecycle_flows_for_owner_provider`; that helper does not exist
-  here, so the durable impl lists the **owner+surface+session flow root** via
-  `flow_records_under_scope_root` (the durable flow path in `durable/paths.rs` is keyed by
-  agent/project/surface/session — thread/mission/invocation-agnostic), which is the exact thread-less
-  set. The fake matches the same owner-root granularity (`flow_shares_setup_owner_root`). Idempotent.
-  RFC 9700 §4.7.1. **Proven:**
-  `oauth_flow_contract::cancel_superseded_setup_flows_supersedes_only_matching_setup_only_flow` (fake)
-  and `durable::tests::filesystem_cancel_superseded_setup_flows_supersedes_only_matching_setup_only_flow`
-  (durable store — real production code path over the FS backend).
+- [x] **A1 · Supersede-on-start.** BUILT + TESTED. Supersession is
+  `AuthFlowManager::create_flow`'s own contract: when the new flow's continuation is
+  setup-class, `create_flow` cancels any prior non-terminal setup flow for the owner+provider
+  inside the creation seam, under the same critical section as the insert (so two racing creates
+  cannot both observe "no live predecessor"). The durable impl lists the **owner+surface+session
+  flow root** via `flow_records_under_scope_root` (the durable flow path in `durable/paths.rs` is
+  keyed by agent/project/surface/session — thread/mission/invocation-agnostic), the exact
+  thread-less set; the in-memory fake matches the same owner-root granularity. Idempotent.
+  RFC 9700 §4.7.1. (The earlier separate `cancel_superseded_setup_flows` seam that
+  `start_setup_oauth_flow` called before `create_flow` was deleted as a strict-subset duplicate —
+  `create_flow` already superseded the full setup class.) **Proven:**
+  `oauth_flow_contract` supersede cases over the fake, and `durable::tests` over the durable store
+  (real production code path over the FS backend).
 - [x] **A2a · Projection honors `expires_at`.** BUILT + TESTED (folded — verbatim structure match).
   `AuthGateRecord::to_view(now)` returns not-live for a non-terminal flow past `expires_at`
   (`crates/ironclaw_product_workflow/src/auth_interaction/types.rs`), and

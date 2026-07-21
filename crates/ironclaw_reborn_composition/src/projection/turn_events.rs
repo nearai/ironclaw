@@ -31,10 +31,8 @@ use ironclaw_turns::{
 };
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 
-use crate::AuthChallengeProvider;
-use crate::product_auth::api::auth_prompt::{
-    BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth,
-};
+use ironclaw_product_workflow::AuthChallengeProvider;
+use ironclaw_product_workflow::{BlockedAuthPromptRequest, auth_prompt_view_for_blocked_auth};
 use ironclaw_runner::failure_summary::{
     pinned_failure_summary_for_category, reborn_failure_summary_for_category_and_detail,
 };
@@ -425,8 +423,8 @@ async fn blocked_prompt_payload(
                     .clone()
                     .unwrap_or_else(|| "Authenticate to continue this run.".to_string()),
                 credential_requirements: &state.credential_requirements,
-                auth_challenges,
-            })
+            },
+            auth_challenges)
             .await?;
             Ok(Some(ProductOutboundPayload::AuthPrompt(view)))
         }

@@ -240,11 +240,11 @@ pub(super) async fn oauth_callback_handler(
 
     let flow_provider = if is_authorized_callback_candidate(&query) {
         Some(
-            run_with_backend_timeout(
-                state
-                    .product_auth
-                    .ensure_oauth_callback_flow_known(&scope, flow_id),
-            )
+            run_with_backend_timeout(state.product_auth.ensure_oauth_callback_flow_known(
+                &scope,
+                flow_id,
+                &state_hash,
+            ))
             .await?,
         )
     } else {
@@ -389,7 +389,7 @@ async fn vendor_oauth_callback_attempt(
     let flow_provider = match run_with_backend_timeout(
         state
             .product_auth
-            .ensure_oauth_callback_flow_known(callback_scope, flow_id),
+            .ensure_oauth_callback_flow_known(callback_scope, flow_id, &state_hash),
     )
     .await
     {

@@ -480,7 +480,6 @@ async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornRuntime
         identity_filesystem: Arc::clone(&base_runtime.identity_filesystem),
         admin_secret_provisioner: base_runtime.admin_secret_provisioner.clone(),
         #[cfg(feature = "libsql")]
-        identity_substrate_db: base_runtime.identity_substrate_db.clone(),
         subagent_goal_filesystem: Arc::new(ScopedFilesystem::with_fixed_view(
             Arc::new(failing_root),
             MountView::new(vec![MountGrant::new(

@@ -611,7 +611,8 @@ pub(crate) struct ChannelHostAssemblyWiring {
         Option<Arc<dyn ironclaw_product_workflow::ApprovalPromptContextSource>>,
     pub(crate) blocked_auth_prompts:
         Option<Arc<dyn ironclaw_product_workflow::BlockedAuthPromptSource>>,
-    pub(crate) auth_flow_cancel: Option<Arc<dyn ironclaw_product_workflow::BlockedAuthFlowCancel>>,
+    pub(crate) auth_flow_cancel:
+        Option<Arc<dyn ironclaw_product_workflow::BlockedAuthFlowCanceller>>,
     pub(crate) run_delivery_settings: ironclaw_product_workflow::RunDeliverySettings,
 }
 

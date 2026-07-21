@@ -87,7 +87,8 @@ pub use auth_interaction::{
     ResolveAuthInteractionResponse, is_auth_gate_ref,
 };
 pub use auth_prompt::{
-    AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller, enrich_auth_prompt_view,
+    AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller, BlockedAuthPromptRequest,
+    auth_prompt_view_for_blocked_auth,
 };
 pub use automation_thread_metadata::{
     AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, automation_trigger_thread_metadata_json,
@@ -157,11 +158,10 @@ pub use policy::{
     NoopBeforeInboundPolicy,
 };
 pub use run_delivery::{
-    ApprovalPromptContextSource, BlockedAuthFlowCancel, BlockedAuthPromptRequest,
-    BlockedAuthPromptSource, DeliveredChannelMessage, PreferenceTargetCodec,
-    PreferenceTargetEncodeRequest, RunDeliveryError, RunDeliveryObserver, RunDeliveryServices,
-    RunDeliverySettings, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
-    triggered_run_delivery_settings,
+    ApprovalPromptContextSource, BlockedAuthPromptSource, DeliveredChannelMessage,
+    PreferenceTargetCodec, PreferenceTargetEncodeRequest, RunDeliveryError, RunDeliveryObserver,
+    RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
+    TriggeredRunDeliveryRequest, triggered_run_delivery_settings,
 };
 // Projection/event types that route handlers need to thread through SSE
 // (parse the resume cursor, render browser-safe event payloads). Re-exported
@@ -182,13 +182,14 @@ pub use reborn_services::{
     AutomationProductFacade, ChannelAuthAccountState, ChannelConfigFacade, ChannelConnectionFacade,
     CodexLoginStart, ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
     ExtensionCredentialSubmitRequest, FilesystemBrowseReader, FsMount, InboundAttachmentLander,
-    InboundAttachmentReader, LOGS_VIEW, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
-    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
-    NearAiAuthProvider, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
-    NearAiWalletLoginResult, OPERATOR_LOGS_VIEW, OperatorLogsService, OperatorServiceLifecycleService,
-    OperatorStatusService, OutboundPreferencesProductFacade, ProductAgentBoundCaller,
-    ProjectCaller, ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError,
-    ProjectFsFile, ProjectFsStat, ProjectService, ProjectServiceError, RebornAccountBindingSource, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW,
+    InboundAttachmentReader, LOGS_VIEW, LlmActiveSelection, LlmConfigService,
+    LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
+    LlmProviderView, NearAiAuthProvider, NearAiLoginRequest, NearAiLoginStart,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_LOGS_VIEW, OperatorLogsService,
+    OperatorServiceLifecycleService, OperatorStatusService, OutboundPreferencesProductFacade,
+    ProductAgentBoundCaller, ProjectCaller, ProjectFilesystemReader, ProjectFsEntry,
+    ProjectFsEntryKind, ProjectFsError, ProjectFsFile, ProjectFsStat, ProjectService,
+    ProjectServiceError, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornAccountBindingSource,
     RebornAccountLoginLinkResponse, RebornAccountTrace, RebornAccountTracesResponse,
     RebornAddMemberRequest, RebornAdminCreateUserRequest, RebornAdminPutSecretRequest,
     RebornAdminSecretDeletedResponse, RebornAdminSecretResponse, RebornAdminSetRoleRequest,
@@ -239,12 +240,14 @@ pub use reborn_services::{
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornStreamEventsSubscription, RebornSubmitTurnResponse, RebornTimelineRequest,
     RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse,
-    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornVendorAuthAccounts, RebornViewDescriptor, RebornViewPage, RebornViewQuery, RunArtifactLogs, RunArtifactMessage, RunArtifactRedaction, RunArtifactToolCall,
-    SetActiveLlmRequest, SettingsToolPermissionState, SkillsProductFacade,
-    StaticOperatorStatusService, TriggerRunThreadScope, UnsupportedAutomationProductFacade,
-    UnsupportedOperatorLogsService, UnsupportedOperatorServiceLifecycleService,
-    UnsupportedOperatorStatusService, UnsupportedOutboundPreferencesProductFacade,
-    UpsertLlmProviderRequest, normalize_operator_log_context_value,
+    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornVendorAuthAccounts,
+    RebornViewDescriptor, RebornViewPage, RebornViewQuery, RunArtifactLogs, RunArtifactMessage,
+    RunArtifactRedaction, RunArtifactToolCall, SetActiveLlmRequest, SettingsToolPermissionState,
+    SkillsProductFacade, StaticOperatorStatusService, TriggerRunThreadScope,
+    UnsupportedAutomationProductFacade, UnsupportedOperatorLogsService,
+    UnsupportedOperatorServiceLifecycleService, UnsupportedOperatorStatusService,
+    UnsupportedOutboundPreferencesProductFacade, UpsertLlmProviderRequest,
+    normalize_operator_log_context_value,
 };
 
 pub use webui_inbound::{

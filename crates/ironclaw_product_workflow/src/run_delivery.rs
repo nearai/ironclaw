@@ -40,6 +40,8 @@ use ironclaw_turns::{
     GateRef, GetRunStateRequest, TurnCoordinator, TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 
+use crate::auth_prompt::{BlockedAuthFlowCanceller, BlockedAuthPromptRequest};
+
 use crate::delivery_coordinator::{
     CoordinatedDeliveryError, CoordinatedDeliveryOutcome, DeliveryCoordinator, DeliveryIntent,
     NoticeDeliveryRequest,
@@ -121,16 +123,6 @@ pub trait ApprovalPromptContextSource: Send + Sync {
     ) -> Option<ApprovalPromptContextView>;
 }
 
-/// Inputs for resolving a blocked-auth run's prompt view.
-pub struct BlockedAuthPromptRequest<'a> {
-    pub fallback_owner_user_id: &'a UserId,
-    pub scope: &'a TurnScope,
-    pub run_id: TurnRunId,
-    pub gate_ref: &'a str,
-    pub body: String,
-    pub credential_requirements: &'a [ironclaw_host_api::RuntimeCredentialAuthRequirement],
-}
-
 /// Auth-prompt enrichment: resolves the challenge (OAuth authorization URL
 /// vs manual credential entry) for a run blocked on auth. Implemented by the
 /// composition over the auth engine.
@@ -140,21 +132,6 @@ pub trait BlockedAuthPromptSource: Send + Sync {
         &self,
         request: BlockedAuthPromptRequest<'_>,
     ) -> Result<AuthPromptView, ProductAdapterError>;
-}
-
-/// Cancels the durable auth-flow record when a blocked-auth run is
-/// auto-cancelled by a channel delivery path (interactive credential entry
-/// is not allowed over chat surfaces). Best-effort: a failure is logged and
-/// never blocks the run cancel that already happened.
-#[async_trait]
-pub trait BlockedAuthFlowCancel: Send + Sync {
-    async fn cancel_blocked_auth_flow(
-        &self,
-        scope: &TurnScope,
-        owner_user_id: &UserId,
-        run_id: TurnRunId,
-        gate_ref: &str,
-    ) -> Result<(), String>;
 }
 
 /// Everything the generic run-delivery components need. All handles are
@@ -180,7 +157,7 @@ pub struct RunDeliveryServices {
     pub fallback_notice_scope: TurnScope,
     pub approval_context: Option<Arc<dyn ApprovalPromptContextSource>>,
     pub blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
-    pub auth_flow_cancel: Option<Arc<dyn BlockedAuthFlowCancel>>,
+    pub auth_flow_cancel: Option<Arc<dyn BlockedAuthFlowCanceller>>,
 }
 
 /// One message a channel accepted, in generic vocabulary: the conversation
@@ -317,7 +294,7 @@ pub(crate) async fn wait_for_actionable_state(
 /// durable auth-flow record is cancelled alongside it (best-effort).
 pub(crate) async fn cancel_auth_blocked_run(
     coordinator: &dyn TurnCoordinator,
-    auth_flow_cancel: Option<&dyn BlockedAuthFlowCancel>,
+    auth_flow_cancel: Option<&dyn BlockedAuthFlowCanceller>,
     scope: &TurnScope,
     actor: ironclaw_turns::TurnActor,
     run_id: TurnRunId,

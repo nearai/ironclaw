@@ -38,20 +38,6 @@ pub trait PostSubmitDeliveryHook: Send + Sync {
     async fn on_trigger_submitted(&self, fire: TriggerFire, run_id: TurnRunId, scope: TurnScope);
 }
 
-/// No-op hook used when no channel host wires triggered delivery.
-pub struct NoopPostSubmitDeliveryHook;
-
-#[async_trait::async_trait]
-impl PostSubmitDeliveryHook for NoopPostSubmitDeliveryHook {
-    async fn on_trigger_submitted(
-        &self,
-        _fire: TriggerFire,
-        _run_id: TurnRunId,
-        _scope: TurnScope,
-    ) {
-    }
-}
-
 mod active_run_lookup;
 pub(crate) use active_run_lookup::SnapshotActiveRunLookup;
 

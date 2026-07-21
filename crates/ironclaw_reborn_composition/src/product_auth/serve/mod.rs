@@ -1537,7 +1537,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::AuthChallengeProvider;
     use crate::RebornAuthContinuationDispatcher;
     use async_trait::async_trait;
     use axum::body::{Body, to_bytes};
@@ -1551,6 +1550,7 @@ mod tests {
         NetworkMethod, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
         RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, SecretHandle, VendorId,
     };
+    use ironclaw_product_workflow::AuthChallengeProvider;
     use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
     use ironclaw_turns::{TurnRunId, TurnScope};
     use std::sync::Mutex;

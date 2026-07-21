@@ -581,6 +581,7 @@ impl RunDeliveryObserver {
                                 scope,
                                 run_id,
                                 gate_ref: gate_ref.as_str(),
+                                invocation_id: None,
                                 body: "Authenticate to continue this run.".to_string(),
                                 credential_requirements: &state.credential_requirements,
                             })

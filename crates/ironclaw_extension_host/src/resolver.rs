@@ -24,8 +24,9 @@ use ironclaw_dispatcher::{
     ToolResolver,
 };
 use ironclaw_host_api::{
-    CapabilityId, DispatchError, ExtensionId, ReservationStatus, ResourceReceipt, ResourceUsage,
-    RuntimeDispatchErrorKind, RuntimeKind, ToolCall, ToolCallResources, ToolError, ToolPorts,
+    CapabilityId, DispatchError, DispatchFailureDetail, ExtensionId, ReservationStatus,
+    ResourceReceipt, ResourceUsage, RuntimeDispatchErrorKind, RuntimeKind, ToolCall,
+    ToolCallResources, ToolError, ToolPorts,
 };
 
 use crate::active::ResolvedToolBinding;
@@ -175,10 +176,86 @@ fn dispatch_error_for_kind(
             kind,
             model_visible_cause: model_visible_cause.or(safe_summary),
         },
+        // FirstParty/System carry the raw cause on the Diagnostic detail
+        // channel (untrusted-provenance text, scrubbed downstream) rather than
+        // dropping it — the lane arms' `model_visible_cause` equivalent for the
+        // detail-shaped variant. A fixed host-authored summary, if that is all
+        // the adapter gave, still travels on `safe_summary`.
         RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::FirstParty {
             kind,
             safe_summary,
-            detail: None,
+            detail: model_visible_cause.map(|text| DispatchFailureDetail::Diagnostic { text }),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cause_of(error: &DispatchError) -> Option<&str> {
+        match error {
+            DispatchError::Wasm {
+                model_visible_cause,
+                ..
+            }
+            | DispatchError::Mcp {
+                model_visible_cause,
+                ..
+            }
+            | DispatchError::Script {
+                model_visible_cause,
+                ..
+            } => model_visible_cause.as_deref(),
+            DispatchError::FirstParty {
+                detail: Some(DispatchFailureDetail::Diagnostic { text }),
+                ..
+            } => Some(text.as_str()),
+            _ => None,
+        }
+    }
+
+    /// The generic extension lanes must carry a failing adapter's
+    /// `model_visible_cause` across the tool ABI onto the dispatch error —
+    /// including the FirstParty/System arm, which routes it to the Diagnostic
+    /// detail channel rather than dropping it (#5965 on the extension path).
+    #[test]
+    fn tool_error_cause_survives_every_lane() {
+        let cap = CapabilityId::new("acme.cap").unwrap();
+        for runtime in [
+            RuntimeKind::Wasm,
+            RuntimeKind::Mcp,
+            RuntimeKind::Script,
+            RuntimeKind::FirstParty,
+            RuntimeKind::System,
+        ] {
+            let error = ToolError::Failed {
+                kind: RuntimeDispatchErrorKind::Backend,
+                safe_summary: None,
+                model_visible_cause: Some("channel_not_found".to_string()),
+            };
+            let dispatch = dispatch_error_for_tool_error(&cap, runtime, error);
+            assert_eq!(
+                cause_of(&dispatch),
+                Some("channel_not_found"),
+                "lane {runtime:?} dropped the model-visible cause"
+            );
+        }
+    }
+
+    /// When the adapter supplied only a fixed host-authored `safe_summary`
+    /// (no raw cause), the lane arms still surface it on the cause channel so
+    /// the failure keeps an actionable label instead of collapsing to the
+    /// kind's generic sentence.
+    #[test]
+    fn lane_summary_rides_the_cause_channel_when_no_raw_cause() {
+        let cap = CapabilityId::new("acme.cap").unwrap();
+        let error = ToolError::Failed {
+            kind: RuntimeDispatchErrorKind::Backend,
+            safe_summary: Some("vendor unavailable".to_string()),
+            model_visible_cause: None,
+        };
+        let dispatch = dispatch_error_for_tool_error(&cap, RuntimeKind::Wasm, error);
+        assert_eq!(cause_of(&dispatch), Some("vendor unavailable"));
     }
 }

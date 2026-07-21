@@ -47,7 +47,9 @@ use crate::product_auth::credentials::runtime_credentials::{
     RuntimeCredentialAccountSelectionService,
 };
 use crate::product_auth::oauth::oauth_gate::{OAuthGateChallengeRequest, OAuthGateFlowDriver};
-use crate::{AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller};
+use ironclaw_product_workflow::{
+    AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller,
+};
 
 pub(crate) const AUTH_CONTINUATION_DISPATCH_FAILED_CODE: &str = "auth_continuation_dispatch_failed";
 
@@ -1259,6 +1261,7 @@ impl RebornProductAuthServices {
         &self,
         scope: &AuthProductScope,
         flow_id: AuthFlowId,
+        state_hash: &OpaqueStateHash,
     ) -> Result<AuthProviderId, RebornOAuthCallbackError> {
         let Some(record) = self
             .flow_manager
@@ -1280,6 +1283,16 @@ impl RebornProductAuthServices {
         }
         if record.expires_at <= Utc::now() {
             return Err(AuthProductError::UnknownOrExpiredFlow.into());
+        }
+        // State-hash preflight, BEFORE the one-shot durable PKCE-verifier
+        // consume the caller performs next: a forged callback that names a
+        // real flow id but cannot present the flow's own `state` must not
+        // burn the verifier out from under the legitimate callback. Same
+        // mismatch signal the manager's claim uses; the flow stays live.
+        if let Some(stored) = record.opaque_state_hash.as_ref()
+            && stored != state_hash
+        {
+            return Err(AuthProductError::CrossScopeDenied.into());
         }
         Ok(record.provider)
     }
@@ -2434,6 +2447,105 @@ mod tests {
         ) -> Result<SecretCleanupReport, AuthProductError> {
             unreachable!("constructor tests do not call cleanup methods")
         }
+    }
+
+    /// Cleanup double that reports one canceled flow so the composition-layer
+    /// eager durable-verifier drop can be exercised.
+    struct ReportingCleanupService {
+        canceled: Vec<ironclaw_auth::CanceledCleanupFlow>,
+    }
+
+    #[async_trait::async_trait]
+    impl SecretCleanupService for ReportingCleanupService {
+        async fn cleanup_for_lifecycle(
+            &self,
+            _request: SecretCleanupRequest,
+        ) -> Result<SecretCleanupReport, AuthProductError> {
+            Ok(SecretCleanupReport {
+                canceled_flows: self.canceled.clone(),
+                ..SecretCleanupReport::default()
+            })
+        }
+    }
+
+    /// The uninstall/disconnect race: cleanup walks a pending setup flow
+    /// terminal, so its durable PKCE verifier must be dropped eagerly rather
+    /// than lingering to TTL. Pins the `report.canceled_flows` → discard loop
+    /// in `cleanup_credentials_for_lifecycle`.
+    #[tokio::test]
+    async fn lifecycle_cleanup_drops_canceled_flows_durable_pkce_verifier() {
+        use ironclaw_host_api::ExtensionId;
+
+        let secret_store: Arc<dyn ironclaw_secrets::SecretStore> =
+            Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral());
+        let scope = test_auth_product_scope();
+        let flow_id = AuthFlowId::new();
+        let double = Arc::new(SharedAuthTestDouble);
+        let cleanup = Arc::new(ReportingCleanupService {
+            canceled: vec![ironclaw_auth::CanceledCleanupFlow {
+                scope: scope.clone(),
+                flow_id,
+            }],
+        });
+        let services = RebornProductAuthServices::new(
+            Arc::new(InMemoryAuthProductServices::new()) as Arc<dyn AuthFlowManager>,
+            double.clone() as Arc<dyn AuthInteractionService>,
+            double.clone() as Arc<dyn CredentialSetupService>,
+            double.clone() as Arc<dyn CredentialAccountService>,
+            double.clone() as Arc<dyn AuthProviderClient>,
+            cleanup as Arc<dyn SecretCleanupService>,
+            Arc::new(NoopAuthContinuationDispatcher),
+        )
+        .with_secret_store(Arc::clone(&secret_store));
+
+        // A durable verifier exists for the flow about to be canceled.
+        services
+            .store_setup_pkce_verifier(
+                &scope,
+                flow_id,
+                secrecy::SecretString::from("verifier-abc".to_string()),
+                Utc::now() + chrono::Duration::minutes(5),
+            )
+            .await
+            .expect("store verifier");
+        assert!(
+            services
+                .consume_setup_pkce_verifier(&scope, flow_id)
+                .await
+                .expect("read verifier")
+                .is_some(),
+            "precondition: the verifier is durably present"
+        );
+        // Re-store it (the assertion above consumed the one-shot copy).
+        services
+            .store_setup_pkce_verifier(
+                &scope,
+                flow_id,
+                secrecy::SecretString::from("verifier-abc".to_string()),
+                Utc::now() + chrono::Duration::minutes(5),
+            )
+            .await
+            .expect("restore verifier");
+
+        services
+            .cleanup_credentials_for_lifecycle(SecretCleanupRequest {
+                scope: scope.clone(),
+                extension_id: ExtensionId::new("vendorco").expect("extension"),
+                provider: None,
+                lifecycle_package: None,
+                action: ironclaw_auth::SecretCleanupAction::Uninstall,
+            })
+            .await
+            .expect("cleanup succeeds");
+
+        assert!(
+            services
+                .consume_setup_pkce_verifier(&scope, flow_id)
+                .await
+                .expect("read verifier after cleanup")
+                .is_none(),
+            "cleanup must have dropped the canceled flow's durable verifier"
+        );
     }
 
     // ── cancel_blocked_auth_flow facade tests ─────────────────────────────────

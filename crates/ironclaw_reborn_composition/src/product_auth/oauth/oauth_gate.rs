@@ -17,7 +17,7 @@ use ironclaw_turns::{TurnRunId, TurnScope};
 use secrecy::SecretString;
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::AuthChallengeView;
+use ironclaw_product_workflow::AuthChallengeView;
 
 const GATE_FLOW_TTL_SECONDS: i64 = 600;
 

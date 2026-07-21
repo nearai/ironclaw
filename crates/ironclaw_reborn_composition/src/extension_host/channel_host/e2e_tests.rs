@@ -100,7 +100,8 @@ use crate::extension_host::extension_ingress::{
 };
 use crate::extension_host::run_delivery_ports::ProductAuthBlockedAuthPromptSource;
 use crate::webui::route_mounts::PublicRouteMount;
-use crate::{AuthChallengeProvider, RebornUserIdentityLookup, RebornUserIdentityLookupError};
+use crate::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
+use ironclaw_product_workflow::AuthChallengeProvider;
 use ironclaw_product_workflow::BlockedAuthPromptSource;
 
 #[path = "e2e_auth_challenge.rs"]

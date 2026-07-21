@@ -44,9 +44,6 @@ mod product_auth;
 mod production_runtime_policy;
 mod profile_approval_authorization;
 mod projection;
-pub use product_auth::api::auth_prompt::{
-    AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller,
-};
 mod provider_identity;
 mod readiness;
 mod root;
@@ -63,7 +60,7 @@ mod webui;
 
 pub use admin_token::AdminApiTokenMinter;
 pub use automation::facade::RebornAutomationProductFacade;
-pub use automation::trigger_poller::{NoopPostSubmitDeliveryHook, PostSubmitDeliveryHook};
+pub use automation::trigger_poller::PostSubmitDeliveryHook;
 pub use error::RebornBuildError;
 pub use extension_host::channel_host::{ChannelHostIdentity, GenericChannelHostAssembly};
 pub use extension_host::channel_identity::{
