@@ -6969,6 +6969,35 @@ fn release_ci_publishes_reborn_without_enabling_legacy_or_docker_paths() {
             && !root.join("wix/main.wxs").exists(),
         "the MSI definition must install only the canonical Reborn executable"
     );
+    let cli_package_section = cli_manifest
+        .split_once("[package]\n")
+        .map(|(_, remainder)| remainder)
+        .and_then(|remainder| remainder.split_once("\n[").map(|(section, _)| section))
+        .expect("Reborn CLI manifest must define a [package] section");
+    let cli_description = cli_package_section
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("description = \"")
+                .and_then(|value| value.strip_suffix('"'))
+        })
+        .expect("Reborn CLI manifest must define a package description");
+    let wix_package_element = wix_manifest
+        .split_once("<Package Id='*'")
+        .map(|(_, remainder)| remainder)
+        .and_then(|remainder| remainder.split_once("/>").map(|(element, _)| element))
+        .expect("Reborn WiX manifest must define a Package element");
+    let wix_description = wix_package_element
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("Description='")
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .expect("Reborn WiX Package element must define a Description attribute");
+    assert_eq!(
+        wix_description, cli_description,
+        "the checked-in WiX package description must match the Cargo package metadata"
+    );
     let reborn_cli_selector = code_style_workflow
         .lines()
         .find(|line| line.contains("grep -Eq") && line.contains("crates/ironclaw_reborn_cli/"))
