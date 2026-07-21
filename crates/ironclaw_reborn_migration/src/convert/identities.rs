@@ -205,7 +205,6 @@ async fn read_channel_identities(
             format!("channel_identities row could not be decoded (skipped): {e}"),
         );
     };
-    #[cfg(feature = "libsql")]
     if let Some(db) = src.handles.libsql_db.as_ref() {
         let conn = db.connect().map_err(|e| read_err(&e))?;
         let mut rows = match conn.query(sql, ()).await {
@@ -228,7 +227,6 @@ async fn read_channel_identities(
         }
         return Ok(out);
     }
-    #[cfg(feature = "postgres")]
     if let Some(pool) = src.handles.pg_pool.as_ref() {
         let client = pool.get().await.map_err(|e| read_err(&e))?;
         let rows = match client.query(sql, &[]).await {

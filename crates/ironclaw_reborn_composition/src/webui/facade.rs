@@ -179,8 +179,8 @@ pub(crate) struct AutomationBacking {
 }
 
 /// Resolves the [`AutomationBacking`] pair for whichever runtime is wired:
-/// local-dev first, then (when compiled with a durable backend) production
-/// runtime as a fallback. Returns `None` when neither runtime is present.
+/// local-dev first, then production runtime as a fallback. Returns `None` when
+/// neither runtime is present.
 pub(crate) fn automation_backing(services: &crate::RebornServices) -> Option<AutomationBacking> {
     let from_local = services
         .local_runtime
@@ -190,8 +190,7 @@ pub(crate) fn automation_backing(services: &crate::RebornServices) -> Option<Aut
             snapshot_source: Arc::clone(&local_runtime.turn_state)
                 as Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
         });
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
-    let from_local = from_local.or_else(|| {
+    from_local.or_else(|| {
         services
             .production_runtime
             .as_ref()
@@ -199,8 +198,7 @@ pub(crate) fn automation_backing(services: &crate::RebornServices) -> Option<Aut
                 repository: production_runtime.trigger_repository(),
                 snapshot_source: production_runtime.turn_run_snapshot_source(),
             })
-    });
-    from_local
+    })
 }
 
 /// Compose the WebUI-facing product facade from an already-built Reborn runtime.

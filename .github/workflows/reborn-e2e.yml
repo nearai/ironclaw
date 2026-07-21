@@ -219,7 +219,7 @@ jobs:
           )
           jq -n \
             --arg product_ref "${product_ref}" \
-            --argjson features '["libsql"]' \
+            --argjson features '[]' \
             '{format_version: 1, product_ref: $product_ref, features: $features}' \
             > "${artifact_dir}/manifest.json"
           echo "product_ref=${product_ref}" >> "${GITHUB_OUTPUT}"

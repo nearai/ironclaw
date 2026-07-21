@@ -27,7 +27,6 @@ use ironclaw_events::{
     InMemoryEventSink, ReadScope,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-#[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{
     DiskFilesystem, Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, RootFilesystem,
@@ -68,7 +67,6 @@ use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustProvenance,
 };
-#[cfg(feature = "libsql")]
 use ironclaw_turns::{
     AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, RunProfileRequest, SourceBindingRef,
     SubmitTurnRequest, TurnActor, TurnScope,
@@ -115,7 +113,6 @@ impl HostPolicyFacts for PermissiveHostPolicyFacts {
 /// tenant/user-scoped target inside `/engine`, and the filesystem backend
 /// supplies durable storage. Used by tests that previously constructed
 /// `LibSqlTurnStateStore` directly.
-#[cfg(feature = "libsql")]
 pub(crate) async fn libsql_scoped_turns_fs(
     db: Arc<libsql::Database>,
 ) -> Arc<ScopedFilesystem<LibSqlRootFilesystem>> {
@@ -136,7 +133,6 @@ pub(crate) struct RecordingTurnRunWakeNotifier {
 }
 
 impl RecordingTurnRunWakeNotifier {
-    #[cfg(feature = "libsql")]
     pub(crate) fn wakes(&self) -> Vec<TurnRunWake> {
         self.wakes.lock().unwrap().clone()
     }
@@ -2222,7 +2218,6 @@ pub(crate) fn http_without_body_then_operation_failed_wat() -> String {
     )
 }
 
-#[cfg(feature = "libsql")]
 pub(crate) fn submit_turn_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest {
     SubmitTurnRequest {
         requested_model: None,

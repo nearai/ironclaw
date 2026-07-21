@@ -1939,7 +1939,6 @@ async fn turn_runner_worker_emits_thread_run_correlated_operator_log() {
     });
 }
 
-#[cfg(feature = "libsql-restart-tests")]
 #[tokio::test]
 async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reopen() {
     let dir = tempfile::tempdir().unwrap();
@@ -2167,7 +2166,6 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
 /// composition routes the alias through the per-invocation
 /// [`MountView`](ironclaw_host_api::MountView) so tenant isolation is
 /// structural rather than something this test has to thread through paths.
-#[cfg(feature = "libsql-restart-tests")]
 async fn build_libsql_thread_service(
     db: Arc<libsql::Database>,
 ) -> ironclaw_threads::FilesystemSessionThreadService<ironclaw_filesystem::LibSqlRootFilesystem> {
@@ -2193,7 +2191,6 @@ async fn build_libsql_thread_service(
 /// Mounts `/turns` at the canonical
 /// `/engine/tenants/<tenant>/users/<user>/turns` target so the per-invocation
 /// `MountView` shape lines up with the production wiring.
-#[cfg(feature = "libsql-restart-tests")]
 async fn libsql_filesystem_turn_store(
     db: Arc<libsql::Database>,
 ) -> ironclaw_turns::FilesystemTurnStateRowStore<ironclaw_filesystem::LibSqlRootFilesystem> {

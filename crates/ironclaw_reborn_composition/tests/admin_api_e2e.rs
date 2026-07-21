@@ -890,11 +890,9 @@ async fn malformed_inputs_are_4xx_not_500() {
 // the admin secret provisioner are sourced from that graph. Gated on `libsql`
 // because the production-runtime path requires the libSQL substrate.
 
-#[cfg(feature = "libsql")]
 #[derive(Debug)]
 struct RecordingSandboxTransport;
 
-#[cfg(feature = "libsql")]
 #[async_trait]
 impl ironclaw_host_runtime::SandboxCommandTransport for RecordingSandboxTransport {
     async fn run_command(
@@ -914,7 +912,6 @@ impl ironclaw_host_runtime::SandboxCommandTransport for RecordingSandboxTranspor
     }
 }
 
-#[cfg(feature = "libsql")]
 fn production_effective_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::HostedMultiTenant,
@@ -929,7 +926,6 @@ fn production_effective_policy() -> EffectiveRuntimePolicy {
     }
 }
 
-#[cfg(feature = "libsql")]
 async fn build_admin_harness_production() -> AdminHarness {
     use ironclaw_reborn_composition::{
         RebornCompositionProfile, RebornRuntimeProcessBinding, builtin_first_party_trust_policy,
@@ -969,7 +965,6 @@ async fn build_admin_harness_production() -> AdminHarness {
 /// every admin op — including these — returned service-unavailable. Drives the
 /// full HTTP admin surface and asserts create-user + per-user secret
 /// provisioning work and are isolated across users.
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_admin_surface_provisions_and_isolates_per_user_secrets() {
     let harness = build_admin_harness_production().await;

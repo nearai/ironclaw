@@ -5,11 +5,6 @@
 //! same on-disk database file and reads the secret back — real on-disk
 //! durability, without the turn/model layer.
 //!
-//! Gated on `feature = "libsql"` (directly instantiates `LibSqlRootFilesystem`,
-//! which only compiles under that feature); 0 tests without it, 2 with it.
-
-#![cfg(feature = "libsql")]
-
 #[allow(dead_code)]
 #[path = "support/mod.rs"]
 mod reborn_support;

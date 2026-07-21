@@ -2824,24 +2824,6 @@ handle = "web_token"
         );
     }
 
-    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-    #[test]
-    fn nearai_manifest_renderer_ignores_config_endpoint_without_durable_product_auth() {
-        let config = NearAiMcpBootstrapConfig::new(
-            "http://invalid-nearai.example.test",
-            secrecy::SecretString::from("nearai-test-key"),
-        )
-        .unwrap();
-
-        let manifest_toml = nearai_mcp_manifest_toml_for_config(Some(&config)).unwrap();
-        let manifest: Value = toml::from_str(&manifest_toml).unwrap();
-
-        assert_eq!(
-            manifest["runtime"]["url"].as_str(),
-            Some("https://cloud-api.near.ai/mcp")
-        );
-    }
-
     #[test]
     fn catalog_extend_replaces_duplicate_package_refs() {
         let stale = test_extension_package_with_wasm_bytes(b"stale");

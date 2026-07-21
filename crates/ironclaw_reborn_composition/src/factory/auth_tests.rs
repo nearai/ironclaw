@@ -323,7 +323,6 @@ async fn local_dev_google_oauth_backend_builds_with_host_provider_config() {
     );
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_libsql_google_oauth_backend_captures_wasm_credential_provider() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -374,7 +373,6 @@ async fn production_libsql_google_oauth_backend_captures_wasm_credential_provide
     );
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked_runs() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -420,9 +418,6 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
         .production_runtime
         .as_ref()
         .expect("production runtime");
-    #[cfg(not(feature = "postgres"))]
-    let RebornProductionRuntimeServices::LibSql(graph) = production_runtime;
-    #[cfg(feature = "postgres")]
     let graph = match production_runtime {
         RebornProductionRuntimeServices::LibSql(graph) => graph,
         RebornProductionRuntimeServices::Postgres(_) => panic!("expected libsql runtime"),

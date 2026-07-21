@@ -16,7 +16,6 @@ layer = "app"
 [package.metadata.dist]
 dist = true
 display-name = "ironclaw"
-features = ["libsql", "postgres"]
 
 [package.metadata.wix]
 upgrade-guid = "650712A0-A6B4-4584-829A-03A90CE3D7D9"
@@ -24,19 +23,6 @@ path-guid = "9BB3F0DB-3513-45E6-A23B-CE5A5E5C1759"
 license = false
 eula = false
 
-[features]
-# libsql is the default storage backend: a file-backed local database needs
-# no external server, so a default `ironclaw` build is runnable as-is.
-# `postgres` remains opt-in for deployments that point `[storage]` at a server.
-default = ["libsql"]
-# Enable production PostgreSQL storage composition for `ironclaw`.
-postgres = [
-    "ironclaw_reborn_composition/postgres",
-]
-# Enable embedded libSQL storage composition for volume-backed hosted previews.
-libsql = [
-    "ironclaw_reborn_composition/libsql",
-]
 [dependencies]
 anyhow = "1"
 async-trait = { version = "0.1" }
@@ -101,6 +87,7 @@ ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0", feat
 # (`put_plaintext`), so this stays a dev-only dependency — see
 # `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs::reborn_cli_binary_crate_stays_separate_from_v1_root`.
 ironclaw_secrets = { path = "../ironclaw_secrets", version = "0.1.0" }
+toml = "1.1"
 
 [[bin]]
 name = "ironclaw"

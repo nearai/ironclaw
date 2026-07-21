@@ -2,9 +2,7 @@ use std::any::type_name;
 
 use std::sync::Arc;
 
-#[cfg(feature = "libsql")]
 use super::LibSqlRootFilesystem;
-#[cfg(feature = "postgres")]
 use super::PostgresRootFilesystem;
 use super::{
     ApprovalRequestStore, AuditSink, CapabilityLeaseStore, CoalescingEventSink, DurableAuditLog,
@@ -37,7 +35,6 @@ where
     S: ProcessStore + 'static,
     R: ProcessResultStore + 'static,
 {
-    #[cfg(any(feature = "postgres", feature = "libsql"))]
     fn with_root_filesystem<T>(self, filesystem: Arc<T>) -> HostRuntimeServices<T, G, S, R>
     where
         T: RootFilesystem + 'static,
@@ -133,7 +130,6 @@ where
         }
     }
 
-    #[cfg(feature = "postgres")]
     pub fn with_postgres_root_filesystem(
         self,
         filesystem: Arc<PostgresRootFilesystem>,
@@ -141,7 +137,6 @@ where
         self.with_root_filesystem(filesystem)
     }
 
-    #[cfg(feature = "libsql")]
     pub fn with_libsql_root_filesystem(
         self,
         filesystem: Arc<LibSqlRootFilesystem>,

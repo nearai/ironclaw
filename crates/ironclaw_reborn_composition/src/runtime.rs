@@ -32,7 +32,6 @@ use uuid::Uuid;
 
 use ironclaw_events::{DurableAuditLog, DurableEventLog, InMemoryAuditSink, RuntimeEvent};
 use ironclaw_extensions::ExtensionRegistry;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_first_party_extension_ports::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
@@ -70,16 +69,12 @@ use ironclaw_runner::runtime::{
     RuntimeSubagentGoalStore, RuntimeTurnStateStore, ToolDisclosureMode,
     build_default_planned_runtime,
 };
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_runner::subagent::await_edge::{
     boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
     store::FilesystemAwaitEdgeStore,
 };
 use ironclaw_runner::subagent::flavors::StaticSubagentDefinitionResolver;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_runner::subagent::goal_store::FilesystemSubagentGoalStore;
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-use ironclaw_runner::subagent::goal_store::InMemoryBoundedSubagentGoalStore;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, MessageKind, MessageStatus,
     SessionThreadService, ThreadHistoryRequest, ThreadScope,
@@ -149,6 +144,7 @@ impl OutboundDeliveryTargetProvider for StaticOutboundDeliveryTargetProvider {
         }])
     }
 }
+use crate::RebornCompositionProfile;
 #[cfg(any(test, feature = "test-support"))]
 use crate::automation::trigger_poller::TenantScopedTrustedTriggerFireAuthorizer;
 use crate::automation::trigger_poller::{
@@ -168,12 +164,6 @@ use crate::{
     RebornBuildError, RebornProductAuthServices, RebornReadiness, RebornServices,
     build_reborn_services,
 };
-// Only `check_production_scheduler_wake_wiring` (cfg libsql/postgres) still
-// names the profile type directly now that live-traffic admission reads the
-// DeploymentConfig; gate the import to match so the default lane sees no unused
-// import.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use crate::RebornCompositionProfile;
 use production::{
     EmptyCapabilitySurfaceResolver, EmptyIdentityContextSource,
     UnavailableApprovalInteractionService, UnavailableCapabilityIo,
@@ -240,106 +230,13 @@ struct RuntimeStoreParts<'a> {
     turn_run_snapshot_source: Arc<dyn TurnRunSnapshotSource>,
 }
 
-/// Non-durable await-edge fallback for the composition profile with neither
-/// `libsql` nor `postgres` enabled (no real filesystem backend exists in
-/// that mode at all — the same reduced-durability posture
-/// `InMemoryBoundedSubagentGoalStore` already accepts for the goal store).
-/// Reported limitation, not silently papered over: this mode never
-/// delivers a subagent's result back to a parked parent (the settler never
-/// fires) and never recognizes an awaited-child gate as blocked-exit
-/// evidence. `spawn_subagent` stays deny-filtered in production regardless
-/// (the design's standing no-flag ruling), so this gap is unreachable
-/// there; it only matters for future non-libsql/non-postgres local-dev
-/// deployments that clear the deny-filter, which is out of PR1's scope.
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-struct NonDurableAwaitEdgeSettler;
-
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-#[async_trait::async_trait]
-impl AwaitEdgeSettler for NonDurableAwaitEdgeSettler {
-    async fn on_child_terminal(
-        &self,
-        _event: &ironclaw_turns::TurnLifecycleEvent,
-    ) -> Result<ironclaw_loop_host::ResolveOutcome, ironclaw_turns::run_profile::AgentLoopHostError>
-    {
-        Ok(ironclaw_loop_host::ResolveOutcome::NotApplicable)
-    }
-
-    fn bind_coordinator(
-        &self,
-        _coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
-    ) -> Result<(), ironclaw_turns::TurnError> {
-        Ok(())
-    }
-
-    fn bind_result_writer(
-        &self,
-        _result_writer: Arc<dyn LoopCapabilityResultWriter>,
-    ) -> Result<(), ironclaw_turns::TurnError> {
-        Ok(())
-    }
-
-    fn as_turn_committed_event_observer(
-        self: Arc<Self>,
-    ) -> Arc<dyn ironclaw_turns::TurnCommittedEventObserver> {
-        self
-    }
-}
-
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-#[async_trait::async_trait]
-impl ironclaw_turns::TurnCommittedEventObserver for NonDurableAwaitEdgeSettler {
-    fn observes_state(&self, _state: &ironclaw_turns::TurnRunState) -> bool {
-        false
-    }
-
-    fn observes_event(&self, _event: &ironclaw_turns::TurnLifecycleEvent) -> bool {
-        false
-    }
-
-    async fn observe_committed_state(
-        &self,
-        _state: ironclaw_turns::TurnRunState,
-    ) -> Result<(), ironclaw_turns::TurnError> {
-        Ok(())
-    }
-
-    async fn observe_committed_event(
-        &self,
-        _event: ironclaw_turns::TurnLifecycleEvent,
-    ) -> Result<(), ironclaw_turns::TurnError> {
-        Ok(())
-    }
-}
-
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-struct NonDurableAwaitDependentRunEvidence;
-
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-#[async_trait::async_trait]
-impl AwaitDependentRunEvidenceStore for NonDurableAwaitDependentRunEvidence {
-    async fn has_awaited_child_gate(
-        &self,
-        _scope: &ironclaw_turns::TurnScope,
-        _run_id: ironclaw_turns::TurnRunId,
-        _gate_ref: &ironclaw_turns::LoopGateRef,
-    ) -> Result<bool, ironclaw_turns::TurnError> {
-        Ok(false)
-    }
-}
-
 fn local_runtime_parts(
     local_runtime: &crate::factory::RebornRuntimeSubstrate,
 ) -> RuntimeStoreParts<'_> {
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     let subagent_goal_store = Arc::new(FilesystemSubagentGoalStore::new(Arc::clone(
         &local_runtime.subagent_goal_filesystem,
     ))) as Arc<dyn RuntimeSubagentGoalStore>;
-    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-    let subagent_goal_store =
-        Arc::new(InMemoryBoundedSubagentGoalStore::new()) as Arc<dyn RuntimeSubagentGoalStore>;
 
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     let (subagent_await_edge_writer, subagent_await_edge_settler, subagent_await_edge_evidence) = {
         let store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::clone(
             &local_runtime.subagent_goal_filesystem,
@@ -361,13 +258,6 @@ fn local_runtime_parts(
             store as Arc<dyn AwaitDependentRunEvidenceStore>,
         )
     };
-    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-    let (subagent_await_edge_writer, subagent_await_edge_settler, subagent_await_edge_evidence) = (
-        Arc::new(ironclaw_loop_host::InMemoryAwaitEdgeWriter::default())
-            as Arc<dyn AwaitEdgeWriter>,
-        Arc::new(NonDurableAwaitEdgeSettler) as Arc<dyn AwaitEdgeSettler>,
-        Arc::new(NonDurableAwaitDependentRunEvidence) as Arc<dyn AwaitDependentRunEvidenceStore>,
-    );
 
     RuntimeStoreParts {
         local_runtime: Some(local_runtime),
@@ -390,7 +280,6 @@ fn local_runtime_parts(
     }
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn production_runtime_parts<F>(
     graph: &Arc<crate::factory::RebornProductionRuntimeStoreGraph<F>>,
 ) -> RuntimeStoreParts<'static>
@@ -490,7 +379,6 @@ fn enforce_runtime_cutover_gate(
 /// runtime would silently create a divergent scheduler-local channel. Extracted
 /// so the negative branch is unit-testable without a full libsql/postgres
 /// substrate.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn check_production_scheduler_wake_wiring(
     profile: RebornCompositionProfile,
     wiring: &Option<ironclaw_runner::runtime::SchedulerWakeWiring>,
@@ -675,7 +563,6 @@ pub struct RebornRuntime {
     thread_scope: ThreadScope,
     turn_scheduler: RuntimeTurnScheduler,
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     credential_refresh_worker_handle:
         Option<crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshWorkerRuntimeHandle>,
     trace_flush_worker: crate::observability::trace_capture::TraceQueueFlushWorkerHandle,
@@ -1033,37 +920,29 @@ fn poller_user_directory(
         );
         return Some(Arc::new(store) as Arc<dyn ironclaw_reborn_identity::RebornUserDirectory>);
     }
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
-    {
-        if let Some(production) = services.production_runtime.as_ref() {
-            let directory: Arc<dyn ironclaw_reborn_identity::RebornUserDirectory> = match production
-            {
-                #[cfg(feature = "libsql")]
-                crate::factory::RebornProductionRuntimeServices::LibSql(graph) => Arc::new(
-                    ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
-                        Arc::clone(&graph.scoped_filesystem),
-                        tenant_id.clone(),
-                        actor_user_id.clone(),
-                        agent_id.clone(),
-                        project_id.cloned(),
-                    ),
+    if let Some(production) = services.production_runtime.as_ref() {
+        let directory: Arc<dyn ironclaw_reborn_identity::RebornUserDirectory> = match production {
+            crate::factory::RebornProductionRuntimeServices::LibSql(graph) => Arc::new(
+                ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
+                    Arc::clone(&graph.scoped_filesystem),
+                    tenant_id.clone(),
+                    actor_user_id.clone(),
+                    agent_id.clone(),
+                    project_id.cloned(),
                 ),
-                #[cfg(feature = "postgres")]
-                crate::factory::RebornProductionRuntimeServices::Postgres(graph) => Arc::new(
-                    ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
-                        Arc::clone(&graph.scoped_filesystem),
-                        tenant_id.clone(),
-                        actor_user_id.clone(),
-                        agent_id.clone(),
-                        project_id.cloned(),
-                    ),
+            ),
+            crate::factory::RebornProductionRuntimeServices::Postgres(graph) => Arc::new(
+                ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
+                    Arc::clone(&graph.scoped_filesystem),
+                    tenant_id.clone(),
+                    actor_user_id.clone(),
+                    agent_id.clone(),
+                    project_id.cloned(),
                 ),
-            };
-            return Some(directory);
-        }
+            ),
+        };
+        return Some(directory);
     }
-    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-    let _ = services;
     None
 }
 
@@ -1347,7 +1226,6 @@ fn approval_turn_locator_unavailable() -> ironclaw_product_workflow::ProductWork
 ///
 /// Reads the legacy libSQL table directly, so it needs this crate's `libsql`
 /// feature.
-#[cfg(feature = "libsql")]
 async fn fold_legacy_webui_identities<R>(
     db: &libsql::Database,
     tenant_id: &TenantId,
@@ -1602,10 +1480,7 @@ impl RebornRuntime {
     /// poller. Returns `None` when no production store graph is present. Gated
     /// behind `test-support` so the substrate handle never leaks into
     /// production builds. For tests only.
-    #[cfg(all(
-        any(test, feature = "test-support"),
-        any(feature = "libsql", feature = "postgres")
-    ))]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn production_trigger_repository_for_test(
         &self,
     ) -> Option<Arc<dyn ironclaw_triggers::TriggerRepository>> {
@@ -1683,7 +1558,6 @@ impl RebornRuntime {
             // rows into the same libSQL substrate. Reading that SQL table is a
             // substrate-level concern, so it lives here in the host layer (not the
             // identity crate) and binds each row into the filesystem-backed store.
-            #[cfg(feature = "libsql")]
             {
                 if let Some(identity_substrate_db) = &local.identity_substrate_db
                     && let Err(err) =
@@ -1704,23 +1578,18 @@ impl RebornRuntime {
         // per-call tenant as an opaque path tail, so one owner-scoped store serves
         // every tenant. The legacy fold is a local libSQL-only migration; a fresh
         // production substrate has no `user_identities` table to fold.
-        #[cfg(any(feature = "libsql", feature = "postgres"))]
-        {
-            let _ = tenant_id;
-            if let Some(production) = self.services.production_runtime.as_ref() {
-                let store: Arc<dyn ironclaw_reborn_identity::RebornIdentityResolver> =
-                    match production {
-                        #[cfg(feature = "libsql")]
-                        crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
-                            Arc::new(self.identity_store_over(Arc::clone(&graph.scoped_filesystem)))
-                        }
-                        #[cfg(feature = "postgres")]
-                        crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
-                            Arc::new(self.identity_store_over(Arc::clone(&graph.scoped_filesystem)))
-                        }
-                    };
-                return Some(Ok(store));
-            }
+        let _ = tenant_id;
+        if let Some(production) = self.services.production_runtime.as_ref() {
+            let store: Arc<dyn ironclaw_reborn_identity::RebornIdentityResolver> = match production
+            {
+                crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
+                    Arc::new(self.identity_store_over(Arc::clone(&graph.scoped_filesystem)))
+                }
+                crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
+                    Arc::new(self.identity_store_over(Arc::clone(&graph.scoped_filesystem)))
+                }
+            };
+            return Some(Ok(store));
         }
         None
     }
@@ -1744,22 +1613,17 @@ impl RebornRuntime {
         }
         // Production-shaped substrate (#5013): same identity mount and per-call
         // tenant partitioning as the local path — see `open_reborn_identity_resolver`.
-        #[cfg(any(feature = "libsql", feature = "postgres"))]
-        {
-            if let Some(production) = self.services.production_runtime.as_ref() {
-                let directory: Arc<dyn ironclaw_reborn_identity::RebornUserDirectory> =
-                    match production {
-                        #[cfg(feature = "libsql")]
-                        crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
-                            Arc::new(self.identity_store_over(Arc::clone(&graph.scoped_filesystem)))
-                        }
-                        #[cfg(feature = "postgres")]
-                        crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
-                            Arc::new(self.identity_store_over(Arc::clone(&graph.scoped_filesystem)))
-                        }
-                    };
-                return Some(directory);
-            }
+        if let Some(production) = self.services.production_runtime.as_ref() {
+            let directory: Arc<dyn ironclaw_reborn_identity::RebornUserDirectory> = match production
+            {
+                crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
+                    Arc::new(self.identity_store_over(Arc::clone(&graph.scoped_filesystem)))
+                }
+                crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
+                    Arc::new(self.identity_store_over(Arc::clone(&graph.scoped_filesystem)))
+                }
+            };
+            return Some(directory);
         }
         None
     }
@@ -1789,20 +1653,15 @@ impl RebornRuntime {
         }
         // Production-shaped substrate: the provisioner was built over the raw
         // production root + the runtime's own crypto in `build_backend_production`.
-        #[cfg(any(feature = "libsql", feature = "postgres"))]
-        {
-            if let Some(production) = self.services.production_runtime.as_ref() {
-                return Some(match production {
-                    #[cfg(feature = "libsql")]
-                    crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
-                        Arc::clone(&graph.admin_secret_provisioner)
-                    }
-                    #[cfg(feature = "postgres")]
-                    crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
-                        Arc::clone(&graph.admin_secret_provisioner)
-                    }
-                });
-            }
+        if let Some(production) = self.services.production_runtime.as_ref() {
+            return Some(match production {
+                crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
+                    Arc::clone(&graph.admin_secret_provisioner)
+                }
+                crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
+                    Arc::clone(&graph.admin_secret_provisioner)
+                }
+            });
         }
         None
     }
@@ -1817,20 +1676,15 @@ impl RebornRuntime {
         if let Some(local) = self.services.local_runtime.as_ref() {
             return Some(Arc::clone(&local.project_service));
         }
-        #[cfg(any(feature = "libsql", feature = "postgres"))]
-        {
-            if let Some(production) = self.services.production_runtime.as_ref() {
-                return Some(match production {
-                    #[cfg(feature = "libsql")]
-                    crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
-                        Arc::clone(&graph.project_service)
-                    }
-                    #[cfg(feature = "postgres")]
-                    crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
-                        Arc::clone(&graph.project_service)
-                    }
-                });
-            }
+        if let Some(production) = self.services.production_runtime.as_ref() {
+            return Some(match production {
+                crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
+                    Arc::clone(&graph.project_service)
+                }
+                crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
+                    Arc::clone(&graph.project_service)
+                }
+            });
         }
         None
     }
@@ -2733,7 +2587,6 @@ impl RebornRuntime {
                 .shutdown(TRIGGER_POLLER_SHUTDOWN_TIMEOUT)
                 .await;
         }
-        #[cfg(any(feature = "libsql", feature = "postgres"))]
         if let Some(credential_refresh_worker) = self.credential_refresh_worker_handle {
             credential_refresh_worker
                 .shutdown(
@@ -3387,7 +3240,6 @@ pub async fn build_reborn_runtime(
     // (minted in `build_production_shaped`) so it can be handed to
     // `DefaultPlannedRuntimeParts.scheduler_wake_wiring` below. The local-dev path
     // leaves this `None` and `build_default_planned_runtime` mints its own wiring.
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     let production_scheduler_wake = {
         let wiring = services.production_scheduler_wake.take();
         // Production and migration-dry-run mint this in `build_production_shaped` so the
@@ -3397,8 +3249,6 @@ pub async fn build_reborn_runtime(
         check_production_scheduler_wake_wiring(profile, &wiring)?;
         wiring
     };
-    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-    let production_scheduler_wake: Option<ironclaw_runner::runtime::SchedulerWakeWiring> = None;
 
     let runtime_parts = match deployment.substrate() {
         RuntimeSubstrate::Local => {
@@ -3413,30 +3263,19 @@ pub async fn build_reborn_runtime(
             local_runtime_parts(local_runtime)
         }
         RuntimeSubstrate::ProductionShaped => {
-            #[cfg(any(feature = "libsql", feature = "postgres"))]
-            {
-                let production_runtime = services.production_runtime.as_ref().ok_or(
-                    RebornRuntimeError::InvalidArgument {
-                        reason: "production RebornServices did not provide runtime substrate"
-                            .to_string(),
-                    },
-                )?;
-                match production_runtime {
-                    #[cfg(feature = "libsql")]
-                    crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
-                        production_runtime_parts(graph)
-                    }
-                    #[cfg(feature = "postgres")]
-                    crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
-                        production_runtime_parts(graph)
-                    }
+            let production_runtime = services.production_runtime.as_ref().ok_or(
+                RebornRuntimeError::InvalidArgument {
+                    reason: "production RebornServices did not provide runtime substrate"
+                        .to_string(),
+                },
+            )?;
+            match production_runtime {
+                crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
+                    production_runtime_parts(graph)
                 }
-            }
-            #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-            {
-                return Err(RebornRuntimeError::InvalidArgument {
-                    reason: "production runtime requires a durable storage feature".to_string(),
-                });
+                crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
+                    production_runtime_parts(graph)
+                }
             }
         }
         // `RuntimeSubstrate::None` never reaches here: the disabled
@@ -4240,7 +4079,6 @@ pub async fn build_reborn_runtime(
         // in-memory) services, or the production store graph's eagerly-built
         // filesystem services. The poller launch is otherwise identical for
         // both, so there is a single substrate-agnostic path below.
-        #[cfg(any(feature = "libsql", feature = "postgres"))]
         let conversation_services = match local_runtime {
             Some(local) => local
                 .durable_trigger_conversation_services()
@@ -4249,11 +4087,9 @@ pub async fn build_reborn_runtime(
                     reason: format!("trigger conversation services unavailable: {error}"),
                 })?,
             None => match services.production_runtime.as_ref() {
-                #[cfg(feature = "libsql")]
                 Some(crate::factory::RebornProductionRuntimeServices::LibSql(graph)) => {
                     graph.trigger_conversation_services.clone()
                 }
-                #[cfg(feature = "postgres")]
                 Some(crate::factory::RebornProductionRuntimeServices::Postgres(graph)) => {
                     graph.trigger_conversation_services.clone()
                 }
@@ -4265,13 +4101,6 @@ pub async fn build_reborn_runtime(
                 }
             },
         };
-        #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-        let conversation_services = local_runtime
-            .ok_or(RebornRuntimeError::InvalidArgument {
-                reason: "trigger poller enabled but no runtime substrate present".to_string(),
-            })?
-            .trigger_conversation_services
-            .clone();
         let trigger_poller_services = build_trigger_poller_services(
             conversation_services,
             Arc::clone(&planned_turn_coordinator),
@@ -4332,12 +4161,11 @@ pub async fn build_reborn_runtime(
     let scheduler_notifier = composition.scheduler_handle.wake_notifier();
 
     // Spawn the background Google OAuth credential keepalive worker (B4).
-    // Gated on the db features: the worker deps (candidate source + leader lock
-    // + refresh port) are only produced together on production paths (libsql /
-    // postgres), bundled into `CredentialRefreshWorkerReady::Ready`. Local-dev /
-    // override paths are `Absent` and the worker is skipped. The `enabled` policy
-    // flag still gates the actual spawn inside `spawn_credential_refresh_worker`.
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    // The factory reports whether the durable worker dependencies are ready.
+    // Local-dev and override paths are `Absent` and skip the worker; production
+    // paths provide the candidate source, leader lock, and refresh port together
+    // as `CredentialRefreshWorkerReady::Ready`. The `enabled` policy flag still
+    // gates the actual spawn inside `spawn_credential_refresh_worker`.
     let credential_refresh_worker_handle = match std::mem::replace(
         &mut services.credential_refresh_worker,
         crate::factory::CredentialRefreshWorkerReady::Absent,
@@ -4356,10 +4184,6 @@ pub async fn build_reborn_runtime(
         ),
         crate::factory::CredentialRefreshWorkerReady::Absent => None,
     };
-    // When no db feature is active, silence the unused-variable warning.
-    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-    let _ = credential_refresh;
-
     let trace_flush_worker =
         crate::observability::trace_capture::spawn_trace_queue_flush_worker(trace_capture_scopes);
     // Scheduler is running (started inside build_default_planned_runtime); mark readiness.
@@ -4420,7 +4244,6 @@ pub async fn build_reborn_runtime(
         thread_scope,
         turn_scheduler: RuntimeTurnScheduler::new(composition.scheduler_handle, scheduler_notifier),
         trigger_poller_handle,
-        #[cfg(any(feature = "libsql", feature = "postgres"))]
         credential_refresh_worker_handle,
         trace_flush_worker,
         skill_learning_extraction_tasks,

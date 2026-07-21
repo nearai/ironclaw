@@ -2,7 +2,6 @@
 //! (`src/tools/wasm/storage.rs`, `src/channels/wasm/storage.rs`) — only the
 //! `list`/`get_capabilities` surface [`crate::convert::extensions`] calls.
 
-#[cfg(feature = "libsql")]
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -15,9 +14,7 @@ pub(crate) enum WasmStorageError {
     Database(String),
 }
 
-#[cfg(feature = "postgres")]
 use crate::source::is_missing_postgres_table_error;
-#[cfg(feature = "libsql")]
 use crate::source::is_missing_table_error;
 
 /// Frozen mirror of `ironclaw::tools::wasm::ToolStatus`.
@@ -92,12 +89,10 @@ pub(crate) trait WasmChannelStore: Send + Sync {
 
 // ============================== libSQL ======================================
 
-#[cfg(feature = "libsql")]
 pub(crate) struct LibSqlWasmToolStore {
     db: Arc<libsql::Database>,
 }
 
-#[cfg(feature = "libsql")]
 impl LibSqlWasmToolStore {
     pub(crate) fn new(db: Arc<libsql::Database>) -> Self {
         Self { db }
@@ -115,7 +110,6 @@ impl LibSqlWasmToolStore {
     }
 }
 
-#[cfg(feature = "libsql")]
 #[async_trait]
 impl WasmToolStore for LibSqlWasmToolStore {
     async fn list(&self, user_id: &str) -> Result<Vec<StoredWasmTool>, WasmStorageError> {
@@ -198,12 +192,10 @@ impl WasmToolStore for LibSqlWasmToolStore {
     }
 }
 
-#[cfg(feature = "libsql")]
 pub(crate) struct LibSqlWasmChannelStore {
     db: Arc<libsql::Database>,
 }
 
-#[cfg(feature = "libsql")]
 impl LibSqlWasmChannelStore {
     pub(crate) fn new(db: Arc<libsql::Database>) -> Self {
         Self { db }
@@ -221,7 +213,6 @@ impl LibSqlWasmChannelStore {
     }
 }
 
-#[cfg(feature = "libsql")]
 #[async_trait]
 impl WasmChannelStore for LibSqlWasmChannelStore {
     async fn list(&self, user_id: &str) -> Result<Vec<StoredWasmChannel>, WasmStorageError> {
@@ -266,19 +257,16 @@ impl WasmChannelStore for LibSqlWasmChannelStore {
 
 // ============================== PostgreSQL ==================================
 
-#[cfg(feature = "postgres")]
 pub(crate) struct PostgresWasmToolStore {
     pool: deadpool_postgres::Pool,
 }
 
-#[cfg(feature = "postgres")]
 impl PostgresWasmToolStore {
     pub(crate) fn new(pool: deadpool_postgres::Pool) -> Self {
         Self { pool }
     }
 }
 
-#[cfg(feature = "postgres")]
 #[async_trait]
 impl WasmToolStore for PostgresWasmToolStore {
     async fn list(&self, user_id: &str) -> Result<Vec<StoredWasmTool>, WasmStorageError> {
@@ -346,19 +334,16 @@ impl WasmToolStore for PostgresWasmToolStore {
     }
 }
 
-#[cfg(feature = "postgres")]
 pub(crate) struct PostgresWasmChannelStore {
     pool: deadpool_postgres::Pool,
 }
 
-#[cfg(feature = "postgres")]
 impl PostgresWasmChannelStore {
     pub(crate) fn new(pool: deadpool_postgres::Pool) -> Self {
         Self { pool }
     }
 }
 
-#[cfg(feature = "postgres")]
 #[async_trait]
 impl WasmChannelStore for PostgresWasmChannelStore {
     async fn list(&self, user_id: &str) -> Result<Vec<StoredWasmChannel>, WasmStorageError> {

@@ -58,7 +58,6 @@
 //! guard inside `ProviderBackedCredentialAccountService` still prevents local
 //! stampede if connectivity recovers mid-tick.
 
-#[cfg(feature = "postgres")]
 use tracing::debug;
 
 // ---------------------------------------------------------------------------
@@ -68,7 +67,6 @@ use tracing::debug;
 // worker leader election" in the Postgres advisory-lock namespace.
 // These were chosen as stable constants; do NOT derive them from a runtime
 // value — the key must be identical across all processes in the deployment.
-#[cfg(feature = "postgres")]
 const KEEPALIVE_LOCK_KEY: (i32, i32) = (0x4B45_4550i32, 0x414C_4956i32); // "KEEP", "ALIV"
 
 // ---------------------------------------------------------------------------
@@ -79,9 +77,8 @@ const KEEPALIVE_LOCK_KEY: (i32, i32) = (0x4B45_4550i32, 0x414C_4956i32); // "KEE
 pub(crate) enum LeaderOutcome<T> {
     /// Another process holds the leader lock; sweep was skipped.
     ///
-    /// Only constructed on the Postgres path; under non-postgres builds the
-    /// worker is always the trivial leader, so this variant is unreachable.
-    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
+    /// Only constructed when a Postgres pool is supplied. Local-dev/libSQL
+    /// callers pass `None` and are always the leader.
     NotLeader,
     /// This process was the leader; the sweep ran and returned `result`.
     Ran(T),
@@ -103,27 +100,15 @@ pub(crate) struct CredentialRefreshLeaderLock {
     /// Postgres pool for leader-lock acquisition. `None` on the libsql /
     /// local-dev path → always-leader (pass-through). MUST stay private;
     /// never exposed through any public API or the composition facade.
-    #[cfg(feature = "postgres")]
     pool: Option<deadpool_postgres::Pool>,
-    /// Marker field so the struct is non-empty when the postgres feature is
-    /// off. ZST — zero runtime cost.
-    #[cfg(not(feature = "postgres"))]
-    _marker: (),
 }
 
 impl CredentialRefreshLeaderLock {
     /// Build a leader lock backed by a Postgres pool (Postgres path).
     ///
     /// Pass `None` for `pool` to get the always-leader (libsql) behaviour.
-    #[cfg(feature = "postgres")]
     pub(crate) fn new(pool: Option<deadpool_postgres::Pool>) -> Self {
         Self { pool }
-    }
-
-    /// Build an always-leader lock (no pool, libsql / local-dev path).
-    #[cfg(not(feature = "postgres"))]
-    pub(crate) fn always_leader() -> Self {
-        Self { _marker: () }
     }
 
     /// Try to become the deployment-wide sweep leader for one tick.
@@ -141,13 +126,10 @@ impl CredentialRefreshLeaderLock {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = T>,
     {
-        #[cfg(feature = "postgres")]
-        {
-            if let Some(pool) = &self.pool {
-                return run_as_leader_postgres(pool, sweep).await;
-            }
+        if let Some(pool) = &self.pool {
+            return run_as_leader_postgres(pool, sweep).await;
         }
-        // No pool (libsql / local-dev / no-postgres): trivially the leader.
+        // No pool (libsql / local-dev): trivially the leader.
         LeaderOutcome::Ran(sweep().await)
     }
 }
@@ -156,7 +138,6 @@ impl CredentialRefreshLeaderLock {
 // Postgres leader-lock logic
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "postgres")]
 async fn run_as_leader_postgres<F, Fut, T>(
     pool: &deadpool_postgres::Pool,
     sweep: F,
@@ -256,9 +237,6 @@ mod tests {
     /// On the no-pool path the sweep always runs.
     #[tokio::test]
     async fn always_leader_runs_sweep() {
-        #[cfg(not(feature = "postgres"))]
-        let lock = CredentialRefreshLeaderLock::always_leader();
-        #[cfg(feature = "postgres")]
         let lock = CredentialRefreshLeaderLock::new(None);
 
         let ran = Arc::new(AtomicBool::new(false));
@@ -279,9 +257,6 @@ mod tests {
     /// Sweep runs twice on successive calls (no state leaks between calls).
     #[tokio::test]
     async fn always_leader_runs_sweep_twice() {
-        #[cfg(not(feature = "postgres"))]
-        let lock = CredentialRefreshLeaderLock::always_leader();
-        #[cfg(feature = "postgres")]
         let lock = CredentialRefreshLeaderLock::new(None);
 
         let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));

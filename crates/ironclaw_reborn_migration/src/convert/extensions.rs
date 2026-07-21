@@ -35,9 +35,7 @@ use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle, UserId};
 use ironclaw_host_runtime::{default_host_api_contract_registry, default_host_port_catalog};
 
 use crate::error::MigrationError;
-#[cfg(feature = "libsql")]
 use crate::legacy_snapshot::wasm_stores::{LibSqlWasmChannelStore, LibSqlWasmToolStore};
-#[cfg(feature = "postgres")]
 use crate::legacy_snapshot::wasm_stores::{PostgresWasmChannelStore, PostgresWasmToolStore};
 use crate::legacy_snapshot::wasm_stores::{
     StoredWasmChannel, StoredWasmTool, ToolStatus, WasmChannelStore, WasmToolStore,
@@ -439,11 +437,9 @@ async fn tool_credential_bindings(
 }
 
 fn build_tool_store(src: &V1Source) -> Option<Arc<dyn WasmToolStore>> {
-    #[cfg(feature = "libsql")]
     if let Some(db) = src.handles.libsql_db.as_ref() {
         return Some(Arc::new(LibSqlWasmToolStore::new(db.clone())));
     }
-    #[cfg(feature = "postgres")]
     if let Some(pool) = src.handles.pg_pool.as_ref() {
         return Some(Arc::new(PostgresWasmToolStore::new(pool.clone())));
     }
@@ -451,11 +447,9 @@ fn build_tool_store(src: &V1Source) -> Option<Arc<dyn WasmToolStore>> {
 }
 
 fn build_channel_store(src: &V1Source) -> Option<Arc<dyn WasmChannelStore>> {
-    #[cfg(feature = "libsql")]
     if let Some(db) = src.handles.libsql_db.as_ref() {
         return Some(Arc::new(LibSqlWasmChannelStore::new(db.clone())));
     }
-    #[cfg(feature = "postgres")]
     if let Some(pool) = src.handles.pg_pool.as_ref() {
         return Some(Arc::new(PostgresWasmChannelStore::new(pool.clone())));
     }

@@ -27,12 +27,9 @@ pub mod predicate;
 pub mod predicate_hash;
 pub mod predicate_state;
 // Durable PredicateStateBackend impls folded in from the former
-// `ironclaw_hooks_{postgres,libsql}` crates. Each is gated behind its own
-// feature so the framework stays DB-free by default; both implement the same
-// `predicate_state::PredicateStateBackend` contract.
-#[cfg(feature = "libsql")]
+// `ironclaw_hooks_{postgres,libsql}` crates. Both implement the same
+// `predicate_state::PredicateStateBackend` contract and compile unconditionally.
 pub mod libsql_backend;
-#[cfg(feature = "postgres")]
 pub mod postgres_backend;
 pub mod registrar;
 pub mod registry;

@@ -17,10 +17,9 @@
 //! - **libSQL**: always — the backend runs over an embedded temp-file db that
 //!   needs no server, so this leg executes in any environment, including
 //!   default `cargo test`.
-//! - **Postgres**: compiled only under `--features postgres`, and at runtime
-//!   only when `IRONCLAW_HOOKS_POSTGRES_URL` / `DATABASE_URL` points at a
-//!   reachable server. Without a URL the Postgres leg is *skipped* (not
-//!   failed), exactly like the per-backend contract suites — but then the
+//! - **Postgres**: runs when `IRONCLAW_HOOKS_POSTGRES_URL` / `DATABASE_URL`
+//!   points at a reachable server. Without a URL the Postgres leg is *skipped*
+//!   (not failed), exactly like the per-backend contract suites — but then the
 //!   parity guarantee is only proven for {in-memory, libSQL}. Set
 //!   `IRONCLAW_REQUIRE_POSTGRES=1` (CI does) to turn a missing/unreachable
 //!   Postgres into a HARD failure so a skip cannot masquerade as a green

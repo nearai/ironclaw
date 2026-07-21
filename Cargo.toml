@@ -210,12 +210,6 @@ ironclaw_embeddings = { path = "crates/ironclaw_embeddings", version = "0.1.0", 
 rstest = "0.23"
 
 [features]
-# Marker features (no dependency gating — every dev-dependency above is
-# unconditional) selecting which backend-specific test variants compile/run.
-# `--features libsql,postgres` mirrors the old default feature set.
-default = ["libsql", "postgres"]
-libsql = []
-postgres = []
 # Opt-in feature for especially heavy integration-test targets that run in a
 # dedicated CI job instead of the default Rust test matrix.
 integration = []
@@ -251,7 +245,6 @@ path = "tests/integration/group_journeys/main.rs"
 [[test]]
 name = "reborn_integration_oauth_refresh"
 path = "tests/integration/auth/oauth_refresh.rs"
-required-features = ["libsql"]
 
 [[test]]
 name = "reborn_integration_triggered_delivery_outcome"

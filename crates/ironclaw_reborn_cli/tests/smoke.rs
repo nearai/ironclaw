@@ -120,15 +120,165 @@ fn write_sparse_reborn_config(reborn_home: &Path) {
     .expect("config");
 }
 
+fn shell_words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut chars = text.chars().peekable();
+    let mut quote = None;
+
+    while let Some(ch) = chars.next() {
+        match (quote, ch) {
+            (None, '\\') => {
+                if matches!(chars.peek(), Some('\r' | '\n')) {
+                    if matches!(chars.peek(), Some('\r')) {
+                        chars.next();
+                    }
+                    if matches!(chars.peek(), Some('\n')) {
+                        chars.next();
+                    }
+                } else if let Some(next) = chars.next() {
+                    word.push(next);
+                }
+            }
+            (Some('"'), '\\') => {
+                if let Some(next) = chars.next() {
+                    word.push(next);
+                }
+            }
+            (None, '\'' | '"') => {
+                quote = Some(ch);
+            }
+            (Some(active), _) if ch == active => {
+                quote = None;
+            }
+            (None, ch) if ch.is_whitespace() => {
+                if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+            }
+            _ => word.push(ch),
+        }
+    }
+
+    if !word.is_empty() {
+        words.push(word);
+    }
+
+    words
+}
+
+fn split_cargo_feature_value(value: &str) -> impl Iterator<Item = &str> {
+    value
+        .split(|ch: char| ch == ',' || ch.is_whitespace())
+        .filter(|feature| !feature.is_empty())
+}
+
+fn cargo_command_features(text: &str) -> Vec<String> {
+    let words = shell_words(text);
+    let mut features = Vec::new();
+    let mut index = 0;
+    while index < words.len() {
+        let word = &words[index];
+        if word == "--features" || word == "-F" {
+            if let Some(value) = words.get(index + 1) {
+                features.extend(split_cargo_feature_value(value).map(str::to_owned));
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(value) = word.strip_prefix("--features=") {
+            features.extend(split_cargo_feature_value(value).map(str::to_owned));
+        }
+        if let Some(value) = word.strip_prefix("-F")
+            && !value.is_empty()
+        {
+            features.extend(split_cargo_feature_value(value).map(str::to_owned));
+        }
+        index += 1;
+    }
+    features
+}
+
+fn assert_no_removed_backend_cargo_features(text: &str, label: &str) {
+    let features = cargo_command_features(text);
+    assert!(
+        !features
+            .iter()
+            .any(|feature| feature == "libsql" || feature == "postgres"),
+        "{label} must not pass removed backend Cargo features: parsed features={features:?}\n{text}"
+    );
+}
+
+fn package_metadata_dist_features(manifest: &str) -> Vec<String> {
+    let manifest: toml::Table = manifest.parse().expect("parse Cargo manifest");
+    manifest
+        .get("package")
+        .and_then(|package| package.get("metadata"))
+        .and_then(|metadata| metadata.get("dist"))
+        .and_then(|dist| dist.get("features"))
+        .and_then(toml::Value::as_array)
+        .map(|features| {
+            features
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[test]
-fn dockerfile_reborn_builds_with_production_features() {
+fn cargo_feature_parser_detects_removed_backend_spellings() {
+    for input in [
+        "cargo build --features libsql",
+        "cargo build --features=postgres",
+        "cargo build --features 'libsql,other'",
+        "cargo build -F postgres",
+        "cargo build -Flibsql",
+        "cargo build -Fpostgres,other",
+    ] {
+        let features = cargo_command_features(input);
+        assert!(
+            features
+                .iter()
+                .any(|feature| feature == "libsql" || feature == "postgres"),
+            "expected removed backend feature in parsed features={features:?} for {input}"
+        );
+    }
+}
+
+#[test]
+fn dist_feature_parser_detects_basic_and_literal_strings() {
+    let manifest = r#"
+[package]
+name = "ironclaw"
+
+[package.metadata.dist]
+dist = true
+features = [
+    "libsql",
+    'postgres',
+    "lib\u0073ql",
+]
+
+[package.metadata.wix]
+"#;
+    assert_eq!(
+        package_metadata_dist_features(manifest),
+        vec![
+            "libsql".to_string(),
+            "postgres".to_string(),
+            "libsql".to_string()
+        ]
+    );
+}
+
+#[test]
+fn dockerfile_reborn_builds_without_backend_feature_flags() {
     let dockerfile =
         std::fs::read_to_string(workspace_root().join("Dockerfile")).expect("Dockerfile");
 
-    assert!(
-        dockerfile.matches("libsql,postgres").count() >= 2,
-        "Dockerfile must compile both cargo-chef deps and final binary with libsql and postgres: {dockerfile}"
-    );
+    assert_no_removed_backend_cargo_features(&dockerfile, "Dockerfile");
     assert!(
         dockerfile.contains("--bin ironclaw")
             && dockerfile
@@ -200,8 +350,6 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         ("aarch64-apple-darwin", "macos-15"),
         ("x86_64-pc-windows-msvc", "windows-2022"),
     ];
-    let release_features = "libsql,postgres";
-
     assert_eq!(
         compile_workflow.matches("          - target: ").count(),
         target_runners.len(),
@@ -222,11 +370,11 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
             && compile_workflow.contains("            --bin ironclaw \\\n")
             && !compile_workflow.contains("--bin ironclaw-reborn")
             && compile_workflow.contains("--target \"$TARGET\"")
-            && compile_workflow
-                .contains(&format!("  REBORN_RELEASE_FEATURES: {release_features}\n"))
-            && compile_workflow.contains("            --features \"$REBORN_RELEASE_FEATURES\""),
-        "Reborn release CI must fully link the shipping binary and keep all target results"
+            && !compile_workflow.contains("REBORN_RELEASE_FEATURES")
+            && !compile_workflow.contains("--features \"$REBORN_RELEASE_FEATURES\""),
+        "Reborn release CI must fully link the shipping binary without removed backend feature flags and keep all target results"
     );
+    assert_no_removed_backend_cargo_features(&compile_workflow, "Reborn release CI");
     assert!(
         compile_workflow.matches("musl: true").count() == 2
             && compile_workflow.contains("sudo apt-get install --yes musl-tools binutils file")
@@ -370,10 +518,16 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
     assert!(
         cli_manifest.contains("[package]\nname = \"ironclaw\"\nversion = \"")
             && cli_manifest.contains("[package.metadata.dist]\ndist = true")
-            && cli_manifest.contains("features = [\"libsql\", \"postgres\"]")
             && cli_manifest.contains("[package.metadata.wix]")
             && cli_manifest.contains("[[bin]]\nname = \"ironclaw\""),
-        "the canonical Reborn package must be cargo-dist enabled with production features and WiX metadata"
+        "the canonical Reborn package must be cargo-dist enabled without removed backend feature flags and with WiX metadata"
+    );
+    let dist_features = package_metadata_dist_features(&cli_manifest);
+    assert!(
+        !dist_features
+            .iter()
+            .any(|feature| feature == "libsql" || feature == "postgres"),
+        "the canonical Reborn package must be cargo-dist enabled without removed backend feature flags and with WiX metadata: parsed dist features={dist_features:?}\n{cli_manifest}"
     );
 }
 
@@ -393,17 +547,13 @@ fn dockerfile_reborn_ships_extension_ownership_migration() {
 
     assert!(
         deps_stage.contains("--package ironclaw_reborn_migration")
-            && deps_stage.contains("--no-default-features")
-            && deps_stage.contains("--features libsql")
             && deps_stage.contains("--recipe-path recipe.json"),
-        "Dockerfile must cache the libSQL-only extension ownership migration dependencies: {dockerfile}"
+        "Dockerfile must cache the extension ownership migration dependencies: {dockerfile}"
     );
     assert!(
         builder_stage.contains("--package ironclaw_reborn_migration")
-            && builder_stage.contains("--no-default-features")
-            && builder_stage.contains("--features libsql")
             && builder_stage.contains("--bin ironclaw-reborn-extension-ownership-migration"),
-        "Dockerfile must build the libSQL-only extension ownership migration binary: {dockerfile}"
+        "Dockerfile must build the extension ownership migration binary: {dockerfile}"
     );
     assert!(
         dockerfile.contains(
@@ -3983,45 +4133,6 @@ fn onboard_bootstraps_reborn_home_without_touching_v1_state() {
     assert!(
         !v1_home.exists(),
         "onboard must not create or read explicit v1 state"
-    );
-}
-
-#[cfg(not(feature = "libsql"))]
-#[test]
-fn onboard_reduced_feature_build_reports_llm_provisioning_as_unavailable() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let process_home = temp.path().join("process-home");
-    let reborn_home = temp.path().join("reborn-home");
-    std::fs::create_dir_all(&process_home).expect("create process home");
-
-    let output = reborn_command()
-        .arg("onboard")
-        .env_clear()
-        .env("HOME", &process_home)
-        .env("IRONCLAW_REBORN_HOME", &reborn_home)
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
-        .output()
-        .expect("reduced-feature ironclaw onboard should run");
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("llm_credentials: unavailable in this build"),
-        "the feature-off outcome must not be reported as non-interactive: {stdout}"
-    );
-    assert!(
-        stdout.contains("--features full") && stdout.contains("rerun `ironclaw onboard`"),
-        "reduced-feature onboarding must print feature-specific remediation: {stdout}"
-    );
-    assert!(
-        !stdout.contains(
-            "configure LLM credentials: rerun `ironclaw onboard` from an interactive terminal"
-        ),
-        "feature-disabled provisioning must not blame terminal interactivity: {stdout}"
     );
 }
 
