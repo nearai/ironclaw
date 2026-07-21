@@ -32,7 +32,7 @@ ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_memory = { path = "../ironclaw_memory", version = "0.1.0" }
 ironclaw_prompt_envelope = { path = "../ironclaw_prompt_envelope" }
 ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.1" }
-jsonschema = { version = "0.46", default-features = false }
+jsonschema = { version = "0.48", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"

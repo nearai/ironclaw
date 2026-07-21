@@ -43,7 +43,7 @@ ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
-jsonschema = { version = "0.46", default-features = false }
+jsonschema = { version = "0.48", default-features = false }
 libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
