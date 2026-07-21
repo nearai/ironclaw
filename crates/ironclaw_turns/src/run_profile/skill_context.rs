@@ -292,7 +292,7 @@ impl SkillContextSnippet {
             safe_summary: self.safe_summary,
             metadata: Some(LoopContextSnippetMetadata {
                 source_name: self.skill_name,
-                trust_level: self.trust.as_str().to_string(),
+                trust_level: self.trust,
             }),
         }
     }

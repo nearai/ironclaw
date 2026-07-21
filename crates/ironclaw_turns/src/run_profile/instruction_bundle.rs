@@ -308,7 +308,7 @@ impl InstructionBundleBuilder {
                 skill_context.push(PromptSkillContextMetadata {
                     ordinal: skill_ordinal,
                     source_name: metadata.source_name.clone(),
-                    trust_level: metadata.trust_level.clone(),
+                    trust_level: metadata.trust_level,
                 });
                 skill_ordinal += 1;
             } else {
@@ -515,7 +515,7 @@ fn snippet_model_content_surface(
     snippet: &LoopContextSnippet,
 ) -> PromptTextSurface {
     match (section, snippet.metadata.as_ref()) {
-        ("skill", Some(metadata)) if metadata.trust_level == SkillTrustLevel::Trusted.as_str() => {
+        ("skill", Some(metadata)) if metadata.trust_level == SkillTrustLevel::Trusted => {
             PromptTextSurface::TrustedSkillInstruction
         }
         _ => PromptTextSurface::GenericModelContent,
