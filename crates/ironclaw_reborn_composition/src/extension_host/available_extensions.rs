@@ -553,17 +553,6 @@ fn package_from_bundle(
         .map(|asset| {
             let content = match asset.content {
                 PackageAssetContent::Bytes(bytes) => AvailableExtensionAssetContent::Bytes(bytes),
-                // Catalog entries must be self-contained inline bytes (see
-                // `AvailableExtensionAssetContent`); the bundled inventory always
-                // embeds asset bytes via `include_bytes!`, so a filesystem-pointer
-                // asset carries no bytes to materialize here and is rejected
-                // rather than dangled.
-                PackageAssetContent::Filesystem(_) => {
-                    return Err(map_binding_error(
-                        "bundled catalog assets must embed bytes; \
-                         filesystem-pointer assets are not supported",
-                    ));
-                }
             };
             Ok(AvailableExtensionAsset {
                 path: asset.path,

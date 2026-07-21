@@ -17,7 +17,6 @@ use async_trait::async_trait;
 
 use ironclaw_host_api::RestrictedEgress;
 
-use crate::error::ProductAdapterError;
 use crate::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
 };
@@ -155,8 +154,8 @@ pub struct OutboundEnvelope {
     pub delivery_attempt_id: String,
     /// Resolved target (source-route reply or preference target).
     pub target: OutboundTarget,
-    /// The rendered message parts (text + attachments), already reduced from
-    /// the semantic intent by the coordinator.
+    /// The rendered message parts, already reduced from the semantic intent by
+    /// the coordinator.
     pub parts: Vec<OutboundPart>,
     /// The stored `reply_context` from the originating inbound message, if
     /// this delivery replies to one.
@@ -176,7 +175,6 @@ pub struct OutboundTarget {
 #[derive(Debug, Clone)]
 pub enum OutboundPart {
     Text(String),
-    Attachment(AttachmentRef),
     /// Remove an earlier delivery in the target conversation (the `Cleanup`
     /// intent, e.g. deleting a working indicator). `vendor_message_ref` is
     /// the reference a previous [`PartDeliveryOutcome::Sent`] returned; the
@@ -234,8 +232,6 @@ pub enum ChannelError {
     VendorWiring { reason: String },
     #[error("channel operation is not supported by this adapter")]
     Unsupported,
-    #[error(transparent)]
-    Adapter(#[from] ProductAdapterError),
 }
 
 impl NormalizedInboundMessage {

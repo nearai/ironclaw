@@ -13,7 +13,7 @@
 
 use std::borrow::Cow;
 
-use ironclaw_host_api::{EffectKind, VirtualPath};
+use ironclaw_host_api::EffectKind;
 
 mod github;
 mod gmail;
@@ -45,9 +45,8 @@ const PACKAGES: &[PackageEntry] = &[
     (web_access::ID, web_access::bundle),
 ];
 
-/// Byte or filesystem content of one asset shipped inside a package, addressed
-/// by its in-package `path` (manifest, input schema, prompt doc, or WASM
-/// module).
+/// Byte content of one asset shipped inside a package, addressed by its
+/// in-package `path` (manifest, input schema, prompt doc, or WASM module).
 pub struct PackageAsset {
     pub path: String,
     pub content: PackageAssetContent,
@@ -55,7 +54,6 @@ pub struct PackageAsset {
 
 pub enum PackageAssetContent {
     Bytes(Vec<u8>),
-    Filesystem(VirtualPath),
 }
 
 /// A package's user-facing onboarding copy, carried as plain data (no host
@@ -128,14 +126,4 @@ pub fn bundled_packages() -> Vec<PackageBundle> {
 /// the full bundles.
 pub fn bundled_package_ids() -> Vec<&'static str> {
     PACKAGES.iter().map(|(id, _)| *id).collect()
-}
-
-/// The Slack channel manifest source, as a `&'static str`. A targeted accessor
-/// for the two remaining slack-specific host paths that need the manifest text
-/// without materializing the whole inventory: the legacy Slack Events ingress
-/// alias (MIG-5, scheduled for removal) and the retired-`slack_bot` installation
-/// forward-migration seed. New generic code must consume packages opaquely via
-/// [`bundled_packages`], not this accessor.
-pub fn slack_manifest_toml() -> &'static str {
-    slack::MANIFEST
 }

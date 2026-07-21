@@ -62,8 +62,6 @@ pub struct ToolResult {
 /// gate and resumes through the standard blocked-turn flow.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ToolError {
-    #[error("invalid tool input: {reason}")]
-    InvalidInput { reason: String },
     #[error("tool invocation requires authorization")]
     AuthRequired {
         required_secrets: Vec<SecretHandle>,
@@ -164,8 +162,6 @@ pub enum RestrictedEgressError {
     ResponseTooLarge,
     #[error("egress transport failed: {reason}")]
     Transport { reason: String },
-    #[error("egress deadline exceeded")]
-    DeadlineExceeded,
 }
 
 impl ToolCall {

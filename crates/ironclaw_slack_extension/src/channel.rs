@@ -105,12 +105,6 @@ impl ChannelAdapter for SlackChannelAdapter {
                         }
                     }
                 }
-                OutboundPart::Attachment(_) => {
-                    parts.push(PartDeliveryOutcome::Permanent {
-                        reason: "slack outbound attachment upload is not supported yet".to_string(),
-                    });
-                    break 'parts;
-                }
                 OutboundPart::Retract { vendor_message_ref } => {
                     let outcome =
                         delete_slack_message(egress, &credential, &channel, vendor_message_ref)
@@ -349,11 +343,9 @@ async fn delete_slack_message(
 
 fn part_outcome_for_egress_error(error: &RestrictedEgressError) -> PartDeliveryOutcome {
     match error {
-        RestrictedEgressError::Transport { .. } | RestrictedEgressError::DeadlineExceeded => {
-            PartDeliveryOutcome::Retryable {
-                reason: error.to_string(),
-            }
-        }
+        RestrictedEgressError::Transport { .. } => PartDeliveryOutcome::Retryable {
+            reason: error.to_string(),
+        },
         RestrictedEgressError::AuthRequired { .. }
         | RestrictedEgressError::UndeclaredCredential { .. } => PartDeliveryOutcome::Unauthorized {
             reason: error.to_string(),
@@ -384,7 +376,7 @@ fn parse_error(error: SlackPayloadParseError) -> ChannelError {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_product_adapters::{AttachmentRef, ProductTriggerReason};
+    use ironclaw_product_adapters::ProductTriggerReason;
 
     use super::*;
 
@@ -869,7 +861,9 @@ mod tests {
 
     #[tokio::test]
     async fn deliver_maps_egress_failures_without_leaking_details() {
-        let egress = ScriptedEgress::new(vec![Err(RestrictedEgressError::DeadlineExceeded)]);
+        let egress = ScriptedEgress::new(vec![Err(RestrictedEgressError::Transport {
+            reason: "connection timed out".to_string(),
+        })]);
         let report = SlackChannelAdapter
             .deliver(
                 envelope(vec![OutboundPart::Text("x".to_string())], None),
@@ -900,40 +894,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deliver_rejects_empty_envelopes_and_reports_attachments_unsupported() {
+    async fn deliver_rejects_empty_envelopes() {
         let egress = ScriptedEgress::new(Vec::new());
         let error = SlackChannelAdapter
             .deliver(envelope(Vec::new(), None), &egress)
             .await
             .expect_err("empty envelope is a render error");
         assert!(matches!(error, ChannelError::Render { .. }));
-
-        let egress = ScriptedEgress::new(Vec::new());
-        let report = SlackChannelAdapter
-            .deliver(
-                envelope(
-                    vec![OutboundPart::Attachment(AttachmentRef {
-                        descriptor: ironclaw_product_adapters::ProductAttachmentDescriptor::new(
-                            "file-1",
-                            "image/png",
-                            Some("img.png".to_string()),
-                            Some(10),
-                            ironclaw_product_adapters::ProductAttachmentKind::Image,
-                        )
-                        .expect("descriptor"),
-                        vendor_ref: "file-1".to_string(),
-                        mime_hint: Some("image/png".to_string()),
-                    })],
-                    None,
-                ),
-                &egress,
-            )
-            .await
-            .expect("deliver drives");
-        assert!(matches!(
-            &report.parts[0],
-            PartDeliveryOutcome::Permanent { .. }
-        ));
-        assert!(egress.requests().is_empty());
     }
 }

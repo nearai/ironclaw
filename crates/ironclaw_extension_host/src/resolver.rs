@@ -141,9 +141,6 @@ fn dispatch_error_for_tool_error(
             required_secrets,
             credential_requirements,
         },
-        ToolError::InvalidInput { .. } => {
-            dispatch_error_for_kind(runtime, RuntimeDispatchErrorKind::InputEncode, None, None)
-        }
         ToolError::Failed {
             kind,
             safe_summary,

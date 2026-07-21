@@ -180,13 +180,6 @@ impl ChannelAdapter for TelegramChannelAdapter {
                         }
                     }
                 }
-                OutboundPart::Attachment(_) => {
-                    parts.push(PartDeliveryOutcome::Permanent {
-                        reason: "telegram outbound attachment upload is not supported yet"
-                            .to_string(),
-                    });
-                    break 'parts;
-                }
                 OutboundPart::Retract { vendor_message_ref } => {
                     let outcome = match vendor_message_ref.parse::<i64>() {
                         Ok(message_id) => {
@@ -329,11 +322,9 @@ fn telegram_outcome_for_egress_error(
 ) -> PartDeliveryOutcome {
     use ironclaw_host_api::RestrictedEgressError as EgressError;
     match error {
-        EgressError::Transport { .. } | EgressError::DeadlineExceeded => {
-            PartDeliveryOutcome::Retryable {
-                reason: error.to_string(),
-            }
-        }
+        EgressError::Transport { .. } => PartDeliveryOutcome::Retryable {
+            reason: error.to_string(),
+        },
         EgressError::AuthRequired { .. } | EgressError::UndeclaredCredential { .. } => {
             PartDeliveryOutcome::Unauthorized {
                 reason: error.to_string(),
