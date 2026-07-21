@@ -55,7 +55,15 @@ struct CapacityState {
 #[derive(Debug)]
 struct NamedSlot {
     generation: u64,
+    client_generation: Option<u64>,
     cancel: watch::Sender<bool>,
+}
+
+#[derive(Debug)]
+pub(crate) enum SseAcquireResult {
+    Acquired(SseSlot),
+    AtCapacity,
+    StaleGeneration,
 }
 
 impl SseCapacity {
@@ -76,13 +84,29 @@ impl SseCapacity {
         user_id: &UserId,
         connection_id: Option<&str>,
     ) -> Option<SseSlot> {
+        match self.try_acquire_ordered(tenant_id, user_id, connection_id, None) {
+            SseAcquireResult::Acquired(slot) => Some(slot),
+            SseAcquireResult::AtCapacity | SseAcquireResult::StaleGeneration => None,
+        }
+    }
+
+    /// Reserve a slot using the browser tab's monotonically increasing stream
+    /// generation. A delayed request from an older route must not cancel the
+    /// newer route merely because it reached the server later.
+    pub(crate) fn try_acquire_ordered(
+        self: &Arc<Self>,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+        connection_id: Option<&str>,
+        client_generation: Option<u64>,
+    ) -> SseAcquireResult {
         // Reject before touching the HashMap so a configured cap of 0
         // (SSE disabled) does not leak a zero-count entry per rejected
         // open. With the insert-before-check order we used to use, every
         // 429 under a configured cap of 0 would
         // store the caller's `(tenant, user)` key indefinitely.
         if self.max_per_caller == 0 {
-            return None;
+            return SseAcquireResult::AtCapacity;
         }
         let key = CallerKey {
             tenant_id: tenant_id.clone(),
@@ -93,12 +117,24 @@ impl SseCapacity {
         if let Some(connection_id) = connection_id {
             let named_key = (key.clone(), connection_id.to_string());
             if let Some(previous) = state.named_slots.get(&named_key) {
+                match (client_generation, previous.client_generation) {
+                    (Some(incoming), Some(current)) if incoming < current => {
+                        return SseAcquireResult::StaleGeneration;
+                    }
+                    (None, Some(_)) => return SseAcquireResult::StaleGeneration,
+                    _ => {}
+                }
                 let _ = previous.cancel.send(true);
                 let (cancel, cancellation) = watch::channel(false);
-                state
-                    .named_slots
-                    .insert(named_key, NamedSlot { generation, cancel });
-                return Some(SseSlot {
+                state.named_slots.insert(
+                    named_key,
+                    NamedSlot {
+                        generation,
+                        client_generation,
+                        cancel,
+                    },
+                );
+                return SseAcquireResult::Acquired(SseSlot {
                     capacity: Arc::clone(self),
                     key,
                     connection_id: Some(connection_id.to_string()),
@@ -109,20 +145,24 @@ impl SseCapacity {
         }
         let entry = state.open_by_caller.entry(key.clone()).or_insert(0);
         if *entry >= self.max_per_caller {
-            return None;
+            return SseAcquireResult::AtCapacity;
         }
         *entry += 1;
         let (connection_id, cancellation) = if let Some(connection_id) = connection_id {
             let (cancel, cancellation) = watch::channel(false);
             state.named_slots.insert(
                 (key.clone(), connection_id.to_string()),
-                NamedSlot { generation, cancel },
+                NamedSlot {
+                    generation,
+                    client_generation,
+                    cancel,
+                },
             );
             (Some(connection_id.to_string()), Some(cancellation))
         } else {
             (None, None)
         };
-        Some(SseSlot {
+        SseAcquireResult::Acquired(SseSlot {
             capacity: Arc::clone(self),
             key,
             connection_id,
@@ -374,5 +414,32 @@ mod tests {
         );
         drop(replacement);
         assert_eq!(cap.open_count(&tenant(), &alice), 0);
+    }
+
+    #[test]
+    fn ordered_named_slot_rejects_a_late_older_client_generation() {
+        let cap = Arc::new(SseCapacity::new(1));
+        let alice = user("alice");
+        let first = match cap.try_acquire_ordered(&tenant(), &alice, Some("browser-tab"), Some(1)) {
+            SseAcquireResult::Acquired(slot) => slot,
+            result => panic!("first generation must be admitted: {result:?}"),
+        };
+        let current = match cap.try_acquire_ordered(&tenant(), &alice, Some("browser-tab"), Some(2))
+        {
+            SseAcquireResult::Acquired(slot) => slot,
+            result => panic!("newer generation must be admitted: {result:?}"),
+        };
+
+        assert!(first.is_cancelled());
+        assert!(!current.is_cancelled());
+        assert!(matches!(
+            cap.try_acquire_ordered(&tenant(), &alice, Some("browser-tab"), Some(1)),
+            SseAcquireResult::StaleGeneration
+        ));
+        assert!(
+            !current.is_cancelled(),
+            "a late older request must not cancel the current route stream"
+        );
+        assert_eq!(cap.open_count(&tenant(), &alice), 1);
     }
 }

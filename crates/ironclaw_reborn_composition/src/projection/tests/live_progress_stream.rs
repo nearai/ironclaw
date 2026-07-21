@@ -202,7 +202,7 @@ async fn webui_event_stream_drains_live_reasoning_projection_from_update_source(
 }
 
 #[tokio::test]
-async fn webui_event_stream_drains_live_assistant_text_projection_from_update_source() {
+async fn fresh_webui_event_stream_compacts_buffered_assistant_text_to_latest_state() {
     let fixture = live_projection_fixture("webui-text");
     let user_id = fixture.user_id.clone();
     let thread_id = fixture.thread_id.clone();
@@ -277,11 +277,8 @@ async fn webui_event_stream_drains_live_assistant_text_projection_from_update_so
 
     assert_eq!(
         text_bodies,
-        vec![
-            "partial answer".to_string(),
-            "partial answer with [redacted]".to_string()
-        ],
-        "assistant text should drain as incremental updates to one stable text item"
+        vec!["partial answer with [redacted]".to_string()],
+        "a fresh route attach must hydrate the latest text state without replaying its growth history"
     );
     let wire = serde_json::to_string(&events).unwrap();
     assert!(!wire.contains(secret_like_token));
@@ -649,6 +646,16 @@ async fn live_publishers_from_same_services_share_monotonic_sequence() {
     let user_id = fixture.user_id.clone();
     let scope = fixture.scope.clone();
     let run_id = TurnRunId::new();
+    let mut subscription = fixture
+        .services
+        .webui_event_stream()
+        .subscribe(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id.clone()),
+            scope: scope.clone(),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
 
     let reasoning = |body: &str| LoopHostMilestone {
         scope: scope.clone(),
@@ -681,38 +688,34 @@ async fn live_publishers_from_same_services_share_monotonic_sequence() {
         .await
         .unwrap();
 
-    let events = fixture
-        .services
-        .webui_event_stream()
-        .drain(ProjectionSubscriptionRequest {
-            actor: TurnActor::new(user_id),
-            scope,
-            after_cursor: None,
-        })
-        .await
-        .unwrap();
-
-    let thinking_cursors = events
-        .iter()
-        .filter(|event| {
-            matches!(
-                event.payload(),
-                ProductOutboundPayload::ProjectionUpdate { state }
-                    if state.items.iter().any(|item| matches!(
-                        item,
-                        ProductProjectionItem::Thinking { body, .. }
-                            if body == "from publisher A" || body == "from publisher B"
-                    ))
-            )
-        })
-        .map(|event| event.projection_cursor().clone())
-        .collect::<Vec<_>>();
+    let mut thinking_cursors = Vec::new();
+    for _ in 0..4 {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), subscription.next())
+            .await
+            .expect("live projection event")
+            .expect("live projection subscription remains open")
+            .expect("live projection event remains valid");
+        if matches!(
+            event.payload(),
+            ProductOutboundPayload::ProjectionUpdate { state }
+                if state.items.iter().any(|item| matches!(
+                    item,
+                    ProductProjectionItem::Thinking { body, .. }
+                        if body == "from publisher A" || body == "from publisher B"
+                ))
+        ) {
+            thinking_cursors.push(event.projection_cursor().clone());
+        }
+        if thinking_cursors.len() == 2 {
+            break;
+        }
+    }
 
     assert_eq!(
         thinking_cursors.len(),
         2,
         "both publishers' live reasoning items must reach the stream on their \
-         own cursor: {events:#?}"
+         own cursor"
     );
     assert_ne!(
         thinking_cursors[0], thinking_cursors[1],
@@ -786,9 +789,9 @@ async fn webui_event_stream_preserves_live_reasoning_and_tool_start_order() {
 
     let live_items = events
         .iter()
-        .filter_map(|event| match event.payload() {
-            ProductOutboundPayload::ProjectionUpdate { state } => state.items.first(),
-            _ => None,
+        .flat_map(|event| match event.payload() {
+            ProductOutboundPayload::ProjectionUpdate { state } => state.items.iter(),
+            _ => [].iter(),
         })
         .map(|item| match item {
             ProductProjectionItem::Thinking { body, .. } => format!("thinking:{body}"),

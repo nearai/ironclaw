@@ -336,7 +336,7 @@ test("useSSE does not reconnect after a non-retryable server error", () => {
   assert.deepEqual(statuses, ["connecting", "disconnected"]);
 });
 
-test("useSSE resumes each thread from its own cursor after switching", () => {
+test("useSSE starts each thread route from a fresh projection", () => {
   const { cleanup, render, streams } = createHarness();
 
   streams[0].listener("projection_update")({
@@ -351,6 +351,7 @@ test("useSSE resumes each thread from its own cursor after switching", () => {
   assert.equal(streams[1].args.threadId, "thread-2");
   assert.equal(streams[1].args.afterCursor, undefined);
   assert.equal(streams[1].args.connectionId, "browser-tab-connection");
+  assert.equal(streams[1].args.connectionGeneration, 2);
 
   streams[1].listener("projection_update")({
     data: JSON.stringify({
@@ -362,7 +363,8 @@ test("useSSE resumes each thread from its own cursor after switching", () => {
 
   render("thread-1");
   assert.equal(streams[2].args.threadId, "thread-1");
-  assert.equal(streams[2].args.afterCursor, "thread-1-cursor");
+  assert.equal(streams[2].args.afterCursor, undefined);
+  assert.equal(streams[2].args.connectionGeneration, 3);
   assert.equal(
     streams[2].args.connectionId,
     streams[1].args.connectionId,
@@ -371,12 +373,13 @@ test("useSSE resumes each thread from its own cursor after switching", () => {
 
   render("thread-2");
   assert.equal(streams[3].args.threadId, "thread-2");
-  assert.equal(streams[3].args.afterCursor, "thread-2-cursor");
+  assert.equal(streams[3].args.afterCursor, undefined);
+  assert.equal(streams[3].args.connectionGeneration, 4);
 
   cleanup();
 });
 
-test("useSSE keeps a thread cursor when the chat page remounts", () => {
+test("useSSE discards a volatile live cursor when the chat page remounts", () => {
   const { cleanup, remount, streams } = createHarness();
 
   streams[0].listener("projection_update")({
@@ -388,7 +391,8 @@ test("useSSE keeps a thread cursor when the chat page remounts", () => {
   });
 
   remount("thread-1");
-  assert.equal(streams[1].args.afterCursor, "before-navigation");
+  assert.equal(streams[1].args.afterCursor, undefined);
+  assert.equal(streams[1].args.connectionGeneration, 2);
 
   cleanup();
 });

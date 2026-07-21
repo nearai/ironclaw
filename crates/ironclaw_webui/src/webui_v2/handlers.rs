@@ -896,14 +896,21 @@ pub async fn stream_events(
     headers: HeaderMap,
     Query(query): Query<StreamEventsQuery>,
 ) -> Result<Response, WebUiV2HttpError> {
-    let slot = state
-        .sse_capacity()
-        .try_acquire(
-            &caller.tenant_id,
-            &caller.user_id,
-            stream_connection_id(query.connection_id.as_deref()),
-        )
-        .ok_or_else(sse_concurrency_exhausted)?;
+    let connection_id = stream_connection_id(query.connection_id.as_deref());
+    let slot = match state.sse_capacity().try_acquire_ordered(
+        &caller.tenant_id,
+        &caller.user_id,
+        connection_id,
+        connection_id.and(query.connection_generation),
+    ) {
+        crate::webui_v2::sse_capacity::SseAcquireResult::Acquired(slot) => slot,
+        crate::webui_v2::sse_capacity::SseAcquireResult::AtCapacity => {
+            return Err(sse_concurrency_exhausted());
+        }
+        crate::webui_v2::sse_capacity::SseAcquireResult::StaleGeneration => {
+            return Ok(StatusCode::NO_CONTENT.into_response());
+        }
+    };
     let services = state.services().clone();
     let initial_cursor = headers
         .get(LAST_EVENT_ID_HEADER)
@@ -951,6 +958,8 @@ pub struct StreamEventsQuery {
     pub after_cursor: Option<String>,
     #[serde(default)]
     pub connection_id: Option<String>,
+    #[serde(default)]
+    pub connection_generation: Option<u64>,
 }
 
 fn stream_connection_id(connection_id: Option<&str>) -> Option<&str> {
@@ -1023,6 +1032,12 @@ fn sse_error_event(error: RebornServicesError) -> Event {
     }
 }
 
+fn sse_ready_event() -> Event {
+    Event::default()
+        .event("keep_alive")
+        .data(r#"{"type":"keep_alive"}"#)
+}
+
 fn build_sse_stream(
     services: std::sync::Arc<dyn RebornServicesApi>,
     caller: WebUiAuthenticatedCaller,
@@ -1074,6 +1089,12 @@ fn build_sse_stream(
                     return;
                 }
             };
+            // Axum can complete the HTTP handshake before the facade has
+            // admitted its projection subscription. This application frame
+            // proves the stream is actually ready, so a route switch can clear
+            // a stale reconnecting state without waiting for the next model
+            // delta or the transport keep-alive interval.
+            yield Ok(sse_ready_event());
             loop {
                 let remaining = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
                 if remaining.is_zero() {

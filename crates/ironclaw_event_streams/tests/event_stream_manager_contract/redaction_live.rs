@@ -1,6 +1,73 @@
 use super::*;
 
 #[tokio::test]
+async fn fresh_subscription_hydrates_latest_live_state_then_tails_new_updates() {
+    let scope = projection_scope("thread-a");
+    let source = Arc::new(InMemoryProjectionUpdateSource::new(8));
+    let manager = manager_with_source(scope.clone(), Arc::clone(&source));
+    let run_id = TurnRunId::new();
+    let thread_id = scope.read_scope.thread_id.clone().unwrap();
+    let live_update = |cursor, body: &str| {
+        ProductProjectionEnvelope::ThreadLiveUpdate(ThreadLiveProjectionUpdate {
+            cursor: ProjectionCursor::for_scope(scope.clone(), EventCursor::new(cursor)),
+            thread_id: thread_id.clone(),
+            items: vec![ThreadLiveProjectionItem::Text {
+                id: "text:active-run".to_string(),
+                run_id,
+                body: body.to_string(),
+            }],
+        })
+    };
+
+    for (cursor, body) in [(100, "partial"), (101, "current partial")] {
+        let error = source
+            .publish(live_update(cursor, body))
+            .expect_err("an update without a subscriber is retained but not broadcast");
+        assert!(matches!(error, ProjectionStreamError::Source));
+    }
+
+    let mut subscription = manager
+        .subscribe(subscribe_request(scope.clone(), None))
+        .await
+        .expect("fresh subscription");
+    assert!(matches!(
+        subscription.next().await,
+        Some(ProjectionStreamItem::Snapshot(_))
+    ));
+    let current = subscription.next().await.expect("current live state");
+    let ProjectionStreamItem::Update(current) = current else {
+        panic!("expected current live update, got {current:?}");
+    };
+    let ProductProjectionEnvelope::ThreadLiveUpdate(current) = current.as_ref() else {
+        panic!("expected thread live update, got {current:?}");
+    };
+    assert_eq!(
+        current.items,
+        vec![ThreadLiveProjectionItem::Text {
+            id: "text:active-run".to_string(),
+            run_id,
+            body: "current partial".to_string(),
+        }],
+        "origin subscribers must receive one current value rather than cumulative replay history"
+    );
+
+    source
+        .publish(live_update(102, "next partial"))
+        .expect("active subscriber receives the next update");
+    let next = subscription.next().await.expect("next live update");
+    let ProjectionStreamItem::Update(next) = next else {
+        panic!("expected next live update, got {next:?}");
+    };
+    let ProductProjectionEnvelope::ThreadLiveUpdate(next) = next.as_ref() else {
+        panic!("expected thread live update, got {next:?}");
+    };
+    assert!(matches!(
+        next.items.as_slice(),
+        [ThreadLiveProjectionItem::Text { body, .. }] if body == "next partial"
+    ));
+}
+
+#[tokio::test]
 async fn no_exposure_validator_rejects_sentinel_payloads() {
     let scope = projection_scope("thread-a");
     let source = Arc::new(InMemoryProjectionUpdateSource::new(8));

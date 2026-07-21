@@ -1,6 +1,5 @@
 import React from "react";
 import { openEventStream } from "../../../lib/api";
-import { authScope } from "../../../lib/auth-scope";
 import {
   CONNECTION_STATUS,
   type ConnectionStatus,
@@ -33,8 +32,6 @@ const V2_EVENT_NAMES = [
 
 const EVENT_SOURCE_CLOSED = 2;
 const EVENT_SOURCE_OPEN = 1;
-const MAX_CACHED_CURSORS = 30;
-const lastEventIdByThread = new Map<string, string>();
 // Stable for this browser tab's loaded SPA. Reusing it across Chat route
 // mounts lets the server supersede a proxy-held stream from the prior thread
 // instead of rejecting the replacement against the per-user connection cap.
@@ -42,28 +39,14 @@ const SSE_CONNECTION_ID =
   typeof globalThis.crypto?.randomUUID === "function"
     ? globalThis.crypto.randomUUID()
     : undefined;
+let nextConnectionGeneration = 0;
 
-function cursorKey(threadId: string) {
-  return `${authScope()}:${threadId}`;
-}
-
-function getLastEventId(threadId: string) {
-  return lastEventIdByThread.get(cursorKey(threadId));
-}
-
-function setLastEventId(threadId: string, eventId: string) {
-  const key = cursorKey(threadId);
-  lastEventIdByThread.delete(key);
-  lastEventIdByThread.set(key, eventId);
-  while (lastEventIdByThread.size > MAX_CACHED_CURSORS) {
-    const oldestKey = lastEventIdByThread.keys().next().value;
-    if (oldestKey === undefined) break;
-    lastEventIdByThread.delete(oldestKey);
-  }
-}
-
-function deleteLastEventId(threadId: string) {
-  lastEventIdByThread.delete(cursorKey(threadId));
+function connectionGeneration() {
+  nextConnectionGeneration =
+    nextConnectionGeneration >= Number.MAX_SAFE_INTEGER
+      ? 1
+      : nextConnectionGeneration + 1;
+  return nextConnectionGeneration;
 }
 
 function eventSourceReadyStateConstant(staticValue: unknown, fallback: number) {
@@ -105,6 +88,12 @@ export function useSSE({ threadId, onEvent, enabled }) {
     let reconnectAttempts = 0;
     let disposed = false;
     let terminalErrorReceived = false;
+    // This cursor belongs to this mounted route only. A route remount must
+    // hydrate current state from the projection origin because the composite
+    // cursor contains a process-local live rail. Native EventSource retries
+    // still carry Last-Event-ID automatically, and explicit retries within
+    // this effect may resume from the latest frame observed here.
+    let lastEventId = null;
     const maxReconnectDelay = 30_000;
     const reconnectOpenDeadline = 10_000;
 
@@ -169,8 +158,9 @@ export function useSSE({ threadId, onEvent, enabled }) {
 
       es = openEventStream({
         threadId,
-        afterCursor: getLastEventId(threadId) || undefined,
+        afterCursor: lastEventId || undefined,
         connectionId: SSE_CONNECTION_ID,
+        connectionGeneration: connectionGeneration(),
       });
       const source = es;
 
@@ -195,7 +185,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
         }
         if (!frame || typeof frame !== "object") return;
         if (event.lastEventId) {
-          setLastEventId(threadId, event.lastEventId);
+          lastEventId = event.lastEventId;
         }
         const rawType = frame.type || fallbackType;
         const type = rawType === "stream_error" ? "error" : rawType;
@@ -240,7 +230,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
           frame.retryable === true &&
           es === source
         ) {
-          deleteLastEventId(threadId);
+          lastEventId = null;
           reconnectWithTimer(CONNECTION_STATUS.RECONNECTING);
         }
       };

@@ -5006,7 +5006,7 @@ async fn stream_events_same_connection_id_supersedes_stale_stream() {
         .expect("first tcp");
     first
         .write_all(
-            b"GET /api/webchat/v2/threads/thread-a/events?connection_id=browser-tab HTTP/1.1\r\n\
+            b"GET /api/webchat/v2/threads/thread-a/events?connection_id=browser-tab&connection_generation=1 HTTP/1.1\r\n\
               Host: localhost\r\n\
               Accept: text/event-stream\r\n\
               Connection: close\r\n\
@@ -5034,7 +5034,7 @@ async fn stream_events_same_connection_id_supersedes_stale_stream() {
         .expect("replacement tcp");
     replacement
         .write_all(
-            b"GET /api/webchat/v2/threads/thread-b/events?connection_id=browser-tab HTTP/1.1\r\n\
+            b"GET /api/webchat/v2/threads/thread-b/events?connection_id=browser-tab&connection_generation=2 HTTP/1.1\r\n\
               Host: localhost\r\n\
               Accept: text/event-stream\r\n\
               Connection: close\r\n\
@@ -5069,6 +5069,34 @@ async fn stream_events_same_connection_id_supersedes_stale_stream() {
     assert!(
         first_closed.is_ok(),
         "superseded stream must close promptly instead of retaining a slot"
+    );
+
+    let mut late_stale = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("late stale tcp");
+    late_stale
+        .write_all(
+            b"GET /api/webchat/v2/threads/thread-a/events?connection_id=browser-tab&connection_generation=1 HTTP/1.1\r\n\
+              Host: localhost\r\n\
+              Accept: text/event-stream\r\n\
+              Connection: close\r\n\
+              \r\n",
+        )
+        .await
+        .expect("late stale request");
+    let mut stale_headers = [0_u8; 512];
+    let stale_read = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        late_stale.read(&mut stale_headers),
+    )
+    .await
+    .expect("stale response within timeout")
+    .expect("stale response");
+    assert!(
+        std::str::from_utf8(&stale_headers[..stale_read])
+            .expect("stale response utf8")
+            .starts_with("HTTP/1.1 204"),
+        "a delayed older route request must stop without replacing the current stream"
     );
 
     let mut different_tab = tokio::net::TcpStream::connect(addr)
@@ -5808,21 +5836,23 @@ async fn stream_events_uses_subscription_when_facade_supports_it() {
 
     let mut body = response.into_body();
     let bytes = collect_sse_until(&mut body, Duration::from_millis(750), |buf| {
-        parse_sse_events(buf).len() >= 2
+        parse_sse_events(buf).len() >= 3
     })
     .await;
     drop(body);
 
     let events = parse_sse_events(&bytes);
     assert!(
-        events.len() >= 2,
+        events.len() >= 3,
         "subscription events must reach SSE without facade polling; got {events:?}; raw: {}",
         String::from_utf8_lossy(&bytes)
     );
     let cursor_a_json =
         serde_json::to_string(envelope_a.projection_cursor()).expect("cursor-a json");
-    assert_eq!(events[0].event.as_deref(), Some("projection_update"));
-    assert_eq!(events[0].id.as_deref(), Some(cursor_a_json.as_str()));
+    assert_eq!(events[0].event.as_deref(), Some("keep_alive"));
+    assert_eq!(events[0].data.as_deref(), Some(r#"{"type":"keep_alive"}"#));
+    assert_eq!(events[1].event.as_deref(), Some("projection_update"));
+    assert_eq!(events[1].id.as_deref(), Some(cursor_a_json.as_str()));
 
     assert_eq!(
         services.stream_events_calls.lock().expect("lock").len(),
