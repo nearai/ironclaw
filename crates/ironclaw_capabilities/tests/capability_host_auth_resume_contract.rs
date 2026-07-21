@@ -509,8 +509,12 @@ async fn auth_resume_json_rejects_capability_id_mismatch_against_run_record() {
 
     let host = capability_host(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
 
-    // Attempt auth_resume with a DIFFERENT capability_id.
-    let different_id = CapabilityId::new("other.capability").unwrap();
+    // Attempt auth_resume with a DIFFERENT but KNOWN-and-plannable capability_id,
+    // so the run-state capability-mismatch check fires. (An unknown id would now
+    // short-circuit to `UnknownCapability` in `resume_preflight` before the
+    // mismatch check — existence-first, matching host_runtime's deleted
+    // pre-authorization; the unknown-capability precedence is covered separately.)
+    let different_id = other_capability_id();
     let err = host
         .auth_resume_json(CapabilityAuthResumeRequest {
             context,

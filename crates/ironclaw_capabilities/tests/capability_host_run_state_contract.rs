@@ -531,11 +531,15 @@ async fn capability_host_returns_resume_business_error_when_run_state_fail_trans
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
+    // Known-and-plannable but different capability, so the mismatch check fires
+    // and drives the run-state fail transition (which this store fails) while the
+    // business error is still returned. An unknown id would short-circuit to
+    // `UnknownCapability` in `resume_preflight` before reaching this path.
     let err = resume_host
         .resume_json(CapabilityResumeRequest {
             context,
             approval_request_id: approval_id,
-            capability_id: CapabilityId::new("echo.other").unwrap(),
+            capability_id: other_capability_id(),
             estimate,
             input,
         })
@@ -544,7 +548,7 @@ async fn capability_host_returns_resume_business_error_when_run_state_fail_trans
 
     match err {
         CapabilityInvocationError::ResumeContextMismatch { capability, kind } => {
-            assert_eq!(capability, CapabilityId::new("echo.other").unwrap());
+            assert_eq!(capability, other_capability_id());
             assert_eq!(kind, ResumeContextMismatchKind::CapabilityId);
         }
         other => panic!("expected ResumeContextMismatch, got {other:?}"),
@@ -1236,7 +1240,11 @@ async fn capability_host_rejects_resume_with_mismatched_capability_id() {
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
-    let wrong_capability = CapabilityId::new("echo.other").unwrap();
+    // Known-and-plannable but different capability, so the run-state
+    // capability-mismatch check fires. (An unknown id would short-circuit to
+    // `UnknownCapability` in `resume_preflight` — existence-first; that
+    // precedence is covered by a dedicated test.)
+    let wrong_capability = other_capability_id();
     let err = resume_host
         .resume_json(CapabilityResumeRequest {
             context,
@@ -1261,6 +1269,79 @@ async fn capability_host_rejects_resume_with_mismatched_capability_id() {
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(run.status, RunStatus::Failed);
     assert_eq!(run.error_kind.as_deref(), Some("ResumeContextMismatch"));
+}
+
+// Existence-first precedence: when the resumed capability is UNKNOWN at resume
+// time (here, unregistered between invoke and resume — same capability_id as the
+// blocked run, but absent from the resume registry), `resume_preflight` rejects
+// it as `UnknownCapability` (→ `MissingRuntime`) and fails the matching blocked
+// run with the internal `error_kind` "unknown_capability", BEFORE the run-state
+// path could turn a missing record into `Backend`. This reproduces host_runtime's
+// deleted `open_pre_authorization` (which resolved the registry first) and pins
+// the unknown-capability coverage the mismatch tests used to provide incidentally
+// (they now use a known-but-different capability).
+#[tokio::test]
+async fn capability_host_resume_unknown_capability_fails_matching_blocked_run() {
+    let registry = registry_with_echo_capability();
+    let empty_registry = ExtensionRegistry::new();
+    let dispatcher = RecordingDispatcher::default();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
+    let leases = in_memory_backed_capability_lease_store();
+    let block_host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let context = execution_context(CapabilitySet::default());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "approved"});
+
+    block_host
+        .invoke_json(CapabilityInvocationRequest {
+            context: context.clone(),
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+        })
+        .await
+        .unwrap_err();
+    let approval_id = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .approval_request_id
+        .unwrap();
+
+    // Resume with the SAME capability_id, but against an empty registry so the
+    // capability is unknown at resume time.
+    let resume_authorizer = GrantAuthorizer::new();
+    let resume_host = capability_host(&empty_registry, &dispatcher, &resume_authorizer)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases);
+    let err = resume_host
+        .resume_json(CapabilityResumeRequest {
+            context,
+            approval_request_id: approval_id,
+            capability_id: capability_id(),
+            estimate,
+            input,
+        })
+        .await
+        .unwrap_err();
+
+    match err {
+        CapabilityInvocationError::UnknownCapability { capability } => {
+            assert_eq!(capability, capability_id());
+        }
+        other => panic!("expected UnknownCapability (existence-first), got {other:?}"),
+    }
+    assert!(!dispatcher.has_request());
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.error_kind.as_deref(), Some("unknown_capability"));
 }
 
 #[tokio::test]

@@ -7,11 +7,11 @@
 //! run-state and approval stores, capability-lease store, and process
 //! manager.
 //!
-//! This layer evaluates the package's manifest-derived trust input immediately
-//! before invoking [`CapabilityHost`] so authorization consumes a host-owned
-//! [`TrustDecision`](ironclaw_trust::TrustDecision) instead of caller-supplied
-//! claims. The default fail-closed policy denies authority until composition
-//! supplies a concrete host policy.
+//! Trust classification and runtime-policy planning are computed inside the
+//! capability kernel's `authorize()` fold ([`CapabilityHost`]); this layer
+//! composes that kernel with the neutral services and maps its results back to
+//! the [`HostRuntime`] contract. The default fail-closed trust policy denies
+//! authority until composition supplies a concrete host policy.
 
 use std::{sync::Arc, time::Instant};
 
@@ -26,11 +26,11 @@ use ironclaw_capabilities::{
     CapabilityInvocationRequest, CapabilityInvocationResult, CapabilityObligationHandler,
     CapabilityResumeRequest, CapabilitySpawnRequest, CapabilitySpawnResult,
 };
-use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
+use ironclaw_extensions::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDispatcher, CapabilityId, DenyReason, DispatchFailureKind,
-    InvocationId, PackageSource, Principal, ResourceScope, RuntimeCredentialAuthRequirement,
+    InvocationId, Principal, ResourceScope, RuntimeCredentialAuthRequirement,
     RuntimeDispatchErrorKind, RuntimeKind, SecretHandle, runtime_policy::EffectiveRuntimePolicy,
     sha256_digest_token,
 };
@@ -46,7 +46,7 @@ use ironclaw_run_state::{
     ApprovalRequestStore, RunStateApprovalStore, RunStateError, RunStateStore, RunStatus,
 };
 use ironclaw_secrets::SecretStore;
-use ironclaw_trust::{HostTrustPolicy, TrustDecision, TrustError, TrustPolicy, TrustProvenance};
+use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
 use ironclaw_turns::run_profile::LoopSafeSummary;
 
 fn trace_capability_latency_ok(
@@ -105,7 +105,6 @@ use crate::{
     RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest,
     VisibleCapabilitySurface, obligations::secret_owner_scope, surface::CapabilityCatalog,
 };
-use ironclaw_runtime_policy::{PlannerError, plan_capability};
 
 /// Default production wiring for [`HostRuntime`].
 pub struct DefaultHostRuntime {
@@ -405,71 +404,6 @@ impl DefaultHostRuntime {
             capability_id,
         })
     }
-
-    /// §5.3.2 authority-as-a-fold — the runtime-policy + trust gates that open
-    /// the pre-authorize derivation, shared by all four dispatch entry points
-    /// (`invoke`/`spawn`/`resume`/`auth_resume`). Runs `enforce_runtime_policy`
-    /// then `evaluate_invocation_trust`, setting `context.trust` on success. On
-    /// rejection it logs the gate + error kind and returns the ready-to-surface
-    /// [`RuntimeCapabilityOutcome`] tagged by gate, plus the `error_kind` string:
-    /// the caller emits its own per-entry-point latency trace and, for
-    /// resume/auth-resume, drives its blocked-resume failure side effect
-    /// (`fail_matching_blocked_{,auth_}resume_on_preflight_error`) before
-    /// returning. Behavior-preserving apart from consolidating the paths'
-    /// `debug!` message text; de-dups the four inline copies and names the seam
-    /// a later slice lifts into the kernel `authorize()`.
-    fn open_pre_authorization(
-        &self,
-        context: &mut ironclaw_host_api::ExecutionContext,
-        capability_id: &CapabilityId,
-    ) -> Result<TrustDecision, PreAuthorizationRejected> {
-        if let Err(error) = self.enforce_runtime_policy(capability_id) {
-            let error_kind = error.kind();
-            tracing::debug!(
-                capability_id = %capability_id,
-                runtime_policy_error_kind = error_kind,
-                "capability runtime policy rejected invocation before authorization"
-            );
-            return Err(PreAuthorizationRejected::RuntimePolicy {
-                outcome: Box::new(runtime_policy_failure(capability_id.clone(), error)),
-                error_kind,
-            });
-        }
-        let trust_decision = match self.evaluate_invocation_trust(capability_id) {
-            Ok(host_decision) => host_decision,
-            Err(error) => {
-                let error_kind = error.kind();
-                tracing::debug!(
-                    capability_id = %capability_id,
-                    trust_error_kind = error_kind,
-                    "capability trust evaluation failed before authorization"
-                );
-                return Err(PreAuthorizationRejected::Trust {
-                    outcome: Box::new(trust_evaluation_failure(capability_id.clone(), error)),
-                    error_kind,
-                });
-            }
-        };
-        context.trust = trust_decision.effective_trust.class();
-        Ok(trust_decision)
-    }
-}
-
-/// Which pre-authorize gate rejected in
-/// [`DefaultHostRuntime::open_pre_authorization`], carrying the ready-to-surface
-/// `outcome` (so the caller picks its own per-entry-point latency label before
-/// returning it) and the `error_kind` string (so the resume/auth-resume callers
-/// can drive their blocked-resume failure side effect, which the invoke/spawn
-/// callers ignore).
-enum PreAuthorizationRejected {
-    RuntimePolicy {
-        outcome: Box<RuntimeCapabilityOutcome>,
-        error_kind: &'static str,
-    },
-    Trust {
-        outcome: Box<RuntimeCapabilityOutcome>,
-        error_kind: &'static str,
-    },
 }
 
 #[async_trait]
@@ -479,7 +413,7 @@ impl HostRuntime for DefaultHostRuntime {
         request: RuntimeCapabilityRequest,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         let RuntimeCapabilityRequest {
-            mut context,
+            context,
             capability_id,
             estimate,
             input,
@@ -500,40 +434,15 @@ impl HostRuntime for DefaultHostRuntime {
             );
         }
 
-        // Still runs `open_pre_authorization` for its context.trust stamp and
-        // fail-closed planning gate (redundant with the kernel's in-fold trust +
-        // planning now; cleaned up in a later slice). The returned
-        // `TrustDecision` is no longer consumed here — persistent-approval moved
-        // into the kernel's `authorize()` fold, which recomputes trust — so only
-        // the rejection is handled.
-        match self.open_pre_authorization(&mut context, &capability_id) {
-            Ok(_trust_decision) => {}
-            Err(PreAuthorizationRejected::RuntimePolicy { outcome, .. }) => {
-                trace_capability_latency_ok(
-                    "invoke_capability_policy_rejected",
-                    &capability_id,
-                    &scope,
-                    total_started_at,
-                );
-                return Ok(*outcome);
-            }
-            Err(PreAuthorizationRejected::Trust { outcome, .. }) => {
-                trace_capability_latency_ok(
-                    "invoke_capability_trust_rejected",
-                    &capability_id,
-                    &scope,
-                    total_started_at,
-                );
-                return Ok(*outcome);
-            }
-        }
-
         let registry = self.registry.snapshot();
 
-        // Validate the execution context before the credential pre-flight queries
-        // the secret store. Without this guard a malformed RuntimeCapabilityRequest
-        // could probe secret-store presence under a forged resource_scope that does
-        // not match the top-level tenant/user/agent/project fields.
+        // Validate the execution context before the kernel's credential pre-flight
+        // queries the secret store. Without this guard a malformed
+        // RuntimeCapabilityRequest could probe secret-store presence under a forged
+        // resource_scope that does not match the top-level
+        // tenant/user/agent/project fields. Trust classification and runtime-policy
+        // planning now run inside the kernel's `authorize()` fold — no host_runtime
+        // pre-authorization stamps `context.trust` before it.
         if let Err(error) = context.validate() {
             return Err(HostRuntimeError::invalid_request(error.to_string()));
         }
@@ -621,7 +530,7 @@ impl HostRuntime for DefaultHostRuntime {
         request: RuntimeCapabilityRequest,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         let RuntimeCapabilityRequest {
-            mut context,
+            context,
             capability_id,
             estimate,
             input,
@@ -648,24 +557,15 @@ impl HostRuntime for DefaultHostRuntime {
             );
         }
 
-        // Still runs `open_pre_authorization` for its context.trust stamp and
-        // fail-closed planning gate; the returned `TrustDecision` is no longer
-        // consumed here (persistent-approval moved into the kernel's spawn
-        // authorize fold, which recomputes trust).
-        if let Err(
-            PreAuthorizationRejected::RuntimePolicy { outcome, .. }
-            | PreAuthorizationRejected::Trust { outcome, .. },
-        ) = self.open_pre_authorization(&mut context, &capability_id)
-        {
-            return Ok(*outcome);
-        }
-
         let registry = self.registry.snapshot();
 
-        // Validate the execution context before the credential pre-flight queries
-        // the secret store. Without this guard a malformed RuntimeCapabilityRequest
-        // could probe secret-store presence under a forged resource_scope that does
-        // not match the top-level tenant/user/agent/project fields.
+        // Validate the execution context before the kernel's credential pre-flight
+        // queries the secret store. Without this guard a malformed
+        // RuntimeCapabilityRequest could probe secret-store presence under a forged
+        // resource_scope that does not match the top-level
+        // tenant/user/agent/project fields. Trust classification and runtime-policy
+        // planning now run inside the kernel's spawn authorize fold — no
+        // host_runtime pre-authorization stamps `context.trust` before it.
         if let Err(error) = context.validate() {
             return Err(HostRuntimeError::invalid_request(error.to_string()));
         }
@@ -706,7 +606,7 @@ impl HostRuntime for DefaultHostRuntime {
         request: RuntimeCapabilityResumeRequest,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         let RuntimeCapabilityResumeRequest {
-            mut context,
+            context,
             approval_request_id,
             capability_id,
             estimate,
@@ -729,32 +629,9 @@ impl HostRuntime for DefaultHostRuntime {
             );
         }
 
-        // Still runs `open_pre_authorization` for its context.trust stamp and
-        // fail-closed preflight (redundant with the kernel's in-fold trust +
-        // planning now; cleaned up in a later slice). The returned
-        // `TrustDecision` is no longer carried on the request — the kernel
-        // recomputes it — so only the rejection is consumed here.
-        if let Err(
-            PreAuthorizationRejected::RuntimePolicy {
-                outcome,
-                error_kind,
-            }
-            | PreAuthorizationRejected::Trust {
-                outcome,
-                error_kind,
-            },
-        ) = self.open_pre_authorization(&mut context, &capability_id)
-        {
-            self.fail_matching_blocked_resume_on_preflight_error(
-                &context,
-                &capability_id,
-                approval_request_id,
-                error_kind,
-            )
-            .await;
-            return Ok(*outcome);
-        }
-
+        // Trust classification runs inside the kernel's `authorize_resumed` fold,
+        // which fails the blocked run on a trust rejection (replacing the former
+        // host_runtime pre-authorization + `context.trust` stamp).
         let registry = self.registry.snapshot();
         let host = self.capability_host(&registry);
         let resume = CapabilityResumeRequest {
@@ -803,7 +680,7 @@ impl HostRuntime for DefaultHostRuntime {
         request: RuntimeCapabilityAuthResumeRequest,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         let RuntimeCapabilityAuthResumeRequest {
-            mut context,
+            context,
             capability_id,
             estimate,
             input,
@@ -826,34 +703,14 @@ impl HostRuntime for DefaultHostRuntime {
             );
         }
 
-        // Still runs `open_pre_authorization` for its context.trust stamp and
-        // fail-closed planning gate; the returned `TrustDecision` is no longer
-        // consumed here. The persistent-approval re-application on auth-resume now
-        // lives in the kernel's `authorize_resumed` fold (§5.2.7/§5.3.2): a
-        // capability authorized only by a persistent grant (e.g.
-        // `extension_activate` under admin-config FirstParty trust) is re-authorized
-        // by the kernel injecting the candidate grant after the credential gate,
-        // instead of host_runtime mutating the context before re-dispatch.
-        if let Err(
-            PreAuthorizationRejected::RuntimePolicy {
-                outcome,
-                error_kind,
-            }
-            | PreAuthorizationRejected::Trust {
-                outcome,
-                error_kind,
-            },
-        ) = self.open_pre_authorization(&mut context, &capability_id)
-        {
-            self.fail_matching_blocked_auth_resume_on_preflight_error(
-                &context,
-                &capability_id,
-                error_kind,
-            )
-            .await;
-            return Ok(*outcome);
-        }
-
+        // Trust classification and the persistent-approval re-application on
+        // auth-resume now live in the kernel's `authorize_resumed` fold
+        // (§5.2.7/§5.3.2): a capability authorized only by a persistent grant
+        // (e.g. `extension_activate` under admin-config FirstParty trust) is
+        // re-authorized by the kernel injecting the candidate grant after the
+        // credential gate, and a trust rejection fails the blocked run there —
+        // replacing the former host_runtime pre-authorization + `context.trust`
+        // stamp.
         let registry = self.registry.snapshot();
         let host = self.capability_host(&registry);
         let auth_resume = CapabilityAuthResumeRequest {
@@ -899,7 +756,7 @@ impl HostRuntime for DefaultHostRuntime {
         request: RuntimeCapabilityResumeRequest,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         let RuntimeCapabilityResumeRequest {
-            mut context,
+            context,
             approval_request_id,
             capability_id,
             estimate,
@@ -932,42 +789,10 @@ impl HostRuntime for DefaultHostRuntime {
             );
         }
 
-        if let Err(error) = self.enforce_runtime_policy(&capability_id) {
-            tracing::debug!(
-                capability_id = %capability_id,
-                runtime_policy_error_kind = error.kind(),
-                "capability runtime policy rejected spawn resume before process start"
-            );
-            self.fail_matching_blocked_resume_on_preflight_error(
-                &context,
-                &capability_id,
-                approval_request_id,
-                error.kind(),
-            )
-            .await;
-            return Ok(runtime_policy_failure(capability_id, error));
-        }
-
-        let trust_decision = match self.evaluate_invocation_trust(&capability_id) {
-            Ok(host_decision) => host_decision,
-            Err(error) => {
-                tracing::debug!(
-                    capability_id = %capability_id,
-                    trust_error_kind = error.kind(),
-                    "capability trust evaluation failed before spawn resume"
-                );
-                self.fail_matching_blocked_resume_on_preflight_error(
-                    &context,
-                    &capability_id,
-                    approval_request_id,
-                    error.kind(),
-                )
-                .await;
-                return Ok(trust_evaluation_failure(capability_id, error));
-            }
-        };
-        context.trust = trust_decision.effective_trust.class();
-
+        // Runtime-policy planning and trust classification run inside the kernel's
+        // `resume_spawn_json` fold, which fails the blocked run on rejection —
+        // replacing the former host_runtime pre-authorization + `context.trust`
+        // stamp.
         let registry = self.registry.snapshot();
         let host = self.capability_host(&registry);
         let resume = CapabilityResumeRequest {
@@ -1227,65 +1052,6 @@ impl DefaultHostRuntime {
         host
     }
 
-    fn evaluate_invocation_trust(
-        &self,
-        capability_id: &CapabilityId,
-    ) -> Result<TrustDecision, TrustEvaluationError> {
-        let policy = self.trust_policy.as_ref();
-
-        let registry = self.registry.snapshot();
-        let descriptor = registry
-            .get_capability(capability_id)
-            .ok_or(TrustEvaluationError::UnknownCapability)?;
-        let package = registry
-            .get_extension(&descriptor.provider)
-            .ok_or(TrustEvaluationError::MissingPackage)?;
-        let package_descriptor = package
-            .capabilities
-            .iter()
-            .find(|candidate| candidate.id == *capability_id)
-            .ok_or(TrustEvaluationError::StalePackageDescriptor)?;
-        if package_descriptor != descriptor {
-            return Err(TrustEvaluationError::ConflictingPackageDescriptor);
-        }
-
-        let input = trust_policy_input_for_local_manifest(package)?;
-        let decision = match policy.evaluate(&input) {
-            Ok(decision) => decision,
-            Err(error) => {
-                tracing::debug!(
-                    capability_id = %capability_id,
-                    trust_policy_error_kind = trust_error_label(&error),
-                    "host trust policy evaluation returned an error"
-                );
-                return Err(TrustEvaluationError::Policy);
-            }
-        };
-        trace_trust_decision(capability_id, &decision);
-        Ok(decision)
-    }
-
-    fn enforce_runtime_policy(
-        &self,
-        capability_id: &CapabilityId,
-    ) -> Result<(), RuntimePolicyEvaluationError> {
-        let registry = self.registry.snapshot();
-        let descriptor = registry
-            .get_capability(capability_id)
-            .ok_or(RuntimePolicyEvaluationError::UnknownCapability)?;
-        let plan = plan_capability(descriptor, &self.runtime_policy)
-            .map_err(RuntimePolicyEvaluationError::Denied)?;
-        tracing::debug!(
-            capability_id = %capability_id,
-            filesystem_backend = ?plan.filesystem_backend,
-            process_backend = ?plan.process_backend,
-            network_mode = ?plan.network_mode,
-            secret_mode = ?plan.secret_mode,
-            "capability runtime policy planned invocation"
-        );
-        Ok(())
-    }
-
     /// Rejects a resume whose sealed ingress actor differs from the actor that
     /// started the run. Callers invoke this before any preflight that can fail
     /// or mutate the blocked run; `CapabilityHost` repeats the check before
@@ -1320,117 +1086,6 @@ impl DefaultHostRuntime {
             error,
             capability_id.clone(),
         ))))
-    }
-
-    async fn fail_matching_blocked_resume_on_preflight_error(
-        &self,
-        context: &ironclaw_host_api::ExecutionContext,
-        capability_id: &CapabilityId,
-        approval_request_id: ApprovalRequestId,
-        error_kind: &'static str,
-    ) {
-        if context.validate().is_err() {
-            return;
-        }
-        let Some(run_state) = self.run_state.as_ref() else {
-            return;
-        };
-        let scope = &context.resource_scope;
-        let invocation_id = context.invocation_id;
-        let record = match run_state.get(scope, invocation_id).await {
-            Ok(Some(record)) => record,
-            Ok(None) => return,
-            Err(error) => {
-                tracing::warn!(
-                    invocation_id = %invocation_id,
-                    capability_id = %capability_id,
-                    preflight_error_kind = error_kind,
-                    transition_error = %unavailable_from_run_state(error),
-                    "blocked resume preflight failed, but run-state lookup failed; leaving run state unchanged",
-                );
-                return;
-            }
-        };
-        if record.status != RunStatus::BlockedApproval
-            || &record.capability_id != capability_id
-            || record.approval_request_id != Some(approval_request_id)
-            || record.authenticated_actor_user_id != context.authenticated_actor_user_id
-        {
-            return;
-        }
-        if let Err(error) = run_state
-            .fail(scope, invocation_id, error_kind.to_string())
-            .await
-        {
-            tracing::warn!(
-                invocation_id = %invocation_id,
-                capability_id = %capability_id,
-                approval_request_id = %approval_request_id,
-                preflight_error_kind = error_kind,
-                transition_error = %unavailable_from_run_state(error),
-                "blocked resume preflight failed, but run-state fail transition failed; original failure is returned to caller",
-            );
-        }
-    }
-
-    /// Mirrors `fail_matching_blocked_resume_on_preflight_error` for
-    /// `auth_resume_capability` preflight rejections.  Checks for a
-    /// `BlockedAuth` run record matching the capability; if found,
-    /// transitions it to `Failed` so it is not left as a stale resumable
-    /// gate after the caller has returned a terminal failure outcome.
-    ///
-    /// The `approval_request_id` carried by the auth-resume request is
-    /// intentionally NOT compared here: the `BlockedAuth` transition always
-    /// clears `approval_request_id` to `None` on the persisted record, so
-    /// any equality check against `Some(id)` would always fail and silently
-    /// skip the fail-transition.  `invocation_id` (embedded in `context`)
-    /// already uniquely identifies the run.
-    async fn fail_matching_blocked_auth_resume_on_preflight_error(
-        &self,
-        context: &ironclaw_host_api::ExecutionContext,
-        capability_id: &CapabilityId,
-        error_kind: &'static str,
-    ) {
-        if context.validate().is_err() {
-            return;
-        }
-        let Some(run_state) = self.run_state.as_ref() else {
-            return;
-        };
-        let scope = &context.resource_scope;
-        let invocation_id = context.invocation_id;
-        let record = match run_state.get(scope, invocation_id).await {
-            Ok(Some(record)) => record,
-            Ok(None) => return,
-            Err(error) => {
-                tracing::warn!(
-                    invocation_id = %invocation_id,
-                    capability_id = %capability_id,
-                    preflight_error_kind = error_kind,
-                    transition_error = %unavailable_from_run_state(error),
-                    "blocked auth-resume preflight failed, but run-state lookup failed; leaving run state unchanged",
-                );
-                return;
-            }
-        };
-        if record.status != RunStatus::BlockedAuth
-            || &record.capability_id != capability_id
-            || record.authenticated_actor_user_id != context.authenticated_actor_user_id
-        {
-            return;
-        }
-        if let Err(error) = run_state
-            .fail(scope, invocation_id, error_kind.to_string())
-            .await
-        {
-            tracing::warn!(
-                invocation_id = %invocation_id,
-                capability_id = %capability_id,
-                preflight_error_kind = error_kind,
-                transition_error = %unavailable_from_run_state(error),
-                "blocked auth-resume preflight failed, but run-state fail transition failed; original failure is returned to caller",
-            );
-        }
     }
 
     async fn translate_invocation_error(
@@ -1663,159 +1318,6 @@ impl ironclaw_capabilities::HostPolicyFacts for DefaultHostRuntime {
             }
         }
         grants
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum TrustEvaluationError {
-    UnknownCapability,
-    MissingPackage,
-    StalePackageDescriptor,
-    ConflictingPackageDescriptor,
-    TrustInput,
-    Policy,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum RuntimePolicyEvaluationError {
-    UnknownCapability,
-    Denied(PlannerError),
-}
-
-impl RuntimePolicyEvaluationError {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::UnknownCapability => "unknown_capability",
-            Self::Denied(PlannerError::ProcessEffectsRequiredButProcessBackendIsNone {
-                ..
-            }) => "process_backend_none",
-            Self::Denied(PlannerError::NetworkRequiredButNetworkModeIsDeny { .. }) => {
-                "network_denied"
-            }
-            Self::Denied(PlannerError::SecretAccessRequiredButSecretModeIsDeny { .. }) => {
-                "secret_denied"
-            }
-        }
-    }
-
-    fn message(&self) -> String {
-        match self {
-            Self::UnknownCapability => "unknown capability".to_string(),
-            Self::Denied(error) => format!("runtime policy denied capability: {error}"),
-        }
-    }
-}
-
-impl TrustEvaluationError {
-    const fn kind(self) -> &'static str {
-        match self {
-            Self::UnknownCapability => "unknown_capability",
-            Self::MissingPackage => "missing_package",
-            Self::StalePackageDescriptor => "stale_package_descriptor",
-            Self::ConflictingPackageDescriptor => "conflicting_package_descriptor",
-            Self::TrustInput => "trust_input",
-            Self::Policy => "policy",
-        }
-    }
-
-    const fn message(self) -> &'static str {
-        match self {
-            Self::UnknownCapability => "unknown capability",
-            Self::MissingPackage => "capability provider trust metadata is missing",
-            Self::StalePackageDescriptor | Self::ConflictingPackageDescriptor => {
-                "capability provider trust metadata is stale"
-            }
-            Self::TrustInput => "capability provider trust metadata is invalid",
-            Self::Policy => "capability provider trust policy evaluation failed",
-        }
-    }
-}
-
-fn trust_policy_input_for_local_manifest(
-    package: &ExtensionPackage,
-) -> Result<ironclaw_trust::TrustPolicyInput, TrustEvaluationError> {
-    package
-        .trust_policy_input(
-            local_manifest_source(package),
-            package.manifest_digest(),
-            None,
-        )
-        .map_err(|_| TrustEvaluationError::TrustInput)
-}
-
-fn local_manifest_source(package: &ExtensionPackage) -> PackageSource {
-    PackageSource::LocalManifest {
-        path: format!(
-            "{}/manifest.toml",
-            package.root.as_str().trim_end_matches('/')
-        ),
-    }
-}
-
-fn trace_trust_decision(capability_id: &CapabilityId, decision: &TrustDecision) {
-    tracing::debug!(
-        capability_id = %capability_id,
-        effective_trust = ?decision.effective_trust.class(),
-        trust_provenance = trust_provenance_label(&decision.provenance),
-        trust_allowed_effect_count = decision.authority_ceiling.allowed_effects.len(),
-        trust_has_resource_ceiling = decision.authority_ceiling.max_resource_ceiling.is_some(),
-        "evaluated capability provider trust from host policy"
-    );
-}
-
-fn trust_provenance_label(provenance: &TrustProvenance) -> &'static str {
-    match provenance {
-        TrustProvenance::Default => "default",
-        TrustProvenance::Bundled => "bundled",
-        TrustProvenance::AdminConfig => "admin_config",
-        TrustProvenance::SignedRegistry { .. } => "signed_registry",
-        TrustProvenance::LocalManifest => "local_manifest",
-    }
-}
-
-fn trust_error_label(error: &TrustError) -> &'static str {
-    match error {
-        TrustError::InvariantViolation { .. } => "invariant_violation",
-    }
-}
-
-fn trust_evaluation_failure(
-    capability_id: CapabilityId,
-    error: TrustEvaluationError,
-) -> RuntimeCapabilityOutcome {
-    RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure::new(
-        capability_id,
-        trust_evaluation_failure_kind(error),
-        Some(error.message().to_string()),
-    ))
-}
-
-fn runtime_policy_failure(
-    capability_id: CapabilityId,
-    error: RuntimePolicyEvaluationError,
-) -> RuntimeCapabilityOutcome {
-    RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure::new(
-        capability_id,
-        runtime_policy_failure_kind(&error),
-        Some(error.message()),
-    ))
-}
-
-fn runtime_policy_failure_kind(error: &RuntimePolicyEvaluationError) -> RuntimeFailureKind {
-    match error {
-        RuntimePolicyEvaluationError::UnknownCapability => RuntimeFailureKind::MissingRuntime,
-        RuntimePolicyEvaluationError::Denied(_) => RuntimeFailureKind::Authorization,
-    }
-}
-
-fn trust_evaluation_failure_kind(error: TrustEvaluationError) -> RuntimeFailureKind {
-    match error {
-        TrustEvaluationError::UnknownCapability => RuntimeFailureKind::MissingRuntime,
-        TrustEvaluationError::MissingPackage
-        | TrustEvaluationError::StalePackageDescriptor
-        | TrustEvaluationError::ConflictingPackageDescriptor
-        | TrustEvaluationError::TrustInput
-        | TrustEvaluationError::Policy => RuntimeFailureKind::Authorization,
     }
 }
 
@@ -2417,9 +1919,9 @@ mod tests {
     };
     use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
     use ironclaw_host_api::{
-        CapabilityId, DispatchFailureKind, ExtensionId, HostPortCatalog, PackageSource,
+        CapabilityId, DispatchFailureKind, ExtensionId, HostPortCatalog,
         RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement,
-        RuntimeDispatchErrorKind, SecretHandle, VirtualPath, sha256_digest_token,
+        RuntimeDispatchErrorKind, SecretHandle, VirtualPath,
     };
 
     fn cap() -> CapabilityId {
@@ -2443,58 +1945,6 @@ mod tests {
             requester_extension: ExtensionId::new("notion").unwrap(),
             provider_scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
         }
-    }
-
-    #[test]
-    fn local_manifest_trust_input_includes_manifest_digest() {
-        const MANIFEST: &str = r#"
-schema_version = "reborn.extension_manifest.v2"
-id = "test"
-name = "Test"
-version = "0.1.0"
-description = "test extension"
-trust = "third_party"
-
-[runtime]
-kind = "script"
-runner = "sandboxed_process"
-command = "echo"
-
-[[capabilities]]
-id = "test.cap"
-description = "Test capability"
-effects = ["network"]
-default_permission = "ask"
-visibility = "model"
-input_schema_ref = "schemas/test.input.json"
-output_schema_ref = "schemas/test.output.json"
-"#;
-        let manifest = ExtensionManifest::parse(
-            MANIFEST,
-            ManifestSource::HostBundled,
-            &HostPortCatalog::empty(),
-        )
-        .unwrap();
-        let package = ExtensionPackage::from_manifest_toml(
-            manifest,
-            VirtualPath::new("/system/extensions/test").unwrap(),
-            MANIFEST,
-        )
-        .unwrap();
-
-        let input = trust_policy_input_for_local_manifest(&package).unwrap();
-
-        assert_eq!(
-            input.identity.source,
-            PackageSource::LocalManifest {
-                path: "/system/extensions/test/manifest.toml".to_string()
-            }
-        );
-        let expected_digest = sha256_digest_token(MANIFEST.as_bytes());
-        assert_eq!(
-            input.identity.digest.as_deref(),
-            Some(expected_digest.as_str())
-        );
     }
 
     #[test]

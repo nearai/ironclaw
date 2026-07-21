@@ -4,12 +4,13 @@ use ironclaw_authorization::{
 };
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{
-    ActivityId, Actor, AuthorizeResult, Authorized, Blocked, CapabilityAuthorizer,
-    CapabilityDescriptor, CapabilityDispatchRequest, CapabilityDispatchResult,
-    CapabilityDispatcher, CapabilityGrantId, CapabilityId, Decision, DenyReason, DenyRef,
-    DispatchError, EffectiveRuntimePolicy, ExecutionContext, GateRef, GateWaypoint, Invocation,
-    InvocationFingerprint, InvocationId, InvocationOrigin, Obligation, PermissionMode, ProcessId,
-    ProductKind, ResourceEstimate, ResourceScope, RuntimeLane, Timestamp,
+    ActivityId, Actor, ApprovalRequestId, AuthorizeResult, Authorized, Blocked,
+    CapabilityAuthorizer, CapabilityDescriptor, CapabilityDispatchRequest,
+    CapabilityDispatchResult, CapabilityDispatcher, CapabilityGrantId, CapabilityId, Decision,
+    DenyReason, DenyRef, DispatchError, EffectiveRuntimePolicy, ExecutionContext, GateRef,
+    GateWaypoint, Invocation, InvocationFingerprint, InvocationId, InvocationOrigin, Obligation,
+    PermissionMode, ProcessId, ProductKind, ResourceEstimate, ResourceScope, RuntimeLane,
+    Timestamp,
 };
 use ironclaw_processes::{ProcessManager, ProcessStart};
 use ironclaw_run_state::{
@@ -87,6 +88,20 @@ struct PendingClaimAfterAuth<'r> {
     leases: &'r dyn CapabilityLeaseStore,
     grant_id: CapabilityGrantId,
     fingerprint: InvocationFingerprint,
+}
+
+/// Which blocked run a resume-path preflight failure may fail (§5.3.2/§9, R-A).
+/// Mirrors host_runtime's two deleted matchers: the approval-resume /
+/// spawn-resume paths key on a `BlockedApproval` record and compare the
+/// `approval_request_id`; the auth-resume path keys on a `BlockedAuth` record and
+/// does NOT compare `approval_request_id` (its `block_auth` transition clears the
+/// persisted id to `None`).
+#[derive(Debug, Clone, Copy)]
+enum BlockedResumeKind {
+    Approval {
+        approval_request_id: ApprovalRequestId,
+    },
+    Auth,
 }
 
 /// Encodes the three mutually-exclusive approval-lease states that
@@ -581,6 +596,19 @@ where
             source,
         })?;
 
+        // Resolve the descriptor BEFORE starting a run record: an unknown
+        // capability must short-circuit without creating a run record (restoring
+        // the behavior host_runtime's deleted pre-check provided). Neither the
+        // fingerprint above nor `run_state.start` below needs the descriptor, so
+        // hoisting this lookup is safe; everything from `start` onward keeps its
+        // original order (the credential pre-flight still runs after `start`).
+        let Some(descriptor) = self.registry.get_capability(&request.capability_id) else {
+            debug!("capability invocation failed before authorization: unknown capability");
+            return Err(CapabilityInvocationError::UnknownCapability {
+                capability: request.capability_id.clone(),
+            });
+        };
+
         if let Some(run_state) = self.run_state {
             run_state
                 .start(RunStart {
@@ -595,15 +623,6 @@ where
                 .await?;
             debug!("capability run state started");
         }
-
-        let Some(descriptor) = self.registry.get_capability(&request.capability_id) else {
-            debug!("capability invocation failed before authorization: unknown capability");
-            fail_run_if_configured(self.run_state, &scope, invocation_id, "UnknownCapability")
-                .await;
-            return Err(CapabilityInvocationError::UnknownCapability {
-                capability: request.capability_id.clone(),
-            });
-        };
 
         // Kernel-computed trust + in-fold runtime-policy planning (§5.3.2/§9),
         // relocated from host_runtime's `open_pre_authorization`. The
@@ -1056,6 +1075,21 @@ where
             });
         }
 
+        // Resume-path pre-authorization (§5.3.2/§9, R-A): resolve the descriptor
+        // and enforce runtime-policy planning BEFORE the run-state lookup so an
+        // unknown capability short-circuits to `UnknownCapability`
+        // (→ `MissingRuntime`) instead of the run-state-not-found `Backend` path,
+        // and a policy tightened between invoke and resume fails closed. On
+        // refusal only the matching `BlockedApproval` run is failed.
+        self.resume_preflight(
+            &request.context,
+            &request.capability_id,
+            BlockedResumeKind::Approval {
+                approval_request_id: request.approval_request_id,
+            },
+        )
+        .await?;
+
         let invocation_fingerprint = invocation_fingerprint_for_kind(
             CapabilityActionKind::Dispatch,
             &scope,
@@ -1231,6 +1265,17 @@ where
                 reason: DenyReason::InternalInvariantViolation,
             });
         }
+
+        // Resume-path pre-authorization (§5.3.2/§9, R-A): descriptor + runtime-policy
+        // planning BEFORE the run-state lookup (see `resume_json`). On refusal only
+        // the matching `BlockedAuth` run is failed — `approval_request_id` is NOT
+        // compared, because `block_auth` clears it to `None` on the record.
+        self.resume_preflight(
+            &request.context,
+            &request.capability_id,
+            BlockedResumeKind::Auth,
+        )
+        .await?;
 
         let run_record = run_state
             .get(&scope, invocation_id)
@@ -1567,6 +1612,19 @@ where
             });
         }
 
+        // Resume-path pre-authorization (§5.3.2/§9, R-A): descriptor + runtime-policy
+        // planning BEFORE the run-state lookup (see `resume_json`), so an unknown
+        // capability short-circuits to `MissingRuntime` and a tightened policy fails
+        // closed. On refusal only the matching `BlockedApproval` run is failed.
+        self.resume_preflight(
+            &request.context,
+            &request.capability_id,
+            BlockedResumeKind::Approval {
+                approval_request_id: request.approval_request_id,
+            },
+        )
+        .await?;
+
         let invocation_fingerprint = invocation_fingerprint_for_kind(
             CapabilityActionKind::Spawn,
             &scope,
@@ -1692,8 +1750,9 @@ where
         let mut authorized_context = request.context.clone();
         authorized_context.grants.grants.push(lease.grant.clone());
 
-        // Kernel-computed trust + in-fold runtime-policy planning (§5.3.2/§9) on
-        // the spawn-resume path, mirroring host_runtime's pre-authorization.
+        // Kernel-computed trust on the spawn-resume path (§5.3.2/§9). Runtime-policy
+        // planning already ran in `resume_preflight` above (fail-closed before the
+        // lease was claimed), so it is not repeated here.
         let trust_decision = match self.evaluate_trust(&capability_id) {
             Ok(d) => d,
             Err(error) => {
@@ -1707,16 +1766,6 @@ where
                 return Err(error);
             }
         };
-        if let Err(error) = self.enforce_runtime_policy(descriptor) {
-            fail_run_if_configured(
-                Some(run_state),
-                &scope,
-                invocation_id,
-                "AuthorizationDenied",
-            )
-            .await;
-            return Err(error);
-        }
         authorized_context.trust = trust_decision.effective_trust.class();
 
         let obligations = match self
@@ -2051,6 +2100,15 @@ where
             source,
         })?;
 
+        // Resolve the descriptor BEFORE starting a run record (see `authorize`):
+        // an unknown capability short-circuits without creating a run record, so
+        // no `fail_run_if_configured` is needed here.
+        let Some(descriptor) = self.registry.get_capability(&request.capability_id) else {
+            return Err(CapabilityInvocationError::UnknownCapability {
+                capability: request.capability_id.clone(),
+            });
+        };
+
         if let Some(run_state) = self.run_state {
             run_state
                 .start(RunStart {
@@ -2064,14 +2122,6 @@ where
                 })
                 .await?;
         }
-
-        let Some(descriptor) = self.registry.get_capability(&request.capability_id) else {
-            fail_run_if_configured(self.run_state, &scope, invocation_id, "UnknownCapability")
-                .await;
-            return Err(CapabilityInvocationError::UnknownCapability {
-                capability: request.capability_id.clone(),
-            });
-        };
 
         // Kernel-computed trust + in-fold runtime-policy planning (§5.3.2/§9),
         // mirroring `authorize()` on the spawn path.
@@ -2339,6 +2389,97 @@ where
         }
     }
 
+    /// Resume-path pre-authorization, relocated from host_runtime's deleted
+    /// `open_pre_authorization` + `fail_matching_blocked_{,auth_}resume_on_preflight_error`
+    /// (§5.3.2/§9, R-A). Resolves the descriptor and enforces runtime-policy
+    /// planning on the resumed capability BEFORE the fold's run-state lookup, so an
+    /// unknown capability short-circuits to `UnknownCapability` (→ `MissingRuntime`)
+    /// instead of the run-state-not-found `Backend` path, and a runtime policy
+    /// tightened between invoke and resume fails closed (reversing #6386's
+    /// "planning is NOT re-run on resume"). On refusal it fails ONLY the matching
+    /// blocked run — via [`Self::fail_matching_blocked_resume_run`] — recording the
+    /// planner-specific INTERNAL `error_kind`, then returns the sanitized error (the
+    /// model-visible message stays sanitized through `DenyReason`; the planner
+    /// detail rides only the run-state audit record). Trust is still classified
+    /// downstream (in `authorize_resumed` / the spawn-resume fold), which stamps
+    /// `context.trust` before the authorizer.
+    async fn resume_preflight(
+        &self,
+        context: &ExecutionContext,
+        capability_id: &CapabilityId,
+        blocked: BlockedResumeKind,
+    ) -> Result<(), CapabilityInvocationError> {
+        let Some(descriptor) = self.registry.get_capability(capability_id) else {
+            self.fail_matching_blocked_resume_run(
+                context,
+                capability_id,
+                blocked,
+                "unknown_capability",
+            )
+            .await;
+            return Err(CapabilityInvocationError::UnknownCapability {
+                capability: capability_id.clone(),
+            });
+        };
+        if let Err(planner_error) = plan_capability(descriptor, self.runtime_policy) {
+            let error_kind = planner_error_kind(&planner_error);
+            self.fail_matching_blocked_resume_run(context, capability_id, blocked, error_kind)
+                .await;
+            return Err(runtime_policy_error_to_invocation_error(
+                capability_id,
+                planner_error,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Fail ONLY the blocked run that matches this resume request, relocated from
+    /// host_runtime's deleted `fail_matching_blocked_{,auth_}resume_on_preflight_error`
+    /// (§5.3.2/§9, R-A). Keyed by the request scope + invocation; a wrong-scope or
+    /// otherwise non-matching request leaves other blocked runs untouched (scope
+    /// isolation). The matching run is transitioned to `Failed` with `error_kind`.
+    async fn fail_matching_blocked_resume_run(
+        &self,
+        context: &ExecutionContext,
+        capability_id: &CapabilityId,
+        blocked: BlockedResumeKind,
+        error_kind: &'static str,
+    ) {
+        let Some(run_state) = self.run_state else {
+            return;
+        };
+        let scope = &context.resource_scope;
+        let invocation_id = context.invocation_id;
+        let record = match run_state.get(scope, invocation_id).await {
+            Ok(Some(record)) => record,
+            Ok(None) => return,
+            Err(error) => {
+                warn!(
+                    invocation_id = %invocation_id,
+                    capability_id = %capability_id,
+                    preflight_error_kind = error_kind,
+                    lookup_error_kind = run_state_error_kind(&error),
+                    "resume preflight failed, but run-state lookup failed; leaving run state unchanged",
+                );
+                return;
+            }
+        };
+        let matches = record.capability_id == *capability_id
+            && record.authenticated_actor_user_id == context.authenticated_actor_user_id
+            && match blocked {
+                BlockedResumeKind::Approval {
+                    approval_request_id,
+                } => {
+                    record.status == RunStatus::BlockedApproval
+                        && record.approval_request_id == Some(approval_request_id)
+                }
+                BlockedResumeKind::Auth => record.status == RunStatus::BlockedAuth,
+            };
+        if matches {
+            fail_run_if_configured(Some(run_state), scope, invocation_id, error_kind).await;
+        }
+    }
+
     /// Pre-dispatch authority fold shared by `resume_json` and
     /// `auth_resume_json`, extracted per arch-simplification §9 step 2 / §5.3.2
     /// exactly as [`Self::authorize`] does for invoke: run trust-aware
@@ -2364,8 +2505,9 @@ where
     ) -> Result<AuthorizeFold, CapabilityInvocationError> {
         // Kernel-computed trust (§5.3.2/§9): trust is classified here from the
         // resumed capability id rather than carried on the request. Runtime-policy
-        // planning is NOT re-run on resume (it ran at the original invoke/spawn);
-        // the `context.trust` stamp reproduces `open_pre_authorization`.
+        // planning already ran in the caller's `resume_preflight` (§5.3.2/§9, R-A,
+        // reversing #6386's "planning is NOT re-run on resume"); the `context.trust`
+        // stamp below reproduces host_runtime's deleted `open_pre_authorization`.
         let trust_decision = match self.evaluate_trust(&params.capability_id) {
             Ok(d) => d,
             Err(error) => {
@@ -2950,6 +3092,22 @@ fn runtime_policy_error_to_invocation_error(
     CapabilityInvocationError::AuthorizationDenied {
         capability: capability_id.clone(),
         reason: DenyReason::PolicyDenied,
+    }
+}
+
+/// Internal (audit-only) `error_kind` for a runtime-policy planner refusal, kept
+/// distinct from the sanitized model-visible `DenyReason::PolicyDenied` that
+/// `runtime_policy_error_to_invocation_error` produces. Mirrors the strings
+/// host_runtime's deleted `RuntimePolicyEvaluationError::kind` recorded on the
+/// blocked-run failure so the run-state audit record is unchanged (e.g.
+/// `"process_backend_none"`); the planner enum name never reaches the model.
+fn planner_error_kind(error: &PlannerError) -> &'static str {
+    match error {
+        PlannerError::ProcessEffectsRequiredButProcessBackendIsNone { .. } => {
+            "process_backend_none"
+        }
+        PlannerError::NetworkRequiredButNetworkModeIsDeny { .. } => "network_denied",
+        PlannerError::SecretAccessRequiredButSecretModeIsDeny { .. } => "secret_denied",
     }
 }
 
