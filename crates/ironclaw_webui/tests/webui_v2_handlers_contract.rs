@@ -18,8 +18,8 @@ use axum::http::{HeaderName, Method, Request, StatusCode, header};
 use chrono::Utc;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{
-    AgentId, CapabilityId, ExtensionId, InstallationState, InvocationId, ProjectId, RuntimeKind,
-    TenantId, ThreadId, UserId,
+    ActivityId, AgentId, CapabilityId, ExtensionId, InstallationState, InvocationId, ProjectId,
+    Resolution, RuntimeKind, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
@@ -253,6 +253,7 @@ struct StubServices {
     stall_global_auto_approve: Mutex<bool>,
     next_global_auto_approve_error: Mutex<Option<RebornServicesError>>,
     view_queries: Mutex<Vec<RebornViewQuery>>,
+    invoke_calls: Mutex<Vec<(CapabilityId, Value, ActivityId)>>,
     read_attachment_calls: Mutex<Vec<RebornAttachmentRequest>>,
     read_attachment_response: Mutex<Option<RebornAttachmentBytes>>,
     stream_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
@@ -610,6 +611,20 @@ impl RebornServicesApi for StubServices {
             summary_artifacts: Vec::new(),
             next_cursor: None,
         })
+    }
+
+    async fn invoke(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        capability: CapabilityId,
+        input: Value,
+        activity_id: ActivityId,
+    ) -> Result<Resolution, RebornServicesError> {
+        self.invoke_calls
+            .lock()
+            .expect("lock")
+            .push((capability, input, activity_id));
+        Err(service_unavailable_error(false))
     }
 
     async fn query(
@@ -4058,6 +4073,60 @@ async fn logs_reject_ambiguous_tail_follow_modes() {
     assert_eq!(body["field"], "follow");
     assert_eq!(body["validation_code"], "invalid_value");
     assert!(services.query_logs_calls.lock().expect("lock").is_empty());
+}
+
+/// The operator configuration PUT is an ingress adapter over the canonical
+/// product mutation conduit. It must not call an admin store or vendor handler
+/// directly, and the untrusted wire idempotency key must be consumed at ingress
+/// rather than forwarded as capability input authority.
+#[tokio::test]
+async fn admin_configuration_put_dispatches_through_generic_invoke() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(
+        services.clone(),
+        WebUiV2Capabilities {
+            operator_webui_config: true,
+        },
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/webchat/v2/operator/extension-configuration/extension.slack")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "values": [{"handle": "slack_team_id", "value": "T-ONE"}],
+                        "expected_revision": 7,
+                        "idempotency_key": "opaque-client-retry-key",
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    let status = response.status();
+    let calls = services.invoke_calls.lock().expect("lock");
+
+    assert_eq!(
+        (status, calls.len()),
+        (StatusCode::SERVICE_UNAVAILABLE, 1),
+        "the route must reach generic invoke and preserve its failure status"
+    );
+    let (capability, input, _activity_id) = &calls[0];
+    assert!(
+        !capability.as_str().contains("slack"),
+        "the mutation capability must be extension-generic: {capability}"
+    );
+    assert_eq!(input["group_id"], "extension.slack");
+    assert_eq!(input["expected_revision"], 7);
+    assert_eq!(input["values"][0]["handle"], "slack_team_id");
+    assert!(
+        input.get("idempotency_key").is_none(),
+        "the authorized invocation scope, not untrusted input, owns idempotency: {input}"
+    );
 }
 
 #[tokio::test]
