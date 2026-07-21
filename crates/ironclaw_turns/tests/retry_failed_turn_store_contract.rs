@@ -11,15 +11,15 @@ use ironclaw_host_api::{
 };
 use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
-    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, CheckpointSchemaId, FilesystemTurnStateStore,
-    GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver,
-    LoopCheckpointKind, LoopCheckpointStateRef, LoopCheckpointStore, LoopExitMapping,
-    PutLoopCheckpointRequest, ReplyTargetBindingRef, RetryTurnRequest, RunProfileRequest,
-    RunProfileVersion, SanitizedFailure, SourceBindingRef, StaticTurnAdmissionLimitProvider,
-    SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor, TurnAdmissionAxisKind, TurnError,
-    TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyReplay,
-    TurnLeaseToken, TurnPersistenceSnapshot, TurnRunId, TurnRunnerId, TurnScope, TurnStateStore,
-    TurnStatus,
+    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, CheckpointSchemaId,
+    FilesystemTurnStateRowStore, GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey,
+    InMemoryRunProfileResolver, LoopCheckpointKind, LoopCheckpointStateRef, LoopCheckpointStore,
+    LoopExitMapping, PutLoopCheckpointRequest, ReplyTargetBindingRef, RetryTurnRequest,
+    RunProfileRequest, RunProfileVersion, SanitizedFailure, SourceBindingRef,
+    StaticTurnAdmissionLimitProvider, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
+    TurnAdmissionAxisKind, TurnError, TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind,
+    TurnIdempotencyReplay, TurnLeaseToken, TurnPersistenceSnapshot, TurnRunId, TurnRunnerId,
+    TurnScope, TurnStateStore, TurnStatus,
     runner::{
         ApplyValidatedLoopExitRequest, ClaimRunRequest, ClaimedTurnRun, FailRunRequest,
         RecoverExpiredLeasesRequest, TurnRunTransitionPort, TurnRunnerOutcome,
@@ -700,7 +700,7 @@ async fn inmemory_retry_failed_turn_spawns_claimable_checkpointed_run() {
 async fn filesystem_retry_failed_turn_spawns_claimable_checkpointed_run() {
     let backend = engine_filesystem();
     let backend = Arc::new(backend);
-    let store = FilesystemTurnStateStore::new(scoped_turns_fs(backend));
+    let store = FilesystemTurnStateRowStore::new(scoped_turns_fs(backend));
     assert_retry_happy_path_spawns_claimable_checkpointed_run(
         &store,
         "thread-filesystem-retry-happy",
@@ -726,7 +726,7 @@ async fn inmemory_retry_failed_turn_leaves_source_failed_run_unchanged() {
 async fn filesystem_retry_failed_turn_leaves_source_failed_run_unchanged() {
     let backend = engine_filesystem();
     let backend = Arc::new(backend);
-    let store = FilesystemTurnStateStore::new(scoped_turns_fs(backend));
+    let store = FilesystemTurnStateRowStore::new(scoped_turns_fs(backend));
     assert_retry_leaves_source_failed_run_unchanged(
         &store,
         "thread-filesystem-retry-source-unchanged",
@@ -752,7 +752,7 @@ async fn inmemory_failed_transition_uses_latest_resumable_checkpoint() {
 async fn filesystem_failed_transition_uses_latest_resumable_checkpoint() {
     let backend = engine_filesystem();
     let backend = Arc::new(backend);
-    let store = FilesystemTurnStateStore::new(scoped_turns_fs(backend));
+    let store = FilesystemTurnStateRowStore::new(scoped_turns_fs(backend));
     assert_failed_transition_uses_latest_resumable_checkpoint(
         &store,
         "thread-filesystem-failed-transition-checkpoint",
@@ -782,7 +782,7 @@ async fn filesystem_retry_admission_rejection_is_not_idempotently_replayed() {
         .with_total_limit(TurnAdmissionAxisKind::Tenant, 1);
     let backend = engine_filesystem();
     let backend = Arc::new(backend);
-    let store = FilesystemTurnStateStore::new(scoped_turns_fs(backend))
+    let store = FilesystemTurnStateRowStore::new(scoped_turns_fs(backend))
         .with_admission_limit_provider(Arc::new(limits));
     assert_retry_admission_rejection_is_not_idempotently_replayed(
         &store,
@@ -803,7 +803,7 @@ async fn inmemory_retry_failed_turn_rejects_invalid_sources_and_replays_idempote
 async fn filesystem_retry_failed_turn_rejects_invalid_sources_and_replays_idempotency() {
     let backend = engine_filesystem();
     let backend = Arc::new(backend);
-    let store = FilesystemTurnStateStore::new(scoped_turns_fs(backend));
+    let store = FilesystemTurnStateRowStore::new(scoped_turns_fs(backend));
     assert_retry_rejections_and_idempotency(&store, "filesystem-retry-reject").await;
 }
 
@@ -817,7 +817,7 @@ async fn inmemory_retry_failed_turn_reacquires_thread_active_lock() {
 async fn filesystem_retry_failed_turn_reacquires_thread_active_lock() {
     let backend = engine_filesystem();
     let backend = Arc::new(backend);
-    let store = FilesystemTurnStateStore::new(scoped_turns_fs(backend));
+    let store = FilesystemTurnStateRowStore::new(scoped_turns_fs(backend));
     assert_retry_reacquires_thread_active_lock(&store, "filesystem").await;
 }
 
@@ -836,7 +836,7 @@ async fn inmemory_retry_thread_busy_is_not_permanent_idempotency_replay() {
 async fn filesystem_retry_thread_busy_is_not_permanent_idempotency_replay() {
     let backend = engine_filesystem();
     let backend = Arc::new(backend);
-    let store = FilesystemTurnStateStore::new(scoped_turns_fs(backend));
+    let store = FilesystemTurnStateRowStore::new(scoped_turns_fs(backend));
     let scenario = create_retry_thread_busy_record(&store, "filesystem").await;
     let snapshot = store.persistence_snapshot().await.unwrap();
     assert_retry_busy_record_is_not_permanent_error(&snapshot, &scenario);
@@ -1012,7 +1012,7 @@ async fn inmemory_external_fail_preserves_retryability() {
 async fn filesystem_external_fail_preserves_retryability() {
     let backend = engine_filesystem();
     let backend = Arc::new(backend);
-    let store = FilesystemTurnStateStore::new(scoped_turns_fs(backend));
+    let store = FilesystemTurnStateRowStore::new(scoped_turns_fs(backend));
     assert_external_fail_preserves_retryability(&store, "filesystem").await;
 }
 
@@ -1026,6 +1026,6 @@ async fn inmemory_lease_recovery_preserves_retryability() {
 async fn filesystem_lease_recovery_preserves_retryability() {
     let backend = engine_filesystem();
     let backend = Arc::new(backend);
-    let store = FilesystemTurnStateStore::new(scoped_turns_fs(backend));
+    let store = FilesystemTurnStateRowStore::new(scoped_turns_fs(backend));
     assert_lease_recovery_preserves_retryability(&store, "filesystem").await;
 }

@@ -221,24 +221,6 @@ impl SnapshotDelta {
     }
 }
 
-pub(super) enum RowPersistError {
-    Turn(TurnError),
-}
-
-impl RowPersistError {
-    pub(super) fn into_turn(self) -> TurnError {
-        match self {
-            Self::Turn(error) => error,
-        }
-    }
-}
-
-impl From<TurnError> for RowPersistError {
-    fn from(error: TurnError) -> Self {
-        Self::Turn(error)
-    }
-}
-
 #[derive(Serialize)]
 struct SpawnTreeReservationKeyForPath<'a> {
     scope: &'a TurnScope,
@@ -293,7 +275,7 @@ pub(super) fn spawn_tree_reservation_record_key(
 pub(super) fn snapshot_delta(
     old: &TurnPersistenceSnapshot,
     new: &TurnPersistenceSnapshot,
-) -> Result<SnapshotDelta, RowPersistError> {
+) -> Result<SnapshotDelta, TurnError> {
     let (turns_upsert, turns_delete) = delta_collection(&old.turns, &new.turns, |record| {
         Ok(record.turn_id.to_string())
     })?;
@@ -456,7 +438,7 @@ fn delta_collection<T, K>(
     old: &[T],
     new: &[T],
     key_fn: K,
-) -> Result<(Vec<T>, Vec<String>), RowPersistError>
+) -> Result<(Vec<T>, Vec<String>), TurnError>
 where
     T: Clone + PartialEq,
     K: Fn(&T) -> Result<String, TurnError>,
@@ -531,7 +513,7 @@ where
 pub(super) fn keyed_records<T, K>(
     records: &[T],
     key_fn: &K,
-) -> Result<HashMap<String, T>, RowPersistError>
+) -> Result<HashMap<String, T>, TurnError>
 where
     T: Clone,
     K: Fn(&T) -> Result<String, TurnError>,
@@ -598,9 +580,7 @@ pub(super) fn full_snapshot_delta(
 ) -> Result<SnapshotDelta, TurnError> {
     let mut new_snapshot = store.persistence_snapshot();
     preserve_loop_checkpoints(snapshot, &mut new_snapshot);
-    snapshot_delta(snapshot, &new_snapshot).map_err(|error| match error {
-        RowPersistError::Turn(error) => error,
-    })
+    snapshot_delta(snapshot, &new_snapshot)
 }
 
 /// Full diff of the engine's post-retry state that — unlike
@@ -621,9 +601,7 @@ pub(super) fn retry_turn_full_delta(
     store: &TurnStateEngine,
 ) -> Result<SnapshotDelta, TurnError> {
     let new_snapshot = store.persistence_snapshot();
-    snapshot_delta(snapshot, &new_snapshot).map_err(|error| match error {
-        RowPersistError::Turn(error) => error,
-    })
+    snapshot_delta(snapshot, &new_snapshot)
 }
 
 pub(super) fn row_store_durable_delta(mut delta: SnapshotDelta) -> SnapshotDelta {

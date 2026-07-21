@@ -118,7 +118,7 @@ impl HarnessCapabilityMode {
         self,
         milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
         turn_thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
-        turn_store: Arc<ironclaw_turns::FilesystemTurnStateStore<HarnessTurnBackend>>,
+        turn_store: Arc<ironclaw_turns::FilesystemTurnStateRowStore<HarnessTurnBackend>>,
     ) -> HarnessResult<HarnessCapabilityParts> {
         match self {
             Self::Recording(port) => {
@@ -974,7 +974,7 @@ impl HostRuntimeCapabilityHarness {
     /// gated on `trigger_active_run_lookup_requested`.
     fn install_trigger_active_run_lookup_for_test(
         &self,
-        turn_store: Arc<ironclaw_turns::FilesystemTurnStateStore<HarnessTurnBackend>>,
+        turn_store: Arc<ironclaw_turns::FilesystemTurnStateRowStore<HarnessTurnBackend>>,
     ) -> HarnessResult<()> {
         let repo = self
             .trigger_repository_for_test()
