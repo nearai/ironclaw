@@ -61,7 +61,7 @@ fn seal_with_mounts_and_reservation(
     Authorized::seal(
         grant,
         invocation(),
-        RuntimeLane::Process,
+        Some(RuntimeLane::Process),
         mounts,
         reservation,
         deadline,
@@ -75,8 +75,24 @@ fn ts(secs: i64) -> Timestamp {
 #[test]
 fn authorized_is_lane_bound_and_carries_its_invocation() {
     let auth = seal_one(ts(1000));
-    assert_eq!(auth.lane(), RuntimeLane::Process);
+    assert_eq!(auth.lane(), Some(RuntimeLane::Process));
     assert_eq!(auth.invocation().capability.as_str(), "shell.exec");
+}
+
+#[test]
+fn host_internal_invocation_seals_a_witness_with_no_lane() {
+    // A host-internal `System`-runtime invocation maps to no untrusted lane, but
+    // the witness is STILL minted (lane `None`) — the witness is present for
+    // every dispatchable/spawnable invocation, not only lane-routed ones. This
+    // is what lets the kernel stop suppressing the whole witness when the lane
+    // is absent.
+    let grant = TestAuthorizer.authorization_grant();
+    let auth = Authorized::seal(grant, invocation(), None, None, None, ts(1000));
+    assert_eq!(auth.lane(), None);
+    let (_inv, lane, _mounts, _res) = auth
+        .into_parts(ts(999))
+        .expect("unexpired witness must consume");
+    assert_eq!(lane, None);
 }
 
 #[test]
@@ -98,7 +114,7 @@ fn single_use_consumes_into_parts_before_deadline() {
         .into_parts(ts(999))
         .expect("unexpired witness must consume");
     // `auth` is moved — a second dispatch is a compile error, not a runtime bug.
-    assert_eq!(lane, RuntimeLane::Process);
+    assert_eq!(lane, Some(RuntimeLane::Process));
     assert_eq!(inv.capability.as_str(), "shell.exec");
     // The real obligation-produced reservation flows through consumption.
     assert!(res.is_some());

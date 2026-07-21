@@ -64,11 +64,13 @@ pub trait CapabilityAuthorizer {
 pub struct AuthorizationGrant(());
 
 /// The dispatch-lane parts a consumed [`Authorized`] yields: the exact
-/// invocation, the descriptor-resolved lane, the fold's `Option<MountView>`, and
-/// the fold's `Option<ResourceReservation>` — all verbatim, never re-derived.
+/// invocation, the descriptor-resolved lane (`None` for a host-internal
+/// `System`-runtime invocation that maps to no untrusted lane), the fold's
+/// `Option<MountView>`, and the fold's `Option<ResourceReservation>` — all
+/// verbatim, never re-derived.
 pub type AuthorizedParts = (
     Invocation,
-    RuntimeLane,
+    Option<RuntimeLane>,
     Option<MountView>,
     Option<ResourceReservation>,
 );
@@ -80,7 +82,10 @@ pub type AuthorizedParts = (
 ///   [`AuthorizationGrant`]. No forging, no repairing to a different invocation.
 /// - **Lane-bound:** it carries the exact [`RuntimeLane`] resolved from the
 ///   descriptor; `dispatch()` routes by that, never to a lane the descriptor did
-///   not name.
+///   not name. `None` for a host-internal `System`-runtime invocation, which
+///   maps to no untrusted lane and is dispatched on the process axis instead —
+///   the witness is still minted (so it is always present for a dispatchable
+///   invocation), it simply carries no lane.
 /// - **Single-use:** not `Clone`; `dispatch()` consumes it. The not-dispatched
 ///   path calls [`Authorized::abort`] explicitly — never `Drop` (destructors do
 ///   no async I/O; a leaked witness is reclaimed by lease-expiry, §5.3.2).
@@ -90,7 +95,11 @@ pub type AuthorizedParts = (
 #[derive(Debug)]
 pub struct Authorized {
     invocation: Invocation,
-    lane: RuntimeLane,
+    /// The descriptor-resolved untrusted lane, or `None` for a host-internal
+    /// `System`-runtime invocation (dispatched on the process axis, not a lane).
+    /// The witness is minted either way — always present for a dispatchable
+    /// invocation.
+    lane: Option<RuntimeLane>,
     /// The filesystem mounts the fold's `UseScopedMounts` obligation produced
     /// (`Some`), or `None` when the capability declares no mount obligation.
     /// Kept as an `Option` — never collapsed to a default `MountView` — so the
@@ -123,7 +132,7 @@ impl Authorized {
     pub fn seal(
         _grant: AuthorizationGrant,
         invocation: Invocation,
-        lane: RuntimeLane,
+        lane: Option<RuntimeLane>,
         mounts: Option<MountView>,
         reservation: Option<ResourceReservation>,
         deadline: Timestamp,
@@ -142,8 +151,10 @@ impl Authorized {
         &self.invocation
     }
 
-    /// The runtime lane resolved from the descriptor — where `dispatch()` routes.
-    pub fn lane(&self) -> RuntimeLane {
+    /// The runtime lane resolved from the descriptor — where `dispatch()`
+    /// routes — or `None` for a host-internal `System`-runtime invocation that
+    /// maps to no untrusted lane.
+    pub fn lane(&self) -> Option<RuntimeLane> {
         self.lane
     }
 

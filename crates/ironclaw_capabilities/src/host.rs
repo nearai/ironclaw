@@ -1029,9 +1029,13 @@ where
             Some(user_id) => Actor::Sealed(user_id),
             None => Actor::System,
         };
-        // Lane resolved from the descriptor's runtime kind; `System` runtimes
-        // have no untrusted execution lane (`None`) and are not sealed here.
-        let lane = RuntimeLane::from_runtime_kind(descriptor.runtime)?;
+        // Lane resolved from the descriptor's runtime kind. `System` runtimes
+        // have no untrusted execution lane (`None`) — they dispatch on the
+        // process axis, not a lane — but the witness is STILL minted for them
+        // (carrying `lane == None`), so a witness is present for every
+        // dispatchable/spawnable invocation. No `?` here: the lane's absence no
+        // longer suppresses the whole witness.
+        let lane = RuntimeLane::from_runtime_kind(descriptor.runtime);
         let scope = &context.resource_scope;
         // Origin is the ingress-stamped authority fact (§5.2.1). The loop path
         // also carries `run_id`, so a context that stamped only `run_id` still
@@ -4103,7 +4107,7 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
         let Some(AuthorizeResult::Authorized(authorized)) = &fold.result else {
             panic!("allow path with a sealed actor must mint an Authorized witness");
         };
-        assert_eq!(authorized.lane(), RuntimeLane::Wasm);
+        assert_eq!(authorized.lane(), Some(RuntimeLane::Wasm));
         let invocation = authorized.invocation();
         assert_eq!(
             invocation.capability,
