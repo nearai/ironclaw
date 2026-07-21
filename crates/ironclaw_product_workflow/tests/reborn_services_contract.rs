@@ -37,7 +37,7 @@ use ironclaw_product_workflow::{
     AuthInteractionDecision, AuthInteractionService, AutomationListRequest, AutomationName,
     AutomationProductFacade, CodexLoginStart, ExtensionCredentialSetupService,
     ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, FilesystemBrowseReader,
-    FsMount, InboundAttachmentLander, InboundAttachmentReader,
+    FsMount, InboundAttachmentLander, InboundAttachmentReader, LOGS_VIEW,
     LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
     LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
     LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
@@ -47,12 +47,12 @@ use ironclaw_product_workflow::{
     ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse, LlmActiveSelection,
     LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
     LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, OperatorLogsService,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_LOGS_VIEW, OperatorLogsService,
     OperatorServiceLifecycleService, OperatorStatusService, OutboundPreferencesProductFacade,
     PendingApprovalInteractionView, ProductAgentBoundCaller, ProductWorkflowError, ProjectCaller,
     ProjectFsEntry, ProjectFsError, ProjectFsFile, ProjectFsStat, ProjectService,
-    ProjectServiceError, RebornAddMemberRequest, RebornAttachmentRequest, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    ProjectServiceError, RUN_ARTIFACT_VIEW, RebornAddMemberRequest, RebornAttachmentRequest,
+    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornChannelConnectAction, RebornChannelConnectStrategy,
     RebornConnectableChannelInfo, RebornCreateProjectRequest, RebornDeleteProjectRequest,
@@ -60,29 +60,29 @@ use ironclaw_product_workflow::{
     RebornGetProjectRequest, RebornGetRunStateRequest, RebornListMembersRequest,
     RebornListMembersResponse, RebornListProjectsRequest, RebornListProjectsResponse,
     RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigSetRequest,
-    RebornOperatorLogsQuery, RebornOperatorSetupRequest, RebornOperatorSetupStatus,
-    RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
-    RebornOperatorStatusState, RebornOperatorSurfaceStatus, RebornOperatorToolCatalog,
-    RebornOperatorToolInfo, RebornOutboundDeliveryModality,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigSetRequest, RebornOperatorLogsQuery, RebornOperatorSetupRequest,
+    RebornOperatorSetupStatus, RebornOperatorStatusCheck, RebornOperatorStatusResponse,
+    RebornOperatorStatusSeverity, RebornOperatorStatusState, RebornOperatorSurfaceStatus,
+    RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
     RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse, RebornProjectInfo,
     RebornProjectMemberInfo, RebornProjectResponse, RebornProjectRole, RebornProjectState,
-    RebornRemoveMemberRequest, RebornResolveGateResponse, RebornServiceLifecycleAction,
-    RebornServiceLifecycleRequest, RebornServiceLifecycleResponse, RebornServiceLifecycleState,
-    RebornServices, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornUpdateMemberRoleRequest,
-    RebornUpdateProjectRequest, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, SetActiveLlmRequest, StaticConnectableChannelsProductFacade,
-    StaticOperatorStatusService, TriggerRunThreadScope, UpsertLlmProviderRequest,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
+    RebornRemoveMemberRequest, RebornResolveGateResponse, RebornRunArtifact,
+    RebornRunArtifactRequest, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
+    RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServices, RebornServicesApi,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+    RebornViewQuery, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SetActiveLlmRequest,
+    StaticConnectableChannelsProductFacade, StaticOperatorStatusService, TriggerRunThreadScope,
+    UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
+    WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
+    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
     automation_trigger_thread_metadata_json,
 };
 use ironclaw_product_workflow::{
@@ -6467,6 +6467,46 @@ impl OperatorLogsService for RecordingOperatorLogsService {
 
 struct CrateRootLifecycleBackend;
 
+async fn query_logs_view(
+    services: &RebornServices,
+    caller: WebUiAuthenticatedCaller,
+    mut request: RebornLogQueryRequest,
+) -> Result<RebornLogQueryResponse, RebornServicesError> {
+    let cursor = request.cursor.take();
+    let page = services
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: LOGS_VIEW.id.to_string(),
+                params: serde_json::to_value(request)
+                    .map_err(RebornServicesError::internal_from)?,
+                cursor,
+            },
+        )
+        .await?;
+    serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
+}
+
+async fn query_operator_logs_view(
+    services: &RebornServices,
+    caller: WebUiAuthenticatedCaller,
+    mut request: RebornOperatorLogsQuery,
+) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
+    let cursor = request.cursor.take();
+    let page = services
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: OPERATOR_LOGS_VIEW.id.to_string(),
+                params: serde_json::to_value(request)
+                    .map_err(RebornServicesError::internal_from)?,
+                cursor,
+            },
+        )
+        .await?;
+    serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
+}
+
 #[async_trait]
 impl OperatorServiceLifecycleService for CrateRootLifecycleBackend {
     async fn control_service(
@@ -6497,26 +6537,26 @@ async fn query_operator_logs_bounds_query_before_logs_service() {
     let oversized_thread_id = format!("{}é", "thread-".repeat(80));
     let oversized_run_id = format!("{}é", "run-".repeat(100));
     let boundary_source = format!("{}é", "s".repeat(254));
-    let response = services
-        .query_operator_logs(
-            caller(),
-            RebornOperatorLogsQuery {
-                limit: Some(u32::MAX),
-                cursor: Some(oversized_cursor),
-                level: Some(RebornLogLevel::Warn),
-                target: Some(oversized_target),
-                thread_id: Some(oversized_thread_id),
-                run_id: Some(oversized_run_id),
-                turn_id: Some("turn-1".to_string()),
-                tool_call_id: Some("tool-call-1".to_string()),
-                tool_name: Some("shell".to_string()),
-                source: Some(boundary_source),
-                tail: true,
-                follow: false,
-            },
-        )
-        .await
-        .expect("operator logs query");
+    let response = query_operator_logs_view(
+        &services,
+        caller(),
+        RebornOperatorLogsQuery {
+            limit: Some(u32::MAX),
+            cursor: Some(oversized_cursor),
+            level: Some(RebornLogLevel::Warn),
+            target: Some(oversized_target),
+            thread_id: Some(oversized_thread_id),
+            run_id: Some(oversized_run_id),
+            turn_id: Some("turn-1".to_string()),
+            tool_call_id: Some("tool-call-1".to_string()),
+            tool_name: Some("shell".to_string()),
+            source: Some(boundary_source),
+            tail: true,
+            follow: false,
+        },
+    )
+    .await
+    .expect("operator logs query");
 
     assert_eq!(response.status, RebornOperatorSurfaceStatus::Available);
     let requests = operator_logs.requests();
@@ -6551,26 +6591,26 @@ async fn query_operator_logs_forwards_follow_mode_to_logs_service() {
     )
     .with_operator_logs_service(operator_logs.clone());
 
-    services
-        .query_operator_logs(
-            caller(),
-            RebornOperatorLogsQuery {
-                limit: Some(25),
-                cursor: Some("after:7".to_string()),
-                level: Some(RebornLogLevel::Info),
-                target: Some("ironclaw".to_string()),
-                thread_id: None,
-                run_id: None,
-                turn_id: None,
-                tool_call_id: None,
-                tool_name: None,
-                source: None,
-                tail: false,
-                follow: true,
-            },
-        )
-        .await
-        .expect("operator logs follow query");
+    query_operator_logs_view(
+        &services,
+        caller(),
+        RebornOperatorLogsQuery {
+            limit: Some(25),
+            cursor: Some("after:7".to_string()),
+            level: Some(RebornLogLevel::Info),
+            target: Some("ironclaw".to_string()),
+            thread_id: None,
+            run_id: None,
+            turn_id: None,
+            tool_call_id: None,
+            tool_name: None,
+            source: None,
+            tail: false,
+            follow: true,
+        },
+    )
+    .await
+    .expect("operator logs follow query");
 
     let requests = operator_logs.requests();
     assert_eq!(requests.len(), 1);
@@ -6591,26 +6631,26 @@ async fn query_operator_logs_rejects_ambiguous_tail_follow_modes() {
     )
     .with_operator_logs_service(operator_logs.clone());
 
-    let err = services
-        .query_operator_logs(
-            caller(),
-            RebornOperatorLogsQuery {
-                limit: None,
-                cursor: None,
-                level: None,
-                target: None,
-                thread_id: None,
-                run_id: None,
-                turn_id: None,
-                tool_call_id: None,
-                tool_name: None,
-                source: None,
-                tail: true,
-                follow: true,
-            },
-        )
-        .await
-        .expect_err("tail and follow cannot be combined");
+    let err = query_operator_logs_view(
+        &services,
+        caller(),
+        RebornOperatorLogsQuery {
+            limit: None,
+            cursor: None,
+            level: None,
+            target: None,
+            thread_id: None,
+            run_id: None,
+            turn_id: None,
+            tool_call_id: None,
+            tool_name: None,
+            source: None,
+            tail: true,
+            follow: true,
+        },
+    )
+    .await
+    .expect_err("tail and follow cannot be combined");
 
     assert_eq!(err.kind, RebornServicesErrorKind::Validation);
     assert_eq!(err.status_code, 400);
@@ -6631,8 +6671,7 @@ async fn query_logs_requires_thread_scope() {
     )
     .with_operator_logs_service(operator_logs.clone());
 
-    let err = services
-        .query_logs(caller(), RebornLogQueryRequest::default())
+    let err = query_logs_view(&services, caller(), RebornLogQueryRequest::default())
         .await
         .expect_err("public logs require a thread scope");
 
@@ -6655,16 +6694,16 @@ async fn query_logs_rejects_ambiguous_tail_follow_modes() {
     )
     .with_operator_logs_service(operator_logs.clone());
 
-    let err = services
-        .query_logs(
-            caller(),
-            RebornLogQueryRequest::default()
-                .set_thread_id("thread-alpha")
-                .set_tail(true)
-                .set_follow(true),
-        )
-        .await
-        .expect_err("tail and follow cannot be combined");
+    let err = query_logs_view(
+        &services,
+        caller(),
+        RebornLogQueryRequest::default()
+            .set_thread_id("thread-alpha")
+            .set_tail(true)
+            .set_follow(true),
+    )
+    .await
+    .expect_err("tail and follow cannot be combined");
 
     assert_eq!(err.kind, RebornServicesErrorKind::Validation);
     assert_eq!(err.status_code, 400);
@@ -6687,19 +6726,19 @@ async fn query_logs_forwards_owned_thread_scope_to_logs_service() {
 
     setup_owned_thread(&services, caller(), "thread-alpha").await;
 
-    services
-        .query_logs(
-            caller(),
-            RebornLogQueryRequest::default()
-                .set_limit(25)
-                .set_cursor("after:7")
-                .set_level(RebornLogLevel::Info)
-                .set_target("ironclaw")
-                .set_thread_id("thread-alpha")
-                .set_follow(true),
-        )
-        .await
-        .expect("owned thread logs query");
+    query_logs_view(
+        &services,
+        caller(),
+        RebornLogQueryRequest::default()
+            .set_limit(25)
+            .set_cursor("after:7")
+            .set_level(RebornLogLevel::Info)
+            .set_target("ironclaw")
+            .set_thread_id("thread-alpha")
+            .set_follow(true),
+    )
+    .await
+    .expect("owned thread logs query");
 
     let requests = operator_logs.requests();
     assert_eq!(requests.len(), 1);
@@ -6723,19 +6762,174 @@ async fn query_logs_rejects_thread_owned_by_another_caller() {
 
     setup_owned_thread(&services, caller_for_user("user-bob"), "thread-bob").await;
 
-    let err = services
-        .query_logs(
-            caller(),
-            RebornLogQueryRequest::default()
-                .set_limit(25)
-                .set_thread_id("thread-bob"),
-        )
-        .await
-        .expect_err("foreign thread logs are not caller-visible");
+    let err = query_logs_view(
+        &services,
+        caller(),
+        RebornLogQueryRequest::default()
+            .set_limit(25)
+            .set_thread_id("thread-bob"),
+    )
+    .await
+    .expect_err("foreign thread logs are not caller-visible");
 
     assert_eq!(err.status_code, 404);
     assert_eq!(err.kind, RebornServicesErrorKind::NotFound);
     assert!(operator_logs.requests().is_empty());
+}
+
+#[tokio::test]
+async fn run_artifact_selects_one_owned_run_and_queries_only_its_scoped_logs() {
+    let owner = caller();
+    let thread_scope = thread_scope_for(&owner);
+    let thread_id = ThreadId::new("thread-artifact").expect("thread id");
+    let run_id = TurnRunId::parse(&run_id_string()).expect("run id");
+    let other_run_id = TurnRunId::new();
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: owner.user_id.as_str().to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("thread");
+    seed_submitted_message(
+        &thread_service,
+        &thread_scope,
+        &thread_id,
+        &run_id,
+        "selected run",
+    )
+    .await;
+    seed_submitted_message(
+        &thread_service,
+        &thread_scope,
+        &thread_id,
+        &other_run_id,
+        "other run",
+    )
+    .await;
+    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_operator_logs_service(operator_logs.clone());
+
+    let page = services
+        .query(
+            owner,
+            RebornViewQuery {
+                view_id: RUN_ARTIFACT_VIEW.id.to_string(),
+                params: serde_json::to_value(RebornRunArtifactRequest {
+                    thread_id: thread_id.to_string(),
+                    run_id: run_id.to_string(),
+                })
+                .expect("artifact params"),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("owned run artifact");
+    let artifact: RebornRunArtifact =
+        serde_json::from_value(page.payload).expect("artifact payload");
+
+    assert_eq!(artifact.messages.len(), 1);
+    assert_eq!(artifact.messages[0].content, "selected run");
+    assert!(!artifact.logs.complete);
+    let requests = operator_logs.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].thread_id.as_deref(), Some("thread-artifact"));
+    assert_eq!(
+        requests[0].run_id.as_deref(),
+        Some(run_id.to_string().as_str())
+    );
+    assert_eq!(requests[0].limit, Some(500));
+}
+
+#[tokio::test]
+async fn run_artifact_rejects_another_user_before_querying_logs() {
+    let owner = caller_for_user("user-bob");
+    let thread_scope = thread_scope_for(&owner);
+    let thread_id = ThreadId::new("thread-bob-artifact").expect("thread id");
+    let run_id = TurnRunId::parse(&run_id_string()).expect("run id");
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: owner.user_id.as_str().to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("thread");
+    seed_submitted_message(
+        &thread_service,
+        &thread_scope,
+        &thread_id,
+        &run_id,
+        "private trajectory",
+    )
+    .await;
+    let operator_logs = Arc::new(RecordingOperatorLogsService::default());
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_operator_logs_service(operator_logs.clone());
+
+    let error = services
+        .query(
+            caller(),
+            RebornViewQuery {
+                view_id: RUN_ARTIFACT_VIEW.id.to_string(),
+                params: serde_json::to_value(RebornRunArtifactRequest {
+                    thread_id: thread_id.to_string(),
+                    run_id: run_id.to_string(),
+                })
+                .expect("artifact params"),
+                cursor: None,
+            },
+        )
+        .await
+        .expect_err("foreign run must not be exported");
+
+    assert_eq!(error.status_code, 404);
+    assert_eq!(error.kind, RebornServicesErrorKind::NotFound);
+    assert!(operator_logs.requests().is_empty());
+}
+
+async fn seed_submitted_message(
+    thread_service: &Arc<InMemorySessionThreadService>,
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+    run_id: &TurnRunId,
+    content: &str,
+) {
+    let accepted = thread_service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            actor_id: scope
+                .owner_user_id
+                .as_ref()
+                .expect("test owner")
+                .as_str()
+                .to_string(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: Some(format!("artifact-{run_id}")),
+            content: MessageContent::text(content),
+        })
+        .await
+        .expect("accepted");
+    thread_service
+        .mark_message_submitted(
+            scope,
+            thread_id,
+            accepted.message_id,
+            format!("turn-{run_id}"),
+            run_id.to_string(),
+        )
+        .await
+        .expect("submitted");
 }
 
 #[tokio::test]

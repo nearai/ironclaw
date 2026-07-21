@@ -93,6 +93,29 @@ test("assistant bubbles expose final reply state for live QA", () => {
   );
 });
 
+test("only final assistant replies expose the run artifact download", async () => {
+  const { MessageBubble } = await import("./message-bubble");
+  const render = (isFinalReply: boolean) =>
+    renderToStaticMarkup(
+      React.createElement(MessageBubble, {
+        message: {
+          id: "assistant-1",
+          role: CHAT_MESSAGE_ROLES.ASSISTANT,
+          content: "done",
+          timestamp: "2026-06-02T00:00:00.000Z",
+          turnRunId: "run-1",
+          isFinalReply,
+        },
+        threadId: "thread-1",
+      }),
+    );
+
+  assert.match(render(true), /data-testid="download-run-artifact"/);
+  assert.doesNotMatch(render(false), /data-testid="download-run-artifact"/);
+  assert.match(messageBubbleSource, /fetchRunArtifact\(\{/);
+  assert.match(messageBubbleSource, /ironclaw-run-\$\{filenameRunId\}\.json/);
+});
+
 test("markdown body and code blocks inherit readable message sizing", () => {
   assert.match(
     appCssSource,
