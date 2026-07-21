@@ -19,6 +19,8 @@ mod backend;
 mod cas;
 mod catalog;
 mod db;
+#[cfg(feature = "test-support")]
+mod fault;
 mod hsm;
 mod in_memory;
 mod index;
@@ -38,6 +40,8 @@ pub use cas::{
     FILESYSTEM_CAS_BACKOFF_MAX, FILESYSTEM_CAS_RETRIES, cas_update,
 };
 pub use catalog::{CompositeRootFilesystem, MountDescriptor, PathPlacement};
+#[cfg(feature = "test-support")]
+pub use fault::{Fault, FaultInjecting, FaultKind, RecordedOp};
 pub use hsm::HsmBackend;
 pub use in_memory::InMemoryBackend;
 pub use index::{Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page};

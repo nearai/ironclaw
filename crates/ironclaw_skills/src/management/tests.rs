@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{
-    BackendCapabilities, DirEntry, FileStat, FilesystemError, FilesystemOperation, InMemoryBackend,
-    RootFilesystem,
+    BackendCapabilities, DirEntry, Fault, FaultInjecting, FileStat, FilesystemError,
+    FilesystemOperation, InMemoryBackend, RootFilesystem,
 };
 use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, ScopedPath, VirtualPath,
@@ -394,13 +394,18 @@ async fn install_rejects_invalid_bundle_files() {
 
 #[tokio::test]
 async fn install_bundle_failure_cleans_up_partial_directory() {
-    let inner = Arc::new(InMemoryBackend::default());
-    let filesystem = Arc::new(FailingBundleWriteFilesystem {
-        inner: inner.clone(),
-        fail_suffix: "/scripts/run.py",
-        fail_delete: false,
-    });
-    let context = skill_management_context_with_root(filesystem, skill_mounts());
+    // The real byte-write path faulted at the backend seam via the shared
+    // `FaultInjecting` decorator: the `scripts/run.py` bundle write (routed
+    // through the entry-plane `put`) surfaces `FilesystemError::Backend`
+    // (→ `InvalidSkill`), triggering the partial-directory cleanup.
+    let backend = Arc::new(
+        FaultInjecting::new(InMemoryBackend::default()).with_fault(
+            Fault::on(FilesystemOperation::WriteFile)
+                .path("scripts/run.py")
+                .backend("injected bundle write failure"),
+        ),
+    );
+    let context = skill_management_context_with_root(backend.clone(), skill_mounts());
 
     let error = install_skill(
         &context,
@@ -425,9 +430,9 @@ async fn install_bundle_failure_cleans_up_partial_directory() {
     .unwrap_err();
     assert_eq!(error.kind(), SkillManagementErrorKind::InvalidSkill);
 
-    assert_missing(&inner, "/projects/skills/partial-helper/SKILL.md").await;
+    assert_missing(backend.as_ref(), "/projects/skills/partial-helper/SKILL.md").await;
     assert_missing(
-        &inner,
+        backend.as_ref(),
         "/projects/skills/partial-helper/references/guide.md",
     )
     .await;
@@ -463,14 +468,18 @@ async fn install_rejects_preexisting_skill_directory_without_deleting_contents()
 
     assert_eq!(error.kind(), SkillManagementErrorKind::Conflict);
     assert_file_contents(
-        &filesystem,
+        filesystem.as_ref(),
         "/projects/skills/existing-helper/references/guide.md",
         b"# Keep\n",
     )
     .await;
-    assert_missing(&filesystem, "/projects/skills/existing-helper/SKILL.md").await;
     assert_missing(
-        &filesystem,
+        filesystem.as_ref(),
+        "/projects/skills/existing-helper/SKILL.md",
+    )
+    .await;
+    assert_missing(
+        filesystem.as_ref(),
         "/projects/skills/existing-helper/scripts/run.py",
     )
     .await;
@@ -507,7 +516,7 @@ async fn install_serializes_concurrent_same_name_requests() {
     let results = [first, second];
     assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 2);
     assert_file_contents(
-        &filesystem,
+        filesystem.as_ref(),
         "/projects/skills/shared-helper/SKILL.md",
         content.as_bytes(),
     )
@@ -516,13 +525,18 @@ async fn install_serializes_concurrent_same_name_requests() {
 
 #[tokio::test]
 async fn install_metadata_write_failure_cleans_up_partial_directory() {
-    let inner = Arc::new(InMemoryBackend::default());
-    let filesystem = Arc::new(FailingBundleWriteFilesystem {
-        inner: inner.clone(),
-        fail_suffix: "/.ironclaw-install.json",
-        fail_delete: false,
-    });
-    let context = skill_management_context_with_root(filesystem, skill_mounts());
+    // The install-metadata write (`.ironclaw-install.json`) faulted at the
+    // backend seam via `FaultInjecting`: the entry-plane `put` for that path
+    // surfaces `FilesystemError::Backend` (→ `InvalidSkill`), triggering the
+    // partial-directory cleanup after the earlier bundle file already landed.
+    let backend = Arc::new(
+        FaultInjecting::new(InMemoryBackend::default()).with_fault(
+            Fault::on(FilesystemOperation::WriteFile)
+                .path(".ironclaw-install.json")
+                .backend("injected bundle write failure"),
+        ),
+    );
+    let context = skill_management_context_with_root(backend.clone(), skill_mounts());
 
     let error = install_skill(
         &context,
@@ -541,9 +555,13 @@ async fn install_metadata_write_failure_cleans_up_partial_directory() {
     .unwrap_err();
     assert_eq!(error.kind(), SkillManagementErrorKind::InvalidSkill);
 
-    assert_missing(&inner, "/projects/skills/metadata-helper/SKILL.md").await;
     assert_missing(
-        &inner,
+        backend.as_ref(),
+        "/projects/skills/metadata-helper/SKILL.md",
+    )
+    .await;
+    assert_missing(
+        backend.as_ref(),
         "/projects/skills/metadata-helper/references/guide.md",
     )
     .await;
@@ -552,10 +570,8 @@ async fn install_metadata_write_failure_cleans_up_partial_directory() {
 #[tokio::test]
 async fn install_cleanup_failure_is_reported() {
     let inner = Arc::new(InMemoryBackend::default());
-    let filesystem = Arc::new(FailingBundleWriteFilesystem {
+    let filesystem = Arc::new(CleanupDeleteDenyingFilesystem {
         inner: inner.clone(),
-        fail_suffix: "/scripts/run.py",
-        fail_delete: true,
     });
     let context = skill_management_context_with_root(filesystem, skill_mounts());
 
@@ -583,7 +599,7 @@ async fn install_cleanup_failure_is_reported() {
 
     assert_eq!(error.kind(), SkillManagementErrorKind::FilesystemDenied);
     assert_file_contents(
-        &inner,
+        inner.as_ref(),
         "/projects/skills/cleanup-helper/references/guide.md",
         b"# Guide\n",
     )
@@ -734,8 +750,14 @@ async fn search_skills_returns_bounded_matches_with_truncation() {
 
 #[tokio::test]
 async fn search_skills_propagates_filesystem_error() {
-    let context =
-        skill_management_context_with_root(Arc::new(FailingListFilesystem), skill_mounts());
+    // The directory listing faulted at the backend seam via `FaultInjecting`:
+    // `list_dir_bounded` routes through the entry-plane `list_dir`, which
+    // surfaces `FilesystemError::Backend` (→ `InvalidSkill`).
+    let backend = Arc::new(
+        FaultInjecting::new(InMemoryBackend::default())
+            .with_fault(Fault::on(FilesystemOperation::ListDir).backend("injected list failure")),
+    );
+    let context = skill_management_context_with_root(backend, skill_mounts());
 
     let error = search_skills(
         &context,
@@ -933,13 +955,13 @@ async fn skill_management_root_filesystem_delete_if_version_delegates_to_inner_b
     assert!(inner.get(&path).await.unwrap().is_none());
 }
 
-async fn write_file(root: &InMemoryBackend, path: &str, body: String) {
+async fn write_file<R: RootFilesystem + ?Sized>(root: &R, path: &str, body: String) {
     root.write_file(&VirtualPath::new(path).unwrap(), body.as_bytes())
         .await
         .unwrap();
 }
 
-async fn read_file(root: &InMemoryBackend, path: &str) -> String {
+async fn read_file<R: RootFilesystem + ?Sized>(root: &R, path: &str) -> String {
     let bytes = root
         .read_file_bounded(
             &VirtualPath::new(path).unwrap(),
@@ -951,7 +973,7 @@ async fn read_file(root: &InMemoryBackend, path: &str) -> String {
     String::from_utf8(bytes).unwrap()
 }
 
-async fn assert_missing(root: &InMemoryBackend, path: &str) {
+async fn assert_missing<R: RootFilesystem + ?Sized>(root: &R, path: &str) {
     match root
         .read_file_bounded(&VirtualPath::new(path).unwrap(), 1024)
         .await
@@ -962,7 +984,7 @@ async fn assert_missing(root: &InMemoryBackend, path: &str) {
     }
 }
 
-async fn assert_file_contents(root: &InMemoryBackend, path: &str, expected: &[u8]) {
+async fn assert_file_contents<R: RootFilesystem + ?Sized>(root: &R, path: &str, expected: &[u8]) {
     let bytes = root
         .read_file_bounded(&VirtualPath::new(path).unwrap(), 1024)
         .await
@@ -971,15 +993,22 @@ async fn assert_file_contents(root: &InMemoryBackend, path: &str, expected: &[u8
     assert_eq!(bytes, expected);
 }
 
+/// KEPT (not folded into `ironclaw_filesystem::FaultInjecting`):
+/// `install_cleanup_failure_is_reported` needs the cleanup `delete` to fail
+/// with `FilesystemError::PermissionDenied` (→ `FilesystemDenied`).
+/// `FaultInjecting` can only inject `Backend`/`BackendBusy`/`NotFound`/
+/// `Unsupported` errors, so it cannot reproduce the specific
+/// `PermissionDenied → FilesystemDenied` mapping this test pins. Faults the
+/// `/scripts/run.py` bundle write (to trigger the cleanup path) and denies the
+/// subsequent cleanup `delete` with `PermissionDenied`; every other op
+/// delegates to the real `InMemoryBackend`.
 #[derive(Clone)]
-struct FailingBundleWriteFilesystem {
+struct CleanupDeleteDenyingFilesystem {
     inner: Arc<InMemoryBackend>,
-    fail_suffix: &'static str,
-    fail_delete: bool,
 }
 
 #[async_trait]
-impl RootFilesystem for FailingBundleWriteFilesystem {
+impl RootFilesystem for CleanupDeleteDenyingFilesystem {
     fn capabilities(&self) -> BackendCapabilities {
         self.inner.capabilities()
     }
@@ -1001,7 +1030,7 @@ impl RootFilesystem for FailingBundleWriteFilesystem {
     }
 
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
-        if path.as_str().ends_with(self.fail_suffix) {
+        if path.as_str().ends_with("/scripts/run.py") {
             return Err(FilesystemError::Backend {
                 operation: FilesystemOperation::WriteFile,
                 path: path.clone(),
@@ -1016,46 +1045,9 @@ impl RootFilesystem for FailingBundleWriteFilesystem {
     }
 
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        if self.fail_delete {
-            return Err(FilesystemError::PermissionDenied {
-                path: ScopedPath::new(path.as_str().to_string()).unwrap(),
-                operation: FilesystemOperation::Delete,
-            });
-        }
-        self.inner.delete(path).await
-    }
-}
-
-#[derive(Clone)]
-struct FailingListFilesystem;
-
-#[async_trait]
-impl RootFilesystem for FailingListFilesystem {
-    fn capabilities(&self) -> BackendCapabilities {
-        BackendCapabilities::default()
-    }
-
-    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        Err(FilesystemError::Backend {
-            operation: FilesystemOperation::ListDir,
-            path: path.clone(),
-            reason: "injected list failure".to_string(),
-        })
-    }
-
-    async fn list_dir_bounded(
-        &self,
-        path: &VirtualPath,
-        _max_entries: usize,
-    ) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.list_dir(path).await
-    }
-
-    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        Err(FilesystemError::Backend {
-            operation: FilesystemOperation::Stat,
-            path: path.clone(),
-            reason: "injected stat failure".to_string(),
+        Err(FilesystemError::PermissionDenied {
+            path: ScopedPath::new(path.as_str().to_string()).unwrap(),
+            operation: FilesystemOperation::Delete,
         })
     }
 }

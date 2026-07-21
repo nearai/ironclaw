@@ -929,6 +929,14 @@ mod tests {
     /// A [`LlmKeyStoreOpener`] whose store's `put` always fails — used to
     /// prove `provision_llm_credentials` writes the secret store BEFORE
     /// `config.toml`: a `put` failure must leave `config.toml` untouched.
+    ///
+    /// The store is the real [`ironclaw_secrets::FilesystemSecretStore`] over a
+    /// [`ironclaw_filesystem::FaultInjecting`] backend armed to fail every
+    /// secret write. This replaces the former whole-trait `FailingSecretStore`
+    /// fake: the store now runs its genuine encryption, CAS write, and
+    /// `FilesystemError::Backend -> SecretStoreError::StoreUnavailable` mapping
+    /// under the injected backend fault, so the test exercises the production
+    /// store path instead of a hand-rolled trait stand-in that reimplemented it.
     struct FailingLlmKeyStoreOpener;
 
     impl LlmKeyStoreOpener for FailingLlmKeyStoreOpener {
@@ -936,83 +944,22 @@ mod tests {
             &self,
             _home_path: &Path,
         ) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore> {
-            Ok(ironclaw_reborn_composition::LlmKeyStore::new(Arc::new(
-                FailingSecretStore,
-            )))
-        }
-    }
-
-    struct FailingSecretStore;
-
-    #[async_trait::async_trait]
-    impl ironclaw_secrets::SecretStore for FailingSecretStore {
-        async fn put(
-            &self,
-            _scope: ironclaw_host_api::ResourceScope,
-            _handle: ironclaw_host_api::SecretHandle,
-            _material: ironclaw_secrets::SecretMaterial,
-            _expires_at: Option<ironclaw_host_api::Timestamp>,
-        ) -> Result<ironclaw_secrets::SecretMetadata, ironclaw_secrets::SecretStoreError> {
-            Err(ironclaw_secrets::SecretStoreError::StoreUnavailable {
-                reason: "simulated failure for write-ordering RED test".to_string(),
-            })
-        }
-
-        async fn metadata(
-            &self,
-            _scope: &ironclaw_host_api::ResourceScope,
-            _handle: &ironclaw_host_api::SecretHandle,
-        ) -> Result<Option<ironclaw_secrets::SecretMetadata>, ironclaw_secrets::SecretStoreError>
-        {
-            unreachable!("not exercised by provision_llm_credentials")
-        }
-
-        async fn metadata_for_scope(
-            &self,
-            _scope: &ironclaw_host_api::ResourceScope,
-        ) -> Result<Vec<ironclaw_secrets::SecretMetadata>, ironclaw_secrets::SecretStoreError>
-        {
-            unreachable!("not exercised by provision_llm_credentials")
-        }
-
-        async fn delete(
-            &self,
-            _scope: &ironclaw_host_api::ResourceScope,
-            _handle: &ironclaw_host_api::SecretHandle,
-        ) -> Result<bool, ironclaw_secrets::SecretStoreError> {
-            unreachable!("not exercised by provision_llm_credentials")
-        }
-
-        async fn lease_once(
-            &self,
-            _scope: &ironclaw_host_api::ResourceScope,
-            _handle: &ironclaw_host_api::SecretHandle,
-        ) -> Result<ironclaw_secrets::SecretLease, ironclaw_secrets::SecretStoreError> {
-            unreachable!("not exercised by provision_llm_credentials")
-        }
-
-        async fn consume(
-            &self,
-            _scope: &ironclaw_host_api::ResourceScope,
-            _lease_id: ironclaw_secrets::SecretLeaseId,
-        ) -> Result<ironclaw_secrets::SecretMaterial, ironclaw_secrets::SecretStoreError> {
-            unreachable!("not exercised by provision_llm_credentials")
-        }
-
-        async fn revoke(
-            &self,
-            _scope: &ironclaw_host_api::ResourceScope,
-            _lease_id: ironclaw_secrets::SecretLeaseId,
-        ) -> Result<ironclaw_secrets::SecretLease, ironclaw_secrets::SecretStoreError> {
-            unreachable!("not exercised by provision_llm_credentials")
-        }
-
-        async fn leases_for_scope(
-            &self,
-            _scope: &ironclaw_host_api::ResourceScope,
-        ) -> Result<Vec<ironclaw_secrets::SecretLease>, ironclaw_secrets::SecretStoreError>
-        {
-            unreachable!("not exercised by provision_llm_credentials")
+            let backend = Arc::new(
+                ironclaw_filesystem::FaultInjecting::new(
+                    ironclaw_filesystem::InMemoryBackend::new(),
+                )
+                .with_fault(
+                    ironclaw_filesystem::Fault::on(
+                        ironclaw_filesystem::FilesystemOperation::WriteFile,
+                    )
+                    .path("secrets")
+                    .backend("simulated failure for write-ordering RED test"),
+                ),
+            );
+            let store = Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral_over(
+                backend,
+            ));
+            Ok(ironclaw_reborn_composition::LlmKeyStore::new(store))
         }
     }
 

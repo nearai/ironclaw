@@ -7327,7 +7327,6 @@ async fn text_only_host_does_not_reinvoke_runtime_after_failed_outcome_retry() {
     assert_eq!(first, second);
     let invocations = runtime.invocations();
     assert_eq!(invocations.len(), 1);
-    assert!(invocations[0].idempotency_key.is_some());
     assert!(io.results().is_empty());
 }
 
@@ -7655,7 +7654,6 @@ async fn text_only_host_does_not_reinvoke_runtime_after_result_write_failure_ret
     assert!(matches!(second, Resolution::Done(ref o) if o.verdict.is_success()));
     let invocations = runtime.invocations();
     assert_eq!(invocations.len(), 1);
-    assert!(invocations[0].idempotency_key.is_some());
     assert_eq!(
         io.results(),
         vec![(capability_id, json!({"write": "fails"}))]

@@ -471,8 +471,10 @@ mod tests {
     use chrono::Utc;
     use ironclaw_host_api::SecretHandle;
 
+    use ironclaw_filesystem::{Fault, FilesystemOperation};
+
     use super::*;
-    use crate::test_support::{fault_injected_telegram_state, telegram_state};
+    use crate::test_support::{fault_injecting_telegram_state, telegram_state};
 
     fn setup(revision: u64) -> TelegramInstallationSetup {
         TelegramInstallationSetup {
@@ -633,13 +635,15 @@ mod tests {
 
     #[tokio::test]
     async fn state_setup_cleanup_maps_filesystem_failure_to_store_unavailable() {
-        let (state, filesystem) = fault_injected_telegram_state();
+        let (state, backend) = fault_injecting_telegram_state();
         let expected = setup(1);
         state
             .put_telegram_installation_setup(&expected)
             .await
             .expect("setup persists before fault");
-        filesystem.fail_versioned_writes();
+        backend.add_fault(
+            Fault::on(FilesystemOperation::WriteFile).backend("test-injected filesystem failure"),
+        );
 
         assert_eq!(
             state

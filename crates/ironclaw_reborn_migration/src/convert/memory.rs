@@ -10,7 +10,10 @@
 //! and is recorded as a loss.
 
 use ironclaw_host_api::{CorrelationId, InvocationId, ResourceScope};
-use ironclaw_memory::{DocumentMetadata, MemoryInvocation, MemoryServiceWriteRequest};
+use ironclaw_memory::{DocumentMetadata, MemoryInvocation};
+use ironclaw_memory_native::{
+    MemoryBackendWriteOptions, MemoryContext, MemoryDocumentPath, MemoryDocumentScope,
+};
 
 use crate::error::MigrationError;
 use crate::options::MigrationOptions;
@@ -63,29 +66,66 @@ pub(crate) async fn run(
                 invocation_id: InvocationId::new(),
             };
             let invocation = MemoryInvocation {
-                scope,
+                scope: scope.clone(),
                 correlation_id: CorrelationId::new(),
             };
             let metadata = DocumentMetadata::from_value(&doc.metadata);
-            let request = MemoryServiceWriteRequest {
-                target: doc.path.clone(),
-                content: doc.content.clone(),
-                append: false,
-                old_string: None,
-                new_string: None,
-                replace_all: false,
-                metadata: Some(metadata),
-                timezone: None,
+            let memory_scope = match MemoryDocumentScope::new_with_agent(
+                invocation.scope.tenant_id.as_str(),
+                invocation.scope.user_id.as_str(),
+                invocation.scope.agent_id.as_ref().map(|id| id.as_str()),
+                invocation.scope.project_id.as_ref().map(|id| id.as_str()),
+            ) {
+                Ok(scope) => scope,
+                Err(error) => {
+                    report.record_loss(
+                        Domain::Memory,
+                        memory_source_id(&doc.user_id, &doc.path),
+                        "scope",
+                        LossReason::Unparseable,
+                        format!("legacy memory document scope is not a valid Reborn memory scope (record skipped): {error}"),
+                    );
+                    continue;
+                }
             };
+            let path = match MemoryDocumentPath::from_scope(memory_scope.clone(), doc.path.clone())
+            {
+                Ok(path) => path,
+                Err(error) => {
+                    report.record_loss(
+                        Domain::Memory,
+                        memory_source_id(&doc.user_id, &doc.path),
+                        "path",
+                        LossReason::Unparseable,
+                        format!("legacy memory document path is not a valid Reborn memory path (record skipped): {error}"),
+                    );
+                    continue;
+                }
+            };
+            let context = MemoryContext::new(memory_scope)
+                .with_audit_context(invocation.scope, invocation.correlation_id);
+            let write_options = MemoryBackendWriteOptions::with_metadata_overlay(Some(metadata));
 
-            tgt.memory_service
-                .write(invocation, request)
+            match tgt
+                .memory_backend
+                .write_document_with_backend_options(
+                    &context,
+                    &path,
+                    doc.content.as_bytes(),
+                    &write_options,
+                )
                 .await
-                .map_err(|e| MigrationError::WriteTarget {
-                    domain: format!("memory document {}", doc.path),
-                    reason: e.to_string(),
-                })?;
-            report.stats.memory_documents += 1;
+            {
+                Ok(_) => {
+                    report.stats.memory_documents += 1;
+                }
+                Err(error) => {
+                    return Err(MigrationError::WriteTarget {
+                        domain: format!("memory document {}", doc.path),
+                        reason: error.to_string(),
+                    });
+                }
+            }
         }
     }
 
@@ -99,4 +139,8 @@ pub(crate) async fn run(
             .to_string(),
     );
     Ok(())
+}
+
+fn memory_source_id(user_id: &str, path: &str) -> String {
+    format!("{user_id}:{path}")
 }

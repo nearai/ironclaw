@@ -127,6 +127,34 @@ struct FaultConfig {
 /// `RootFilesystem` wrapper over `InMemoryBackend` with write-fault injection
 /// and mutation recording (for byte-state forks). Concrete over
 /// `InMemoryBackend` because that is the only backend under test.
+///
+/// # Why this is NOT `ironclaw_filesystem::FaultInjecting`
+///
+/// The pure I/O-fault half (fail the Nth / a path-matching mutating write)
+/// *could* be expressed with `FaultInjecting`, but this backend is kept whole
+/// because its crash-consistency machinery needs three things `FaultInjecting`
+/// structurally cannot provide, and they are inseparably interleaved with the
+/// fault injection in the same `put`/`append`/`delete` methods:
+///
+/// 1. **Byte-state reconstruction** ([`FaultBackend::fork_durable_bytes`]) —
+///    records the full [`Entry`]/[`CasExpectation`]/payloads of every applied
+///    mutation and replays them into a fresh backend to rebuild a
+///    byte-identical durable state "at moment T" (the crash primitive).
+///    `FaultInjecting::recorded()` records only `{operation, path}`, so it
+///    cannot reconstruct durable bytes.
+/// 2. **Append stall barrier** ([`FaultBackend::append_gate`]) — a
+///    `tokio::sync::Mutex` a test holds to freeze the flusher so pending
+///    write-behind acks never resolve. `FaultInjecting` is not a
+///    synchronization primitive.
+/// 3. **Relative / countdown one-shot fault triggers** (`fail_next_appends`
+///    countdown, `fail_at_relative_write` = current-count + n).
+///    `FaultInjecting`'s `Nth` is absolute-from-construction, not
+///    relative-from-now.
+///
+/// Folding only the write-fault part would strand the recording (needed for the
+/// fork primitive) in a second wrapper while losing the relative triggers, so
+/// there is no clean sub-part to migrate. Kept as the purpose-named
+/// crash-consistency harness per the fault-fake migration STRICT SCOPE RULE.
 struct FaultBackend {
     inner: InMemoryBackend,
     write_count: AtomicUsize,
