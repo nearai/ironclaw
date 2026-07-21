@@ -54,10 +54,9 @@ use ironclaw_turns::{
         LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
         LoopRunContext, LoopTranscriptPort, ModelVisibleToolObservation, ObservationTrust,
         ParentLoopOutput, PersonalContextPolicy, PromptMode, PromptSkillContextMetadata,
-        SkillTrustLevel,
-        ProviderToolCallReference, ProviderToolDefinition, SkillVisibility, ToolObservationDetail,
-        ToolObservationStatus, UpdateAssistantDraft, VisibleCapabilityRequest,
-        VisibleCapabilitySurface, resolution,
+        ProviderToolCallReference, ProviderToolDefinition, SkillTrustLevel, SkillVisibility,
+        ToolObservationDetail, ToolObservationStatus, UpdateAssistantDraft,
+        VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
     },
 };
 use tracing_test::traced_test;
