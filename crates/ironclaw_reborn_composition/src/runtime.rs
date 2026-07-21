@@ -1683,6 +1683,18 @@ impl RebornRuntime {
         None
     }
 
+    /// Test-only accessor for the admin user directory the WebUI facade wires.
+    /// Mirrors the production call `build_webui_services` makes to
+    /// [`Self::reborn_user_directory`] (`pub(crate)`), which integration tests
+    /// in a separate crate cannot reach. Gated behind `test-support` so the
+    /// substrate handle never leaks into production builds. For tests only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn reborn_user_directory_for_tests(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_reborn_identity::RebornUserDirectory>> {
+        self.reborn_user_directory()
+    }
+
     /// Admin per-user secret provisioner over the host-owned secret substrate,
     /// scoped to an arbitrary target user (not the runtime owner). `None` when
     /// no filesystem secret store was built. See `admin_secrets.rs`.

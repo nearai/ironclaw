@@ -177,5 +177,27 @@ async fn production_runtime_wires_identity_resolver_and_isolates_tenants() {
          tenant A's user (cross-tenant identity isolation)"
     );
 
+    // (4) ADMIN USER DIRECTORY WIRING (#5013). `RebornRuntime::reborn_user_directory`
+    // got the identical `None`→production-fallback fix as the resolver above, so it
+    // must be wired (return `Some`) on a production build and enumerate exactly the
+    // users SSO login persists — under the same per-call tenant partitioning. Tenant
+    // A's page contains `user_a` and never `user_b` (which was minted under tenant B);
+    // a leak here is a cross-tenant directory read, not a flake.
+    let directory = runtime
+        .reborn_user_directory_for_tests()
+        .expect("production runtime must wire the admin user directory (#5013)");
+    let tenant_a_users = directory
+        .list_users(&tenant_a, None, None, 10)
+        .await
+        .expect("list_users succeeds");
+    assert!(
+        tenant_a_users.iter().any(|u| u.user_id == user_a),
+        "tenant A's directory page must contain the user SSO login minted for tenant A"
+    );
+    assert!(
+        tenant_a_users.iter().all(|u| u.user_id != user_b),
+        "tenant A's directory page must not expose tenant B's user (cross-tenant isolation)"
+    );
+
     runtime.shutdown().await.expect("runtime shutdown");
 }
