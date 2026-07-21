@@ -14,8 +14,13 @@ export function useAdminConfiguration() {
     queryFn: fetchExtensionAdminConfiguration,
   });
   const mutation = useMutation({
-    mutationFn: ({ groupId, values }) =>
-      replaceExtensionAdminConfiguration(groupId, values),
+    mutationFn: ({ groupId, values, expectedRevision, idempotencyKey }) =>
+      replaceExtensionAdminConfiguration(
+        groupId,
+        values,
+        expectedRevision,
+        idempotencyKey,
+      ),
     onSuccess: (saved) => {
       queryClient.setQueryData(queryKey, (groups = []) =>
         groups.map((group) => group.group_id === saved.group_id ? saved : group),

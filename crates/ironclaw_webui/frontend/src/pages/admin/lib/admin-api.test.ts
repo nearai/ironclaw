@@ -127,12 +127,15 @@ test("fetchExtensionAdminConfiguration reads every manifest-driven group", async
   assert.equal(calls[0].init.method, undefined);
 });
 
-test("replaceExtensionAdminConfiguration PUTs only descriptor handles and values", async () => {
-  stubFetch(() => ({ group_id: "vendor.example", fields: [] }));
+test("replaceExtensionAdminConfiguration preserves optimistic revision and client idempotency", async () => {
+  stubFetch(() => ({ group_id: "vendor.example", revision: 8, fields: [] }));
 
-  await replaceExtensionAdminConfiguration("vendor.example", [
-    { handle: "client_secret", value: "write-only" },
-  ]);
+  await replaceExtensionAdminConfiguration(
+    "vendor.example",
+    [{ handle: "client_secret", value: "write-only" }],
+    7,
+    "save-7-client-generated",
+  );
 
   assert.equal(
     calls[0].path,
@@ -141,6 +144,8 @@ test("replaceExtensionAdminConfiguration PUTs only descriptor handles and values
   assert.equal(calls[0].init.method, "PUT");
   assert.deepEqual(jsonBody(calls[0]), {
     values: [{ handle: "client_secret", value: "write-only" }],
+    expected_revision: 7,
+    idempotency_key: "save-7-client-generated",
   });
 });
 

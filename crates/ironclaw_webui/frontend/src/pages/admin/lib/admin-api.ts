@@ -136,12 +136,21 @@ export async function fetchExtensionAdminConfiguration() {
   return Array.isArray(response?.groups) ? response.groups : [];
 }
 
-export async function replaceExtensionAdminConfiguration(groupId, values) {
+export async function replaceExtensionAdminConfiguration(
+  groupId,
+  values,
+  expectedRevision,
+  idempotencyKey,
+) {
   return apiFetch(
     `${EXTENSION_CONFIGURATION_BASE}/${encodeURIComponent(groupId)}`,
     {
       method: "PUT",
-      body: JSON.stringify({ values }),
+      body: JSON.stringify({
+        values,
+        expected_revision: expectedRevision,
+        idempotency_key: idempotencyKey,
+      }),
     },
   );
 }

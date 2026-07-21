@@ -32,6 +32,18 @@ export function AdminConfigurationTab() {
   );
 }
 
+export function buildConfigurationSaveMutation(group, values, idempotencyKey) {
+  return {
+    groupId: group.group_id,
+    expectedRevision: group.revision,
+    idempotencyKey,
+    values: group.fields.map((field) => ({
+      handle: field.handle,
+      value: values[field.handle] || "",
+    })),
+  };
+}
+
 export function ConfigurationGroup({ group, state }) {
   const initialValues = React.useMemo(
     () => Object.fromEntries(group.fields.map((field) => [field.handle, field.value || ""])),
@@ -46,12 +58,13 @@ export function ConfigurationGroup({ group, state }) {
     event.preventDefault();
     setSaved(false);
     state.resetSave?.();
-    const submitted = group.fields.map((field) => ({
-      handle: field.handle,
-      value: values[field.handle] || "",
-    }));
+    const mutation = buildConfigurationSaveMutation(
+      group,
+      values,
+      globalThis.crypto.randomUUID(),
+    );
     try {
-      await state.save({ groupId: group.group_id, values: submitted });
+      await state.save(mutation);
       setSaved(true);
       setValues((current) => Object.fromEntries(group.fields.map((field) => [
         field.handle,

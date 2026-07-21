@@ -3,7 +3,38 @@ import assert from "node:assert/strict";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { test } from "vitest";
-import { ConfigurationGroup } from "./configuration-tab";
+import {
+  ConfigurationGroup,
+  buildConfigurationSaveMutation,
+} from "./configuration-tab";
+
+test("configuration save mutation carries the loaded revision and client idempotency key", () => {
+  const mutation = buildConfigurationSaveMutation(
+    {
+      group_id: "fixture.shared",
+      revision: 12,
+      fields: [
+        { handle: "fixture_secret" },
+        { handle: "public_name" },
+      ],
+    },
+    {
+      fixture_secret: "write-only",
+      public_name: "fixture-bot",
+    },
+    "save-12-client-generated",
+  );
+
+  assert.deepEqual(mutation, {
+    groupId: "fixture.shared",
+    expectedRevision: 12,
+    idempotencyKey: "save-12-client-generated",
+    values: [
+      { handle: "fixture_secret", value: "write-only" },
+      { handle: "public_name", value: "fixture-bot" },
+    ],
+  });
+});
 
 test("configuration group renders generic operator fields and no lifecycle actions", () => {
   const html = renderToStaticMarkup(React.createElement(ConfigurationGroup, {
