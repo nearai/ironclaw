@@ -2,12 +2,26 @@
 
 Python/Playwright test suite that runs against a live ironclaw instance. Added in PR #553 ("Trajectory benchmarks and e2e trace test rig").
 
-**Two surfaces are covered, not one.** The suite drives both:
+**The live surface is the Reborn `ironclaw serve` WebChat v2 SPA** (`/`,
+`/api/webchat/v2/*`), driven via the `reborn_webui_harness` / `reborn_v2_*`
+fixtures and `SEL_V2` selectors. This is the only surface the Reborn coverage
+gate (`reborn_coverage_tests.txt`, run by `reborn-e2e.yml`) exercises. When
+adding a browser test, use the `reborn_v2_*` fixtures — see
+`test_reborn_webui_v2_smoke.py` for the canonical example.
 
-- the **legacy `ironclaw` gateway** (`/`, `#auth-screen`, `/api/chat/*`) via the `ironclaw_binary` + `page` fixtures, and
-- the **Reborn `ironclaw serve` WebChat v2 SPA** (`/`, `/api/webchat/v2/*`) via the `ironclaw_reborn_binary` + `reborn_v2_server` / `reborn_v2_browser` / `reborn_v2_page` fixtures.
-
-When adding a browser test for the v2 SPA, use the `reborn_v2_*` fixtures and `SEL_V2` selectors — **not** the legacy `page`/`SEL`. See `test_reborn_webui_v2_smoke.py` for the canonical v2 example.
+> **Tier B note:** the v1 legacy `ironclaw` gateway binary
+> (`ironclaw-legacy`, formerly built by the `ironclaw_binary` fixture) was
+> **deleted** under Tier B (`docs/plans/2026-07-02-reborn-internal-module-refactor.md`
+> §8). The eight browser scenarios that drove only the legacy gateway
+> (`test_connection`, `test_chat`, `test_html_injection`, `test_skills`,
+> `test_sse_reconnect`, `test_tool_approval`, `test_dom_resource_limits`,
+> `test_reborn_gateway_smoke`) were removed. The remaining suite still carries
+> legacy `conftest.py` fixtures (`ironclaw_binary`, `ironclaw_server`, the
+> legacy `page`/`browser`) and a number of `test_v2_*` scenarios that depend on
+> them; those are non-functional until repointed at the Reborn serve binary and
+> are tracked as a dedicated migration in issue #6369. The doc below still
+> describes that legacy machinery where it remains — treat any `ironclaw_binary`
+> / legacy-`page` reference as pending-removal, not current guidance.
 
 ## Setup
 

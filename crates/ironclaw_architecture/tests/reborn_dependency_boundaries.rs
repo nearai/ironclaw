@@ -796,26 +796,8 @@ fn reborn_turns_public_surface_keeps_runner_api_explicit() {
 }
 
 #[test]
-fn reborn_runner_llm_wiring_stays_out_of_root_src() {
+fn reborn_runner_llm_wiring_is_isolated() {
     let root = workspace_root();
-    let root_lib =
-        std::fs::read_to_string(root.join("src/lib.rs")).expect("root src/lib.rs must be readable");
-    assert!(
-        !root_lib.contains("pub mod reborn_loop_support;"),
-        "retired Reborn loop-support wiring must not return to root src/lib.rs"
-    );
-    assert!(
-        !root.join("src/reborn_loop_support.rs").exists(),
-        "retired Reborn loop-support wiring must not return under root src/"
-    );
-    assert!(
-        !root_lib.contains("pub mod reborn_loop_host;"),
-        "Reborn loop-host wiring must live under crates/ironclaw_loop_host, not root src/lib.rs"
-    );
-    assert!(
-        !root.join("src/reborn_loop_host.rs").exists(),
-        "Reborn loop-host wiring must not live under root src/"
-    );
 
     let reborn_gateway = root.join("crates/ironclaw_runner/src/model_gateway.rs");
     assert!(
@@ -831,9 +813,10 @@ fn reborn_runner_llm_wiring_stays_out_of_root_src() {
     );
 
     // Reborn crates may reuse the extracted LLM crate, but never on its default
-    // terms: `ironclaw_llm`'s defaults drag in the root app's postgres/libsql/tui
-    // feature set, which would couple the Reborn stack back to the v1 monolith.
-    // `default-features = false` on every edge is the durable invariant.
+    // terms: `ironclaw_llm`'s defaults pull in extra provider/backend features
+    // (e.g. `bedrock`) Reborn doesn't need. `default-features = false` on every
+    // edge is the durable invariant, keeping the Reborn stack's dependency
+    // footprint minimal and explicit.
     for manifest_path in [
         "crates/ironclaw_runner/Cargo.toml",
         "crates/ironclaw_reborn_composition/Cargo.toml",
