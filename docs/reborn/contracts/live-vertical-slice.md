@@ -14,8 +14,8 @@ This slice proves the first Reborn host path is runnable:
 DiskFilesystem mounted at /system/extensions
 -> ExtensionDiscovery reads manifests
 -> ExtensionRegistry registers capabilities
--> RuntimeDispatcher receives already-authorized dispatch requests
--> RuntimeDispatcher routes dispatch by RuntimeKind through registered adapters
+-> RuntimeDispatcher receives sealed `Authorized` witnesses
+-> RuntimeDispatcher routes dispatch by sealed `RuntimeLane` through registered adapters
 -> dispatcher example adapters execute JSON echo capabilities
 -> HostRuntimeServices examples wrap real ScriptRuntime backends for end-to-end capability/process demos
 -> InMemoryResourceGovernor reserves and reconciles all invocations
@@ -64,7 +64,7 @@ The integration test `crates/ironclaw_dispatcher/tests/vertical_slice_contract.r
 
 - extension manifests are read from `DiskFilesystem` via `/system/extensions`
 - extension discovery returns WASM, Script, and MCP packages
-- dispatcher crate tests exercise already-authorized `CapabilityDispatchRequest` values directly
+- dispatcher receives already-authorized sealed `Authorized` witnesses and routes by their sealed `RuntimeLane`
 - higher-level caller workflow stays out of dispatcher crate dev surfaces
 - WASM dispatch goes through `RuntimeDispatcher` and a registered runtime adapter
 - Script dispatch goes through `RuntimeDispatcher` and a registered runtime adapter

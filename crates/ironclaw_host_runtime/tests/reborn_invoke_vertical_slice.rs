@@ -8,7 +8,7 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
-use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
+use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_dispatcher::{
     RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher, RuntimeExecutor,
 };
@@ -17,8 +17,8 @@ use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry
 use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
-    CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeFailureKind,
+    BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime,
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
 };
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceGovernor, ResourceTally,
@@ -42,7 +42,8 @@ async fn default_host_runtime_invokes_through_runtime_dispatcher_with_resources_
     let adapter = Arc::new(RecordingRuntimeAdapter::new(json!({"via":"host-runtime"})));
     let (registry, dispatcher, governor, events) = runtime_dispatcher_stack(Arc::clone(&adapter));
     let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(dispatcher);
-    let authorizer = Arc::new(CountingGrantAuthorizer::default());
+    let expected_mounts = representative_mounts();
+    let authorizer = Arc::new(MountingAuthorizer::new(expected_mounts.clone()));
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let runtime = DefaultHostRuntime::new(
         Arc::clone(&registry),
@@ -52,10 +53,12 @@ async fn default_host_runtime_invokes_through_runtime_dispatcher_with_resources_
         local_test_runtime_policy(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy()))
-    .with_run_state(run_state.clone());
-    let context = execution_context(CapabilitySet {
+    .with_run_state(run_state.clone())
+    .with_obligation_handler(Arc::new(BuiltinObligationHandler::new()));
+    let mut context = execution_context(CapabilitySet {
         grants: vec![dispatch_grant()],
     });
+    context.mounts = expected_mounts.clone();
     let scope = context.resource_scope.clone();
     let invocation_id = context.invocation_id;
     let estimate = ResourceEstimate::default().set_output_bytes(4_096);
@@ -83,7 +86,7 @@ async fn default_host_runtime_invokes_through_runtime_dispatcher_with_resources_
     assert_eq!(recorded.capability_id, capability_id());
     assert_eq!(recorded.scope, scope);
     assert_eq!(recorded.estimate, estimate);
-    assert_eq!(recorded.mounts, None);
+    assert_eq!(recorded.mounts, Some(expected_mounts));
     assert_eq!(recorded.resource_reservation, None);
     assert_eq!(recorded.input, input);
 
@@ -245,30 +248,40 @@ impl RuntimeExecutor<DiskFilesystem, InMemoryResourceGovernor> for RecordingRunt
     }
 }
 
-#[derive(Default)]
-struct CountingGrantAuthorizer {
+struct MountingAuthorizer {
     calls: AtomicUsize,
+    mounts: MountView,
 }
 
-impl CountingGrantAuthorizer {
+impl MountingAuthorizer {
+    fn new(mounts: MountView) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            mounts,
+        }
+    }
+
     fn call_count(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
     }
 }
 
 #[async_trait]
-impl TrustAwareCapabilityDispatchAuthorizer for CountingGrantAuthorizer {
+impl TrustAwareCapabilityDispatchAuthorizer for MountingAuthorizer {
     async fn authorize_dispatch_with_trust(
         &self,
-        context: &ExecutionContext,
-        descriptor: &CapabilityDescriptor,
-        estimate: &ResourceEstimate,
-        trust_decision: &TrustDecision,
+        _context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+        _trust_decision: &TrustDecision,
     ) -> Decision {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        GrantAuthorizer::new()
-            .authorize_dispatch_with_trust(context, descriptor, estimate, trust_decision)
-            .await
+        Decision::Allow {
+            obligations: Obligations::new(vec![Obligation::UseScopedMounts {
+                mounts: self.mounts.clone(),
+            }])
+            .unwrap(),
+        }
     }
 }
 
@@ -341,7 +354,7 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
 }
 
 fn execution_context(grants: CapabilitySet) -> ExecutionContext {
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::Wasm,
@@ -349,7 +362,9 @@ fn execution_context(grants: CapabilitySet) -> ExecutionContext {
         grants,
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn dispatch_grant() -> CapabilityGrant {
@@ -368,6 +383,21 @@ fn dispatch_grant() -> CapabilityGrant {
             max_invocations: None,
         },
     }
+}
+
+fn representative_mounts() -> MountView {
+    MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/project-a").unwrap(),
+        MountPermissions {
+            read: true,
+            write: true,
+            delete: false,
+            list: true,
+            execute: false,
+        },
+    )])
+    .unwrap()
 }
 
 fn local_manifest_trust_policy() -> HostTrustPolicy {

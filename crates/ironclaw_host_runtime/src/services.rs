@@ -506,13 +506,18 @@ where
     /// Builds the upper facade with the same dispatcher, process services,
     /// stores, cancellation registry, result store, and runtime health graph.
     fn build_host_runtime(&self) -> DefaultHostRuntime {
-        let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(self.runtime_dispatcher());
-        let process_executor = Arc::new(HostProcessExecutor::new(
-            Arc::new(RuntimeDispatchProcessExecutor::new(Arc::clone(&dispatcher))),
-            self.process_sandbox_executor.clone(),
-        ));
         let lifecycle_process_store = Arc::clone(&self.process_lifecycle_store);
         let process_store: Arc<dyn ProcessStore> = lifecycle_process_store.clone();
+        let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(self.runtime_dispatcher());
+        let process_executor = Arc::new(HostProcessExecutor::new(
+            Arc::new(RuntimeDispatchProcessExecutor::new(
+                Arc::clone(&dispatcher),
+                ironclaw_capabilities::process_authorization_remint_port(Arc::clone(
+                    &process_store,
+                )),
+            )),
+            self.process_sandbox_executor.clone(),
+        ));
         let result_failure_cleanup_store = Arc::clone(&lifecycle_process_store);
         let process_manager: Arc<dyn ProcessManager> = Arc::new(
             ironclaw_processes::BackgroundProcessManager::new(

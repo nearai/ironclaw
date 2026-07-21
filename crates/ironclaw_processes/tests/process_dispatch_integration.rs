@@ -553,6 +553,7 @@ fn process_start_with_input(
         mounts: MountView::default(),
         estimated_resources: ResourceEstimate::default(),
         resource_reservation_id: None,
+        authorized_continuation: None,
         input,
     }
 }

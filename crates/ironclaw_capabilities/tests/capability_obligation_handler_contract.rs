@@ -118,8 +118,8 @@ async fn capability_host_passes_prepared_effects_to_dispatch() {
     .unwrap();
 
     let request = dispatcher.last_request().unwrap();
-    assert_eq!(request.scope, scope);
-    assert_eq!(request.estimate, estimate);
+    assert_eq!(request.invocation.scope, scope);
+    assert_eq!(request.invocation.estimate, estimate);
     assert_eq!(request.mounts, Some(narrowed_mounts));
     assert_eq!(
         request
@@ -446,12 +446,12 @@ async fn invoke_fails_closed_and_releases_reservation_when_witness_expired() {
     assert!(
         matches!(
             err,
-            CapabilityInvocationError::AuthorizationDenied {
-                reason: DenyReason::InternalInvariantViolation,
+            CapabilityInvocationError::Dispatch {
+                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::PolicyDenied),
                 ..
             }
         ),
-        "an expired witness must fail closed with a terminal internal invariant, got {err:?}"
+        "an expired witness must fail closed as an expired sealed dispatch authorization, got {err:?}"
     );
     assert!(
         !dispatcher.has_request(),
@@ -505,12 +505,12 @@ async fn spawn_fails_closed_and_releases_reservation_when_witness_expired() {
     assert!(
         matches!(
             err,
-            CapabilityInvocationError::AuthorizationDenied {
-                reason: DenyReason::InternalInvariantViolation,
+            CapabilityInvocationError::Dispatch {
+                kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::PolicyDenied),
                 ..
             }
         ),
-        "an expired spawn witness must fail closed, got {err:?}"
+        "an expired spawn witness must fail closed as an expired sealed dispatch authorization, got {err:?}"
     );
     assert!(
         aborted.load(Ordering::SeqCst),
@@ -800,6 +800,7 @@ fn process_record_from_start(start: ProcessStart, status: ProcessStatus) -> Proc
         mounts: start.mounts,
         estimated_resources: start.estimated_resources,
         resource_reservation_id: start.resource_reservation_id,
+        authorized_continuation: start.authorized_continuation,
         error_kind: None,
     }
 }

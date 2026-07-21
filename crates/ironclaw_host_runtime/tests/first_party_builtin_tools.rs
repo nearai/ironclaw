@@ -3496,6 +3496,51 @@ async fn builtin_shell_uses_configured_tenant_sandbox_process_port() {
 }
 
 #[tokio::test]
+async fn builtin_shell_tenant_sandbox_process_uses_callers_scope_for_two_user_isolation() {
+    let local_process = Arc::new(RecordingProcessPort::default());
+    let sandbox_transport = Arc::new(RecordingSandboxTransport::default());
+    let sandbox_process = Arc::new(TenantSandboxProcessPort::new(sandbox_transport.clone()));
+    let runtime = runtime_with_local_and_sandbox_process_ports(
+        Arc::clone(&local_process),
+        Arc::clone(&sandbox_process),
+        tenant_sandbox_process_policy(),
+    );
+    let user_a = UserId::new("user-a").unwrap();
+    let user_b = UserId::new("user-b").unwrap();
+    let tenant = TenantId::new("tenant-shared").unwrap();
+    let mut context = execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy());
+    context.run_id = Some(RunId::new());
+    let agent_id = context.agent_id.clone();
+    let project_id = context.project_id.clone();
+    set_context_scope(
+        &mut context,
+        tenant.clone(),
+        user_b.clone(),
+        agent_id,
+        project_id,
+    );
+    let expected_scope = context.resource_scope.clone();
+
+    let output = invoke_with_context(
+        &runtime,
+        SHELL_CAPABILITY_ID,
+        json!({"command": "cat /workspace/user-a-secret.txt"}),
+        context,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["sandboxed"], json!(true));
+    assert!(local_process.requests.lock().unwrap().is_empty());
+    let requests = sandbox_transport.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].scope, expected_scope);
+    assert_eq!(requests[0].scope.tenant_id, tenant);
+    assert_eq!(requests[0].scope.user_id, user_b);
+    assert_ne!(requests[0].scope.user_id, user_a);
+}
+
+#[tokio::test]
 async fn builtin_shell_rejects_hosted_process_plan_before_handler_runs() {
     let process_port = Arc::new(RecordingProcessPort::default());
     let runtime =
@@ -9718,7 +9763,7 @@ where
             .map(|grant| dispatch_grant(grant.as_ref()))
             .collect(),
     };
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::FirstParty,
@@ -9726,7 +9771,9 @@ where
         capability_set,
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn execution_context_with_mounts<I>(grants: I, mounts: MountView) -> ExecutionContext
@@ -9740,7 +9787,7 @@ where
             .map(|grant| dispatch_grant_with_mounts(grant.as_ref(), mounts.clone()))
             .collect(),
     };
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::FirstParty,
@@ -9748,7 +9795,9 @@ where
         capability_set,
         mounts,
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn execution_context_with_network<I>(grants: I, network: NetworkPolicy) -> ExecutionContext
@@ -9780,7 +9829,7 @@ where
             })
             .collect(),
     };
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::FirstParty,
@@ -9788,7 +9837,9 @@ where
         capability_set,
         mounts,
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn set_context_scope(

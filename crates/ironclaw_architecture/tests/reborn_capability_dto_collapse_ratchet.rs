@@ -60,8 +60,6 @@ const FROZEN_COLLAPSE_DTOS: &[&str] = &[
     "CapabilityInvocationRequest",
     "CapabilityResumeRequest",
     "CapabilityAuthResumeRequest",
-    // host_api (the shape that already lives at the bottom — `Invocation`/`Authorized`)
-    "CapabilityDispatchRequest",
     // dispatcher (`Authorized` + resolved handles replace it, §3.1)
     "RuntimeAdapterRequest",
     // ── result side: the overloaded ten-variant enum (§1.2 → `Resolution`) ──
@@ -132,7 +130,7 @@ fn reborn_capability_dto_allowlist_is_frozen_and_only_shrinks() {
 fn collapse_dto_predicate_is_exact_name() {
     let sample = r#"
         pub struct RuntimeCapabilityRequest { a: u8 }     // frozen -> flagged
-        pub struct CapabilityDispatchRequest { a: u8 }    // frozen -> flagged
+        pub struct CapabilityAuthResumeRequest { a: u8 }  // frozen -> flagged
         pub struct RuntimeAdapterRequestBuilder;          // suffix -> NOT flagged
         pub struct Invocation;                            // the target -> NOT flagged
         pub struct CapabilityDispatchResult;              // sibling result -> NOT flagged
@@ -143,6 +141,6 @@ fn collapse_dto_predicate_is_exact_name() {
         .collect();
     assert_eq!(
         got,
-        vec!["RuntimeCapabilityRequest", "CapabilityDispatchRequest"]
+        vec!["RuntimeCapabilityRequest", "CapabilityAuthResumeRequest"]
     );
 }

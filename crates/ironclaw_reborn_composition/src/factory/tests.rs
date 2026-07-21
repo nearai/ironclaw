@@ -13,7 +13,7 @@ use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
     ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant, MountPermissions,
     NetworkPolicy, NetworkScheme, NetworkTargetPattern, Principal, ResourceEstimate, ResourceScope,
-    ResourceUsage, RuntimeKind, ScopedPath, SecretHandle, TenantId, TrustClass, UserId,
+    ResourceUsage, RunId, RuntimeKind, ScopedPath, SecretHandle, TenantId, TrustClass, UserId,
     VirtualPath,
 };
 use ironclaw_host_api::{
@@ -2471,7 +2471,7 @@ fn memory_context(capability_id: &str) -> ExecutionContext {
 
 fn gsuite_context(capability_id: &str) -> ExecutionContext {
     let extension_id = ExtensionId::new("caller").expect("valid extension id");
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("local-dev-test-user").expect("valid user id"),
         extension_id.clone(),
         RuntimeKind::FirstParty,
@@ -2495,7 +2495,9 @@ fn gsuite_context(capability_id: &str) -> ExecutionContext {
         },
         MountView::new(Vec::new()).expect("valid empty mount view"),
     )
-    .expect("valid execution context")
+    .expect("valid execution context");
+    context.run_id = Some(RunId::new());
+    context
 }
 
 /// Turn on the global auto-approve switch for `context`'s actor scope so a
@@ -2522,7 +2524,7 @@ use crate::approval_test_support::disable_global_auto_approve;
 
 fn notion_mcp_context(capability_id: &str) -> ExecutionContext {
     let extension_id = ExtensionId::new("caller").expect("valid extension id");
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("local-dev-test-user").expect("valid user id"),
         extension_id.clone(),
         RuntimeKind::Mcp,
@@ -2546,12 +2548,14 @@ fn notion_mcp_context(capability_id: &str) -> ExecutionContext {
         },
         MountView::new(Vec::new()).expect("valid empty mount view"),
     )
-    .expect("valid execution context")
+    .expect("valid execution context");
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn web_access_context(capability_id: &str) -> ExecutionContext {
     let extension_id = ExtensionId::new("caller").expect("valid extension id");
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("local-dev-test-user").expect("valid user id"),
         extension_id.clone(),
         RuntimeKind::FirstParty,
@@ -2575,7 +2579,9 @@ fn web_access_context(capability_id: &str) -> ExecutionContext {
         },
         MountView::new(Vec::new()).expect("valid empty mount view"),
     )
-    .expect("valid execution context")
+    .expect("valid execution context");
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn web_access_network_policy() -> NetworkPolicy {
@@ -2592,7 +2598,7 @@ fn web_access_network_policy() -> NetworkPolicy {
 
 fn execution_context(capability_id: &str, mounts: MountView) -> ExecutionContext {
     let extension_id = ExtensionId::new("caller").expect("valid extension id");
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("local-dev-test-user").expect("valid user id"),
         extension_id.clone(),
         RuntimeKind::FirstParty,
@@ -2606,7 +2612,9 @@ fn execution_context(capability_id: &str, mounts: MountView) -> ExecutionContext
         },
         mounts,
     )
-    .expect("valid execution context")
+    .expect("valid execution context");
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn capability_grant(

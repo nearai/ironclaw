@@ -27,9 +27,9 @@ use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
     AgentId, CapabilityGrantId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId,
     GrantConstraints, MountAlias, MountGrant, MountPermissions, MountView, NetworkPolicy,
-    PackageId, Principal, ProjectId, ResourceEstimate, RuntimeHttpEgress, RuntimeHttpEgressError,
-    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, TenantId, ThreadId,
-    TrustClass, UserId, VirtualPath,
+    PackageId, Principal, ProjectId, ResourceEstimate, RunId, RuntimeHttpEgress,
+    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind,
+    TenantId, ThreadId, TrustClass, UserId, VirtualPath,
     runtime_policy::{
         ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
         NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -177,6 +177,7 @@ fn agent_scoped_context(
     ctx.user_id = UserId::new(user_id).unwrap();
     ctx.agent_id = Some(AgentId::new(agent_id).unwrap());
     ctx.project_id = Some(ProjectId::new(project_id).unwrap());
+    ctx.run_id = Some(RunId::new());
     ctx.resource_scope.tenant_id = TenantId::new(tenant_id).unwrap();
     ctx.resource_scope.user_id = UserId::new(user_id).unwrap();
     ctx.resource_scope.agent_id = Some(AgentId::new(agent_id).unwrap());

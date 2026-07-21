@@ -1,6 +1,8 @@
 mod support;
 
-use support::{RecordingExecutor, legacy_capability_fixture_to_v2};
+use support::{
+    CapabilityDispatchRequest, RecordingExecutor, authorized, legacy_capability_fixture_to_v2,
+};
 
 use ironclaw_dispatcher::*;
 use ironclaw_extensions::*;
@@ -26,7 +28,7 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
     let wasm_scope = scope.clone();
     let wasm_account = ResourceAccount::tenant(wasm_scope.tenant_id.clone());
     let wasm = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("echo-wasm.say").unwrap(),
             scope: wasm_scope,
@@ -37,7 +39,7 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "hello wasm"}),
-        })
+        }))
         .await
         .unwrap();
 
@@ -53,7 +55,7 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
     let script_scope = scope.clone();
     let script_account = ResourceAccount::tenant(script_scope.tenant_id.clone());
     let script = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope: script_scope,
@@ -65,7 +67,7 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "hello script"}),
-        })
+        }))
         .await
         .unwrap();
 
@@ -83,7 +85,7 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
     let mcp_scope = scope;
     let mcp_account = ResourceAccount::tenant(mcp_scope.tenant_id.clone());
     let mcp = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("echo-mcp.say").unwrap(),
             scope: mcp_scope,
@@ -95,7 +97,7 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "hello mcp"}),
-        })
+        }))
         .await
         .unwrap();
 

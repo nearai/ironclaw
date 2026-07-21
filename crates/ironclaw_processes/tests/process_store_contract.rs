@@ -47,6 +47,39 @@ async fn in_memory_process_store_starts_capability_process_record() {
 }
 
 #[tokio::test]
+async fn process_store_round_trips_authorized_continuation_on_start_reload() {
+    let store = in_memory_process_store();
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let estimate = ResourceEstimate::default();
+    let continuation = ProcessAuthorizedContinuation {
+        invocation: ProcessAuthorizedInvocation {
+            activity_id: ActivityId::new(),
+            capability: CapabilityId::new("echo.say").unwrap(),
+            scope: scope.clone(),
+            actor: Actor::System,
+            origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
+            estimate: estimate.clone(),
+            correlation_id: CorrelationId::new(),
+            process_id,
+            parent_process_id: None,
+        },
+        lane: RuntimeLane::Wasm,
+        mounts: Some(MountView::default()),
+        resource_reservation: None,
+    };
+    let mut start = process_start_with_estimate(process_id, invocation_id, scope.clone(), estimate);
+    start.authorized_continuation = Some(continuation.clone());
+
+    let record = store.start(start).await.unwrap();
+    assert_eq!(record.authorized_continuation, Some(continuation.clone()));
+
+    let reloaded = store.get(&scope, process_id).await.unwrap().unwrap();
+    assert_eq!(reloaded.authorized_continuation, Some(continuation));
+}
+
+#[tokio::test]
 async fn in_memory_process_store_rejects_duplicate_process_id_in_same_resource_scope() {
     let store = in_memory_process_store();
     let invocation_id = InvocationId::new();
@@ -1807,6 +1840,7 @@ async fn assert_unowned_process_reservation_rejected(transition: UnownedTransiti
         mounts: MountView::default(),
         estimated_resources: estimate,
         resource_reservation_id: Some(forged_reservation.id),
+        authorized_continuation: None,
         status: ProcessStatus::Running,
         error_kind: None,
     });
@@ -1890,6 +1924,7 @@ impl ProcessStore for ForgedProcessStore {
             mounts: start.mounts,
             estimated_resources: start.estimated_resources,
             resource_reservation_id: start.resource_reservation_id,
+            authorized_continuation: start.authorized_continuation,
             error_kind: None,
         };
         self.insert(record.clone());
@@ -2158,6 +2193,7 @@ impl ProcessStore for ReservationDroppingStore {
             mounts: start.mounts,
             estimated_resources: start.estimated_resources,
             resource_reservation_id: None,
+            authorized_continuation: start.authorized_continuation,
             error_kind: None,
         })
     }
@@ -2448,6 +2484,7 @@ fn process_record(
         mounts: start.mounts,
         estimated_resources: start.estimated_resources,
         resource_reservation_id: start.resource_reservation_id,
+        authorized_continuation: start.authorized_continuation,
         error_kind: None,
     }
 }
@@ -2500,6 +2537,7 @@ fn process_start_with_estimate(
         mounts: MountView::default(),
         estimated_resources,
         resource_reservation_id: None,
+        authorized_continuation: None,
         input: serde_json::json!({"message": "runtime payload"}),
     }
 }

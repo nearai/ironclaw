@@ -792,7 +792,7 @@ async fn auth_resume_after_real_approval_bounce_reuses_claimed_lease() {
         if call_index == 0 {
             // First dispatch: return AuthRequired to trigger the auth bounce.
             Err(DispatchError::AuthRequired {
-                capability: request.capability_id.clone(),
+                capability: request.invocation.capability.clone(),
                 required_secrets: vec![],
                 credential_requirements: vec![],
             })
@@ -969,7 +969,7 @@ async fn auth_resume_after_real_approval_bounce_reuses_claimed_lease() {
     // The second (successful) dispatch is the most recently recorded request.
     let dispatched_request = dispatcher.last_request().unwrap();
     assert_eq!(
-        dispatched_request.scope.invocation_id, original_invocation_id,
+        dispatched_request.invocation.scope.invocation_id, original_invocation_id,
         "(e) capability must be dispatched with the original invocation_id"
     );
 }
@@ -1827,14 +1827,16 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
     impl CapabilityDispatcher for GatingDispatcher {
         async fn dispatch_json(
             &self,
-            request: CapabilityDispatchRequest,
+            request: Authorized,
         ) -> Result<CapabilityDispatchResult, DispatchError> {
             let count = self
                 .call_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if count == 0 {
+                let capability = request.invocation().capability.clone();
+                let _ = request.abort();
                 return Err(DispatchError::AuthRequired {
-                    capability: request.capability_id,
+                    capability,
                     required_secrets: vec![],
                     credential_requirements: vec![],
                 });

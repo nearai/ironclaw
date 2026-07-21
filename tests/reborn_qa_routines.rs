@@ -34,7 +34,7 @@ use ironclaw_approvals::AutoApproveSettingInput;
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
     ExecutionContext, ExtensionId, GrantConstraints, MountView, NetworkPolicy, Principal,
-    ResourceEstimate, RuntimeKind, TenantId, TrustClass, UserId,
+    ResourceEstimate, RunId, RuntimeKind, TenantId, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
     ECHO_CAPABILITY_ID, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
@@ -663,5 +663,6 @@ fn trigger_management_execution_context() -> ExecutionContext {
     context.resource_scope.tenant_id = tenant_id;
     context.resource_scope.agent_id = Some(agent_id);
     context.resource_scope.project_id = None;
+    context.run_id = Some(RunId::new());
     context
 }

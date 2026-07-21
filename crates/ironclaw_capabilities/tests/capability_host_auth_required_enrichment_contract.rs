@@ -154,7 +154,7 @@ async fn invoke_json_preserves_non_empty_credential_requirements_from_dispatcher
     };
     let dispatcher = TestDispatcher::responding(|request, _| {
         Err(DispatchError::AuthRequired {
-            capability: request.capability_id.clone(),
+            capability: request.invocation.capability.clone(),
             required_secrets: Vec::new(),
             credential_requirements: vec![RuntimeCredentialAuthRequirement {
                 provider: RuntimeCredentialAccountProviderId::new("mcp_provider").unwrap(),
@@ -408,7 +408,7 @@ async fn invoke_json_preserves_required_secrets_from_dispatcher() {
     };
     let dispatcher = TestDispatcher::responding(|request, _| {
         Err(DispatchError::AuthRequired {
-            capability: request.capability_id.clone(),
+            capability: request.invocation.capability.clone(),
             required_secrets: vec![SecretHandle::new("raw_secret_handle").unwrap()],
             credential_requirements: Vec::new(),
         })

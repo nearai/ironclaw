@@ -10,11 +10,68 @@ use ironclaw_dispatcher::{
 };
 use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, MountView, ResourceScope, ResourceUsage, RuntimeKind, RuntimeLane,
-    UserId, runtime_policy::NetworkMode,
+    ActivityId, Actor, CapabilityId, CorrelationId, ExtensionId, Invocation, InvocationOrigin,
+    MountView, ProductKind, ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage,
+    RunId, RuntimeKind, RuntimeLane, UserId, runtime_policy::NetworkMode,
 };
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceGovernor};
 use serde_json::Value;
+
+#[derive(Debug, Clone)]
+pub struct CapabilityDispatchRequest {
+    pub capability_id: CapabilityId,
+    pub scope: ResourceScope,
+    pub authenticated_actor_user_id: Option<UserId>,
+    pub run_id: Option<RunId>,
+    pub estimate: ResourceEstimate,
+    pub mounts: Option<MountView>,
+    pub resource_reservation: Option<ResourceReservation>,
+    pub input: Value,
+}
+
+pub fn authorized(request: CapabilityDispatchRequest) -> ironclaw_host_api::Authorized {
+    let lane = if request.capability_id.as_str().contains("mcp") {
+        RuntimeLane::Mcp
+    } else if request.capability_id.as_str().contains("script") {
+        RuntimeLane::Process
+    } else if request.capability_id.as_str().contains("first_party") {
+        RuntimeLane::FirstParty
+    } else {
+        RuntimeLane::Wasm
+    };
+    authorized_with_lane(request, lane)
+}
+
+pub fn authorized_with_lane(
+    request: CapabilityDispatchRequest,
+    lane: RuntimeLane,
+) -> ironclaw_host_api::Authorized {
+    let invocation = Invocation {
+        activity_id: ActivityId::new(),
+        capability: request.capability_id,
+        input: request.input,
+        scope: request.scope,
+        actor: request
+            .authenticated_actor_user_id
+            .map(Actor::Sealed)
+            .unwrap_or(Actor::System),
+        origin: request
+            .run_id
+            .map(InvocationOrigin::LoopRun)
+            .unwrap_or_else(|| InvocationOrigin::Product(ProductKind::new("test").unwrap())),
+        estimate: request.estimate,
+        correlation_id: CorrelationId::new(),
+        process_id: None,
+        parent_process_id: None,
+    };
+    ironclaw_host_api::Authorized::seal_for_test(
+        invocation,
+        lane,
+        request.mounts.unwrap_or_default(),
+        request.resource_reservation,
+        chrono::DateTime::<chrono::Utc>::MAX_UTC,
+    )
+}
 
 /// Behavior a [`RecordingExecutor`] applies to a configured lane.
 #[derive(Clone)]
@@ -139,10 +196,15 @@ impl RuntimeExecutor<DiskFilesystem, InMemoryResourceGovernor> for RecordingExec
                 runtime,
                 RuntimeKind::Script | RuntimeKind::Mcp
             )));
-        let reservation = request
-            .governor
-            .reserve(request.scope.clone(), request.estimate.clone())
-            .map_err(|_| dispatch_error_for_runtime(runtime, RuntimeDispatchErrorKind::Resource))?;
+        let reservation = match request.resource_reservation {
+            Some(reservation) => reservation,
+            None => request
+                .governor
+                .reserve(request.scope.clone(), request.estimate.clone())
+                .map_err(|_| {
+                    dispatch_error_for_runtime(runtime, RuntimeDispatchErrorKind::Resource)
+                })?,
+        };
         let receipt = request
             .governor
             .reconcile(reservation.id, usage.clone())

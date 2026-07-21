@@ -818,7 +818,7 @@ async fn invoke_http_fixture(
 }
 
 fn execution_context(grants: CapabilitySet) -> ExecutionContext {
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::FirstParty,
@@ -826,7 +826,9 @@ fn execution_context(grants: CapabilitySet) -> ExecutionContext {
         grants,
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn dispatch_grant() -> CapabilityGrant {

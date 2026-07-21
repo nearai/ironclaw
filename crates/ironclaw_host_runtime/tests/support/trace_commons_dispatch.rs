@@ -254,7 +254,7 @@ pub fn execution_context_with_network(
             network,
         )],
     };
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new(user_id).unwrap(),
         ExtensionId::new(caller_extension_id).unwrap(),
         RuntimeKind::FirstParty,
@@ -262,7 +262,9 @@ pub fn execution_context_with_network(
         capability_set,
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 /// Execution context granting a read-only capability (no network needed).

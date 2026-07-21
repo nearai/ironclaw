@@ -1,6 +1,8 @@
 mod support;
 
-use support::{RecordingExecutor, legacy_capability_fixture_to_v2};
+use support::{
+    CapabilityDispatchRequest, RecordingExecutor, authorized, legacy_capability_fixture_to_v2,
+};
 
 use async_trait::async_trait;
 use ironclaw_dispatcher::*;
@@ -26,7 +28,7 @@ async fn dispatcher_emits_events_for_wasm_and_script_success() {
         RuntimeDispatcher::new(&registry, &fs, &governor, executor).with_event_sink(&events);
 
     dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("echo-wasm.say").unwrap(),
             scope: sample_scope(),
@@ -37,12 +39,12 @@ async fn dispatcher_emits_events_for_wasm_and_script_success() {
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "hello wasm"}),
-        })
+        }))
         .await
         .unwrap();
 
     dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope: sample_scope(),
@@ -54,7 +56,7 @@ async fn dispatcher_emits_events_for_wasm_and_script_success() {
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "hello script"}),
-        })
+        }))
         .await
         .unwrap();
 
@@ -99,7 +101,7 @@ async fn dispatcher_ignores_event_sink_failures_on_success() {
         RuntimeDispatcher::new(&registry, &fs, &governor, executor).with_event_sink(&events);
 
     let result = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("echo-wasm.say").unwrap(),
             scope: sample_scope(),
@@ -110,7 +112,7 @@ async fn dispatcher_ignores_event_sink_failures_on_success() {
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "event sink fails"}),
-        })
+        }))
         .await
         .unwrap();
 
@@ -127,7 +129,7 @@ async fn dispatcher_preserves_original_error_when_failure_event_sink_fails() {
         .with_event_sink(&events);
 
     let err = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope: sample_scope(),
@@ -138,7 +140,7 @@ async fn dispatcher_preserves_original_error_when_failure_event_sink_fails() {
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "missing backend"}),
-        })
+        }))
         .await
         .unwrap_err();
 
@@ -167,7 +169,7 @@ async fn dispatcher_logs_release_failure_without_masking_dispatch_error() {
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor, RecordingExecutor::new());
 
     let err = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope,
@@ -178,7 +180,7 @@ async fn dispatcher_logs_release_failure_without_masking_dispatch_error() {
             mounts: None,
             resource_reservation: Some(reservation.clone()),
             input: json!({"message": "missing backend"}),
-        })
+        }))
         .instrument(tracing::info_span!(
             "dispatcher_logs_release_failure_without_masking_dispatch_error"
         ))
@@ -209,7 +211,7 @@ async fn dispatcher_emits_redacted_runtime_error_kind_for_adapter_failure() {
         RuntimeDispatcher::new(&registry, &fs, &governor, executor).with_event_sink(&events);
 
     let err = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope: sample_scope(),
@@ -220,7 +222,7 @@ async fn dispatcher_emits_redacted_runtime_error_kind_for_adapter_failure() {
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "adapter fails"}),
-        })
+        }))
         .await
         .unwrap_err();
 
@@ -253,7 +255,7 @@ async fn dispatcher_emits_events_for_mcp_success() {
         RuntimeDispatcher::new(&registry, &fs, &governor, executor).with_event_sink(&events);
 
     dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("github-mcp.search").unwrap(),
             scope: sample_scope(),
@@ -265,7 +267,7 @@ async fn dispatcher_emits_events_for_mcp_success() {
             mounts: None,
             resource_reservation: None,
             input: json!({"query": "ironclaw"}),
-        })
+        }))
         .await
         .unwrap();
 
@@ -294,7 +296,7 @@ async fn dispatcher_emits_failed_event_for_missing_backend_without_reserving() {
         .with_event_sink(&events);
 
     let err = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope,
@@ -305,7 +307,7 @@ async fn dispatcher_emits_failed_event_for_missing_backend_without_reserving() {
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "blocked"}),
-        })
+        }))
         .await
         .unwrap_err();
 

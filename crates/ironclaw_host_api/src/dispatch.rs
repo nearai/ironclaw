@@ -12,25 +12,9 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
-    CapabilityId, ExtensionId, HostRemediation, MountView, ResourceEstimate, ResourceReceipt,
-    ResourceReservation, ResourceScope, ResourceUsage, RunId, RuntimeCredentialAuthRequirement,
-    RuntimeKind, SecretHandle, UserId,
+    Authorized, CapabilityId, ExtensionId, HostRemediation, ResourceReceipt, ResourceUsage,
+    RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle,
 };
-
-/// Request for one already-authorized declared capability dispatch.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CapabilityDispatchRequest {
-    pub capability_id: CapabilityId,
-    pub scope: ResourceScope,
-    pub authenticated_actor_user_id: Option<UserId>,
-    /// Loop turn-run identity forwarded from `ExecutionContext::run_id`.
-    /// `None` for non-loop callers.
-    pub run_id: Option<RunId>,
-    pub estimate: ResourceEstimate,
-    pub mounts: Option<MountView>,
-    pub resource_reservation: Option<ResourceReservation>,
-    pub input: Value,
-}
 
 /// Display-only preview metadata for a completed capability result.
 ///
@@ -367,6 +351,12 @@ pub enum DispatchError {
         capability: CapabilityId,
         runtime: RuntimeKind,
     },
+    #[error("capability {capability} has no sealed dispatch authorization")]
+    MissingAuthorization { capability: CapabilityId },
+    #[error("authorized dispatch witness for capability {capability} has expired")]
+    AuthorizationExpired { capability: CapabilityId },
+    #[error("process dispatch is missing durable authorization for capability {capability}")]
+    MissingProcessAuthorization { capability: CapabilityId },
     /// Authentication is required to dispatch this capability.
     ///
     /// `required_secrets` names the credentials the caller must stage.  The
@@ -451,6 +441,18 @@ impl fmt::Debug for DispatchError {
                 .field("capability", capability)
                 .field("runtime", runtime)
                 .finish(),
+            Self::MissingAuthorization { capability } => f
+                .debug_struct("MissingAuthorization")
+                .field("capability", capability)
+                .finish(),
+            Self::AuthorizationExpired { capability } => f
+                .debug_struct("AuthorizationExpired")
+                .field("capability", capability)
+                .finish(),
+            Self::MissingProcessAuthorization { capability } => f
+                .debug_struct("MissingProcessAuthorization")
+                .field("capability", capability)
+                .finish(),
             // `required_secrets` handle names are omitted from Debug output to
             // prevent leaking secret identifiers into logs and error chains.
             Self::AuthRequired {
@@ -503,6 +505,11 @@ impl DispatchError {
             Self::RuntimeMismatch { .. } => DispatchFailureKind::RuntimeMismatch,
             Self::MissingRuntimeBackend { .. } => DispatchFailureKind::MissingRuntimeBackend,
             Self::UnsupportedRuntime { .. } => DispatchFailureKind::UnsupportedRuntime,
+            Self::MissingAuthorization { .. }
+            | Self::AuthorizationExpired { .. }
+            | Self::MissingProcessAuthorization { .. } => {
+                DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::PolicyDenied)
+            }
             Self::AuthRequired { .. } => DispatchFailureKind::AuthRequired,
             Self::Mcp { kind, .. }
             | Self::Script { kind, .. }
@@ -522,6 +529,9 @@ impl DispatchError {
             Self::RuntimeMismatch { .. } => "runtime_mismatch",
             Self::MissingRuntimeBackend { .. } => "missing_runtime_backend",
             Self::UnsupportedRuntime { .. } => "unsupported_runtime",
+            Self::MissingAuthorization { .. } => "missing_authorization",
+            Self::AuthorizationExpired { .. } => "authorization_expired",
+            Self::MissingProcessAuthorization { .. } => "missing_process_authorization",
             Self::AuthRequired { .. } => "auth_required",
             Self::Mcp { kind, .. }
             | Self::Script { kind, .. }
@@ -537,7 +547,7 @@ pub trait CapabilityDispatcher: Send + Sync {
     /// Dispatches one already-authorized JSON capability request and must not perform caller-facing authorization or approval resolution.
     async fn dispatch_json(
         &self,
-        request: CapabilityDispatchRequest,
+        authorized: Authorized,
     ) -> Result<CapabilityDispatchResult, DispatchError>;
 }
 

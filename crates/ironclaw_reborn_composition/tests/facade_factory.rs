@@ -17,7 +17,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId,
-    GrantConstraints, MountView, NetworkPolicy, Principal, ResourceEstimate, TrustClass, UserId,
+    GrantConstraints, MountView, NetworkPolicy, Principal, ResourceEstimate, RunId, TrustClass,
+    UserId,
 };
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
@@ -439,7 +440,7 @@ fn trigger_management_execution_context() -> ExecutionContext {
             ),
         ],
     };
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("trigger-user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::FirstParty,
@@ -447,7 +448,9 @@ fn trigger_management_execution_context() -> ExecutionContext {
         grants,
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn empty_trust_policy() -> Arc<HostTrustPolicy> {

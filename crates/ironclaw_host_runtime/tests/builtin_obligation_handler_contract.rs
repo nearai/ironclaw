@@ -1218,7 +1218,7 @@ fn execution_context(grants: CapabilitySet) -> ExecutionContext {
         invocation_id,
     };
     ExecutionContext {
-        run_id: None,
+        run_id: Some(RunId::new()),
         origin: None,
         invocation_id,
         correlation_id: CorrelationId::new(),

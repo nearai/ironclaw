@@ -15,7 +15,7 @@ It connects already-validated extension capabilities to runtime lanes:
 ```text
 ExtensionRegistry + RootFilesystem + ResourceGovernor + registered RuntimeAdapter backends
   -> RuntimeDispatcher::dispatch_json(...)
-  -> selected adapter for RuntimeKind
+  -> selected adapter for sealed RuntimeLane
   -> normalized CapabilityDispatchResult
 ```
 
@@ -24,7 +24,7 @@ The dispatcher does not discover extensions, parse manifests, implement policy, 
 The dispatch port contracts live in `ironclaw_host_api`:
 
 ```rust
-CapabilityDispatchRequest
+Authorized
 CapabilityDispatchResult
 CapabilityDispatcher
 DispatchError
@@ -37,17 +37,24 @@ RuntimeDispatchErrorKind
 
 ## 2. Inputs
 
-The dispatcher receives an already-authorized `CapabilityDispatchRequest`:
+The dispatcher receives an already-authorized sealed `Authorized` witness:
 
 ```rust
-pub struct CapabilityDispatchRequest {
-    pub capability_id: CapabilityId,
-    pub scope: ResourceScope,
-    pub authenticated_actor_user_id: Option<UserId>,
-    pub estimate: ResourceEstimate,
-    pub input: serde_json::Value,
+pub struct Authorized {
+    /* private: sealed invocation + RuntimeLane + mounts + reservation + deadline */
+}
+
+pub trait CapabilityDispatcher {
+    async fn dispatch_json(
+        &self,
+        authorized: Authorized,
+    ) -> Result<CapabilityDispatchResult, DispatchError>;
 }
 ```
+
+The dispatcher unpacks the witness at execution time, rejects expired witnesses,
+routes by the witness `RuntimeLane`, and rejects host-internal `RuntimeKind::System`
+descriptors before any backend call.
 
 The dispatcher can be constructed from borrowed service boundaries for request-scoped composition:
 
@@ -76,12 +83,15 @@ The owned form keeps dispatcher composition-only while allowing `DispatchProcess
 V1 `dispatch_json` performs only routing and consistency checks:
 
 ```text
-1. lookup capability in ExtensionRegistry
-2. lookup provider package in ExtensionRegistry
-3. verify descriptor.runtime == package.manifest.runtime_kind()
-4. select the registered `RuntimeAdapter` for `RuntimeKind`
-5. call the configured adapter for that lane, forwarding the authenticated actor unchanged
-6. return normalized result or typed failure with a stable redacted `RuntimeDispatchErrorKind`
+1. consume the sealed `Authorized` witness and reject expired witnesses
+2. lookup capability in ExtensionRegistry
+3. lookup provider package in ExtensionRegistry
+4. verify descriptor.runtime == package.manifest.runtime_kind()
+5. reject `RuntimeKind::System` before any backend call
+6. re-derive `RuntimeLane` from the fresh descriptor runtime and compare it to the sealed lane
+7. select the registered `RuntimeAdapter` by sealed `RuntimeLane`
+8. call the configured adapter for that lane, forwarding the authenticated actor unchanged
+9. return normalized result or typed failure with a stable redacted `RuntimeDispatchErrorKind`
 ```
 
 `RuntimeAdapter` is the open extension seam:
@@ -100,7 +110,7 @@ where
 }
 ```
 
-Each runtime adapter owns its local reserve/prepare/invoke/reconcile/release lifecycle. The dispatcher does not duplicate the resource-governor protocol and does not import concrete runtime crates.
+Each runtime adapter owns its local reserve/prepare/invoke/reconcile/release lifecycle. The dispatcher validates a prepared reservation is still active before adapter execution, but it does not own the full resource-governor protocol and does not import concrete runtime crates.
 
 `RuntimeAdapterRequest.authenticated_actor_user_id` is copied directly from the already-authorized dispatch request. It is not recomputed from `ResourceScope.user_id`; a shared subject may be acted on by a separately authenticated human actor.
 
@@ -108,17 +118,17 @@ Each runtime adapter owns its local reserve/prepare/invoke/reconcile/release lif
 
 ## 4. Runtime lane status
 
-V1 routes any `RuntimeKind` through a registered adapter:
+V1 routes by the sealed `RuntimeLane` carried by `Authorized`, after rechecking that the fresh descriptor runtime maps to that lane:
 
 | Runtime kind | Dispatch behavior |
 | --- | --- |
-| `Wasm` | Executes through a configured WASM adapter, usually composed by `ironclaw_host_runtime` |
-| `Script` | Executes through a configured Script adapter, usually composed by `ironclaw_host_runtime` |
-| `Mcp` | Executes through a configured MCP adapter, usually composed by `ironclaw_host_runtime` |
-| `FirstParty` | Requires a registered host-service adapter |
-| `System` | Requires a registered system-service adapter |
+| `Wasm` | Descriptor runtime must map to sealed `RuntimeLane::Wasm`; executes through a configured WASM adapter, usually composed by `ironclaw_host_runtime` |
+| `Script` | Descriptor runtime must map to sealed `RuntimeLane::Script`; executes through a configured Script adapter, usually composed by `ironclaw_host_runtime` |
+| `Mcp` | Descriptor runtime must map to sealed `RuntimeLane::Mcp`; executes through a configured MCP adapter, usually composed by `ironclaw_host_runtime` |
+| `FirstParty` | Descriptor runtime must map to sealed `RuntimeLane::FirstParty`; requires a registered host-service adapter |
+| `System` | Rejected as `MissingRuntimeBackend` before backend calls |
 
-If the selected runtime kind has no adapter configured, dispatch returns `MissingRuntimeBackend` before reserving resources.
+If the sealed runtime lane has no adapter configured, dispatch returns `MissingRuntimeBackend` before adapter execution.
 
 Runtime-specific failures are collapsed to stable categories (`Backend`, `ExitFailure`, `OutputDecode`, `Resource`, and similar) before crossing the dispatch port. Raw backend strings, stderr, host paths, and internal runtime detail strings stay inside the runtime crate.
 

@@ -1,6 +1,8 @@
 mod support;
 
-use support::{RecordingExecutor, legacy_capability_fixture_to_v2};
+use support::{
+    CapabilityDispatchRequest, RecordingExecutor, authorized, legacy_capability_fixture_to_v2,
+};
 
 use std::sync::Arc;
 
@@ -56,7 +58,7 @@ async fn runtime_dispatcher_routes_already_authorized_request_through_public_tra
         UserId::new("slack-alice").expect("valid authenticated actor user id");
 
     let result = dispatch_port
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: scope.clone(),
@@ -67,7 +69,7 @@ async fn runtime_dispatcher_routes_already_authorized_request_through_public_tra
             mounts: Some(mounts.clone()),
             resource_reservation: None,
             input: json!({"message": "hello through public seam"}),
-        })
+        }))
         .await
         .unwrap();
 
@@ -124,7 +126,7 @@ async fn runtime_dispatcher_forwards_configured_runtime_policy_to_adapter() {
         .with_runtime_policy(local_dev_policy());
 
     dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope: sample_scope(),
@@ -133,7 +135,7 @@ async fn runtime_dispatcher_forwards_configured_runtime_policy_to_adapter() {
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "hello through configured policy"}),
-        })
+        }))
         .await
         .unwrap();
 
@@ -161,7 +163,7 @@ async fn runtime_dispatcher_fails_closed_for_missing_backend_before_reservation_
     let dispatch_port: &dyn CapabilityDispatcher = &dispatcher;
 
     let err = dispatch_port
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("script.echo").unwrap(),
             scope,
@@ -172,7 +174,7 @@ async fn runtime_dispatcher_fails_closed_for_missing_backend_before_reservation_
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "blocked"}),
-        })
+        }))
         .await
         .unwrap_err();
 

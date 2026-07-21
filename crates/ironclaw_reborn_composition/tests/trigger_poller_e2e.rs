@@ -17,7 +17,7 @@ use ironclaw_conversations::{AdapterInstallationId, AdapterKind, ExternalActorRe
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
     ExecutionContext, ExtensionId, GrantConstraints, MountView, NetworkPolicy, Principal,
-    ProviderToolName, ResourceEstimate, RuntimeKind, TenantId, TrustClass, UserId,
+    ProviderToolName, ResourceEstimate, RunId, RuntimeKind, TenantId, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
     RuntimeCapabilityOutcome, RuntimeCapabilityRequest, TRIGGER_CREATE_CAPABILITY_ID,
@@ -534,6 +534,7 @@ fn trigger_management_execution_context() -> ExecutionContext {
     context.resource_scope.tenant_id = tenant_id;
     context.resource_scope.agent_id = Some(agent_id);
     context.resource_scope.project_id = None;
+    context.run_id = Some(RunId::new());
     context
 }
 

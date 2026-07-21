@@ -1,6 +1,9 @@
 mod support;
 
-use support::{RecordingExecutor, legacy_capability_fixture_to_v2};
+use support::{
+    CapabilityDispatchRequest, RecordingExecutor, authorized, authorized_with_lane,
+    legacy_capability_fixture_to_v2,
+};
 
 use ironclaw_dispatcher::*;
 use ironclaw_extensions::*;
@@ -32,7 +35,7 @@ async fn dispatcher_routes_wasm_capability_through_registered_adapter() {
 
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor, executor.clone());
     let result = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope,
@@ -43,7 +46,7 @@ async fn dispatcher_routes_wasm_capability_through_registered_adapter() {
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "hello dispatcher"}),
-        })
+        }))
         .await
         .unwrap();
 
@@ -95,7 +98,7 @@ async fn dispatcher_routes_script_capability_through_registered_adapter() {
 
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor, executor);
     let result = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("script.echo").unwrap(),
             scope,
@@ -107,7 +110,7 @@ async fn dispatcher_routes_script_capability_through_registered_adapter() {
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "hello script dispatcher"}),
-        })
+        }))
         .await
         .unwrap();
 
@@ -146,7 +149,7 @@ async fn dispatcher_redacts_runtime_adapter_failure_details() {
 
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor, executor);
     let err = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("script.echo").unwrap(),
             scope,
@@ -158,7 +161,7 @@ async fn dispatcher_redacts_runtime_adapter_failure_details() {
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "redact stderr"}),
-        })
+        }))
         .await
         .unwrap_err();
 
@@ -202,7 +205,7 @@ async fn dispatcher_routes_mcp_capability_through_registered_adapter() {
 
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor, executor);
     let result = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("github-mcp.search").unwrap(),
             scope,
@@ -214,7 +217,7 @@ async fn dispatcher_routes_mcp_capability_through_registered_adapter() {
             mounts: None,
             resource_reservation: None,
             input: json!({"query": "ironclaw"}),
-        })
+        }))
         .await
         .unwrap();
 
@@ -241,7 +244,7 @@ async fn dispatcher_fails_unknown_capability_without_reserving_resources() {
 
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor, executor.clone());
     let err = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("missing.say").unwrap(),
             scope,
@@ -250,7 +253,7 @@ async fn dispatcher_fails_unknown_capability_without_reserving_resources() {
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "nope"}),
-        })
+        }))
         .await
         .unwrap_err();
 
@@ -273,7 +276,7 @@ async fn dispatcher_releases_prepared_reservation_when_validation_fails_before_a
 
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor, RecordingExecutor::new());
     let err = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("missing.say").unwrap(),
             scope,
@@ -282,11 +285,53 @@ async fn dispatcher_releases_prepared_reservation_when_validation_fails_before_a
             mounts: None,
             resource_reservation: Some(reservation),
             input: json!({"message": "release on validation failure"}),
-        })
+        }))
         .await
         .unwrap_err();
 
     assert!(matches!(err, DispatchError::UnknownCapability { .. }));
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert_eq!(governor.usage_for(&account), ResourceTally::default());
+}
+
+#[tokio::test]
+async fn dispatcher_fails_closed_when_prepared_reservation_was_revoked_before_execution() {
+    let fs = mounted_empty_extension_root();
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(package_from_manifest(WASM_MANIFEST))
+        .unwrap();
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    let estimate = ResourceEstimate::default().set_concurrency_slots(1);
+    let reservation = governor.reserve(scope.clone(), estimate.clone()).unwrap();
+    governor.release(reservation.id).unwrap();
+
+    let executor = RecordingExecutor::new().echo(RuntimeKind::Wasm);
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor, executor.clone());
+    let err = dispatcher
+        .dispatch_json(authorized(CapabilityDispatchRequest {
+            run_id: None,
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            scope,
+            authenticated_actor_user_id: None,
+            estimate,
+            mounts: None,
+            resource_reservation: Some(reservation),
+            input: json!({"message": "stale reservation"}),
+        }))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        DispatchError::Wasm {
+            kind: RuntimeDispatchErrorKind::Resource,
+            ..
+        }
+    ));
+    assert!(executor.requests().is_empty());
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert_eq!(governor.usage_for(&account), ResourceTally::default());
 }
@@ -304,7 +349,7 @@ async fn dispatcher_requires_mcp_backend_before_reserving_resources() {
 
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor, RecordingExecutor::new());
     let err = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("github-mcp.search").unwrap(),
             scope,
@@ -315,7 +360,7 @@ async fn dispatcher_requires_mcp_backend_before_reserving_resources() {
             mounts: None,
             resource_reservation: None,
             input: json!({"query": "blocked"}),
-        })
+        }))
         .await
         .unwrap_err();
 
@@ -342,7 +387,7 @@ async fn dispatcher_requires_script_backend_before_reserving_resources() {
 
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor, RecordingExecutor::new());
     let err = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("script.echo").unwrap(),
             scope,
@@ -353,7 +398,7 @@ async fn dispatcher_requires_script_backend_before_reserving_resources() {
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "blocked"}),
-        })
+        }))
         .await
         .unwrap_err();
 
@@ -380,7 +425,7 @@ async fn dispatcher_requires_wasm_backend_before_reserving_resources() {
 
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor, RecordingExecutor::new());
     let err = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             scope,
@@ -389,7 +434,7 @@ async fn dispatcher_requires_wasm_backend_before_reserving_resources() {
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "blocked"}),
-        })
+        }))
         .await
         .unwrap_err();
 
@@ -401,6 +446,49 @@ async fn dispatcher_requires_wasm_backend_before_reserving_resources() {
     ));
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert_eq!(governor.usage_for(&account), ResourceTally::default());
+}
+
+#[tokio::test]
+async fn dispatcher_rejects_stale_authorized_lane_before_runtime_dispatch() {
+    let fs = mounted_empty_extension_root();
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(package_from_manifest(WASM_MANIFEST))
+        .unwrap();
+    let executor = RecordingExecutor::new()
+        .echo(RuntimeKind::Wasm)
+        .echo(RuntimeKind::Script);
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope();
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+
+    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor, executor.clone());
+    let err = dispatcher
+        .dispatch_json(authorized_with_lane(
+            CapabilityDispatchRequest {
+                run_id: None,
+                capability_id: CapabilityId::new("echo.say").unwrap(),
+                scope,
+                authenticated_actor_user_id: None,
+                estimate: ResourceEstimate::default().set_concurrency_slots(1),
+                mounts: None,
+                resource_reservation: None,
+                input: json!({"message": "stale lane"}),
+            },
+            RuntimeLane::Process,
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        DispatchError::MissingRuntimeBackend {
+            runtime: RuntimeKind::Wasm
+        }
+    ));
+    assert_eq!(governor.reserved_for(&account), ResourceTally::default());
+    assert_eq!(governor.usage_for(&account), ResourceTally::default());
+    assert!(executor.requests().is_empty());
 }
 
 #[tokio::test]
@@ -425,7 +513,7 @@ async fn dispatcher_fails_closed_for_system_runtime_without_routing_to_a_lane() 
 
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor, executor.clone());
     let err = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("system-ext.op").unwrap(),
             scope,
@@ -434,7 +522,7 @@ async fn dispatcher_fails_closed_for_system_runtime_without_routing_to_a_lane() 
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "host-internal"}),
-        })
+        }))
         .await
         .unwrap_err();
 

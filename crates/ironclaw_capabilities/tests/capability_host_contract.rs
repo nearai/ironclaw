@@ -93,9 +93,9 @@ async fn capability_host_authorized_dispatch_uses_neutral_dispatch_port() {
 
     assert_eq!(result.dispatch.output, json!({"ok": true}));
     let recorded = dispatcher.last_request().unwrap();
-    assert_eq!(recorded.capability_id, capability_id());
-    assert_eq!(recorded.scope, scope);
-    assert_eq!(recorded.input, json!({"message": "authorized"}));
+    assert_eq!(recorded.invocation.capability, capability_id());
+    assert_eq!(recorded.invocation.scope, scope);
+    assert_eq!(recorded.invocation.input, json!({"message": "authorized"}));
     assert_eq!(recorded.mounts, None);
     assert_eq!(recorded.resource_reservation, None);
 }

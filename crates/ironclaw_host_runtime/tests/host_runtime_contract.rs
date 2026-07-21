@@ -1069,6 +1069,7 @@ fn process_start(context: &ExecutionContext, process_id: ProcessId) -> ProcessSt
         mounts: context.mounts.clone(),
         estimated_resources: ResourceEstimate::default(),
         resource_reservation_id: None,
+        authorized_continuation: None,
         input: json!({"message": "background"}),
     }
 }
@@ -1494,7 +1495,7 @@ fn execution_context_with_dispatch_grant() -> ExecutionContext {
             max_invocations: None,
         },
     });
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::Wasm,
@@ -1502,7 +1503,9 @@ fn execution_context_with_dispatch_grant() -> ExecutionContext {
         grants,
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn visible_capability_request(context: ExecutionContext) -> VisibleCapabilityRequest {

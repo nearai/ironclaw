@@ -79,8 +79,11 @@ async fn capability_host_resumes_approved_github_comment_issue_and_dispatches_on
     assert_eq!(result.dispatch.output, json!({"ok": true}));
     assert_eq!(fixture.dispatcher.call_count(), 1);
     let request = fixture.dispatcher.last_request().unwrap();
-    assert_eq!(request.capability_id, github_comment_capability_id());
-    assert_eq!(request.input, fixture.input);
+    assert_eq!(
+        request.invocation.capability,
+        github_comment_capability_id()
+    );
+    assert_eq!(request.invocation.input, fixture.input);
     let run = fixture
         .run_state
         .get(&fixture.scope, fixture.invocation_id)
