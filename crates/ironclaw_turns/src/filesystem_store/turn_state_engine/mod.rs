@@ -324,53 +324,6 @@ impl TurnStateEngine {
         }
     }
 
-    /// Attach a durable sink for gate-blocked turns (persist-on-block). Off the
-    /// hot path — the sink is called only when the blocked-run set changes.
-    // Preserved engine API now reachable only in-crate after the public store
-    // was eliminated (#6263); no behavior change.
-    #[allow(dead_code)]
-    pub(crate) fn with_block_persistence(
-        mut self,
-        block_persistence: Arc<dyn crate::TurnStateBlockPersistence>,
-    ) -> Self {
-        self.block_persistence = Some(block_persistence);
-        // Seed the gate-persisted set from any *gate-touched, not-yet-terminal*
-        // run rehydrated from a recovery snapshot via `from_persistence_snapshot`.
-        // `mark_gate_persisted` only fires for runs that block *live* after the
-        // sink is attached, so the restore path must be seeded here or a recovered
-        // run would reach a terminal state with `is_gate_persisted == false`, skip
-        // its durable terminal-convergence write, and be resurrected as live on
-        // the next restart.
-        //
-        // A currently-blocked run is the obvious case, but a run that blocked then
-        // resumed is persisted as `Queued`/`Running`, so status alone misses it.
-        // `checkpoint_id` is set only on the gate-block paths (`block_run` and the
-        // loop-exit block) and is not cleared on resume, so it is the durable
-        // marker that a not-yet-terminal run was gate-touched — seed from that.
-        let gate_touched: Vec<TurnRunId> = {
-            let inner = match self.inner.lock() {
-                Ok(inner) => inner,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            inner
-                .records
-                .iter()
-                .filter(|(_, record)| {
-                    !record.status.get().is_terminal() && record.checkpoint_id.is_some()
-                })
-                .map(|(run_id, _)| *run_id)
-                .collect()
-        };
-        if !gate_touched.is_empty() {
-            let mut set = match self.gate_persisted_runs.lock() {
-                Ok(set) => set,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            set.extend(gate_touched);
-        }
-        self
-    }
-
     #[allow(dead_code)] // preserved engine API, in-crate-only post-#6263
     pub(crate) fn with_admission_limit_provider(
         admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
@@ -1153,7 +1106,7 @@ impl Inner {
         } else {
             None
         };
-        let retryable = (kind == TurnEventKind::Failed).then(|| record.checkpoint_id.is_some());
+        let retryable = (kind == TurnEventKind::Failed).then(|| self.failed_run_retryable(record));
         self.events.push(TurnLifecycleEvent {
             cursor: record.event_cursor,
             scope: record.scope.clone(),

@@ -449,20 +449,45 @@ where
     )
     .await;
     fail_claimed_run(store, &no_checkpoint_claimed).await;
-    let no_checkpoint_error = store
+    let no_checkpoint_retry = store
         .retry_turn(retry_request(
             &no_checkpoint_thread,
             no_checkpoint_claimed.state.run_id,
             &format!("idem-{prefix}-no-checkpoint-retry"),
         ))
         .await
-        .unwrap_err();
-    assert_eq!(
-        no_checkpoint_error,
-        TurnError::RunNotRetryable {
-            run_id: no_checkpoint_claimed.state.run_id
-        }
+        .unwrap();
+    assert_ne!(
+        no_checkpoint_retry.run_id,
+        no_checkpoint_claimed.state.run_id
     );
+    assert_eq!(no_checkpoint_retry.status, TurnStatus::Queued);
+    let no_checkpoint_retry_state = store
+        .get_run_state(GetRunStateRequest {
+            scope: scope(&no_checkpoint_thread),
+            run_id: no_checkpoint_retry.run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(no_checkpoint_retry_state.checkpoint_id, None);
+    let no_checkpoint_claimed_retry = store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(scope(&no_checkpoint_thread)),
+        })
+        .await
+        .unwrap()
+        .expect("checkpointless retry should replay from the accepted message");
+    assert_eq!(
+        no_checkpoint_claimed_retry.state.run_id,
+        no_checkpoint_retry.run_id
+    );
+    assert_eq!(
+        no_checkpoint_claimed_retry.state.accepted_message_ref,
+        no_checkpoint_claimed.state.accepted_message_ref
+    );
+    assert_eq!(no_checkpoint_claimed_retry.state.checkpoint_id, None);
 
     let side_effect_thread = format!("{prefix}-side-effect");
     let (side_effect_run_id, _) = seed_failed_run_with_checkpoint(

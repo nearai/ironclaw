@@ -388,17 +388,25 @@ impl Inner {
                     run_id: request.run_id,
                 });
             }
-            let Some(source_checkpoint_id) = failed.checkpoint_id else {
-                return Err(TurnError::RunNotRetryable {
-                    run_id: request.run_id,
-                });
-            };
-            let Some(source_checkpoint) =
-                self.retryable_loop_checkpoint(failed, source_checkpoint_id)
-            else {
-                return Err(TurnError::RunNotRetryable {
-                    run_id: request.run_id,
-                });
+            let source_checkpoint = match failed.checkpoint_id {
+                Some(source_checkpoint_id) => {
+                    let Some(source_checkpoint) =
+                        self.retryable_loop_checkpoint(failed, source_checkpoint_id)
+                    else {
+                        return Err(TurnError::RunNotRetryable {
+                            run_id: request.run_id,
+                        });
+                    };
+                    Some(source_checkpoint)
+                }
+                None => {
+                    if self.run_has_loop_checkpoint(&failed.scope, failed.turn_id, failed.run_id) {
+                        return Err(TurnError::RunNotRetryable {
+                            run_id: request.run_id,
+                        });
+                    }
+                    None
+                }
             };
             (
                 TurnActiveLockKey::from(&failed.scope),
@@ -433,8 +441,9 @@ impl Inner {
         ) {
             return Err(TurnError::AdmissionRejected(rejection));
         }
-        let retry_checkpoint_id =
-            self.link_loop_checkpoint_for_retry(&source_checkpoint, new_run_id, now);
+        let retry_checkpoint_id = source_checkpoint.as_ref().map(|source_checkpoint| {
+            self.link_loop_checkpoint_for_retry(source_checkpoint, new_run_id, now)
+        });
         let event_cursor = self.next_cursor();
         let mut record = RunRecord::queued(QueuedRunFields {
             scope,
@@ -448,7 +457,7 @@ impl Inner {
             event_cursor,
             received_at: now,
         });
-        record.checkpoint_id = Some(retry_checkpoint_id);
+        record.checkpoint_id = retry_checkpoint_id;
         record.parent_run_id = parent_run_id;
         record.subagent_depth = subagent_depth;
         record.spawn_tree_root_run_id = spawn_tree_root_run_id;
@@ -1064,7 +1073,7 @@ impl Inner {
     /// "safe to re-drive from scratch" condition. A run that recorded a
     /// checkpoint (even a non-resumable `Final` one) already did work and must
     /// NOT be re-driven from scratch.
-    fn run_has_loop_checkpoint(
+    pub(super) fn run_has_loop_checkpoint(
         &self,
         scope: &TurnScope,
         turn_id: crate::TurnId,
@@ -1075,6 +1084,11 @@ impl Inner {
                 && checkpoint.turn_id == turn_id
                 && checkpoint.run_id == run_id
         })
+    }
+
+    pub(super) fn failed_run_retryable(&self, record: &RunRecord) -> bool {
+        record.checkpoint_id.is_some()
+            || !self.run_has_loop_checkpoint(&record.scope, record.turn_id, record.run_id)
     }
 
     fn latest_resumable_loop_checkpoint(

@@ -954,6 +954,32 @@ TOOL_CALL_PATTERNS = [
 _github_api_url: str = "https://api.github.com"
 _last_chat_request: dict | None = None
 _chat_requests: list[dict] = []
+_llm_fault_scripts: list[dict] = []
+
+
+def _reset_llm_fault_scripts() -> None:
+    _llm_fault_scripts.clear()
+
+
+def _latest_user_matches_fault(messages: list[dict], match_text: str) -> bool:
+    latest_user = _last_user_content(messages).lower()
+    return match_text.lower() in latest_user
+
+
+def _next_llm_fault_action(messages: list[dict]) -> dict | None:
+    for script in list(_llm_fault_scripts):
+        match_text = str(script.get("match", ""))
+        actions = script.get("actions")
+        if not match_text or not isinstance(actions, list):
+            continue
+        if not _latest_user_matches_fault(messages, match_text):
+            continue
+        if not actions:
+            continue
+        action = actions.pop(0)
+        script["applied"] = int(script.get("applied", 0)) + 1
+        return action if isinstance(action, dict) else None
+    return None
 
 
 def _new_oauth_state() -> dict:
@@ -2434,6 +2460,52 @@ async def _dispatch_special_response(
     return await _stream_text(request, cid, text)
 
 
+async def _broken_stream_before_text(request: web.Request, cid: str) -> web.StreamResponse:
+    resp = web.StreamResponse(
+        status=200,
+        headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"},
+    )
+    await resp.prepare(request)
+    await resp.write(f"data: {{\"id\":\"{cid}\",\"choices\":[{{\"delta\":".encode())
+    return resp
+
+
+async def _apply_llm_fault_action(
+    request: web.Request,
+    cid: str,
+    stream: bool,
+    action: dict,
+) -> web.StreamResponse | web.Response | None:
+    action_type = action.get("type")
+    if action_type == "delay":
+        await asyncio.sleep(float(action.get("seconds", 1.0)))
+        return None
+    if action_type == "http_error":
+        status = int(action.get("status", 502))
+        return web.json_response(
+            {
+                "error": {
+                    "message": action.get("message", "scripted mock LLM failure"),
+                    "type": "server_error",
+                }
+            },
+            status=status,
+        )
+    if action_type == "broken_stream_before_text":
+        if stream:
+            return await _broken_stream_before_text(request, cid)
+        return web.json_response(
+            {
+                "error": {
+                    "message": "scripted stream fault requested for non-streaming call",
+                    "type": "server_error",
+                }
+            },
+            status=502,
+        )
+    return None
+
+
 async def chat_completions(request: web.Request) -> web.StreamResponse:
     """Handle POST /v1/chat/completions and /chat/completions."""
     global _last_chat_request
@@ -2446,6 +2518,17 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
     has_tools = bool(tools)
     available_tool_names = _advertised_tool_names(tools)
     cid = f"mock-{uuid.uuid4().hex[:8]}"
+
+    fault_action = _next_llm_fault_action(messages)
+    if fault_action:
+        fault_response = await _apply_llm_fault_action(
+            request,
+            cid,
+            stream,
+            fault_action,
+        )
+        if fault_response is not None:
+            return fault_response
 
     slow_response_delay = _conversation_slow_response_delay(messages)
     if slow_response_delay > 0:
@@ -3272,11 +3355,64 @@ def main():
         _chat_requests.clear()
         return web.json_response({"ok": True})
 
+    async def set_llm_faults(request: web.Request) -> web.Response:
+        body = await request.json()
+        faults = body.get("faults", [])
+        if not isinstance(faults, list):
+            return web.json_response(
+                {"ok": False, "error": "faults must be a list"},
+                status=400,
+            )
+        parsed_scripts = []
+        for fault in faults:
+            if not isinstance(fault, dict):
+                return web.json_response(
+                    {"ok": False, "error": "each fault must be an object"},
+                    status=400,
+                )
+            match_text = fault.get("match")
+            actions = fault.get("actions")
+            if not isinstance(match_text, str) or not match_text:
+                return web.json_response(
+                    {"ok": False, "error": "fault.match must be a non-empty string"},
+                    status=400,
+                )
+            if not isinstance(actions, list):
+                return web.json_response(
+                    {"ok": False, "error": "fault.actions must be a list"},
+                    status=400,
+                )
+            if not all(isinstance(action, dict) for action in actions):
+                return web.json_response(
+                    {"ok": False, "error": "fault.actions entries must be objects"},
+                    status=400,
+                )
+            parsed_scripts.append(
+                {
+                    "match": match_text,
+                    "actions": [dict(action) for action in actions],
+                    "applied": 0,
+                }
+            )
+        _reset_llm_fault_scripts()
+        _llm_fault_scripts.extend(parsed_scripts)
+        return web.json_response({"ok": True, "faults": _llm_fault_scripts})
+
+    async def get_llm_faults(request: web.Request) -> web.Response:
+        return web.json_response({"faults": _llm_fault_scripts})
+
+    async def reset_llm_faults(request: web.Request) -> web.Response:
+        _reset_llm_fault_scripts()
+        return web.json_response({"ok": True})
+
     app.router.add_post("/__mock/set_github_api_url", set_github_api_url)
     app.router.add_get("/__mock/github_api_url", get_github_api_url)
     app.router.add_get("/__mock/last_chat_request", get_last_chat_request)
     app.router.add_get("/__mock/chat_requests", get_chat_requests)
     app.router.add_post("/__mock/chat_requests/reset", reset_chat_requests)
+    app.router.add_post("/__mock/llm_faults", set_llm_faults)
+    app.router.add_get("/__mock/llm_faults", get_llm_faults)
+    app.router.add_post("/__mock/llm_faults/reset", reset_llm_faults)
     # Mock MCP server endpoints
     app.router.add_post("/mcp", mcp_endpoint)
     app.router.add_post("/mcp-400", mcp_endpoint_400)
