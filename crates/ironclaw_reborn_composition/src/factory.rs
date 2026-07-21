@@ -7066,10 +7066,26 @@ mod tests {
     async fn local_dev_web_search_brave_is_auto_installed_and_activated_when_configured() {
         let dir = tempfile::tempdir().expect("tempdir");
         let owner = "local-dev-web-search-owner";
-        let services = build_reborn_services(RebornBuildInput::local_dev(
-            owner,
-            dir.path().join("local-dev"),
-        ))
+        // Match `ExecutionContext::local_default`'s tenant/agent below (both
+        // resolve to `LOCAL_DEFAULT_TENANT_ID`/`LOCAL_DEFAULT_AGENT_ID` when no
+        // explicit identity is threaded through) — this is exactly the
+        // scope-mismatch bug this test now guards against: the bootstrap
+        // must provision the secret under the SAME (tenant, user) a real
+        // capability invocation will look it up under, not whatever internal
+        // fallback identity composition happens to default to.
+        let runtime_identity = RebornLocalRuntimeIdentity {
+            tenant_id: ironclaw_host_api::TenantId::new(ironclaw_host_api::LOCAL_DEFAULT_TENANT_ID)
+                .expect("valid tenant id"),
+            agent_id: ironclaw_host_api::AgentId::new(ironclaw_host_api::LOCAL_DEFAULT_AGENT_ID)
+                .expect("valid agent id"),
+        };
+        let services = build_reborn_services(
+            RebornBuildInput::local_dev(owner, dir.path().join("local-dev"))
+                .with_local_runtime_identity(
+                    runtime_identity.tenant_id.clone(),
+                    runtime_identity.agent_id.clone(),
+                ),
+        )
         .await
         .expect("local-dev services build");
         let local_runtime = services.local_runtime.as_ref().expect("local runtime");
@@ -7081,9 +7097,11 @@ mod tests {
             .admin_secret_provisioner
             .as_ref()
             .expect("admin secret provisioner");
-        let owner_scope =
-            local_dev_nearai_mcp_owner_scope(UserId::new(owner).expect("valid owner"), None)
-                .expect("owner scope");
+        let owner_scope = local_dev_nearai_mcp_owner_scope(
+            UserId::new(owner).expect("valid owner"),
+            Some(&runtime_identity),
+        )
+        .expect("owner scope");
 
         // Without a configured key, `build_reborn_services` above already ran
         // `bootstrap_web_search_brave(None, ...)` — assert it left `web_search`
@@ -7127,16 +7145,104 @@ mod tests {
             .phase;
         assert_eq!(phase_after, LifecyclePhase::Active);
 
+        // Must be provisioned under the TENANT-SHARED scope, not the
+        // bootstrap caller's own (tenant, user) — `secret_owner_scope` (the
+        // dispatch-time credential pre-flight in ironclaw_host_runtime) only
+        // ever checks the real invocation caller's own scope, then falls back
+        // to `caller_scope.tenant_shared_managed_scope()`, never an arbitrary
+        // third scope. Provisioning anywhere else leaves the secret invisible
+        // to every real capability invocation regardless of who calls it —
+        // this regressed once already (dispatch-time pre-flight kept
+        // reporting the secret absent and surfacing AuthRequired, so Brave
+        // was never actually called end-to-end despite `web_search`
+        // reporting `Active`).
+        let shared_scope = owner_scope.tenant_shared_managed_scope();
         let secrets = admin_secret_provisioner
-            .list(&owner_scope.tenant_id, &owner_scope.user_id)
+            .list(&shared_scope.tenant_id, &shared_scope.user_id)
             .await
             .expect("list secrets");
         assert!(
             secrets
                 .iter()
                 .any(|meta| meta.handle.as_str() == "brave_api_key"),
-            "expected brave_api_key to be seeded, got: {secrets:?}"
+            "expected brave_api_key to be seeded at the tenant-shared scope, got: {secrets:?}"
         );
+
+        // End-to-end regression guard for the scope bug itself: invoke
+        // `web_search.search` as an ARBITRARY caller (not the bootstrap/tenant-
+        // operator identity) and assert the credential pre-flight does not
+        // gate it on `AuthRequired`. Before the tenant-shared-scope fix this
+        // always returned `AuthRequired` regardless of who called it, because
+        // the secret was provisioned under a scope no real invocation could
+        // ever read back. Whatever happens after the credential check (a real
+        // network call to Brave with a fake key, which can be slow to fail)
+        // is out of scope here — bounded by a short timeout so a slow/hanging
+        // egress attempt can't turn this into a multi-minute test; a timeout
+        // still proves the credential gate itself was cleared.
+        let context = web_search_context("web_search.search");
+        enable_global_auto_approve_for_context(local_runtime, &context).await;
+        let invocation = services
+            .host_runtime
+            .as_ref()
+            .expect("host runtime")
+            .invoke_capability(RuntimeCapabilityRequest::new(
+                context,
+                CapabilityId::new("web_search.search").unwrap(),
+                ResourceEstimate::default(),
+                serde_json::json!({ "query": "ironclaw reborn" }),
+            ));
+        match tokio::time::timeout(std::time::Duration::from_secs(10), invocation).await {
+            Ok(result) => {
+                let outcome = result.expect("runtime invocation completes");
+                assert!(
+                    !matches!(outcome, RuntimeCapabilityOutcome::AuthRequired(_)),
+                    "expected the brave_api_key credential pre-flight to resolve \
+                     (regardless of what the actual HTTP call then does), got: {outcome:?}"
+                );
+            }
+            Err(_) => {
+                // Timed out past the credential gate (presumably stuck on the
+                // real network call with a fake key) — the gate itself was
+                // cleared, which is all this test asserts.
+            }
+        }
+    }
+
+    fn web_search_context(capability_id: &str) -> ExecutionContext {
+        let extension_id = ExtensionId::new("caller").expect("valid extension id");
+        ExecutionContext::local_default(
+            UserId::new("local-dev-test-user").expect("valid user id"),
+            extension_id.clone(),
+            RuntimeKind::FirstParty,
+            TrustClass::FirstParty,
+            CapabilitySet {
+                grants: vec![CapabilityGrant {
+                    id: CapabilityGrantId::new(),
+                    capability: CapabilityId::new(capability_id).expect("valid capability id"),
+                    grantee: Principal::Extension(extension_id),
+                    issued_by: Principal::HostRuntime,
+                    constraints: GrantConstraints {
+                        allowed_effects: web_access_allowed_effects(),
+                        mounts: MountView::new(Vec::new()).expect("valid empty mount view"),
+                        network: NetworkPolicy {
+                            allowed_targets: vec![NetworkTargetPattern {
+                                scheme: Some(ironclaw_host_api::NetworkScheme::Https),
+                                host_pattern: "api.search.brave.com".to_string(),
+                                port: None,
+                            }],
+                            deny_private_ip_ranges: true,
+                            max_egress_bytes: None,
+                        },
+                        secrets: Vec::new(),
+                        resource_ceiling: None,
+                        expires_at: None,
+                        max_invocations: None,
+                    },
+                }],
+            },
+            MountView::new(Vec::new()).expect("valid empty mount view"),
+        )
+        .expect("valid execution context")
     }
 
     fn nearai_bootstrap_input_with_base(

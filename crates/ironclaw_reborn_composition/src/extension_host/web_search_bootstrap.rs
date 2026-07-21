@@ -151,16 +151,27 @@ pub(crate) async fn bootstrap_web_search_brave(
     // we still install/activate (the tool itself fails closed per-call with
     // a clear "Brave API key not found" message rather than silently
     // pretending to work), so a missing provisioner is not fatal here.
+    //
+    // Provision under the TENANT-SHARED scope, not the bootstrap caller's own
+    // (tenant, user) pair: `web_search` installs Tenant-owned (same as
+    // `web-access`), and the host's dispatch-time credential pre-flight
+    // (`secret_owner_scope`) only ever checks the model-invocation caller's
+    // own scope, then falls back to `caller_scope.tenant_shared_managed_scope()`
+    // — never an arbitrary third scope. Provisioning under the bootstrap's
+    // own owner scope left the secret invisible to every real invocation
+    // (dispatch-time pre-flight always reported it absent, surfacing
+    // AuthRequired instead of ever calling Brave).
     if let Some(provisioner) = admin_secret_provisioner {
         let handle = SecretHandle::new(BRAVE_API_KEY_SECRET_NAME).map_err(|error| {
             RebornBuildError::InvalidConfig {
                 reason: format!("brave_api_key secret handle is invalid: {error}"),
             }
         })?;
+        let shared_scope = owner_scope.tenant_shared_managed_scope();
         provisioner
             .put(
-                &owner_scope.tenant_id,
-                &owner_scope.user_id,
+                &shared_scope.tenant_id,
+                &shared_scope.user_id,
                 handle,
                 api_key,
             )
