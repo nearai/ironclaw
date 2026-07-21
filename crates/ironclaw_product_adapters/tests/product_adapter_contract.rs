@@ -1,23 +1,25 @@
 //! Architecture/boundary tests for the ProductAdapter contract.
 
-use std::path::Path;
-use std::process::Command;
+use std::{path::Path, process::Command, sync::Mutex};
 
+use async_trait::async_trait;
+use ironclaw_attachments::WorkspaceFile;
+use ironclaw_host_api::ScopedPath;
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, DeclaredEgressHost, DeliveryStatus,
     EgressCredentialHandle, EgressMethod, EgressPath, EgressRequest, ExternalActorRef,
     ExternalConversationRef, ExternalEventId, FakeOutboundDeliverySink, FakeProductWorkflow,
     FakeProjectionStream, FakeProtocolHttpEgress, InboundCommandPayload, OutboundDeliverySink,
-    ParsedProductInbound, ProductAdapterCapabilities, ProductAdapterError, ProductAdapterId,
-    ProductAttachmentDescriptor, ProductAttachmentKind, ProductCapabilityFlag,
+    ParsedProductInbound, ProductAdapter, ProductAdapterCapabilities, ProductAdapterError,
+    ProductAdapterId, ProductAttachmentDescriptor, ProductAttachmentKind, ProductCapabilityFlag,
     ProductControlActionPayload, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
     ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem,
     ProductProjectionReadInput, ProductProjectionState, ProductProjectionSubject,
-    ProductProjectionSubscribeInput, ProductRejection, ProductRejectionKind, ProductSurfaceKind,
-    ProductTriggerReason, ProductWorkflow, ProjectionCursor, ProjectionReadRequest,
-    ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthEvidence, ProtocolHttpEgress,
-    ProtocolHttpEgressError, REDACTED_PLACEHOLDER, RedactedDebug, RedactedString,
-    TrustedInboundContext, UserMessagePayload,
+    ProductProjectionSubscribeInput, ProductRejection, ProductRejectionKind, ProductRenderOutcome,
+    ProductSurfaceKind, ProductTriggerReason, ProductWorkflow, ProjectionCursor,
+    ProjectionReadRequest, ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthEvidence,
+    ProtocolHttpEgress, ProtocolHttpEgressError, REDACTED_PLACEHOLDER, RedactedDebug,
+    RedactedString, TrustedInboundContext, UserMessagePayload,
 };
 use ironclaw_turns::{AcceptedMessageRef, ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 
@@ -550,4 +552,108 @@ fn payload_alias_matches_reexport() {
     ) -> ProductInboundPayload {
         p
     }
+}
+
+struct RecordingWorkspaceFileAdapter {
+    files: Mutex<Vec<WorkspaceFile>>,
+    adapter_id: ProductAdapterId,
+    installation_id: AdapterInstallationId,
+    capabilities: ProductAdapterCapabilities,
+    auth_requirement: AuthRequirement,
+}
+
+impl RecordingWorkspaceFileAdapter {
+    fn new() -> Self {
+        Self {
+            files: Mutex::new(Vec::new()),
+            adapter_id: adapter_id(),
+            installation_id: installation_id(),
+            capabilities: ProductAdapterCapabilities::empty(),
+            auth_requirement: AuthRequirement::BearerToken,
+        }
+    }
+}
+
+#[async_trait]
+impl ProductAdapter for RecordingWorkspaceFileAdapter {
+    fn adapter_id(&self) -> &ProductAdapterId {
+        &self.adapter_id
+    }
+
+    fn installation_id(&self) -> &AdapterInstallationId {
+        &self.installation_id
+    }
+
+    fn surface_kind(&self) -> ProductSurfaceKind {
+        ProductSurfaceKind::ExternalChannel
+    }
+
+    fn capabilities(&self) -> &ProductAdapterCapabilities {
+        &self.capabilities
+    }
+
+    fn auth_requirement(&self) -> &AuthRequirement {
+        &self.auth_requirement
+    }
+
+    fn parse_inbound(
+        &self,
+        _raw_payload: &[u8],
+        _auth_evidence: &ProtocolAuthEvidence,
+    ) -> Result<ParsedProductInbound, ProductAdapterError> {
+        unreachable!("outbound contract test does not parse inbound payloads")
+    }
+
+    async fn render_outbound(
+        &self,
+        _envelope: ProductOutboundEnvelope,
+        _egress: &dyn ProtocolHttpEgress,
+        _delivery_sink: &dyn OutboundDeliverySink,
+    ) -> Result<ProductRenderOutcome, ProductAdapterError> {
+        Ok(ProductRenderOutcome::DeliveryRecorded)
+    }
+
+    async fn render_outbound_with_attachments(
+        &self,
+        _envelope: ProductOutboundEnvelope,
+        attachments: Vec<WorkspaceFile>,
+        _egress: &dyn ProtocolHttpEgress,
+        _delivery_sink: &dyn OutboundDeliverySink,
+    ) -> Result<ProductRenderOutcome, ProductAdapterError> {
+        *self.files.lock().expect("test mutex") = attachments;
+        Ok(ProductRenderOutcome::DeliveryRecorded)
+    }
+}
+
+#[tokio::test]
+async fn outbound_workspace_file_preserves_scoped_path_and_bytes_at_adapter_boundary() {
+    let adapter = RecordingWorkspaceFileAdapter::new();
+    let file = WorkspaceFile {
+        path: ScopedPath::new("/workspace/reports/q2.csv").expect("valid scoped workspace path"),
+        filename: Some("q2.csv".into()),
+        mime_type: "text/csv".into(),
+        bytes: b"quarter,revenue\nQ2,42\n".to_vec(),
+    };
+    let expected = file.clone();
+    let egress = FakeProtocolHttpEgress::new([]);
+    let sink = FakeOutboundDeliverySink::new();
+    let envelope = ProductOutboundEnvelope::new(
+        adapter_id(),
+        installation_id(),
+        sample_target(),
+        ProjectionCursor::new("cursor:workspace-file").expect("cursor"),
+        ProductOutboundPayload::FinalReply(ironclaw_product_adapters::FinalReplyView {
+            turn_run_id: TurnRunId::new(),
+            text: "attached report".into(),
+            generated_at: chrono::Utc::now(),
+        }),
+    );
+
+    adapter
+        .render_outbound_with_attachments(envelope, vec![file], &egress, &sink)
+        .await
+        .expect("adapter accepts canonical workspace file");
+
+    let received = adapter.files.lock().expect("test mutex").clone();
+    assert_eq!(received, vec![expected]);
 }

@@ -35,6 +35,7 @@ use crate::setup::TelegramSetupService;
 
 const TELEGRAM_EGRESS_TIMEOUT_MS: u32 = 10_000;
 const TELEGRAM_EGRESS_RESPONSE_BODY_LIMIT_BYTES: u64 = 64 * 1024;
+const TELEGRAM_EGRESS_MAX_RESPONSE_BODY_LIMIT_BYTES: u64 = 5 * 1024 * 1024;
 const TELEGRAM_EGRESS_CAPABILITY_ID: &str = "telegram.egress";
 /// Opaque credential handle the adapter renders; doubles as the literal URL
 /// placeholder the mediated egress substitutes.
@@ -98,7 +99,12 @@ impl TelegramProtocolHttpEgress {
                     body: request.body().to_vec(),
                     network_policy: telegram_network_policy(request.host().as_str()),
                     credential_injections: Vec::new(),
-                    response_body_limit: Some(TELEGRAM_EGRESS_RESPONSE_BODY_LIMIT_BYTES),
+                    response_body_limit: Some(
+                        request
+                            .response_body_limit()
+                            .unwrap_or(TELEGRAM_EGRESS_RESPONSE_BODY_LIMIT_BYTES)
+                            .min(TELEGRAM_EGRESS_MAX_RESPONSE_BODY_LIMIT_BYTES),
+                    ),
                     save_body_to: None,
                     timeout_ms: Some(TELEGRAM_EGRESS_TIMEOUT_MS),
                 },
@@ -240,7 +246,12 @@ impl TelegramProtocolHttpEgress {
 /// [`crate::bot_api::HostEgressTelegramBotApi`]'s URL
 /// construction so setup-time and delivery-time egress cannot drift.
 fn bot_api_url(host: &str, path: &str) -> String {
-    format!("https://{host}/bot{{{TELEGRAM_BOT_TOKEN_CREDENTIAL_HANDLE}}}{path}")
+    match path.strip_prefix("/file/") {
+        Some(file_path) => {
+            format!("https://{host}/file/bot{{{TELEGRAM_BOT_TOKEN_CREDENTIAL_HANDLE}}}/{file_path}")
+        }
+        None => format!("https://{host}/bot{{{TELEGRAM_BOT_TOKEN_CREDENTIAL_HANDLE}}}{path}"),
+    }
 }
 
 fn validate_bot_token(token: &SecretString) -> Result<(), ProtocolHttpEgressError> {

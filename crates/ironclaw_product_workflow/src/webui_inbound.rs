@@ -4,7 +4,7 @@
 //! into canonical Reborn commands without depending on WebUI route handlers,
 //! product adapters, protocol auth evidence, WASM, or adapter registries.
 
-use ironclaw_attachments::InboundAttachment;
+use ironclaw_attachments::{DEFAULT_ATTACHMENT_BUDGETS, InboundAttachment};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
     CancelRunRequest, GateRef, IdempotencyKey, SanitizedCancelReason, TurnActor, TurnRunId,
@@ -17,12 +17,6 @@ const CLIENT_ACTION_ID_MAX_BYTES: usize = 256;
 const USER_MESSAGE_TEXT_MAX_BYTES: usize = 64 * 1024;
 const GATE_REF_MAX_BYTES: usize = 256;
 const CREDENTIAL_REF_MAX_BYTES: usize = 512;
-/// Inline-attachment budgets, mirroring the v1 web gateway: at most
-/// `MAX_INLINE_ATTACHMENTS` files, `MAX_INLINE_ATTACHMENT_BYTES` decoded bytes
-/// per file, and `MAX_INLINE_TOTAL_ATTACHMENT_BYTES` decoded bytes total.
-const MAX_INLINE_ATTACHMENTS: usize = 10;
-const MAX_INLINE_ATTACHMENT_BYTES: usize = 5 * 1024 * 1024;
-const MAX_INLINE_TOTAL_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const ATTACHMENT_FILENAME_MAX_BYTES: usize = 256;
 
 /// Browser-facing inline-attachment contract advertised to the WebUI.
@@ -54,9 +48,9 @@ pub struct WebUiAttachmentCapabilities {
 pub fn webui_attachment_capabilities() -> WebUiAttachmentCapabilities {
     WebUiAttachmentCapabilities {
         accept: ironclaw_common::accept_tokens(),
-        max_count: MAX_INLINE_ATTACHMENTS,
-        max_file_bytes: MAX_INLINE_ATTACHMENT_BYTES,
-        max_total_bytes: MAX_INLINE_TOTAL_ATTACHMENT_BYTES,
+        max_count: DEFAULT_ATTACHMENT_BUDGETS.max_count,
+        max_file_bytes: DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes,
+        max_total_bytes: DEFAULT_ATTACHMENT_BUDGETS.max_total_bytes,
     }
 }
 
@@ -177,7 +171,7 @@ impl WebUiSendMessageRequest {
     ) -> Result<Vec<InboundAttachment>, WebUiInboundValidationError> {
         use base64::Engine;
 
-        if self.attachments.len() > MAX_INLINE_ATTACHMENTS {
+        if self.attachments.len() > DEFAULT_ATTACHMENT_BUDGETS.max_count {
             return Err(WebUiInboundValidationError::new(
                 "attachments",
                 WebUiInboundValidationCode::TooLong,
@@ -203,14 +197,14 @@ impl WebUiSendMessageRequest {
                         WebUiInboundValidationCode::InvalidValue,
                     )
                 })?;
-            if bytes.len() > MAX_INLINE_ATTACHMENT_BYTES {
+            if bytes.len() > DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes {
                 return Err(WebUiInboundValidationError::new(
                     "attachments",
                     WebUiInboundValidationCode::TooLong,
                 ));
             }
             total_bytes = total_bytes.saturating_add(bytes.len());
-            if total_bytes > MAX_INLINE_TOTAL_ATTACHMENT_BYTES {
+            if total_bytes > DEFAULT_ATTACHMENT_BUDGETS.max_total_bytes {
                 return Err(WebUiInboundValidationError::new(
                     "attachments",
                     WebUiInboundValidationCode::TooLong,

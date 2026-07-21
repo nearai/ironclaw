@@ -41,9 +41,11 @@ use ironclaw_product_workflow::{
     ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse,
     PendingApprovalInteractionView, ProductActorUserResolver, ProductConversationBindingService,
     ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
+    ProjectFilesystemReader, ProjectFsEntry, ProjectFsError, ProjectFsStat,
     ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, ResolveBindingRequest,
     ResolvedBinding, StaticProductActorUserResolver, StaticProductInstallationResolver,
+    WorkspaceFile,
 };
 use ironclaw_slack_v2_adapter::{
     SLACK_USER_ACTOR_KIND, SlackV2Adapter, SlackV2AdapterConfig,
@@ -93,6 +95,39 @@ const SLACK_SIGNATURE_HEADER: &str = "X-Slack-Signature";
 const SLACK_TIMESTAMP_HEADER: &str = "X-Slack-Request-Timestamp";
 const SECRET: &str = "topsecret";
 const GATE: &str = "gate:approval-00000000-0000-0000-0000-000000000001";
+
+struct DenyingProjectFilesystemReader;
+
+#[async_trait]
+impl ProjectFilesystemReader for DenyingProjectFilesystemReader {
+    async fn list_dir(
+        &self,
+        _thread_scope: &ThreadScope,
+        _path: &str,
+    ) -> Result<Vec<ProjectFsEntry>, ProjectFsError> {
+        Err(ProjectFsError::Denied)
+    }
+
+    async fn read_file(
+        &self,
+        _thread_scope: &ThreadScope,
+        _path: &str,
+    ) -> Result<WorkspaceFile, ProjectFsError> {
+        Err(ProjectFsError::Denied)
+    }
+
+    async fn stat(
+        &self,
+        _thread_scope: &ThreadScope,
+        _path: &str,
+    ) -> Result<ProjectFsStat, ProjectFsError> {
+        Err(ProjectFsError::Denied)
+    }
+}
+
+fn denying_project_filesystem_reader() -> Arc<dyn ProjectFilesystemReader> {
+    Arc::new(DenyingProjectFilesystemReader)
+}
 const GATE_B: &str = "gate:approval-00000000-0000-0000-0000-000000000002";
 const AUTH_GATE: &str = "gate:auth-slack";
 
@@ -339,6 +374,7 @@ async fn build_harness_with_full_settings(
             adapter,
             egress: Arc::new(egress.clone()),
             delivery_sink: Arc::new(sink),
+            project_filesystem_reader: denying_project_filesystem_reader(),
             auth_challenges,
             auth_flow_canceller: None,
             approval_requests: None,
@@ -557,6 +593,7 @@ async fn build_harness_for_delivered_route_tests_with_store_mode(
             adapter,
             egress: Arc::new(egress.clone()),
             delivery_sink: Arc::new(sink),
+            project_filesystem_reader: denying_project_filesystem_reader(),
             auth_challenges: None,
             auth_flow_canceller: None,
             approval_requests: None,
@@ -1073,6 +1110,7 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
         adapter,
         egress: Arc::new(driver_egress.clone()),
         delivery_sink: Arc::new(RecordingDeliverySink::default()),
+        project_filesystem_reader: denying_project_filesystem_reader(),
         auth_challenges: None,
         auth_flow_canceller: None,
         approval_requests: None,
@@ -1332,6 +1370,7 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
         adapter,
         egress: Arc::new(driver_egress.clone()),
         delivery_sink: Arc::new(RecordingDeliverySink::default()),
+        project_filesystem_reader: denying_project_filesystem_reader(),
         auth_challenges: Some(auth_challenges),
         auth_flow_canceller: None,
         approval_requests: None,
@@ -1469,6 +1508,7 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
         adapter,
         egress: Arc::new(driver_egress.clone()),
         delivery_sink: Arc::new(RecordingDeliverySink::default()),
+        project_filesystem_reader: denying_project_filesystem_reader(),
         auth_challenges: Some(auth_challenges),
         auth_flow_canceller: None,
         approval_requests: None,
@@ -3356,6 +3396,7 @@ async fn build_harness_for_auth_fanout_test(
             adapter,
             egress: Arc::new(egress.clone()),
             delivery_sink: Arc::new(sink),
+            project_filesystem_reader: denying_project_filesystem_reader(),
             auth_challenges: Some(auth_challenges),
             auth_flow_canceller: None,
             approval_requests: None,

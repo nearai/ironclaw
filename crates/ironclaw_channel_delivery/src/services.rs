@@ -23,6 +23,7 @@ use ironclaw_product_adapters::{
 };
 use ironclaw_product_workflow::{
     AuthChallengeProvider, BlockedAuthFlowCanceller, ConversationBindingService,
+    ProjectFilesystemReader,
 };
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_threads::SessionThreadService;
@@ -104,6 +105,9 @@ pub struct FinalReplyDeliveryServices {
     pub adapter: Arc<dyn ProductAdapter>,
     pub egress: Arc<dyn ProtocolHttpEgress>,
     pub delivery_sink: Arc<dyn OutboundDeliverySink>,
+    /// Required scoped reader for materializing assistant-mentioned workspace
+    /// files before native channel delivery.
+    pub project_filesystem_reader: Arc<dyn ProjectFilesystemReader>,
     /// Resolves auth challenges for `BlockedAuth` runs. Only link-based OAuth
     /// challenges are surfaced in Slack; other challenge kinds are denied (see the
     /// `BlockedAuth` arm of `notification_for_actionable_state`).

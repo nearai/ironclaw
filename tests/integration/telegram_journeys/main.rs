@@ -54,6 +54,7 @@ mod support;
 mod harness;
 
 mod scenario_admin_setup_pair_resume_reply;
+mod scenario_attachments;
 mod scenario_decline_in_chat;
 mod scenario_delivery_honesty;
 mod scenario_gated_install_deny_arm;

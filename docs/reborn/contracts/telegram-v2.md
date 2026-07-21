@@ -120,10 +120,13 @@ Operator-managed, one bot per deployment
   verifier/adapter/runner chain per setup revision.
 - **Rate limiting:** a per-installation token bucket (120/60s) applies
   after verification → 429.
-- **Immediate-ack dispatch:** Telegram gets its 200 immediately; the turn
-  runs async through `NativeProductAdapterRunner` wrapping the unchanged
-  `TelegramV2Adapter` (2s intake timeout covering auth/parse/stamp/submit
-  only, 64 in-flight cap).
+- **Acknowledgement dispatch:** text-only updates get their 200 immediately and
+  run async through `NativeProductAdapterRunner` wrapping the unchanged
+  `TelegramV2Adapter` (2s intake timeout covering auth/parse/stamp/submit only,
+  64 in-flight cap). Descriptor-bearing user messages use the runner's bounded
+  15s pre-ack intake arm instead: transient `getFile`/download/landing failures
+  return a retryable webhook response so Telegram redelivers, while a durable
+  accepted outcome releases admission before the final-reply observer runs.
 - **DM-only admission** (the pairing-aware pre-router wraps the runner):
 
   | Verified update | Outcome |
@@ -208,7 +211,12 @@ travels as an opaque credential handle substituted into the URL path by the
 mediated host egress (`{telegram_bot_token}` placeholder — token bytes never
 appear in adapter-visible state, composition inputs, or logs).
 
-Final replies render as plain text. Replies over Telegram's 4096-UTF-16-unit
+Final replies render as plain text. When the final text references a valid
+`/workspace/file.ext` path (the same recognition contract used by WebUI), the
+host reads that file through the scoped project filesystem and appends a native
+`sendDocument` upload after the ordered text messages. Missing, unreadable, or
+oversized referenced files fail the delivery honestly; they are never silently
+dropped. Replies over Telegram's 4096-UTF-16-unit
 message cap split into **ordered lossless `sendMessage` chunks** (never inside
 a character), sent sequentially; a mid-sequence failure stops the remaining
 chunks and records ONE honest failure status for the attempt — already-sent
@@ -285,6 +293,16 @@ group/supergroup trigger logic exists but is moot at the host tier: the
 host admits private-chat messages only and wires `recognized_commands`
 empty. `ExternalProgressPush` remains opt-in and is wired off.
 
+Descriptor-bearing messages are materialized only after idempotency replay and
+inbound policy succeed. The Telegram host calls `getFile`, downloads through
+the credential-mediated `/file/bot{token}/...` route, enforces the shared
+10-file / 5 MiB-each / 10 MiB-total channel budget, and hands bytes to the same
+canonical workspace lander used by WebUI. A lookup/download/limit failure
+rejects or retries the whole intake; no attachment-less turn is submitted. A
+retryable transfer failure is surfaced before webhook acknowledgement, and a
+redelivery of the same `update_id` re-enters the released idempotency reservation
+without duplicating a successfully landed attachment.
+
 ## Exclusivity guard (v1 monolith arbitration)
 
 `REBORN_TELEGRAM_V2_ENABLED` and
@@ -333,6 +351,7 @@ Deltas now shipped:
 | Retired-taxonomy zero + no v1 pairing-route literals in the Reborn context | `crates/ironclaw_architecture/tests/telegram_extension_gates.rs` | `cargo test -p ironclaw_architecture --test telegram_extension_gates` (wired into `scripts/reborn-e2e-rust.sh` architecture group) |
 | v1↔v2 exclusivity arbitration + default-off posture | `tests/telegram_v2_default_off_integration.rs` (root crate) | `cargo test --test telegram_v2_default_off_integration` |
 | Adapter parse/render/idempotency/delivery mapping | `ironclaw_telegram_v2_adapter` per-module `mod tests` | `cargo test -p ironclaw_telegram_v2_adapter --lib` |
+| Production-composed setup/pairing, signed webhook intake, exact landed attachment refs/bytes, retry-before-ack idempotency, real `builtin.write_file`, final text, and native `sendDocument` | `tests/integration/telegram_journeys/` (`reborn_integration_telegram_journey`) | `cargo test --test reborn_integration_telegram_journey scenario_attachments -- --nocapture` |
 
 Live proof rides the Reborn WebUI v2 live-QA lane
 (`scripts/reborn_webui_v2_live_qa/`), whose Telegram cases drive admin

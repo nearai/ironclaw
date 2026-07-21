@@ -126,7 +126,8 @@ pub use filesystem_ledger::RebornLibSqlIdempotencyLedger;
 pub use filesystem_ledger::RebornPostgresIdempotencyLedger;
 pub use in_memory_ledger::InMemoryIdempotencyLedger;
 pub use inbound_turn::{
-    DefaultInboundTurnService, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
+    AttachmentMaterializationError, DefaultInboundTurnService, InboundAttachmentMaterializer,
+    InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
 };
 pub use ironclaw_common::{AutomationName, AutomationNameError, MAX_AUTOMATION_NAME_BYTES};
 pub use ledger::{IdempotencyDecision, IdempotencyLedger};
@@ -147,6 +148,7 @@ pub use outbound_delivery::{
     ProductOutboundDeliveryError, ProductOutboundDeliveryOutcome, ProductOutboundDeliveryRequest,
     ProductOutboundStatusUpdateFailure, ProductOutboundTargetResolver,
     VerifiedProductOutboundTargetMetadata, prepare_and_render_product_outbound,
+    prepare_and_render_product_outbound_with_attachments,
 };
 pub use policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
@@ -235,7 +237,7 @@ pub use reborn_services::{
     StaticConnectableChannelsProductFacade, StaticOperatorStatusService, TriggerRunThreadScope,
     UnsupportedAutomationProductFacade, UnsupportedOperatorLogsService,
     UnsupportedOperatorServiceLifecycleService, UnsupportedOperatorStatusService,
-    UnsupportedOutboundPreferencesProductFacade, UpsertLlmProviderRequest,
+    UnsupportedOutboundPreferencesProductFacade, UpsertLlmProviderRequest, WorkspaceFile,
     normalize_operator_log_context_value,
 };
 

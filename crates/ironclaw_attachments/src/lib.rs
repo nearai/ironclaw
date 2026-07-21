@@ -17,11 +17,17 @@
 //! [`ScopedFilesystem`]: ironclaw_filesystem::ScopedFilesystem
 //! [`MountPermissions`]: ironclaw_host_api::MountPermissions
 
+mod budgets;
 mod inbound;
 mod landing;
+mod materialized_file;
+mod workspace_refs;
 
+pub use budgets::{AttachmentBudgets, DEFAULT_ATTACHMENT_BUDGETS};
 pub use inbound::{InboundAttachment, land_inbound_attachments};
 pub use landing::{
     ATTACHMENTS_DIR, AttachmentLanding, AttachmentLandingError, DEFAULT_MAX_ATTACHMENT_BYTES,
     attachment_scoped_path, land_attachment,
 };
+pub use materialized_file::{MaterializedFile, ProjectFsFile, WorkspaceFile};
+pub use workspace_refs::extract_workspace_attachment_paths;

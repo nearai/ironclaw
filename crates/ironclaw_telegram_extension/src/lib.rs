@@ -18,6 +18,8 @@
 
 #![warn(unreachable_pub)]
 
+mod attachment_materializer;
+
 pub mod bot_api;
 pub mod channel_routes;
 pub mod delivery;

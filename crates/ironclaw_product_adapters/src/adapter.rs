@@ -1,6 +1,7 @@
 //! ProductAdapter trait.
 
 use async_trait::async_trait;
+use ironclaw_attachments::WorkspaceFile;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{AuthRequirement, ProtocolAuthEvidence};
@@ -57,6 +58,26 @@ pub trait ProductAdapter: Send + Sync {
         egress: &dyn ProtocolHttpEgress,
         delivery_sink: &dyn OutboundDeliverySink,
     ) -> Result<ProductRenderOutcome, ProductAdapterError>;
+
+    /// Render with transient host-materialized workspace files. Text-only
+    /// behavior remains backward compatible; adapters that do not implement
+    /// files fail closed instead of silently dropping them.
+    async fn render_outbound_with_attachments(
+        &self,
+        envelope: ProductOutboundEnvelope,
+        attachments: Vec<WorkspaceFile>,
+        egress: &dyn ProtocolHttpEgress,
+        delivery_sink: &dyn OutboundDeliverySink,
+    ) -> Result<ProductRenderOutcome, ProductAdapterError> {
+        if attachments.is_empty() {
+            return self.render_outbound(envelope, egress, delivery_sink).await;
+        }
+        Err(ProductAdapterError::Internal {
+            detail: crate::redaction::RedactedString::new(
+                "product adapter does not support outbound attachments",
+            ),
+        })
+    }
 
     fn health(&self) -> ProductAdapterHealth {
         ProductAdapterHealth::Healthy

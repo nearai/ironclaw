@@ -29,6 +29,8 @@ use thiserror::Error;
 
 const SLACK_EGRESS_TIMEOUT_MS: u32 = 10_000;
 const SLACK_EGRESS_RESPONSE_BODY_LIMIT_BYTES: u64 = 64 * 1024;
+const SLACK_EGRESS_MAX_RESPONSE_BODY_LIMIT_BYTES: u64 =
+    ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64;
 const SLACK_EGRESS_CAPABILITY_ID: &str = "slack.egress";
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -178,7 +180,12 @@ impl ProtocolHttpEgress for SlackProtocolHttpEgress {
                     body: request.body().to_vec(),
                     network_policy: slack_network_policy(request.host().as_str()),
                     credential_injections: Vec::new(),
-                    response_body_limit: Some(SLACK_EGRESS_RESPONSE_BODY_LIMIT_BYTES),
+                    response_body_limit: Some(
+                        request
+                            .response_body_limit()
+                            .unwrap_or(SLACK_EGRESS_RESPONSE_BODY_LIMIT_BYTES)
+                            .min(SLACK_EGRESS_MAX_RESPONSE_BODY_LIMIT_BYTES),
+                    ),
                     save_body_to: None,
                     timeout_ms: Some(SLACK_EGRESS_TIMEOUT_MS),
                 },

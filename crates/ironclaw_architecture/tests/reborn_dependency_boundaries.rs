@@ -8,6 +8,33 @@ use std::{
 use serde_json::Value;
 
 #[test]
+fn channel_attachment_composition_uses_deployment_neutral_runtime_ports() {
+    let root = workspace_root();
+    for surface in ["slack/slack_host_beta.rs", "telegram/telegram_host_beta.rs"] {
+        let path = root
+            .join("crates/ironclaw_reborn_composition/src")
+            .join(surface);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("could not read {}: {error}", path.display()));
+        assert!(
+            !source.contains(".webui_workspace_filesystem()"),
+            "{} must not derive attachment authority from a WebUI-specific filesystem accessor",
+            path.display()
+        );
+        for required_port in [
+            ".inbound_attachment_lander()",
+            ".project_filesystem_reader()",
+        ] {
+            assert!(
+                source.contains(required_port),
+                "{} must consume the canonical runtime port `{required_port}`",
+                path.display()
+            );
+        }
+    }
+}
+
+#[test]
 fn reborn_boundary_rules_active_crates_are_workspace_members() {
     // Regression for PR #3212 review: a boundary rule whose crate has a
     // `Cargo.toml` on disk but is missing from `cargo metadata` would
@@ -293,6 +320,50 @@ fn reborn_crate_dependency_boundaries_hold() {
     for rule in boundary_rules() {
         assert_no_normal_workspace_deps(&dependencies, rule.crate_name, rule.forbidden);
     }
+}
+
+#[test]
+fn slack_provider_transfer_stays_in_slack_extension() {
+    let root = workspace_root();
+    let composition_violations = production_composition_sources(&root)
+        .into_iter()
+        .filter_map(|(path, _)| {
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            source
+                // This scan is an ownership guard for production composition
+                // code. Slack-host integration fixtures still run through the
+                // assembled route, but they are not a provider implementation.
+                .split("#[cfg(test)]")
+                .next()
+                .unwrap_or(&source)
+                .contains("/api/files.info")
+                .then(|| {
+                    path.strip_prefix(&root)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .into_owned()
+                })
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        composition_violations.is_empty(),
+        "Slack provider transfer must live in ironclaw_slack_extension, not composition. Violations:\n{}",
+        composition_violations.join("\n")
+    );
+
+    let metadata = cargo_metadata();
+    let dependencies = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata must include packages")
+        .iter()
+        .filter_map(package_dependencies)
+        .collect::<HashMap<_, _>>();
+    assert_no_normal_workspace_deps(
+        &dependencies,
+        "ironclaw_slack_extension",
+        ["ironclaw_reborn_composition"],
+    );
 }
 
 #[test]
@@ -2803,6 +2874,13 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
+            // Slack provider transfer is product-owned. Composition supplies
+            // mediated handles and assembles the workflow, but must not become
+            // a second Slack implementation surface.
+            crate_name: "ironclaw_slack_extension",
+            forbidden: vec!["ironclaw_reborn_composition"],
+        },
+        BoundaryRule {
             // Product-neutral delivery orchestration consumes channel-host
             // contracts but never a concrete channel or an application root.
             crate_name: "ironclaw_channel_delivery",
@@ -4518,4 +4596,26 @@ fn collect_forbidden_uses_detects_violation() {
         "violation should report the forbidden-use reason: {:?}",
         violations
     );
+}
+
+#[test]
+fn attachment_delivery_uses_the_canonical_workspace_file_contract() {
+    let root = workspace_root();
+    let product_adapter =
+        std::fs::read_to_string(root.join("crates/ironclaw_product_adapters/src/adapter.rs"))
+            .expect("read product adapter contract");
+    assert!(
+        !product_adapter.contains("pub struct ProductOutboundAttachment"),
+        "ProductOutboundAttachment mirrors the canonical workspace file carrier"
+    );
+
+    for file in ["observer.rs", "triggered.rs"] {
+        let source =
+            std::fs::read_to_string(root.join("crates/ironclaw_channel_delivery/src").join(file))
+                .expect("read channel delivery source");
+        assert!(
+            !source.contains("with_project_filesystem_reader"),
+            "channel delivery must receive ProjectFilesystemReader through FinalReplyDeliveryServices ({file})"
+        );
+    }
 }

@@ -4974,20 +4974,11 @@ async fn local_dev_runtime_webui_bundle_reuses_thread_and_turn_facades() {
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
-/// Caller-level regression for the production attachment-landing path:
-/// drives `RebornRuntime::webui_workspace_filesystem()` — the exact method
-/// `build_webui_services`/`build_openai_compat_route_mount` call — through
-/// a real `ProjectScopedAttachmentLander`, then reads the landed bytes back
-/// through the same `ProjectScopedAttachmentReader` production wires
-/// `attachment_read_port` with. The C-ATTACH integration tests exercise the
-/// shared `RebornServices::read_write_workspace_filesystem` recipe via the
-/// `local_dev_attachment_test_support_for_test` seam, but never call through
-/// this `RebornRuntime` wrapper itself; this closes that gap so a future
-/// regression in the wrapper (not just the shared recipe) fails a test
-/// instead of only breaking WebUI/OpenAI-compatible attachment landing in
-/// production.
+/// Caller-level regression for the canonical runtime attachment ports. WebUI,
+/// Slack, Telegram, and OpenAI-compatible composition all clone these exact
+/// trait objects instead of reconstructing concrete filesystem adapters.
 #[tokio::test]
-async fn webui_workspace_filesystem_lands_attachment_with_read_write_mount() {
+async fn runtime_attachment_ports_are_shared_and_round_trip_workspace_bytes() {
     let root = tempfile::tempdir().expect("tempdir");
     let gateway = Arc::new(RecordingGateway {
         reply: "attachment mount ok".to_string(),
@@ -5013,21 +5004,17 @@ async fn webui_workspace_filesystem_lands_attachment_with_read_write_mount() {
     .with_model_gateway_override(gateway);
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let read_write_filesystem = runtime
-        .webui_workspace_filesystem()
-        .expect("local-dev runtime composes a read-write webui workspace filesystem");
-    let local_runtime = runtime
-        .services()
-        .local_runtime
-        .as_ref()
-        .expect("local-dev runtime substrate");
-    // Mirrors production's `attachment_read_port` wiring (read-only
-    // `workspace_filesystem`), so the read side is the same authority a
-    // vision-capable model's multimodal part would resolve through.
-    let read_port = crate::support::fs::ProjectScopedAttachmentReader::new(Arc::clone(
-        &local_runtime.workspace_filesystem,
-    ));
-    let lander = crate::support::fs::ProjectScopedAttachmentLander::new(read_write_filesystem);
+    let webui_lander = runtime.inbound_attachment_lander();
+    let slack_lander = runtime.inbound_attachment_lander();
+    let telegram_lander = runtime.inbound_attachment_lander();
+    assert!(Arc::ptr_eq(&webui_lander, &slack_lander));
+    assert!(Arc::ptr_eq(&webui_lander, &telegram_lander));
+
+    let webui_reader = runtime.project_filesystem_reader();
+    let slack_reader = runtime.project_filesystem_reader();
+    let telegram_reader = runtime.project_filesystem_reader();
+    assert!(Arc::ptr_eq(&webui_reader, &slack_reader));
+    assert!(Arc::ptr_eq(&webui_reader, &telegram_reader));
 
     let thread_scope = ThreadScope {
         tenant_id: TenantId::new("runtime-attachment-mount-tenant").unwrap(),
@@ -5037,7 +5024,7 @@ async fn webui_workspace_filesystem_lands_attachment_with_read_write_mount() {
         mission_id: None,
     };
     let refs = ironclaw_product_workflow::InboundAttachmentLander::land(
-        &lander,
+        webui_lander.as_ref(),
         &thread_scope,
         "msg-attachment-mount",
         vec![ironclaw_attachments::InboundAttachment {
@@ -5054,17 +5041,72 @@ async fn webui_workspace_filesystem_lands_attachment_with_read_write_mount() {
         .as_deref()
         .expect("landed attachment carries a storage_key");
 
-    let read_back = ironclaw_loop_host::LoopAttachmentReadPort::read_attachment_bytes(
-        &read_port,
-        &thread_scope.to_resource_scope(),
-        storage_key,
+    let read_back = telegram_reader
+        .read_file(&thread_scope, storage_key)
+        .await
+        .expect("reading the landed attachment back through the shared reader succeeds");
+
+    assert_eq!(read_back.bytes, b"attachment-mount-bytes".to_vec());
+
+    // Sharing this reader with channel delivery must not lower the existing
+    // WebUI workspace-file ceiling to the narrower 5 MiB channel budget.
+    let webui_sized_bytes = vec![
+        b'w';
+        ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS
+            .max_file_bytes
+            .saturating_add(1)
+    ];
+    let webui_refs = ironclaw_product_workflow::InboundAttachmentLander::land(
+        webui_lander.as_ref(),
+        &thread_scope,
+        "msg-webui-sized-attachment",
+        vec![ironclaw_attachments::InboundAttachment {
+            id: "att-webui-sized".to_string(),
+            mime_type: "application/octet-stream".to_string(),
+            filename: Some("webui-sized.bin".to_string()),
+            bytes: webui_sized_bytes.clone(),
+        }],
     )
     .await
-    .expect("reading the landed attachment back through the read port succeeds");
-
-    assert_eq!(read_back, b"attachment-mount-bytes".to_vec());
+    .expect("landing a file above the channel limit but below the WebUI limit succeeds");
+    let webui_storage_key = webui_refs[0]
+        .storage_key
+        .as_deref()
+        .expect("landed WebUI-sized attachment carries a storage_key");
+    let webui_read_back = webui_reader
+        .read_file(&thread_scope, webui_storage_key)
+        .await
+        .expect("shared reader preserves the existing WebUI file-size limit");
+    assert_eq!(webui_read_back.bytes, webui_sized_bytes);
 
     runtime.shutdown().await.expect("runtime shutdown");
+}
+
+#[test]
+fn runtime_attachment_ports_keep_channel_hosts_deployment_neutral() {
+    for (surface, source) in [
+        (
+            "slack",
+            include_str!("../../slack/slack_host_beta.rs") as &str,
+        ),
+        (
+            "telegram",
+            include_str!("../../telegram/telegram_host_beta.rs") as &str,
+        ),
+    ] {
+        assert!(
+            !source.contains(".webui_workspace_filesystem()"),
+            "{surface} host must consume the deployment-neutral runtime attachment ports"
+        );
+        assert!(
+            source.contains(".inbound_attachment_lander()"),
+            "{surface} host must clone the canonical inbound attachment lander"
+        );
+        assert!(
+            source.contains(".project_filesystem_reader()"),
+            "{surface} host must clone the canonical project filesystem reader"
+        );
+    }
 }
 
 #[tokio::test]

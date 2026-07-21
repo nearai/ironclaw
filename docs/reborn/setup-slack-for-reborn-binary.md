@@ -157,6 +157,7 @@ https://<public-host>/api/reborn/product-auth/oauth/slack_personal/callback
   - `groups:history` if the bot should receive private-channel message events.
   - `mpim:history` if the bot should receive group-DM message events.
   - `files:read` if Slack file attachments should be downloaded and processed.
+  - `files:write` to upload assistant-produced `/workspace/...` files back to Slack.
 - Add user token scopes:
   - `users:read` for binding the authenticated Slack user to the Reborn user.
 - Install or reinstall the app to the workspace after changing scopes.
@@ -209,6 +210,7 @@ oauth_config:
       - groups:history
       - mpim:history
       - files:read
+      - files:write
     user:
       - users:read
 settings:
@@ -226,8 +228,9 @@ settings:
 ```
 
 Use least privilege for production. For example, omit `groups:history` if the
-bot does not need private-channel events, and omit `files:read` if attachment
-processing is not needed.
+bot does not need private-channel events. Omit `files:read` if inbound
+attachment processing is not needed, and omit `files:write` if native delivery
+of assistant-produced workspace files is not needed.
 
 ## Start and Verify
 
@@ -276,7 +279,9 @@ Confirm the WebUI Slack setup signing secret matches the app signing secret and 
 
 ### Slack replies fail with missing_scope
 
-Add or confirm chat:write, reinstall the Slack app, and update the bot token in WebUI Slack setup if Slack issued a new token.
+Add or confirm `chat:write` for text replies, `files:read` for inbound files,
+and `files:write` for outbound files; reinstall the Slack app, then update the
+bot token in WebUI Slack setup if Slack issued a new token.
 
 ### Slack OAuth callback fails
 

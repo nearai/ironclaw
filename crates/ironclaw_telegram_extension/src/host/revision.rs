@@ -15,8 +15,9 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     ApprovalInteractionService, AuthInteractionService,
     ConversationBindingService as ProductBindingService, DefaultInboundTurnService,
-    DefaultProductWorkflow, IdempotencyLedger, ProductActorUserResolver,
-    ProductConversationBindingService, ProductInstallationKey, ProductInstallationScope,
+    DefaultProductWorkflow, IdempotencyLedger, InboundAttachmentLander,
+    InboundAttachmentMaterializer, ProductActorUserResolver, ProductConversationBindingService,
+    ProductInstallationKey, ProductInstallationScope, ProjectFilesystemReader,
     StaticProductInstallationResolver,
 };
 use ironclaw_threads::SessionThreadService;
@@ -44,6 +45,9 @@ pub(crate) struct TelegramRevisionWorkflowParts {
     turn_coordinator: Arc<dyn TurnCoordinator>,
     approval_interactions: Arc<dyn ApprovalInteractionService>,
     auth_interactions: Arc<dyn AuthInteractionService>,
+    inbound_attachment_lander: Arc<dyn InboundAttachmentLander>,
+    inbound_attachment_materializer: Arc<dyn InboundAttachmentMaterializer>,
+    project_filesystem_reader: Arc<dyn ProjectFilesystemReader>,
     delivery_services: TelegramDeliveryServicePorts,
     egress: Arc<dyn ProtocolHttpEgress>,
     token_handle: EgressCredentialHandle,
@@ -62,6 +66,9 @@ impl TelegramRevisionWorkflowParts {
         turn_coordinator: Arc<dyn TurnCoordinator>,
         approval_interactions: Arc<dyn ApprovalInteractionService>,
         auth_interactions: Arc<dyn AuthInteractionService>,
+        inbound_attachment_lander: Arc<dyn InboundAttachmentLander>,
+        inbound_attachment_materializer: Arc<dyn InboundAttachmentMaterializer>,
+        project_filesystem_reader: Arc<dyn ProjectFilesystemReader>,
         delivery_services: TelegramDeliveryServicePorts,
         egress: Arc<dyn ProtocolHttpEgress>,
         token_handle: EgressCredentialHandle,
@@ -76,6 +83,9 @@ impl TelegramRevisionWorkflowParts {
             turn_coordinator,
             approval_interactions,
             auth_interactions,
+            inbound_attachment_lander,
+            inbound_attachment_materializer,
+            project_filesystem_reader,
             delivery_services,
             egress,
             token_handle,
@@ -117,6 +127,7 @@ impl TelegramRevisionWorkflowParts {
             adapter,
             egress: Arc::clone(&self.egress),
             delivery_sink: Arc::new(NoopTelegramDeliverySink),
+            project_filesystem_reader: Arc::clone(&self.project_filesystem_reader),
             auth_challenges: self.delivery_services.auth_challenges.clone(),
             auth_flow_canceller: self.delivery_services.auth_flow_canceller.clone(),
             approval_requests: Some(Arc::clone(&self.delivery_services.approval_requests)),
@@ -152,11 +163,15 @@ impl TelegramRevisionWorkflowBuilder for TelegramRevisionWorkflowParts {
             Arc::clone(&self.conversation_bindings),
             installation_resolver,
         );
-        let inbound = Arc::new(DefaultInboundTurnService::new(
-            binding.clone(),
-            Arc::clone(&self.thread_service),
-            Arc::clone(&self.turn_coordinator),
-        ));
+        let inbound = Arc::new(
+            DefaultInboundTurnService::new(
+                binding.clone(),
+                Arc::clone(&self.thread_service),
+                Arc::clone(&self.turn_coordinator),
+            )
+            .with_inbound_attachment_materializer(Arc::clone(&self.inbound_attachment_materializer))
+            .with_inbound_attachments(Arc::clone(&self.inbound_attachment_lander)),
+        );
         let workflow: Arc<dyn ProductWorkflow> = Arc::new(
             DefaultProductWorkflow::new(
                 inbound,

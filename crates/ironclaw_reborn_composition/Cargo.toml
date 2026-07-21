@@ -94,6 +94,7 @@ ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
 ironclaw_skills = { path = "../ironclaw_skills" }
 ironclaw_slack_v2_adapter = { path = "../ironclaw_slack_v2_adapter" }
+ironclaw_slack_extension = { path = "../ironclaw_slack_extension" }
 ironclaw_telegram_extension = { path = "../ironclaw_telegram_extension" }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_triggers = { path = "../ironclaw_triggers" }

@@ -76,6 +76,7 @@ The itemized changes since 0.29.1 follow.
 
 ### Added
 
+- *(channels)* land Telegram and Slack inbound files through the shared Reborn workspace attachment pipeline and deliver assistant-referenced `/workspace/...` files as native channel attachments.
 - *(reborn)* automations and `trigger_list` now surface why a scheduled trigger is currently held (approval/auth/in-progress) and how many scheduled occurrences elapsed while held ([#5886](https://github.com/nearai/ironclaw/issues/5886)).
 - *(reborn)* `ironclaw service install`/`start`/`stop`/`restart`/`status`/`uninstall` manage the standalone Reborn binary as an OS-native service (launchd user agent on macOS, systemd user unit on Linux), with a webui-token-file fallback for `serve` and atomic install with rollback on failure.
 

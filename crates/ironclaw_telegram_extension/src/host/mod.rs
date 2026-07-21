@@ -21,7 +21,8 @@ use ironclaw_outbound::{
 use ironclaw_product_workflow::{
     AccountConnectionStatusSource, ApprovalInteractionService, AuthChallengeProvider,
     AuthInteractionService, BlockedAuthFlowCanceller, ChannelConnectionFacade,
-    ConnectableChannelsProductFacade, IdempotencyLedger,
+    ConnectableChannelsProductFacade, IdempotencyLedger, InboundAttachmentLander,
+    ProjectFilesystemReader,
 };
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_secrets::SecretStore;
@@ -93,6 +94,8 @@ pub struct TelegramHostInput {
     pub turn_coordinator: Arc<dyn TurnCoordinator>,
     pub approval_interactions: Arc<dyn ApprovalInteractionService>,
     pub auth_interactions: Arc<dyn AuthInteractionService>,
+    pub inbound_attachment_lander: Arc<dyn InboundAttachmentLander>,
+    pub project_filesystem_reader: Arc<dyn ProjectFilesystemReader>,
     pub delivery_services: TelegramDeliveryServicePorts,
     pub setup_activation: Option<Arc<dyn TelegramChannelSetupActivation>>,
 }

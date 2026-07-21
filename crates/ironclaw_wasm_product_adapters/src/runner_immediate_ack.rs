@@ -3,24 +3,27 @@
 //! Protocols such as Slack must receive a 2xx response before the ProductWorkflow
 //! result is available. This extension keeps the verified parse/stamp/admission
 //! preparation shared with the synchronous runner path, then schedules bounded
-//! workflow dispatch after the protocol ACK is safe to return.
+//! workflow dispatch after the protocol ACK is safe to return. Attachment-bearing
+//! user messages are the deliberate exception: their provider transfer must
+//! reach a durable workflow outcome before a 2xx removes provider redelivery.
 //!
 //! # Delivery contract
 //!
-//! Immediate-ACK dispatch deliberately changes retry semantics. Once this path
-//! returns a protocol-level 2xx, transports such as Slack will not redeliver the
-//! event even if the asynchronous workflow later returns
-//! [`InboundRetryDisposition::Retry`]. The runner logs that case as a potential
-//! permanent drop, but hosts that need post-ACK retry guarantees must first land
-//! the event in a durable queue/tracked runtime before acknowledging the
-//! transport.
+//! Immediate-ACK dispatch deliberately changes retry semantics for events with
+//! no external attachment descriptors. Once this path returns a protocol-level
+//! 2xx, transports such as Slack will not redeliver the event even if the
+//! asynchronous workflow later returns [`InboundRetryDisposition::Retry`]. For
+//! attachment-bearing user messages, the runner instead waits for bounded
+//! workflow acceptance: a transient provider transfer failure is returned to
+//! the webhook transport so it can redeliver, while a durable acceptance still
+//! releases admission before the post-accept observer runs.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_product_adapters::{
     InboundRetryDisposition, ProductAdapterError, ProductInboundAck, ProductInboundEnvelope,
-    ProtocolAuthEvidence,
+    ProductInboundPayload, ProtocolAuthEvidence,
 };
 
 use crate::runner::{NativeProductAdapterRunner, RunnerError, WebhookProcessOutcome};
@@ -45,9 +48,10 @@ pub trait ImmediateAckWorkflowObserver: Send + Sync {
 }
 
 impl NativeProductAdapterRunner {
-    /// Verify, parse, stamp, and schedule workflow dispatch without waiting for
-    /// the workflow result. This is the path for protocols that require an
-    /// immediate webhook ACK after authentication and syntactic normalization.
+    /// Verify, parse, stamp, and normally schedule workflow dispatch without
+    /// waiting for the workflow result. Attachment-bearing user messages wait
+    /// for bounded durable acceptance so transient provider transfers remain
+    /// eligible for webhook redelivery.
     pub async fn process_webhook_immediate_ack(
         &self,
         headers: &http::HeaderMap,
@@ -58,10 +62,11 @@ impl NativeProductAdapterRunner {
             .await
     }
 
-    /// Schedule a previously verified webhook payload. Exposed for
+    /// Dispatch a previously verified webhook payload. Exposed for
     /// protocol-specific handlers that must verify once, handle a special
     /// synchronous protocol handshake, and then continue into the normal async
-    /// ProductWorkflow dispatch path for ordinary events.
+    /// ProductWorkflow dispatch path for ordinary events. Attachment-bearing
+    /// user messages complete the workflow intake before this method returns.
     pub async fn process_verified_webhook_immediate_ack(
         &self,
         body: &[u8],
@@ -72,9 +77,10 @@ impl NativeProductAdapterRunner {
     }
 
     /// Same as [`Self::process_verified_webhook_immediate_ack`], but notifies a
-    /// host-owned observer after the asynchronous workflow dispatch returns an
-    /// ack or error. This lets product hosts trigger follow-up delivery (for
-    /// example a final reply push) without delaying the protocol-level ACK.
+    /// host-owned observer after workflow acceptance. This lets product hosts
+    /// trigger follow-up delivery (for example a final reply push) without
+    /// holding either the admission permit or the attachment-bearing request
+    /// open across the potentially long final-reply wait.
     pub async fn process_verified_webhook_immediate_ack_with_observer(
         &self,
         body: &[u8],
@@ -82,19 +88,29 @@ impl NativeProductAdapterRunner {
         observer: Option<Arc<dyn ImmediateAckWorkflowObserver>>,
     ) -> Result<WebhookProcessOutcome, RunnerError> {
         let (envelope, permit) = self.prepare_inbound_envelope(body, evidence).await?;
+        if let Some(timeout) = self.config.pre_ack_attachment_workflow_timeout
+            && requires_pre_ack_workflow_acceptance(&envelope)
+        {
+            let ack = self
+                .submit_inbound_bounded_with_timeout(envelope.clone(), timeout)
+                .await?;
+            drop(permit);
+            if let Some(observer) = observer {
+                let observer_ack = ack.clone();
+                let mut tasks = self.immediate_ack_tasks.lock().await;
+                reap_finished_tasks(&mut tasks);
+                tasks.spawn(async move {
+                    observer.observe_workflow_ack(envelope, observer_ack).await;
+                });
+            }
+            return Ok(WebhookProcessOutcome::Acknowledged { ack });
+        }
+
         let workflow_envelope = envelope.clone();
         let workflow = Arc::clone(&self.workflow);
         let workflow_timeout = self.config.workflow_timeout;
         let mut tasks = self.immediate_ack_tasks.lock().await;
-        while let Some(result) = tasks.try_join_next() {
-            if let Err(error) = result {
-                tracing::debug!(
-                    target = "ironclaw::product_adapter::runner",
-                    error = %error,
-                    "tracked async webhook workflow dispatch task finished with join error"
-                );
-            }
-        }
+        reap_finished_tasks(&mut tasks);
         tasks.spawn(async move {
             // The admission permit gates only fast intake (auth/parse/stamp/
             // submit), bounded by `workflow_timeout`. It must NOT be held across
@@ -175,6 +191,25 @@ impl NativeProductAdapterRunner {
     }
 }
 
+fn requires_pre_ack_workflow_acceptance(envelope: &ProductInboundEnvelope) -> bool {
+    matches!(
+        envelope.payload(),
+        ProductInboundPayload::UserMessage(payload) if !payload.attachments.is_empty()
+    )
+}
+
+fn reap_finished_tasks(tasks: &mut tokio::task::JoinSet<()>) {
+    while let Some(result) = tasks.try_join_next() {
+        if let Err(error) = result {
+            tracing::debug!(
+                target = "ironclaw::product_adapter::runner",
+                error = %error,
+                "tracked async webhook workflow dispatch task finished with join error"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -192,10 +227,10 @@ mod tests {
     };
     use ironclaw_product_adapters::{
         AuthRequirement, OutboundDeliverySink, ParsedProductInbound, ProductAdapter,
-        ProductAdapterError, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
-        ProductOutboundEnvelope, ProductRenderOutcome, ProductTriggerReason,
-        ProjectionSubscriptionRequest, ProtocolAuthEvidence, ProtocolAuthFailure,
-        ProtocolHttpEgress, UserMessagePayload,
+        ProductAdapterError, ProductAttachmentDescriptor, ProductAttachmentKind, ProductInboundAck,
+        ProductInboundEnvelope, ProductInboundPayload, ProductOutboundEnvelope,
+        ProductRenderOutcome, ProductTriggerReason, ProjectionSubscriptionRequest,
+        ProtocolAuthEvidence, ProtocolAuthFailure, ProtocolHttpEgress, UserMessagePayload,
     };
     use tokio::sync::Notify;
 
@@ -210,6 +245,7 @@ mod tests {
         installation_id: AdapterInstallationId,
         capabilities: ProductAdapterCapabilities,
         parse_count: Arc<AtomicUsize>,
+        include_attachment: bool,
     }
 
     impl StaticAdapter {
@@ -220,7 +256,13 @@ mod tests {
                     .expect("valid installation id"),
                 capabilities: ProductAdapterCapabilities::empty(),
                 parse_count,
+                include_attachment: false,
             }
+        }
+
+        fn with_attachment(mut self) -> Self {
+            self.include_attachment = true;
+            self
         }
     }
 
@@ -256,6 +298,17 @@ mod tests {
             _auth_evidence: &ProtocolAuthEvidence,
         ) -> Result<ParsedProductInbound, ProductAdapterError> {
             self.parse_count.fetch_add(1, Ordering::SeqCst);
+            let attachments = if self.include_attachment {
+                vec![ProductAttachmentDescriptor::new(
+                    "provider-file-1",
+                    "text/plain",
+                    Some("notes.txt".to_string()),
+                    Some(4),
+                    ProductAttachmentKind::Document,
+                )?]
+            } else {
+                Vec::new()
+            };
             ParsedProductInbound::new(
                 ExternalEventId::new("slack-event-1").expect("valid event id"),
                 ExternalActorRef::new("slack_user", "U123", None::<String>)
@@ -263,7 +316,7 @@ mod tests {
                 ExternalConversationRef::new(None, "C123", None::<&str>, None::<&str>)
                     .expect("valid conversation ref"),
                 ProductInboundPayload::UserMessage(
-                    UserMessagePayload::new("hello", Vec::new(), ProductTriggerReason::DirectChat)
+                    UserMessagePayload::new("hello", attachments, ProductTriggerReason::DirectChat)
                         .expect("valid user message"),
                 ),
             )
@@ -362,6 +415,38 @@ mod tests {
         }
     }
 
+    struct RetryOnceWorkflow {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ironclaw_product_adapters::ProductWorkflow for RetryOnceWorkflow {
+        async fn submit_inbound(
+            &self,
+            _envelope: ProductInboundEnvelope,
+        ) -> Result<ProductInboundAck, ProductAdapterError> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(ProductAdapterError::WorkflowTransient {
+                    reason: ironclaw_product_adapters::RedactedString::new(
+                        "attachment provider temporarily unavailable",
+                    ),
+                });
+            }
+            Ok(ProductInboundAck::NoOp)
+        }
+
+        async fn resolve_projection_subscription(
+            &self,
+            _envelope: ProductInboundEnvelope,
+        ) -> Result<ProjectionSubscriptionRequest, ProductAdapterError> {
+            Err(ProductAdapterError::Internal {
+                detail: ironclaw_product_adapters::RedactedString::new(
+                    "test stub: resolve_projection_subscription not supported",
+                ),
+            })
+        }
+    }
+
     struct RecordingObserver {
         ack_count: Arc<AtomicUsize>,
         error_count: Arc<AtomicUsize>,
@@ -451,8 +536,16 @@ mod tests {
         workflow: Arc<dyn ironclaw_product_adapters::ProductWorkflow>,
         max_in_flight: usize,
     ) -> NativeProductAdapterRunner {
+        runner_with_adapter_and_workflow(StaticAdapter::new(parse_count), workflow, max_in_flight)
+    }
+
+    fn runner_with_adapter_and_workflow(
+        adapter: StaticAdapter,
+        workflow: Arc<dyn ironclaw_product_adapters::ProductWorkflow>,
+        max_in_flight: usize,
+    ) -> NativeProductAdapterRunner {
         NativeProductAdapterRunner::with_config(
-            Arc::new(StaticAdapter::new(parse_count)),
+            Arc::new(adapter),
             workflow,
             WebhookAuth::SharedSecretHeader(SharedSecretHeaderAuth {
                 header_name: "X-Test-Secret".into(),
@@ -501,6 +594,74 @@ mod tests {
         assert_eq!(outcome, WebhookProcessOutcome::AcceptedForAsyncDispatch);
         runner.drain_immediate_ack_tasks().await;
         assert_eq!(parse_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn attachment_message_stays_on_immediate_ack_without_host_policy() {
+        let parse_count = Arc::new(AtomicUsize::new(0));
+        let workflow_calls = Arc::new(AtomicUsize::new(0));
+        let runner = runner_with_adapter_and_workflow(
+            StaticAdapter::new(Arc::clone(&parse_count)).with_attachment(),
+            Arc::new(RetryOnceWorkflow {
+                calls: Arc::clone(&workflow_calls),
+            }),
+            1,
+        );
+        let evidence = verified_evidence(&runner);
+
+        let outcome = runner
+            .process_verified_webhook_immediate_ack(b"{}", &evidence)
+            .await
+            .expect("attachments need an explicit host policy before delaying the ACK");
+
+        assert_eq!(outcome, WebhookProcessOutcome::AcceptedForAsyncDispatch);
+        runner.drain_immediate_ack_tasks().await;
+        assert_eq!(workflow_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(parse_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn attachment_message_surfaces_transient_workflow_before_ack_and_retries() {
+        let parse_count = Arc::new(AtomicUsize::new(0));
+        let workflow_calls = Arc::new(AtomicUsize::new(0));
+        let config = NativeProductAdapterRunnerConfig::new(
+            Duration::from_secs(1),
+            std::num::NonZeroUsize::new(1).expect("nonzero"),
+        )
+        .with_pre_ack_attachment_workflow_timeout(Duration::from_secs(1));
+        let runner = NativeProductAdapterRunner::with_config(
+            Arc::new(StaticAdapter::new(Arc::clone(&parse_count)).with_attachment()),
+            Arc::new(RetryOnceWorkflow {
+                calls: Arc::clone(&workflow_calls),
+            }),
+            WebhookAuth::SharedSecretHeader(SharedSecretHeaderAuth {
+                header_name: "X-Test-Secret".into(),
+                expected_secret: "topsecret".into(),
+                subject: "slack_install_alpha".into(),
+            }),
+            config,
+        );
+        let evidence = verified_evidence(&runner);
+
+        let error = runner
+            .process_verified_webhook_immediate_ack(b"{}", &evidence)
+            .await
+            .expect_err("transient attachment transfer must remain visible before ack");
+        assert!(error.is_retryable());
+        assert_eq!(workflow_calls.load(Ordering::SeqCst), 1);
+
+        let outcome = runner
+            .process_verified_webhook_immediate_ack(b"{}", &evidence)
+            .await
+            .expect("provider redelivery succeeds after the transient fault clears");
+        assert_eq!(
+            outcome,
+            WebhookProcessOutcome::Acknowledged {
+                ack: ProductInboundAck::NoOp
+            }
+        );
+        assert_eq!(workflow_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(parse_count.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

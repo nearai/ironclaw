@@ -18,7 +18,7 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     ProductOutboundDeliveryRequest, ProductOutboundTargetResolver, ProductWorkflowError,
     ResolvedBinding, VerifiedProductOutboundTargetMetadata, approval_prompt_context_view,
-    enrich_auth_prompt_view, prepare_and_render_product_outbound,
+    enrich_auth_prompt_view, prepare_and_render_product_outbound_with_attachments,
 };
 use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, SessionThreadService, ThreadScope};
 use ironclaw_triggers::TriggerFire;
@@ -36,6 +36,7 @@ use crate::actionable::{
 use crate::hooks::{PostSubmitDeliveryError, PostSubmitDeliveryHook};
 use crate::routing::{TrackingPostEgress, record_gate_route_if_needed};
 use crate::services::*;
+use crate::workspace_attachments::resolve_workspace_attachments;
 
 /// Drives triggered-run delivery for a single submitted run.
 ///
@@ -218,6 +219,7 @@ impl TriggeredRunDeliveryDriver {
             adapter: Arc::clone(&self.services.adapter),
             egress: Arc::clone(&self.services.egress),
             delivery_sink: Arc::clone(&self.services.delivery_sink),
+            project_filesystem_reader: Arc::clone(&self.services.project_filesystem_reader),
             auth_challenges: self.services.auth_challenges.clone(),
             auth_flow_canceller: self.services.auth_flow_canceller.clone(),
             approval_requests: self.services.approval_requests.clone(),
@@ -488,6 +490,7 @@ async fn deliver_triggered_run(
         let delivery_result = deliver_triggered_notification(
             services,
             &scope,
+            &thread_scope,
             &actor,
             run_id,
             &state,
@@ -599,7 +602,15 @@ async fn deliver_triggered_run(
                     gate_ref_for_routing: None,
                 };
                 let outcome = match deliver_triggered_notification(
-                    services, &scope, &actor, run_id, &state, &authority, notice, false,
+                    services,
+                    &scope,
+                    &thread_scope,
+                    &actor,
+                    run_id,
+                    &state,
+                    &authority,
+                    notice,
+                    false,
                 )
                 .await
                 {
@@ -937,6 +948,7 @@ impl std::fmt::Display for TriggeredNotificationFailure {
 async fn deliver_triggered_notification(
     services: &FinalReplyDeliveryServices,
     scope: &TurnScope,
+    thread_scope: &ThreadScope,
     actor: &TurnActor,
     run_id: TurnRunId,
     state: &TurnRunState,
@@ -1000,7 +1012,17 @@ async fn deliver_triggered_notification(
         Arc::clone(&services.egress),
         Arc::clone(&services.channel_protocol),
     );
-    let render_result = prepare_and_render_product_outbound(
+    let attachments = resolve_workspace_attachments(
+        &payload,
+        thread_scope,
+        services.project_filesystem_reader.as_ref(),
+    )
+    .await
+    .map_err(|error| {
+        tracing::warn!(%error, "workspace attachment resolution failed");
+        TriggeredNotificationFailure::Other(error.to_string())
+    })?;
+    let render_result = prepare_and_render_product_outbound_with_attachments(
         &outbound_policy,
         services.communication_preferences.as_ref(),
         authority,
@@ -1016,6 +1038,7 @@ async fn deliver_triggered_notification(
             delivery_sink: services.delivery_sink.as_ref(),
             require_direct_message_target,
         },
+        attachments,
     )
     .await;
 

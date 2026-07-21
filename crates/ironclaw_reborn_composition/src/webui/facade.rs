@@ -37,10 +37,7 @@ use crate::{
         RebornOutboundPreferencesFacade, outbound_delivery_synthetic_provider,
         outbound_delivery_target_set_operator_tool_info,
     },
-    support::fs::{
-        MountScopedFilesystemReader, ProjectScopedAttachmentLander, ProjectScopedAttachmentReader,
-        ProjectScopedFilesystemReader,
-    },
+    support::fs::{MountScopedFilesystemReader, ProjectScopedAttachmentReader},
 };
 
 static SKILL_CONTENT_SAFETY: std::sync::LazyLock<ironclaw_safety::Sanitizer> =
@@ -253,21 +250,19 @@ pub(crate) fn build_webui_services_with_connectable_channels(
             ),
         ));
     }
-    if let Some(workspace_filesystem) = runtime.webui_workspace_filesystem() {
-        api = api
-            .with_inbound_attachments(Arc::new(ProjectScopedAttachmentLander::new(Arc::clone(
-                &workspace_filesystem,
-            ))))
-            // Read-only project filesystem backing directory listing and file
-            // download chips, over the same workspace mount.
-            .with_project_filesystem_reader(Arc::new(ProjectScopedFilesystemReader::new(
-                Arc::clone(&workspace_filesystem),
-            )))
-            // Read counterpart: serves landed attachment bytes back to the
-            // browser (image thumbnails) through the same workspace mount.
-            .with_inbound_attachment_reader(Arc::new(ProjectScopedAttachmentReader::new(
-                workspace_filesystem,
-            )));
+    api = api
+        .with_inbound_attachments(runtime.inbound_attachment_lander())
+        // Read-only project filesystem backing directory listing and file
+        // download chips, shared with channel delivery over the active
+        // deployment's scoped workspace root.
+        .with_project_filesystem_reader(runtime.project_filesystem_reader());
+    if let Some(local_runtime) = &services.local_runtime {
+        // Read counterpart: serves landed attachment bytes back to the browser
+        // (image thumbnails). It is a distinct byte-read contract from the
+        // canonical project-file reader above.
+        api = api.with_inbound_attachment_reader(Arc::new(ProjectScopedAttachmentReader::new(
+            Arc::clone(&local_runtime.workspace_filesystem),
+        )));
     }
     // Standalone read-only filesystem viewer: browses memory + workspace over a
     // dedicated read-only multi-mount view (not the read-write workspace handle

@@ -55,6 +55,7 @@ pub use inbound::{
     parse_product_slash_command,
 };
 pub use interaction_commands::{parse_interaction_resolution_text, strip_wrapping_inline_code};
+pub use ironclaw_attachments::WorkspaceFile;
 pub use outbound::{
     ApprovalPromptActionView, ApprovalPromptContextView, ApprovalPromptDestinationView,
     ApprovalPromptDetailView, ApprovalPromptScopeView, AuthPromptChallengeKind,

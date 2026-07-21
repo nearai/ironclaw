@@ -8,6 +8,7 @@ mod observer;
 mod routing;
 mod services;
 mod triggered;
+mod workspace_attachments;
 
 pub use hooks::{
     CompositePostSubmitDeliveryHook, NoopPostSubmitDeliveryHook, PostSubmitDeliveryError,

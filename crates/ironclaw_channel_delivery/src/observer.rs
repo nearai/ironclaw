@@ -15,7 +15,7 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     ConversationBindingService, ProductOutboundDeliveryRequest, ResolveBindingRequest,
     ResolvedBinding, approval_prompt_context_view, enrich_auth_prompt_view,
-    prepare_and_render_product_outbound,
+    prepare_and_render_product_outbound_with_attachments,
 };
 use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, SessionThreadService, ThreadScope};
 use ironclaw_turns::{
@@ -35,6 +35,7 @@ use crate::routing::{
 };
 use crate::services::*;
 use crate::triggered::{thread_scope_from_binding, turn_scope_from_thread_scope};
+use crate::workspace_attachments::resolve_workspace_attachments;
 
 pub struct FinalReplyDeliveryObserver {
     pub(crate) services: FinalReplyDeliveryServices,
@@ -225,8 +226,8 @@ impl FinalReplyDeliveryObserver {
                 .deliver_run_notification(
                     &envelope,
                     &scope,
+                    &thread_scope,
                     &actor,
-                    run_id,
                     &actionable_state,
                     notification,
                 )
@@ -452,11 +453,12 @@ impl FinalReplyDeliveryObserver {
         &self,
         envelope: &ProductInboundEnvelope,
         scope: &TurnScope,
+        thread_scope: &ThreadScope,
         actor: &TurnActor,
-        run_id: TurnRunId,
         state: &TurnRunState,
         notification: ChannelActionableNotification,
     ) -> Result<Vec<PostedChannelMessage>, FinalReplyDeliveryError> {
+        let run_id = state.run_id;
         let ChannelActionableNotification {
             event_kind,
             payload,
@@ -506,7 +508,13 @@ impl FinalReplyDeliveryObserver {
             self.services.egress.clone(),
             Arc::clone(&self.services.channel_protocol),
         );
-        let _outcome = prepare_and_render_product_outbound(
+        let attachments = resolve_workspace_attachments(
+            &payload,
+            thread_scope,
+            self.services.project_filesystem_reader.as_ref(),
+        )
+        .await?;
+        let _outcome = prepare_and_render_product_outbound_with_attachments(
             &outbound_policy,
             self.services.communication_preferences.as_ref(),
             &target_authority,
@@ -522,6 +530,7 @@ impl FinalReplyDeliveryObserver {
                 delivery_sink: self.services.delivery_sink.as_ref(),
                 require_direct_message_target: false,
             },
+            attachments,
         )
         .await?;
         let posted_messages = tracked_egress.take_posted_messages();

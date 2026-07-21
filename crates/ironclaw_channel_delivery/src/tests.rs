@@ -34,6 +34,39 @@ mod tests {
     };
     use ironclaw_turns::AcceptedMessageRef;
 
+    struct DenyingProjectFilesystemReader;
+
+    #[async_trait::async_trait]
+    impl ironclaw_product_workflow::ProjectFilesystemReader for DenyingProjectFilesystemReader {
+        async fn list_dir(
+            &self,
+            _thread_scope: &ironclaw_threads::ThreadScope,
+            _path: &str,
+        ) -> Result<Vec<ironclaw_product_workflow::ProjectFsEntry>, ironclaw_product_workflow::ProjectFsError> {
+            Err(ironclaw_product_workflow::ProjectFsError::Denied)
+        }
+
+        async fn read_file(
+            &self,
+            _thread_scope: &ironclaw_threads::ThreadScope,
+            _path: &str,
+        ) -> Result<ironclaw_product_workflow::WorkspaceFile, ironclaw_product_workflow::ProjectFsError> {
+            Err(ironclaw_product_workflow::ProjectFsError::Denied)
+        }
+
+        async fn stat(
+            &self,
+            _thread_scope: &ironclaw_threads::ThreadScope,
+            _path: &str,
+        ) -> Result<ironclaw_product_workflow::ProjectFsStat, ironclaw_product_workflow::ProjectFsError> {
+            Err(ironclaw_product_workflow::ProjectFsError::Denied)
+        }
+    }
+
+    fn denying_project_filesystem_reader() -> Arc<dyn ironclaw_product_workflow::ProjectFilesystemReader> {
+        Arc::new(DenyingProjectFilesystemReader)
+    }
+
     fn accepted_ack() -> ProductInboundAck {
         ProductInboundAck::Accepted {
             accepted_message_ref: AcceptedMessageRef::new("slack:test-message")
@@ -900,6 +933,7 @@ mod tests {
             adapter: test_adapter(installation_id),
             egress,
             delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
+            project_filesystem_reader: denying_project_filesystem_reader(),
             auth_challenges: None,
             auth_flow_canceller,
             approval_requests: None,
@@ -2150,6 +2184,7 @@ mod tests {
             adapter: test_adapter(installation_id),
             egress,
             delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
+            project_filesystem_reader: denying_project_filesystem_reader(),
             auth_challenges: None,
             auth_flow_canceller,
             approval_requests: None,
@@ -2592,6 +2627,7 @@ mod tests {
             adapter,
             egress: telegram_egress.clone(),
             delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
+            project_filesystem_reader: denying_project_filesystem_reader(),
             auth_challenges: None,
             auth_flow_canceller: None,
             approval_requests: None,
@@ -3363,6 +3399,7 @@ mod tests {
             adapter: test_adapter(install),
             egress: egress.clone(),
             delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
+            project_filesystem_reader: denying_project_filesystem_reader(),
             auth_challenges: None,
             auth_flow_canceller: None,
             approval_requests: None,
@@ -3826,6 +3863,7 @@ mod tests {
             adapter: test_adapter(install),
             egress: egress.clone(),
             delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
+            project_filesystem_reader: denying_project_filesystem_reader(),
             auth_challenges: None,
             auth_flow_canceller: None,
             approval_requests: None,
@@ -3906,6 +3944,7 @@ mod tests {
             adapter: test_adapter(install),
             egress: egress.clone(),
             delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
+            project_filesystem_reader: denying_project_filesystem_reader(),
             auth_challenges: None,
             auth_flow_canceller: None,
             approval_requests: None,
@@ -4186,6 +4225,7 @@ mod tests {
             adapter: test_adapter(install),
             egress: egress.clone(),
             delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
+            project_filesystem_reader: denying_project_filesystem_reader(),
             auth_challenges: None,
             auth_flow_canceller: None,
             approval_requests: None,
@@ -5685,6 +5725,7 @@ mod tests {
             adapter: test_adapter(install),
             egress: egress.clone(),
             delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
+            project_filesystem_reader: denying_project_filesystem_reader(),
             auth_challenges: None,
             auth_flow_canceller: None,
             approval_requests: None,
@@ -5753,6 +5794,7 @@ mod tests {
             adapter: test_adapter(install),
             egress: egress.clone(),
             delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
+            project_filesystem_reader: denying_project_filesystem_reader(),
             auth_challenges: None,
             auth_flow_canceller: None,
             approval_requests: None,
@@ -6101,6 +6143,7 @@ mod tests {
             adapter: test_adapter(install),
             egress: egress.clone(),
             delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
+            project_filesystem_reader: denying_project_filesystem_reader(),
             auth_challenges: None,
             auth_flow_canceller: None,
             approval_requests: None,
@@ -6187,6 +6230,7 @@ mod tests {
             adapter: test_adapter(install),
             egress: egress.clone(),
             delivery_sink: Arc::new(FakeOutboundDeliverySink::default()),
+            project_filesystem_reader: denying_project_filesystem_reader(),
             auth_challenges: None,
             auth_flow_canceller: None,
             approval_requests: None,

@@ -69,8 +69,8 @@ pub enum WebhookProcessOutcome {
     Acknowledged { ack: ProductInboundAck },
     /// Auth succeeded, adapter parsed an envelope, and workflow dispatch was
     /// scheduled outside the protocol response path. Public webhook protocols
-    /// such as Slack require an immediate 2xx acknowledgement, so callers must
-    /// not wait for a durable workflow ack before replying.
+    /// such as Slack require an immediate 2xx acknowledgement for events that
+    /// do not require provider-side attachment transfer before acceptance.
     AcceptedForAsyncDispatch,
 }
 
@@ -200,6 +200,7 @@ const DEFAULT_MAX_IN_FLIGHT_WEBHOOKS_NONZERO: NonZeroUsize =
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NativeProductAdapterRunnerConfig {
     pub workflow_timeout: Duration,
+    pub pre_ack_attachment_workflow_timeout: Option<Duration>,
     pub max_in_flight: NonZeroUsize,
 }
 
@@ -207,12 +208,24 @@ impl NativeProductAdapterRunnerConfig {
     pub fn new(workflow_timeout: Duration, max_in_flight: NonZeroUsize) -> Self {
         Self {
             workflow_timeout,
+            pre_ack_attachment_workflow_timeout: None,
             max_in_flight,
         }
     }
 
     pub fn with_workflow_timeout(mut self, workflow_timeout: Duration) -> Self {
         self.workflow_timeout = workflow_timeout;
+        self
+    }
+
+    /// Opt into bounded pre-ACK workflow acceptance for attachment-bearing
+    /// inbound messages. Hosts must select this deliberately because it trades
+    /// protocol response latency for provider-redelivery safety.
+    pub fn with_pre_ack_attachment_workflow_timeout(
+        mut self,
+        pre_ack_attachment_workflow_timeout: Duration,
+    ) -> Self {
+        self.pre_ack_attachment_workflow_timeout = Some(pre_ack_attachment_workflow_timeout);
         self
     }
 
@@ -230,6 +243,7 @@ impl Default for NativeProductAdapterRunnerConfig {
     fn default() -> Self {
         Self {
             workflow_timeout: DEFAULT_WEBHOOK_WORKFLOW_TIMEOUT,
+            pre_ack_attachment_workflow_timeout: None,
             max_in_flight: DEFAULT_MAX_IN_FLIGHT_WEBHOOKS_NONZERO,
         }
     }
@@ -383,11 +397,27 @@ impl NativeProductAdapterRunner {
     ) -> Result<WebhookProcessOutcome, RunnerError> {
         let evidence = self.verify_webhook_auth(headers, body)?;
         let (envelope, _permit) = self.prepare_inbound_envelope(body, &evidence).await?;
+        let ack = self.submit_inbound_bounded(envelope).await?;
+        Ok(WebhookProcessOutcome::Acknowledged { ack })
+    }
+
+    pub(crate) async fn submit_inbound_bounded(
+        &self,
+        envelope: ProductInboundEnvelope,
+    ) -> Result<ProductInboundAck, RunnerError> {
+        self.submit_inbound_bounded_with_timeout(envelope, self.config.workflow_timeout)
+            .await
+    }
+
+    pub(crate) async fn submit_inbound_bounded_with_timeout(
+        &self,
+        envelope: ProductInboundEnvelope,
+        timeout: Duration,
+    ) -> Result<ProductInboundAck, RunnerError> {
         let workflow = Arc::clone(&self.workflow);
         let mut workflow_task =
             tokio::spawn(async move { workflow.submit_inbound(envelope).await });
-        let ack = match tokio::time::timeout(self.config.workflow_timeout, &mut workflow_task).await
-        {
+        let ack = match tokio::time::timeout(timeout, &mut workflow_task).await {
             Ok(Ok(result)) => result?,
             Ok(Err(join_error)) if join_error.is_panic() => {
                 return Err(RunnerError::WorkflowPanicked);
@@ -395,9 +425,7 @@ impl NativeProductAdapterRunner {
             Ok(Err(_)) => return Err(RunnerError::WorkflowJoinFailed),
             Err(_) => {
                 workflow_task.abort();
-                return Err(RunnerError::WorkflowTimeout {
-                    timeout: self.config.workflow_timeout,
-                });
+                return Err(RunnerError::WorkflowTimeout { timeout });
             }
         };
         if ack.retry_disposition() == InboundRetryDisposition::Retry {
@@ -406,7 +434,7 @@ impl NativeProductAdapterRunner {
             }
             .into());
         }
-        Ok(WebhookProcessOutcome::Acknowledged { ack })
+        Ok(ack)
     }
 }
 

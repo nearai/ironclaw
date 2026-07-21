@@ -123,6 +123,7 @@ pub use project_fs::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
     ProjectFsStat, RebornProjectFsListRequest, RebornProjectFsListResponse,
     RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
+    WorkspaceFile,
 };
 pub use projects::{
     ProjectCaller, ProjectService, ProjectServiceError, RebornAddMemberRequest,
@@ -4009,10 +4010,16 @@ impl RebornServicesApi for RebornServices {
             .await?;
         // dispatch-exempt: read-only, already-authorized workspace file download
         // through the facade's own port — not an in-turn mutating tool call.
-        reader
+        let file = reader
             .read_file(&thread_scope, &request.path)
             .await
-            .map_err(map_project_fs_error)
+            .map_err(map_project_fs_error)?;
+        Ok(ProjectFsFile {
+            path: file.path.as_str().to_string(),
+            filename: file.filename,
+            mime_type: file.mime_type,
+            bytes: file.bytes,
+        })
     }
 
     async fn list_fs_mounts(

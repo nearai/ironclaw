@@ -19,10 +19,13 @@ use ironclaw_loop_host::{
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
-use ironclaw_product_workflow::WebUiAuthenticatedCaller;
+use ironclaw_product_workflow::{
+    RebornProjectFsReadRequest, RebornTimelineRequest, WebUiAuthenticatedCaller,
+    WebUiListThreadsRequest,
+};
 use ironclaw_reborn_composition::{
-    RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput, TelegramHostRuntimeConfig,
-    build_reborn_runtime, build_telegram_host_runtime_mounts,
+    ConversationId, RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput,
+    TelegramHostRuntimeConfig, build_reborn_runtime, build_telegram_host_runtime_mounts,
     build_webui_services_with_telegram_host_mounts, local_dev_runtime_policy,
 };
 use ironclaw_runner::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
@@ -57,12 +60,20 @@ pub(crate) struct ScriptedTelegramNetwork {
     /// the authoritative provider-outcome log (a captured request alone does
     /// not prove delivery; see the F3 assertions).
     send_outcomes: Mutex<Vec<(Value, u16)>>,
+    /// HTTP status answered for every native document upload attempt.
+    send_document_outcomes: Mutex<Vec<u16>>,
     sent_messages: Mutex<u32>,
     /// When set, the first `/sendMessage` whose text contains the needle
     /// answers with this HTTP status and an `ok:false` envelope (then
     /// clears) — the F3 blocked-recipient shape, targeted so unrelated
     /// status posts (e.g. the working message) keep succeeding.
     fail_matching_send: Mutex<Option<(String, u16)>>,
+    /// While set, every `getFile` request returns this status. Tests clear the
+    /// fault between webhook attempts so provider redelivery can prove the
+    /// attachment transfer is retried end to end.
+    get_file_failure_status: Mutex<Option<u16>>,
+    /// Return a deliberately short 2xx body for the attachment download.
+    truncate_attachment_download: Mutex<bool>,
 }
 
 impl ScriptedTelegramNetwork {
@@ -73,6 +84,20 @@ impl ScriptedTelegramNetwork {
     pub(crate) fn fail_send_containing(&self, needle: &str, status: u16) {
         *self.fail_matching_send.lock().expect("fail toggle lock") =
             Some((needle.to_string(), status));
+    }
+
+    pub(crate) fn set_get_file_failure(&self, status: Option<u16>) {
+        *self
+            .get_file_failure_status
+            .lock()
+            .expect("getFile failure toggle lock") = status;
+    }
+
+    pub(crate) fn set_truncate_attachment_download(&self, truncate: bool) {
+        *self
+            .truncate_attachment_download
+            .lock()
+            .expect("attachment truncation toggle lock") = truncate;
     }
 
     pub(crate) fn request_bodies_for(&self, url_substr: &str) -> Vec<Value> {
@@ -107,6 +132,13 @@ impl ScriptedTelegramNetwork {
             })
             .count()
     }
+
+    pub(crate) fn send_document_outcomes(&self) -> Vec<u16> {
+        self.send_document_outcomes
+            .lock()
+            .expect("document outcomes lock")
+            .clone()
+    }
 }
 
 pub(crate) fn json_response(status: u16, body: Value) -> NetworkHttpResponse {
@@ -123,6 +155,87 @@ pub(crate) fn json_response(status: u16, body: Value) -> NetworkHttpResponse {
     }
 }
 
+pub(crate) fn bytes_response(status: u16, body: Vec<u8>) -> NetworkHttpResponse {
+    NetworkHttpResponse {
+        status,
+        headers: Vec::new(),
+        usage: NetworkUsage {
+            request_bytes: 0,
+            response_bytes: body.len() as u64,
+            resolved_ip: None,
+        },
+        body,
+    }
+}
+
+/// Validate one native Telegram document by reconstructing the only accepted
+/// multipart encoding from its declared boundary and comparing the complete
+/// byte body. This catches duplicate fields, malformed framing, extra bytes,
+/// and payload corruption without introducing a general multipart parser into
+/// the integration harness.
+pub(crate) fn validate_single_document_multipart(
+    request: &NetworkHttpRequest,
+    expected_chat_id: &str,
+    expected_routing_fields: &[(&str, &str)],
+    expected_filename: &str,
+    expected_content_type: &str,
+    expected_bytes: &[u8],
+) -> Result<(), String> {
+    let content_types = request
+        .headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        .map(|(_, value)| value.as_str())
+        .collect::<Vec<_>>();
+    let [content_type] = content_types.as_slice() else {
+        return Err(format!(
+            "expected exactly one content-type header, found {}",
+            content_types.len()
+        ));
+    };
+    let boundary = content_type
+        .strip_prefix("multipart/form-data; boundary=")
+        .filter(|boundary| !boundary.is_empty())
+        .ok_or_else(|| format!("invalid multipart content type {content_type:?}"))?;
+    if boundary.bytes().any(|byte| byte <= b' ' || byte >= 0x7f) {
+        return Err("multipart boundary contains invalid bytes".to_string());
+    }
+
+    let mut expected = Vec::new();
+    push_expected_text_part(&mut expected, boundary, "chat_id", expected_chat_id);
+    for &(name, value) in expected_routing_fields {
+        if !matches!(name, "message_thread_id" | "reply_to_message_id")
+            || value.is_empty()
+            || !value.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(format!("invalid expected Telegram routing field {name:?}"));
+        }
+        push_expected_text_part(&mut expected, boundary, name, value);
+    }
+    expected.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"document\"; filename=\"{expected_filename}\"\r\nContent-Type: {expected_content_type}\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    expected.extend_from_slice(expected_bytes);
+    expected.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    if request.body != expected {
+        return Err("Telegram document multipart did not exactly match the canonical body".into());
+    }
+    Ok(())
+}
+
+fn push_expected_text_part(body: &mut Vec<u8>, boundary: &str, name: &str, value: &str) {
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+        )
+        .as_bytes(),
+    );
+}
+
 #[async_trait]
 impl NetworkHttpEgress for ScriptedTelegramNetwork {
     async fn execute(
@@ -134,8 +247,7 @@ impl NetworkHttpEgress for ScriptedTelegramNetwork {
         // log: `requests().last()` after the push races concurrent egress
         // calls and could pair this URL with another call's body,
         // misdirecting the failure toggle.
-        let request_body: Value =
-            serde_json::from_slice(&request.body).expect("captured sendMessage body is valid JSON");
+        let request_body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
         self.requests
             .lock()
             .expect("network requests lock")
@@ -147,6 +259,37 @@ impl NetworkHttpEgress for ScriptedTelegramNetwork {
             )
         } else if url.ends_with("/setWebhook") || url.ends_with("/deleteWebhook") {
             json_response(200, json!({"ok": true, "result": true}))
+        } else if url.contains("/getFile?") {
+            let failure_status = *self
+                .get_file_failure_status
+                .lock()
+                .expect("getFile failure toggle lock");
+            match failure_status {
+                Some(status) => json_response(
+                    status,
+                    json!({"ok": false, "description": "scripted getFile failure"}),
+                ),
+                None => json_response(
+                    200,
+                    json!({"ok": true, "result": {
+                        "file_path": "documents/journey-notes.txt",
+                        "file_size": 24
+                    }}),
+                ),
+            }
+        } else if url.contains("/file/bot") && url.ends_with("/documents/journey-notes.txt") {
+            let truncate = *self
+                .truncate_attachment_download
+                .lock()
+                .expect("attachment truncation toggle lock");
+            bytes_response(
+                200,
+                if truncate {
+                    b"short".to_vec()
+                } else {
+                    b"journey attachment bytes".to_vec()
+                },
+            )
         } else if url.ends_with("/sendMessage") {
             let matched_failure = {
                 let mut toggle = self.fail_matching_send.lock().expect("fail toggle lock");
@@ -179,6 +322,14 @@ impl NetworkHttpEgress for ScriptedTelegramNetwork {
                 .lock()
                 .expect("send outcomes lock")
                 .push((request_body, 200));
+            json_response(200, json!({"ok": true, "result": {"message_id": *sent}}))
+        } else if url.ends_with("/sendDocument") {
+            self.send_document_outcomes
+                .lock()
+                .expect("document outcomes lock")
+                .push(200);
+            let mut sent = self.sent_messages.lock().expect("sent counter lock");
+            *sent += 1;
             json_response(200, json!({"ok": true, "result": {"message_id": *sent}}))
         } else {
             json_response(
@@ -307,6 +458,26 @@ pub(crate) fn dm_update(update_id: i64, text: &str) -> Value {
     dm_update_from(update_id, TG_USER_ID, TG_CHAT_ID, text)
 }
 
+pub(crate) fn dm_document_update(update_id: i64) -> Value {
+    json!({
+        "update_id": update_id,
+        "message": {
+            "message_id": update_id,
+            "from": {"id": TG_USER_ID, "is_bot": false, "first_name": "Journey"},
+            "chat": {"id": TG_CHAT_ID, "type": "private"},
+            "date": 1_700_000_000,
+            "caption": "Please review the attached report",
+            "document": {
+                "file_id": "telegram-journey-file",
+                "file_unique_id": "telegram-journey-unique",
+                "file_name": "journey-notes.txt",
+                "mime_type": "text/plain",
+                "file_size": 24
+            }
+        }
+    })
+}
+
 pub(crate) fn dm_update_from(update_id: i64, tg_user: i64, chat_id: i64, text: &str) -> Value {
     json!({
         "update_id": update_id,
@@ -411,6 +582,98 @@ impl JourneyStack {
             "no matching sendMessage for chat {chat_id}; captured: {:?}",
             self.network.request_bodies_for("/sendMessage")
         ))
+    }
+
+    /// Read through the WebUI product facade until the channel-created thread
+    /// contains the requested durable message. This is the same caller-scoped
+    /// read seam the browser uses; the journey never reaches into a thread
+    /// store directly.
+    pub(crate) async fn wait_for_unique_timeline_message(
+        &self,
+        expected_content: &str,
+    ) -> Result<
+        (
+            ironclaw_product_workflow::RebornTimelineResponse,
+            ironclaw_threads::ThreadMessageRecord,
+        ),
+        String,
+    > {
+        for _ in 0..200 {
+            let threads = self
+                .webui
+                .api
+                .list_threads(
+                    self.caller.clone(),
+                    WebUiListThreadsRequest::default().set_limit(100),
+                )
+                .await
+                .map_err(|error| format!("list Telegram-created threads failed: {error}"))?;
+            let mut matches = Vec::new();
+            for thread in threads.threads {
+                let timeline = self
+                    .webui
+                    .api
+                    .get_timeline(
+                        self.caller.clone(),
+                        RebornTimelineRequest::new(thread.thread_id.as_str()),
+                    )
+                    .await
+                    .map_err(|error| format!("read Telegram thread timeline failed: {error}"))?;
+                for message in timeline
+                    .messages
+                    .iter()
+                    .filter(|message| message.content.as_deref() == Some(expected_content))
+                    .cloned()
+                {
+                    matches.push((timeline.clone(), message));
+                }
+            }
+            match matches.len() {
+                0 => {}
+                1 => {
+                    return matches
+                        .pop()
+                        .ok_or_else(|| "unique match disappeared".to_string());
+                }
+                count => {
+                    return Err(format!(
+                        "expected one Telegram timeline message containing {expected_content:?}, found {count} across the caller's threads"
+                    ));
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        Err(format!(
+            "Telegram timelines never contained {expected_content:?}"
+        ))
+    }
+
+    pub(crate) async fn read_project_file_bytes(
+        &self,
+        thread_id: &ironclaw_host_api::ThreadId,
+        path: &str,
+    ) -> Result<Vec<u8>, String> {
+        self.webui
+            .api
+            .read_project_file(
+                self.caller.clone(),
+                RebornProjectFsReadRequest {
+                    thread_id: thread_id.as_str().to_string(),
+                    path: path.to_string(),
+                },
+            )
+            .await
+            .map(|file| file.bytes)
+            .map_err(|error| format!("read Telegram workspace file failed: {error}"))
+    }
+
+    pub(crate) async fn enable_auto_approve_for_thread(
+        &self,
+        thread_id: ironclaw_host_api::ThreadId,
+    ) {
+        self.runtime
+            .enable_global_auto_approve_for_test(&ConversationId(thread_id))
+            .await;
     }
 }
 
