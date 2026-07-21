@@ -311,10 +311,7 @@ impl<S: ?Sized> LifecyclePublishingTurnStateStore<S> {
     /// ([`event_kind_for_state`] / [`sanitized_reason_for_state`]) — the same
     /// values every `TurnRunTransitionPort` terminal transition would compute
     /// by hand, so this is the one place that shape lives.
-    async fn publish_transition(
-        &self,
-        state: TurnRunState,
-    ) -> Result<TurnRunState, TurnError> {
+    async fn publish_transition(&self, state: TurnRunState) -> Result<TurnRunState, TurnError> {
         let event = TurnLifecycleEvent::from_run_state(
             &state,
             event_kind_for_state(&state),

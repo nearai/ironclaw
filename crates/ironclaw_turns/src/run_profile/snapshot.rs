@@ -10,8 +10,8 @@ use super::{
     },
     refs::{
         CapabilitySurfaceProfileId, CheckpointSchemaId, ConcurrencyClass, ContextProfileId,
-        LoopDriverId, ModelProfileId, RunClassId, RunProfileFingerprint,
-        RunProfileSourceLayer, RunProfileSourceRef, RunnerPoolId, SchedulingClass,
+        LoopDriverId, ModelProfileId, RunClassId, RunProfileFingerprint, RunProfileSourceLayer,
+        RunProfileSourceRef, RunnerPoolId, SchedulingClass,
     },
 };
 

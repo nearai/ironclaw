@@ -260,15 +260,30 @@ fn submit_event_cursor(response: &SubmitTurnResponse) -> EventCursor {
 }
 
 fn resume_wake(scope: TurnScope, response: &ResumeTurnResponse) -> TurnRunWake {
-    wake_from(scope, response.run_id, response.status, response.event_cursor)
+    wake_from(
+        scope,
+        response.run_id,
+        response.status,
+        response.event_cursor,
+    )
 }
 
 fn retry_wake(scope: TurnScope, response: &RetryTurnResponse) -> TurnRunWake {
-    wake_from(scope, response.run_id, response.status, response.event_cursor)
+    wake_from(
+        scope,
+        response.run_id,
+        response.status,
+        response.event_cursor,
+    )
 }
 
 fn cancel_wake(scope: TurnScope, response: &CancelRunResponse) -> TurnRunWake {
-    wake_from(scope, response.run_id, response.status, response.event_cursor)
+    wake_from(
+        scope,
+        response.run_id,
+        response.status,
+        response.event_cursor,
+    )
 }
 
 fn notify_queued_run_best_effort(notifier: &dyn TurnRunWakeNotifier, wake: TurnRunWake) {
