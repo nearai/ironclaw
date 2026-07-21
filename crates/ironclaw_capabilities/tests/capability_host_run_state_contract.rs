@@ -2106,6 +2106,11 @@ impl RunStateStore for FailOnFailRunStateStore {
     }
 }
 
+// Synchronization primitive + domain-state fake, not an I/O fault — cannot move
+// to ironclaw_filesystem::FaultInjecting: it uses `tokio::sync::Notify` to
+// interleave two concurrent `claim` calls and returns a domain
+// `CapabilityLeaseError::InactiveLease{Consumed}` for the loser. FaultInjecting
+// is neither a synchronization barrier nor able to produce that domain error.
 struct CoordinatedClaimConflictLeaseStore {
     inner: FilesystemCapabilityLeaseStore<InMemoryBackend>,
     claim_calls: AtomicUsize,
@@ -2204,6 +2209,13 @@ impl CapabilityLeaseStore for CoordinatedClaimConflictLeaseStore {
     }
 }
 
+// I/O-shaped (returns `CapabilityLeaseError::Persistence` on `consume`), but kept:
+// FaultInjecting gates by FilesystemOperation + path only, and `consume`'s CAS
+// write is indistinguishable — same op (WriteFile) and same lease-file path — from
+// the `claim`/`begin_dispatch_claimed` CAS writes in the same `resume_json` call,
+// so a backend fault cannot isolate the consume failure this test needs. This is
+// the documented FaultInjecting limitation ("can't fault only versioned writes";
+// ironclaw_filesystem/CLAUDE.md), not a domain-double.
 struct ConsumeFailingLeaseStore {
     inner: FilesystemCapabilityLeaseStore<InMemoryBackend>,
 }

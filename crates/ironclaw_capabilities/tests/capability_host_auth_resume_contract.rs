@@ -1346,6 +1346,10 @@ async fn concurrent_auth_resume_claim_loser_returns_lease_error_without_failing_
     // A lease store that delegates everything to an inner FilesystemCapabilityLeaseStore<InMemoryBackend>
     // except `claim()`, which returns InactiveLease { status: Claimed } once the
     // `fail_next_claim` flag is set — simulating the loser of a concurrent claim race.
+    // domain-state fake, not an I/O fault — cannot move to
+    // ironclaw_filesystem::FaultInjecting: it returns a domain
+    // `CapabilityLeaseError::InactiveLease{Claimed}` (the concurrent winner already
+    // claimed) that no backend fault (which only yields `Persistence`) can produce.
     struct ClaimFailingLeaseStore {
         inner: FilesystemCapabilityLeaseStore<InMemoryBackend>,
         fail_next_claim: AtomicBool,
@@ -1792,6 +1796,10 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
     // `begin_dispatch_claimed`, creating the real data race on the state
     // machine transition: one wins (Claimed→Dispatching), the other loses
     // (sees Dispatching → InactiveLease{Dispatching}).
+    // Synchronization primitive, not an I/O fault — cannot move to
+    // ironclaw_filesystem::FaultInjecting: FaultInjecting injects errors + records
+    // ops but is explicitly NOT a read/write-interleaving barrier (see
+    // ironclaw_filesystem/CLAUDE.md). The Barrier(2) interleave is the whole test.
     struct BarrierLeaseStore {
         inner: FilesystemCapabilityLeaseStore<InMemoryBackend>,
         /// Both concurrent auth_resume_json callers rendezvous here after
@@ -2948,6 +2956,10 @@ async fn concurrent_auth_resume_fresh_active_lease_loser_does_not_double_dispatc
     // store, suspends the caller until `claim_release` is notified.  Any other
     // caller that runs `matching_approval_lease` during this window finds None
     // (lease is Claimed, not Active) and falls into the REUSE branch.
+    // Synchronization primitive, not an I/O fault — cannot move to
+    // ironclaw_filesystem::FaultInjecting: the Notify gate suspends a caller
+    // mid-`claim` to force an interleaving; FaultInjecting only injects errors +
+    // records ops and is explicitly not a synchronization barrier.
     struct GatedLeaseStore {
         inner: FilesystemCapabilityLeaseStore<InMemoryBackend>,
         claim_entered: StdArc<Notify>,
