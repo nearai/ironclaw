@@ -29,6 +29,58 @@ use parity_qa_support::{
 use reborn_support::doubles::RecordingTestCapabilityPort;
 use serde_json::json;
 
+/// A single stale capability surface is recoverable inside the same run: the
+/// loop re-drives the model from `BeforeModel`, consumes a second model turn,
+/// and persists the recovered reply without requiring an external retry.
+#[tokio::test]
+async fn reborn_single_stale_model_request_redrives_in_loop_to_completion() {
+    let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
+        RebornModelReplayStep::ModelError {
+            kind: HostManagedModelErrorKind::StaleRequest,
+            message: "capability surface changed before model dispatch".to_string(),
+        },
+        RebornModelReplayStep::Response {
+            response: HostManagedModelResponse::assistant_reply(
+                "Recovered after refreshing the capability surface.",
+            ),
+            expected_tool_results: Vec::new(),
+        },
+    ]);
+    let mut harness = RebornBinaryE2EHarness::with_model_gateway(
+        "room-single-stale-model-redrive",
+        model_gateway,
+        RecordingTestCapabilityPort::echo(),
+    )
+    .await
+    .expect("harness");
+    harness.start();
+
+    let submitted = harness
+        .submit_text(
+            "event-single-stale-model-redrive",
+            "Answer using the current capability surface",
+        )
+        .await
+        .expect("submit text");
+    harness
+        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .await
+        .expect("one stale request is recovered in-loop");
+    harness
+        .assert_final_reply("Recovered after refreshing the capability surface.")
+        .await
+        .expect("recovered reply persisted to the thread");
+
+    assert_eq!(
+        harness.model_requests().len(),
+        2,
+        "one stale request must cause exactly one same-run model re-drive"
+    );
+    assert_eq!(harness.remaining_model_responses(), 0);
+
+    harness.shutdown().await;
+}
+
 /// Repeated stale model requests exhaust in-loop recovery; the run must end as
 /// a sanitized, retryable `Failed`. Retrying resumes from the `BeforeModel`
 /// checkpoint and the next model call succeeds, completing the run.

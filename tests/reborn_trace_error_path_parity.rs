@@ -16,6 +16,7 @@ use parity_qa_support::{
         RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayModelGateway,
     },
 };
+use reborn_support::doubles::RecordingTestCapabilityPort;
 
 /// Exercises read_file with a missing `path` parameter, proving malformed real
 /// built-in tool input is returned to the model and the turn can recover.
@@ -81,6 +82,85 @@ async fn reborn_trace_error_path_parity() {
         )),
         "the model's recovery reply should be finalized"
     );
+
+    harness.shutdown().await;
+}
+
+/// A model-actionable `InvalidInput` remains inside the same run: the immediate
+/// next model request receives the typed failure, the model changes its input,
+/// the corrected call succeeds, and only then is the final reply persisted.
+#[tokio::test]
+async fn reborn_trace_invalid_input_recovers_with_changed_action() {
+    let echo = CapabilityId::new("test.echo").expect("valid capability id");
+    let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![RebornScriptedProviderToolCall::new(
+                echo.clone(),
+                "call_echo_invalid_input",
+                serde_json::json!({"message": ""}),
+            )],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::ProviderToolCallsForRequest {
+            request_contains: "invalid_input".to_string(),
+            calls: vec![RebornScriptedProviderToolCall::new(
+                echo.clone(),
+                "call_echo_corrected_input",
+                serde_json::json!({"message": "corrected"}),
+            )],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::ResponseForRequest {
+            request_contains: "echo: hi".to_string(),
+            response: HostManagedModelResponse::assistant_reply(
+                "I corrected the invalid input and completed the call.",
+            ),
+            expected_tool_results: Vec::new(),
+        },
+    ]);
+    let mut harness = RebornBinaryE2EHarness::with_model_gateway(
+        "room-trace-invalid-input-recovery",
+        model_gateway,
+        RecordingTestCapabilityPort::invalid_input_then_echo(),
+    )
+    .await
+    .expect("harness");
+    harness.start();
+
+    let submitted = harness
+        .submit_text(
+            "event-trace-invalid-input-recovery",
+            "Call the test capability and correct invalid input if needed",
+        )
+        .await
+        .expect("submit text");
+    let state = harness
+        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .await
+        .expect("invalid input remains model-recoverable");
+    assert!(state.failure.is_none());
+    harness
+        .assert_final_reply("I corrected the invalid input and completed the call.")
+        .await
+        .expect("recovery reply persisted");
+
+    let invocations = harness.capability_invocations();
+    assert_eq!(invocations.len(), 2);
+    assert!(
+        invocations
+            .iter()
+            .all(|invocation| invocation.capability_id == echo)
+    );
+    let requests = harness.model_requests();
+    assert_eq!(requests.len(), 3);
+    let recovery_request = serde_json::to_string(&requests[1]).expect("request serializes");
+    for expected in ["invalid_input", "capability input failed validation"] {
+        assert!(
+            recovery_request.contains(expected),
+            "recovery request must contain {expected:?}: {recovery_request}"
+        );
+    }
+    harness.assert_model_exhausted();
 
     harness.shutdown().await;
 }

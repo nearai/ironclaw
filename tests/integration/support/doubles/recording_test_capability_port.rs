@@ -19,10 +19,10 @@ use ironclaw_turns::{
     LoopGateRef,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-        CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
-        CapabilityInvocation, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort,
-        ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
-        VisibleCapabilitySurface, resolution,
+        CapabilityCallCandidate, CapabilityDescriptorView, CapabilityFailureKind,
+        CapabilityInputRef, CapabilityInvocation, CapabilitySurfaceVersion, ConcurrencyHint,
+        LoopCapabilityPort, ProviderToolCallReplay, ProviderToolDefinition,
+        VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
     },
 };
 use serde_json::json;
@@ -48,6 +48,7 @@ enum CapabilityMode {
     ApprovalThenEcho,
     SpawnAuthThenApprovalThenEcho,
     InvocationError,
+    InvalidInputThenEcho,
 }
 
 impl RecordingTestCapabilityPort {
@@ -59,6 +60,13 @@ impl RecordingTestCapabilityPort {
     /// (fault-matrix P4: non-model capability-stage failure).
     pub fn invocation_error() -> Self {
         Self::new(CapabilityMode::InvocationError, false, false)
+    }
+
+    /// First invocation is a model-actionable invalid input; a changed second
+    /// invocation succeeds. Used to prove the whole-turn correction loop
+    /// independently of any one capability producer.
+    pub fn invalid_input_then_echo() -> Self {
+        Self::new(CapabilityMode::InvalidInputThenEcho, false, false)
     }
 
     pub fn echo_with_spawn_subagent() -> Self {
@@ -267,6 +275,15 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
                 "scripted capability invocation failure",
+            ));
+        }
+        if matches!(self.mode, CapabilityMode::InvalidInputThenEcho)
+            && self.approval_calls.fetch_add(1, Ordering::SeqCst) == 0
+        {
+            return Ok(resolution::failed(
+                CapabilityFailureKind::InvalidInput,
+                "capability input failed validation".to_string(),
+                None,
             ));
         }
         if matches!(self.mode, CapabilityMode::ApprovalThenEcho)

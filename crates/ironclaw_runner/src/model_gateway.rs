@@ -2773,6 +2773,10 @@ mod tests {
                 AgentLoopHostErrorKind::Invalid,
                 HostManagedModelErrorKind::InvalidRequest,
             ),
+            (
+                AgentLoopHostErrorKind::ScopeMismatch,
+                HostManagedModelErrorKind::InvalidRequest,
+            ),
         ] {
             let mapped = map_capability_host_error(AgentLoopHostError::new(
                 host_kind,

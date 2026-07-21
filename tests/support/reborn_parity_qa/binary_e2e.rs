@@ -1362,6 +1362,11 @@ impl RebornBinaryE2EHarness {
         self.capability_recorder.network_http_requests()
     }
 
+    pub fn install_network_response_script(&self, status: u16, body: Vec<u8>) -> HarnessResult<()> {
+        self.capability_recorder
+            .install_network_response_script(status, body)
+    }
+
     pub fn host_workspace_file_path(&self, relative: &str) -> HarnessResult<PathBuf> {
         self.capability_recorder
             .workspace_file_path(relative)
