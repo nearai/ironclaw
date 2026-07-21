@@ -62,14 +62,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
          profile name becomes deployment data (§4.4). This entry stays.",
     ),
     (
-        "local_runtime_profile.rs",
-        "The composition edge itself: maps a profile to its config and to the \
-         local build-input shape. The remaining production branch selects the \
-         hosted-single-tenant-volume build input, whose `libsql`-feature \
-         requirement no `DeploymentConfig` axis yet captures; retires into \
-         `deployment.rs` once that shape is a config axis (Phase 4 / §5.11).",
-    ),
-    (
         "readiness.rs",
         "Readiness diagnostics carry a profile as an operator-facing **label** \
          on the wire (`RebornReadinessDiagnostic::profile`), not a branch. \
