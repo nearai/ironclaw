@@ -87,15 +87,6 @@ const FROZEN_DEBT_INMEMORY_STORES: &[&str] = &[
 /// §1.4 lock-step store duplicates. Each annotation states the reason; do not
 /// "consolidate" these without first invalidating that reason in review.
 const JUSTIFIED_KEEP_INMEMORY_STORES: &[&str] = &[
-    // --- Bounded volatile cache next to an already-wired durable store
-    //     (`FilesystemOpenAiCompatRefStore` in OpenAI-compatible serving).
-    //     Do NOT swap it for a durable store in tests that exercise the
-    //     bounded/evicting cache semantics. ---
-    //   OpenAiCompatRef: capacity-bounded with oldest-created eviction (evicts
-    //     the minimum `created_at`; reads do not refresh recency — NOT an LRU)
-    //     AND the crate's documented filesystem-free default so contract-only
-    //     consumers pull no `ironclaw_filesystem` dep (openai_compat CLAUDE.md).
-    "InMemoryOpenAiCompatRefStore",
     // --- Ephemeral per-run staging BY DESIGN. Constructed per claimed run /
     //     model call (`ironclaw_runner` loop_driver_host + model_gateway) to
     //     stage raw model-visible prompt content between the prompt and model
