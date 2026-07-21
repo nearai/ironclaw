@@ -2530,8 +2530,7 @@ impl HostRuntimeLoopCapabilityPort {
                     request.capability_id,
                     estimate.clone(),
                     input.clone(),
-                )
-                .with_idempotency_key(idempotency_key.clone());
+                );
                 dispatch_runtime_capability_resume(self.runtime.as_ref(), runtime_request).await
             }
             ResolvedResumeMode::Auth {
@@ -2554,8 +2553,7 @@ impl HostRuntimeLoopCapabilityPort {
                     estimate.clone(),
                     input.clone(),
                     prior_approval_id,
-                )
-                .with_idempotency_key(idempotency_key.clone());
+                );
                 dispatch_runtime_capability_auth_resume(self.runtime.as_ref(), runtime_request)
                     .await
             }
@@ -2565,8 +2563,7 @@ impl HostRuntimeLoopCapabilityPort {
                     request.capability_id,
                     estimate.clone(),
                     input.clone(),
-                )
-                .with_idempotency_key(idempotency_key.clone());
+                );
                 dispatch_runtime_capability(self.runtime.as_ref(), runtime_request).await
             }
         };

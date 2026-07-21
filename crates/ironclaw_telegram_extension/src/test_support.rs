@@ -6,8 +6,8 @@ use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_filesystem::{
-    BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError,
-    FilesystemOperation, InMemoryBackend, RecordVersion, RootFilesystem, ScopedFilesystem,
+    BackendCapabilities, CasExpectation, DirEntry, Entry, FaultInjecting, FileStat,
+    FilesystemError, InMemoryBackend, RecordVersion, RootFilesystem, ScopedFilesystem,
     VersionedEntry,
 };
 use ironclaw_host_api::{
@@ -345,11 +345,29 @@ pub(crate) fn telegram_state() -> Arc<FilesystemTelegramHostState> {
     telegram_state_with_root(root)
 }
 
-pub(crate) fn fault_injected_telegram_state() -> (
+/// Telegram state over the shared [`FaultInjecting`] backend. Drive the setup
+/// writes first, then arm a fault through the returned handle
+/// (`backend.add_fault(Fault::on(op).backend(reason))`); the genuine
+/// filesystem-backed state store then surfaces the injected `FilesystemError`
+/// through its real `FilesystemError -> DomainError` mapping instead of a
+/// hand-rolled stand-in.
+pub(crate) fn fault_injecting_telegram_state() -> (
     Arc<FilesystemTelegramHostState>,
-    Arc<FaultInjectingFilesystem>,
+    Arc<FaultInjecting<InMemoryBackend>>,
 ) {
-    let filesystem = Arc::new(FaultInjectingFilesystem::new(Arc::new(
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::default()));
+    let root: Arc<dyn RootFilesystem> = backend.clone();
+    (telegram_state_with_root(root), backend)
+}
+
+/// Telegram state over the [`ReadBarrierFilesystem`] decorator, which pins a
+/// deterministic concurrent read/read/write interleaving for the pairing/
+/// rotation concurrency tests. This is a synchronization seam, not a fault, so
+/// it deliberately cannot fold into `ironclaw_filesystem::FaultInjecting`
+/// (which only injects errors and records ops).
+pub(crate) fn read_barrier_telegram_state()
+-> (Arc<FilesystemTelegramHostState>, Arc<ReadBarrierFilesystem>) {
+    let filesystem = Arc::new(ReadBarrierFilesystem::new(Arc::new(
         InMemoryBackend::default(),
     )));
     let root: Arc<dyn RootFilesystem> = filesystem.clone();
@@ -376,48 +394,33 @@ pub(crate) fn telegram_state_with_root(
     ))
 }
 
-/// Filesystem-level fault controller used instead of parallel Telegram store
-/// fakes. Every non-faulted operation delegates to the production in-memory
-/// backend, so tests still exercise real record paths, JSON, locks, and CAS.
-pub(crate) struct FaultInjectingFilesystem {
+/// Read-barrier `RootFilesystem` decorator: every op delegates to the inner
+/// backend, but a `get` armed via [`ReadBarrierFilesystem::hold_next_reads_at`]
+/// blocks on a shared barrier *after* the underlying read completes, pinning a
+/// deterministic read/read/write interleaving for the pairing/rotation
+/// concurrency tests. This is a synchronization primitive, not a fault
+/// injector — filesystem-level fault behavior now lives in the shared
+/// `ironclaw_filesystem::FaultInjecting` decorator, which deliberately does not
+/// (and should not) provide a blocking barrier.
+pub(crate) struct ReadBarrierFilesystem {
     inner: Arc<dyn RootFilesystem>,
-    fail_reads: AtomicBool,
-    fail_writes: AtomicBool,
-    fail_deletes: AtomicBool,
-    fail_versioned_writes: AtomicBool,
     next_read_barrier: std::sync::Mutex<Option<(usize, Arc<tokio::sync::Barrier>)>>,
 }
 
-impl std::fmt::Debug for FaultInjectingFilesystem {
+impl std::fmt::Debug for ReadBarrierFilesystem {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("FaultInjectingFilesystem")
+            .debug_struct("ReadBarrierFilesystem")
             .finish_non_exhaustive()
     }
 }
 
-impl FaultInjectingFilesystem {
+impl ReadBarrierFilesystem {
     pub(crate) fn new(inner: Arc<dyn RootFilesystem>) -> Self {
         Self {
             inner,
-            fail_reads: AtomicBool::new(false),
-            fail_writes: AtomicBool::new(false),
-            fail_deletes: AtomicBool::new(false),
-            fail_versioned_writes: AtomicBool::new(false),
             next_read_barrier: std::sync::Mutex::new(None),
         }
-    }
-
-    pub(crate) fn fail_reads(&self) {
-        self.fail_reads.store(true, Ordering::SeqCst);
-    }
-
-    pub(crate) fn fail_writes(&self) {
-        self.fail_writes.store(true, Ordering::SeqCst);
-    }
-
-    pub(crate) fn fail_versioned_writes(&self) {
-        self.fail_versioned_writes.store(true, Ordering::SeqCst);
     }
 
     pub(crate) fn hold_next_reads_at(&self, read_count: usize, barrier: Arc<tokio::sync::Barrier>) {
@@ -427,18 +430,10 @@ impl FaultInjectingFilesystem {
         };
         *slot = Some((read_count, barrier));
     }
-
-    fn injected(path: &VirtualPath, operation: FilesystemOperation) -> FilesystemError {
-        FilesystemError::Backend {
-            path: path.clone(),
-            operation,
-            reason: "test-injected filesystem failure".to_string(),
-        }
-    }
 }
 
 #[async_trait]
-impl RootFilesystem for FaultInjectingFilesystem {
+impl RootFilesystem for ReadBarrierFilesystem {
     fn capabilities(&self) -> BackendCapabilities {
         self.inner.capabilities()
     }
@@ -449,19 +444,10 @@ impl RootFilesystem for FaultInjectingFilesystem {
         entry: Entry,
         cas: CasExpectation,
     ) -> Result<RecordVersion, FilesystemError> {
-        if self.fail_writes.load(Ordering::SeqCst)
-            || (matches!(cas, CasExpectation::Version(_))
-                && self.fail_versioned_writes.load(Ordering::SeqCst))
-        {
-            return Err(Self::injected(path, FilesystemOperation::WriteFile));
-        }
         self.inner.put(path, entry, cas).await
     }
 
     async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
-        if self.fail_reads.load(Ordering::SeqCst) {
-            return Err(Self::injected(path, FilesystemOperation::ReadFile));
-        }
         // Capture the backend snapshot before waiting so concurrent tests pin
         // a true read/read/write interleaving rather than merely releasing two
         // readers whose actual reads can still occur sequentially.
@@ -497,20 +483,14 @@ impl RootFilesystem for FaultInjectingFilesystem {
     }
 
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        if self.fail_deletes.load(Ordering::SeqCst) {
-            return Err(Self::injected(path, FilesystemOperation::Delete));
-        }
         self.inner.delete(path).await
     }
 
     async fn delete_if_version(
         &self,
         path: &VirtualPath,
-        expected_version: ironclaw_filesystem::RecordVersion,
+        expected_version: RecordVersion,
     ) -> Result<(), FilesystemError> {
-        if self.fail_deletes.load(Ordering::SeqCst) {
-            return Err(Self::injected(path, FilesystemOperation::Delete));
-        }
         self.inner.delete_if_version(path, expected_version).await
     }
 }

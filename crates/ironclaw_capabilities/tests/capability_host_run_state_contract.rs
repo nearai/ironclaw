@@ -19,7 +19,7 @@ use support::*;
 #[tokio::test]
 async fn capability_host_blocks_for_approval_without_dispatch() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
@@ -45,7 +45,7 @@ async fn capability_host_blocks_for_approval_without_dispatch() {
         err,
         CapabilityInvocationError::AuthorizationRequiresApproval { .. }
     ));
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(run.status, RunStatus::BlockedApproval);
     let approval_id = run.approval_request_id.unwrap();
@@ -100,7 +100,7 @@ output_schema_ref = "schemas/shell.output.v1.json"
     .unwrap();
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
@@ -160,7 +160,7 @@ output_schema_ref = "schemas/shell.output.v1.json"
 #[tokio::test]
 async fn capability_host_uses_combined_store_for_atomic_approval_block() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let store = RecordingCombinedRunStateApprovalStore::new();
     let host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state_approval_store(&store);
@@ -209,7 +209,7 @@ async fn capability_host_uses_combined_store_for_atomic_approval_block() {
 #[tokio::test]
 async fn capability_host_separate_store_setters_clear_combined_atomic_path() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let combined = RecordingCombinedRunStateApprovalStore::new();
     let separate_run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
@@ -251,7 +251,7 @@ async fn capability_host_separate_store_setters_clear_combined_atomic_path() {
 #[tokio::test]
 async fn capability_host_leaves_run_blocked_when_resume_is_attempted_before_approval_resolves() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
@@ -304,7 +304,7 @@ async fn capability_host_leaves_run_blocked_when_resume_is_attempted_before_appr
             ..
         }
     ));
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(run.status, RunStatus::BlockedApproval);
     assert_eq!(run.approval_request_id, Some(approval_id));
@@ -345,7 +345,7 @@ async fn assert_mismatched_approval_request_rejected(
     expected_field: &'static str,
 ) {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let authorizer = MismatchedApprovalRequestAuthorizer { mismatch };
@@ -372,7 +372,7 @@ async fn assert_mismatched_approval_request_rejected(
         }
         other => panic!("expected ApprovalRequestMismatch, got {other:?}"),
     }
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
     assert!(
         approval_requests
             .records_for_scope(&scope)
@@ -388,7 +388,7 @@ async fn assert_mismatched_approval_request_rejected(
 #[tokio::test]
 async fn capability_host_does_not_point_run_at_approval_before_approval_is_persisted() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = HangingSaveApprovalRequestStore::new();
     let host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
@@ -436,7 +436,7 @@ async fn capability_host_does_not_point_run_at_approval_before_approval_is_persi
 #[tokio::test]
 async fn capability_host_marks_run_failed_when_obligations_are_unsupported() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let host =
         capability_host(&registry, &dispatcher, &ObligatingAuthorizer).with_run_state(&run_state);
@@ -458,7 +458,7 @@ async fn capability_host_marks_run_failed_when_obligations_are_unsupported() {
         err,
         CapabilityInvocationError::UnsupportedObligations { .. }
     ));
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(run.status, RunStatus::Failed);
     assert_eq!(run.error_kind.as_deref(), Some("UnsupportedObligations"));
@@ -467,7 +467,7 @@ async fn capability_host_marks_run_failed_when_obligations_are_unsupported() {
 #[tokio::test]
 async fn capability_host_returns_business_error_when_run_state_fail_transition_fails() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let authorizer = GrantAuthorizer::new();
     let run_state = FailOnFailRunStateStore::new();
     let host = capability_host(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
@@ -490,13 +490,13 @@ async fn capability_host_returns_business_error_when_run_state_fail_transition_f
             ..
         }
     ));
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
 }
 
 #[tokio::test]
 async fn capability_host_returns_resume_business_error_when_run_state_fail_transition_fails() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = FailOnFailRunStateStore::new();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
@@ -553,13 +553,13 @@ async fn capability_host_returns_resume_business_error_when_run_state_fail_trans
         }
         other => panic!("expected ResumeContextMismatch, got {other:?}"),
     }
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
 }
 
 #[tokio::test]
 async fn capability_host_does_not_orphan_approval_when_run_block_fails() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = FailBlockApprovalRunStateStore::new();
     let approval_requests = RecordingApprovalStore::new();
     let host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
@@ -580,7 +580,7 @@ async fn capability_host_does_not_orphan_approval_when_run_block_fails() {
         .unwrap_err();
 
     assert!(matches!(err, CapabilityInvocationError::RunState(_)));
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
     assert!(
         approval_requests
             .records_for_scope(&scope)
@@ -626,7 +626,7 @@ async fn capability_host_does_not_orphan_approval_when_run_block_fails() {
 #[tokio::test]
 async fn capability_host_returns_specific_error_for_authorizer_fingerprint_mismatch() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let host = capability_host(&registry, &dispatcher, &MismatchedApprovalAuthorizer)
@@ -648,13 +648,13 @@ async fn capability_host_returns_specific_error_for_authorizer_fingerprint_misma
         err,
         CapabilityInvocationError::ApprovalFingerprintMismatch { .. }
     ));
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
 }
 
 #[tokio::test]
 async fn capability_host_returns_dispatch_result_when_run_completion_fails_after_invoke() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let authorizer = GrantAuthorizer::new();
     let run_state = FailCompleteRunStateStore::new();
     let host = capability_host(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
@@ -673,13 +673,13 @@ async fn capability_host_returns_dispatch_result_when_run_completion_fails_after
         .unwrap();
 
     assert_eq!(result.dispatch.output, json!({"ok": true}));
-    assert!(dispatcher.has_request());
+    assert!(dispatcher.call_count() > 0);
 }
 
 #[tokio::test]
 async fn capability_host_resumes_approved_invocation_and_consumes_matching_lease() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
@@ -753,7 +753,7 @@ async fn capability_host_resumes_approved_invocation_and_consumes_matching_lease
             ..
         }
     ));
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
     assert_eq!(
         run_state
             .get(&scope, invocation_id)
@@ -782,7 +782,8 @@ async fn capability_host_resumes_approved_invocation_and_consumes_matching_lease
     assert_eq!(result.dispatch.output, json!({"ok": true}));
     assert_eq!(
         dispatcher
-            .take_request()
+            .last_request()
+            .unwrap()
             .authenticated_actor_user_id
             .as_ref()
             .map(UserId::as_str),
@@ -797,7 +798,7 @@ async fn capability_host_resumes_approved_invocation_and_consumes_matching_lease
 #[tokio::test]
 async fn capability_host_returns_dispatch_result_when_run_completion_fails_after_resume() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = FailCompleteRunStateStore::new();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
@@ -868,7 +869,7 @@ async fn capability_host_returns_dispatch_result_when_run_completion_fails_after
 #[tokio::test]
 async fn capability_host_denies_resume_when_trust_ceiling_omits_capability_effect() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
@@ -949,7 +950,7 @@ async fn capability_host_denies_resume_when_trust_ceiling_omits_capability_effec
             ..
         }
     ));
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
     let active = leases.get(&scope, lease.grant.id).await.unwrap();
     assert_eq!(active.status, CapabilityLeaseStatus::Active);
 }
@@ -957,11 +958,16 @@ async fn capability_host_denies_resume_when_trust_ceiling_omits_capability_effec
 #[tokio::test]
 async fn capability_host_revokes_claimed_lease_when_dispatch_fails_after_resume() {
     let registry = registry_with_echo_capability();
-    let dispatcher = FailingDispatcher;
+    let dispatcher = TestDispatcher::responding(|_, _| {
+        Err(DispatchError::Wasm {
+            kind: RuntimeDispatchErrorKind::Backend,
+            model_visible_cause: None,
+        })
+    });
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
-    let block_dispatcher = RecordingDispatcher::default();
+    let block_dispatcher = recording_dispatcher();
     let block_host = capability_host(&registry, &block_dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
@@ -1046,7 +1052,7 @@ async fn capability_host_revokes_claimed_lease_when_dispatch_fails_after_resume(
 #[tokio::test]
 async fn capability_host_returns_dispatch_result_when_lease_consume_fails_after_dispatch() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = ConsumeFailingLeaseStore::new();
@@ -1121,7 +1127,7 @@ async fn capability_host_returns_dispatch_result_when_lease_consume_fails_after_
 #[tokio::test]
 async fn capability_host_does_not_overwrite_completed_run_when_concurrent_resume_loses_claim() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let complete_notify = Arc::new(tokio::sync::Notify::new());
     let run_state = CompleteNotifyingRunStateStore::new(complete_notify.clone());
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
@@ -1205,7 +1211,7 @@ async fn capability_host_does_not_overwrite_completed_run_when_concurrent_resume
 #[tokio::test]
 async fn capability_host_rejects_resume_with_mismatched_capability_id() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
@@ -1265,7 +1271,7 @@ async fn capability_host_rejects_resume_with_mismatched_capability_id() {
         }
         other => panic!("expected ResumeContextMismatch, got {other:?}"),
     }
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(run.status, RunStatus::Failed);
     assert_eq!(run.error_kind.as_deref(), Some("ResumeContextMismatch"));
@@ -1347,7 +1353,7 @@ async fn capability_host_resume_unknown_capability_fails_matching_blocked_run() 
 #[tokio::test]
 async fn capability_host_rejects_resume_with_mismatched_approval_request_id() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
@@ -1405,13 +1411,13 @@ async fn capability_host_rejects_resume_with_mismatched_approval_request_id() {
         }
         other => panic!("expected ResumeContextMismatch, got {other:?}"),
     }
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
 }
 
 #[tokio::test]
 async fn capability_host_rejects_resume_with_mutated_input_before_lease_claim_or_dispatch() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
@@ -1479,7 +1485,7 @@ async fn capability_host_rejects_resume_with_mutated_input_before_lease_claim_or
         err,
         CapabilityInvocationError::ApprovalFingerprintMismatch { .. }
     ));
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
     let active = leases.get(&scope, lease.grant.id).await.unwrap();
     assert_eq!(active.status, CapabilityLeaseStatus::Active);
 }
@@ -1490,21 +1496,6 @@ enum ApprovalRequestMismatch {
     Estimate,
     RequestedBy,
     CorrelationId,
-}
-
-struct FailingDispatcher;
-
-#[async_trait]
-impl CapabilityDispatcher for FailingDispatcher {
-    async fn dispatch_json(
-        &self,
-        _request: CapabilityDispatchRequest,
-    ) -> Result<CapabilityDispatchResult, DispatchError> {
-        Err(DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::Backend,
-            model_visible_cause: None,
-        })
-    }
 }
 
 struct MismatchedApprovalRequestAuthorizer {
@@ -2161,6 +2152,11 @@ impl RunStateStore for FailOnFailRunStateStore {
     }
 }
 
+// Synchronization primitive + domain-state fake, not an I/O fault — cannot move
+// to ironclaw_filesystem::FaultInjecting: it uses `tokio::sync::Notify` to
+// interleave two concurrent `claim` calls and returns a domain
+// `CapabilityLeaseError::InactiveLease{Consumed}` for the loser. FaultInjecting
+// is neither a synchronization barrier nor able to produce that domain error.
 struct CoordinatedClaimConflictLeaseStore {
     inner: FilesystemCapabilityLeaseStore<InMemoryBackend>,
     claim_calls: AtomicUsize,
@@ -2259,6 +2255,13 @@ impl CapabilityLeaseStore for CoordinatedClaimConflictLeaseStore {
     }
 }
 
+// I/O-shaped (returns `CapabilityLeaseError::Persistence` on `consume`), but kept:
+// FaultInjecting gates by FilesystemOperation + path only, and `consume`'s CAS
+// write is indistinguishable — same op (WriteFile) and same lease-file path — from
+// the `claim`/`begin_dispatch_claimed` CAS writes in the same `resume_json` call,
+// so a backend fault cannot isolate the consume failure this test needs. This is
+// the documented FaultInjecting limitation ("can't fault only versioned writes";
+// ironclaw_filesystem/CLAUDE.md), not a domain-double.
 struct ConsumeFailingLeaseStore {
     inner: FilesystemCapabilityLeaseStore<InMemoryBackend>,
 }

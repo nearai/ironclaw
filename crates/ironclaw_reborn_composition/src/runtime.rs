@@ -41,7 +41,7 @@ use ironclaw_first_party_extension_ports::{
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AgentId, ApprovalRequestId, AuditEnvelope, AuditEventId,
     AuditStage, CapabilityId, CorrelationId, DecisionSummary, EffectKind, ExtensionId,
-    InvocationId, Principal, ResourceScope, TenantId, ThreadId, UserId,
+    InvocationId, Principal, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
 };
 use ironclaw_loop_host::{
     AwaitEdgeSettler, AwaitEdgeWriter, CapabilityAllowSet, CapabilityResolveError,
@@ -232,6 +232,12 @@ struct RuntimeStoreParts<'a> {
     subagent_await_edge_settler: Arc<dyn AwaitEdgeSettler>,
     subagent_await_edge_evidence: Arc<dyn AwaitDependentRunEvidenceStore>,
     trigger_repository: Option<Arc<dyn ironclaw_triggers::TriggerRepository>>,
+    /// Unified turn-run snapshot source for the substrate-agnostic trigger
+    /// poller's active-run lookup. Local sets it from `local_runtime.turn_state`;
+    /// production from `graph.turn_state`. Both back
+    /// `SnapshotActiveRunLookup` identically, so the poller-launch block no
+    /// longer reaches into the concrete local substrate for it.
+    turn_run_snapshot_source: Arc<dyn TurnRunSnapshotSource>,
 }
 
 /// Non-durable await-edge fallback for the composition profile with neither
@@ -379,6 +385,8 @@ fn local_runtime_parts(
         subagent_await_edge_settler,
         subagent_await_edge_evidence,
         trigger_repository: Some(Arc::clone(&local_runtime.trigger_repository)),
+        turn_run_snapshot_source: Arc::clone(&local_runtime.turn_state)
+            as Arc<dyn TurnRunSnapshotSource>,
     }
 }
 
@@ -424,6 +432,7 @@ where
         subagent_await_edge_settler: await_edge_resolver as Arc<dyn AwaitEdgeSettler>,
         subagent_await_edge_evidence: await_edge_store as Arc<dyn AwaitDependentRunEvidenceStore>,
         trigger_repository: Some(Arc::clone(&graph.trigger_repository)),
+        turn_run_snapshot_source: Arc::clone(&graph.turn_state) as Arc<dyn TurnRunSnapshotSource>,
     }
 }
 
@@ -862,73 +871,51 @@ struct TriggerPollerServices {
     pairing_service: Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
 }
 
-async fn build_trigger_poller_services(
-    local_runtime: &crate::factory::RebornRuntimeSubstrate,
+/// Build the trigger-poller services from already-resolved conversation
+/// services. Substrate-agnostic: the caller resolves the concrete conversation
+/// services type per substrate (local `RebornFilesystemConversationServices` /
+/// `InMemoryConversationServices`, or the production graph's
+/// `RebornFilesystemConversationServices`) and hands it in by value, so this
+/// function no longer reaches into the local substrate or branches on the
+/// durable-backend cfg.
+fn build_trigger_poller_services<C>(
+    conversation_services: C,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     thread_service: Arc<dyn SessionThreadService>,
     authorizer_config: TriggerPollerAuthorizerConfig,
     access_checker: Option<Arc<dyn crate::runtime_input::TriggerFireAccessChecker>>,
     tenant_id: TenantId,
     default_agent_id: AgentId,
-) -> Result<TriggerPollerServices, RebornRuntimeError> {
+) -> Result<TriggerPollerServices, RebornRuntimeError>
+where
+    C: ironclaw_conversations::ConversationBindingService
+        + ironclaw_conversations::SessionThreadService
+        + ironclaw_conversations::ConversationActorPairingService
+        + Clone
+        + 'static,
+{
     let authorizer = build_trigger_fire_authorizer(authorizer_config, access_checker, tenant_id)?;
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
-    {
-        let conversations = local_runtime
-            .durable_trigger_conversation_services()
-            .await
-            .map_err(|error| RebornRuntimeError::InvalidArgument {
-                reason: format!("trigger conversation services unavailable: {error}"),
-            })?;
+    #[cfg(any(test, feature = "test-support"))]
+    let pairing_service: Arc<dyn ironclaw_conversations::ConversationActorPairingService> =
+        Arc::new(conversation_services.clone());
+    let TriggerPollerServicesInner {
+        materializer,
+        trusted_submitter,
+    } = build_trigger_poller_services_from_conversation_services(
+        conversation_services.clone(),
+        conversation_services,
+        turn_coordinator,
+        thread_service,
+        default_agent_id,
+        authorizer,
+    );
+    Ok(TriggerPollerServices {
+        materializer,
+        trusted_submitter,
+        post_submit_hook_slot: Arc::new(std::sync::OnceLock::new()),
         #[cfg(any(test, feature = "test-support"))]
-        let pairing_service: Arc<
-            dyn ironclaw_conversations::ConversationActorPairingService,
-        > = Arc::new(conversations.clone());
-        let TriggerPollerServicesInner {
-            materializer,
-            trusted_submitter,
-        } = build_trigger_poller_services_from_conversation_services(
-            conversations.clone(),
-            conversations,
-            turn_coordinator,
-            thread_service,
-            default_agent_id,
-            authorizer,
-        );
-        Ok(TriggerPollerServices {
-            materializer,
-            trusted_submitter,
-            post_submit_hook_slot: Arc::new(std::sync::OnceLock::new()),
-            #[cfg(any(test, feature = "test-support"))]
-            pairing_service,
-        })
-    }
-    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-    {
-        let conversations = local_runtime.trigger_conversation_services.clone();
-        #[cfg(any(test, feature = "test-support"))]
-        let pairing_service: Arc<
-            dyn ironclaw_conversations::ConversationActorPairingService,
-        > = Arc::new(conversations.clone());
-        let TriggerPollerServicesInner {
-            materializer,
-            trusted_submitter,
-        } = build_trigger_poller_services_from_conversation_services(
-            conversations.clone(),
-            conversations,
-            turn_coordinator,
-            thread_service,
-            default_agent_id,
-            authorizer,
-        );
-        Ok(TriggerPollerServices {
-            materializer,
-            trusted_submitter,
-            post_submit_hook_slot: Arc::new(std::sync::OnceLock::new()),
-            #[cfg(any(test, feature = "test-support"))]
-            pairing_service,
-        })
-    }
+        pairing_service,
+    })
 }
 
 fn trigger_poller_authorization_required_error() -> RebornRuntimeError {
@@ -1015,10 +1002,69 @@ where
 }
 
 fn build_trigger_active_run_lookup(
-    turn_state_store: Arc<ComposedTurnStateStore>,
+    snapshot_source: Arc<dyn TurnRunSnapshotSource>,
 ) -> Arc<dyn ironclaw_triggers::TriggerActiveRunLookup> {
-    let snapshot_source = turn_state_store as Arc<dyn TurnRunSnapshotSource>;
     Arc::new(SnapshotActiveRunLookup::new(snapshot_source))
+}
+
+/// Resolve the fire-time `TenantMembership` user directory from either
+/// substrate. Mirrors [`RebornRuntime::reborn_user_directory`] but as a free
+/// function usable during `build_reborn_runtime` (before a `RebornRuntime`
+/// exists): local builds it over the local substrate's identity filesystem;
+/// production-shaped builds match the production store graph and build it over
+/// the same scoped filesystem the identity resolver uses. Returns `None` only
+/// when no substrate is present, in which case a `TenantMembership` grant
+/// cannot be honored and the caller fails closed.
+fn poller_user_directory(
+    services: &RebornServices,
+    local_runtime: Option<&crate::factory::RebornRuntimeSubstrate>,
+    tenant_id: &TenantId,
+    actor_user_id: &UserId,
+    agent_id: &AgentId,
+    project_id: Option<&ProjectId>,
+) -> Option<Arc<dyn ironclaw_reborn_identity::RebornUserDirectory>> {
+    if let Some(local) = local_runtime {
+        let store = ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
+            Arc::clone(&local.identity_filesystem),
+            tenant_id.clone(),
+            actor_user_id.clone(),
+            agent_id.clone(),
+            project_id.cloned(),
+        );
+        return Some(Arc::new(store) as Arc<dyn ironclaw_reborn_identity::RebornUserDirectory>);
+    }
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    {
+        if let Some(production) = services.production_runtime.as_ref() {
+            let directory: Arc<dyn ironclaw_reborn_identity::RebornUserDirectory> = match production
+            {
+                #[cfg(feature = "libsql")]
+                crate::factory::RebornProductionRuntimeServices::LibSql(graph) => Arc::new(
+                    ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
+                        Arc::clone(&graph.scoped_filesystem),
+                        tenant_id.clone(),
+                        actor_user_id.clone(),
+                        agent_id.clone(),
+                        project_id.cloned(),
+                    ),
+                ),
+                #[cfg(feature = "postgres")]
+                crate::factory::RebornProductionRuntimeServices::Postgres(graph) => Arc::new(
+                    ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
+                        Arc::clone(&graph.scoped_filesystem),
+                        tenant_id.clone(),
+                        actor_user_id.clone(),
+                        agent_id.clone(),
+                        project_id.cloned(),
+                    ),
+                ),
+            };
+            return Some(directory);
+        }
+    }
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    let _ = services;
+    None
 }
 
 struct SnapshotApprovalTurnRunLocator {
@@ -1545,6 +1591,28 @@ impl RebornRuntime {
             .local_runtime
             .as_ref()
             .map(|local_runtime| Arc::clone(&local_runtime.trigger_repository))
+    }
+
+    /// Test-only accessor for the trigger repository backing a
+    /// production-shaped runtime (where `local_runtime` is `None`, so
+    /// [`Self::trigger_repository`] returns `None`). Mirrors the production
+    /// call site `RebornProductionRuntimeServices::trigger_repository`, which
+    /// the WebUI automations facade uses. Integration tests use this to seed
+    /// due `TriggerRecord` rows on a production runtime before driving the
+    /// poller. Returns `None` when no production store graph is present. Gated
+    /// behind `test-support` so the substrate handle never leaks into
+    /// production builds. For tests only.
+    #[cfg(all(
+        any(test, feature = "test-support"),
+        any(feature = "libsql", feature = "postgres")
+    ))]
+    pub fn production_trigger_repository_for_test(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_triggers::TriggerRepository>> {
+        self.services
+            .production_runtime
+            .as_ref()
+            .map(|production| production.trigger_repository())
     }
 
     /// Test-only accessor for the SAME `ConversationActorPairingService`
@@ -3398,7 +3466,8 @@ pub async fn build_reborn_runtime(
         subagent_await_edge_writer,
         subagent_await_edge_settler,
         subagent_await_edge_evidence,
-        trigger_repository: _trigger_repository,
+        trigger_repository,
+        turn_run_snapshot_source,
     } = runtime_parts;
     let (skill_context_source, skill_activation_source, skill_execution_adapter) =
         match (configured_skill_context_source, local_runtime) {
@@ -4100,9 +4169,6 @@ pub async fn build_reborn_runtime(
         Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
     >;
     if trigger_poller.enabled {
-        let local_runtime = local_runtime.ok_or(RebornRuntimeError::InvalidArgument {
-            reason: "trigger poller is not wired for production runtime launch".to_string(),
-        })?;
         // Fire-time authorizer: an explicit override wins (tests/advanced),
         // otherwise build one from the deployment's `TriggerFireAccessPolicy`
         // (arch-simplification §4.4 — the former `local_trigger_access` store is
@@ -4128,17 +4194,22 @@ pub async fn build_reborn_runtime(
                 TriggerFireAccessGrant::TenantMembership { agent, project } => {
                     // Membership is resolved against the canonical identity
                     // directory the SSO login path populates — the same store
-                    // `reborn_user_directory` opens, built here from the
-                    // runtime's own identity filesystem.
-                    let store = ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
-                        Arc::clone(&local_runtime.identity_filesystem),
-                        thread_scope.tenant_id.clone(),
-                        actor_user_id.clone(),
-                        thread_scope.agent_id.clone(),
-                        thread_scope.project_id.clone(),
-                    );
-                    let directory: Arc<dyn ironclaw_reborn_identity::RebornUserDirectory> =
-                        Arc::new(store);
+                    // `reborn_user_directory` opens, built here from whichever
+                    // substrate (local or production-shaped) backs this runtime.
+                    // Fail closed if no substrate can provide the directory.
+                    let directory = poller_user_directory(
+                        &services,
+                        local_runtime,
+                        &thread_scope.tenant_id,
+                        &actor_user_id,
+                        &thread_scope.agent_id,
+                        thread_scope.project_id.as_ref(),
+                    )
+                    .ok_or(RebornRuntimeError::InvalidArgument {
+                        reason: "trigger poller TenantMembership grant requires an identity \
+                                 directory, but no runtime substrate is present"
+                            .to_string(),
+                    })?;
                     let checker: Arc<dyn TriggerFireAccessChecker> =
                         Arc::new(IdentityMembershipTriggerFireChecker::new(
                             directory,
@@ -4164,18 +4235,64 @@ pub async fn build_reborn_runtime(
             &trigger_poller,
             effective_trigger_fire_access_checker.as_ref(),
         )?;
+        // Resolve the trigger conversation services from whichever substrate
+        // backs this runtime — the local substrate's (lazily-built durable /
+        // in-memory) services, or the production store graph's eagerly-built
+        // filesystem services. The poller launch is otherwise identical for
+        // both, so there is a single substrate-agnostic path below.
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        let conversation_services = match local_runtime {
+            Some(local) => local
+                .durable_trigger_conversation_services()
+                .await
+                .map_err(|error| RebornRuntimeError::InvalidArgument {
+                    reason: format!("trigger conversation services unavailable: {error}"),
+                })?,
+            None => match services.production_runtime.as_ref() {
+                #[cfg(feature = "libsql")]
+                Some(crate::factory::RebornProductionRuntimeServices::LibSql(graph)) => {
+                    graph.trigger_conversation_services.clone()
+                }
+                #[cfg(feature = "postgres")]
+                Some(crate::factory::RebornProductionRuntimeServices::Postgres(graph)) => {
+                    graph.trigger_conversation_services.clone()
+                }
+                None => {
+                    return Err(RebornRuntimeError::InvalidArgument {
+                        reason: "trigger poller enabled but no runtime substrate present"
+                            .to_string(),
+                    });
+                }
+            },
+        };
+        #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+        let conversation_services = local_runtime
+            .ok_or(RebornRuntimeError::InvalidArgument {
+                reason: "trigger poller enabled but no runtime substrate present".to_string(),
+            })?
+            .trigger_conversation_services
+            .clone();
         let trigger_poller_services = build_trigger_poller_services(
-            local_runtime,
+            conversation_services,
             Arc::clone(&planned_turn_coordinator),
             Arc::clone(&thread_service),
             trigger_poller.authorizer,
             effective_trigger_fire_access_checker.clone(),
             thread_scope.tenant_id.clone(),
             validated_identity.agent_id.clone(),
-        )
-        .await?;
+        )?;
         let active_run_lookup =
-            build_trigger_active_run_lookup(Arc::clone(&local_runtime.turn_state));
+            build_trigger_active_run_lookup(Arc::clone(&turn_run_snapshot_source));
+        // Fail closed if the substrate produced no trigger repository (both the
+        // local and production parts always set `Some`; a `None` here means the
+        // runtime was assembled without a substrate, which the poller cannot
+        // service).
+        let trigger_repository =
+            trigger_repository
+                .clone()
+                .ok_or(RebornRuntimeError::InvalidArgument {
+                    reason: "trigger poller enabled but no trigger repository present".to_string(),
+                })?;
         #[cfg(any(test, feature = "test-support"))]
         {
             trigger_conversation_pairing_value =
@@ -4191,7 +4308,7 @@ pub async fn build_reborn_runtime(
         trigger_poller_handle = spawn_trigger_poller(
             trigger_poller,
             TriggerPollerCompositionDeps {
-                repository: Arc::clone(&local_runtime.trigger_repository),
+                repository: trigger_repository,
                 materializer: trigger_poller_services.materializer,
                 trusted_submitter: trigger_poller_services.trusted_submitter,
                 active_run_lookup,
