@@ -41,6 +41,14 @@ uuid = { version = "1", features = ["v4", "serde"] }
 [dev-dependencies]
 # Self-reference so the crate's own integration tests see `test_support`.
 ironclaw_turns = { path = ".", features = ["test-support"] }
+# Test-only: the durable-read perf harness (`events_query_stress`) builds a real
+# libSQL-backed store. Matches `ironclaw_filesystem`'s libsql feature set.
+libsql = { version = "0.9", default-features = false, features = [
+    "core",
+    "replication",
+    "remote",
+    "tls",
+] }
 rand = "0.10"
 static_assertions = "1"
 tempfile = "3"

@@ -4836,6 +4836,7 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_observability",
  "ironclaw_turns",
+ "libsql",
  "rand 0.10.1",
  "serde",
  "serde_jcs",
