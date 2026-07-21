@@ -1033,8 +1033,16 @@ async def _apply_extension_setup_api_after_start(
         if not isinstance(active_extensions, list):
             raise LiveQaError("Extensions API active read-back omitted the extensions list")
         active_projection = _extension_projection(active_extensions, package_id)
-        if not isinstance(active_projection, dict) or active_projection.get("active") is not True:
-            raise LiveQaError("Extension activation did not produce an active projection")
+        if (
+            not isinstance(active_projection, dict)
+            or active_projection.get("active") is not True
+            or active_projection.get("authenticated") is not True
+            or active_projection.get("needs_setup") is not False
+        ):
+            raise LiveQaError(
+                "Extension activation did not produce a fully ready projection "
+                "(required active=true, authenticated=true, needs_setup=false)"
+            )
     return {
         "applied": True,
         "status_code": response.status_code,

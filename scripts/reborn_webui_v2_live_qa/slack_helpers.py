@@ -551,6 +551,8 @@ def _slack_setup_payload(
     setup = _slack_setup_from_reborn_home(reborn_home) or {}
     bot_token = _env_value(SLACK_BOT_TOKEN_ENV, extra_env)
     signing_secret = _env_value(SLACK_SIGNING_SECRET_ENV, extra_env)
+    oauth_client_id = str(preflight.get("oauth_client_id") or "").strip()
+    oauth_client_secret = _env_value(SLACK_OAUTH_CLIENT_SECRET_ENV, extra_env)
     resolved_bot_user_id = str(bot_user_id or "").strip() or _slack_setup_field(
         setup,
         config_text,
@@ -574,6 +576,8 @@ def _slack_setup_payload(
         "signing_secret": signing_secret,
         "bot_user_id": resolved_bot_user_id,
         "shared_subject_user_id": resolved_shared_subject_user_id,
+        "oauth_client_id": oauth_client_id,
+        "oauth_client_secret": oauth_client_secret,
     }
     missing = [key for key, value in required.items() if not str(value or "").strip()]
     if missing:
@@ -588,13 +592,9 @@ def _slack_setup_payload(
         "shared_subject_user_id": str(required["shared_subject_user_id"]),
         "allowed_channels": "[]",
         "subject_routes": "{}",
+        "oauth_client_id": str(required["oauth_client_id"]),
+        "oauth_client_secret": required["oauth_client_secret"],
     }
-    oauth_client_id = str(preflight.get("oauth_client_id") or "").strip()
-    oauth_client_secret = _env_value(SLACK_OAUTH_CLIENT_SECRET_ENV, extra_env)
-    if oauth_client_id:
-        payload["oauth_client_id"] = oauth_client_id
-    if oauth_client_secret:
-        payload["oauth_client_secret"] = oauth_client_secret
     return payload, {**preflight, "ready_for_api": True, "missing": []}
 
 

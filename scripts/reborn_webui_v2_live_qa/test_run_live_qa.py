@@ -5661,6 +5661,47 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(preflight["oauth_client_id"], "fresh-client-id")
         self.assertTrue(preflight["personal_oauth_ready"])
 
+    def test_slack_setup_payload_requires_oauth_client_material(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reborn_home = Path(tmpdir) / "reborn-home"
+            db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+            run_live_qa._root_filesystem_create_table(db_path)
+            run_live_qa._put_root_filesystem_json(
+                db_path,
+                "/tenants/reborn-cli/shared/slack-setup/installation.json",
+                {
+                    "installation_id": "local-dev-installation",
+                    "team_id": "T123",
+                    "api_app_id": "A123",
+                },
+            )
+            base_env = {
+                "IRONCLAW_REBORN_SLACK_BOT_TOKEN": "xoxb-bot",
+                "IRONCLAW_REBORN_SLACK_SIGNING_SECRET": "signing-secret",
+            }
+            cases = {
+                "oauth_client_id": {
+                    **base_env,
+                    "REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_SECRET": "oauth-secret",
+                },
+                "oauth_client_secret": {
+                    **base_env,
+                    "REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_ID": "oauth-client-id",
+                },
+            }
+            for missing_name, env in cases.items():
+                with self.subTest(missing=missing_name):
+                    payload, preflight = run_live_qa._slack_setup_payload(
+                        reborn_home,
+                        "[slack]\nenabled = true\n",
+                        env,
+                        bot_user_id="U-BOT",
+                        shared_subject_user_id="user:web",
+                    )
+                    self.assertIsNone(payload)
+                    self.assertFalse(preflight["ready_for_api"])
+                    self.assertIn(missing_name, preflight["missing"])
+
     def test_slack_personal_auth_preflight_rejects_account_without_user_scope(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir) / "reborn-home"
@@ -5981,6 +6022,95 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             ],
         )
         self.assertTrue(result["activation"]["verified_active"])
+
+    def test_slack_setup_api_requires_fully_ready_activation_projection(self):
+        class FakeResponse:
+            def __init__(self, body: dict[str, object]):
+                self.status_code = 200
+                self._body = body
+
+            def json(self):
+                return self._body
+
+        list_count = 0
+
+        class FakeAsyncClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, _exc_type, _exc, _tb):
+                return None
+
+            async def get(self, url, **_kwargs):
+                nonlocal list_count
+                if url.endswith("/api/webchat/v2/extensions"):
+                    list_count += 1
+                    return FakeResponse(
+                        {
+                            "extensions": [
+                                {
+                                    "package_ref": {
+                                        "kind": "extension",
+                                        "id": "slack",
+                                    },
+                                    "active": list_count > 1,
+                                    "authenticated": False,
+                                    "needs_setup": True,
+                                }
+                            ]
+                        }
+                    )
+                return FakeResponse(
+                    {
+                        "package_ref": {"kind": "extension", "id": "slack"},
+                        "phase": "installed",
+                        "secrets": [
+                            {
+                                "name": "slack_bot_token",
+                                "optional": False,
+                                "provided": False,
+                            }
+                        ],
+                        "fields": [{"name": "slack_team_id", "optional": False}],
+                    }
+                )
+
+            async def post(self, url, **_kwargs):
+                if url.endswith("/activate"):
+                    return FakeResponse({"success": True, "activated": True})
+                return FakeResponse(
+                    {
+                        "package_ref": {"kind": "extension", "id": "slack"},
+                        "phase": "installed",
+                        "secrets": [
+                            {
+                                "name": "slack_bot_token",
+                                "optional": False,
+                                "provided": True,
+                            }
+                        ],
+                        "fields": [{"name": "slack_team_id", "optional": False}],
+                    }
+                )
+
+        fake_httpx = types.SimpleNamespace(AsyncClient=FakeAsyncClient)
+        with (
+            patch.dict(sys.modules, {"httpx": fake_httpx}),
+            self.assertRaises(run_live_qa.LiveQaError) as raised,
+        ):
+            asyncio.run(
+                run_live_qa._apply_extension_setup_api_after_start(
+                    base_url="http://127.0.0.1:38555",
+                    package_id="slack",
+                    values={"bot_token": "xoxb-bot", "team_id": "T123"},
+                )
+            )
+
+        self.assertIn("authenticated=true", str(raised.exception))
+        self.assertIn("needs_setup=false", str(raised.exception))
 
     def test_slack_setup_api_requires_secret_presence_projection(self):
         class FakeResponse:
