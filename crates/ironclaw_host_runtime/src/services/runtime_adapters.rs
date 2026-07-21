@@ -1060,7 +1060,12 @@ fn script_error_kind(error: &ScriptError) -> RuntimeDispatchErrorKind {
         ScriptError::InvalidInvocation { .. } => RuntimeDispatchErrorKind::InputEncode,
         ScriptError::ExitFailure { .. } => RuntimeDispatchErrorKind::ExitFailure,
         ScriptError::OutputLimitExceeded { .. } => RuntimeDispatchErrorKind::OutputTooLarge,
-        ScriptError::Timeout { .. } => RuntimeDispatchErrorKind::Executor,
+        // Timeouts are usually driven by the composed request (over-broad
+        // command, oversized input), not host infrastructure — an identical
+        // retry times out identically. Classify as a model-visible operation
+        // failure so the model can narrow the request instead of the host
+        // burning infra retries.
+        ScriptError::Timeout { .. } => RuntimeDispatchErrorKind::OperationFailed,
         ScriptError::InvalidOutput { .. } => RuntimeDispatchErrorKind::OutputDecode,
     }
 }
@@ -1092,5 +1097,23 @@ pub(super) fn wasm_error_kind(error: &WasmError) -> RuntimeDispatchErrorKind {
         WasmError::InstantiationFailed(_) => RuntimeDispatchErrorKind::MethodMissing,
         WasmError::ExecutionFailed { .. } => RuntimeDispatchErrorKind::Guest,
         WasmError::InvalidSchema(_) => RuntimeDispatchErrorKind::Manifest,
+    }
+}
+
+#[cfg(test)]
+mod error_classifier_tests {
+    use super::*;
+
+    // A script timeout is usually driven by the request the model composed
+    // (over-broad command, too much input), not by host infrastructure. It
+    // must classify as an immediately model-visible operation failure, not
+    // the retryable-infra Executor bucket that burns availability retries on
+    // a call that will time out identically each attempt.
+    #[test]
+    fn script_timeout_classifies_as_model_visible_operation_failure() {
+        assert_eq!(
+            script_error_kind(&ScriptError::Timeout { limit_ms: 1_000 }),
+            RuntimeDispatchErrorKind::OperationFailed,
+        );
     }
 }
