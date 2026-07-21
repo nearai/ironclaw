@@ -2713,17 +2713,20 @@ mod tests {
     mod private_install_tests;
 
     fn filesystem_installation_store() -> FilesystemExtensionInstallationStore {
+        let host_ports =
+            ironclaw_host_runtime::default_host_port_catalog().expect("default host port catalog");
+        let contracts = product_extension_host_api_contract_registry().expect("host API contracts");
         futures::executor::block_on(FilesystemExtensionInstallationStore::load_at(
             Arc::new(InMemoryBackend::new()),
             VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
-            HostPortCatalog::empty(),
-            ironclaw_extensions::HostApiContractRegistry::new(),
+            host_ports,
+            contracts,
         ))
         .expect("filesystem store")
     }
 
     #[tokio::test]
-    async fn lifecycle_owner_projections_reject_duplicate_extension_ids() {
+    async fn lifecycle_owner_projections_canonicalize_duplicate_extension_ids() {
         let (_dir, _storage_root, port, _active_registry, installation_store) =
             extension_management_port_fixture_with_catalog_and_service(
                 AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
@@ -2757,23 +2760,17 @@ mod tests {
                 .unwrap();
         }
 
-        let owners_error = port
+        let owners = port
             .installation_owners()
             .await
-            .expect_err("duplicate owner rows fail closed");
-        assert!(matches!(
-            owners_error,
-            ProductWorkflowError::InvalidBindingRequest { .. }
-        ));
+            .expect("duplicate owner rows canonicalize");
+        assert_eq!(owners.get(&extension_id), Some(&InstallationOwner::Tenant));
 
-        let active_error = port
+        let active_capabilities = port
             .active_model_visible_capabilities()
             .await
-            .expect_err("duplicate active owner rows fail closed");
-        assert!(matches!(
-            active_error,
-            ProductWorkflowError::InvalidBindingRequest { .. }
-        ));
+            .expect("duplicate active owner rows canonicalize");
+        assert!(active_capabilities.is_empty());
     }
 
     fn zip_bundle(entries: &[(&str, &[u8])]) -> Vec<u8> {
