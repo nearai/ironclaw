@@ -113,9 +113,7 @@ pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelError
         // state moved). An iteration-scoped retry rebuilds both; exhaustion
         // fails with the precise `model_stale_request` category. Audit
         // §6.1/§7, docs/plans/2026-06-28-reborn-error-recoverability-audit.md.
-        AgentLoopHostErrorKind::StaleSurface
-        | AgentLoopHostErrorKind::InvalidInvocation
-        | AgentLoopHostErrorKind::Invalid => Some(ModelErrorClass::StaleRequest),
+        AgentLoopHostErrorKind::StaleSurface => Some(ModelErrorClass::StaleRequest),
         // Precise terminal categories: immediate abort via the recovery
         // strategy so the run fails gracefully (`LoopExit::Failed` with a
         // user-actionable category) instead of hard-borking as a generic
@@ -125,10 +123,14 @@ pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelError
         AgentLoopHostErrorKind::TranscriptWriteFailed => {
             Some(ModelErrorClass::TranscriptWriteFailed)
         }
-        // Deliberately unclassified (terminal with diagnostics): a model-path
-        // policy denial or scope mismatch is host/config-shaped; the runner
-        // surfaces it as a retryable `host_stage_unavailable_model` failure.
-        AgentLoopHostErrorKind::ScopeMismatch | AgentLoopHostErrorKind::PolicyDenied => None,
+        // Deliberately unclassified (terminal with diagnostics): deterministic
+        // request-invalid errors must not masquerade as stale/retryable, while
+        // policy denial and scope mismatch remain host/config-shaped. The
+        // runner preserves the original kind when categorizing the failure.
+        AgentLoopHostErrorKind::InvalidInvocation
+        | AgentLoopHostErrorKind::Invalid
+        | AgentLoopHostErrorKind::ScopeMismatch
+        | AgentLoopHostErrorKind::PolicyDenied => None,
     }
 }
 
@@ -453,8 +455,6 @@ mod tests {
             // Model-fixable-by-rebuild: iteration retry refreshes the surface
             // and prompt bundle; exhaustion -> `model_stale_request`.
             (K::StaleSurface, Some(C::StaleRequest)),
-            (K::InvalidInvocation, Some(C::StaleRequest)),
-            (K::Invalid, Some(C::StaleRequest)),
             // Precise terminal categories, never silently retried.
             (K::Unauthorized, Some(C::Unauthorized)),
             (K::CheckpointRejected, Some(C::CheckpointRejected)),
@@ -464,6 +464,8 @@ mod tests {
             (K::BudgetApprovalRequired, None),
             (K::Cancelled, None),
             (K::CredentialUnavailable, None),
+            (K::InvalidInvocation, None),
+            (K::Invalid, None),
             (K::PolicyDenied, None),
             (K::ScopeMismatch, None),
         ];

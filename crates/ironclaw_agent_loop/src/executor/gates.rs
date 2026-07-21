@@ -28,8 +28,8 @@ use super::{
 /// `SkipAndContinue` on an Approval / AwaitDependentRun / ExternalTool gate is
 /// a strategy-contract violation, and silently skipping the gated call would
 /// mask a driver bug behind a normal completion. The invalid outcome is
-/// downgraded to `Abort` with the validator's failure kind (`DriverBug`) so
-/// the run fails through the standard abort path.
+/// enforced as `Abort` with the validator's failure kind (`DriverBug`) so the
+/// run fails through the standard abort path.
 fn enforce_gate_outcome_contract(outcome: GateOutcome, kind: GateKind) -> GateOutcome {
     match outcome.validate_for_gate_kind(kind) {
         Ok(()) => outcome,

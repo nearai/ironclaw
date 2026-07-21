@@ -334,7 +334,7 @@ where
         }
         if prompt_bundle.surface_version != request.surface_version {
             return Err(host_error_to_model_gateway_error(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
+                AgentLoopHostErrorKind::StaleSurface,
                 "model request surface version does not match the host-built prompt bundle",
             )));
         }
@@ -2045,10 +2045,10 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
             HostManagedModelErrorKind::BudgetAccountingFailed
         }
         AgentLoopHostErrorKind::Cancelled => HostManagedModelErrorKind::Cancelled,
+        AgentLoopHostErrorKind::StaleSurface => HostManagedModelErrorKind::StaleRequest,
         AgentLoopHostErrorKind::Invalid
         | AgentLoopHostErrorKind::InvalidInvocation
-        | AgentLoopHostErrorKind::ScopeMismatch
-        | AgentLoopHostErrorKind::StaleSurface => HostManagedModelErrorKind::InvalidRequest,
+        | AgentLoopHostErrorKind::ScopeMismatch => HostManagedModelErrorKind::InvalidRequest,
         AgentLoopHostErrorKind::Unavailable
         | AgentLoopHostErrorKind::InvalidOutput
         | AgentLoopHostErrorKind::CheckpointRejected
@@ -2756,6 +2756,31 @@ mod tests {
             HostManagedModelErrorKind::BudgetAccountingFailed,
             "accounting infrastructure failure must cross the model gateway unchanged"
         );
+    }
+
+    #[test]
+    fn capability_model_request_errors_preserve_stale_distinction() {
+        for (host_kind, gateway_kind) in [
+            (
+                AgentLoopHostErrorKind::StaleSurface,
+                HostManagedModelErrorKind::StaleRequest,
+            ),
+            (
+                AgentLoopHostErrorKind::InvalidInvocation,
+                HostManagedModelErrorKind::InvalidRequest,
+            ),
+            (
+                AgentLoopHostErrorKind::Invalid,
+                HostManagedModelErrorKind::InvalidRequest,
+            ),
+        ] {
+            let mapped = map_capability_host_error(AgentLoopHostError::new(
+                host_kind,
+                "model request classification test",
+            ));
+
+            assert_eq!(mapped.kind, gateway_kind, "mapping for {host_kind:?}");
+        }
     }
 
     #[test]

@@ -35,19 +35,19 @@ use serde_json::json;
 #[tokio::test]
 async fn reborn_model_failure_is_retryable_and_retry_resumes_to_completion() {
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
-        // Invalid requests are treated as a stale model surface and retried
-        // twice in-loop. Three consecutive failures exhaust that budget and
-        // leave the successful response for the externally resumed run.
+        // Typed stale requests are retried twice in-loop. Three consecutive
+        // failures exhaust that budget and leave the successful response for
+        // the externally resumed run.
         RebornModelReplayStep::ModelError {
-            kind: HostManagedModelErrorKind::InvalidRequest,
+            kind: HostManagedModelErrorKind::StaleRequest,
             message: "model provider rejected the request".to_string(),
         },
         RebornModelReplayStep::ModelError {
-            kind: HostManagedModelErrorKind::InvalidRequest,
+            kind: HostManagedModelErrorKind::StaleRequest,
             message: "model provider rejected the retried request".to_string(),
         },
         RebornModelReplayStep::ModelError {
-            kind: HostManagedModelErrorKind::InvalidRequest,
+            kind: HostManagedModelErrorKind::StaleRequest,
             message: "model provider rejected the final in-loop retry".to_string(),
         },
         // The externally retried run resumes and succeeds with a final reply.
@@ -123,6 +123,45 @@ async fn reborn_model_failure_is_retryable_and_retry_resumes_to_completion() {
     // All scripted steps were consumed: three in-loop failures and the
     // recovered external retry call.
     assert_eq!(harness.remaining_model_responses(), 0);
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn reborn_invalid_model_request_fails_without_in_loop_retry() {
+    let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
+        RebornModelReplayStep::ModelError {
+            kind: HostManagedModelErrorKind::InvalidRequest,
+            message: "model request is deterministically invalid".to_string(),
+        },
+        RebornModelReplayStep::Response {
+            response: HostManagedModelResponse::assistant_reply("must remain unused"),
+            expected_tool_results: Vec::new(),
+        },
+    ]);
+    let mut harness = RebornBinaryE2EHarness::with_model_gateway(
+        "room-invalid-model-request",
+        model_gateway,
+        RecordingTestCapabilityPort::echo(),
+    )
+    .await
+    .expect("harness");
+    harness.start();
+
+    let submitted = harness
+        .submit_text("event-invalid-model-request", "Answer my question")
+        .await
+        .expect("submit text");
+    harness
+        .wait_for_status(submitted.run_id, TurnStatus::Failed)
+        .await
+        .expect("invalid request fails the run");
+
+    assert_eq!(
+        harness.remaining_model_responses(),
+        1,
+        "deterministic InvalidRequest must not consume an in-loop retry"
+    );
 
     harness.shutdown().await;
 }

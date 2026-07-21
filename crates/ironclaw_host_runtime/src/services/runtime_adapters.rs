@@ -7,7 +7,8 @@ use std::{
 use async_trait::async_trait;
 use futures_util::FutureExt;
 
-use super::wasm_execution::{ReservationGuard, execute_prepared_wasm, run_wasm_prepare_blocking};
+use super::wasm_blocking::run_wasm_prepare_blocking;
+use super::wasm_execution::{ReservationGuard, execute_prepared_wasm};
 use super::{
     CapabilityId, DenyWasmHostHttp, DispatchError, ExtensionRuntime, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, InvocationServicesResolutionRequest, InvocationServicesResolver,
@@ -949,8 +950,8 @@ where
             )
             .await
             .map_err(|error| DispatchError::Wasm {
-                kind: wasm_error_kind(&error),
-                model_visible_cause: Some(error.to_string()),
+                kind: error.kind(),
+                model_visible_cause: Some(error.source().to_string()),
             })?,
         );
         let prepared = {

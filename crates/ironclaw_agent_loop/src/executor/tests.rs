@@ -2145,6 +2145,40 @@ async fn exit_stage_no_progress_fails_when_nudge_disabled() {
 }
 
 #[tokio::test]
+async fn no_progress_explanation_cancellation_returns_cancelled_before_final_checkpoint() {
+    let host = MockHost::new(Vec::new()).with_model_errors(vec![AgentLoopHostError::new(
+        AgentLoopHostErrorKind::Cancelled,
+        "cancelled during no-progress explanation",
+    )]);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let result = ExitStage
+        .process(
+            ctx,
+            ExitInput {
+                state,
+                kind: StopKind::NoProgressDetected,
+            },
+        )
+        .await;
+
+    assert!(
+        matches!(result, Err(AgentLoopExecutorError::Cancelled)),
+        "cancellation during the no-progress explanation must propagate before failure finalization: {result:?}"
+    );
+    assert!(
+        host.checkpoint_kinds().is_empty(),
+        "cancellation must not write a Final checkpoint for a failed no-progress exit"
+    );
+    assert!(host.finalized_assistant_messages().is_empty());
+}
+
+#[tokio::test]
 async fn no_progress_nudge_synthesizes_reply_when_gate_enabled() {
     // Gate ON + a model reply queued for the tool-free nudge call: the
     // no-progress exit should issue ONE tool-free model call and finalize the
@@ -3429,46 +3463,69 @@ async fn model_budget_accounting_failure_preserves_kind_without_model_retry() {
     );
 }
 
-/// Model-path stale-request kinds are model-fixable-by-rebuild: an
-/// iteration-scoped retry rebuilds the capability surface and prompt bundle,
-/// so a surface refreshed mid-iteration no longer hard-borks the run
-/// invisible to the model. Audit §6.1/§7,
-/// `docs/plans/2026-06-28-reborn-error-recoverability-audit.md`.
+/// A typed stale surface is model-fixable-by-rebuild: an iteration-scoped retry
+/// rebuilds the capability surface and prompt bundle, so a surface refreshed
+/// mid-iteration no longer hard-borks the run invisible to the model.
 #[tokio::test]
-async fn model_stale_request_kinds_retry_iteration_with_fresh_bundle_and_complete() {
+async fn model_stale_surface_retries_iteration_with_fresh_bundle_and_completes() {
+    let host =
+        MockHost::new(vec![reply_response()]).with_model_errors(vec![AgentLoopHostError::new(
+            AgentLoopHostErrorKind::StaleSurface,
+            "model request surface version does not match the host-built prompt bundle",
+        )]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("typed stale surface must be recoverable");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(host.model_requests().len(), 2);
+    assert_eq!(
+        host.prompt_requests().len(),
+        2,
+        "stale-surface retry must rebuild the host prompt bundle"
+    );
+}
+
+#[tokio::test]
+async fn model_invalid_request_kinds_are_terminal_without_retry() {
     for kind in [
-        AgentLoopHostErrorKind::StaleSurface,
         AgentLoopHostErrorKind::InvalidInvocation,
         AgentLoopHostErrorKind::Invalid,
     ] {
         let host =
             MockHost::new(vec![reply_response()]).with_model_errors(vec![AgentLoopHostError::new(
                 kind,
-                "model request does not match the host-built prompt bundle",
+                "model request is deterministically invalid",
             )]);
         let executor = CanonicalAgentLoopExecutor;
         let state = LoopExecutionState::initial_for_run(host.run_context());
 
-        let exit = executor
+        let error = executor
             .execute_family(&crate::families::default(), &host, state)
             .await
-            .unwrap_or_else(|error| {
-                panic!("model-path {kind:?} must be recoverable, got hard error {error:?}")
-            });
+            .expect_err("deterministic invalid model requests must terminate");
 
-        assert!(
-            matches!(exit, LoopExit::Completed(_)),
-            "{kind:?} should complete after an iteration retry, got {exit:?}"
-        );
+        assert!(matches!(
+            error,
+            AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+                stage: HostStage::Model,
+                kind: actual_kind,
+                ..
+            } if actual_kind == kind
+        ));
         assert_eq!(
             host.model_requests().len(),
-            2,
-            "{kind:?} should retry the model call exactly once"
+            1,
+            "{kind:?} must not consume a retry"
         );
         assert_eq!(
             host.prompt_requests().len(),
-            2,
-            "{kind:?} iteration retry must rebuild the host prompt bundle"
+            1,
+            "{kind:?} must not rebuild the prompt for a deterministic failure"
         );
     }
 }
@@ -5664,6 +5721,48 @@ async fn await_dependent_run_gate_skip_and_continue_fails_as_driver_bug() {
             assert!(failed.checkpoint_id.is_some());
         }
         other => panic!("invalid AwaitDependentRun skip must fail as DriverBug, got {other:?}"),
+    }
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "a driver contract violation must stop before another model turn"
+    );
+}
+
+/// An external-tool suspension cannot be silently discarded by a custom gate
+/// strategy. Drive the full executor so the assertion covers the GateStage
+/// caller path, not only `GateOutcome::validate_for_gate_kind`.
+#[tokio::test]
+async fn external_tool_gate_skip_and_continue_fails_as_driver_bug() {
+    let family = family_with_gate_outcome(GateOutcome::SkipAndContinue {
+        gate: empty_gate_state(),
+    });
+    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+        ironclaw_host_api::ResolutionBatch {
+            resolutions: vec![
+                resolution::external_tool_pending(
+                    LoopGateRef::new("gate:external-tool-skip").expect("valid"),
+                    "external tool skip and continue".to_string(),
+                )
+                .resolution,
+            ],
+            stopped_on_suspension: false,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&family, &host, state)
+        .await
+        .expect("execute");
+
+    match exit {
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::DriverBug);
+            assert!(failed.checkpoint_id.is_some());
+        }
+        other => panic!("invalid ExternalTool skip must fail as DriverBug, got {other:?}"),
     }
     assert_eq!(
         host.model_requests().len(),
