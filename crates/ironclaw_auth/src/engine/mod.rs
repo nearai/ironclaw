@@ -1,10 +1,10 @@
 //! The host auth engine (`docs/reborn/extension-runtime/overview.md` §4.3).
 //!
-//! One engine implements each auth *method* once — `oauth2_code` (with PKCE),
-//! `api_key`, and RFC 7591 dynamic client registration for vendors whose
-//! recipe carries no deployment client credentials. Vendors differ only in
-//! recipe **data** (`ironclaw_host_api::VendorAuthRecipe`); there is no auth
-//! trait in the extension ABI and no per-vendor code path here.
+//! One engine implements `oauth2_code` (with PKCE) and RFC 7591 dynamic client
+//! registration for vendors whose recipe carries no deployment client
+//! credentials. Vendors differ only in recipe **data**
+//! (`ironclaw_host_api::VendorAuthRecipe`); there is no auth trait in the
+//! extension ABI and no per-vendor code path here.
 //!
 //! Engine-owned, for every vendor:
 //! - host-constructed authorize URLs (recipes can never supply or override
@@ -15,7 +15,6 @@
 //! - token exchange over `post_body` or `basic` client authentication,
 //! - bounded JSON-pointer extraction of token-response and identity fields,
 //! - on-demand refresh honoring `rotates_refresh_token` both ways,
-//! - idempotent best-effort revocation,
 //! - the auth-account state machine ([`crate::AuthAccountState`]).
 //!
 //! Vendor response bodies are size-capped and never logged or embedded in
