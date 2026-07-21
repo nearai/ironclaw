@@ -866,7 +866,7 @@ CLAUDE.md for the full mapping + gap catalog.
 - ❌ Codex native app-server runtime + Computer Use
 - ❌ Talk Mode / realtime voice (browser + backend)
 - ❌ OpenTelemetry diagnostics + Prometheus exporter
-- ❌ Active Memory + Skill Workshop + Trajectory export
+- ❌ Active Memory + Skill Workshop; 🚧 Trajectory export (caller-owned, redacted single-run export; full parity remains pending)
 - ❌ Outbound proxy routing + `proxy validate`
 - ❌ `migrate` (Claude/Hermes import)
 

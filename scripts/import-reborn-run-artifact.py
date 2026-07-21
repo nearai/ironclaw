@@ -117,6 +117,8 @@ def trace_candidate(artifact: dict[str, Any], model_override: str | None) -> dic
         if pending_results:
             step["expected_tool_results"] = pending_results
         steps.append(step)
+    elif pending_results:
+        raise ValueError("artifact ends with tool results but no finalized assistant response")
 
     if not steps:
         raise ValueError("artifact has neither tool calls nor a finalized assistant response")
@@ -158,7 +160,7 @@ def main() -> int:
         candidate = trace_candidate(load_artifact(args.artifact), args.model_name)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(candidate, indent=2) + "\n", encoding="utf-8")
-    except ValueError as error:
+    except (ValueError, KeyError, TypeError, AttributeError) as error:
         print(error, file=sys.stderr)
         return 2
     print(f"wrote review-required fixture candidate: {args.output}")

@@ -301,27 +301,33 @@ fn redact_json(
     redactor: &DeterministicTraceRedactor,
     input: &serde_json::Value,
 ) -> (serde_json::Value, bool) {
-    let keyed = redact_sensitive_json(input);
-    let redacted = match keyed {
+    let redacted = redact_json_strings(redactor, redact_sensitive_json(input));
+    let changed = redacted != *input;
+    (redacted, changed)
+}
+
+fn redact_json_strings(
+    redactor: &DeterministicTraceRedactor,
+    input: serde_json::Value,
+) -> serde_json::Value {
+    match input {
         serde_json::Value::String(value) => {
             serde_json::Value::String(redactor.redact_text(&value).0)
         }
         serde_json::Value::Array(values) => serde_json::Value::Array(
             values
-                .iter()
-                .map(|value| redact_json(redactor, value).0)
+                .into_iter()
+                .map(|value| redact_json_strings(redactor, value))
                 .collect(),
         ),
         serde_json::Value::Object(values) => serde_json::Value::Object(
             values
-                .iter()
-                .map(|(key, value)| (key.clone(), redact_json(redactor, value).0))
+                .into_iter()
+                .map(|(key, value)| (key, redact_json_strings(redactor, value)))
                 .collect(),
         ),
         value => value,
-    };
-    let changed = redacted != *input;
-    (redacted, changed)
+    }
 }
 
 #[cfg(test)]
