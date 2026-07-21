@@ -25,10 +25,10 @@ use ironclaw_product_adapters::{
 };
 use ironclaw_product_workflow::RebornFilesystemIdempotencyLedger;
 use ironclaw_product_workflow::{
-    DefaultInboundTurnService, DefaultProductWorkflow, InboundAttachmentLander,
-    ProductActorUserResolutionRequest, ProductActorUserResolver, ProductConversationBindingService,
-    ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
-    ResolvedProductActorUser, StaticProductInstallationResolver,
+    DefaultInboundTurnService, DefaultProductWorkflow, ProductActorUserResolutionRequest,
+    ProductActorUserResolver, ProductConversationBindingService, ProductInstallationKey,
+    ProductInstallationScope, ProductWorkflowError, ResolvedProductActorUser,
+    StaticProductInstallationResolver,
 };
 use ironclaw_product_workflow::{
     LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, WebUiAuthenticatedCaller,
@@ -137,20 +137,15 @@ pub async fn build_openai_compat_route_mount(
         installation_scope,
     )]);
     let binding = ProductConversationBindingService::new(conversation_port, installation_resolver);
-    let mut inbound_turn_service = DefaultInboundTurnService::new(
+    let inbound_turn_service = DefaultInboundTurnService::new(
         binding.clone(),
         runtime.webui_thread_service(),
         runtime.webui_turn_coordinator(),
-    );
+    )
     // Lands inline image bytes (vision, #4644) through the same project-scoped
     // workspace authority the agent's file tools resolve through, so an image
     // attached to an OpenAI-compatible chat completion reaches the model.
-    if let Some(workspace_filesystem) = runtime.webui_workspace_filesystem() {
-        let lander: Arc<dyn InboundAttachmentLander> = Arc::new(
-            crate::support::fs::ProjectScopedAttachmentLander::new(workspace_filesystem),
-        );
-        inbound_turn_service = inbound_turn_service.with_inbound_attachments(lander);
-    }
+    .with_inbound_attachments(runtime.inbound_attachment_lander());
     let inbound = Arc::new(inbound_turn_service);
     // `.with_delivered_gate_routes` is intentionally omitted here. The
     // OpenAI-compat surface never produces `ApprovalResolution`,

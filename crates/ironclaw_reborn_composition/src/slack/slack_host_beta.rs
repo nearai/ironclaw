@@ -671,9 +671,6 @@ impl SlackHostBetaRuntimeParts {
                 Arc::clone(&local_runtime.delivered_gate_routes),
             ),
         );
-        let workspace_filesystem = runtime
-            .webui_workspace_filesystem()
-            .ok_or(SlackHostBetaBuildError::DurableHostStateUnavailable)?;
         Ok(Self {
             local_runtime: Arc::clone(local_runtime),
             thread_service: runtime.webui_thread_service(),
@@ -682,17 +679,8 @@ impl SlackHostBetaRuntimeParts {
             auth_interaction_service: runtime.webui_auth_interaction_service(),
             auth_challenge_provider: runtime.auth_challenge_provider(),
             auth_flow_canceller: runtime.blocked_auth_flow_canceller(),
-            inbound_attachment_lander: Arc::new(
-                crate::support::fs::ProjectScopedAttachmentLander::new(Arc::clone(
-                    &workspace_filesystem,
-                )),
-            ),
-            project_filesystem_reader: Arc::new(
-                crate::support::fs::ProjectScopedFilesystemReader::with_max_read_bytes(
-                    workspace_filesystem,
-                    ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64,
-                ),
-            ),
+            inbound_attachment_lander: runtime.inbound_attachment_lander(),
+            project_filesystem_reader: runtime.project_filesystem_reader(),
         })
     }
 }

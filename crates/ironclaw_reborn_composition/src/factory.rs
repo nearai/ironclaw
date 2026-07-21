@@ -8,7 +8,9 @@ use std::{
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use crate::product_auth::durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
-use crate::support::fs::RebornProjectService;
+use crate::support::fs::{
+    ProjectScopedAttachmentLander, ProjectScopedFilesystemReader, RebornProjectService,
+};
 use ironclaw_approvals::{
     FilesystemAutoApproveSettingStore, FilesystemPersistentApprovalPolicyStore,
     FilesystemToolPermissionOverrideStore,
@@ -36,7 +38,6 @@ use ironclaw_extensions::{
     ExtensionInstallationStore, ExtensionLifecycleService, ExtensionRegistry,
     SharedExtensionRegistry,
 };
-#[cfg(not(feature = "libsql"))]
 use ironclaw_filesystem::InMemoryBackend;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
@@ -90,7 +91,9 @@ use ironclaw_outbound::CommunicationPreferenceRepository;
 use ironclaw_outbound::FilesystemOutboundStateStore;
 use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRunDeliveryStore};
 use ironclaw_processes::ProcessServices;
-use ironclaw_product_workflow::ChannelConnectionFacade;
+use ironclaw_product_workflow::{
+    ChannelConnectionFacade, InboundAttachmentLander, ProjectFilesystemReader,
+};
 use ironclaw_product_workflow::{
     ExtensionAccountSetupRegistry, LifecycleProductSurfaceContext,
     ProductAuthTurnGateResumeDispatcher, ProjectService,
@@ -493,6 +496,24 @@ where
     }
 }
 
+fn project_attachment_ports<F>(
+    filesystem: Arc<ScopedFilesystem<F>>,
+) -> (
+    Arc<dyn InboundAttachmentLander>,
+    Arc<dyn ProjectFilesystemReader>,
+)
+where
+    F: RootFilesystem + 'static,
+{
+    (
+        Arc::new(ProjectScopedAttachmentLander::new(Arc::clone(&filesystem))),
+        Arc::new(ProjectScopedFilesystemReader::with_max_read_bytes(
+            filesystem,
+            ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64,
+        )),
+    )
+}
+
 pub struct RebornServices {
     pub host_runtime: Option<Arc<dyn ironclaw_host_runtime::HostRuntime>>,
     pub turn_coordinator: Option<Arc<dyn ironclaw_turns::TurnCoordinator>>,
@@ -500,6 +521,13 @@ pub struct RebornServices {
     pub readiness: RebornReadiness,
     pub(crate) skill_management: Option<Arc<RebornLocalSkillManagementPort>>,
     pub(crate) local_runtime: Option<Arc<RebornRuntimeSubstrate>>,
+    /// Canonical deployment-neutral inbound attachment landing port. Product
+    /// surfaces clone this exact handle instead of reconstructing concrete
+    /// filesystem adapters from deployment-specific state.
+    pub(crate) inbound_attachment_lander: Arc<dyn InboundAttachmentLander>,
+    /// Canonical deployment-neutral project file reader shared by WebUI and
+    /// channel delivery surfaces.
+    pub(crate) project_filesystem_reader: Arc<dyn ProjectFilesystemReader>,
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     // arch-exempt: optional_arc, local-dev vs production split pending RebornServices split, plan #4471
     pub(crate) production_runtime: Option<RebornProductionRuntimeServices>,
@@ -562,29 +590,6 @@ impl RebornServices {
     #[cfg(feature = "test-support")]
     pub fn secret_store_for_test(&self) -> Arc<dyn SecretStore> {
         Arc::clone(&self.secret_store)
-    }
-
-    /// Read-write project-scoped workspace filesystem, built over
-    /// `local_runtime.extension_filesystem` + `local_runtime.workspace_mounts`.
-    /// `None` when no local runtime is composed.
-    ///
-    /// This deliberately does NOT reuse `local_runtime.workspace_filesystem`:
-    /// that handle is intentionally read-only (it backs setup-marker reads —
-    /// see `local_dev_setup_marker_workspace_filesystem_is_read_only`), so
-    /// writing through it fails closed with `PermissionDenied`.
-    ///
-    /// Single owner of this recipe — both `RebornRuntime::webui_workspace_filesystem`
-    /// (production attachment landing) and `local_dev_attachment_test_support_for_test`
-    /// (C-ATTACH test seam) call this rather than each rebuilding the view, so the
-    /// two can never drift apart.
-    pub(crate) fn read_write_workspace_filesystem(
-        &self,
-    ) -> Option<Arc<ScopedFilesystem<CompositeRootFilesystem>>> {
-        let local_runtime = self.local_runtime.as_ref()?;
-        Some(Arc::new(ScopedFilesystem::with_fixed_view(
-            Arc::clone(&local_runtime.extension_filesystem),
-            local_runtime.workspace_mounts.clone(),
-        )))
     }
 
     #[cfg(feature = "test-support")]
@@ -730,11 +735,9 @@ impl RebornServices {
     /// the C-ATTACH seam. The read port is built over `local_runtime.workspace_filesystem`,
     /// exactly like production's `attachment_read_port` (`runtime.rs` ~line 3328) —
     /// that handle is intentionally read-only (it backs setup-marker reads), which
-    /// is fine for reading. The lander is built over the SAME read-write view
-    /// `RebornRuntime::webui_workspace_filesystem` uses in production, via the
-    /// shared [`Self::read_write_workspace_filesystem`] helper — landing through
-    /// the read-only `workspace_filesystem` handle fails closed with
-    /// `PermissionDenied`. Bundled into one accessor (rather than two, mirroring
+    /// is fine for reading. The lander is the SAME canonical required port every
+    /// product surface receives from `RebornServices`. Bundled into one accessor
+    /// (rather than two, mirroring
     /// `local_dev_profile_filesystem_for_test` / `local_dev_project_service_for_test`
     /// above) because the two are always populated together. Returns `None` for
     /// production-profile compositions without a local-dev runtime.
@@ -742,12 +745,9 @@ impl RebornServices {
     pub fn local_dev_attachment_test_support_for_test(&self) -> Option<AttachmentTestSupport> {
         let read_port = self.local_dev_workspace_attachment_reader_for_test()?
             as Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>;
-        let read_write_workspace_filesystem = self.read_write_workspace_filesystem()?;
         Some(AttachmentTestSupport {
             read_port,
-            lander: Arc::new(crate::support::fs::ProjectScopedAttachmentLander::new(
-                read_write_workspace_filesystem,
-            )),
+            lander: Arc::clone(&self.inbound_attachment_lander),
         })
     }
 
@@ -1270,6 +1270,9 @@ impl std::fmt::Debug for RebornServices {
 
 impl RebornServices {
     pub fn disabled() -> Self {
+        let disabled_filesystem = crate::wrap_scoped(Arc::new(InMemoryBackend::new()));
+        let (inbound_attachment_lander, project_filesystem_reader) =
+            project_attachment_ports(disabled_filesystem);
         Self {
             host_runtime: None,
             turn_coordinator: None,
@@ -1277,6 +1280,8 @@ impl RebornServices {
             readiness: RebornReadiness::disabled(),
             skill_management: None,
             local_runtime: None,
+            inbound_attachment_lander,
+            project_filesystem_reader,
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             production_runtime: None,
             #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -2114,6 +2119,12 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         services.wasm_runtime_credential_provider_captured_for_test();
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_local_testing());
+    let attachment_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&store_graph.local_runtime.extension_filesystem),
+        store_graph.local_runtime.workspace_mounts.clone(),
+    ));
+    let (inbound_attachment_lander, project_filesystem_reader) =
+        project_attachment_ports(attachment_filesystem);
 
     Ok(RebornServices {
         host_runtime: Some(host_runtime),
@@ -2124,6 +2135,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         readiness: readiness_for(profile, true, true, true),
         skill_management: Some(Arc::clone(&store_graph.local_runtime.skill_management)),
         local_runtime: Some(store_graph.local_runtime),
+        inbound_attachment_lander,
+        project_filesystem_reader,
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         production_runtime: None,
         #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -5463,6 +5476,8 @@ where
         services.wasm_runtime_credential_provider_captured_for_test();
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_production(&wiring_config)?);
+    let (inbound_attachment_lander, project_filesystem_reader) =
+        project_attachment_ports(Arc::clone(&stores.scoped_filesystem));
 
     Ok(RebornServices {
         host_runtime: Some(host_runtime),
@@ -5471,6 +5486,8 @@ where
         product_auth: Some(product_auth_services),
         skill_management: Some(skill_management),
         local_runtime: None,
+        inbound_attachment_lander,
+        project_filesystem_reader,
         #[cfg(any(feature = "libsql", feature = "postgres"))]
         production_runtime: Some(production_runtime),
         #[cfg(any(feature = "libsql", feature = "postgres"))]

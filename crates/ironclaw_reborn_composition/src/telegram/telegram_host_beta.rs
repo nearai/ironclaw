@@ -171,9 +171,6 @@ pub async fn build_telegram_host_runtime_mounts(
             }) as Arc<dyn TelegramChannelSetupActivation>
         });
     let provider_key = telegram_outbound_delivery_target_provider_key(&config);
-    let workspace_filesystem = runtime
-        .webui_workspace_filesystem()
-        .ok_or(TelegramHostBuildError::DurableHostStateUnavailable)?;
     let TelegramHostParts {
         updates,
         channel_routes,
@@ -195,17 +192,8 @@ pub async fn build_telegram_host_runtime_mounts(
         turn_coordinator: runtime.webui_turn_coordinator(),
         approval_interactions,
         auth_interactions: runtime.webui_auth_interaction_service(),
-        inbound_attachment_lander: Arc::new(
-            crate::support::fs::ProjectScopedAttachmentLander::new(Arc::clone(
-                &workspace_filesystem,
-            )),
-        ),
-        project_filesystem_reader: Arc::new(
-            crate::support::fs::ProjectScopedFilesystemReader::with_max_read_bytes(
-                workspace_filesystem,
-                ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64,
-            ),
-        ),
+        inbound_attachment_lander: runtime.inbound_attachment_lander(),
+        project_filesystem_reader: runtime.project_filesystem_reader(),
         delivery_services: TelegramDeliveryServicePorts {
             outbound_store: Arc::clone(&local_runtime.outbound_state),
             delivered_gate_routes: Arc::clone(&local_runtime.delivered_gate_routes),

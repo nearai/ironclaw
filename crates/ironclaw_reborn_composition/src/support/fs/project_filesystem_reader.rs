@@ -13,6 +13,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+#[cfg(test)]
 use ironclaw_attachments::DEFAULT_MAX_ATTACHMENT_BYTES;
 use ironclaw_filesystem::{
     DirEntry, FileStat, FileType, FilesystemError, RootFilesystem, ScopedFilesystem,
@@ -39,6 +40,7 @@ pub(crate) struct ProjectScopedFilesystemReader<F: RootFilesystem> {
 }
 
 impl<F: RootFilesystem> ProjectScopedFilesystemReader<F> {
+    #[cfg(test)]
     pub(crate) fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self {
             filesystem,

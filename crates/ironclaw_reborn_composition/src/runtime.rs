@@ -55,8 +55,8 @@ use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
     ApprovalBlockedTurnRun, ApprovalInteractionScope, ApprovalInteractionService,
     ApprovalResolverPort, ApprovalTurnRunLocator, AuthInteractionService,
-    DefaultApprovalInteractionService, DefaultAuthInteractionService,
-    OutboundPreferencesProductFacade, PersistentApprovalGranteeResolver,
+    DefaultApprovalInteractionService, DefaultAuthInteractionService, InboundAttachmentLander,
+    OutboundPreferencesProductFacade, PersistentApprovalGranteeResolver, ProjectFilesystemReader,
     RunStateApprovalInteractionReadModel,
 };
 use ironclaw_runner::loop_exit_applier::{
@@ -1887,23 +1887,16 @@ impl RebornRuntime {
         self.skill_activation_source.clone()
     }
 
-    /// Read-write project-scoped workspace filesystem for landing inbound
-    /// attachment bytes at paths the agent's file tools can later read back.
-    /// `None` when no local runtime is composed.
-    ///
-    /// This deliberately does NOT reuse `rt.workspace_filesystem`: that handle
-    /// is intentionally read-only (it backs setup-marker reads — see
-    /// `local_dev_setup_marker_workspace_filesystem_is_read_only`), so writing
-    /// an attachment through it fails closed with `PermissionDenied`. Delegates
-    /// to `RebornServices::read_write_workspace_filesystem` — the single owner
-    /// of this recipe, shared with the `local_dev_attachment_test_support_for_test`
-    /// C-ATTACH test seam so the two views can never drift apart.
-    pub(crate) fn webui_workspace_filesystem(
-        &self,
-    ) -> Option<
-        Arc<ironclaw_filesystem::ScopedFilesystem<ironclaw_filesystem::CompositeRootFilesystem>>,
-    > {
-        self.services.read_write_workspace_filesystem()
+    /// Canonical deployment-neutral attachment landing port shared by every
+    /// product surface composed over this runtime.
+    pub(crate) fn inbound_attachment_lander(&self) -> Arc<dyn InboundAttachmentLander> {
+        Arc::clone(&self.services.inbound_attachment_lander)
+    }
+
+    /// Canonical deployment-neutral project file reader shared by WebUI and
+    /// channel delivery surfaces.
+    pub(crate) fn project_filesystem_reader(&self) -> Arc<dyn ProjectFilesystemReader> {
+        Arc::clone(&self.services.project_filesystem_reader)
     }
 
     /// Read-only scoped filesystem spanning every mount the standalone WebUI
@@ -1912,9 +1905,8 @@ impl RebornRuntime {
     /// when no local runtime is composed; scope-specific mount resolution errors
     /// surface during browse operations.
     ///
-    /// Distinct from [`Self::webui_workspace_filesystem`]: that handle is the
-    /// read-write workspace-only view used to land attachments, whereas this is
-    /// a strictly read-only, multi-mount navigation view.
+    /// This is a strictly read-only, multi-mount navigation view; attachment
+    /// landing and project-file reads use the deployment-neutral ports above.
     pub(crate) fn webui_browse_filesystem(
         &self,
     ) -> Option<

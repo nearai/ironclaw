@@ -8,6 +8,33 @@ use std::{
 use serde_json::Value;
 
 #[test]
+fn channel_attachment_composition_uses_deployment_neutral_runtime_ports() {
+    let root = workspace_root();
+    for surface in ["slack/slack_host_beta.rs", "telegram/telegram_host_beta.rs"] {
+        let path = root
+            .join("crates/ironclaw_reborn_composition/src")
+            .join(surface);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("could not read {}: {error}", path.display()));
+        assert!(
+            !source.contains(".webui_workspace_filesystem()"),
+            "{} must not derive attachment authority from a WebUI-specific filesystem accessor",
+            path.display()
+        );
+        for required_port in [
+            ".inbound_attachment_lander()",
+            ".project_filesystem_reader()",
+        ] {
+            assert!(
+                source.contains(required_port),
+                "{} must consume the canonical runtime port `{required_port}`",
+                path.display()
+            );
+        }
+    }
+}
+
+#[test]
 fn reborn_boundary_rules_active_crates_are_workspace_members() {
     // Regression for PR #3212 review: a boundary rule whose crate has a
     // `Cargo.toml` on disk but is missing from `cargo metadata` would
