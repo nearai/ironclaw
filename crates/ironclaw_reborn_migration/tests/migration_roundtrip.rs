@@ -378,6 +378,7 @@ async fn seed_v1_fixture(dir: &std::path::Path) -> PathBuf {
     let c2 = insert_conversation(&conn, "telegram", USER).await;
     insert_conversation_message(&conn, c2, "user", "what's on my calendar?").await;
     insert_conversation_message(&conn, c2, "assistant", "you have 2 meetings").await;
+    insert_conversation_message(&conn, c2, "tool_calls", "[{\"name\":\"calendar.list\"}]").await;
 
     // ── routines: every trigger variant × both actions ──
     insert_routine(
@@ -501,6 +502,8 @@ async fn seed_v1_fixture(dir: &std::path::Path) -> PathBuf {
 
     // ── a non-engine memory document ──
     insert_memory_document(&conn, USER, "context/vision.md", "# Vision\nbe helpful").await;
+    insert_memory_document(&conn, USER, ".system/gateway/.config", "").await;
+    insert_memory_document(&conn, USER, "BOOTSTRAP.md", "# Legacy bootstrap\nkeep me").await;
 
     // ── settings ──
     insert_setting(&conn, USER, "model", &serde_json::json!("gpt-4")).await;
@@ -581,6 +584,17 @@ fn options(src: PathBuf, dst: PathBuf, dry_run: bool) -> MigrationOptions {
     }
 }
 
+fn options_without_secret_key(src: PathBuf, dst: PathBuf, dry_run: bool) -> MigrationOptions {
+    MigrationOptions {
+        source: SourceDb::LibSql { path: src },
+        target: TargetStore::LibSql { path: dst },
+        tenant_id: TenantId::new(TENANT).unwrap(),
+        agent_id: ironclaw_host_api::AgentId::new(AGENT).unwrap(),
+        secret_master_key: None,
+        dry_run,
+    }
+}
+
 /// Count rows in the Reborn store whose resolved path matches a LIKE pattern,
 /// via a fresh connection — proves on-disk durability of a domain's documents.
 async fn reborn_entry_count(path: &Path, like: &str) -> i64 {
@@ -596,6 +610,27 @@ async fn reborn_entry_count(path: &Path, like: &str) -> i64 {
         )
         .await
         .expect("query entries");
+    let row = rows.next().await.expect("row").expect("some row");
+    row.get::<i64>(0).expect("count")
+}
+
+async fn reborn_entry_count_by_path_and_content(
+    path: &Path,
+    path_like: &str,
+    content_like: &str,
+) -> i64 {
+    let db = libsql::Builder::new_local(path)
+        .build()
+        .await
+        .expect("open reborn db");
+    let conn = db.connect().expect("connect");
+    let mut rows = conn
+        .query(
+            "SELECT count(*) FROM root_filesystem_entries WHERE path LIKE ?1 AND CAST(contents AS TEXT) LIKE ?2",
+            libsql::params![path_like, content_like],
+        )
+        .await
+        .expect("query entries by path and content");
     let row = rows.next().await.expect("row").expect("some row");
     row.get::<i64>(0).expect("count")
 }
@@ -618,6 +653,27 @@ async fn reborn_entry_content(path: &Path, like: &str) -> String {
     let row = rows.next().await.expect("row").expect("some row");
     let blob = row.get::<Vec<u8>>(0).expect("contents blob");
     String::from_utf8(blob).expect("utf-8 contents")
+}
+
+async fn reborn_entry_contents(path: &Path, like: &str) -> Vec<String> {
+    let db = libsql::Builder::new_local(path)
+        .build()
+        .await
+        .expect("open reborn db");
+    let conn = db.connect().expect("connect");
+    let mut rows = conn
+        .query(
+            "SELECT contents FROM root_filesystem_entries WHERE path LIKE ?1 ORDER BY path",
+            [like],
+        )
+        .await
+        .expect("query entry contents");
+    let mut contents = Vec::new();
+    while let Some(row) = rows.next().await.expect("row") {
+        let blob = row.get::<Vec<u8>>(0).expect("contents blob");
+        contents.push(String::from_utf8(blob).expect("utf-8 contents"));
+    }
+    contents
 }
 
 async fn reborn_triggers(path: &Path) -> Vec<ironclaw_triggers::TriggerRecord> {
@@ -673,7 +729,7 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
     // user+assistant messages: conv1 (2) + conv2 (2) + mission thread (2) = 6.
     assert_eq!(report.stats.messages, 6, "messages: {:?}", report.stats);
     assert_eq!(
-        report.stats.memory_documents, 1,
+        report.stats.memory_documents, 3,
         "memory: {:?}",
         report.stats
     );
@@ -684,8 +740,9 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
     let expected_losses = [
         // owner/thread/mission ids are all valid → no thread-identity losses.
         (Domain::Thread, 0),
-        // conv1's single "system" transcript message (no first-class append path).
-        (Domain::Message, 1),
+        // conv1 system + conv2 tool_calls transcript messages are retained in
+        // thread metadata because they have no first-class append path.
+        (Domain::Message, 2),
         // 6 routines: each cron routine records 3 field losses
         // (action + guardrails/notify/counters + routine_runs); each non-cron
         // routine records 1 trigger-source loss + 2 field losses. 6 × 3 = 18.
@@ -815,6 +872,20 @@ async fn migrates_v1_and_engine_v2_state_without_loss() {
         reborn_thread_doc_count(&dst).await >= 3,
         "expected >=3 persisted thread.json docs"
     );
+    assert!(
+        reborn_entry_count_by_path_and_content(&dst, "%/thread.json", "%session started%").await
+            >= 1,
+        "system transcript content must be retained in thread metadata"
+    );
+    assert!(
+        reborn_entry_count_by_path_and_content(&dst, "%/thread.json", "%calendar.list%").await >= 1,
+        "tool_calls transcript content must be retained in thread metadata"
+    );
+    assert!(
+        reborn_entry_count_by_path_and_content(&dst, "%/BOOTSTRAP.md", "%Legacy bootstrap%").await
+            >= 1,
+        "protected legacy memory documents must be preserved by the migration backend"
+    );
 
     // ── idempotency: re-running the migration into the same target re-adopts
     // identities (first-writer-wins) and upserts the extension installation by
@@ -867,6 +938,109 @@ async fn migrates_all_active_duplicate_users_as_enabled() {
     assert_eq!(
         installation["owner"]["user_ids"],
         serde_json::json!([USER, USER_BOB])
+    );
+}
+
+#[tokio::test]
+async fn migration_preserves_empty_and_prompt_protected_memory_documents() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("v1_memory_edges.db");
+    let dst = dir.path().join("reborn.db");
+
+    let db = open_v1_fixture_db(&src).await;
+    let conn = db.connect().expect("connect");
+    insert_memory_document(&conn, USER, "context/vision.md", "# Vision\nbe helpful").await;
+    insert_memory_document(&conn, USER, ".system/gateway/.config", "").await;
+    insert_memory_document(&conn, USER, "BOOTSTRAP.md", "# Legacy bootstrap\nkeep me").await;
+    drop(conn);
+    drop(db);
+
+    let report = run_migration(options(src, dst.clone(), false))
+        .await
+        .expect("migration runs");
+
+    assert_eq!(report.stats.memory_documents, 3);
+    assert_eq!(report.losses_in(Domain::Memory), 1);
+    assert_eq!(
+        reborn_entry_contents(&dst, "%/.system/gateway/.config").await,
+        vec![String::new()],
+        "empty legacy memory documents must remain present, not disappear as no-op writes"
+    );
+    assert_eq!(
+        reborn_entry_content(&dst, "%/BOOTSTRAP.md").await,
+        "# Legacy bootstrap\nkeep me",
+        "prompt-protected legacy paths must be imported by the migration backend"
+    );
+}
+
+#[tokio::test]
+async fn migration_retains_non_first_class_transcript_content_in_thread_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("v1_transcript_edges.db");
+    let dst = dir.path().join("reborn.db");
+
+    let db = open_v1_fixture_db(&src).await;
+    let conn = db.connect().expect("connect");
+    let conversation = insert_conversation(&conn, "gateway", USER).await;
+    insert_conversation_message(&conn, conversation, "system", "session started").await;
+    insert_conversation_message(
+        &conn,
+        conversation,
+        "tool_calls",
+        "[{\"name\":\"calendar.list\"}]",
+    )
+    .await;
+    insert_conversation_message(&conn, conversation, "tool", "{\"result\":\"ok\"}").await;
+    drop(conn);
+    drop(db);
+
+    let report = run_migration(options(src, dst.clone(), false))
+        .await
+        .expect("migration runs");
+
+    assert_eq!(report.stats.threads, 1);
+    assert_eq!(report.stats.messages, 0);
+    assert_eq!(report.losses_in(Domain::Message), 3);
+    let thread_doc = reborn_entry_content(&dst, "%/thread.json").await;
+    assert!(thread_doc.contains("session started"));
+    assert!(thread_doc.contains("calendar.list"));
+    assert!(thread_doc.contains("result"));
+    assert!(thread_doc.contains("ok"));
+}
+
+#[tokio::test]
+async fn migration_reports_secrets_as_unmigrated_without_master_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("v1_secret_edges.db");
+    let dst = dir.path().join("reborn.db");
+
+    let db = open_v1_fixture_db(&src).await;
+    let conn = db.connect().expect("connect");
+    let now = Utc.with_ymd_and_hms(2024, 1, 2, 3, 4, 5).unwrap();
+    seed_secret(&conn, now).await;
+    drop(conn);
+    drop(db);
+
+    let report = run_migration(options_without_secret_key(src, dst.clone(), false))
+        .await
+        .expect("migration runs");
+
+    assert_eq!(report.stats.secrets, 0);
+    assert_eq!(report.losses_in(Domain::Secret), 1);
+    assert!(
+        report.lossy.iter().any(|loss| {
+            loss.domain == Domain::Secret
+                && loss.source_id == "secrets"
+                && loss.field == "*"
+                && loss.detail.contains("secret-master-key")
+        }),
+        "missing master key must be explicit in the report: {:#?}",
+        report.lossy
+    );
+    assert_eq!(
+        reborn_entry_count(&dst, "%/secrets/%openai_api_key.json").await,
+        0,
+        "a skipped v1 secret must not create an empty Reborn secret document"
     );
 }
 
@@ -955,6 +1129,71 @@ async fn dry_run_reports_without_writing() {
         reborn_thread_doc_count(&dst).await,
         0,
         "dry run wrote thread docs"
+    );
+}
+
+#[tokio::test]
+async fn migration_reads_older_optional_tables_without_wit_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v1_old_wasm.db");
+    let dst = dir.path().join("reborn.db");
+
+    let db = open_v1_fixture_db(&path).await;
+    let conn = db.connect().expect("connect");
+    seed_wasm_tool(&conn, Utc.with_ymd_and_hms(2024, 1, 2, 3, 4, 5).unwrap()).await;
+    conn.execute("ALTER TABLE wasm_tools DROP COLUMN wit_version", ())
+        .await
+        .expect("drop wasm_tools.wit_version");
+    conn.execute("ALTER TABLE wasm_channels DROP COLUMN wit_version", ())
+        .await
+        .expect("drop wasm_channels.wit_version");
+    conn.execute("DROP TABLE wasm_channels", ())
+        .await
+        .expect("drop optional wasm_channels table");
+    conn.execute("DROP TABLE tool_capabilities", ())
+        .await
+        .expect("drop optional tool_capabilities table");
+    conn.execute("DROP TABLE user_identities", ())
+        .await
+        .expect("drop optional user_identities table");
+    conn.execute("DROP TABLE channel_identities", ())
+        .await
+        .expect("drop optional channel_identities table");
+    insert_memory_document(
+        &conn,
+        USER,
+        "context/old-wasm.md",
+        "old schema still migrates",
+    )
+    .await;
+    drop(conn);
+    drop(db);
+
+    // Run a real (non-dry) migration so the write path is genuinely exercised:
+    // a dry run only counts in memory and would not prove the older schema lets
+    // real writes through.
+    let report = run_migration(options(path, dst.clone(), false))
+        .await
+        .expect("older wasm schema should not block migration");
+
+    assert_eq!(report.stats.memory_documents, 1);
+    assert_eq!(
+        report.stats.extensions, 1,
+        "installed tools must still migrate when the optional capabilities table is absent"
+    );
+
+    // Assert the migrated content is actually persisted on disk (the point of
+    // dropping dry-run): the memory document and the extension installation
+    // record must be readable back through a fresh connection.
+    assert!(
+        reborn_entry_count_by_path_and_content(&dst, "%old-wasm.md", "%old schema still migrates%")
+            .await
+            >= 1,
+        "the migrated memory document must be persisted on disk, not just counted"
+    );
+    assert!(
+        reborn_entry_count(&dst, "%/system/extensions/.installations/state.json").await >= 1,
+        "the installed tool must be persisted as an extension installation on disk"
     );
 }
 

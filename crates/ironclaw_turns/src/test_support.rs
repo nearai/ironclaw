@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 
 use crate::FilesystemTurnStateRowStore;
@@ -41,11 +41,12 @@ pub fn in_memory_turns_filesystem() -> Arc<ScopedFilesystem<InMemoryBackend>> {
     scoped_turns_filesystem(Arc::new(InMemoryBackend::new()))
 }
 
-/// Wrap a specific [`InMemoryBackend`] in the scoped `/turns` mount the row
-/// store expects. Handy when a test needs to hold the backend itself.
-pub fn scoped_turns_filesystem(
-    backend: Arc<InMemoryBackend>,
-) -> Arc<ScopedFilesystem<InMemoryBackend>> {
+/// Wrap a specific backend in the scoped `/turns` mount the row store expects.
+/// Handy when a test needs to hold the backend itself — e.g. a bare
+/// [`InMemoryBackend`], or an
+/// [`ironclaw_filesystem::FaultInjecting`]`<InMemoryBackend>` so a store fault
+/// path runs through the real store's `FilesystemError -> TurnError` mapping.
+pub fn scoped_turns_filesystem<F: RootFilesystem>(backend: Arc<F>) -> Arc<ScopedFilesystem<F>> {
     let mounts = MountView::new(vec![MountGrant::new(
         MountAlias::new("/turns").expect("turns alias"),
         VirtualPath::new("/turns").expect("turns target"),

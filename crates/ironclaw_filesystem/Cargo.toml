@@ -13,6 +13,15 @@ publish = false
 [package.metadata.ironclaw]
 layer = "substrates"
 
+[features]
+# Dev-only seam (rule: cargo-features.md bar #4 — the one sanctioned
+# `test-support` name). Compiles the `FaultInjecting` RootFilesystem decorator
+# so downstream crates can drive their *real* filesystem-backed stores against
+# injected backend faults, instead of substituting a hand-rolled fault fake for
+# the whole store trait (which never exercises the production store code path).
+# Never enabled by a shipped artifact.
+test-support = []
+
 [dependencies]
 async-trait = "0.1"
 blake3 = "1"

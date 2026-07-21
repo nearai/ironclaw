@@ -2658,7 +2658,7 @@ mod tests {
         SharedExtensionRegistry,
     };
     use ironclaw_filesystem::{
-        DirEntry, DiskFilesystem, FileStat, FilesystemError, FilesystemOperation, InMemoryBackend,
+        DiskFilesystem, Fault, FaultInjecting, FilesystemOperation, InMemoryBackend,
     };
     use ironclaw_host_api::{
         AgentId, CapabilityId, ExtensionLifecycleOperation, HostPath, HostPortCatalog,
@@ -8055,9 +8055,10 @@ output_schema_ref = "schemas/run.output.json"
                 HostPath::from_path_buf(storage_root.join("system/extensions")),
             )
             .expect("mount system extensions");
-        let filesystem: Arc<dyn RootFilesystem> = Arc::new(filesystem);
-        let root_filesystem: Arc<dyn RootFilesystem> =
-            Arc::new(DeleteFailingRootFilesystem { inner: filesystem });
+        let root_filesystem: Arc<dyn RootFilesystem> = Arc::new(
+            FaultInjecting::new(filesystem)
+                .with_fault(Fault::on(FilesystemOperation::Delete).backend("delete failed")),
+        );
         let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
         let trust_policy = test_extension_trust_policy();
         let installation_store = Arc::new(filesystem_installation_store());
@@ -8343,45 +8344,6 @@ output_schema_ref = "schemas/run.output.json"
             .expect("read fixture installation")
             .expect("fixture installation remains")
             .activation_state()
-    }
-
-    struct DeleteFailingRootFilesystem {
-        inner: Arc<dyn RootFilesystem>,
-    }
-
-    #[async_trait]
-    impl RootFilesystem for DeleteFailingRootFilesystem {
-        fn capabilities(&self) -> ironclaw_filesystem::BackendCapabilities {
-            self.inner.capabilities()
-        }
-
-        async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-            self.inner.list_dir(path).await
-        }
-
-        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-            self.inner.stat(path).await
-        }
-
-        async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
-            self.inner.read_file(path).await
-        }
-
-        async fn write_file(
-            &self,
-            path: &VirtualPath,
-            bytes: &[u8],
-        ) -> Result<(), FilesystemError> {
-            self.inner.write_file(path, bytes).await
-        }
-
-        async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-            Err(FilesystemError::Backend {
-                path: path.clone(),
-                operation: FilesystemOperation::Delete,
-                reason: "delete failed".to_string(),
-            })
-        }
     }
 
     async fn assert_enabled_active_extension_state<S>(

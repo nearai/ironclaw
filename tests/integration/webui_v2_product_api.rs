@@ -13,6 +13,7 @@ mod support;
 
 use std::io::Write;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
@@ -1244,32 +1245,50 @@ async fn approval_gate_rediscovered_and_resolved_after_refresh() {
     let caller = webui_caller_for(&h.binding);
     let thread_id = h.binding.thread_id.as_str().to_string();
 
-    // --- simulate a cold browser refresh: fresh drain, after_cursor: None ---
-    let replayed = services
-        .stream_events(
-            caller.clone(),
-            RebornStreamEventsRequest {
-                thread_id: thread_id.clone(),
-                after_cursor: None,
-            },
-        )
-        .await
-        .expect("post-refresh drain succeeds");
-    let gate_prompt = replayed
-        .events
-        .iter()
-        .find_map(|envelope| match &envelope.payload {
-            ProductOutboundPayload::GatePrompt(view) if view.gate_ref == gate_ref.as_str() => {
-                Some(view)
-            }
-            _ => None,
-        })
-        .unwrap_or_else(|| {
+    // --- simulate a cold browser refresh: first drain starts without a cursor,
+    // then follows the cursor exactly like the SSE handler's polling wrapper. ---
+    // The hot turn-state cache can expose BlockedApproval just before the
+    // best-effort Blocked lifecycle event reaches the durable projection source.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut after_cursor = None;
+    let gate_prompt = loop {
+        let replayed = services
+            .stream_events(
+                caller.clone(),
+                RebornStreamEventsRequest {
+                    thread_id: thread_id.clone(),
+                    after_cursor: after_cursor.clone(),
+                },
+            )
+            .await
+            .expect("post-refresh drain succeeds");
+        if let Some(prompt) = replayed
+            .events
+            .iter()
+            .find_map(|envelope| match &envelope.payload {
+                ProductOutboundPayload::GatePrompt(view) if view.gate_ref == gate_ref.as_str() => {
+                    Some(view.clone())
+                }
+                _ => None,
+            })
+        {
+            break prompt;
+        }
+        if tokio::time::Instant::now() >= deadline {
             panic!(
                 "expected the replayed cold-refresh drain to surface a GatePrompt for {gate_ref:?}: {:?}",
                 replayed.events
-            )
-        });
+            );
+        }
+        if let Some(cursor) = replayed
+            .events
+            .last()
+            .map(|envelope| envelope.projection_cursor.clone())
+        {
+            after_cursor = Some(cursor);
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
     assert_eq!(
         gate_prompt.turn_run_id, run_id,
         "replayed gate prompt must be for the actual blocked run"

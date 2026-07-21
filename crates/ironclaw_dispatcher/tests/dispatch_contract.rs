@@ -165,7 +165,8 @@ async fn dispatcher_redacts_runtime_adapter_failure_details() {
     assert!(matches!(
         err,
         DispatchError::Script {
-            kind: RuntimeDispatchErrorKind::ExitFailure
+            kind: RuntimeDispatchErrorKind::ExitFailure,
+            ..
         }
     ));
     let message = err.to_string();

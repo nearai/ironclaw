@@ -12,6 +12,18 @@ use crate::error::MigrationError;
 use crate::legacy_snapshot::{self, LegacyDb, LegacyHandles};
 use crate::options::SourceDb;
 
+/// True when a PostgreSQL error is the "table/relation does not exist" class,
+/// the one case the read paths tolerate as "nothing here" (see
+/// [`is_missing_table_error`] for the string-based libSQL counterpart). Shared
+/// across every read site in the crate (source discovery, the frozen legacy
+/// queries, the wasm stores, and the identity converter).
+#[cfg(feature = "postgres")]
+pub(crate) fn is_missing_postgres_table_error(error: &tokio_postgres::Error) -> bool {
+    error
+        .as_db_error()
+        .is_some_and(|db| db.code() == &tokio_postgres::error::SqlState::UNDEFINED_TABLE)
+}
+
 /// A live handle to the v1 source database.
 ///
 /// Crate-internal: the only public entry point is [`crate::run_migration`], and
@@ -94,7 +106,7 @@ impl V1Source {
             let client = pool.get().await.map_err(|e| read_err(&e))?;
             let stmt_rows = match client.query(sql.as_str(), &[]).await {
                 Ok(rows) => rows,
-                Err(e) if is_missing_table_error(&e.to_string()) => return Ok(Vec::new()),
+                Err(e) if is_missing_postgres_table_error(&e) => return Ok(Vec::new()),
                 Err(e) => return Err(read_err(&e)),
             };
             return stmt_rows

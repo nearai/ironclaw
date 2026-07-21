@@ -378,8 +378,12 @@ mod tests {
     use ironclaw_host_api::{TenantId, UserId};
     use ironclaw_product_adapters::AdapterInstallationId;
 
+    use ironclaw_filesystem::{Fault, FilesystemOperation};
+
     use super::*;
-    use crate::test_support::{fault_injected_telegram_state, telegram_state};
+    use crate::test_support::{
+        fault_injecting_telegram_state, read_barrier_telegram_state, telegram_state,
+    };
 
     fn user(value: &str) -> UserId {
         UserId::new(value).expect("user")
@@ -429,7 +433,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_rotations_publish_exactly_one_authoritative_code() {
-        let (state, filesystem) = fault_injected_telegram_state();
+        let (state, filesystem) = read_barrier_telegram_state();
         state
             .upsert_pending_pairing(live_record("ABCD2345", "ben"))
             .await
@@ -523,12 +527,14 @@ mod tests {
 
     #[tokio::test]
     async fn state_claim_reports_non_conflict_cas_failure() {
-        let (state, filesystem) = fault_injected_telegram_state();
+        let (state, backend) = fault_injecting_telegram_state();
         state
             .upsert_pending_pairing(live_record("JKLM2345", "ben"))
             .await
             .expect("upsert");
-        filesystem.fail_versioned_writes();
+        backend.add_fault(
+            Fault::on(FilesystemOperation::WriteFile).backend("test-injected filesystem failure"),
+        );
 
         let error = state
             .claim_pairing(&PairingCode::parse("JKLM2345").expect("valid pairing code"))

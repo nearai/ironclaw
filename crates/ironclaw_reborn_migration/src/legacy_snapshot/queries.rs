@@ -22,6 +22,11 @@ use super::types::{
 };
 use super::types::{Routine, RoutineAction};
 
+#[cfg(feature = "postgres")]
+use crate::source::is_missing_postgres_table_error;
+#[cfg(feature = "libsql")]
+use crate::source::is_missing_table_error;
+
 /// Explicit column list for the `routines` table — libSQL positional reads
 /// match this order 1:1; Postgres reads `SELECT *` by name, so this is
 /// libSQL-only (see [`super::connect::ensure_schema_current`] for the
@@ -394,7 +399,7 @@ async fn libsql_identities_for_user(
     user_id: &str,
 ) -> Result<Vec<UserIdentityRecord>, LegacyError> {
     let conn = libsql_connect(db).await?;
-    let mut rows = conn
+    let mut rows = match conn
         .query(
             "SELECT id, user_id, provider, provider_user_id, email, email_verified, \
              display_name, avatar_url, raw_profile, created_at, updated_at \
@@ -402,7 +407,11 @@ async fn libsql_identities_for_user(
             libsql::params![user_id],
         )
         .await
-        .map_err(|e| LegacyError::Query(e.to_string()))?;
+    {
+        Ok(rows) => rows,
+        Err(e) if is_missing_table_error(&e.to_string()) => return Ok(Vec::new()),
+        Err(e) => return Err(LegacyError::Query(e.to_string())),
+    };
 
     let mut result = Vec::new();
     while let Some(row) = rows
@@ -701,7 +710,7 @@ async fn postgres_identities_for_user(
     user_id: &str,
 ) -> Result<Vec<UserIdentityRecord>, LegacyError> {
     let client = pg_client(pool).await?;
-    let rows = client
+    let rows = match client
         .query(
             "SELECT id, user_id, provider, provider_user_id, email, email_verified, \
              display_name, avatar_url, raw_profile, created_at, updated_at \
@@ -709,7 +718,11 @@ async fn postgres_identities_for_user(
             &[&user_id],
         )
         .await
-        .map_err(|e| LegacyError::Query(e.to_string()))?;
+    {
+        Ok(rows) => rows,
+        Err(e) if is_missing_postgres_table_error(&e) => return Ok(Vec::new()),
+        Err(e) => return Err(LegacyError::Query(e.to_string())),
+    };
 
     Ok(rows
         .iter()

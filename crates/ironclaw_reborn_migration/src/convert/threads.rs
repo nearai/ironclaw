@@ -246,11 +246,15 @@ fn build_metadata_json(import: &ThreadImport) -> Result<String, MigrationError> 
         .messages
         .iter()
         .map(|m| {
-            json!({
+            let mut message = json!({
                 "role": m.raw_role,
                 "created_at": m.created_at.to_rfc3339(),
                 "orig_id": m.orig_id,
-            })
+            });
+            if m.role == ImportRole::Other {
+                message["content"] = json!(m.content);
+            }
+            message
         })
         .collect();
     serde_json::to_string(&json!({
