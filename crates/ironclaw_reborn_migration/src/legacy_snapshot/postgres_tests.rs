@@ -1,8 +1,8 @@
 //! Postgres coverage for the frozen v1 reader — the one backend the crate's
-//! `tests/migration_roundtrip.rs` acceptance suite doesn't reach (it is
-//! `required-features = ["libsql"]`-only). Drives the same production entry
-//! points the libSQL suite does (`connect::connect`, `LegacyDb::list_all_routines`)
-//! against a real Postgres testcontainer, covering exactly the path review
+//! `tests/migration_roundtrip.rs` acceptance suite doesn't reach. Drives the
+//! same production entry points the libSQL suite does (`connect::connect`,
+//! `LegacyDb::list_all_routines`) against a real Postgres testcontainer,
+//! covering exactly the path review
 //! flagged as most fragile: `postgres_all_routines`'s `SELECT *` + by-name
 //! column reads, which panic (not a `Result`) on a schema drift that
 //! `ensure_schema_current` doesn't independently catch.

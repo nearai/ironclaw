@@ -6027,7 +6027,6 @@ async fn filesystem_oauth_cas_conflict_branch_purges_previous_secrets() {
 /// Builds an `AuthProductScope` for `resource` using the Web surface (the
 /// surface used by most fixture helpers). This is only for scope construction;
 /// the surface does not affect the keepalive candidate filter.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn scope_for_resource(
     resource: ironclaw_host_api::ResourceScope,
 ) -> ironclaw_auth::AuthProductScope {
@@ -6036,7 +6035,6 @@ fn scope_for_resource(
 
 /// Builds a minimal `ResourceScope` for a given (tenant, user) pair.
 /// `agent_id` and `project_id` are threaded through directly.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn resource_scope(
     tenant_id: &str,
     user_id: &str,
@@ -6055,7 +6053,6 @@ fn resource_scope(
     }
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn list_refresh_candidates_covers_agent_and_project_scopes() {
     // Goal: verify that `list_refresh_candidates` discovers Google keepalive

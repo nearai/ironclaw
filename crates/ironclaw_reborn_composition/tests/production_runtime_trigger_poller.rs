@@ -37,9 +37,8 @@
 //! is fully exercised here. Delivery likewise stays downstream: the poller runs
 //! without a post-submit delivery hook (production gets no channel driver yet).
 //!
-//! Gated on `libsql` because the production-runtime path under test requires
-//! the libsql substrate.
-#![cfg(feature = "libsql")]
+//! Uses the libSQL production substrate; database backends always compile, so
+//! the test is active with the rest of the crate's integration tests.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

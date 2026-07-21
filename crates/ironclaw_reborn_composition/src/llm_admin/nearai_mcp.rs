@@ -406,7 +406,7 @@ impl NearAiMcpBootstrapOutcome {
 }
 
 pub(crate) fn durable_product_auth_storage_enabled() -> bool {
-    cfg!(any(feature = "libsql", feature = "postgres"))
+    true
 }
 
 fn nearai_mcp_bootstrap_account_is_usable(

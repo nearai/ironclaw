@@ -411,8 +411,6 @@ pub fn build_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
 /// flow) directly into `sweep_once` without needing the full tenant-path
 /// enumeration to work in an in-memory backend.
 ///
-/// Gated on `any(feature = "libsql", feature = "postgres")` because
-/// `credential_refresh_worker` is only compiled under those features.
 // TODO(follow-up): add a LibSql-backed sweep test that drives the real
 // `FilesystemCredentialRefreshCandidateSource` enumeration. `FixedCandidateSource`
 // bypasses the tenant-path filesystem walk because this bundle's fixed view
@@ -420,12 +418,10 @@ pub fn build_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
 // (`sweep_once` -> `refresh_account` -> provider client -> egress -> status
 // write-back) is already covered here at full fidelity; only candidate
 // enumeration is stubbed.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 struct FixedCandidateSource {
     candidates: Vec<ironclaw_auth::CredentialAccount>,
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[async_trait]
 impl crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshCandidateSource
     for FixedCandidateSource
@@ -435,7 +431,6 @@ impl crate::product_auth::credentials::credential_refresh_worker::CredentialRefr
     }
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 impl OAuthProductAuthTestBundle {
     /// Run one credential-refresh sweep tick with a fixed account list and a
     /// frozen clock.
@@ -471,11 +466,6 @@ impl OAuthProductAuthTestBundle {
         let candidate_source = std::sync::Arc::new(FixedCandidateSource { candidates });
 
         // Build an always-leader lock: no Postgres pool needed for tests.
-        #[cfg(not(feature = "postgres"))]
-        let leader_lock = std::sync::Arc::new(
-            crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock::always_leader(),
-        );
-        #[cfg(feature = "postgres")]
         let leader_lock = std::sync::Arc::new(
             crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(None),
         );
@@ -503,12 +493,7 @@ impl OAuthProductAuthTestBundle {
 ///   `ProviderBackedCredentialAccountService` rather than returning
 ///   `BackendUnavailable`.
 ///
-/// Gated on `any(feature = "libsql", feature = "postgres")` because
-/// `sweep_for_refresh` (the primary consumer) requires `credential_refresh_worker`,
-/// which is compiled only under those features.
-///
 /// Calling this multiple times produces independent, isolated bundles.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub fn build_google_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
     let OAuthProductAuthInfra {
         secret_store,

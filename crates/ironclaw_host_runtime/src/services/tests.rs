@@ -76,11 +76,9 @@ async fn production_wiring_reports_missing_persistent_approval_policies() {
 
 // The volatile, in-memory-backed persistent-approval store must never satisfy
 // production wiring. `in_memory_backed_persistent_approval_policy_store()` returns
-// `FilesystemPersistentApprovalPolicyStore<InMemoryBackend>` — the exact concrete
-// type the no-durable-features composition wires (factory.rs
-// `ComposedPersistentApprovalPolicyStore`), so this guards the real shape, not a
-// synthetic one. The durable libSQL/Postgres monomorphizations are distinct types
-// and fall through to `ProductionCandidate`.
+// `FilesystemPersistentApprovalPolicyStore<InMemoryBackend>`, so this guards the
+// concrete volatile shape. The durable libSQL/Postgres monomorphizations are
+// distinct types and fall through to `ProductionCandidate`.
 #[tokio::test]
 async fn production_wiring_reports_local_only_persistent_approval_policies() {
     let services = test_services().with_persistent_approval_policies(Arc::new(

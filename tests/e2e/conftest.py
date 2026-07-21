@@ -399,8 +399,6 @@ def ironclaw_binary():
                 "cargo", "build",
                 "-p", "ironclaw_legacy",
                 "--bin", "ironclaw-legacy",
-                "--no-default-features",
-                "--features", "libsql",
             ],
             cwd=ROOT,
             check=True,

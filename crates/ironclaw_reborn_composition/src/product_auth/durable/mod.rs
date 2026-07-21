@@ -1,11 +1,3 @@
-#![cfg_attr(
-    not(any(feature = "libsql", feature = "postgres")),
-    allow(
-        dead_code,
-        reason = "the durable product-auth service is constructed only by the libsql/postgres composition paths (see factory.rs); default-feature builds compile it for type checking only"
-    )
-)]
-
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, Weak},
@@ -59,7 +51,6 @@ fn flow_requires_lifecycle_cleanup(flow: &AuthFlowRecord) -> bool {
             ))
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) use provider::UnavailableAuthProviderClient;
 
 /// Durable production implementation of the product-auth ports.

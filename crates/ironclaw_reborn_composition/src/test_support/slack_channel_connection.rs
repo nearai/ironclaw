@@ -227,10 +227,7 @@ impl SlackChannelConnectionTestBundle {
     /// single reopen means a positive probe and its non-vacuity control read
     /// the same reconstructed store. Tests only.
     ///
-    /// `libsql`-only, matching the factory seam it opens: the local-default
-    /// reopen path composes the libsql local-dev backend, so a wider gate
-    /// would silently probe a fresh in-memory store on non-libsql builds.
-    #[cfg(feature = "libsql")]
+    /// The local-default reopen path composes the libSQL local-dev backend.
     pub async fn active_identity_bindings_after_reopen(
         &self,
         storage_root: &std::path::Path,

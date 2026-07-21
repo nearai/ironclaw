@@ -9,8 +9,8 @@ fi
 package="$1"
 
 # Default flags for closure crates without an explicit recipe above: opt into
-# `default` and `libsql` when the crate declares them, so storage-backed crates
-# build their libSQL paths. Crates with no matching features build bare.
+# `default` when the crate declares it. Crates with no matching features build
+# bare; database backends compile unconditionally.
 fallback_feature_flags() {
   local metadata
   metadata="$(cargo metadata --no-deps --format-version 1)"
@@ -29,10 +29,6 @@ fallback_feature_flags() {
   if printf '%s\n' "${feature_list}" | grep -Fxq "default"; then
     features+=("default")
   fi
-  if printf '%s\n' "${feature_list}" | grep -Fxq "libsql"; then
-    features+=("libsql")
-  fi
-
   if [ "${#features[@]}" -gt 0 ]; then
     local IFS=,
     printf '%s\n' "--features ${features[*]}"
@@ -47,20 +43,18 @@ case "${package}" in
     printf '%s\n' "--features test-support"
     ;;
   ironclaw_reborn_composition)
-    printf '%s\n' "--features test-support,libsql"
+    printf '%s\n' "--features test-support"
     ;;
   ironclaw_runner)
-    printf '%s\n' "--features libsql-restart-tests"
     ;;
   ironclaw_reborn_event_store)
     ;;
   ironclaw_hooks)
     # The durable libSQL/Postgres backends + parity matrix folded into this
     # crate are exercised by the dedicated hooks-parity job in
-    # platform-and-compat.yml (postgres,libsql,integration,test-support).
+    # platform-and-compat.yml (integration,test-support).
     # Keep this reborn-closure job light — the framework's own unit tests only —
-    # so it does not pull the heavy libSQL/Postgres driver deps that the default
-    # fallback would otherwise add now that the crate declares a `libsql` feature.
+    # so it does not pull more integration-tier work into the crate bucket.
     printf '%s\n' "--features test-support"
     ;;
   ironclaw_webui)
@@ -69,9 +63,8 @@ case "${package}" in
   ironclaw_host_runtime)
     # Integration tests (tests/) link the lib as a normal dependency, so
     # cfg(test) is false there; the deterministic test-mode behavior they assert
-    # is gated behind `feature = "test-support"`. libsql exercises the embedded
-    # DB paths without a Postgres server (which the crate-tests job has none of).
-    printf '%s\n' "--features test-support,libsql"
+    # is gated behind `feature = "test-support"`.
+    printf '%s\n' "--features test-support"
     ;;
   ironclaw_reborn_openai_compat)
     ;;

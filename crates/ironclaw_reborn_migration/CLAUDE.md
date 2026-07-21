@@ -133,7 +133,7 @@ writes with, pinning conversion correctness independently of that reconciliation
 
 ## Tests
 
-`tests/migration_roundtrip.rs` (`required-features = ["libsql"]`, Docker-free):
+`tests/migration_roundtrip.rs` (Docker-free):
 seeds a rich v1+engine-v2 fixture (conversations, every routine trigger variant,
 cron + non-cron missions with a mission thread, memory docs, settings, a secret,
 an OAuth + a channel identity, an installed WASM tool), runs the migration, and
@@ -145,5 +145,5 @@ nothing. Add a Postgres variant with the `postgres_pool_or_skip()`
 skip-if-no-Docker helper (see `crates/ironclaw_reborn_composition/tests/postgres_substrate.rs`).
 
 ```
-cargo test -p ironclaw_reborn_migration --features libsql --test migration_roundtrip
+cargo test -p ironclaw_reborn_migration --test migration_roundtrip
 ```

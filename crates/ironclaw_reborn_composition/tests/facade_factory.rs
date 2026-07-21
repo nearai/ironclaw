@@ -2,85 +2,62 @@
 //
 // Decomposition of this suite travels with the composition god-crate shrink
 // (#6168); do not add unrelated cases here.
-#[cfg(feature = "postgres")]
 #[path = "support/postgres.rs"]
 mod postgres_support;
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use std::{collections::BTreeMap, sync::Arc};
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use chrono::Utc;
-#[cfg(feature = "postgres")]
 use deadpool_postgres::tokio_postgres;
-#[cfg(feature = "libsql")]
 use ironclaw_auth::{OAuthClientId, OAuthRedirectUri};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{
     AuditMode, DeploymentMode, EffectKind, FilesystemBackendKind, NetworkMode, PackageId,
     ProcessBackendKind, RuntimeKind, RuntimeProfile, SecretMode,
     runtime_policy::{ApprovalPolicy, EffectiveRuntimePolicy},
 };
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId,
     GrantConstraints, MountView, NetworkPolicy, Principal, ResourceEstimate, TrustClass, UserId,
 };
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
     RuntimeFailureKind, SHELL_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind,
     VisibleCapabilityRequest,
 };
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn_composition::RebornRuntimeProcessBinding;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn_composition::{RebornBuildError, RebornCompositionProfile, RebornServices};
 use ironclaw_reborn_composition::{
     RebornBuildInput, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
     RebornReadinessDiagnostic, RebornReadinessState, build_reborn_services,
 };
-#[cfg(feature = "libsql")]
 use ironclaw_reborn_composition::{
     RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
     RebornReadinessDiagnosticStatus,
 };
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_runner::turn_scheduler::{
     SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
     TurnRunSchedulerConfig, TurnRunSchedulerHandle,
 };
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_secrets::SecretMaterial;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::{
     runner::{ClaimedTurnRun, TurnRunTransitionPort},
     test_support::in_memory_turn_state_store,
 };
-#[cfg(feature = "postgres")]
 use postgres_support::assert_postgres_accepts_connections;
 use secrecy::SecretString;
-#[cfg(feature = "libsql")]
 use serde_json::Value;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use serde_json::json;
-#[cfg(feature = "libsql")]
 use tokio::sync::Mutex;
 
-#[cfg(feature = "libsql")]
 static SECRETS_MASTER_KEY_ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
-#[cfg(feature = "libsql")]
 struct EnvVarGuard {
     key: &'static str,
     previous: Option<std::ffi::OsString>,
 }
 
-#[cfg(feature = "libsql")]
 impl EnvVarGuard {
     fn set(key: &'static str, value: &str) -> Self {
         let previous = std::env::var_os(key);
@@ -93,7 +70,6 @@ impl EnvVarGuard {
     }
 }
 
-#[cfg(feature = "libsql")]
 impl Drop for EnvVarGuard {
     fn drop(&mut self) {
         // SAFETY: EnvVarGuard is only constructed while
@@ -107,15 +83,12 @@ impl Drop for EnvVarGuard {
     }
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn test_master_key() -> SecretMaterial {
     SecretMaterial::from("01234567890123456789012345678901")
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 struct NoopTurnRunExecutor;
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[async_trait::async_trait]
 impl TurnRunExecutor for NoopTurnRunExecutor {
     async fn execute_claimed_run(
@@ -127,7 +100,6 @@ impl TurnRunExecutor for NoopTurnRunExecutor {
     }
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn production_trust_policy() -> Arc<HostTrustPolicy> {
     Arc::new(
         HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries([
@@ -142,7 +114,6 @@ fn production_trust_policy() -> Arc<HostTrustPolicy> {
     )
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn production_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::HostedMultiTenant,
@@ -157,7 +128,6 @@ fn production_runtime_policy() -> EffectiveRuntimePolicy {
     }
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn hosted_secure_default_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::HostedMultiTenant,
@@ -172,7 +142,6 @@ fn hosted_secure_default_runtime_policy() -> EffectiveRuntimePolicy {
     }
 }
 
-#[cfg(feature = "libsql")]
 fn local_only_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
@@ -187,7 +156,6 @@ fn local_only_runtime_policy() -> EffectiveRuntimePolicy {
     }
 }
 
-#[cfg(feature = "libsql")]
 fn local_only_minimal_approval_policy() -> EffectiveRuntimePolicy {
     let mut policy = local_only_runtime_policy();
     policy.requested_profile = RuntimeProfile::LocalYolo;
@@ -196,7 +164,6 @@ fn local_only_minimal_approval_policy() -> EffectiveRuntimePolicy {
     policy
 }
 
-#[cfg(feature = "libsql")]
 fn network_denied_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
@@ -211,7 +178,6 @@ fn network_denied_runtime_policy() -> EffectiveRuntimePolicy {
     }
 }
 
-#[cfg(feature = "libsql")]
 fn local_dev_builtin_visible_request() -> VisibleCapabilityRequest {
     let grants = CapabilitySet {
         grants: vec![
@@ -263,7 +229,6 @@ fn local_dev_builtin_visible_request() -> VisibleCapabilityRequest {
         .with_provider_trust(provider_trust)
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn production_builtin_visible_request() -> VisibleCapabilityRequest {
     let context = production_process_capability_execution_context();
 
@@ -272,7 +237,6 @@ fn production_builtin_visible_request() -> VisibleCapabilityRequest {
         .with_provider_trust(production_builtin_provider_trust())
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn production_process_capability_execution_context() -> ExecutionContext {
     let grants = CapabilitySet {
         grants: vec![
@@ -304,7 +268,6 @@ fn production_process_capability_execution_context() -> ExecutionContext {
     .unwrap()
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn production_builtin_provider_trust() -> BTreeMap<ExtensionId, TrustDecision> {
     let mut provider_trust = BTreeMap::new();
     provider_trust.insert(
@@ -314,7 +277,6 @@ fn production_builtin_provider_trust() -> BTreeMap<ExtensionId, TrustDecision> {
     provider_trust
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn production_builtin_trust_decision() -> TrustDecision {
     TrustDecision {
         effective_trust: EffectiveTrustClass::user_trusted(),
@@ -334,7 +296,6 @@ fn production_builtin_trust_decision() -> TrustDecision {
     }
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn assert_failed_capability(
     outcome: RuntimeCapabilityOutcome,
     capability_id: &str,
@@ -363,7 +324,6 @@ fn assert_failed_capability(
     }
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 async fn assert_process_capabilities_unavailable_for_processless_runtime(
     services: &RebornServices,
     expected_shell_failure_kind: RuntimeFailureKind,
@@ -424,7 +384,6 @@ async fn assert_process_capabilities_unavailable_for_processless_runtime(
     );
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn local_dev_grant(capability: &str, allowed_effects: Vec<EffectKind>) -> CapabilityGrant {
     CapabilityGrant {
         id: CapabilityGrantId::new(),
@@ -443,7 +402,6 @@ fn local_dev_grant(capability: &str, allowed_effects: Vec<EffectKind>) -> Capabi
     }
 }
 
-#[cfg(feature = "libsql")]
 async fn invoke_trigger_management(
     runtime: &dyn ironclaw_host_runtime::HostRuntime,
     capability: &str,
@@ -464,7 +422,6 @@ async fn invoke_trigger_management(
     completed.output
 }
 
-#[cfg(feature = "libsql")]
 fn trigger_management_execution_context() -> ExecutionContext {
     let grants = CapabilitySet {
         grants: vec![
@@ -493,12 +450,10 @@ fn trigger_management_execution_context() -> ExecutionContext {
     .unwrap()
 }
 
-#[cfg(feature = "libsql")]
 fn empty_trust_policy() -> Arc<HostTrustPolicy> {
     Arc::new(HostTrustPolicy::empty())
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn live_wake_notifier() -> (Arc<SchedulerTurnRunWakeNotifier>, TurnRunSchedulerHandle) {
     let transitions: Arc<dyn TurnRunTransitionPort> = Arc::new(in_memory_turn_state_store());
     let executor: Arc<dyn TurnRunExecutor> = Arc::new(NoopTurnRunExecutor);
@@ -507,7 +462,6 @@ fn live_wake_notifier() -> (Arc<SchedulerTurnRunWakeNotifier>, TurnRunSchedulerH
     (handle.wake_notifier(), handle)
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 async fn assert_production_services_ready_with_first_party_runtime(services: &RebornServices) {
     assert_eq!(
         services.readiness.state,
@@ -531,7 +485,6 @@ async fn assert_production_services_ready_with_first_party_runtime(services: &Re
     assert!(health.missing_runtime_backends.is_empty());
 }
 
-#[cfg(feature = "libsql")]
 async fn libsql_db_at(path: impl AsRef<std::path::Path>) -> Arc<libsql::Database> {
     Arc::new(
         libsql::Builder::new_local(path.as_ref())
@@ -541,7 +494,6 @@ async fn libsql_db_at(path: impl AsRef<std::path::Path>) -> Arc<libsql::Database
     )
 }
 
-#[cfg(feature = "libsql")]
 async fn libsql_trigger_record_count(db: &libsql::Database) -> i64 {
     let conn = db.connect().expect("connect libsql db");
     let mut rows = conn
@@ -556,7 +508,6 @@ async fn libsql_trigger_record_count(db: &libsql::Database) -> i64 {
     row.get(0).expect("trigger count")
 }
 
-#[cfg(feature = "postgres")]
 async fn postgres_pool_or_skip() -> Option<(
     testcontainers_modules::testcontainers::ContainerAsync<
         testcontainers_modules::postgres::Postgres,
@@ -577,7 +528,6 @@ async fn postgres_pool_or_skip() -> Option<(
     Some((container, pool, database_url))
 }
 
-#[cfg(feature = "postgres")]
 async fn start_postgres_container() -> Option<(
     testcontainers_modules::testcontainers::ContainerAsync<
         testcontainers_modules::postgres::Postgres,
@@ -659,7 +609,6 @@ async fn local_dev_builds_facades_without_production_claim() {
     assert!(services.product_auth.is_some());
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn hosted_single_tenant_volume_hides_process_capabilities() {
     let dir = tempfile::tempdir().unwrap();
@@ -688,7 +637,6 @@ async fn hosted_single_tenant_volume_hides_process_capabilities() {
     .await;
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn test_sandbox_process_binding() -> RebornRuntimeProcessBinding {
     let process_port = Arc::new(ironclaw_host_runtime::TenantSandboxProcessPort::new(
         Arc::new(ProductionReadySandboxTransport),
@@ -696,11 +644,9 @@ fn test_sandbox_process_binding() -> RebornRuntimeProcessBinding {
     RebornRuntimeProcessBinding::tenant_sandbox(process_port)
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[derive(Debug)]
 struct ProductionReadySandboxTransport;
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[async_trait::async_trait]
 impl ironclaw_host_runtime::SandboxCommandTransport for ProductionReadySandboxTransport {
     async fn run_command(
@@ -791,7 +737,6 @@ fn auth_scope(user: &str) -> ironclaw_auth::AuthProductScope {
     .with_session_id(ironclaw_auth::AuthSessionId::new(format!("session-{user}")).unwrap())
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn local_dev_runtime_policy_exposes_http_capability() {
     let dir = tempfile::tempdir().unwrap();
@@ -826,7 +771,6 @@ async fn local_dev_runtime_policy_exposes_http_capability() {
     );
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn local_dev_runtime_policy_hides_http_capability() {
     let dir = tempfile::tempdir().unwrap();
@@ -861,7 +805,6 @@ async fn local_dev_runtime_policy_hides_http_capability() {
     );
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_requires_configured_trust_policy() {
     let dir = tempfile::tempdir().unwrap();
@@ -883,7 +826,6 @@ async fn production_requires_configured_trust_policy() {
     ));
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_google_oauth_config_uses_factory_built_product_auth_ports() {
     let dir = tempfile::tempdir().unwrap();
@@ -918,7 +860,6 @@ async fn production_google_oauth_config_uses_factory_built_product_auth_ports() 
     assert!(services.product_auth.is_some());
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_factory_built_product_auth_manual_token_round_trips() {
     let dir = tempfile::tempdir().unwrap();
@@ -986,7 +927,6 @@ async fn production_factory_built_product_auth_manual_token_round_trips() {
     handle.shutdown().await;
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_rejects_empty_trust_policy() {
     let dir = tempfile::tempdir().unwrap();
@@ -1015,7 +955,6 @@ async fn production_rejects_empty_trust_policy() {
     ));
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_self_mints_turn_wake_wiring() {
     // Production no longer requires an externally-supplied turn-run wake notifier:
@@ -1047,7 +986,6 @@ async fn production_self_mints_turn_wake_wiring() {
     );
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_requires_runtime_policy() {
     let dir = tempfile::tempdir().unwrap();
@@ -1076,7 +1014,6 @@ async fn production_requires_runtime_policy() {
     ));
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_rejects_local_only_runtime_policy() {
     let dir = tempfile::tempdir().unwrap();
@@ -1159,7 +1096,6 @@ async fn production_rejects_local_only_runtime_policy() {
     assert!(!serialized.contains("postgres://"));
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_rejects_memory_libsql_event_store() {
     let db = Arc::new(
@@ -1193,7 +1129,6 @@ async fn production_rejects_memory_libsql_event_store() {
     assert!(!rendered.contains("token"));
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_libsql_resolved_secret_master_key_rejects_invalid_env_key() {
     let _guard = SECRETS_MASTER_KEY_ENV_LOCK.lock().await;
@@ -1245,7 +1180,6 @@ async fn production_libsql_resolved_secret_master_key_rejects_invalid_env_key() 
 ///   which even `#[cfg(test)]` can't locally downgrade. This `tests/*.rs`
 ///   binary is a separate crate the `forbid` doesn't reach, and already uses
 ///   the `EnvVarGuard`/`SECRETS_MASTER_KEY_ENV_LOCK` convention for this.
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn local_dev_secret_store_falls_through_suppressed_keychain_to_dotfile() {
     let _guard = SECRETS_MASTER_KEY_ENV_LOCK.lock().await;
@@ -1290,7 +1224,6 @@ async fn local_dev_secret_store_falls_through_suppressed_keychain_to_dotfile() {
     );
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_libsql_services_wire_first_party_runtime_http_egress() {
     let dir = tempfile::tempdir().unwrap();
@@ -1322,7 +1255,6 @@ async fn production_libsql_services_wire_first_party_runtime_http_egress() {
     assert_production_services_ready_with_first_party_runtime(&services).await;
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_libsql_services_migrate_trigger_repository_before_runtime_injection() {
     let dir = tempfile::tempdir().unwrap();
@@ -1364,7 +1296,6 @@ async fn production_libsql_services_migrate_trigger_repository_before_runtime_in
     assert_eq!(count, 0);
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn local_dev_services_dispatch_trigger_management_through_composed_runtime() {
     let dir = tempfile::tempdir().unwrap();
@@ -1448,7 +1379,6 @@ async fn local_dev_services_dispatch_trigger_management_through_composed_runtime
     );
 }
 
-#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn production_postgres_services_migrate_trigger_repository_before_runtime_injection() {
     let Some((_container, pool, database_url)) = postgres_pool_or_skip().await else {
@@ -1485,7 +1415,6 @@ async fn production_postgres_services_migrate_trigger_repository_before_runtime_
     assert_eq!(count, 0);
 }
 
-#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn production_postgres_services_wire_first_party_runtime_http_egress() {
     let Some((_container, pool, database_url)) = postgres_pool_or_skip().await else {
@@ -1517,7 +1446,6 @@ async fn production_postgres_services_wire_first_party_runtime_http_egress() {
     assert_production_services_ready_with_first_party_runtime(&services).await;
 }
 
-#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn production_postgres_secure_default_builds_without_process_port() {
     let Some((_container, pool, database_url)) = postgres_pool_or_skip().await else {
@@ -1551,7 +1479,6 @@ async fn production_postgres_secure_default_builds_without_process_port() {
     .await;
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_libsql_secure_default_builds_without_process_port() {
     let dir = tempfile::tempdir().unwrap();
@@ -1585,7 +1512,6 @@ async fn production_libsql_secure_default_builds_without_process_port() {
     .await;
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_libsql_services_require_process_port_for_first_party_runtime() {
     let dir = tempfile::tempdir().unwrap();
@@ -1621,7 +1547,6 @@ async fn production_libsql_services_require_process_port_for_first_party_runtime
     );
 }
 
-#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn production_postgres_services_require_process_port_for_first_party_runtime() {
     let Some((_container, pool, database_url)) = postgres_pool_or_skip().await else {
@@ -1658,7 +1583,6 @@ async fn production_postgres_services_require_process_port_for_first_party_runti
     );
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn migration_dry_run_validates_libsql_shape() {
     let dir = tempfile::tempdir().unwrap();
@@ -1694,7 +1618,6 @@ async fn migration_dry_run_validates_libsql_shape() {
     assert!(services.turn_coordinator.is_some());
 }
 
-#[cfg(feature = "postgres")]
 #[tokio::test]
 #[ignore = "TODO(#3856): restore when tenant sandbox process-port wiring exists"]
 async fn migration_dry_run_validates_postgres_planned_turn_profile() {
@@ -1702,7 +1625,6 @@ async fn migration_dry_run_validates_postgres_planned_turn_profile() {
     // submit_turn assertions that are temporarily fail-closed below.
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn migration_dry_run_requires_libsql_process_port_for_first_party_runtime() {
     let dir = tempfile::tempdir().unwrap();
@@ -1736,7 +1658,6 @@ async fn migration_dry_run_requires_libsql_process_port_for_first_party_runtime(
     );
 }
 
-#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn migration_dry_run_requires_postgres_process_port_for_first_party_runtime() {
     let Some((_container, pool, database_url)) = postgres_pool_or_skip().await else {

@@ -146,10 +146,7 @@ fn rewrite_installation_owners(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, sync::Arc};
-
-    #[cfg(feature = "libsql")]
-    use std::path::Path;
+    use std::{collections::BTreeSet, path::Path, sync::Arc};
 
     use chrono::Utc;
     use ironclaw_extensions::{
@@ -158,20 +155,15 @@ mod tests {
         FilesystemExtensionInstallationStore, InstallationOwner, ManifestSource,
     };
     use ironclaw_filesystem::InMemoryBackend;
-    #[cfg(feature = "libsql")]
     use ironclaw_filesystem::{LibSqlRootFilesystem, RootFilesystem, ScopedFilesystem};
-    #[cfg(feature = "libsql")]
     use ironclaw_host_api::AgentId;
     use ironclaw_host_api::{ExtensionId, HostPortCatalog, TenantId, UserId, VirtualPath};
-    #[cfg(feature = "libsql")]
     use ironclaw_reborn_identity::{
         FilesystemRebornIdentityStore, RebornUserDirectory, RebornUserRole,
     };
 
-    #[cfg(feature = "libsql")]
     use super::{ExtensionOwnershipMigrationOptions, run_extension_ownership_migration};
     use super::{rewrite_installation_owners, rewrite_store};
-    #[cfg(feature = "libsql")]
     use crate::options::TargetStore;
 
     fn installation(id: &str, owner: InstallationOwner) -> ExtensionInstallation {
@@ -306,7 +298,6 @@ output_schema_ref = "schemas/read.output.json"
         assert!(rerun.changed_extension_ids.is_empty());
     }
 
-    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn public_migration_reads_tenant_users_and_tenant_installation_store() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -419,7 +410,6 @@ output_schema_ref = "schemas/read.output.json"
         assert!(rerun.changed_extension_ids.is_empty());
     }
 
-    #[cfg(feature = "libsql")]
     async fn open_root(path: &Path) -> Arc<LibSqlRootFilesystem> {
         let database = Arc::new(
             libsql::Builder::new_local(path)
@@ -432,7 +422,6 @@ output_schema_ref = "schemas/read.output.json"
         root
     }
 
-    #[cfg(feature = "libsql")]
     async fn read_github_owner(path: &Path, tenant_id: &TenantId) -> InstallationOwner {
         let root = open_root(path).await;
         let root_dyn: Arc<dyn RootFilesystem> = root;
