@@ -156,9 +156,9 @@ fn reborn_dockerfile_uses_feature_matched_cache_and_loopback_default() {
 
     assert!(
         dockerfile.contains(
-            "cargo chef cook \\\n    --profile dist \\\n    --package ironclaw \\\n    --features libsql,postgres"
+            "cargo chef cook \\\n    --profile dist \\\n    --package ironclaw \\\n    --recipe-path recipe.json"
         ),
-        "cargo chef cook must target the Reborn CLI package with the same features as the final build"
+        "cargo chef cook must target the Reborn CLI package"
     );
     assert!(
         dockerfile.contains("IRONCLAW_REBORN_SERVE_HOST=127.0.0.1"),

@@ -58,7 +58,6 @@ WORKDIR /app
 RUN cargo chef cook \
     --profile dist \
     --package ironclaw \
-    --features libsql,postgres \
     --recipe-path recipe.json
 FROM deps AS builder
 
@@ -81,7 +80,6 @@ WORKDIR /app
 RUN cargo build \
     --profile dist \
     --package ironclaw \
-    --features libsql,postgres \
     --bin ironclaw
 
 FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS runtime

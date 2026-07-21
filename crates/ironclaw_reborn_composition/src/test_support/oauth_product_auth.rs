@@ -468,7 +468,6 @@ pub fn build_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
 /// with the durable flow/account store persisted on a real libSQL-backed root
 /// filesystem instead of the in-memory backend — the second persistence leg
 /// for the auth engine (checklist AUTH-15).
-#[cfg(feature = "libsql")]
 pub async fn build_oauth_product_auth_for_test_on_libsql(
     db_path: &std::path::Path,
 ) -> OAuthProductAuthTestBundle {
@@ -541,7 +540,6 @@ pub async fn build_oauth_product_auth_for_test_on_libsql(
 /// the OAuth product-auth bundle is built outside the harness's storage
 /// composite, so the harness's `StorageMode::Postgres` cannot construct it
 /// (correction A: this is the sanctioned thin composition-tier addition).
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub async fn build_oauth_product_auth_for_test_on_root<F>(
     root: Arc<F>,
 ) -> OAuthProductAuthTestBundle
@@ -620,8 +618,6 @@ where
 /// without needing the full tenant-path enumeration to work in an in-memory
 /// backend.
 ///
-/// Gated on `any(feature = "libsql", feature = "postgres")` to match the
-/// production spawn wiring (`CredentialRefreshWorkerReady`).
 // TODO(follow-up): add a LibSql-backed sweep test that drives the real
 // durable candidate enumeration. `FixedCandidateSource` bypasses the
 // tenant-path filesystem walk because this bundle's fixed view mounts only
@@ -629,12 +625,10 @@ where
 // (`sweep_once` -> `refresh_account` -> provider client -> egress -> status
 // write-back) is already covered here at full fidelity; only candidate
 // enumeration is stubbed.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 struct FixedCandidateSource {
     candidates: Vec<ironclaw_auth::CredentialAccount>,
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[async_trait]
 impl ironclaw_auth::KeepaliveCandidateSource for FixedCandidateSource {
     async fn list_keepalive_candidates(&self) -> Vec<ironclaw_auth::CredentialAccount> {
@@ -642,7 +636,6 @@ impl ironclaw_auth::KeepaliveCandidateSource for FixedCandidateSource {
     }
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 impl OAuthProductAuthTestBundle {
     /// Run one credential-keepalive sweep tick with a fixed account list and
     /// a frozen clock.
@@ -699,13 +692,7 @@ impl OAuthProductAuthTestBundle {
 ///   `ProviderBackedCredentialAccountService` rather than returning
 ///   `BackendUnavailable`.
 ///
-/// Gated on `any(feature = "libsql", feature = "postgres")` because
-/// `sweep_for_refresh` (the primary consumer) mirrors the production spawn
-/// wiring (`CredentialRefreshWorkerReady`), which is compiled only under
-/// those features.
-///
 /// Calling this multiple times produces independent, isolated bundles.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub fn build_google_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
     let OAuthProductAuthInfra {
         secret_store,

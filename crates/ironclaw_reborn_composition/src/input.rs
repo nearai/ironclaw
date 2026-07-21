@@ -1,12 +1,9 @@
 use std::path::PathBuf;
-#[cfg(feature = "postgres")]
 use std::str::FromStr;
 use std::sync::Arc;
 
 use ironclaw_auth::{AuthProductError, OAuthClientId, OAuthRedirectUri};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::runtime_policy::ProcessBackendKind;
-#[cfg(feature = "postgres")]
 use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
 use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, SecretMode,
@@ -19,28 +16,19 @@ use ironclaw_trust::HostTrustPolicy;
 use ironclaw_turns::{TurnRunWakeNotifier, TurnStateStoreLimits};
 use secrecy::SecretString;
 
-#[cfg(feature = "postgres")]
 use ironclaw_reborn_config::StorageBackend;
-#[cfg(feature = "postgres")]
 use ironclaw_reborn_event_store::{PostgresPoolTlsOptions, RebornPostgresSslMode};
 
-#[cfg(feature = "postgres")]
 use crate::RebornBuildError;
 use crate::deployment::DeploymentConfig;
 use crate::{RebornCompositionProfile, RebornProductAuthServicePorts};
 
-#[cfg(feature = "postgres")]
 const DEFAULT_REBORN_POSTGRES_URL_ENV: &str = "IRONCLAW_REBORN_POSTGRES_URL";
-#[cfg(feature = "postgres")]
 const DEFAULT_REBORN_SECRET_MASTER_KEY_ENV: &str = "IRONCLAW_REBORN_SECRET_MASTER_KEY";
-#[cfg(feature = "postgres")]
 const REBORN_POSTGRES_POOL_MAX_SIZE_ENV: &str = "IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE";
-#[cfg(feature = "postgres")]
 const REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON_ENV: &str =
     "IRONCLAW_REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON";
-#[cfg(feature = "postgres")]
 const DATABASE_SSLMODE_ENV: &str = "DATABASE_SSLMODE";
-#[cfg(feature = "postgres")]
 const ALLOW_REMOTE_POSTGRES_CLEAR_TEXT_ENV: &str =
     "IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT";
 
@@ -120,14 +108,12 @@ pub enum RebornRuntimeProcessBinding {
     },
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RebornRuntimeProcessBindingError {
     MissingTenantSandboxProcessPort,
     UnexpectedTenantSandboxProcessPort { process_backend: ProcessBackendKind },
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 impl std::fmt::Display for RebornRuntimeProcessBindingError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -151,7 +137,6 @@ impl RebornRuntimeProcessBinding {
         Self::TenantSandbox { process_port }
     }
 
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) fn validate_for_production_policy(
         &self,
         runtime_policy: &EffectiveRuntimePolicy,
@@ -268,7 +253,6 @@ pub(crate) enum RebornStorageInput {
         workspace_root: Option<PathBuf>,
         host_home_root: Option<PathBuf>,
     },
-    #[cfg(feature = "postgres")]
     HostedSingleTenantPostgres {
         root: PathBuf,
         workspace_root: Option<PathBuf>,
@@ -277,7 +261,6 @@ pub(crate) enum RebornStorageInput {
         secret_master_key: ironclaw_secrets::SecretMaterial,
         process_local_resource_governor_singleton: bool,
     },
-    #[cfg(feature = "libsql")]
     Libsql {
         db: Arc<libsql::Database>,
         path_or_url: String,
@@ -285,7 +268,6 @@ pub(crate) enum RebornStorageInput {
         secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
         process_local_resource_governor_singleton: bool,
     },
-    #[cfg(feature = "postgres")]
     Postgres {
         pool: deadpool_postgres::Pool,
         url: ironclaw_secrets::SecretMaterial,
@@ -398,7 +380,6 @@ impl RebornBuildInput {
         )
     }
 
-    #[cfg(feature = "postgres")]
     pub fn hosted_single_tenant_postgres(
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,
@@ -433,7 +414,6 @@ impl RebornBuildInput {
         ))
     }
 
-    #[cfg(feature = "postgres")]
     pub fn hosted_single_tenant_postgres_from_config_and_env(
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,
@@ -481,7 +461,6 @@ impl RebornBuildInput {
             } => {
                 *root = Some(workspace_root);
             }
-            #[cfg(feature = "postgres")]
             RebornStorageInput::HostedSingleTenantPostgres {
                 workspace_root: root,
                 ..
@@ -505,7 +484,6 @@ impl RebornBuildInput {
             } => {
                 *root = Some(host_home_root);
             }
-            #[cfg(feature = "postgres")]
             RebornStorageInput::HostedSingleTenantPostgres {
                 host_home_root: root,
                 ..
@@ -539,7 +517,6 @@ impl RebornBuildInput {
         })
     }
 
-    #[cfg(feature = "libsql")]
     pub fn libsql(
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,
@@ -561,7 +538,6 @@ impl RebornBuildInput {
         )
     }
 
-    #[cfg(feature = "libsql")]
     pub fn libsql_with_resolved_secret_master_key(
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,
@@ -582,7 +558,6 @@ impl RebornBuildInput {
         )
     }
 
-    #[cfg(feature = "postgres")]
     pub fn postgres(
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,
@@ -603,7 +578,6 @@ impl RebornBuildInput {
         )
     }
 
-    #[cfg(feature = "postgres")]
     pub fn postgres_with_resolved_secret_master_key(
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,
@@ -623,7 +597,6 @@ impl RebornBuildInput {
         )
     }
 
-    #[cfg(feature = "postgres")]
     pub fn postgres_from_config_and_env(
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,
@@ -869,7 +842,6 @@ impl RebornBuildInput {
     }
 }
 
-#[cfg(feature = "postgres")]
 struct ResolvedPostgresStorage {
     pool: deadpool_postgres::Pool,
     url: ironclaw_secrets::SecretMaterial,
@@ -878,7 +850,6 @@ struct ResolvedPostgresStorage {
     process_local_resource_governor_singleton: bool,
 }
 
-#[cfg(feature = "postgres")]
 fn resolve_postgres_storage_from_config_and_env(
     profile: RebornCompositionProfile,
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
@@ -947,7 +918,6 @@ fn resolve_postgres_storage_from_config_and_env(
     })
 }
 
-#[cfg(feature = "postgres")]
 fn resolve_production_runtime_policy(
     profile: RebornCompositionProfile,
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
@@ -995,7 +965,6 @@ fn resolve_production_runtime_policy(
     })
 }
 
-#[cfg(feature = "postgres")]
 fn resolve_postgres_pool_max_size(
     configured: Option<usize>,
 ) -> Result<(usize, &'static str), RebornBuildError> {
@@ -1029,7 +998,6 @@ fn resolve_postgres_pool_max_size(
     }
 }
 
-#[cfg(feature = "postgres")]
 fn required_production_url_env(
     env_name: &str,
     description: &str,
@@ -1049,7 +1017,6 @@ fn required_production_url_env(
     Ok(SecretString::from(trimmed.to_string()))
 }
 
-#[cfg(feature = "postgres")]
 fn required_production_key_env(
     env_name: &str,
     description: &str,
@@ -1068,7 +1035,6 @@ fn required_production_key_env(
     Ok(SecretString::from(value))
 }
 
-#[cfg(feature = "postgres")]
 fn require_postgres_resource_governor_singleton_env() -> Result<bool, RebornBuildError> {
     match std::env::var(REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON_ENV) {
         Ok(value) => match parse_bool_opt_in(&value) {
@@ -1097,7 +1063,6 @@ fn require_postgres_resource_governor_singleton_env() -> Result<bool, RebornBuil
     }
 }
 
-#[cfg(feature = "postgres")]
 fn postgres_pool_tls_options_from_env() -> Result<PostgresPoolTlsOptions, RebornBuildError> {
     let ssl_mode_override = match std::env::var(DATABASE_SSLMODE_ENV) {
         Ok(value) if value.trim().is_empty() => None,
@@ -1138,7 +1103,6 @@ fn postgres_pool_tls_options_from_env() -> Result<PostgresPoolTlsOptions, Reborn
     })
 }
 
-#[cfg(feature = "postgres")]
 fn parse_bool_opt_in(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "" | "0" | "false" | "no" | "off" => Some(false),

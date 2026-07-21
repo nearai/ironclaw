@@ -8,7 +8,6 @@ use ironclaw_auth::{
 };
 use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStore, GrantAuthorizer};
 use ironclaw_filesystem::FilesystemError;
-#[cfg(feature = "libsql")]
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::InstallationState;
 use ironclaw_host_api::{
@@ -18,7 +17,6 @@ use ironclaw_host_api::{
     ResourceUsage, RuntimeKind, ScopedPath, SecretHandle, TenantId, TrustClass, UserId,
     VirtualPath,
 };
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{
     RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource, VendorId,
 };
@@ -28,13 +26,10 @@ use ironclaw_host_runtime::{
     SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
     TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
 };
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_runtime::{RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver};
 use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef};
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use rust_decimal_macros::dec;
-#[cfg(feature = "libsql")]
 use secrecy::ExposeSecret;
 
 use crate::builtin_capability_policy::{BuiltinApprovalPolicyAction, BuiltinCapabilityPolicyError};
@@ -44,7 +39,6 @@ use crate::{
     RebornReadinessDiagnostic, RebornReadinessState, runtime::SKILL_ACTIVATE_CAPABILITY_ID,
 };
 
-#[cfg(feature = "libsql")]
 #[test]
 fn libsql_build_resource_governor_guard_requires_singleton_authority() {
     assert!(ensure_libsql_resource_governor_authority_for_build(true).is_ok());
@@ -55,7 +49,6 @@ fn libsql_build_resource_governor_guard_requires_singleton_authority() {
     ));
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn production_turn_state_store_uses_row_layout() {
     let view = MountView::new(vec![MountGrant::new(
@@ -80,7 +73,6 @@ async fn production_turn_state_store_uses_row_layout() {
     assert!(snapshot.runs.is_empty());
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[test]
 fn build_reborn_services_uses_filesystem_resource_governor() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -373,7 +365,6 @@ async fn pair_trigger_creator_maps_pairing_failure_to_sanitized_backend_error() 
     assert_eq!(reason, "trigger creator actor pairing failed");
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornRuntimeSubstrate> {
     let local_dev_root = tempfile::tempdir().expect("tempdir");
     let owner_user_id = "pairing-owner";
@@ -433,9 +424,6 @@ async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornRuntime
         outbound_state: Arc::clone(&base_runtime.outbound_state),
         delivered_gate_routes: Arc::clone(&base_runtime.delivered_gate_routes),
         triggered_run_delivery: Arc::clone(&base_runtime.triggered_run_delivery),
-        #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-        trigger_conversation_services: base_runtime.trigger_conversation_services.clone(),
-        #[cfg(any(feature = "libsql", feature = "postgres"))]
         trigger_conversation_services: tokio::sync::OnceCell::new(),
         checkpoint_state_store: Arc::clone(&base_runtime.checkpoint_state_store),
         loop_checkpoint_store: Arc::clone(&base_runtime.loop_checkpoint_store),
@@ -458,12 +446,9 @@ async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornRuntime
         system_extensions_lifecycle_mounts: base_runtime.system_extensions_lifecycle_mounts.clone(),
         skill_filesystem: Arc::clone(&base_runtime.skill_filesystem),
         workspace_filesystem: Arc::clone(&base_runtime.workspace_filesystem),
-        #[cfg(any(feature = "libsql", feature = "postgres"))]
         identity_filesystem: Arc::clone(&base_runtime.identity_filesystem),
         admin_secret_provisioner: base_runtime.admin_secret_provisioner.clone(),
-        #[cfg(feature = "libsql")]
         identity_substrate_db: base_runtime.identity_substrate_db.clone(),
-        #[cfg(feature = "libsql")]
         subagent_goal_filesystem: Arc::new(ScopedFilesystem::with_fixed_view(
             Arc::new(failing_root),
             MountView::new(vec![MountGrant::new(
@@ -484,7 +469,6 @@ async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornRuntime
     })
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn durable_trigger_conversation_services_propagates_init_error() {
     let runtime = local_runtime_with_failing_trigger_conversations().await;
@@ -500,7 +484,6 @@ async fn durable_trigger_conversation_services_propagates_init_error() {
     ));
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn local_runtime_trigger_create_hook_maps_conversation_init_error_to_backend() {
     let hook = LocalRuntimeTriggerCreatorPairingHook {
@@ -623,7 +606,6 @@ async fn local_dev_memory_first_party_tools_use_mounted_memory_root() {
     );
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn local_dev_memory_documents_persist_across_rebuilds() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -680,7 +662,6 @@ async fn local_dev_memory_documents_persist_across_rebuilds() {
     );
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn local_dev_default_product_auth_preserves_manual_token_across_rebuilds() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -824,7 +805,6 @@ fn attach_hosted_mcp_runtime_skips_services_without_http_egress() {
 /// material reaches `SecretsCrypto::new` several layers deep. Mirrors the
 /// real all-zeros key an `[env] SECRETS_MASTER_KEY = "000...0"` cargo
 /// override writes into the cached key file.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn resolve_local_dev_secret_master_key_rejects_malformed_file_with_path_context() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -859,7 +839,6 @@ async fn resolve_local_dev_secret_master_key_rejects_malformed_file_with_path_co
 /// (via its env-parameterized inner) so this also guards the
 /// write-before-validate invariant: a rejected env key must never be
 /// persisted to the cached `.reborn-local-dev-secrets-master-key` file.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn resolve_local_dev_secret_master_key_rejects_malformed_env_without_persisting() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -900,7 +879,6 @@ async fn resolve_local_dev_secret_master_key_rejects_malformed_env_without_persi
 }
 
 #[tokio::test]
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 async fn resolve_local_dev_secret_master_key_rejects_set_but_empty_env_without_persisting() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
@@ -929,7 +907,6 @@ async fn resolve_local_dev_secret_master_key_rejects_set_but_empty_env_without_p
 }
 
 #[tokio::test]
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 async fn resolve_local_dev_secret_master_key_rejects_empty_env_even_with_cached_file() {
     // Regression: the empty-env rejection must run BEFORE the cached-file
     // read, so an explicitly-set-but-empty SECRETS_MASTER_KEY fails closed
@@ -970,7 +947,6 @@ async fn resolve_local_dev_secret_master_key_rejects_empty_env_even_with_cached_
 }
 
 #[tokio::test]
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 async fn resolve_local_dev_secret_master_key_rejects_malformed_env_even_with_cached_file() {
     // A non-empty-but-malformed env value must also fail closed BEFORE the
     // cached-file read, so `SECRETS_MASTER_KEY=0000...` is not silently
@@ -1009,7 +985,6 @@ async fn resolve_local_dev_secret_master_key_rejects_malformed_env_even_with_cac
 }
 
 /// A well-formed cached key file passes through unchanged.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn resolve_local_dev_secret_master_key_accepts_valid_cached_file() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1029,7 +1004,6 @@ async fn resolve_local_dev_secret_master_key_accepts_valid_cached_file() {
 /// `forbid(unsafe_code)` note above — this crate's inline tests cannot
 /// mutate process env, and a cached dotfile is the non-env-mutating way
 /// to make the resolver deterministic here).
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn open_local_dev_secret_store_opens_a_working_store_over_the_bare_root() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1061,7 +1035,6 @@ async fn open_local_dev_secret_store_opens_a_working_store_over_the_bare_root() 
 /// db file, same cached master key) must decrypt a value written by a
 /// prior open — this is the "onboard writes, serve reads" contract B2
 /// exists to satisfy.
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn open_local_dev_secret_store_is_visible_across_reopens_of_the_same_root() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1415,7 +1388,6 @@ fn hosted_single_tenant_nearai_mcp_bootstrap_scope_uses_runtime_identity() {
     assert!(scope.project_id.is_none());
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[test]
 fn turn_state_filesystem_routes_global_store_ops_to_owner_turns_path() {
     let root = Arc::new(ironclaw_filesystem::InMemoryBackend::default());
@@ -1441,7 +1413,6 @@ fn turn_state_filesystem_routes_global_store_ops_to_owner_turns_path() {
     );
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[test]
 fn runtime_owner_scope_uses_configured_runtime_identity_for_turn_state() {
     let owner = UserId::new("configured-owner").expect("owner");
@@ -1456,7 +1427,6 @@ fn runtime_owner_scope_uses_configured_runtime_identity_for_turn_state() {
     assert_eq!(scope.agent_id, Some(identity.agent_id));
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_libsql_turn_state_uses_configured_runtime_identity() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1502,9 +1472,6 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
         .production_runtime
         .as_ref()
         .expect("production runtime");
-    #[cfg(not(feature = "postgres"))]
-    let RebornProductionRuntimeServices::LibSql(graph) = production_runtime;
-    #[cfg(feature = "postgres")]
     let graph = match production_runtime {
         RebornProductionRuntimeServices::LibSql(graph) => graph,
         RebornProductionRuntimeServices::Postgres(_) => {
@@ -1575,7 +1542,6 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
     );
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfigured() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1618,9 +1584,6 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
         .production_runtime
         .as_ref()
         .expect("production runtime");
-    #[cfg(not(feature = "postgres"))]
-    let RebornProductionRuntimeServices::LibSql(graph) = production_runtime;
-    #[cfg(feature = "postgres")]
     let graph = match production_runtime {
         RebornProductionRuntimeServices::LibSql(graph) => graph,
         RebornProductionRuntimeServices::Postgres(_) => {
@@ -1691,7 +1654,6 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
     );
 }
 
-#[cfg(feature = "libsql")]
 async fn append_log_has_entries<F>(filesystem: &F, path: &VirtualPath, label: &str) -> bool
 where
     F: RootFilesystem,
@@ -1706,7 +1668,6 @@ where
     }
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_libsql_builder_rejects_invalid_owner_id_at_composition_boundary() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1749,7 +1710,6 @@ async fn production_libsql_builder_rejects_invalid_owner_id_at_composition_bound
     );
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1919,67 +1879,6 @@ async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
     assert_eq!(resolved.scope, nearai_account_scope);
 }
 
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-#[tokio::test]
-async fn local_dev_nearai_mcp_skips_auto_activation_without_durable_product_auth() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let owner = "local-dev-nearai-mcp-no-durable-owner";
-    let services = build_reborn_services(nearai_bootstrap_input_with_base(
-            owner,
-            dir.path().join("local-dev"),
-            "http://private.near.ai",
-            "nearai-test-key",
-        ))
-        .await
-        .expect("local-dev services build should ignore invalid NEAR AI MCP endpoint without durable product auth");
-    let local_runtime = services.local_runtime.as_ref().expect("local runtime");
-    let extension_management = local_runtime
-        .extension_management
-        .as_ref()
-        .expect("extension management");
-    let nearai_ref =
-        LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
-
-    let projection = extension_management
-        .project(
-            nearai_ref,
-            extension_management.tenant_operator_user_id_for_test(),
-        )
-        .await
-        .expect("NEAR AI MCP projected");
-    assert_eq!(projection.phase, InstallationState::Installed);
-
-    let capabilities = extension_management
-        .active_model_visible_capabilities()
-        .await
-        .expect("active capabilities");
-    assert!(
-        capabilities
-            .iter()
-            .all(|capability| capability.id.as_str() != "nearai.web_search")
-    );
-
-    let auth_scope = AuthProductScope::new(
-        local_dev_nearai_mcp_owner_scope(UserId::new(owner).unwrap(), None)
-            .expect("NEAR AI MCP owner scope"),
-        AuthSurface::Api,
-    );
-    let accounts = services
-        .product_auth
-        .as_ref()
-        .expect("product auth")
-        .credential_account_record_source()
-        .accounts_for_owner(&auth_scope)
-        .await
-        .expect("credential accounts load");
-    assert!(
-        accounts
-            .iter()
-            .all(|account| account.provider.as_str() != "nearai")
-    );
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn local_dev_nearai_mcp_rebootstrap_reuses_existing_account() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2056,7 +1955,6 @@ async fn local_dev_nearai_mcp_rebootstrap_reuses_existing_account() {
     );
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn local_dev_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2149,7 +2047,6 @@ async fn local_dev_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential(
     );
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn local_dev_nearai_mcp_invalid_base_url_fails_build() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2190,7 +2087,6 @@ fn attach_hosted_mcp_runtime_skips_services_without_runtime_http_egress() {
     assert!(services.product_auth_provider_runtime_ports().is_none());
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn local_dev_services_persist_thread_records_across_rebuilds() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2502,7 +2398,6 @@ fn builtin_first_party_package_declares_skill_management_tools() {
     ));
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[test]
 fn production_skill_management_mounts_use_production_namespace() {
     let scope = ResourceScope {
@@ -2870,7 +2765,6 @@ fn skill_md(name: &str, description: &str, prompt: &str) -> String {
 /// `RebornRuntimeSubstrate` and compares their data halves via
 /// `std::ptr::addr_eq` (trait objects of different traits cannot be compared
 /// with `Arc::ptr_eq` directly).
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn local_dev_outbound_store_durable_shares_one_allocation_across_all_roles() {
     let dir = tempfile::tempdir().expect("tempdir");

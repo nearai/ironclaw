@@ -100,6 +100,6 @@ Recommended closeout validation:
 ```bash
 cargo fmt --all -- --check
 cargo test -p ironclaw_reborn_composition runtime_rejects_disabled_profile_before_local_substrate_lookup
-cargo test -p ironclaw_reborn_composition runtime_rejects_migration_dry_run_before_live_traffic --features libsql --locked
+cargo test -p ironclaw_reborn_composition runtime_rejects_migration_dry_run_before_live_traffic --locked
 cargo test -p ironclaw_architecture reborn_binary_main_is_thin_bootstrap
 ```

@@ -40,7 +40,6 @@ mod local_dev_mounts;
 mod observability;
 mod outbound;
 mod product_auth;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 mod production_runtime_policy;
 mod profile_approval_authorization;
 mod projection;
@@ -86,15 +85,11 @@ pub use extension_host::skill_listing::{RebornSkillListError, list_reborn_local_
 pub use factory::AttachmentTestSupport;
 #[cfg(feature = "test-support")]
 pub use factory::ChannelHostAssemblyTestWiring;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use factory::LOCAL_DEV_SECRETS_MASTER_KEY_PATH;
 #[cfg(feature = "test-support")]
 pub use factory::RebornApprovalTestParts;
-#[cfg(any(feature = "libsql", feature = "test-support"))]
 pub use factory::local_dev_db_path;
-#[cfg(feature = "libsql")]
 pub use factory::open_local_dev_secret_store;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use factory::{KeychainMasterKeyOutcome, provision_local_dev_keychain_master_key};
 pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
 pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
@@ -134,7 +129,6 @@ pub use ironclaw_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
 // classifier items moved to `ironclaw_runner::{failure_lane, failure_summary,
 // retry_disposition}` with consumers repointed (no path-preservation shims).
 pub use ironclaw_runner::failure_summary::reborn_failure_summary_for_category;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use ironclaw_runtime_policy::{
     ResolveRequest as RuntimePolicyResolveRequest, resolve as resolve_runtime_policy,
 };
@@ -205,7 +199,6 @@ pub use product_auth::api::auth::{
 pub use product_auth::serve::{
     ProductAuthRouteMount, ProductAuthRouteState, product_auth_route_mount,
 };
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
 pub use provider_identity::{
     ProviderIdentityActorResolver, RebornIdentityProviderId, RebornIdentityProviderUserId,
@@ -399,37 +392,27 @@ pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
 }
 
 use ironclaw_authorization::CapabilityLeaseError;
-#[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
-#[cfg(feature = "postgres")]
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::ProcessBackendKind;
 use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, VirtualPath,
 };
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn_event_store::RebornEventStoreConfig;
 use ironclaw_reborn_event_store::RebornEventStoreError;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_resources::FilesystemResourceGovernor;
 use ironclaw_resources::ResourceError;
 use ironclaw_run_state::RunStateError;
 use ironclaw_secrets::SecretError;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_secrets::SecretMaterial;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_trust::TrustPolicy;
 use ironclaw_turns::TurnError;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::TurnRunWakeNotifier;
 use thiserror::Error;
 
-#[cfg(feature = "libsql")]
 pub type LibSqlProductionHostRuntimeServices = HostRuntimeServices<
     LibSqlRootFilesystem,
     FilesystemResourceGovernor<LibSqlRootFilesystem>,
@@ -437,7 +420,6 @@ pub type LibSqlProductionHostRuntimeServices = HostRuntimeServices<
     FilesystemProcessResultStore<LibSqlRootFilesystem>,
 >;
 
-#[cfg(feature = "postgres")]
 pub type PostgresProductionHostRuntimeServices = HostRuntimeServices<
     PostgresRootFilesystem,
     FilesystemResourceGovernor<PostgresRootFilesystem>,
@@ -557,7 +539,6 @@ where
 }
 
 /// libSQL substrate handles needed to build production host-runtime services.
-#[cfg(feature = "libsql")]
 pub struct LibSqlProductionSubstrateConfig<TPolicy, TWake>
 where
     TPolicy: TrustPolicy + 'static,
@@ -577,7 +558,6 @@ where
 }
 
 /// PostgreSQL substrate handles needed to build production host-runtime services.
-#[cfg(feature = "postgres")]
 pub struct PostgresProductionSubstrateConfig<TPolicy, TWake>
 where
     TPolicy: TrustPolicy + 'static,
@@ -643,7 +623,6 @@ pub enum RebornCompositionError {
 /// sequentially against the shared database. Earlier successful migrations are
 /// not rolled back if a later substrate fails; each migration is expected to be
 /// idempotent so callers can fix the underlying failure and retry composition.
-#[cfg(feature = "libsql")]
 pub async fn build_libsql_production_host_runtime_services<TPolicy, TWake>(
     config: LibSqlProductionSubstrateConfig<TPolicy, TWake>,
 ) -> Result<LibSqlProductionHostRuntimeServices, RebornCompositionError>
@@ -660,7 +639,6 @@ where
 /// sequentially against the shared database. Earlier successful migrations are
 /// not rolled back if a later substrate fails; each migration is expected to be
 /// idempotent so callers can fix the underlying failure and retry composition.
-#[cfg(feature = "postgres")]
 pub async fn build_postgres_production_host_runtime_services<TPolicy, TWake>(
     config: PostgresProductionSubstrateConfig<TPolicy, TWake>,
 ) -> Result<PostgresProductionHostRuntimeServices, RebornCompositionError>
@@ -677,7 +655,6 @@ where
 /// Callers are responsible for validating that production boot selected the
 /// PostgreSQL storage backend and that the URL came from an env-only config
 /// reference before passing it here.
-#[cfg(feature = "postgres")]
 pub fn open_reborn_postgres_pool(
     url: secrecy::SecretString,
 ) -> Result<deadpool_postgres::Pool, RebornCompositionError> {
@@ -686,7 +663,6 @@ pub fn open_reborn_postgres_pool(
 
 /// Open a PostgreSQL pool for Reborn production storage with an explicit
 /// maximum connection count.
-#[cfg(feature = "postgres")]
 pub fn open_reborn_postgres_pool_with_max_size(
     url: secrecy::SecretString,
     max_size: usize,
@@ -694,7 +670,7 @@ pub fn open_reborn_postgres_pool_with_max_size(
     Ok(ironclaw_reborn_event_store::open_postgres_pool_with_max_size(url, max_size)?)
 }
 
-#[cfg(all(test, any(feature = "libsql", feature = "postgres")))]
+#[cfg(test)]
 mod mount_view_tests {
     use super::*;
     use ironclaw_filesystem::{FilesystemError, FilesystemOperation, InMemoryBackend};
@@ -878,7 +854,7 @@ mod mount_view_tests {
     }
 }
 
-#[cfg(all(test, any(feature = "libsql", feature = "postgres")))]
+#[cfg(test)]
 mod two_tenant_isolation_tests {
     //! Regression test for the cross-tenant collision finding from the
     //! 2026-05-17 serrrfirat review.

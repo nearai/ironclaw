@@ -70,7 +70,7 @@ ironclaw_capabilities = { path = "../ironclaw_capabilities", version = "0.1.0" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
 ironclaw_loop_host = { path = "../ironclaw_loop_host", features = ["test-support"] }
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
-ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", features = ["test-support", "libsql"] }
+ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", features = ["test-support"] }
 # Test-only construction of `ironclaw_runner::subagent::await_edge`'s
 # CAS-backed test fixtures (in-memory `FilesystemAwaitEdgeStore`) in this
 # crate's own test harnesses.

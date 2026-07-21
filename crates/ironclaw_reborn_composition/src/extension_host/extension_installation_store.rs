@@ -990,7 +990,6 @@ access_token = "/access_token"
         assert_rehydrates_without_reparse(Arc::new(InMemoryBackend::new())).await;
     }
 
-    #[cfg(feature = "libsql")]
     async fn libsql_filesystem(dir: &std::path::Path) -> Arc<dyn RootFilesystem> {
         let db = std::sync::Arc::new(
             libsql::Builder::new_local(dir.join("store.db"))
@@ -1003,7 +1002,6 @@ access_token = "/access_token"
         Arc::new(filesystem)
     }
 
-    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn records_rehydrate_from_resolved_on_libsql() {
         let dir = tempfile::tempdir().expect("tempdir");

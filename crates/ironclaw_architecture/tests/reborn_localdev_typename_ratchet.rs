@@ -196,19 +196,16 @@ fn localdev_same_file_duplicate_detection_self_test() {
     assert_eq!(duplicated[0].1.len(), 2);
 }
 
-/// Regression for the composition `factory.rs` pattern: a durable/no-durable
-/// alias pair — the SAME name defined twice, each under a mutually exclusive
-/// `#[cfg(...)]` — is legitimate and must NOT be flagged as a duplicate. A
-/// mixed pair (only one occurrence gated) is still flagged.
+/// Regression for duplicate local-dev aliases: a pair with the SAME name
+/// defined twice under mutually exclusive `#[cfg(...)]` gates is legitimate
+/// and must NOT be flagged as a duplicate. A mixed pair (only one occurrence
+/// gated) is still flagged.
 #[test]
 fn localdev_cfg_gated_alias_pair_is_not_a_duplicate() {
     let sample = r#"
-        #[cfg(any(
-            not(feature = "inmemory-turn-state"),
-            any(feature = "libsql", feature = "postgres")
-        ))]
+        #[cfg(feature = "durable-test-backend")]
         pub(crate) type LocalDevCfgPairStore = DurableImpl;
-        #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+        #[cfg(feature = "volatile-test-backend")]
         pub(crate) type LocalDevCfgPairStore = VolatileImpl;
     "#;
     let occurrences = scan_type_defs(sample, KEYWORDS, &is_localdev_type);
@@ -232,7 +229,6 @@ fn localdev_cfg_gated_alias_pair_is_not_a_duplicate() {
 
     // Mixed: one gated, one not — still duplicate debt.
     let mixed_sample = r#"
-        #[cfg(feature = "libsql")]
         pub(crate) type LocalDevMixedThing = A;
         pub(crate) type LocalDevMixedThing = B;
     "#;

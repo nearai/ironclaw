@@ -13,12 +13,6 @@ publish = false
 [package.metadata.ironclaw]
 layer = "kernel"
 
-[features]
-# Opt-in because the restart coverage opens real libSQL-backed turn/thread
-# stores. Kept off the default so local `cargo test -p ironclaw_runner` stays
-# fast, while CI can exercise process-restart persistence explicitly.
-libsql-restart-tests = ["dep:libsql"]
-
 [dependencies]
 async-trait = "0.1"
 base64 = "0.22"
@@ -44,7 +38,7 @@ ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 jsonschema = { version = "0.46", default-features = false }
-libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
+libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
 parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

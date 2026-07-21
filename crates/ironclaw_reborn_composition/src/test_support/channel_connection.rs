@@ -307,7 +307,6 @@ impl ChannelConnectionTestBundle {
     /// `libsql`-only, matching the factory seam it opens: the local-default
     /// reopen path composes the libsql local-dev backend, so a wider gate
     /// would silently probe a fresh in-memory store on non-libsql builds.
-    #[cfg(feature = "libsql")]
     pub async fn active_identity_bindings_after_reopen(
         &self,
         provider: &str,

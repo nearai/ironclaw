@@ -890,7 +890,6 @@ async fn select_source_credential_account(
             {
                 return account;
             }
-            #[cfg(feature = "libsql")]
             match scan_local_dev_db_for_source_account(source, &provider).await {
                 Ok(Some(account)) => {
                     eprintln!(
@@ -946,7 +945,6 @@ fn select_unique_visible_source_account(
     }
 }
 
-#[cfg(feature = "libsql")]
 async fn scan_local_dev_db_for_source_account(
     source: &RebornQaCredentialSource,
     provider: &AuthProviderId,
@@ -1008,7 +1006,6 @@ struct StoredSecretScopeRecord {
     handle: SecretHandle,
 }
 
-#[cfg(feature = "libsql")]
 #[derive(serde::Deserialize)]
 struct StoredSecretMaterialRecord {
     scope: ResourceScope,
@@ -1023,7 +1020,6 @@ async fn resolve_source_secret_scope(
     handle: &SecretHandle,
     kind: &str,
 ) -> ResourceScope {
-    #[cfg(feature = "libsql")]
     match scan_local_dev_db_for_secret_scope(source, handle).await {
         Ok(Some(scope)) => return scope,
         Ok(None) => {}
@@ -1046,7 +1042,6 @@ async fn resolve_source_secret_scope(
     account.scope.resource.without_thread_and_mission()
 }
 
-#[cfg(feature = "libsql")]
 async fn scan_local_dev_db_for_secret_scope(
     source: &RebornQaCredentialSource,
     handle: &SecretHandle,
@@ -1111,7 +1106,6 @@ async fn scan_local_dev_db_for_secret_scope(
     })
 }
 
-#[cfg(feature = "libsql")]
 async fn read_local_dev_db_secret_material(
     source: &RebornQaCredentialSource,
     handle: &SecretHandle,
@@ -1142,7 +1136,6 @@ async fn read_local_dev_db_secret_material(
     ))
 }
 
-#[cfg(feature = "libsql")]
 async fn scan_local_dev_db_for_secret_material_record(
     source: &RebornQaCredentialSource,
     handle: &SecretHandle,
@@ -1207,7 +1200,6 @@ async fn scan_local_dev_db_for_secret_material_record(
     })
 }
 
-#[cfg(feature = "libsql")]
 fn read_local_dev_secret_master_key(source: &RebornQaCredentialSource) -> Result<String, String> {
     let key_path = source
         .local_dev_root
@@ -1305,59 +1297,43 @@ async fn consume_source_secret(
     let lease = match store.lease_once(scope, handle).await {
         Ok(lease) => lease,
         Err(lease_error) => {
-            #[cfg(feature = "libsql")]
-            {
-                eprintln!(
-                    "[RebornQaTrace] source secret store could not lease {kind} secret {} for \
+            eprintln!(
+                "[RebornQaTrace] source secret store could not lease {kind} secret {} for \
                      account {:?} ({lease_error}); reading encrypted local-dev secret record \
                      directly",
-                    handle.as_str(),
-                    account.id
-                );
-                return read_local_dev_db_secret_material(source, handle)
-                    .await
-                    .unwrap_or_else(|fallback_error| {
-                        panic!(
-                            "lease {kind} secret for source Reborn credential account {:?}: \
-                             {lease_error}; local-dev fallback failed: {fallback_error}",
-                            account.id
-                        )
-                    });
-            }
-            #[cfg(not(feature = "libsql"))]
-            panic!(
-                "lease {kind} secret for source Reborn credential account {:?}: {lease_error}",
+                handle.as_str(),
                 account.id
-            )
+            );
+            return read_local_dev_db_secret_material(source, handle)
+                .await
+                .unwrap_or_else(|fallback_error| {
+                    panic!(
+                        "lease {kind} secret for source Reborn credential account {:?}: \
+                             {lease_error}; local-dev fallback failed: {fallback_error}",
+                        account.id
+                    )
+                });
         }
     };
     match store.consume(scope, lease.id).await {
         Ok(material) => material,
         Err(consume_error) => {
-            #[cfg(feature = "libsql")]
-            {
-                eprintln!(
-                    "[RebornQaTrace] source secret store could not consume {kind} secret {} for \
+            eprintln!(
+                "[RebornQaTrace] source secret store could not consume {kind} secret {} for \
                      account {:?} ({consume_error}); reading encrypted local-dev secret record \
                      directly",
-                    handle.as_str(),
-                    account.id
-                );
-                read_local_dev_db_secret_material(source, handle)
-                    .await
-                    .unwrap_or_else(|fallback_error| {
-                        panic!(
-                            "consume {kind} secret for source Reborn credential account {:?}: \
-                             {consume_error}; local-dev fallback failed: {fallback_error}",
-                            account.id
-                        )
-                    })
-            }
-            #[cfg(not(feature = "libsql"))]
-            panic!(
-                "consume {kind} secret for source Reborn credential account {:?}: {consume_error}",
+                handle.as_str(),
                 account.id
-            )
+            );
+            read_local_dev_db_secret_material(source, handle)
+                .await
+                .unwrap_or_else(|fallback_error| {
+                    panic!(
+                        "consume {kind} secret for source Reborn credential account {:?}: \
+                             {consume_error}; local-dev fallback failed: {fallback_error}",
+                        account.id
+                    )
+                })
         }
     }
 }
@@ -2006,7 +1982,6 @@ mod tests {
         assert_eq!(response.usage.response_bytes, 12);
     }
 
-    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn local_dev_db_secret_material_reader_decrypts_record() {
         let dir = tempfile::tempdir().unwrap();
@@ -2068,7 +2043,6 @@ mod tests {
         assert_eq!(material.expose_secret(), "local-dev-secret-value");
     }
 
-    #[cfg(feature = "libsql")]
     #[tokio::test]
     #[ignore = "requires IRONCLAW_REBORN_QA_CREDENTIAL_SOURCE_ROOT with a live Google credential"]
     async fn reborn_qa_crm_google_credential_preflight_from_source_root() {

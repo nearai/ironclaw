@@ -14,7 +14,6 @@ use ironclaw_events::{
     DurableAuditSink, DurableEventSink, EventStreamKey, ReadScope, RuntimeEventKind,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-#[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::*;
@@ -192,7 +191,6 @@ async fn approval_resume_survives_filesystem_service_restart_and_consumes_lease_
 /// opened over the same on-disk libSQL file, mirroring
 /// `libsql_root()` in
 /// `crates/ironclaw_filesystem/tests/db_root_filesystem_contract.rs`.
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn approval_resume_survives_durable_libsql_reopen_and_consumes_lease_once() {
     let temp = tempfile::tempdir().unwrap();
@@ -562,7 +560,6 @@ async fn durable_services(
 /// reopen, not just a service-graph rebuild around a still-live store.
 /// Mirrors `libsql_root()` in
 /// `crates/ironclaw_filesystem/tests/db_root_filesystem_contract.rs`.
-#[cfg(feature = "libsql")]
 async fn durable_services_with_libsql_run_state(
     engine_root: &Path,
     event_root: &Path,
@@ -599,7 +596,6 @@ async fn durable_services_with_libsql_run_state(
 /// `scoped_run_state_filesystem`. Called once per simulated process restart
 /// so each call is a real reopen of the on-disk libSQL file, not a
 /// reconnect to a still-live in-process handle.
-#[cfg(feature = "libsql")]
 async fn scoped_libsql_run_state_filesystem(
     db_path: &Path,
 ) -> Arc<ScopedFilesystem<LibSqlRootFilesystem>> {

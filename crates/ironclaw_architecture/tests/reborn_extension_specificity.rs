@@ -1132,7 +1132,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_reborn_composition/src/extension_host/gsuite.rs",
         "google",
     ),
-    ("crates/ironclaw_reborn_composition/src/lib.rs", "github"),
     (
         "crates/ironclaw_reborn_composition/src/projection/display_preview.rs",
         "web-access",
@@ -1247,10 +1246,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     (
         "crates/ironclaw_reborn_composition/src/factory.rs",
         "notion",
-    ),
-    (
-        "crates/ironclaw_reborn_composition/src/factory.rs",
-        "telegram",
     ),
     (
         "crates/ironclaw_reborn_composition/src/google_oauth_secret_store.rs",

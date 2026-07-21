@@ -555,7 +555,6 @@ fn runtime_cutover_gate_rejects_local_dev_readiness_for_hosted_single_tenant() {
 // postgres substrate.  The guard is gated on the same `libsql | postgres`
 // cfg as the production composition path it protects.
 
-#[cfg(feature = "libsql")]
 #[test]
 fn production_scheduler_wake_guard_rejects_production_with_absent_wiring() {
     let err =
@@ -572,7 +571,6 @@ fn production_scheduler_wake_guard_rejects_production_with_absent_wiring() {
     );
 }
 
-#[cfg(feature = "libsql")]
 #[test]
 fn production_scheduler_wake_guard_rejects_migration_dry_run_with_absent_wiring() {
     let err = super::check_production_scheduler_wake_wiring(
@@ -589,7 +587,6 @@ fn production_scheduler_wake_guard_rejects_migration_dry_run_with_absent_wiring(
     );
 }
 
-#[cfg(feature = "libsql")]
 #[test]
 fn production_scheduler_wake_guard_passes_local_dev_with_absent_wiring() {
     // Local-dev never mints scheduler wake wiring; the guard must not
@@ -601,7 +598,6 @@ fn production_scheduler_wake_guard_passes_local_dev_with_absent_wiring() {
 use ironclaw_authorization::CapabilityLeaseStore;
 use ironclaw_events::{EventStreamKey, ReadScope};
 use ironclaw_host_api::InstallationState;
-#[cfg(feature = "libsql")]
 use ironclaw_host_api::ProjectId;
 use ironclaw_host_api::{
     Action, AgentId, ApprovalRequest, ApprovalRequestId, AuditStage, CapabilityId, CorrelationId,
@@ -649,11 +645,9 @@ use ironclaw_turns::{
 };
 use rust_decimal_macros::dec;
 
-#[cfg(feature = "libsql")]
 use crate::RebornRuntimeProcessBinding;
 use crate::extension_host::extension_lifecycle::ExtensionActivationMode;
 use crate::input::RebornBuildInput;
-#[cfg(feature = "libsql")]
 use crate::observability::hooks::HooksActivationConfig;
 use crate::runtime_input::{
     PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessCheck,
@@ -662,7 +656,6 @@ use crate::runtime_input::{
 };
 use crate::webui::facade::build_webui_services;
 use crate::{RebornCompositionProfile, RebornReadiness, RebornReadinessState, RebornRuntimeError};
-#[cfg(feature = "libsql")]
 use ironclaw_reborn_config::{RebornBootConfig, RebornHome, RebornProfile};
 
 use super::{
@@ -1974,7 +1967,6 @@ async fn runtime_nearai_mcp_bootstraps_from_nearai_session_token() {
     stop_turn_runner_worker_for_manual_state_test(&runtime).await;
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
     let _env_guard =
@@ -2082,7 +2074,6 @@ async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
     stop_turn_runner_worker_for_manual_state_test(&runtime).await;
 }
 
-#[cfg(feature = "libsql")]
 async fn nearai_mcp_runtime_access_secret(
     runtime: &super::RebornRuntime,
     owner_scope: ResourceScope,
@@ -2127,7 +2118,6 @@ async fn nearai_mcp_runtime_access_secret(
     secrecy::ExposeSecret::expose_secret(&material).to_string()
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn runtime_nearai_mcp_prebuild_api_key_is_not_replaced_by_stored_key() {
     let _env_guard =
@@ -2562,7 +2552,6 @@ async fn provider_factory_runs_during_production_boot() {
 /// reload adapter can re-resolve `[llm.default]` from disk) instead of
 /// pre-baking the stored key into a directly-supplied `ResolvedRebornLlm`
 /// (which no longer feeds the gateway at all).
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart() {
     // NOTE on isolation: this test does not need to override
@@ -2655,7 +2644,6 @@ async fn local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart() {
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_runtime_rejects_enabled_hooks_without_local_runtime() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2722,7 +2710,6 @@ async fn production_runtime_rejects_enabled_hooks_without_local_runtime() {
     );
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn build_reborn_runtime_allows_validated_production_readiness() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2792,7 +2779,6 @@ async fn build_reborn_runtime_allows_validated_production_readiness() {
 /// through the local-dev capability path, so supplying one to a production
 /// runtime (no local runtime to observe) must fail fast rather than silently
 /// produce an empty trajectory.
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn build_reborn_runtime_rejects_trajectory_observer_for_production() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2860,11 +2846,9 @@ async fn build_reborn_runtime_rejects_trajectory_observer_for_production() {
     );
 }
 
-#[cfg(feature = "libsql")]
 #[derive(Debug)]
 struct RecordingSandboxTransport;
 
-#[cfg(feature = "libsql")]
 #[async_trait]
 impl ironclaw_host_runtime::SandboxCommandTransport for RecordingSandboxTransport {
     async fn run_command(
