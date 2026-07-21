@@ -1266,6 +1266,168 @@ async fn stale_admin_configuration_revision_is_rejected() {
     fixture.shutdown().await;
 }
 
+/// Empty secret inputs are the UI's explicit "keep the existing secret"
+/// sentinel. A later replacement may update inline values while preserving the
+/// prior secret reference and advancing the group revision.
+#[tokio::test]
+async fn blank_admin_secret_preserves_stored_value() {
+    let fixture = AdminConfigurationFixture::new("blank-secret").await;
+    let route = "/api/webchat/v2/operator/extension-configuration/extension.slack";
+    let (first_status, first_body) = put_json(
+        fixture.operator_router(),
+        route,
+        serde_json::json!({
+            "values": slack_admin_configuration_values("retained-secret", "T-ORIGINAL"),
+            "expected_revision": 0,
+            "idempotency_key": "webui-admin-secret-first",
+        }),
+    )
+    .await;
+    let (second_status, second_body) = put_json(
+        fixture.operator_router(),
+        route,
+        serde_json::json!({
+            "values": slack_admin_configuration_values("", "T-UPDATED"),
+            "expected_revision": 1,
+            "idempotency_key": "webui-admin-secret-second",
+        }),
+    )
+    .await;
+    let (read_status, read_body) = get_json(
+        fixture.operator_router(),
+        "/api/webchat/v2/operator/extension-configuration",
+    )
+    .await;
+
+    assert_eq!(
+        (first_status, second_status, read_status),
+        (StatusCode::OK, StatusCode::OK, StatusCode::OK),
+        "first response: {first_body}; second response: {second_body}; read response: {read_body}"
+    );
+    let slack = configuration_group(&read_body, "extension.slack");
+    assert_eq!(slack["revision"], 2, "read response: {read_body}");
+    let bot_token = configuration_field(slack, "slack_bot_token");
+    assert_eq!(bot_token["provided"], true, "read response: {read_body}");
+    assert!(
+        bot_token.get("value").is_none_or(Value::is_null),
+        "retained secret remains redacted: {bot_token}"
+    );
+    let team_id = configuration_field(slack, "slack_team_id");
+    assert_eq!(team_id["value"], "T-UPDATED", "read response: {read_body}");
+    fixture.shutdown().await;
+}
+
+/// Installation membership and tenant deployment configuration are distinct
+/// lifecycles. Removing a user's extension installation cannot delete the
+/// operator's manifest-group revision or configured values.
+#[tokio::test]
+async fn user_extension_removal_does_not_erase_admin_configuration() {
+    let fixture = AdminConfigurationFixture::new("remove-preserves-config").await;
+    let (save_status, save_body) = put_json(
+        fixture.operator_router(),
+        "/api/webchat/v2/operator/extension-configuration/extension.telegram",
+        serde_json::json!({
+            "values": telegram_admin_configuration_values(),
+            "expected_revision": 0,
+            "idempotency_key": "webui-admin-before-user-remove",
+        }),
+    )
+    .await;
+    let (install_status, install_body) = post_json(
+        fixture.member_router(),
+        "/api/webchat/v2/extensions/install",
+        serde_json::json!({
+            "package_ref": {"kind": "extension", "id": "telegram"}
+        }),
+    )
+    .await;
+    let (remove_status, remove_body) = post_json(
+        fixture.member_router(),
+        "/api/webchat/v2/extensions/telegram/remove",
+        serde_json::json!({}),
+    )
+    .await;
+    let (read_status, read_body) = get_json(
+        fixture.operator_router(),
+        "/api/webchat/v2/operator/extension-configuration",
+    )
+    .await;
+
+    assert_eq!(
+        (save_status, install_status, remove_status, read_status),
+        (
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::OK,
+        ),
+        "save: {save_body}; install: {install_body}; remove: {remove_body}; read: {read_body}"
+    );
+    let telegram = configuration_group(&read_body, "extension.telegram");
+    assert_eq!(telegram["revision"], 1, "read response: {read_body}");
+    assert_eq!(telegram["complete"], true, "read response: {read_body}");
+    assert_eq!(
+        configuration_field(telegram, "telegram_bot_token")["provided"],
+        true,
+        "read response: {read_body}"
+    );
+    fixture.shutdown().await;
+}
+
+/// A manifest-declared channel consumer must resolve the tenant's saved admin
+/// values through the generic configuration path. This drives the ordinary
+/// extension setup projection rather than reading the admin store directly;
+/// both Telegram secret handles must already be present after a pre-install
+/// operator save, with no Telegram-specific adapter branch in this journey.
+#[tokio::test]
+async fn extension_setup_consumer_sees_manifest_admin_configuration() {
+    let fixture = AdminConfigurationFixture::new("effective-consumer").await;
+    let (save_status, save_body) = put_json(
+        fixture.operator_router(),
+        "/api/webchat/v2/operator/extension-configuration/extension.telegram",
+        serde_json::json!({
+            "values": telegram_admin_configuration_values(),
+            "expected_revision": 0,
+            "idempotency_key": "webui-admin-effective-consumer",
+        }),
+    )
+    .await;
+    let (install_status, install_body) = post_json(
+        fixture.member_router(),
+        "/api/webchat/v2/extensions/install",
+        serde_json::json!({
+            "package_ref": {"kind": "extension", "id": "telegram"}
+        }),
+    )
+    .await;
+    let (setup_status, setup_body) = get_json(
+        fixture.member_router(),
+        "/api/webchat/v2/extensions/telegram/setup",
+    )
+    .await;
+
+    assert_eq!(
+        (save_status, install_status, setup_status),
+        (StatusCode::OK, StatusCode::OK, StatusCode::OK),
+        "save: {save_body}; install: {install_body}; setup: {setup_body}"
+    );
+    for handle in ["telegram_bot_token", "telegram_webhook_secret"] {
+        let secret = setup_body["secrets"]
+            .as_array()
+            .and_then(|secrets| secrets.iter().find(|secret| secret["name"] == handle))
+            .unwrap_or_else(|| panic!("setup consumer omitted {handle}: {setup_body}"));
+        assert_eq!(
+            secret["provided"], true,
+            "setup consumer did not resolve saved {handle}: {setup_body}"
+        );
+        assert!(
+            secret.get("value").is_none(),
+            "setup projection must remain presence-only: {secret}"
+        );
+    }
+    fixture.shutdown().await;
+}
+
 struct AdminConfigurationFixture {
     _root: TempDir,
     runtime: RebornRuntime,
@@ -1373,6 +1535,29 @@ fn slack_admin_configuration_values(bot_token: &str, team_id: &str) -> Value {
         {"handle": "slack_oauth_client_id", "value": "oauth-client"},
         {"handle": "slack_oauth_client_secret", "value": "oauth-secret"}
     ])
+}
+
+fn telegram_admin_configuration_values() -> Value {
+    serde_json::json!([
+        {"handle": "telegram_bot_token", "value": "telegram-bot-secret"},
+        {"handle": "telegram_webhook_secret", "value": "telegram-webhook-secret"},
+        {"handle": "telegram_webhook_url", "value": "https://example.test/telegram/updates"},
+        {"handle": "bot_username", "value": "ironclaw_test_bot"}
+    ])
+}
+
+fn configuration_group<'a>(body: &'a Value, group_id: &str) -> &'a Value {
+    body["groups"]
+        .as_array()
+        .and_then(|groups| groups.iter().find(|group| group["group_id"] == group_id))
+        .unwrap_or_else(|| panic!("configuration group {group_id} missing: {body}"))
+}
+
+fn configuration_field<'a>(group: &'a Value, handle: &str) -> &'a Value {
+    group["fields"]
+        .as_array()
+        .and_then(|fields| fields.iter().find(|field| field["handle"] == handle))
+        .unwrap_or_else(|| panic!("configuration field {handle} missing: {group}"))
 }
 
 async fn post_raw(router: Router, path: &str, body: Vec<u8>) -> (StatusCode, Value) {
