@@ -11,6 +11,8 @@ use sha2::{Digest, Sha256};
 
 use crate::LoopMessageRef;
 
+use crate::run_profile::snippet_ref::{sanitize_ref_suffix, stable_skill_snippet_display_hash};
+
 use super::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptorView, LoopContextBundle,
     LoopContextMessage, LoopContextSnippet, LoopInlineMessage, LoopInlineMessageRole,
@@ -19,7 +21,6 @@ use super::{
     prompt_text::{PromptTextSurface, validate_model_safe_text, validate_prompt_text},
     runtime_context::LoopRuntimeContext,
     skill_snippet_model_message_ref,
-    snippet_ref::{sanitize_ref_suffix, stable_skill_snippet_display_hash},
 };
 
 const CAPABILITY_SURFACE_USAGE_POLICY: &str =

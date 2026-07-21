@@ -524,9 +524,8 @@ where
         provider: Option<ExtensionId>,
         runtime: Option<RuntimeKind>,
         reason_kind: CapabilityFailureKind,
-        safe_summary: Option<String>,
+        safe_summary: Option<LoopSafeSummary>,
     ) -> Result<(), AgentLoopHostError> {
-        let safe_summary = safe_summary.map(LoopSafeSummary::capability_failure_summary);
         self.publish(LoopHostMilestoneKind::CapabilityFailed {
             activity_id,
             capability_id,

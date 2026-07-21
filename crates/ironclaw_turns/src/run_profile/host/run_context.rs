@@ -18,11 +18,37 @@ use super::validate::validate_model_route_component_value;
 const ADVISORY_MODEL_ROUTE_COMPONENT: &str = "requested";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "LoopModelRouteSnapshotWire")]
 pub struct LoopModelRouteSnapshot {
     pub provider_id: String,
     pub model_id: String,
     pub config_version: String,
     pub auth_version: String,
+}
+
+/// Unvalidated wire shape for [`LoopModelRouteSnapshot`]. Deserialization routes
+/// through [`LoopModelRouteSnapshot::try_new`] so a persisted or wire snapshot
+/// can never rehydrate into an unvalidated route. `new` stays an infallible
+/// construction bypass for negative tests only.
+#[derive(Deserialize)]
+struct LoopModelRouteSnapshotWire {
+    provider_id: String,
+    model_id: String,
+    config_version: String,
+    auth_version: String,
+}
+
+impl TryFrom<LoopModelRouteSnapshotWire> for LoopModelRouteSnapshot {
+    type Error = String;
+
+    fn try_from(wire: LoopModelRouteSnapshotWire) -> Result<Self, Self::Error> {
+        Self::try_new(
+            wire.provider_id,
+            wire.model_id,
+            wire.config_version,
+            wire.auth_version,
+        )
+    }
 }
 
 impl LoopModelRouteSnapshot {
@@ -207,6 +233,38 @@ mod tests {
     fn operator_resolved_route_is_not_advisory() {
         let route = LoopModelRouteSnapshot::new("openai", "gpt-4o", "config:v1", "auth:v1");
         assert!(!route.is_advisory());
+    }
+
+    #[test]
+    fn deserialize_validates_route_components() {
+        // A well-formed operator route round-trips.
+        let valid = LoopModelRouteSnapshot::new("openai", "gpt-4o", "config:v1", "auth:v1");
+        let json = serde_json::to_string(&valid).expect("serialize");
+        let restored: LoopModelRouteSnapshot = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored, valid);
+
+        // Deserialization must not bypass validation: a secret-like component
+        // that `new` would happily construct must be rejected on the wire so a
+        // tampered/legacy snapshot cannot rehydrate into an unvalidated route.
+        let secret_like = serde_json::json!({
+            "provider_id": "sk-secret-provider",
+            "model_id": "gpt-4",
+            "config_version": "config:v1",
+            "auth_version": "auth:v1",
+        })
+        .to_string();
+        serde_json::from_str::<LoopModelRouteSnapshot>(&secret_like)
+            .expect_err("secret-like provider_id must be rejected on deserialize");
+
+        let forbidden_marker = serde_json::json!({
+            "provider_id": "openrouter",
+            "model_id": "gpt-4",
+            "config_version": "config:api_key",
+            "auth_version": "auth:v1",
+        })
+        .to_string();
+        serde_json::from_str::<LoopModelRouteSnapshot>(&forbidden_marker)
+            .expect_err("forbidden marker in config_version must be rejected on deserialize");
     }
 
     #[test]

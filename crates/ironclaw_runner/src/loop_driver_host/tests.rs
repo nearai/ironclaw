@@ -106,7 +106,7 @@ async fn checkpoint_port_load_payload_roundtrips_staged_payload() {
     let state_ref = port
         .stage_checkpoint_payload(StageCheckpointPayloadRequest {
             kind: LoopCheckpointKind::BeforeSideEffect,
-            schema_id: expected_schema_id.as_str().to_string(),
+            schema_id: expected_schema_id.clone(),
             payload: payload.clone(),
         })
         .await
@@ -151,7 +151,7 @@ async fn checkpoint_port_skips_read_back_for_host_staged_ref() {
     let state_ref = port
         .stage_checkpoint_payload(StageCheckpointPayloadRequest {
             kind: LoopCheckpointKind::BeforeModel,
-            schema_id: context.checkpoint_schema_id.as_str().to_string(),
+            schema_id: context.checkpoint_schema_id.clone(),
             payload: br#"{"iteration":1}"#.to_vec(),
         })
         .await
@@ -270,7 +270,7 @@ async fn checkpoint_port_load_payload_rejects_schema_mismatch() {
     let state_ref = port
         .stage_checkpoint_payload(StageCheckpointPayloadRequest {
             kind: LoopCheckpointKind::BeforeModel,
-            schema_id: expected_schema_id.as_str().to_string(),
+            schema_id: expected_schema_id.clone(),
             payload: b"{}".to_vec(),
         })
         .await
@@ -306,7 +306,7 @@ async fn checkpoint_port_load_payload_rejects_schema_version_mismatch() {
     let state_ref = port
         .stage_checkpoint_payload(StageCheckpointPayloadRequest {
             kind: LoopCheckpointKind::BeforeModel,
-            schema_id: expected_schema_id.as_str().to_string(),
+            schema_id: expected_schema_id.clone(),
             payload: b"{}".to_vec(),
         })
         .await

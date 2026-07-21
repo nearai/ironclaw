@@ -2006,7 +2006,10 @@ where
         let snapshot = resolver
             .resolve_model_route(slot)
             .map_err(model_route_error_to_host_error)?;
-        Ok(run_context.with_resolved_model_route(snapshot.to_loop_model_route_snapshot()))
+        let route_snapshot = snapshot
+            .to_loop_model_route_snapshot()
+            .map_err(|reason| RebornLoopDriverHostError::InvalidRequest { reason })?;
+        Ok(run_context.with_resolved_model_route(route_snapshot))
     }
 }
 
@@ -2890,7 +2893,7 @@ mod tests {
         let state_ref = port
             .stage_checkpoint_payload(StageCheckpointPayloadRequest {
                 kind: LoopCheckpointKind::BeforeSideEffect,
-                schema_id: expected_schema_id.as_str().to_string(),
+                schema_id: expected_schema_id.clone(),
                 payload: payload.clone(),
             })
             .await
@@ -2928,7 +2931,7 @@ mod tests {
         let state_ref = port
             .stage_checkpoint_payload(StageCheckpointPayloadRequest {
                 kind: LoopCheckpointKind::BeforeModel,
-                schema_id: expected_schema_id.as_str().to_string(),
+                schema_id: expected_schema_id.clone(),
                 payload: b"{}".to_vec(),
             })
             .await
@@ -2964,7 +2967,7 @@ mod tests {
         let state_ref = port
             .stage_checkpoint_payload(StageCheckpointPayloadRequest {
                 kind: LoopCheckpointKind::BeforeModel,
-                schema_id: expected_schema_id.as_str().to_string(),
+                schema_id: expected_schema_id.clone(),
                 payload: b"{}".to_vec(),
             })
             .await
