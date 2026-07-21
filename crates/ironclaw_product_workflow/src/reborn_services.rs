@@ -24,8 +24,9 @@ use ironclaw_auth::{
 };
 use ironclaw_common::{AutomationName, AutomationNameError};
 use ironclaw_host_api::{
-    AgentId, CapabilityId, EffectKind, ExtensionId, GrantConstraints, InvocationId, PermissionMode,
-    Principal, ProjectId, ResourceScope, SecretHandle, TenantId, ThreadId, UserId,
+    ActivityId, AgentId, CapabilityId, EffectKind, ExtensionId, GrantConstraints, InvocationId,
+    PermissionMode, Principal, ProjectId, Resolution, ResourceScope, SecretHandle, TenantId,
+    ThreadId, UserId,
 };
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductWorkflowRejectionKind, ProjectionStream,
@@ -1838,6 +1839,25 @@ pub trait RebornServicesApi: Send + Sync {
         _caller: WebUiAuthenticatedCaller,
     ) -> Result<bool, RebornServicesError> {
         Ok(false)
+    }
+
+    /// Invoke one descriptor-declared product capability through the generic
+    /// mutation conduit targeted by architecture simplification §5.2.
+    ///
+    /// `caller` is trusted ingress input. `capability` and `input` are
+    /// designators only; a wired implementation must resolve and authorize
+    /// them rather than treating either as authority. `activity_id` is the
+    /// client-minted idempotency identity and must be preserved across retries.
+    /// The unwired default fails closed without performing any side effect.
+    async fn invoke(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        capability: CapabilityId,
+        input: serde_json::Value,
+        activity_id: ActivityId,
+    ) -> Result<Resolution, RebornServicesError> {
+        let _ = (caller, capability, input, activity_id);
+        Err(RebornServicesError::service_unavailable(false))
     }
 
     /// Query one descriptor-declared, read-only product view. This is the

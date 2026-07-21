@@ -25,8 +25,9 @@ use ironclaw_auth::{
     CredentialAccountStatus,
 };
 use ironclaw_host_api::{
-    AgentId, ApprovalRequestId, CapabilityId, EffectKind, ExtensionId, InvocationId,
-    PermissionMode, Principal, ProjectId, ResourceScope, SecretHandle, TenantId, ThreadId, UserId,
+    ActivityId, AgentId, ApprovalRequestId, CapabilityId, EffectKind, ExtensionId, InvocationId,
+    PermissionMode, Principal, ProjectId, Resolution, ResourceScope, SecretHandle, TenantId,
+    ThreadId, UserId,
 };
 use ironclaw_host_api::{CapabilitySurfaceKind, InstallationState};
 use ironclaw_product_adapters::{
@@ -2159,6 +2160,29 @@ async fn create_thread_for(
         )
         .await
         .expect("create thread");
+}
+
+#[tokio::test]
+async fn default_invoke_uses_canonical_host_types_and_fails_closed() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let result: Result<Resolution, RebornServicesError> = services
+        .invoke(
+            caller(),
+            CapabilityId::new("product.test_invoke").expect("valid capability id"),
+            json!({"request": "test"}),
+            ActivityId::new(),
+        )
+        .await;
+
+    let error = result.expect_err("unwired invoke must fail closed");
+    assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
+    assert_eq!(error.status_code, 503);
+    assert!(!error.retryable);
 }
 
 #[tokio::test]
