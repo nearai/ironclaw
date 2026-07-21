@@ -80,12 +80,3 @@ pub(crate) fn provision_master_key(
         })
     })
 }
-
-/// No storage backend, no secret store: the resolver lives behind the same
-/// `libsql`/`postgres` feature gate in `ironclaw_reborn_composition`.
-#[cfg(any())]
-pub(crate) fn provision_master_key(
-    _boot: &RebornBootConfig,
-) -> anyhow::Result<MasterKeyProvisionOutcome> {
-    Ok(MasterKeyProvisionOutcome::Suppressed)
-}

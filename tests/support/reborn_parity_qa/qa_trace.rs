@@ -1297,57 +1297,43 @@ async fn consume_source_secret(
     let lease = match store.lease_once(scope, handle).await {
         Ok(lease) => lease,
         Err(lease_error) => {
-            {
-                eprintln!(
-                    "[RebornQaTrace] source secret store could not lease {kind} secret {} for \
+            eprintln!(
+                "[RebornQaTrace] source secret store could not lease {kind} secret {} for \
                      account {:?} ({lease_error}); reading encrypted local-dev secret record \
                      directly",
-                    handle.as_str(),
-                    account.id
-                );
-                return read_local_dev_db_secret_material(source, handle)
-                    .await
-                    .unwrap_or_else(|fallback_error| {
-                        panic!(
-                            "lease {kind} secret for source Reborn credential account {:?}: \
-                             {lease_error}; local-dev fallback failed: {fallback_error}",
-                            account.id
-                        )
-                    });
-            }
-            #[cfg(any())]
-            panic!(
-                "lease {kind} secret for source Reborn credential account {:?}: {lease_error}",
+                handle.as_str(),
                 account.id
-            )
+            );
+            return read_local_dev_db_secret_material(source, handle)
+                .await
+                .unwrap_or_else(|fallback_error| {
+                    panic!(
+                        "lease {kind} secret for source Reborn credential account {:?}: \
+                             {lease_error}; local-dev fallback failed: {fallback_error}",
+                        account.id
+                    )
+                });
         }
     };
     match store.consume(scope, lease.id).await {
         Ok(material) => material,
         Err(consume_error) => {
-            {
-                eprintln!(
-                    "[RebornQaTrace] source secret store could not consume {kind} secret {} for \
+            eprintln!(
+                "[RebornQaTrace] source secret store could not consume {kind} secret {} for \
                      account {:?} ({consume_error}); reading encrypted local-dev secret record \
                      directly",
-                    handle.as_str(),
-                    account.id
-                );
-                read_local_dev_db_secret_material(source, handle)
-                    .await
-                    .unwrap_or_else(|fallback_error| {
-                        panic!(
-                            "consume {kind} secret for source Reborn credential account {:?}: \
-                             {consume_error}; local-dev fallback failed: {fallback_error}",
-                            account.id
-                        )
-                    })
-            }
-            #[cfg(any())]
-            panic!(
-                "consume {kind} secret for source Reborn credential account {:?}: {consume_error}",
+                handle.as_str(),
                 account.id
-            )
+            );
+            read_local_dev_db_secret_material(source, handle)
+                .await
+                .unwrap_or_else(|fallback_error| {
+                    panic!(
+                        "consume {kind} secret for source Reborn credential account {:?}: \
+                             {consume_error}; local-dev fallback failed: {fallback_error}",
+                        account.id
+                    )
+                })
         }
     }
 }

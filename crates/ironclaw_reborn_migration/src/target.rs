@@ -333,10 +333,6 @@ async fn open_backend(target: &TargetStore) -> Result<Backend, MigrationError> {
                 .map_err(|e| MigrationError::OpenTarget(e.to_string()))?;
             Ok(Backend::LibSql { root, db })
         }
-        #[cfg(any())]
-        TargetStore::LibSql { .. } => Err(MigrationError::OpenTarget(
-            "binary built without the libsql feature".into(),
-        )),
         TargetStore::Postgres { url } => {
             let pool = open_postgres_pool(url)?;
             let root = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(
@@ -347,10 +343,6 @@ async fn open_backend(target: &TargetStore) -> Result<Backend, MigrationError> {
                 .map_err(|e| MigrationError::OpenTarget(e.to_string()))?;
             Ok(Backend::Postgres { root, pool })
         }
-        #[cfg(any())]
-        TargetStore::Postgres { .. } => Err(MigrationError::OpenTarget(
-            "binary built without the postgres feature".into(),
-        )),
     }
 }
 

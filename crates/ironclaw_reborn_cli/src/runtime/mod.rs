@@ -530,19 +530,6 @@ fn resolve_reborn_runtime_llm_with_stored_key_fallback(
     .map_err(Into::into)
 }
 
-/// Feature-off fallback: without `libsql` there is no local-dev secret store
-/// to check, so behavior here is byte-identical to calling
-/// `resolve_reborn_runtime_llm` directly — a required-but-unset API key
-/// still fails closed with `ApiKeyEnvUnset`.
-#[cfg(any())]
-fn resolve_reborn_runtime_llm_with_stored_key_fallback(
-    config: &RebornBootConfig,
-    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
-    _caller: RuntimeInputCaller,
-) -> anyhow::Result<Option<ironclaw_reborn_composition::ResolvedRebornLlm>> {
-    ironclaw_reborn_composition::resolve_reborn_runtime_llm(config, config_file).map_err(Into::into)
-}
-
 pub(crate) fn build_runtime_input_with_options(
     config: &RebornBootConfig,
     caller: RuntimeInputCaller,
@@ -739,19 +726,6 @@ fn build_hosted_single_tenant_services_input(
     )
 }
 
-#[cfg(any())]
-fn build_hosted_single_tenant_services_input(
-    profile: RebornProfile,
-    _owner_id: &str,
-    _config: &RebornBootConfig,
-    _config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
-) -> anyhow::Result<RebornBuildInput> {
-    anyhow::bail!(
-        "profile={profile} requires a binary built with the `postgres` feature for hosted \
-         single-tenant storage; the default PostgreSQL URL env var is IRONCLAW_REBORN_POSTGRES_URL"
-    )
-}
-
 fn build_production_services_input(
     profile: RebornProfile,
     owner_id: &str,
@@ -764,18 +738,6 @@ fn build_production_services_input(
     )
     .map_err(anyhow::Error::from)
 }
-#[cfg(any())]
-fn build_production_services_input(
-    profile: RebornProfile,
-    _owner_id: &str,
-    _config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
-) -> anyhow::Result<RebornBuildInput> {
-    anyhow::bail!(
-        "profile={profile} requires a binary built with the `postgres` feature for production \
-         storage; the default PostgreSQL URL env var is IRONCLAW_REBORN_POSTGRES_URL"
-    )
-}
-
 /// Resolve the Google OAuth backend config for boot, merging env vars with
 /// the operator's `[google]` config.toml section and the encrypted
 /// client-secret store. See [`resolve_google_oauth_config_state_merged`]
@@ -828,11 +790,6 @@ pub(crate) fn resolve_google_oauth_config_state_from_env(
 /// env secret exists, avoiding unnecessary keychain or filesystem access on
 /// unconfigured and partial hosts. Status never calls this material-reading
 /// path because secret presence cannot affect its public-field diagnosis.
-///
-/// `libsql`-gated because that is the only Cargo feature under which
-/// `config set google.client_secret` can ever have written anything here —
-/// a binary without it can't have populated the store, so there is nothing
-/// to read.
 fn google_oauth_client_secret_from_store(
     config: &RebornBootConfig,
 ) -> anyhow::Result<Option<SecretString>> {
@@ -851,13 +808,6 @@ fn google_oauth_client_secret_from_store(
             .await
             .map_err(anyhow::Error::from)
     })
-}
-
-#[cfg(any())]
-fn google_oauth_client_secret_from_store(
-    _config: &RebornBootConfig,
-) -> anyhow::Result<Option<SecretString>> {
-    Ok(None)
 }
 
 pub(crate) fn resolve_slack_personal_oauth_redirect_uri_from_env()

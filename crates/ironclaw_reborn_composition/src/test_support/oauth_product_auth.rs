@@ -466,10 +466,6 @@ impl OAuthProductAuthTestBundle {
         let candidate_source = std::sync::Arc::new(FixedCandidateSource { candidates });
 
         // Build an always-leader lock: no Postgres pool needed for tests.
-        #[cfg(any())]
-        let leader_lock = std::sync::Arc::new(
-            crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock::always_leader(),
-        );
         let leader_lock = std::sync::Arc::new(
             crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(None),
         );

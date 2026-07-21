@@ -242,7 +242,7 @@ CANNED_RESPONSES = [
 
 ## Configuration
 
-`conftest.py` handles all server startup automatically — you do not need to start ironclaw manually before running `pytest`. The conftest builds the binary (libsql feature), starts the mock LLM, and starts ironclaw with a fresh temp database on every `pytest` invocation.
+`conftest.py` handles all server startup automatically — you do not need to start ironclaw manually before running `pytest`. The conftest builds the binary, starts the mock LLM, and starts ironclaw with a fresh temp database on every `pytest` invocation.
 
 If you need to test against a manually started ironclaw, you can skip conftest by running pytest with `--co` (collect-only) to understand what would run, or by calling the httpx/REST helpers directly without the `page` fixture.
 

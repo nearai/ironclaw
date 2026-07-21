@@ -205,7 +205,7 @@ fn localdev_cfg_gated_alias_pair_is_not_a_duplicate() {
     let sample = r#"
         #[cfg(feature = "durable-test-backend")]
         pub(crate) type LocalDevCfgPairStore = DurableImpl;
-        #[cfg(any())]
+        #[cfg(feature = "volatile-test-backend")]
         pub(crate) type LocalDevCfgPairStore = VolatileImpl;
     "#;
     let occurrences = scan_type_defs(sample, KEYWORDS, &is_localdev_type);

@@ -87,8 +87,6 @@ impl OnboardCommand {
                 | LlmCredentialProvisionOutcome::AlreadyConfigured { .. }
                 | LlmCredentialProvisionOutcome::ConfiguredFromEnv { .. }
         );
-        #[cfg(any())]
-        let llm_configured = false;
         let marker_action = write_onboarding_marker(
             home,
             &marker_path,
@@ -144,11 +142,6 @@ impl OnboardCommand {
         if llm_configured {
             println!("- none for LLM credentials (configured above)");
         } else {
-            #[cfg(any())]
-            println!(
-                "- LLM credential provisioning is unavailable in this build: rebuild or \
-                 install `ironclaw` with `--features full`, then rerun `ironclaw onboard`"
-            );
             println!(
                 "- configure LLM credentials: rerun `ironclaw onboard` from an \
                  interactive terminal, run \

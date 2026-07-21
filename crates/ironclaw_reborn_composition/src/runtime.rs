@@ -75,8 +75,6 @@ use ironclaw_runner::subagent::await_edge::{
 };
 use ironclaw_runner::subagent::flavors::StaticSubagentDefinitionResolver;
 use ironclaw_runner::subagent::goal_store::FilesystemSubagentGoalStore;
-#[cfg(any())]
-use ironclaw_runner::subagent::goal_store::InMemoryBoundedSubagentGoalStore;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, MessageKind, MessageStatus,
     SessionThreadService, ThreadHistoryRequest, ThreadScope,
@@ -146,6 +144,7 @@ impl OutboundDeliveryTargetProvider for StaticOutboundDeliveryTargetProvider {
         }])
     }
 }
+use crate::RebornCompositionProfile;
 #[cfg(any(test, feature = "test-support"))]
 use crate::automation::trigger_poller::TenantScopedTrustedTriggerFireAuthorizer;
 use crate::automation::trigger_poller::{
@@ -165,11 +164,6 @@ use crate::{
     RebornBuildError, RebornProductAuthServices, RebornReadiness, RebornServices,
     build_reborn_services,
 };
-// Only `check_production_scheduler_wake_wiring` (cfg libsql/postgres) still
-// names the profile type directly now that live-traffic admission reads the
-// DeploymentConfig; gate the import to match so the default lane sees no unused
-// import.
-use crate::RebornCompositionProfile;
 use production::{
     EmptyCapabilitySurfaceResolver, EmptyIdentityContextSource,
     UnavailableApprovalInteractionService, UnavailableCapabilityIo,
@@ -230,103 +224,12 @@ struct RuntimeStoreParts<'a> {
     trigger_repository: Option<Arc<dyn ironclaw_triggers::TriggerRepository>>,
 }
 
-/// Non-durable await-edge fallback for the composition profile with neither
-/// `libsql` nor `postgres` enabled (no real filesystem backend exists in
-/// that mode at all — the same reduced-durability posture
-/// `InMemoryBoundedSubagentGoalStore` already accepts for the goal store).
-/// Reported limitation, not silently papered over: this mode never
-/// delivers a subagent's result back to a parked parent (the settler never
-/// fires) and never recognizes an awaited-child gate as blocked-exit
-/// evidence. `spawn_subagent` stays deny-filtered in production regardless
-/// (the design's standing no-flag ruling), so this gap is unreachable
-/// there; it only matters for future non-libsql/non-postgres local-dev
-/// deployments that clear the deny-filter, which is out of PR1's scope.
-#[cfg(any())]
-struct NonDurableAwaitEdgeSettler;
-
-#[cfg(any())]
-#[async_trait::async_trait]
-impl AwaitEdgeSettler for NonDurableAwaitEdgeSettler {
-    async fn on_child_terminal(
-        &self,
-        _event: &ironclaw_turns::TurnLifecycleEvent,
-    ) -> Result<ironclaw_loop_host::ResolveOutcome, ironclaw_turns::run_profile::AgentLoopHostError>
-    {
-        Ok(ironclaw_loop_host::ResolveOutcome::NotApplicable)
-    }
-
-    fn bind_coordinator(
-        &self,
-        _coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
-    ) -> Result<(), ironclaw_turns::TurnError> {
-        Ok(())
-    }
-
-    fn bind_result_writer(
-        &self,
-        _result_writer: Arc<dyn LoopCapabilityResultWriter>,
-    ) -> Result<(), ironclaw_turns::TurnError> {
-        Ok(())
-    }
-
-    fn as_turn_committed_event_observer(
-        self: Arc<Self>,
-    ) -> Arc<dyn ironclaw_turns::TurnCommittedEventObserver> {
-        self
-    }
-}
-
-#[cfg(any())]
-#[async_trait::async_trait]
-impl ironclaw_turns::TurnCommittedEventObserver for NonDurableAwaitEdgeSettler {
-    fn observes_state(&self, _state: &ironclaw_turns::TurnRunState) -> bool {
-        false
-    }
-
-    fn observes_event(&self, _event: &ironclaw_turns::TurnLifecycleEvent) -> bool {
-        false
-    }
-
-    async fn observe_committed_state(
-        &self,
-        _state: ironclaw_turns::TurnRunState,
-    ) -> Result<(), ironclaw_turns::TurnError> {
-        Ok(())
-    }
-
-    async fn observe_committed_event(
-        &self,
-        _event: ironclaw_turns::TurnLifecycleEvent,
-    ) -> Result<(), ironclaw_turns::TurnError> {
-        Ok(())
-    }
-}
-
-#[cfg(any())]
-struct NonDurableAwaitDependentRunEvidence;
-
-#[cfg(any())]
-#[async_trait::async_trait]
-impl AwaitDependentRunEvidenceStore for NonDurableAwaitDependentRunEvidence {
-    async fn has_awaited_child_gate(
-        &self,
-        _scope: &ironclaw_turns::TurnScope,
-        _run_id: ironclaw_turns::TurnRunId,
-        _gate_ref: &ironclaw_turns::LoopGateRef,
-    ) -> Result<bool, ironclaw_turns::TurnError> {
-        Ok(false)
-    }
-}
-
 fn local_runtime_parts(
     local_runtime: &crate::factory::RebornRuntimeSubstrate,
 ) -> RuntimeStoreParts<'_> {
     let subagent_goal_store = Arc::new(FilesystemSubagentGoalStore::new(Arc::clone(
         &local_runtime.subagent_goal_filesystem,
     ))) as Arc<dyn RuntimeSubagentGoalStore>;
-    #[cfg(any())]
-    let subagent_goal_store =
-        Arc::new(InMemoryBoundedSubagentGoalStore::new()) as Arc<dyn RuntimeSubagentGoalStore>;
 
     let (subagent_await_edge_writer, subagent_await_edge_settler, subagent_await_edge_evidence) = {
         let store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::clone(
@@ -349,13 +252,6 @@ fn local_runtime_parts(
             store as Arc<dyn AwaitDependentRunEvidenceStore>,
         )
     };
-    #[cfg(any())]
-    let (subagent_await_edge_writer, subagent_await_edge_settler, subagent_await_edge_evidence) = (
-        Arc::new(ironclaw_loop_host::InMemoryAwaitEdgeWriter::default())
-            as Arc<dyn AwaitEdgeWriter>,
-        Arc::new(NonDurableAwaitEdgeSettler) as Arc<dyn AwaitEdgeSettler>,
-        Arc::new(NonDurableAwaitDependentRunEvidence) as Arc<dyn AwaitDependentRunEvidenceStore>,
-    );
 
     RuntimeStoreParts {
         local_runtime: Some(local_runtime),
@@ -870,32 +766,6 @@ async fn build_trigger_poller_services(
             .map_err(|error| RebornRuntimeError::InvalidArgument {
                 reason: format!("trigger conversation services unavailable: {error}"),
             })?;
-        #[cfg(any(test, feature = "test-support"))]
-        let pairing_service: Arc<
-            dyn ironclaw_conversations::ConversationActorPairingService,
-        > = Arc::new(conversations.clone());
-        let TriggerPollerServicesInner {
-            materializer,
-            trusted_submitter,
-        } = build_trigger_poller_services_from_conversation_services(
-            conversations.clone(),
-            conversations,
-            turn_coordinator,
-            thread_service,
-            default_agent_id,
-            authorizer,
-        );
-        Ok(TriggerPollerServices {
-            materializer,
-            trusted_submitter,
-            post_submit_hook_slot: Arc::new(std::sync::OnceLock::new()),
-            #[cfg(any(test, feature = "test-support"))]
-            pairing_service,
-        })
-    }
-    #[cfg(any())]
-    {
-        let conversations = local_runtime.trigger_conversation_services.clone();
         #[cfg(any(test, feature = "test-support"))]
         let pairing_service: Arc<
             dyn ironclaw_conversations::ConversationActorPairingService,
@@ -3303,8 +3173,6 @@ pub async fn build_reborn_runtime(
         check_production_scheduler_wake_wiring(profile, &wiring)?;
         wiring
     };
-    #[cfg(any())]
-    let production_scheduler_wake: Option<ironclaw_runner::runtime::SchedulerWakeWiring> = None;
 
     let runtime_parts = match deployment.substrate() {
         RuntimeSubstrate::Local => {
@@ -3319,27 +3187,19 @@ pub async fn build_reborn_runtime(
             local_runtime_parts(local_runtime)
         }
         RuntimeSubstrate::ProductionShaped => {
-            {
-                let production_runtime = services.production_runtime.as_ref().ok_or(
-                    RebornRuntimeError::InvalidArgument {
-                        reason: "production RebornServices did not provide runtime substrate"
-                            .to_string(),
-                    },
-                )?;
-                match production_runtime {
-                    crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
-                        production_runtime_parts(graph)
-                    }
-                    crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
-                        production_runtime_parts(graph)
-                    }
+            let production_runtime = services.production_runtime.as_ref().ok_or(
+                RebornRuntimeError::InvalidArgument {
+                    reason: "production RebornServices did not provide runtime substrate"
+                        .to_string(),
+                },
+            )?;
+            match production_runtime {
+                crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
+                    production_runtime_parts(graph)
                 }
-            }
-            #[cfg(any())]
-            {
-                return Err(RebornRuntimeError::InvalidArgument {
-                    reason: "production runtime requires a durable storage feature".to_string(),
-                });
+                crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
+                    production_runtime_parts(graph)
+                }
             }
         }
         // `RuntimeSubstrate::None` never reaches here: the disabled
@@ -4209,10 +4069,6 @@ pub async fn build_reborn_runtime(
         ),
         crate::factory::CredentialRefreshWorkerReady::Absent => None,
     };
-    // When no db feature is active, silence the unused-variable warning.
-    #[cfg(any())]
-    let _ = credential_refresh;
-
     let trace_flush_worker =
         crate::observability::trace_capture::spawn_trace_queue_flush_worker(trace_capture_scopes);
     // Scheduler is running (started inside build_default_planned_runtime); mark readiness.

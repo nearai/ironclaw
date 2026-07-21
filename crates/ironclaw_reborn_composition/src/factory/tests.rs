@@ -439,8 +439,6 @@ async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornRuntime
         outbound_state: Arc::clone(&base_runtime.outbound_state),
         delivered_gate_routes: Arc::clone(&base_runtime.delivered_gate_routes),
         triggered_run_delivery: Arc::clone(&base_runtime.triggered_run_delivery),
-        #[cfg(any())]
-        trigger_conversation_services: base_runtime.trigger_conversation_services.clone(),
         trigger_conversation_services: tokio::sync::OnceCell::new(),
         checkpoint_state_store: Arc::clone(&base_runtime.checkpoint_state_store),
         loop_checkpoint_store: Arc::clone(&base_runtime.loop_checkpoint_store),
@@ -1516,8 +1514,6 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
         .production_runtime
         .as_ref()
         .expect("production runtime");
-    #[cfg(any())]
-    let RebornProductionRuntimeServices::LibSql(graph) = production_runtime;
     let graph = match production_runtime {
         RebornProductionRuntimeServices::LibSql(graph) => graph,
         RebornProductionRuntimeServices::Postgres(_) => {
@@ -1630,8 +1626,6 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
         .production_runtime
         .as_ref()
         .expect("production runtime");
-    #[cfg(any())]
-    let RebornProductionRuntimeServices::LibSql(graph) = production_runtime;
     let graph = match production_runtime {
         RebornProductionRuntimeServices::LibSql(graph) => graph,
         RebornProductionRuntimeServices::Postgres(_) => {
@@ -1873,66 +1867,6 @@ async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
         .expect("SSO user should resolve host-managed NEAR AI credential");
     assert_eq!(resolved.handle, nearai_access_secret);
     assert_eq!(resolved.scope, nearai_account_scope);
-}
-
-#[cfg(any())]
-#[tokio::test]
-async fn local_dev_nearai_mcp_skips_auto_activation_without_durable_product_auth() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let owner = "local-dev-nearai-mcp-no-durable-owner";
-    let services = build_reborn_services(nearai_bootstrap_input_with_base(
-            owner,
-            dir.path().join("local-dev"),
-            "http://private.near.ai",
-            "nearai-test-key",
-        ))
-        .await
-        .expect("local-dev services build should ignore invalid NEAR AI MCP endpoint without durable product auth");
-    let local_runtime = services.local_runtime.as_ref().expect("local runtime");
-    let extension_management = local_runtime
-        .extension_management
-        .as_ref()
-        .expect("extension management");
-    let nearai_ref =
-        LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
-
-    let projection = extension_management
-        .project(
-            nearai_ref,
-            extension_management.tenant_operator_user_id_for_test(),
-        )
-        .await
-        .expect("NEAR AI MCP projected");
-    assert_eq!(projection.phase, LifecyclePhase::Discovered);
-
-    let capabilities = extension_management
-        .active_model_visible_capabilities()
-        .await
-        .expect("active capabilities");
-    assert!(
-        capabilities
-            .iter()
-            .all(|capability| capability.id.as_str() != "nearai.web_search")
-    );
-
-    let auth_scope = AuthProductScope::new(
-        local_dev_nearai_mcp_owner_scope(UserId::new(owner).unwrap(), None)
-            .expect("NEAR AI MCP owner scope"),
-        AuthSurface::Api,
-    );
-    let accounts = services
-        .product_auth
-        .as_ref()
-        .expect("product auth")
-        .credential_account_record_source()
-        .accounts_for_owner(&auth_scope)
-        .await
-        .expect("credential accounts load");
-    assert!(
-        accounts
-            .iter()
-            .all(|account| account.provider.as_str() != "nearai")
-    );
 }
 
 #[tokio::test]

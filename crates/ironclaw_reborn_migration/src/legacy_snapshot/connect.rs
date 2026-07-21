@@ -72,10 +72,6 @@ pub(crate) async fn connect(source: &SourceDb) -> Result<(LegacyDb, LegacyHandle
             ensure_schema_current(&legacy_db).await?;
             Ok((legacy_db, handles))
         }
-        #[cfg(any())]
-        SourceDb::LibSql { .. } => Err(LegacyError::Connect(
-            "libsql feature not enabled in this build".to_string(),
-        )),
         SourceDb::Postgres { url } => {
             let pool = open_postgres(url)?;
             // Cheap connectivity smoke test, mirroring `Store::new`.
@@ -88,10 +84,6 @@ pub(crate) async fn connect(source: &SourceDb) -> Result<(LegacyDb, LegacyHandle
             ensure_schema_current(&legacy_db).await?;
             Ok((legacy_db, handles))
         }
-        #[cfg(any())]
-        SourceDb::Postgres { .. } => Err(LegacyError::Connect(
-            "postgres feature not enabled in this build".to_string(),
-        )),
     }
 }
 

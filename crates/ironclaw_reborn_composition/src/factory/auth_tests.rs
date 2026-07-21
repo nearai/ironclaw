@@ -418,8 +418,6 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
         .production_runtime
         .as_ref()
         .expect("production runtime");
-    #[cfg(any())]
-    let RebornProductionRuntimeServices::LibSql(graph) = production_runtime;
     let graph = match production_runtime {
         RebornProductionRuntimeServices::LibSql(graph) => graph,
         RebornProductionRuntimeServices::Postgres(_) => panic!("expected libsql runtime"),

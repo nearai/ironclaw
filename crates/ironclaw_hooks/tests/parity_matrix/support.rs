@@ -416,11 +416,6 @@ where
             ),
         }
     }
-    #[cfg(any())]
-    {
-        require_postgres_or_skip(script_name);
-    }
-
     eprintln!("[{script_name}] parity legs executed: {ran:?}");
     ran
 }

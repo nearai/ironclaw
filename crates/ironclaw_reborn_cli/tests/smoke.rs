@@ -3982,45 +3982,6 @@ fn onboard_bootstraps_reborn_home_without_touching_v1_state() {
     );
 }
 
-#[cfg(any())]
-#[test]
-fn onboard_reduced_feature_build_reports_llm_provisioning_as_unavailable() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let process_home = temp.path().join("process-home");
-    let reborn_home = temp.path().join("reborn-home");
-    std::fs::create_dir_all(&process_home).expect("create process home");
-
-    let output = reborn_command()
-        .arg("onboard")
-        .env_clear()
-        .env("HOME", &process_home)
-        .env("IRONCLAW_REBORN_HOME", &reborn_home)
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
-        .output()
-        .expect("reduced-feature ironclaw onboard should run");
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("llm_credentials: unavailable in this build"),
-        "the feature-off outcome must not be reported as non-interactive: {stdout}"
-    );
-    assert!(
-        stdout.contains("--features full") && stdout.contains("rerun `ironclaw onboard`"),
-        "reduced-feature onboarding must print feature-specific remediation: {stdout}"
-    );
-    assert!(
-        !stdout.contains(
-            "configure LLM credentials: rerun `ironclaw onboard` from an interactive terminal"
-        ),
-        "feature-disabled provisioning must not blame terminal interactivity: {stdout}"
-    );
-}
-
 #[test]
 fn onboard_is_idempotent_for_the_webui_token_file() {
     // Token doubles as serve's session-signing key: re-running onboard must

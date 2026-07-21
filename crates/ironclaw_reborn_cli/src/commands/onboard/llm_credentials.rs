@@ -51,11 +51,6 @@ pub(crate) enum LlmCredentialProvisionOutcome {
     SkippedNonInteractivePartialEnv {
         reason: String,
     },
-    /// This binary was built without the storage/provider features required
-    /// for interactive LLM provisioning. Unlike `SkippedNonInteractive`,
-    /// changing terminal interactivity cannot make this step available.
-    #[cfg(any())]
-    UnavailableInBuild,
 }
 
 impl LlmCredentialProvisionOutcome {
@@ -79,8 +74,6 @@ impl LlmCredentialProvisionOutcome {
                     "skipped (non-interactive session; partial environment LLM config: {reason})"
                 )
             }
-            #[cfg(any())]
-            Self::UnavailableInBuild => "unavailable in this build (requires `libsql`)".to_string(),
         }
     }
 }
@@ -89,9 +82,6 @@ impl LlmCredentialProvisionOutcome {
 /// secret store from. Injected — mirrors [`PromptSource`] — so a test can
 /// supply a store whose `put` fails, proving the store-before-config write
 /// ordering without touching the real local-dev libsql-backed store.
-/// - Gated on `libsql`, the same cfg as
-///   `ironclaw_reborn_composition::LlmKeyStore` (which only exists behind that
-///   feature); see the `#[cfg(not(...))]` stub below for feature-off.
 pub(crate) trait LlmKeyStoreOpener {
     fn open(&self, home_path: &Path) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore>;
 }
@@ -114,19 +104,6 @@ impl LlmKeyStoreOpener for EncryptedLlmKeyStoreOpener {
     }
 }
 
-/// Feature-off stub: no `LlmKeyStore` type without `libsql`. Exists so
-/// `execute()`'s unconditional
-/// `&EncryptedLlmKeyStoreOpener` call site compiles everywhere — the
-/// feature-off `provision_llm_credentials` below never calls `open`.
-#[cfg(any())]
-pub(crate) trait LlmKeyStoreOpener {}
-
-#[cfg(any())]
-pub(crate) struct EncryptedLlmKeyStoreOpener;
-
-#[cfg(any())]
-impl LlmKeyStoreOpener for EncryptedLlmKeyStoreOpener {}
-
 /// Where `provision_via_menu`'s pre-write key/model verification probe comes
 /// from — injected so a test can script outcomes (rejected key, unreachable
 /// endpoint, ok-with-a-model-list, …) without a live LLM endpoint.
@@ -134,8 +111,6 @@ impl LlmKeyStoreOpener for EncryptedLlmKeyStoreOpener {}
 ///   the side-effecting network call itself, so its method takes the
 ///   already-built [`ironclaw_reborn_composition::RebornProviderAdmin`]
 ///   rather than raw construction ingredients.
-/// - Gated the same as [`LlmKeyStoreOpener`]: no `RebornProviderAdmin`/
-///   `ProviderProbeOutcome` without `libsql`.
 pub(crate) trait LlmProbe {
     fn probe(
         &self,
@@ -172,18 +147,6 @@ impl LlmProbe for LiveLlmProbe {
         })
     }
 }
-
-/// Feature-off stub, same reasoning as [`LlmKeyStoreOpener`]'s stub: keeps
-/// `execute()`'s unconditional `&LiveLlmProbe` call site compiling; the
-/// feature-off `provision_llm_credentials` below never calls `probe`.
-#[cfg(any())]
-pub(crate) trait LlmProbe {}
-
-#[cfg(any())]
-pub(crate) struct LiveLlmProbe;
-
-#[cfg(any())]
-impl LlmProbe for LiveLlmProbe {}
 
 /// Provision onboard's `[llm.default]` slot.
 ///
@@ -607,26 +570,6 @@ fn provider_api_key_required(
     admin
         .effective_api_key_required(provider_id)
         .map_err(|error| LlmCredentialPromptError::Other(error.into()))
-}
-
-/// No `libsql`, nothing to write to — same reasoning as
-/// `provision_master_key`'s not-any-storage-feature fallback.
-#[cfg(any())]
-pub(crate) fn provision_llm_credentials(
-    home: &RebornHome,
-    _boot: &ironclaw_reborn_config::RebornBootConfig,
-    _prompts: &mut dyn PromptSource,
-    _store_opener: &dyn LlmKeyStoreOpener,
-    _probe: &dyn LlmProbe,
-    _force: bool,
-) -> Result<LlmCredentialProvisionOutcome, LlmCredentialPromptError> {
-    // The full provider path validates the persisted config while checking
-    // whether credentials are already configured. Preserve that fail-closed
-    // behavior in feature-reduced builds even though they cannot provision an
-    // LLM: onboarding must never report success over a corrupt config.toml.
-    let _ = ironclaw_reborn_config::RebornConfigFile::load(&home.config_file_path())
-        .map_err(|error| LlmCredentialPromptError::Other(error.into()))?;
-    Ok(LlmCredentialProvisionOutcome::UnavailableInBuild)
 }
 
 #[cfg(test)]

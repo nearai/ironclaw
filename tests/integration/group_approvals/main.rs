@@ -186,7 +186,7 @@ async fn approvals_group_libsql_e2e() {
         .await
         .expect("approve-always persists cross-thread");
     // W4-ASK-EACH-ONCE: must run after every other `builtin.write_file`
-    // scenario above -- see the non-libsql variant's comment above.
+    // scenario above because it flips approval preferences.
     report.record(
         "ask_each_time_resumes_once",
         scenario_ask_each_time_resumes_once::run(&g).await,

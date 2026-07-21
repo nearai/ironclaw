@@ -227,19 +227,6 @@ fn write_llm_api_key(
     })
 }
 
-#[cfg(any())]
-fn write_llm_api_key(
-    _context: &RebornCliContext,
-    _provider_id: &str,
-    _value: &str,
-    _store_opener: &dyn SecretStoreOpener,
-) -> anyhow::Result<()> {
-    anyhow::bail!(
-        "`config set <provider>.api_key` requires the binary to be built with the `libsql` Cargo \
-         feature"
-    )
-}
-
 fn write_google_client_secret(
     context: &RebornCliContext,
     value: &str,
@@ -257,18 +244,6 @@ fn write_google_client_secret(
             .await
             .map_err(anyhow::Error::from)
     })
-}
-
-#[cfg(any())]
-fn write_google_client_secret(
-    _context: &RebornCliContext,
-    _value: &str,
-    _store_opener: &dyn SecretStoreOpener,
-) -> anyhow::Result<()> {
-    anyhow::bail!(
-        "`config set google.client_secret` requires the binary to be built with the `libsql` \
-         Cargo feature"
-    )
 }
 
 // ── Apply step ──────────────────────────────────────────────────
