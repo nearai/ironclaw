@@ -39,3 +39,30 @@ cargo test -p ironclaw_architecture attachment -- --nocapture
 ## Follow-up
 
 The parent controller is responsible for the requested broader product-workflow and composition validation matrix and for reviewing the concurrent attachment-review changes left unstaged by this task.
+
+## Follow-up compile fix
+
+Broader validation exposed `E0382` in `project_fs_download_response`: moving the owned `file.mime_type` into the response builder happened before `file.size_bytes()` borrowed the carrier. The fix computes `size_bytes` before moving any owned fields and then uses that value for `Content-Length`; response behavior is unchanged.
+
+Red evidence:
+
+```text
+cargo check -p ironclaw_webui
+error[E0382]: borrow of partially moved value: `file`
+```
+
+Exact follow-up results:
+
+```text
+cargo test -p ironclaw_webui --test webui_v2_handlers_contract
+test result: ok. 105 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+cargo check -p ironclaw_webui
+Finished `dev` profile successfully
+
+cargo fmt --all -- --check
+passed
+
+git diff --check
+passed
+```

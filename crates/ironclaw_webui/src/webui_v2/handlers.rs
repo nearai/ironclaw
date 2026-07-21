@@ -483,11 +483,12 @@ pub async fn read_project_file(
 /// Serving every file as an attachment with `nosniff` means a generated
 /// `.html`/`.svg` cannot execute in the app origin.
 fn project_fs_download_response(file: ProjectFsFile) -> Result<Response, WebUiV2HttpError> {
+    let size_bytes = file.size_bytes();
     let filename = sanitized_download_filename(file.filename.as_deref());
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, file.mime_type)
-        .header(header::CONTENT_LENGTH, file.size_bytes())
+        .header(header::CONTENT_LENGTH, size_bytes)
         .header(
             header::CONTENT_DISPOSITION,
             format!("attachment; filename=\"{filename}\""),
