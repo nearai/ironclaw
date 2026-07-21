@@ -7,8 +7,9 @@
 //! can inspect exactly what carried over and what was dropped. Nothing is ever
 //! silently lost: a value that has no Reborn home lands here as a `LossyItem`.
 
-use ironclaw_host_api::UserId;
 use serde::{Deserialize, Serialize};
+
+use ironclaw_host_api::UserId;
 
 /// The domain a converted item or a loss belongs to. Keeps report entries
 /// grouped and greppable rather than free-text.

@@ -1661,6 +1661,7 @@ fn sample_context() -> ExecutionContext {
     let project_id = ProjectId::new("project1").unwrap();
 
     ExecutionContext {
+        run_id: None,
         invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,

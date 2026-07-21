@@ -13,40 +13,27 @@ publish = false
 [package.metadata.ironclaw]
 layer = "substrates"
 
-[features]
-default = []
-postgres = [
-    "dep:deadpool-postgres",
-    "dep:tokio-postgres",
-    "dep:tokio-postgres-rustls",
-    "dep:rustls",
-    "dep:rustls-native-certs",
-    "dep:webpki-roots",
-    "ironclaw_filesystem/postgres",
-]
-libsql = ["dep:libsql", "ironclaw_filesystem/libsql"]
-
 [dependencies]
 async-trait = "0.1"
-deadpool-postgres = { version = "0.14", optional = true }
+deadpool-postgres = "0.14"
 hex = "0.4"
 ironclaw_events = { path = "../ironclaw_events", version = "0.1.0" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
-libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
-rustls = { version = "0.23", optional = true, default-features = false, features = ["ring"] }
-rustls-native-certs = { version = "0.8", optional = true }
+libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rustls-native-certs = "0.8"
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "rt", "sync", "time"] }
-tokio-postgres = { version = "0.7", optional = true, features = ["with-serde_json-1"] }
-tokio-postgres-rustls = { version = "0.13", optional = true }
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
+tokio-postgres-rustls = "0.13"
 tracing = "0.1"
 urlencoding = "2"
-webpki-roots = { version = "1.0", optional = true }
+webpki-roots = "1.0"
 
 [dev-dependencies]
 chrono = { version = "0.4", features = ["serde"] }

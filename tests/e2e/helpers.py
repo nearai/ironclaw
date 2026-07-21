@@ -227,18 +227,59 @@ EMULATE_GITHUB_SECONDARY_BEARER = "ghp_emulate_github_secondary_token"
 # which targets the legacy `ironclaw` web channel.
 REBORN_V2_AUTH_TOKEN = "e2e-reborn-v2-bearer-token-0123456789abcdef"
 
-# Selectors for the Reborn WebUI v2 React SPA (served under /v2/). The shell
+# Selectors for the Reborn WebUI v2 React SPA (served at /). The shell
 # DOM differs entirely from the legacy gateway in SEL, so keep these separate.
 SEL_V2 = {
     "root":           "#v2-root",          # SPA mount point (index.html)
     "login_token":    "#v2-token",         # token input on the login/connect view
+    "admin_new_user_button_name": "New user",
+    "admin_create_form": "form",
+    "admin_display_name_input": 'input[type="text"]',
+    "admin_email_input": 'input[type="email"]',
+    "admin_create_user_button_name": "Create user",
+    "admin_token_created_text": "Token created",
+    "admin_token_value": "code",
+    "admin_token_description_text": "Copy this now — it will not be shown again.",
+    "admin_create_token_button_name": "Create token",
+    "admin_user_secrets_panel": "[data-testid='admin-user-secrets-panel']",
+    "admin_secret_handle_input": "[data-testid='admin-secret-handle']",
+    "admin_secret_value_input": "[data-testid='admin-secret-value']",
+    "admin_secret_save": "[data-testid='admin-secret-save']",
+    "admin_secret_status": "[data-testid='admin-secret-status']",
+    "admin_secret_row_for": (
+        "[data-testid='admin-secret-row'][data-secret-handle='{handle}']"
+    ),
+    "admin_secret_replace_for": (
+        "[data-testid='admin-secret-replace'][data-secret-handle='{handle}']"
+    ),
+    "admin_secret_delete_for": (
+        "[data-testid='admin-secret-delete'][data-secret-handle='{handle}']"
+    ),
+    "admin_secret_delete_dialog": "[data-testid='admin-secret-delete-dialog']",
+    "admin_secret_delete_confirm": "[data-testid='admin-secret-delete-confirm']",
     "sidebar":        "#gateway-sidebar",  # app navigation sidebar
     "sidebar_button": "#gateway-sidebar button",
+    "nav_workspace": "[data-testid='nav-workspace']",
+    "workspace_heading": "[data-testid='workspace-heading']",
+    "workspace_download": "[data-testid='workspace-download']",
+    "workspace_directory_entry_for": (
+        "[data-testid='workspace-directory-entry'][data-entry-path='{path}']"
+    ),
+    "thread_delete_for": (
+        '[data-testid="thread-delete"][data-thread-id="{id}"]'
+    ),
+    "confirm_dialog_cancel": '[data-testid="confirm-dialog-cancel"]',
+    "confirm_dialog_confirm": '[data-testid="confirm-dialog-confirm"]',
     "sidebar_toggle": "button[aria-label='Toggle sidebar']",
     "sign_out_button": "button[title='Sign out']",
+    "appearance_theme_light": "[data-testid='appearance-theme-light']",
+    "appearance_theme_dark": "[data-testid='appearance-theme-dark']",
     "chat_composer":  "[data-testid='chat-composer']",  # message textarea on /chat
     "attachment_file_input": "input[type=file][multiple]",
     "typing_indicator": "[data-testid='typing-indicator']",
+    "connection_status": "[data-testid='connection-status']",
+    "connection_status_toggle": "[data-testid='connection-status-toggle']",
+    "connection_status_label": "[data-testid='connection-status-label']",
     "msg_user":       "[data-testid='msg-user']",       # user message bubble
     "msg_assistant":  "[data-testid='msg-assistant']",  # assistant message bubble
     "msg_system":     "[data-testid='msg-system']",     # system notice bubble
@@ -251,10 +292,14 @@ SEL_V2 = {
     "notification_panel": "[data-testid='notification-panel']",
     "notification_row": "[data-testid='notification-row']",
     "notification_unread_dot": "[data-testid='notification-unread-dot']",
+    "toast": "[data-testid='toast']",
+    "toast_dismiss": "[data-testid='toast-dismiss']",
+    "toast_viewport": "[data-rht-toaster]",
     "header_logs_link": "[data-testid='header-logs-link']",
     "header_docs_link": "[data-testid='header-docs-link']",
     "command_palette_dialog_name": "Command palette",
     "command_palette_search_placeholder": "Type a command or search",
+    "command_palette_go_settings_name": "Go to Settings",
     "auth_gate":      "[data-testid='auth-gate']",
     "auth_gate_for":  "[data-testid='auth-gate'][data-auth-challenge='{kind}']",
     "auth_token_input": "[data-testid='auth-token-input']",
@@ -265,6 +310,9 @@ SEL_V2 = {
         "[data-strategy='{strategy}']"
     ),
     "channel_connect_dismiss": "[data-testid='channel-connect-dismiss']",
+    "extension_card_for": (
+        "[data-testid='extension-card'][data-extension-id='{id}']"
+    ),
     "pairing_section": "[data-testid='pairing-section']",
     "pairing_code_input": "[data-testid='pairing-code-input']",
     "pairing_submit": "[data-testid='pairing-submit']",
@@ -311,6 +359,7 @@ SEL_V2 = {
     "logs_entry_context": "[data-testid='logs-entry-context']",
     "logs_context_chip": "[data-testid='logs-context-chip'][data-context-key='{key}']",
     "settings_search_placeholder": "Search settings...",
+    "settings_import_file": 'input[type="file"][accept=".json,application/json"]',
     "settings_tool_row_for": (
         "[data-testid='settings-tool-row'][data-tool-name='{name}']"
     ),
@@ -318,6 +367,7 @@ SEL_V2 = {
         "[data-testid='settings-tool-permission-select'] button[aria-haspopup='listbox']"
     ),
     "settings_tool_lock": "[data-testid='settings-tool-lock']",
+    "skill_action_result": "[data-testid='skill-action-result']",
     "llm_provider_card_for": (
         "[data-testid='llm-provider-card'][data-provider-id='{provider_id}']"
     ),

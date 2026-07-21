@@ -24,7 +24,7 @@ async fn mcp_adapter_maps_executor_auth_required_to_dispatch_auth_required() {
         requirement: requirement.clone(),
     }));
     let descriptor = test_descriptor(RuntimeKind::Mcp, Vec::new());
-    let filesystem = LocalFilesystem::new();
+    let filesystem = DiskFilesystem::new();
     let governor = InMemoryResourceGovernor::new();
     let package = test_package(MCP_MANIFEST, "test");
     let policy = policy_with(
@@ -36,6 +36,7 @@ async fn mcp_adapter_maps_executor_auth_required_to_dispatch_auth_required() {
 
     let result = adapter
         .dispatch_json(RuntimeAdapterRequest {
+            run_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,
@@ -76,7 +77,7 @@ async fn mcp_adapter_preserves_executor_failure_cause() {
         reason: raw.to_string(),
     }));
     let descriptor = test_descriptor(RuntimeKind::Mcp, Vec::new());
-    let filesystem = LocalFilesystem::new();
+    let filesystem = DiskFilesystem::new();
     let governor = InMemoryResourceGovernor::new();
     let package = test_package(MCP_MANIFEST, "test");
     let policy = policy_with(
@@ -88,6 +89,7 @@ async fn mcp_adapter_preserves_executor_failure_cause() {
 
     let result = adapter
         .dispatch_json(RuntimeAdapterRequest {
+            run_id: None,
             package: &package,
             descriptor: &descriptor,
             filesystem: &filesystem,

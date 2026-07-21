@@ -8,10 +8,9 @@ publish = false
 layer = "kernel"
 
 [features]
-default = []
 test-support = []
-postgres = ["dep:deadpool-postgres", "ironclaw_filesystem/postgres", "ironclaw_resources/postgres", "ironclaw_run_state/postgres"]
-libsql = ["dep:libsql", "ironclaw_filesystem/libsql", "ironclaw_resources/libsql", "ironclaw_run_state/libsql"]
+postgres = ["dep:deadpool-postgres"]
+libsql = ["dep:libsql"]
 
 [dependencies]
 async-trait = "0.1"
@@ -74,7 +73,15 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 [dev-dependencies]
 axum = { version = "0.8", features = ["json"] }
 hex = "0.4"
+# Enables the in-memory-backed approval store constructors for tests only.
+ironclaw_approvals = { path = "../ironclaw_approvals", features = ["test-support"] }
+# Enables the in-memory-backed capability-lease store constructor for tests only.
+ironclaw_authorization = { path = "../ironclaw_authorization", features = ["test-support"] }
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
+# Enables the in-memory-backed process store constructors for tests only.
+ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support"] }
+# Enables the in-memory-backed run-state/approval store constructors for tests only.
+ironclaw_run_state = { path = "../ironclaw_run_state", features = ["test-support"] }
 sha2 = "0.11"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }

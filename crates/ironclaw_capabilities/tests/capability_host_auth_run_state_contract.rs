@@ -13,9 +13,9 @@ use support::*;
 async fn capability_host_blocks_auth_when_obligation_requires_secret_recovery() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
-    let run_state = InMemoryRunStateStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let handler = AuthRequiredObligationHandler;
-    let host = CapabilityHost::new(&registry, &dispatcher, &ObligatingAuthorizer)
+    let host = capability_host(&registry, &dispatcher, &ObligatingAuthorizer)
         .with_run_state(&run_state)
         .with_obligation_handler(&handler);
     let context = execution_context(CapabilitySet::default());
@@ -28,7 +28,6 @@ async fn capability_host_blocks_auth_when_obligation_requires_secret_recovery() 
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "needs auth"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -49,9 +48,9 @@ async fn capability_host_blocks_auth_when_dispatch_returns_auth_required() {
     // the run to BlockedAuth, not Failed, so auth-resume can pick it up.
     let registry = registry_with_echo_capability();
     let dispatcher = AuthRequiredDispatcher;
-    let run_state = InMemoryRunStateStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let authorizer = PlainAllowAuthorizer;
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
+    let host = capability_host(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
     let context = execution_context(CapabilitySet::default());
     let scope = context.resource_scope.clone();
     let invocation_id = context.invocation_id;
@@ -62,7 +61,6 @@ async fn capability_host_blocks_auth_when_dispatch_returns_auth_required() {
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "dispatch auth required"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -87,9 +85,9 @@ async fn capability_host_blocks_auth_when_dispatch_returns_auth_required() {
 async fn capability_host_fails_post_dispatch_auth_required_without_retryable_gate() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
-    let run_state = InMemoryRunStateStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let handler = PostDispatchAuthRequiredObligationHandler;
-    let host = CapabilityHost::new(&registry, &dispatcher, &ObligatingAuthorizer)
+    let host = capability_host(&registry, &dispatcher, &ObligatingAuthorizer)
         .with_run_state(&run_state)
         .with_obligation_handler(&handler);
     let context = execution_context(CapabilitySet::default());
@@ -102,7 +100,6 @@ async fn capability_host_fails_post_dispatch_auth_required_without_retryable_gat
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "post dispatch auth"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();

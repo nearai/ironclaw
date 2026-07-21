@@ -25,6 +25,13 @@ pub enum CapabilityInvocationError {
     AuthorizationDenied {
         capability: CapabilityId,
         reason: DenyReason,
+        /// Optional model-visible sanitized cause behind the collapsed
+        /// [`DenyReason`] (e.g. the runtime-policy planner's "requires process
+        /// effects but policy resolves to `ProcessBackendKind::None`"). The
+        /// closed `DenyReason` set cannot carry it, so callers that resolve a
+        /// specific fail-closed reason thread it here; `None` when the bare
+        /// verdict is self-explanatory. Surfaced via [`sanitized_failure_message`].
+        detail: Option<String>,
     },
     #[error("capability {capability} returned unsupported authorization obligations")]
     UnsupportedObligations {

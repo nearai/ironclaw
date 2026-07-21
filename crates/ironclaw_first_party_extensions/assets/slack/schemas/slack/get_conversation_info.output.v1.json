@@ -1,0 +1,35 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Slack get_conversation_info output",
+  "type": "object",
+  "properties": {
+    "ok": { "type": "boolean" },
+    "conversation": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Exact conversation ID." },
+        "name": { "type": "string", "description": "Channel name. Absent for DMs." },
+        "is_channel": { "type": "boolean" },
+        "is_private": { "type": "boolean" },
+        "is_im": { "type": "boolean" },
+        "is_mpim": { "type": "boolean" },
+        "is_member": { "type": "boolean", "description": "Whether the connected account belongs to this channel. Absent for DMs." },
+        "user": { "type": "string", "minLength": 1, "description": "For a DM: authoritative raw Slack user ID of the counterpart. Use for follow-up calls or <@U…> mentions; do not show it as plain text to the user." },
+        "user_display_name": { "type": "string", "description": "For a DM: human-readable counterpart name resolved via users.info. Use this in user-facing output. Absent when resolution failed." }
+      },
+      "required": ["id", "is_channel", "is_private", "is_im", "is_mpim"],
+      "allOf": [
+        {
+          "if": {
+            "properties": { "is_im": { "const": true } },
+            "required": ["is_im"]
+          },
+          "then": { "required": ["user"] }
+        }
+      ],
+      "additionalProperties": true
+    }
+  },
+  "required": ["ok", "conversation"],
+  "additionalProperties": true
+}

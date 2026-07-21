@@ -1,7 +1,10 @@
+// arch-exempt: large_file, WebUI facade DTOs live with their contract awaiting the RebornServicesApi domain-port split, plan #5985
 use chrono::{DateTime, Utc};
+use ironclaw_common::llm_costs::RunCost;
 use ironclaw_host_api::ThreadId;
 use ironclaw_product_adapters::{ProductOutboundEnvelope, ProjectionCursor};
 use ironclaw_threads::{SessionThreadRecord, SummaryArtifact, ThreadMessageRecord};
+use ironclaw_turns::run_profile::LoopModelUsage;
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunResponse, EventCursor, GateRef, ResumeTurnResponse,
     RetryTurnResponse, SanitizedFailure, TurnCheckpointId, TurnRunId, TurnRunState, TurnStatus,
@@ -496,7 +499,9 @@ pub struct RebornGetRunStateRequest {
 /// Deliberately omits M3-internal fields carried on [`TurnRunState`]:
 /// `scope`, `source_binding_ref`, `reply_target_binding_ref`, and
 /// `resolved_model_route`. Route handlers and downstream M5 consumers must
-/// build their views from this surface only.
+/// build their views from this surface only. Per-run token `usage` and USD
+/// `cost` are surfaced (mirroring the OpenAI-compatible API); the resolved
+/// model route stays internal — only its model id feeds cost pricing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornGetRunStateResponse {
     pub turn_id: String,
@@ -513,10 +518,49 @@ pub struct RebornGetRunStateResponse {
     pub gate_ref: Option<GateRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<SanitizedFailure>,
+    /// Cumulative token usage for the run, once the model has reported it.
+    /// `None` until the first model response lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<LoopModelUsage>,
+    /// USD cost priced from `usage` for the run's resolved model. `None` when
+    /// usage is absent or no concrete model was resolved (a default-model run
+    /// reports usage without cost until the active model is surfaced).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<RunCost>,
 }
 
-impl From<TurnRunState> for RebornGetRunStateResponse {
-    fn from(value: TurnRunState) -> Self {
+impl RebornGetRunStateResponse {
+    /// Build the WebUI run-state projection from canonical run state, pricing
+    /// USD `cost` from the run's `model_usage`.
+    ///
+    /// The model that feeds the cost table is chosen in this order:
+    /// 1. the run's `resolved_model_route` model id, when the caller explicitly
+    ///    selected/routed a model (only its id crosses; the route stays
+    ///    internal);
+    /// 2. otherwise `active_model_id` — the runtime's live default model, which
+    ///    for a default (unrouted) run is the model that actually ran.
+    ///
+    /// `cost` stays `None` only when no usage was reported or neither source
+    /// yields a concrete model id (the `"default"` alias and empty strings are
+    /// treated as non-concrete so a run is never mispriced against a sentinel).
+    pub fn from_run_state(value: TurnRunState, active_model_id: Option<&str>) -> Self {
+        let priced_model = value
+            .resolved_model_route
+            .as_ref()
+            .map(|route| route.model_id())
+            .or(active_model_id)
+            .map(str::trim)
+            .filter(|model| !model.is_empty() && !model.eq_ignore_ascii_case("default"));
+        let cost = match (value.model_usage, priced_model) {
+            (Some(usage), Some(model_id)) => Some(RunCost::from_usage(
+                model_id,
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_read_input_tokens,
+                usage.cache_creation_input_tokens,
+            )),
+            _ => None,
+        };
         Self {
             turn_id: value.turn_id.to_string(),
             run_id: value.run_id,
@@ -536,7 +580,19 @@ impl From<TurnRunState> for RebornGetRunStateResponse {
                 .failure
                 .as_ref()
                 .map(SanitizedFailure::public_projection),
+            usage: value.model_usage,
+            cost,
         }
+    }
+}
+
+impl From<TurnRunState> for RebornGetRunStateResponse {
+    /// Convenience conversion with no default-model fallback: a default-model
+    /// run (no `resolved_model_route`) reports usage without cost. Callers that
+    /// can supply the live active model — the facade's `get_run_state` — use
+    /// [`RebornGetRunStateResponse::from_run_state`] so those runs are priced.
+    fn from(value: TurnRunState) -> Self {
+        Self::from_run_state(value, None)
     }
 }
 
@@ -1118,6 +1174,40 @@ pub struct RebornAutomationInfo {
     pub is_active: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
+    /// Present while this automation's active fire is held (gate-parked or
+    /// still running) and scheduled fires are being skipped (#5886). Derived
+    /// at read time from the active run's state; never persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_hold: Option<RebornAutomationActiveHold>,
+}
+
+/// Why an automation's schedule is currently held, plus elapsed-occurrence
+/// accounting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAutomationActiveHold {
+    pub reason: RebornAutomationHoldReason,
+    /// The held fire's claimed slot — when the pause effectively began.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<DateTime<Utc>>,
+    /// Scheduled occurrences elapsed while held; display-only, capped. Not a
+    /// count of runs the poller attempted — accrues from wall-clock cron
+    /// slots regardless of poller activity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_occurrences: Option<u32>,
+    /// True when `elapsed_occurrences` hit the cap — render as "N+".
+    #[serde(default)]
+    pub elapsed_occurrences_capped: bool,
+}
+
+/// Client-visible hold reason. `in_progress` = the previous run is still
+/// executing; the gate-parked reasons need the user to act.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornAutomationHoldReason {
+    Approval,
+    Auth,
+    InProgress,
+    Other,
 }
 
 /// Source discriminator for automation rows.
@@ -1362,6 +1452,9 @@ pub enum RebornExtensionCredentialSetup {
         scopes: Vec<String>,
         invocation_id: String,
     },
+    /// Channel pairing: the setup card routes to the channel's pairing panel
+    /// (host-issued code + deep link), never a token-submit form.
+    Pairing,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

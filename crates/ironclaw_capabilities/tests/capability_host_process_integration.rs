@@ -18,7 +18,7 @@ use support::*;
 async fn capability_host_spawn_runs_background_process_through_process_host() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
-    let run_state = InMemoryRunStateStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let process_services = ProcessServices::in_memory();
     let executor = Arc::new(RecordingSuccessExecutor::default());
     let process_manager = process_services.background_manager(Arc::clone(&executor));
@@ -26,7 +26,7 @@ async fn capability_host_spawn_runs_background_process_through_process_host() {
         .host()
         .with_poll_interval(Duration::from_millis(5));
     let authorizer = SpawnOnlyAuthorizer;
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+    let host = capability_host(&registry, &dispatcher, &authorizer)
         .with_run_state(&run_state)
         .with_process_manager(&process_manager);
     let parent_process_id = ProcessId::new();
@@ -52,7 +52,6 @@ async fn capability_host_spawn_runs_background_process_through_process_host() {
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap();
@@ -72,7 +71,9 @@ async fn capability_host_spawn_runs_background_process_through_process_host() {
     let process_id = spawned.process.process_id;
     let result = process_host.await_result(&scope, process_id).await.unwrap();
     assert_eq!(result.status, ProcessStatus::Completed);
-    assert_eq!(result.output, Some(json!({"process":"done"})));
+    // Filesystem result store externalizes output behind `output_ref` (§4.3);
+    // the inline record field is None — the bytes are read via `output()` below.
+    assert_eq!(result.output, None);
     assert_eq!(
         process_host
             .status(&scope, process_id)
@@ -117,8 +118,8 @@ async fn capability_spawn_process_host_hides_cross_scope_status_and_output() {
         .host()
         .with_poll_interval(Duration::from_millis(5));
     let authorizer = SpawnOnlyAuthorizer;
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
-        .with_process_manager(&process_manager);
+    let host =
+        capability_host(&registry, &dispatcher, &authorizer).with_process_manager(&process_manager);
     let context = execution_context(CapabilitySet {
         grants: vec![spawn_grant()],
     });
@@ -133,7 +134,6 @@ async fn capability_spawn_process_host_hides_cross_scope_status_and_output() {
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message":"private"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap();
@@ -152,11 +152,11 @@ async fn capability_spawn_process_host_hides_cross_scope_status_and_output() {
 async fn capability_host_spawn_fails_closed_on_unsupported_obligations_before_process_start() {
     let registry = registry_with_echo_capability();
     let dispatcher = RecordingDispatcher::default();
-    let run_state = InMemoryRunStateStore::new();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let process_services = ProcessServices::in_memory();
     let executor = Arc::new(RecordingSuccessExecutor::default());
     let process_manager = process_services.background_manager(Arc::clone(&executor));
-    let host = CapabilityHost::new(&registry, &dispatcher, &SpawnObligatingAuthorizer)
+    let host = capability_host(&registry, &dispatcher, &SpawnObligatingAuthorizer)
         .with_run_state(&run_state)
         .with_process_manager(&process_manager);
     let context = execution_context(CapabilitySet {
@@ -171,7 +171,6 @@ async fn capability_host_spawn_fails_closed_on_unsupported_obligations_before_pr
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message":"must not spawn"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();

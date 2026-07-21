@@ -248,27 +248,154 @@ fn reject_unbacked_scoped_workdir(
     ))
 }
 
+/// Bound a failure reason before it becomes the dispatch safe summary.
+///
+/// Truncation counts chars (never bytes), so multibyte input cannot split a
+/// code point. No other sanitization happens here on purpose: downstream,
+/// `failure_from` (production.rs) validates the reason against the strict
+/// loop safe-summary rules — reasons that pass ride the summary, and reasons
+/// that fail (paths, newlines) are preserved on the model-visible diagnostic
+/// detail, where secret values are scrubbed and control characters
+/// normalized at the loop boundary.
+fn bounded_failure_reason(reason: String) -> String {
+    const MAX_CHARS: usize = 512;
+    if reason.chars().count() <= MAX_CHARS {
+        return reason;
+    }
+    let bounded: String = reason.chars().take(MAX_CHARS - 3).collect();
+    format!("{bounded}...")
+}
+
 fn shell_error(error: shell_core::ShellExecutionError) -> FirstPartyCapabilityError {
-    let kind = match error {
-        shell_core::ShellExecutionError::InvalidParameters(_) => {
-            RuntimeDispatchErrorKind::InputEncode
+    // Carry the reason: the model can only repair its call (fix a parameter,
+    // pick another approach) when the failure says what went wrong.
+    let (kind, reason) = match error {
+        shell_core::ShellExecutionError::InvalidParameters(reason) => {
+            (RuntimeDispatchErrorKind::InputEncode, reason)
         }
-        shell_core::ShellExecutionError::NotAuthorized(_) => RuntimeDispatchErrorKind::Client,
+        shell_core::ShellExecutionError::NotAuthorized(reason) => {
+            (RuntimeDispatchErrorKind::PolicyDenied, reason)
+        }
     };
-    FirstPartyCapabilityError::new(kind)
+    FirstPartyCapabilityError::with_safe_summary(kind, bounded_failure_reason(reason))
 }
 
 fn process_error(error: RuntimeProcessError) -> FirstPartyCapabilityError {
-    let kind = match error {
-        RuntimeProcessError::Timeout(_) => RuntimeDispatchErrorKind::Resource,
-        RuntimeProcessError::ExecutionFailed(_) => RuntimeDispatchErrorKind::Executor,
+    let (kind, reason) = match error {
+        RuntimeProcessError::Timeout(duration) => (
+            RuntimeDispatchErrorKind::Resource,
+            format!("shell command timed out after {}s", duration.as_secs()),
+        ),
+        RuntimeProcessError::ExecutionFailed(reason) => (
+            RuntimeDispatchErrorKind::Executor,
+            format!("shell execution failed: {reason}"),
+        ),
     };
-    FirstPartyCapabilityError::new(kind)
+    FirstPartyCapabilityError::with_safe_summary(kind, bounded_failure_reason(reason))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dispatch_safe_summary(error: &FirstPartyCapabilityError) -> Option<&str> {
+        match error {
+            FirstPartyCapabilityError::Dispatch { safe_summary, .. } => safe_summary.as_deref(),
+            FirstPartyCapabilityError::AuthRequired { .. } => None,
+        }
+    }
+
+    #[test]
+    fn shell_error_carries_the_invalid_parameter_reason() {
+        // The model must see WHY its shell call was rejected (e.g. which
+        // parameter was missing); a bare input-encode category leaves it
+        // retrying the identical call blind.
+        let error = shell_error(shell_core::ShellExecutionError::InvalidParameters(
+            "missing 'command' parameter".to_string(),
+        ));
+
+        let summary = dispatch_safe_summary(&error).expect("reason must be carried");
+        assert!(
+            summary.contains("missing 'command' parameter"),
+            "summary should carry the parameter reason, got: {summary}"
+        );
+    }
+
+    #[test]
+    fn process_error_carries_timeout_and_execution_reasons() {
+        let timeout = process_error(RuntimeProcessError::Timeout(Duration::from_secs(30)));
+        let summary = dispatch_safe_summary(&timeout).expect("timeout reason must be carried");
+        assert!(
+            summary.contains("timed out"),
+            "summary should describe the timeout, got: {summary}"
+        );
+
+        let failed = process_error(RuntimeProcessError::ExecutionFailed(
+            "spawn failed: no such file".to_string(),
+        ));
+        let summary = dispatch_safe_summary(&failed).expect("execution reason must be carried");
+        assert!(
+            summary.contains("spawn failed: no such file"),
+            "summary should carry the execution failure reason, got: {summary}"
+        );
+    }
+
+    #[test]
+    fn shell_error_preserves_paths_and_newlines_for_the_diagnostic_channel() {
+        // The producer must NOT pre-sanitize: reasons carrying paths or
+        // newlines fail the strict loop safe-summary validator downstream and
+        // are then preserved verbatim on the model-visible diagnostic detail
+        // (`failure_from` in production.rs), where secret values are scrubbed
+        // and control characters normalized at the loop boundary. Stripping
+        // them here would blind the diagnostic.
+        let error = shell_error(shell_core::ShellExecutionError::NotAuthorized(
+            "Blocked sensitive file access: cat /etc/passwd\nsecond line".to_string(),
+        ));
+
+        let summary = dispatch_safe_summary(&error).expect("reason must be carried");
+        assert!(
+            summary.contains("/etc/passwd"),
+            "the concrete path must be preserved for the diagnostic, got: {summary}"
+        );
+        assert!(
+            summary.contains('\n'),
+            "newlines must be preserved for the diagnostic, got: {summary:?}"
+        );
+    }
+
+    #[test]
+    fn bounded_failure_reason_keeps_exactly_512_chars_intact() {
+        let input = "x".repeat(512);
+
+        assert_eq!(bounded_failure_reason(input.clone()), input);
+    }
+
+    #[test]
+    fn bounded_failure_reason_truncates_513_chars_to_512_with_ellipsis() {
+        let bounded = bounded_failure_reason("x".repeat(513));
+
+        assert_eq!(bounded.chars().count(), 512);
+        assert!(bounded.ends_with("..."));
+        assert!(bounded.starts_with(&"x".repeat(509)));
+    }
+
+    #[test]
+    fn bounded_failure_reason_truncates_multibyte_input_on_char_boundaries() {
+        // 513 three-byte chars: byte-index truncation would panic or split a
+        // code point; char-based truncation must stay on boundaries.
+        let bounded = bounded_failure_reason("界".repeat(513));
+
+        assert_eq!(bounded.chars().count(), 512);
+        assert!(bounded.ends_with("..."));
+        assert_eq!(
+            bounded.chars().take(509).collect::<String>(),
+            "界".repeat(509)
+        );
+
+        // Exactly at the limit, multibyte input is kept intact.
+        let exact = "界".repeat(512);
+        assert_eq!(bounded_failure_reason(exact.clone()), exact);
+    }
 
     #[test]
     fn render_shell_output_preserves_unsaved_output() {

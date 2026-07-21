@@ -40,13 +40,16 @@ pnpm --version
 
 echo "==> WebUI frontend build"
 (
-    cd crates/ironclaw_webui_v2/frontend
+    cd crates/ironclaw_webui/frontend
     pnpm install --frozen-lockfile
     pnpm build
 )
 
 echo "==> clippy (all warnings)"
 cargo clippy --locked --all --benches --tests --examples --all-features -- -D warnings
+
+echo "==> static: include_str! paths + Docker COPY coverage"
+"$(git rev-parse --show-toplevel)/scripts/ci/check-include-str-paths.sh"
 
 echo "==> cargo deny"
 require_command cargo-deny "install with: cargo install cargo-deny"

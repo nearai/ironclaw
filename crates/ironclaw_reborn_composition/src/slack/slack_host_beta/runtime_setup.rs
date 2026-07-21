@@ -20,15 +20,12 @@ use crate::extension_host::extension_lifecycle::{
 };
 use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
-use crate::slack::slack_actor_identity::{
-    RebornUserIdentityLookup, SlackUserIdentityActorResolver,
-};
+use crate::slack::slack_actor_identity::SlackUserIdentityActorResolver;
 use crate::slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteAssignment, SlackChannelRouteError,
     SlackChannelRouteStore, SlackChannelRouteSubjectResolver, SlackChannelSetupActivation,
     SlackChannelSetupActivationError,
 };
-use crate::slack::slack_delivery::{PostSubmitDeliveryHook, TriggeredRunDeliveryDriver};
 use crate::slack::slack_host_state::FilesystemSlackHostState;
 use crate::slack::slack_outbound_targets::{
     SlackHostBetaOutboundTargetProvider, SlackOutboundTargetProviderConfig, SlackPersonalDmTarget,
@@ -52,6 +49,10 @@ use crate::slack::slack_setup::{
     SlackInstallationSetup, SlackInstallationSetupStore, SlackInstallationSetupUpdate,
     SlackSetupService,
 };
+use ironclaw_channel_delivery::{
+    PostSubmitDeliveryError, PostSubmitDeliveryHook, TriggeredRunDeliveryDriver,
+};
+use ironclaw_channel_host::identity::RebornUserIdentityLookup;
 
 use super::{
     ProvisioningSlackPersonalUserBinder, SlackConversationServices, SlackHostBetaActorUserResolver,
@@ -563,14 +564,23 @@ impl DynamicSlackTriggeredRunDeliveryHook {
 
 #[async_trait::async_trait]
 impl PostSubmitDeliveryHook for DynamicSlackTriggeredRunDeliveryHook {
-    async fn on_trigger_submitted(&self, fire: TriggerFire, run_id: TurnRunId, scope: TurnScope) {
+    async fn on_trigger_submitted(
+        &self,
+        fire: TriggerFire,
+        run_id: TurnRunId,
+        scope: TurnScope,
+    ) -> Result<(), PostSubmitDeliveryError> {
         match self.current_driver().await {
-            Ok(Some(driver)) => driver.on_trigger_submitted(fire, run_id, scope).await,
+            Ok(Some(driver)) => {
+                PostSubmitDeliveryHook::on_trigger_submitted(driver.as_ref(), fire, run_id, scope)
+                    .await
+            }
             Ok(None) => {
                 tracing::debug!(
                     %run_id,
                     "Slack dynamic triggered-run delivery skipped: Slack setup is not configured"
                 );
+                Ok(())
             }
             Err(error) => {
                 tracing::warn!(
@@ -578,6 +588,7 @@ impl PostSubmitDeliveryHook for DynamicSlackTriggeredRunDeliveryHook {
                     %error,
                     "Slack dynamic triggered-run delivery skipped: delivery hook unavailable"
                 );
+                Ok(())
             }
         }
     }
@@ -668,7 +679,7 @@ impl DynamicSlackInstallationResolver {
             .map_err(map_build_error_to_ingress_not_found(
                 "build Slack setup config",
             ))?;
-        let identity_lookup: Arc<dyn crate::slack::slack_actor_identity::RebornUserIdentityLookup> =
+        let identity_lookup: Arc<dyn ironclaw_channel_host::identity::RebornUserIdentityLookup> =
             self.state.clone();
         let actor_user_resolver = Arc::new(SlackHostBetaActorUserResolver::new(Arc::new(
             SlackUserIdentityActorResolver::new(Arc::clone(&identity_lookup)),
@@ -1012,7 +1023,7 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     use ironclaw_host_api::{SecretHandle, UserId};
-    use ironclaw_secrets::InMemorySecretStore;
+    use ironclaw_secrets::FilesystemSecretStore;
 
     use tokio::sync::RwLock;
 
@@ -1025,7 +1036,7 @@ mod tests {
     #[tokio::test]
     async fn seed_legacy_slack_setup_fails_closed_without_identity_binding() {
         let setup_store = Arc::new(InMemorySetupStore::empty());
-        let secret_store = Arc::new(InMemorySecretStore::default());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let setup_service = Arc::new(SlackSetupService::new(
             TenantId::new("tenant:slack").unwrap(),
             AgentId::new("agent:slack").unwrap(),
@@ -1082,7 +1093,7 @@ mod tests {
             None,
             UserId::new("user:operator").unwrap(),
             setup_store,
-            Arc::new(InMemorySecretStore::default()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
         ));
         let binding_store = Arc::new(RecordingBindingStore::default());
         let route_store = Arc::new(RecordingRouteStore::default());
@@ -1126,7 +1137,7 @@ mod tests {
             None,
             UserId::new("user:operator").unwrap(),
             Arc::new(InMemorySetupStore::new(setup_record(7))),
-            Arc::new(InMemorySecretStore::default()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
         ));
         let resolver = DynamicSlackPersonalConnectionScopeResolver { setup_service };
 
@@ -1147,7 +1158,7 @@ mod tests {
             None,
             UserId::new("user:operator").unwrap(),
             Arc::new(InMemorySetupStore::empty()),
-            Arc::new(InMemorySecretStore::default()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
         ));
         let resolver = DynamicSlackPersonalConnectionScopeResolver { setup_service };
 

@@ -76,7 +76,7 @@ fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         )?,
         lifecycle_manifest(
             EXTENSION_ACTIVATE_CAPABILITY_ID,
-            "Activate an installed Reborn extension for the local-dev capability surface. Use after install succeeds or when install reports the extension is already installed. This is the step that opens the credential/auth gate when required; do not ask the user for credentials before calling it. If activation returns activated=true with visible_capability_ids, those model-visible tools are ready unless a later tool call raises auth_required. If activation says the extension is an external channel or publishes no model-visible tools, follow the returned channel-specific setup/pairing/connect instructions first. For proof-code flows, tell the user to message the extension app/bot and paste the code into the WebChat connection panel, not into normal chat; after the connection panel succeeds, continue the original request.",
+            "Activate an installed Reborn extension for the local-dev capability surface. Use after install succeeds or when install reports the extension is already installed. This is the step that opens the credential/auth gate when required; do not ask the user for credentials before calling it. If activation returns activated=true with visible_capability_ids, those model-visible tools are ready unless a later tool call raises auth_required. If activation says the extension is an external channel or publishes no model-visible tools, follow the returned channel-specific setup/pairing/connect instructions first. For proof-code flows, tell the user to message the extension app/bot and paste the code into the WebChat connection panel, not into normal chat; after the connection panel succeeds, continue the original request. If activation fails with instance-configuration remediation (naming ironclaw config set commands), relay those exact commands verbatim to the user instead of the credential/OAuth guidance above.",
             vec![
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
@@ -339,28 +339,77 @@ fn extension_package_ref(
         .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode))
 }
 
+/// Fixed, host-authored, validator-safe headline for the
+/// `dispatch_with_host_remediation` call below — the strict `safe_summary`
+/// validator rejects `{}[]<>/` and secret-like vocabulary
+/// (`agent-loop-capabilities` invariant 2), so the full `config set`
+/// remediation text rides the trusted host-remediation channel instead;
+/// `safe_summary` stays this short fixed literal.
+const PROVIDER_INSTANCE_NOT_CONFIGURED_SAFE_SUMMARY: &str =
+    "extension activation requires host instance configuration";
+
 fn lifecycle_error(error: ProductWorkflowError) -> FirstPartyCapabilityError {
-    let kind = match error {
-        ProductWorkflowError::InvalidBindingRequest { .. }
-        | ProductWorkflowError::UnsupportedActionKind { .. } => {
-            RuntimeDispatchErrorKind::InputEncode
+    match error {
+        // UNTRUSTED on purpose. `InvalidBindingRequest` has ~40 construction
+        // sites and several interpolate externally-influenced text: a hosted
+        // MCP server's live `tools/list` tool names
+        // (`hosted_mcp_discovery.rs` -> `hosted_mcp_discovery_error`), the
+        // MODEL-chosen `extension_id` (charset-validated only, e.g. "extension
+        // {} is not installed"), and uploaded-zip entry names
+        // (`extension_bundle.rs`). `HostRemediation::new` is a VALUE guard, not
+        // a provenance guard — it rejects credential-SHAPED tokens but allows
+        // adversarial prose — so routing this whole class onto the trusted
+        // channel would stamp `ObservationTrust::HostAuthored` on attacker
+        // -influenced text and skip the credential-vocabulary scan
+        // `ironclaw_threads` applies to untrusted output. The trusted channel
+        // is reserved for reasons built entirely from host-authored constants
+        // (the `ProviderInstanceNotConfigured` arm below).
+        ProductWorkflowError::InvalidBindingRequest { reason } => {
+            FirstPartyCapabilityError::dispatch_with_diagnostic(
+                RuntimeDispatchErrorKind::InputEncode,
+                None,
+                reason,
+            )
         }
-        ProductWorkflowError::Transient { .. } => RuntimeDispatchErrorKind::OperationFailed,
-        _ => RuntimeDispatchErrorKind::OperationFailed,
-    };
-    FirstPartyCapabilityError::new(kind)
+        // The third readiness axis: a provider-instance readiness failure is
+        // a build-time configuration fault, not a malformed-input fault, so it
+        // maps to `OperationFailed` rather than `InvalidBindingRequest`'s
+        // `InputEncode` (PR #6095 misclassification precedent). Both arms are
+        // non-terminal, but they deliberately ride DIFFERENT trust channels:
+        // `InvalidBindingRequest` above stays UNTRUSTED
+        // (`dispatch_with_diagnostic`) because its ~40 construction sites
+        // interpolate externally-influenced text — MCP tool names off the
+        // wire, model-supplied `extension_id`, uploaded-zip entry names. This
+        // arm is the one exception routed onto the TRUSTED channel
+        // (`dispatch_with_host_remediation`), because its `reason` is built
+        // entirely from host-authored constants.
+        ProductWorkflowError::ProviderInstanceNotConfigured { reason } => {
+            FirstPartyCapabilityError::dispatch_with_host_remediation(
+                RuntimeDispatchErrorKind::OperationFailed,
+                Some(PROVIDER_INSTANCE_NOT_CONFIGURED_SAFE_SUMMARY.to_string()),
+                reason,
+            )
+        }
+        ProductWorkflowError::UnsupportedActionKind { .. } => {
+            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
+        }
+        ProductWorkflowError::Transient { .. } => {
+            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+        }
+        _ => FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
-    #[cfg(feature = "slack-v2-host-beta")]
     use std::{collections::HashMap, path::PathBuf, sync::Mutex};
 
     use ironclaw_auth::{
         AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
         CredentialAccountStatus, CredentialOwnership, NewCredentialAccount, ProviderScope,
     };
+    use ironclaw_extensions::ExtensionInstallationId;
     use ironclaw_host_api::{
         CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilitySet, ExecutionContext,
         ExtensionId, GrantConstraints, MountView, NetworkPolicy, NetworkTargetPattern,
@@ -373,14 +422,30 @@ mod tests {
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
     use super::*;
-    use crate::{RebornBuildInput, RebornServices, build_reborn_services};
-    #[cfg(feature = "slack-v2-host-beta")]
+    use crate::{OAuthClientConfig, RebornBuildInput, RebornServices, build_reborn_services};
     use ironclaw_product_workflow::{
         ChannelConnectionFacade, RebornServicesError, WebUiAuthenticatedCaller,
     };
     use ironclaw_product_workflow::{
         ChannelConnectionRequirement, LifecyclePhase, RebornChannelConnectStrategy,
     };
+
+    /// Dummy but well-formed Google OAuth backend config for tests below that
+    /// exercise PER-ACCOUNT credential gating (scope coalescing, shared
+    /// credential reuse) rather than the provider-instance readiness map —
+    /// without this, every google-family activation on a plain
+    /// `RebornBuildInput::local_dev(..)` fixture now fails closed
+    /// with `ProviderInstanceNotConfigured` before it ever reaches the
+    /// per-account gate these tests target. Mirrors
+    /// `factory/auth_tests.rs::local_dev_google_oauth_backend_builds_with_host_provider_config`.
+    fn test_google_oauth_client_config() -> OAuthClientConfig {
+        OAuthClientConfig::new(
+            "itest-google-client-id.apps.googleusercontent.com",
+            "http://127.0.0.1/oauth/callback/google",
+            None,
+        )
+        .expect("valid test google oauth client config")
+    }
 
     fn slack_activation_response() -> LifecycleProductResponse {
         let requirement = ChannelConnectionRequirement {
@@ -661,20 +726,20 @@ mod tests {
         assert!(!storage_root.join("system/extensions/web-access").exists());
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[derive(Debug, Default)]
     struct RecordingChannelConnectionFacade {
         connections: Mutex<HashMap<String, bool>>,
+        connection_status_calls: Mutex<usize>,
         disconnects: Mutex<Vec<(WebUiAuthenticatedCaller, String)>>,
         watched_package_path: Option<PathBuf>,
         package_present_during_disconnect: Mutex<Vec<bool>>,
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     impl RecordingChannelConnectionFacade {
         fn with_connection(channel: &str, connected: bool) -> Self {
             Self {
                 connections: Mutex::new(HashMap::from([(channel.to_string(), connected)])),
+                connection_status_calls: Mutex::new(0),
                 disconnects: Mutex::new(Vec::new()),
                 watched_package_path: None,
                 package_present_during_disconnect: Mutex::new(Vec::new()),
@@ -690,6 +755,13 @@ mod tests {
             self.disconnects.lock().expect("disconnects lock").clone()
         }
 
+        fn connection_status_calls(&self) -> usize {
+            *self
+                .connection_status_calls
+                .lock()
+                .expect("connection status calls lock")
+        }
+
         fn package_present_during_disconnect(&self) -> Vec<bool> {
             self.package_present_during_disconnect
                 .lock()
@@ -698,13 +770,16 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[async_trait]
     impl ChannelConnectionFacade for RecordingChannelConnectionFacade {
         async fn caller_channel_connections(
             &self,
             _caller: WebUiAuthenticatedCaller,
         ) -> Result<HashMap<String, bool>, RebornServicesError> {
+            *self
+                .connection_status_calls
+                .lock()
+                .expect("connection status calls lock") += 1;
             Ok(self.connections.lock().expect("connections lock").clone())
         }
 
@@ -729,7 +804,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[tokio::test]
     async fn webui_and_tool_extension_remove_share_ordered_actor_scoped_cleanup() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -808,12 +882,14 @@ mod tests {
             .install_extension(expected_caller.clone(), slack_package_ref)
             .await
             .expect("WebUI reinstall succeeds");
+        let mut retry_remove_context = execution_context([EXTENSION_REMOVE_CAPABILITY_ID]);
+        retry_remove_context.authenticated_actor_user_id =
+            remove_context.authenticated_actor_user_id.clone();
         let remove = crate::approval_test_support::invoke_json_with_local_dev_approval(
             runtime.services(),
             EXTENSION_REMOVE_CAPABILITY_ID,
             remove_context,
             serde_json::json!({"extension_id": "slack"}),
-            trust_decision(),
         )
         .await
         .expect("remove succeeds");
@@ -822,24 +898,221 @@ mod tests {
             !slack_package_path.exists(),
             "tool removal deletes the package"
         );
+        let retry_remove = crate::approval_test_support::invoke_json_with_local_dev_approval(
+            runtime.services(),
+            EXTENSION_REMOVE_CAPABILITY_ID,
+            retry_remove_context,
+            serde_json::json!({"extension_id": "slack"}),
+        )
+        .await
+        .expect("retrying removal after the package is absent succeeds");
+        assert_eq!(retry_remove["payload"]["removed"], false);
+        assert_eq!(retry_remove["phase"], "removed");
 
         assert_eq!(
             channel_connection.disconnects(),
             vec![
                 (expected_caller.clone(), "slack".to_string()),
+                (expected_caller.clone(), "slack".to_string()),
                 (expected_caller, "slack".to_string())
             ],
-            "WebUI and tool removal must run the same actor-scoped Slack cleanup even when status projection is stale"
+            "WebUI, tool removal, and an absent-package retry must run the same actor-scoped Slack cleanup"
         );
         assert_eq!(
             channel_connection.package_present_during_disconnect(),
-            vec![true, true],
-            "both callers must clean up before package removal"
+            vec![true, true, false],
+            "cleanup must also run after the package is already absent"
+        );
+        assert_eq!(
+            channel_connection.connection_status_calls(),
+            0,
+            "declared Slack cleanup must disconnect directly without status discovery"
         );
         runtime.shutdown().await.expect("runtime shutdown");
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
+    #[tokio::test]
+    async fn webui_and_tool_extension_remove_generic_filesystem_channel_without_slack_cleanup() {
+        const GENERIC_CHANNEL_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "channel-ext"
+name = "Channel Ext"
+version = "0.1.0"
+description = "A filesystem-discovered external channel extension."
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/channel.wasm"
+
+[[host_api]]
+id = "ironclaw.product_adapter/v1"
+section = "product_adapter.inbound"
+
+[product_adapter.inbound]
+surface_kind = "external_channel"
+
+[product_adapter.inbound.auth]
+kind = "request_signature"
+header_name = "X-Channel-Signature"
+timestamp_header_name = "X-Channel-Timestamp"
+
+[product_adapter.inbound.capabilities]
+flags = ["inbound_messages"]
+
+[[product_adapter.inbound.required_credentials]]
+handle = "channel_ext_token"
+
+[[product_adapter.inbound.egress]]
+host = "example.com"
+credential_handle = "channel_ext_token"
+"#;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let package_path = storage_root.join("system/extensions/channel-ext");
+        std::fs::create_dir_all(&package_path).expect("generic channel package directory");
+        std::fs::write(package_path.join("manifest.toml"), GENERIC_CHANNEL_MANIFEST)
+            .expect("generic channel manifest");
+        let authenticated_actor =
+            UserId::new("extension-tool-test-alice").expect("valid actor user id");
+        let mut remove_context = execution_context([EXTENSION_REMOVE_CAPABILITY_ID]);
+        remove_context.authenticated_actor_user_id = Some(authenticated_actor.clone());
+        let caller = WebUiAuthenticatedCaller::new(
+            remove_context.resource_scope.tenant_id.clone(),
+            authenticated_actor,
+            remove_context.resource_scope.agent_id.clone(),
+            remove_context.resource_scope.project_id.clone(),
+        );
+        let runtime = crate::build_reborn_runtime(
+            crate::RebornRuntimeInput::from_services(
+                RebornBuildInput::local_dev(
+                    "extension-tools-remove-generic-channel-owner",
+                    storage_root.clone(),
+                )
+                .with_runtime_policy(
+                    crate::local_dev_runtime_policy().expect("local-dev policy resolves"),
+                ),
+            )
+            .with_identity(crate::RebornRuntimeIdentity {
+                tenant_id: caller.tenant_id.as_str().to_string(),
+                agent_id: "extension-remove-generic-channel-test-agent".to_string(),
+                source_binding_id: "extension-remove-generic-channel-test-source".to_string(),
+                reply_target_binding_id: "extension-remove-generic-channel-test-reply".to_string(),
+            }),
+        )
+        .await
+        .expect("local-dev runtime build");
+        let channel_connection = Arc::new(
+            RecordingChannelConnectionFacade::with_connection("slack", false)
+                .watching_package(package_path.clone()),
+        );
+        let channel_connection_trait: Arc<dyn ChannelConnectionFacade> = channel_connection.clone();
+        assert!(
+            runtime.set_channel_connection_facade(channel_connection_trait.clone()),
+            "channel connection facade slot should be unset in the test runtime"
+        );
+        let webui = crate::webui::facade::build_webui_services_with_connectable_channels(
+            &runtime,
+            None,
+            None,
+            Some(channel_connection_trait),
+            Vec::new(),
+        )
+        .expect("WebUI services build");
+        let package_ref =
+            extension_package_ref("channel-ext".to_string()).expect("valid channel package ref");
+        let extension_id = ExtensionId::new("channel-ext").expect("valid extension id");
+        let installation_id =
+            ExtensionInstallationId::new("channel-ext").expect("valid installation id");
+        let installation_store = runtime
+            .services()
+            .extension_installation_store_for_test()
+            .expect("live extension installation store");
+
+        webui
+            .api
+            .install_extension(caller.clone(), package_ref.clone())
+            .await
+            .expect("WebUI install succeeds");
+        webui
+            .api
+            .remove_extension(caller.clone(), package_ref.clone())
+            .await
+            .expect("WebUI remove succeeds");
+        assert!(
+            !package_path.exists(),
+            "WebUI removal deletes the generic channel package"
+        );
+        assert!(
+            installation_store
+                .get_manifest(&extension_id)
+                .await
+                .expect("manifest lookup after WebUI removal")
+                .is_none(),
+            "WebUI removal deletes the manifest record"
+        );
+        assert!(
+            installation_store
+                .get_installation(&installation_id)
+                .await
+                .expect("installation lookup after WebUI removal")
+                .is_none(),
+            "WebUI removal deletes the installation record"
+        );
+
+        webui
+            .api
+            .install_extension(caller, package_ref)
+            .await
+            .expect("WebUI reinstall succeeds");
+        let remove = crate::approval_test_support::invoke_json_with_local_dev_approval(
+            runtime.services(),
+            EXTENSION_REMOVE_CAPABILITY_ID,
+            remove_context,
+            serde_json::json!({"extension_id": "channel-ext"}),
+        )
+        .await
+        .expect("tool removal succeeds");
+        assert_eq!(remove["payload"]["removed"], true);
+        assert!(
+            !package_path.exists(),
+            "tool removal deletes the generic channel package"
+        );
+        assert!(
+            installation_store
+                .get_manifest(&extension_id)
+                .await
+                .expect("manifest lookup after tool removal")
+                .is_none(),
+            "tool removal deletes the manifest record"
+        );
+        assert!(
+            installation_store
+                .get_installation(&installation_id)
+                .await
+                .expect("installation lookup after tool removal")
+                .is_none(),
+            "tool removal deletes the installation record"
+        );
+        assert!(
+            channel_connection.disconnects().is_empty(),
+            "generic external channels must not inherit personal Slack cleanup"
+        );
+        assert_eq!(
+            channel_connection.connection_status_calls(),
+            0,
+            "cleanup selection must not probe channel connection status"
+        );
+        assert!(
+            channel_connection
+                .package_present_during_disconnect()
+                .is_empty(),
+            "no Slack disconnect should be attempted for a generic channel"
+        );
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
     #[tokio::test]
     async fn extension_remove_fails_closed_without_authenticated_actor_for_personal_cleanup() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -879,7 +1152,6 @@ mod tests {
             EXTENSION_REMOVE_CAPABILITY_ID,
             remove_context,
             serde_json::json!({"extension_id": "slack"}),
-            trust_decision(),
         )
         .await
         .expect_err("personal cleanup without an authenticated actor must fail closed");
@@ -967,10 +1239,13 @@ mod tests {
         // share the `google` provider; removing Gmail must leave the Google
         // credential intact so Calendar keeps working.
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
-            "extension-tools-remove-shared-owner",
-            dir.path().join("local-dev"),
-        ))
+        let services = build_reborn_services(
+            RebornBuildInput::local_dev(
+                "extension-tools-remove-shared-owner",
+                dir.path().join("local-dev"),
+            )
+            .with_google_oauth_backend(test_google_oauth_client_config()),
+        )
         .await
         .expect("local-dev services build");
 
@@ -1093,7 +1368,6 @@ mod tests {
                 [EXTENSION_ACTIVATE_CAPABILITY_ID],
             ),
             serde_json::json!({"extension_id": "github"}),
-            trust_decision(),
         )
         .await;
         let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
@@ -1103,7 +1377,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_extension_search_hides_onboarding_after_credentialed_activation() {
+    async fn local_dev_extension_search_distinguishes_configured_from_active() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = build_reborn_services(RebornBuildInput::local_dev(
             "extension-tools-active-search-owner",
@@ -1159,6 +1433,15 @@ mod tests {
             .find(|extension| extension["package_ref"]["id"] == "github")
             .expect("github search result");
         assert_eq!(installed_github["installation_phase"], "installed");
+        let installed_message = installed_search["message"]
+            .as_str()
+            .expect("installed inactive search should carry activation guidance");
+        assert!(
+            installed_message.contains("installed but not activated")
+                && installed_message.contains("not currently callable tools")
+                && installed_message.contains(EXTENSION_ACTIVATE_CAPABILITY_ID),
+            "installed inactive GitHub search must not imply tools are active, got {installed_search}"
+        );
         assert!(
             installed_github.get("credential_requirements").is_none(),
             "installed inactive GitHub model-visible search results must not expose stale PAT requirements before activation"
@@ -1178,11 +1461,18 @@ mod tests {
         )
         .await
         .expect("configured search succeeds");
+        let configured_message = configured_search["message"]
+            .as_str()
+            .expect("configured inactive search should carry activation guidance");
         assert!(
-            configured_search["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("already configured or active")),
-            "configured GitHub search should override stale PAT onboarding, got {configured_search}"
+            configured_message.contains("installed but not activated")
+                && configured_message.contains("configured only means")
+                && configured_message.contains("not currently callable tools"),
+            "configured GitHub search must not report activation before activation, got {configured_search}"
+        );
+        assert!(
+            !configured_message.contains("ready"),
+            "configured-but-inactive GitHub search must not be marked ready, got {configured_search}"
         );
         let extensions = configured_search["payload"]["extensions"]
             .as_array()
@@ -1220,7 +1510,7 @@ mod tests {
         assert!(
             active_search["message"]
                 .as_str()
-                .is_some_and(|message| message.contains("already configured or active")),
+                .is_some_and(|message| message.contains("active installed extension results")),
             "active GitHub search should override stale PAT onboarding, got {active_search}"
         );
         let extensions = active_search["payload"]["extensions"]
@@ -1244,10 +1534,13 @@ mod tests {
     #[tokio::test]
     async fn local_dev_extension_activate_returns_auth_gate_when_account_lacks_required_scope() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
-            "extension-tools-scope-gate-owner",
-            dir.path().join("local-dev"),
-        ))
+        let services = build_reborn_services(
+            RebornBuildInput::local_dev(
+                "extension-tools-scope-gate-owner",
+                dir.path().join("local-dev"),
+            )
+            .with_google_oauth_backend(test_google_oauth_client_config()),
+        )
         .await
         .expect("local-dev services build");
         let extension_management = services
@@ -1308,10 +1601,13 @@ mod tests {
     #[tokio::test]
     async fn local_dev_extension_activate_coalesces_gmail_oauth_scopes_into_one_auth_gate() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
-            "extension-tools-gmail-scope-union-owner",
-            dir.path().join("local-dev"),
-        ))
+        let services = build_reborn_services(
+            RebornBuildInput::local_dev(
+                "extension-tools-gmail-scope-union-owner",
+                dir.path().join("local-dev"),
+            )
+            .with_google_oauth_backend(test_google_oauth_client_config()),
+        )
         .await
         .expect("local-dev services build");
         let extension_management = services
@@ -1527,7 +1823,6 @@ mod tests {
             capability_id,
             execution_context([capability_id]),
             input,
-            trust_decision(),
         )
         .await
     }
@@ -1542,7 +1837,6 @@ mod tests {
             capability_id,
             execution_context([capability_id]),
             input,
-            trust_decision(),
         )
         .await
     }
@@ -1710,5 +2004,99 @@ mod tests {
             provenance: TrustProvenance::Default,
             evaluated_at: chrono::Utc::now(),
         }
+    }
+
+    /// The fixed `safe_summary` headline used
+    /// for `ProviderInstanceNotConfigured` must itself pass the strict
+    /// `LoopSafeSummary` validator (agent-loop-capabilities invariant 2) —
+    /// proves the summary never trips the `{}[]<>/` / secret-vocabulary
+    /// rejection that would otherwise kill the whole run — and the full
+    /// remediation must ride the diagnostic-detail channel, naming the exact
+    /// `config set` command verbatim.
+    #[test]
+    fn provider_instance_not_configured_safe_summary_validates_and_diagnostic_names_config_set() {
+        ironclaw_turns::run_profile::LoopSafeSummary::new(
+            PROVIDER_INSTANCE_NOT_CONFIGURED_SAFE_SUMMARY,
+        )
+        .expect("fixed safe_summary must pass the strict LoopSafeSummary validator");
+
+        let reason = format!(
+            "{}\n\n{}",
+            ironclaw_reborn_config::google_remediation_text(),
+            ironclaw_reborn_config::apply_step_text()
+        );
+        let mapped = lifecycle_error(ProductWorkflowError::ProviderInstanceNotConfigured {
+            reason: reason.clone(),
+        });
+
+        let FirstPartyCapabilityError::Dispatch {
+            kind,
+            safe_summary,
+            detail,
+            ..
+        } = mapped
+        else {
+            panic!("expected a Dispatch failure, got {mapped:?}");
+        };
+        assert_eq!(kind, RuntimeDispatchErrorKind::OperationFailed);
+        assert_eq!(
+            safe_summary,
+            Some(PROVIDER_INSTANCE_NOT_CONFIGURED_SAFE_SUMMARY.to_string())
+        );
+        let detail = detail.expect("remediation detail must be present");
+        // The TRUSTED channel, not the untrusted diagnostic one: this reason is
+        // host-authored, and the untrusted channel collapses it to the
+        // safe-summary placeholder at the host_api boundary (#6299).
+        let ironclaw_host_api::DispatchFailureDetail::HostRemediation { text } = *detail else {
+            panic!("expected a HostRemediation detail, got {detail:?}");
+        };
+        assert!(text.as_str().contains("config set google.client_id"));
+        assert_eq!(text.as_str(), reason);
+    }
+
+    /// `InvalidBindingRequest` keeps its existing `InputEncode` kind and
+    /// carries its reason on the UNTRUSTED diagnostic channel. Several of its
+    /// ~40 construction sites interpolate externally-influenced text (hosted
+    /// MCP tool names, the model-chosen `extension_id`, uploaded-zip entry
+    /// names), so the whole class must stay scanned; only reasons built
+    /// entirely from host-authored constants may ride the trusted channel.
+    #[test]
+    fn invalid_binding_request_carries_reason_on_the_untrusted_diagnostic_channel() {
+        let mapped = lifecycle_error(ProductWorkflowError::InvalidBindingRequest {
+            reason: "telegram account setup was declared without a mounted host".to_string(),
+        });
+
+        let FirstPartyCapabilityError::Dispatch { kind, detail, .. } = mapped else {
+            panic!("expected a Dispatch failure, got {mapped:?}");
+        };
+        assert_eq!(kind, RuntimeDispatchErrorKind::InputEncode);
+        let detail = detail.expect("diagnostic detail must be present");
+        let ironclaw_host_api::DispatchFailureDetail::Diagnostic { text } = *detail else {
+            panic!("expected a Diagnostic detail, got {detail:?}");
+        };
+        assert!(text.contains("mounted host"));
+    }
+
+    /// The provenance regression itself, at the unit seam: a reason carrying
+    /// credential vocabulary (the shape a model-chosen `extension_id` can
+    /// produce) must NOT land on the trusted host-remediation channel, where
+    /// `ObservationTrust::HostAuthored` would exempt it from the downstream
+    /// credential-vocabulary scan.
+    #[test]
+    fn model_influenced_invalid_binding_reason_never_reaches_the_trusted_channel() {
+        let mapped = lifecycle_error(ProductWorkflowError::InvalidBindingRequest {
+            reason: "extension api_key is not installed".to_string(),
+        });
+
+        let FirstPartyCapabilityError::Dispatch { detail, .. } = mapped else {
+            panic!("expected a Dispatch failure, got {mapped:?}");
+        };
+        assert!(
+            matches!(
+                detail.as_deref(),
+                Some(ironclaw_host_api::DispatchFailureDetail::Diagnostic { .. })
+            ),
+            "externally-influenced text must stay on the scanned channel, got {detail:?}"
+        );
     }
 }

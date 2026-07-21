@@ -14,6 +14,7 @@
 //!
 //! - `search_messages`: Search all messages the user can see
 //! - `list_conversations`: List channels, DMs, and group DMs the user is in
+//! - `get_conversation_info`: Retrieve one exact conversation by ID
 //! - `get_conversation_history`: Read history of any channel or DM
 //! - `get_thread_replies`: Read one thread's replies (not part of history)
 //! - `get_user_info`: Get information about a Slack user
@@ -115,6 +116,11 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
 
+        SlackUserAction::GetConversationInfo { channel } => {
+            let result = api::get_conversation_info(&channel)?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())?
+        }
+
         SlackUserAction::GetConversationHistory {
             channel,
             limit,
@@ -171,6 +177,7 @@ fn action_from_context(context: Option<&str>) -> Result<&'static str, String> {
     match context.capability_id.as_str() {
         "slack.search_messages" => Ok("search_messages"),
         "slack.list_conversations" => Ok("list_conversations"),
+        "slack.get_conversation_info" => Ok("get_conversation_info"),
         "slack.get_conversation_history" => Ok("get_conversation_history"),
         "slack.get_thread_replies" => Ok("get_thread_replies"),
         "slack.get_user_info" => Ok("get_user_info"),

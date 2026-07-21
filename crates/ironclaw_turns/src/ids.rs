@@ -246,7 +246,6 @@ loop_ref!(LoopExitId, "loop_exit_id", "exit:");
 loop_ref!(LoopMessageRef, "loop_message_ref", "msg:");
 loop_ref!(LoopResultRef, "loop_result_ref", "result:");
 loop_ref!(LoopGateRef, "loop_gate_ref", "gate:");
-loop_ref!(LoopUsageSummaryRef, "loop_usage_summary_ref", "usage:");
 loop_ref!(LoopDiagnosticRef, "loop_diagnostic_ref", "diag:");
 
 // GateRef and LoopGateRef carry the same validated `gate:<id>` string by

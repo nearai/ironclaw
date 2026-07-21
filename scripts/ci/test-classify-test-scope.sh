@@ -81,6 +81,30 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
+  "reborn channel host support crate" \
+  "crates/ironclaw_channel_host/src/lib.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "reborn channel delivery support crate" \
+  "crates/ironclaw_channel_delivery/src/lib.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "reborn telegram extension crate" \
+  "crates/ironclaw_telegram_extension/src/telegram_pairing.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
   "reborn support crate" \
   "crates/ironclaw_outbound/src/lib.rs" \
   "docs_only=false
@@ -148,8 +172,8 @@ has_legacy_tests=true
 has_reborn_tests=true"
 
 assert_scope \
-  "legacy root runtime" \
-  "src/agent/session.rs" \
+  "non-reborn channel source" \
+  "channels-src/telegram/src/lib.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
@@ -185,6 +209,30 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
+has_reborn_tests=true"
+
+assert_scope \
+  "Reborn Responses E2E manifest checker" \
+  "scripts/ci/check-reborn-responses-e2e-manifest.py" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "Reborn Responses E2E manifest" \
+  "tests/e2e/reborn_responses_e2e_tests.txt" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "Reborn coverage manifest" \
+  "tests/e2e/reborn_coverage_tests.txt" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
@@ -234,8 +282,8 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
-  "mixed legacy and reborn" \
-  "src/agent/session.rs
+  "mixed non-reborn and reborn" \
+  "channels-src/telegram/src/lib.rs
 crates/ironclaw_reborn_composition/src/lib.rs" \
   "docs_only=false
 has_core_code=true

@@ -3,7 +3,7 @@ use crate::{
 };
 
 /// Project the children of a run directly from a snapshot without building
-/// an `InMemoryTurnStateStore`. Mirrors `InMemoryTurnStateStore::children_of`
+/// an `TurnStateEngine`. Mirrors `TurnStateEngine::children_of`
 /// scope semantics: returns an empty list when the parent is missing or out of
 /// scope, filters children by the parent's scope envelope (tenant/agent/project),
 /// and sorts by `received_at`.
@@ -35,7 +35,7 @@ pub(super) fn children_of(
 }
 
 /// Project a run record by id directly from a snapshot, scoped exactly to
-/// `scope`. Mirrors `InMemoryTurnStateStore::get_run_record` semantics.
+/// `scope`. Mirrors `TurnStateEngine::get_run_record` semantics.
 pub(super) fn run_record(
     snapshot: &TurnPersistenceSnapshot,
     scope: &TurnScope,
@@ -61,6 +61,7 @@ pub(super) fn run_state_from_record(run: TurnRunRecord, actor: TurnActor) -> Tur
         resolved_run_profile_id: run.profile.id,
         resolved_run_profile_version: run.profile.version,
         resolved_model_route: run.resolved_model_route,
+        model_usage: run.model_usage,
         received_at: run.received_at,
         checkpoint_id: run.checkpoint_id,
         gate_ref: run.gate_ref,

@@ -27,26 +27,95 @@ class ValidateRebornBinaryArtifactTests(unittest.TestCase):
             f"{digest}  {VALIDATOR.ARCHIVE_NAME}\n",
             encoding="utf-8",
         )
+        self.write_manifest("postgres,libsql")
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def write_manifest(
+        self, features: object, *, product_ref: str | None = None
+    ) -> None:
         (self.artifact_dir / VALIDATOR.MANIFEST_NAME).write_text(
             json.dumps(
                 {
                     "format_version": 1,
-                    "product_ref": "a" * 40,
-                    "features": "webui-v2-beta,slack-v2-host-beta",
+                    "product_ref": product_ref or "a" * 40,
+                    "features": features,
                 }
             ),
             encoding="utf-8",
         )
 
-    def tearDown(self) -> None:
-        self.temp_dir.cleanup()
-
     def test_accepts_matching_artifact(self) -> None:
         VALIDATOR.validate_artifact(
             self.artifact_dir,
             "a" * 40,
-            "webui-v2-beta,slack-v2-host-beta",
+            "postgres,libsql",
         )
+
+    def test_accepts_array_feature_superset(self) -> None:
+        self.write_manifest(
+            [
+                "extra-feature",
+                "libsql",
+                "postgres",
+            ]
+        )
+
+        VALIDATOR.validate_artifact(
+            self.artifact_dir,
+            "a" * 40,
+            "postgres,libsql",
+        )
+
+    def test_rejects_missing_required_feature(self) -> None:
+        self.write_manifest(["postgres"])
+
+        with self.assertRaisesRegex(ValueError, "libsql"):
+            VALIDATOR.validate_artifact(
+                self.artifact_dir,
+                "a" * 40,
+                "postgres,libsql",
+            )
+
+    def test_rejects_invalid_feature_shape(self) -> None:
+        self.write_manifest(["postgres", 42])
+
+        with self.assertRaisesRegex(
+            ValueError, "comma-separated string or string array"
+        ):
+            VALIDATOR.validate_artifact(
+                self.artifact_dir,
+                "a" * 40,
+                "postgres,libsql",
+            )
+
+    def test_rejects_empty_feature_entries(self) -> None:
+        for features in ("postgres,", ["postgres", ""]):
+            with self.subTest(features=features):
+                self.write_manifest(features)
+
+                with self.assertRaisesRegex(ValueError, "empty feature"):
+                    VALIDATOR.validate_artifact(
+                        self.artifact_dir,
+                        "a" * 40,
+                        "postgres,libsql",
+                    )
+
+    def test_rejects_duplicate_features(self) -> None:
+        for features in (
+            "postgres,postgres",
+            ["postgres", "postgres"],
+        ):
+            with self.subTest(features=features):
+                self.write_manifest(features)
+
+                with self.assertRaisesRegex(ValueError, "duplicate features"):
+                    VALIDATOR.validate_artifact(
+                        self.artifact_dir,
+                        "a" * 40,
+                        "postgres,libsql",
+                    )
 
     def test_rejects_corrupt_archive(self) -> None:
         self.archive.write_bytes(b"corrupt")
@@ -55,15 +124,20 @@ class ValidateRebornBinaryArtifactTests(unittest.TestCase):
             VALIDATOR.validate_artifact(
                 self.artifact_dir,
                 "a" * 40,
-                "webui-v2-beta,slack-v2-host-beta",
+                "postgres,libsql",
             )
 
     def test_rejects_mismatched_manifest(self) -> None:
+        self.write_manifest(
+            "postgres,libsql",
+            product_ref="b" * 40,
+        )
+
         with self.assertRaisesRegex(ValueError, "product_ref"):
             VALIDATOR.validate_artifact(
                 self.artifact_dir,
-                "b" * 40,
-                "webui-v2-beta,slack-v2-host-beta",
+                "a" * 40,
+                "postgres,libsql",
             )
 
 

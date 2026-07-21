@@ -2,8 +2,9 @@ use async_trait::async_trait;
 use ironclaw_turns::{
     LoopGateRef,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, LoopCheckpointRequest, LoopProgressEvent,
-        LoopSafeSummary, StageCheckpointPayloadRequest, sanitize_model_visible_text,
+        AgentLoopHostError, AgentLoopHostErrorKind, CheckpointSchemaId, LoopCheckpointRequest,
+        LoopProgressEvent, LoopSafeSummary, StageCheckpointPayloadRequest,
+        sanitize_model_visible_text,
     },
 };
 
@@ -70,11 +71,13 @@ impl CheckpointStage {
         let payload = serde_json::to_vec(&state)
             .map_err(|_| AgentLoopExecutorError::CheckpointFailed { stage: kind })?;
         let host_kind = checkpoint_kind_to_host(kind);
+        let schema_id = CheckpointSchemaId::new(crate::state::CHECKPOINT_SCHEMA_ID)
+            .map_err(|_| AgentLoopExecutorError::CheckpointFailed { stage: kind })?;
         let state_ref = ctx
             .host
             .stage_checkpoint_payload(StageCheckpointPayloadRequest {
                 kind: host_kind,
-                schema_id: crate::state::CHECKPOINT_SCHEMA_ID.to_string(),
+                schema_id,
                 payload,
             })
             .await

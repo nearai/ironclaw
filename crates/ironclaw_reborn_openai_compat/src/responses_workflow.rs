@@ -1382,11 +1382,18 @@ fn validate_temperature(temperature: Option<f64>) -> Result<(), OpenAiCompatHttp
 fn responses_user_message_payload(
     request: &OpenAiResponsesCreateRequest,
 ) -> Result<UserMessagePayload, OpenAiCompatHttpError> {
-    Ok(UserMessagePayload::new(
+    let payload = UserMessagePayload::new(
         responses_input_to_product_text(request)?,
         vec![],
         ProductTriggerReason::DirectChat,
-    )?)
+    )?
+    .with_requested_model(ironclaw_common::model_selection::requested_model_hint(
+        &request.model,
+    ));
+    // The builder attaches the model hint after `new`'s validation, so bound the
+    // assembled payload before it is submitted.
+    payload.validate()?;
+    Ok(payload)
 }
 
 fn responses_input_to_product_text(

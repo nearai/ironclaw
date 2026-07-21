@@ -55,7 +55,7 @@ impl HarnessCapabilityRecorder {
     /// `None` for the Echo backend and HostRuntime harnesses without skill activation.
     pub(crate) fn skill_context_source(
         &self,
-    ) -> Option<Arc<dyn ironclaw_loop_support::HostSkillContextSource>> {
+    ) -> Option<Arc<dyn ironclaw_loop_host::HostSkillContextSource>> {
         match self {
             Self::Recording(_) => None,
             Self::HostRuntime(harness) => harness.skill_context_source_for_test(),

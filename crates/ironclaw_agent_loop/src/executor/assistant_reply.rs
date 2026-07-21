@@ -31,6 +31,10 @@ impl ExecutorStage<AssistantReplyInput> for AssistantReplyStage {
             .usage
             .map(|usage| usage.output_tokens)
             .unwrap_or_else(|| estimate_output_tokens(&input.reply));
+        // Record whether this reply trailed off without a real closing answer so
+        // the stop handling can decide a graceful stop warrants a tools-capable
+        // completion nudge. Captured before `reply` is moved into the transcript.
+        state.last_reply_trailed_off = super::reply_trailed_off(&input.reply.content);
         let reply_ref = ctx
             .host
             .finalize_assistant_message(FinalizeAssistantMessage { reply: input.reply })
@@ -40,6 +44,10 @@ impl ExecutorStage<AssistantReplyInput> for AssistantReplyStage {
             })?;
         state.assistant_refs.push(reply_ref.clone());
         state.recent_output_token_counts.push(output_tokens);
+        // NOTE: cumulative model usage is accumulated once per model response in
+        // the canonical executor (before the output branch), so it is NOT
+        // accumulated again here — doing so would double-count assistant-reply
+        // turns. `input.usage` is still used above for the output-token window.
         state = match CheckpointStage.cancel_if_requested(ctx, state).await? {
             CancelCheck::Continue(state) => *state,
             CancelCheck::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),

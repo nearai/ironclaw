@@ -352,14 +352,14 @@ mod tests {
     use ironclaw_host_api::{
         AgentId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
     };
+    use ironclaw_turns::test_support::in_memory_turn_state_store;
     use ironclaw_turns::{
         AcceptedMessageRef, BlockedReason, CancelRunRequest, CancelRunResponse,
         DefaultTurnCoordinator, EventCursor, GetRunStateRequest, IdempotencyKey,
-        InMemoryTurnStateStore, LoopCheckpointStateRef, ReplyTargetBindingRef, ResumeTurnRequest,
-        ResumeTurnResponse, RunProfileId, RunProfileRequest, RunProfileVersion, SourceBindingRef,
-        SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnCoordinator,
-        TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope,
-        TurnStatus,
+        LoopCheckpointStateRef, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
+        RunProfileId, RunProfileRequest, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
+        SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnCoordinator, TurnError, TurnId,
+        TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope, TurnStatus,
         runner::{BlockRunRequest, ClaimRunRequest, TurnRunTransitionPort},
     };
 
@@ -547,6 +547,7 @@ mod tests {
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             resolved_model_route: None,
+            model_usage: None,
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: gate_ref.map(|value| GateRef::new(value).unwrap()),
@@ -782,7 +783,7 @@ mod tests {
 
     #[tokio::test]
     async fn turn_gate_continuation_rejects_cross_scope_resume_through_real_coordinator() {
-        let store = Arc::new(InMemoryTurnStateStore::default());
+        let store = Arc::new(in_memory_turn_state_store());
         let coordinator = Arc::new(DefaultTurnCoordinator::new(store.clone()));
         let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator.clone());
         let scope = TurnScope::new(
@@ -794,6 +795,7 @@ mod tests {
         let actor = TurnActor::new(UserId::new("alice").unwrap());
         let submit = coordinator
             .submit_turn(SubmitTurnRequest {
+                requested_model: None,
                 scope: scope.clone(),
                 actor: actor.clone(),
                 accepted_message_ref: AcceptedMessageRef::new("message-auth-real").unwrap(),

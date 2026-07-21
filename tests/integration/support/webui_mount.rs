@@ -9,7 +9,7 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use ironclaw_product_workflow::{RebornServicesApi, ResolvedBinding, WebUiAuthenticatedCaller};
-use ironclaw_webui_v2::{
+use ironclaw_webui::webui_v2::{
     DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State, webui_v2_router,
 };
 use serde_json::Value;

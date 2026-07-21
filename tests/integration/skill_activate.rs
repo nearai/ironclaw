@@ -59,6 +59,14 @@ async fn skill_activate_dispatches_and_injects_skill_context() {
         .await
         .expect("skill_activate reported one skill activated");
 
+    // Model-invoked skill discovery: before activation the skill advertises
+    // itself as a one-line `- name: description` listing entry (the first
+    // model request is built before `skill_activate` runs).
+    harness
+        .assert_model_request_contains("- greet: greets the user warmly")
+        .await
+        .expect("discovered skill must appear as a one-line listing entry");
+
     // Half B: the activated skill's instructions reached a later model request
     // through the wired `skill_context_source`.
     harness
@@ -111,6 +119,19 @@ async fn skill_criteria_auto_activation_stays_off_on_coordinator_path() {
         err.to_string().starts_with("no model request contained"),
         "expected the intended \"not found\" assertion failure, got a different harness error: {err}"
     );
+
+    // Listing-mode discovery (default `IRONCLAW_REBORN_SKILL_INJECTION=listing`):
+    // the non-activated skill still ADVERTISES itself as a one-line
+    // `- name: description` entry under the skill_activate header, so the
+    // model can choose to activate it — its body stays out (asserted above).
+    harness
+        .assert_model_request_contains("- greet: greets the user warmly")
+        .await
+        .expect("non-activated skill must appear as a one-line listing entry");
+    harness
+        .assert_model_request_contains("builtin.skill_activate when it matches the task")
+        .await
+        .expect("listing header must explain model-invoked activation");
 
     // And the explicit capability was never dispatched either.
     assert!(

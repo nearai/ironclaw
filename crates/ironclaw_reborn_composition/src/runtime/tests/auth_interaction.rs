@@ -14,7 +14,7 @@ use ironclaw_host_api::runtime_policy::{
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
 use ironclaw_host_api::{InvocationId, ResourceScope, RuntimeCredentialAuthRequirement, UserId};
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse,
 };
@@ -199,6 +199,7 @@ async fn submit_and_block_auth_run(
         .turn_state
         .submit_turn(
             SubmitTurnRequest {
+                requested_model: None,
                 scope: scope.clone(),
                 actor,
                 accepted_message_ref: AcceptedMessageRef::new("message-runtime-auth-read-model")

@@ -25,7 +25,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use ironclaw_extensions::ExtensionInstallationStore;
 use ironclaw_filesystem::{
     CompositeRootFilesystem, InMemoryBackend, LibSqlRootFilesystem, ScopedFilesystem,
 };
@@ -46,10 +45,10 @@ use ironclaw_turns::run_profile::{
     CommunicationContextProvider, InstructionSafetyContext, LoopHostMilestone,
 };
 use ironclaw_turns::{
-    CancelRunRequest, CancelRunResponse, FilesystemTurnStateStore, GateRef, GateResumeDisposition,
-    GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef, ResumeTurnPrecondition,
-    ResumeTurnRequest, SanitizedCancelReason, SourceBindingRef, TurnActor, TurnCoordinator,
-    TurnRunId, TurnRunState, TurnScope, TurnStateStore, TurnStatus,
+    CancelRunRequest, CancelRunResponse, FilesystemTurnStateRowStore, GateRef,
+    GateResumeDisposition, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef,
+    ResumeTurnPrecondition, ResumeTurnRequest, SanitizedCancelReason, SourceBindingRef, TurnActor,
+    TurnCoordinator, TurnRunId, TurnRunState, TurnScope, TurnStateStore, TurnStatus,
 };
 
 use super::capability_backend::{
@@ -308,6 +307,25 @@ impl RebornIntegrationHarnessBuilder {
         self
     }
 
+    /// `write_file`/`read_file` tools (same set as `file_tools()`), backed by
+    /// the REAL `StagedCapabilityIo` (durable tool-result projection seam,
+    /// issue #5838) instead of the ephemeral `ProductLiveCapabilityIo` test
+    /// double, so a large `read_file` output is persisted durably and
+    /// `result_read` can page through it.
+    pub fn with_durable_capability_io_file_tools(mut self) -> Self {
+        self.capability = RebornCapabilityBackend::FileToolsDurableIo;
+        self
+    }
+
+    /// Harness-port-seam Change 4: same as `.with_builtin_http_tools()` plus a
+    /// confirmed `/host` mount grant, so `wrap_surface_disclosure`'s
+    /// scoped-roots note is observable on `read_file`'s captured tool
+    /// definition (the layer is disabled without a confirmed host-home mount).
+    pub fn with_confirmed_host_mount(mut self) -> Self {
+        self.capability = RebornCapabilityBackend::BuiltinHttpToolsConfirmedHostMount;
+        self
+    }
+
     /// Opt-in to real shell execution for this harness. By default the
     /// `BuiltinHttpTools` backend injects an inert `RecordingProcessPort` so that
     /// `builtin.shell` turns record the command without spawning any OS process.
@@ -544,7 +562,7 @@ pub struct RebornIntegrationHarness {
     pub(crate) actor_id: String,
     pub(crate) binding: ResolvedBinding,
     pub(crate) turn_scope: TurnScope,
-    pub(crate) turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
+    pub(crate) turn_store: Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>>,
     pub(crate) thread_harness: RebornThreadHarness<CompositeRootFilesystem>,
     /// Turn coordinator, used to resume a `BlockedApproval`/`BlockedAuth` run
     /// after `approve_gate`/`deny_gate` resolves the gate. Mirrors the binary-E2E
@@ -577,6 +595,9 @@ pub struct RebornIntegrationHarness {
     pub(crate) baseline_process_count: usize,
     /// Network-egress-request count at harness construction. See `baseline_invocation_count`.
     pub(crate) baseline_network_count: usize,
+    /// Security-audit-event count at harness construction. See
+    /// `baseline_invocation_count`.
+    pub(crate) baseline_security_audit_count: usize,
     /// Turn-lifecycle-event count on the group-shared `InMemoryTurnEventSink` at
     /// harness construction, if `.with_turn_event_sink()` opted in. The sink has
     /// no per-thread channel, so without this baseline a group thread's
@@ -657,6 +678,19 @@ impl RebornIntegrationHarness {
         let run_id = self.submit_turn_async(text).await?;
         self.wait_for_status(run_id, TurnStatus::Completed).await?;
         Ok(run_id)
+    }
+
+    /// Enqueue additional scripted replies AFTER the harness is built — for a
+    /// second turn whose tool-call arguments depend on a server-minted value
+    /// (e.g. a durable `result_ref`) only known once an earlier turn has
+    /// completed and its result has been read back from persisted state. The
+    /// fixed-at-build-time script (`.script(..)`) remains the norm; reach for
+    /// this only when the dependent value genuinely cannot be known ahead of
+    /// time.
+    pub fn push_script(&self, replies: impl IntoIterator<Item = RebornScriptedReply>) {
+        for reply in replies {
+            self.scripted_llm.push_step(reply.into_step());
+        }
     }
 
     /// Submit a user turn and return its run id **without** waiting for any status
@@ -935,7 +969,7 @@ impl RebornIntegrationHarness {
             .as_ref()
             .ok_or("assert_gate_survives_reopen requires StorageMode::LibSql")?;
         let fresh_composite = reopen_fresh_libsql_composite(db_path).await?;
-        let fresh_turn_store = FilesystemTurnStateStore::new(scoped_turns_fs_composite(
+        let fresh_turn_store = FilesystemTurnStateRowStore::new(scoped_turns_fs_composite(
             fresh_composite,
             &self._shared.canonical_binding,
         )?);
@@ -972,32 +1006,10 @@ impl RebornIntegrationHarness {
         &self,
         extension_id: &str,
     ) -> HarnessResult<()> {
-        let harness = match &self._shared.capability {
-            GroupCapability::HostRuntime(arc) => arc,
-            GroupCapability::Recording => {
-                return Err("no host-runtime capability backend for durable reopen".into());
-            }
-        };
-        let store =
-            ironclaw_reborn_composition::test_support::open_local_dev_extension_installation_store_for_test(
-                &harness.storage_root_for_test(),
-            )
-            .await?;
-        let installations = store.list_installations().await?;
-        if installations
-            .iter()
-            .any(|installation| installation.extension_id().as_str() == extension_id)
-        {
-            return Ok(());
-        }
-        let seen: Vec<&str> = installations
-            .iter()
-            .map(|installation| installation.extension_id().as_str())
-            .collect();
-        Err(
-            format!("extension {extension_id:?} not found after independent reopen; saw {seen:?}")
-                .into(),
-        )
+        self._shared
+            .capability
+            .assert_extension_install_persists_after_reopen(extension_id)
+            .await
     }
 
     /// Assert the named capability was invoked through the real capability path
@@ -1132,6 +1144,17 @@ impl RebornIntegrationHarness {
                 all[self.baseline_turn_event_count.min(all.len())..].to_vec()
             })
             .unwrap_or_default()
+    }
+
+    /// Security-audit events recorded by the always-wired harness recorder, for
+    /// this thread only. Reads the group-shared sink but slices
+    /// `[baseline_security_audit_count..]` so a group thread never sees an
+    /// earlier sibling thread's events.
+    pub(super) fn recorded_security_audit_events(
+        &self,
+    ) -> Vec<ironclaw_events::SecurityAuditEvent> {
+        let all = self._shared.security_audit_sink.events();
+        all[self.baseline_security_audit_count.min(all.len())..].to_vec()
     }
 
     /// Every `data:` URL from a `ContentPart::ImageUrl` part across all captured
@@ -1532,6 +1555,33 @@ impl RebornIntegrationHarness {
             .await
     }
 
+    /// Flip every non-revoked credential account for `provider` under this
+    /// group's capability dispatch scope to `Revoked` — modeling an external
+    /// revocation of the user's grant (#5878 shape). Same scoping as
+    /// [`Self::seed_capability_credential_account`]; errors if nothing was
+    /// revoked so a vacuous revoke can't silently pass a re-auth assertion.
+    pub async fn revoke_capability_credential_accounts(&self, provider: &str) -> HarnessResult<()> {
+        let harness = match &self._shared.capability {
+            GroupCapability::HostRuntime(arc) => arc,
+            GroupCapability::Recording => {
+                return Err(
+                    "no host-runtime capability backend to revoke credential accounts".into(),
+                );
+            }
+        };
+        let scope = self.run_resource_scope_for_user(harness.capability_user_id().clone());
+        let revoked = harness
+            .revoke_credential_accounts_for_provider(&scope, provider)
+            .await?;
+        if revoked == 0 {
+            return Err(format!(
+                "no non-revoked credential account for provider {provider:?} was found to revoke"
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     /// This thread's run `(tenant, agent, project)` scope with `user_id` as
     /// the owner — the exact four fields dispatch-time credential-account
     /// selection matches. Which user is correct depends on the caller: the
@@ -1782,6 +1832,11 @@ pub(crate) fn apply_hermetic_env() {
             std::env::set_var("IRONCLAW_DISABLE_OS_KEYCHAIN", "1");
             std::env::set_var("TZ", "UTC");
             std::env::set_var("LLM_MAX_RETRIES", "0");
+            // Loop-level counterpart of LLM_MAX_RETRIES=0: production rides
+            // out provider outages for minutes (deep availability retries with
+            // long backoff), which would stall any scenario that deliberately
+            // scripts a model failure. One attempt keeps failure paths fast.
+            std::env::set_var("IRONCLAW_REBORN_MODEL_AVAILABILITY_RETRY_ATTEMPTS", "1");
             std::env::remove_var("NEARAI_CHEAP_MODEL");
             std::env::remove_var("NEARAI_FALLBACK_MODEL");
             std::env::remove_var("LLM_CHEAP_MODEL");

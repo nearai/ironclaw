@@ -228,7 +228,7 @@ async def _open_mocked_empty_reply_page(reborn_v2_server, reborn_v2_browser):
     await page.route("**/api/webchat/v2/threads/*/timeline**", handle_timeline)
 
     await page.goto(
-        f"{reborn_v2_server}/v2/chat/{EMPTY_REPLY_THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}"
+        f"{reborn_v2_server}/chat/{EMPTY_REPLY_THREAD_ID}?token={REBORN_V2_AUTH_TOKEN}"
     )
     await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(timeout=15000)
     await expect(page.locator(SEL_V2["msg_user"]).last).to_contain_text(

@@ -1,3 +1,4 @@
+// arch-exempt: large_file, cross-surface auth interaction contract suite, plan #5905
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -179,6 +180,22 @@ impl AuthFlowManager for RecordingFlowManager {
         &self,
         _scope: &AuthProductScope,
         _input: OAuthCallbackFailureInput,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        Err(AuthProductError::BackendUnavailable)
+    }
+
+    async fn claim_continuation_dispatch(
+        &self,
+        _scope: &AuthProductScope,
+        _input: ironclaw_auth::AuthContinuationDispatchClaimInput,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        Err(AuthProductError::BackendUnavailable)
+    }
+
+    async fn settle_continuation_dispatch(
+        &self,
+        _scope: &AuthProductScope,
+        _input: ironclaw_auth::AuthContinuationDispatchSettlementInput,
     ) -> Result<AuthFlowRecord, AuthProductError> {
         Err(AuthProductError::BackendUnavailable)
     }
@@ -374,6 +391,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             resolved_model_route: None,
+            model_usage: None,
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: self.gate_ref.lock().expect("lock").clone(),
@@ -543,6 +561,59 @@ async fn list_pending_auth_projects_challenges_to_minimal_safe_views() {
     assert!(!serialized.contains("private.extension"));
     assert!(!serialized.contains("granted.extension"));
     assert!(!serialized.contains("secret_handle_count"));
+}
+
+/// The pending-auth projection must honor `expires_at` (RFC 6819 §5.1.5.3). A
+/// non-terminal flow whose TTL has already passed — but which no background
+/// sweep has transitioned to `Expired` yet — must not read as a live
+/// authenticating interaction. Only the still-live flow is listed.
+#[tokio::test]
+async fn list_pending_auth_omits_flow_past_its_expiry() {
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let scope = turn_scope("alice", "thread-a");
+    let live_gate = make_gate_ref("gate:auth-live");
+    let expired_gate = make_gate_ref("gate:auth-expired");
+    let now = Utc::now();
+
+    let live = auth_flow(
+        AuthFlowStatus::AwaitingUser,
+        &scope,
+        &actor,
+        TurnRunId::new(),
+        &live_gate,
+        None,
+        setup_challenge(),
+    );
+    // Abandoned popup: still `AwaitingUser` in storage, but past its deadline
+    // and never swept. The projection must treat it as not-live.
+    let mut expired = auth_flow(
+        AuthFlowStatus::AwaitingUser,
+        &scope,
+        &actor,
+        TurnRunId::new(),
+        &expired_gate,
+        None,
+        setup_challenge(),
+    );
+    expired.expires_at = now - Duration::minutes(1);
+
+    let service = service(
+        live.clone(),
+        vec![live, expired],
+        actor.clone(),
+        live_gate.clone(),
+    );
+
+    let response = service
+        .list_pending(ListPendingAuthInteractionsRequest { scope, actor })
+        .await
+        .expect("list pending auth");
+
+    assert_eq!(response.auth_interactions.len(), 1);
+    assert_eq!(
+        response.auth_interactions[0].auth_request_ref.as_str(),
+        live_gate.as_str()
+    );
 }
 
 #[tokio::test]
@@ -1743,6 +1814,7 @@ fn auth_flow(
             gate_ref: AuthGateRef::new(gate_ref.as_str()).unwrap(),
         },
         credential_account_id,
+        credential_secret_fingerprint: None,
         update_binding: Option::<CredentialAccountUpdateBinding>::None,
         opaque_state_hash: None,
         pkce_verifier_hash: None,

@@ -123,6 +123,18 @@ TRUNCATED_TOOL_CALL_TRIGGER = re.compile(
 EMPTY_REPLY_TRIGGER = re.compile(r"issue 1780 empty reply", re.IGNORECASE)
 LOOP_FOREVER_TRIGGER = re.compile(r"issue 1780 loop forever", re.IGNORECASE)
 MULTI_STEP_TRIGGER = re.compile(r"multi step echo then time", re.IGNORECASE)
+REBORN_EXTERNAL_TOOL_LOOP_TRIGGER = re.compile(
+    r"reborn external tool loop",
+    re.IGNORECASE,
+)
+REBORN_EXTERNAL_TOOL_FAILURE_TRIGGER = re.compile(
+    r"reborn external tool failure",
+    re.IGNORECASE,
+)
+REBORN_MIXED_INTERNAL_EXTERNAL_TRIGGER = re.compile(
+    r"reborn mixed internal external tools",
+    re.IGNORECASE,
+)
 
 # Lifecycle canary triggers for write+cleanup flows against real provider APIs.
 GITHUB_ISSUE_LIFECYCLE_TRIGGER = re.compile(
@@ -941,6 +953,33 @@ TOOL_CALL_PATTERNS = [
 # Set via POST /__mock/set_github_api_url with {"url": "http://..."}
 _github_api_url: str = "https://api.github.com"
 _last_chat_request: dict | None = None
+_chat_requests: list[dict] = []
+_llm_fault_scripts: list[dict] = []
+
+
+def _reset_llm_fault_scripts() -> None:
+    _llm_fault_scripts.clear()
+
+
+def _latest_user_matches_fault(messages: list[dict], match_text: str) -> bool:
+    latest_user = _last_user_content(messages).lower()
+    return match_text.lower() in latest_user
+
+
+def _next_llm_fault_action(messages: list[dict]) -> dict | None:
+    for script in list(_llm_fault_scripts):
+        match_text = str(script.get("match", ""))
+        actions = script.get("actions")
+        if not match_text or not isinstance(actions, list):
+            continue
+        if not _latest_user_matches_fault(messages, match_text):
+            continue
+        if not actions:
+            continue
+        action = actions.pop(0)
+        script["applied"] = int(script.get("applied", 0)) + 1
+        return action if isinstance(action, dict) else None
+    return None
 
 
 def _new_oauth_state() -> dict:
@@ -1617,6 +1656,83 @@ def _find_tool_result(messages: list[dict]) -> dict | None:
 def _find_named_tool_results(messages: list[dict], name: str) -> list[dict]:
     """Collect fresh tool results for one tool name."""
     return [result for result in _find_tool_results(messages) if result.get("name") == name]
+
+
+REBORN_SCRIPTED_TOOL_SCENARIOS = (
+    {
+        "trigger": REBORN_EXTERNAL_TOOL_LOOP_TRIGGER,
+        "batches": (
+            (("lookup_weather", {"city": "Boston"}),),
+            (("lookup_time", {"city": "Boston"}),),
+            (("lookup_fact", {"topic": "Boston"}),),
+        ),
+        "missing_text": "Reborn external tool loop missing tool definitions.",
+        "complete_prefix": "Reborn external tool loop complete: ",
+        "summary_order": ("lookup_weather", "lookup_time", "lookup_fact"),
+    },
+    {
+        "trigger": REBORN_EXTERNAL_TOOL_FAILURE_TRIGGER,
+        "batches": ((("lookup_weather", {"city": "Boston"}),),),
+        "missing_text": "Reborn external tool failure missing tool definitions.",
+        "complete_prefix": "Reborn external tool failure observed: ",
+        "summary_order": ("lookup_weather",),
+    },
+    {
+        "trigger": REBORN_MIXED_INTERNAL_EXTERNAL_TRIGGER,
+        "batches": (
+            (
+                ("builtin__echo", {"message": "mixed-internal-echo"}),
+                ("lookup_weather", {"city": "Boston"}),
+            ),
+        ),
+        "missing_text": "Reborn mixed tool run missing tool definitions.",
+        "complete_prefix": "Reborn mixed tool run complete: ",
+        "summary_order": ("builtin__echo", "lookup_weather"),
+    },
+)
+
+
+def match_reborn_scripted_tool_response(
+    messages: list[dict],
+    has_tools: bool,
+) -> dict | None:
+    """Run the matching table-driven Responses API tool scenario."""
+    scenario = next(
+        (
+            candidate
+            for candidate in REBORN_SCRIPTED_TOOL_SCENARIOS
+            if _conversation_has_user_trigger(messages, candidate["trigger"])
+        ),
+        None,
+    )
+    if scenario is None:
+        return None
+
+    result_by_name = {
+        result["name"]: result["content"] for result in _find_tool_results(messages)
+    }
+    for batch in scenario["batches"]:
+        missing_calls = [
+            {"tool_name": name, "arguments": arguments}
+            for name, arguments in batch
+            if name not in result_by_name
+        ]
+        if not missing_calls:
+            continue
+        if not result_by_name and not has_tools:
+            return {"type": "text", "text": scenario["missing_text"]}
+        return {
+            "type": "tool_call",
+            "tool_call": missing_calls[0] if len(missing_calls) == 1 else missing_calls,
+        }
+
+    summary = "; ".join(
+        f"{name}={result_by_name[name]}" for name in scenario["summary_order"]
+    )
+    return {
+        "type": "text",
+        "text": f"{scenario['complete_prefix']}{summary}",
+    }
 
 
 def _tool_results_include_denial(tool_results: list[dict]) -> bool:
@@ -2344,17 +2460,75 @@ async def _dispatch_special_response(
     return await _stream_text(request, cid, text)
 
 
+async def _broken_stream_before_text(request: web.Request, cid: str) -> web.StreamResponse:
+    resp = web.StreamResponse(
+        status=200,
+        headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"},
+    )
+    await resp.prepare(request)
+    await resp.write(f"data: {{\"id\":\"{cid}\",\"choices\":[{{\"delta\":".encode())
+    return resp
+
+
+async def _apply_llm_fault_action(
+    request: web.Request,
+    cid: str,
+    stream: bool,
+    action: dict,
+) -> web.StreamResponse | web.Response | None:
+    action_type = action.get("type")
+    if action_type == "delay":
+        await asyncio.sleep(float(action.get("seconds", 1.0)))
+        return None
+    if action_type == "http_error":
+        status = int(action.get("status", 502))
+        return web.json_response(
+            {
+                "error": {
+                    "message": action.get("message", "scripted mock LLM failure"),
+                    "type": "server_error",
+                }
+            },
+            status=status,
+        )
+    if action_type == "broken_stream_before_text":
+        if stream:
+            return await _broken_stream_before_text(request, cid)
+        return web.json_response(
+            {
+                "error": {
+                    "message": "scripted stream fault requested for non-streaming call",
+                    "type": "server_error",
+                }
+            },
+            status=502,
+        )
+    return None
+
+
 async def chat_completions(request: web.Request) -> web.StreamResponse:
     """Handle POST /v1/chat/completions and /chat/completions."""
     global _last_chat_request
     body = await request.json()
     _last_chat_request = body
+    _chat_requests.append(body)
     messages = body.get("messages", [])
     stream = body.get("stream", False)
     tools = body.get("tools")
     has_tools = bool(tools)
     available_tool_names = _advertised_tool_names(tools)
     cid = f"mock-{uuid.uuid4().hex[:8]}"
+
+    fault_action = _next_llm_fault_action(messages)
+    if fault_action:
+        fault_response = await _apply_llm_fault_action(
+            request,
+            cid,
+            stream,
+            fault_action,
+        )
+        if fault_response is not None:
+            return fault_response
 
     slow_response_delay = _conversation_slow_response_delay(messages)
     if slow_response_delay > 0:
@@ -2409,6 +2583,12 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
             if not stream:
                 return _tool_call_response(cid, followup)
             return await _stream_tool_call(request, cid, followup)
+
+    reborn_scripted_tool = match_reborn_scripted_tool_response(messages, has_tools)
+    if reborn_scripted_tool:
+        return await _dispatch_special_response(
+            request, cid, stream, reborn_scripted_tool
+        )
     if (
         not tool_results
         and _conversation_uses_codeact(messages)
@@ -3166,15 +3346,73 @@ def main():
     async def get_last_chat_request(request: web.Request) -> web.Response:
         return web.json_response(_last_chat_request or {})
 
+    async def get_chat_requests(request: web.Request) -> web.Response:
+        return web.json_response({"requests": _chat_requests})
+
     async def reset_chat_requests(request: web.Request) -> web.Response:
         global _last_chat_request
         _last_chat_request = None
+        _chat_requests.clear()
+        return web.json_response({"ok": True})
+
+    async def set_llm_faults(request: web.Request) -> web.Response:
+        body = await request.json()
+        faults = body.get("faults", [])
+        if not isinstance(faults, list):
+            return web.json_response(
+                {"ok": False, "error": "faults must be a list"},
+                status=400,
+            )
+        parsed_scripts = []
+        for fault in faults:
+            if not isinstance(fault, dict):
+                return web.json_response(
+                    {"ok": False, "error": "each fault must be an object"},
+                    status=400,
+                )
+            match_text = fault.get("match")
+            actions = fault.get("actions")
+            if not isinstance(match_text, str) or not match_text:
+                return web.json_response(
+                    {"ok": False, "error": "fault.match must be a non-empty string"},
+                    status=400,
+                )
+            if not isinstance(actions, list):
+                return web.json_response(
+                    {"ok": False, "error": "fault.actions must be a list"},
+                    status=400,
+                )
+            if not all(isinstance(action, dict) for action in actions):
+                return web.json_response(
+                    {"ok": False, "error": "fault.actions entries must be objects"},
+                    status=400,
+                )
+            parsed_scripts.append(
+                {
+                    "match": match_text,
+                    "actions": [dict(action) for action in actions],
+                    "applied": 0,
+                }
+            )
+        _reset_llm_fault_scripts()
+        _llm_fault_scripts.extend(parsed_scripts)
+        return web.json_response({"ok": True, "faults": _llm_fault_scripts})
+
+    async def get_llm_faults(request: web.Request) -> web.Response:
+        return web.json_response({"faults": _llm_fault_scripts})
+
+    async def reset_llm_faults(request: web.Request) -> web.Response:
+        _reset_llm_fault_scripts()
         return web.json_response({"ok": True})
 
     app.router.add_post("/__mock/set_github_api_url", set_github_api_url)
     app.router.add_get("/__mock/github_api_url", get_github_api_url)
     app.router.add_get("/__mock/last_chat_request", get_last_chat_request)
+    app.router.add_get("/__mock/chat_requests", get_chat_requests)
     app.router.add_post("/__mock/chat_requests/reset", reset_chat_requests)
+    app.router.add_post("/__mock/llm_faults", set_llm_faults)
+    app.router.add_get("/__mock/llm_faults", get_llm_faults)
+    app.router.add_post("/__mock/llm_faults/reset", reset_llm_faults)
     # Mock MCP server endpoints
     app.router.add_post("/mcp", mcp_endpoint)
     app.router.add_post("/mcp-400", mcp_endpoint_400)

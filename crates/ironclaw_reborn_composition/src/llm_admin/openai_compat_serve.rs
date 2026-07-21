@@ -1,3 +1,4 @@
+// arch-exempt: large_file, §4.4.1 mechanical inline of the redundant LocalDevRootFilesystem alias -> CompositeRootFilesystem (de-prefix, no logic change), plan #6168
 //! Reborn host composition for OpenAI-compatible API routes.
 //!
 //! The route crate owns DTOs and HTTP handlers, but the Reborn host owns the
@@ -29,7 +30,6 @@ use ironclaw_product_workflow::{
     ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
     ResolvedProductActorUser, StaticProductInstallationResolver,
 };
-#[cfg(feature = "root-llm-provider")]
 use ironclaw_product_workflow::{
     LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, WebUiAuthenticatedCaller,
 };
@@ -44,14 +44,15 @@ use ironclaw_reborn_openai_compat::{
     OpenAiCompatRouterState, OpenAiResponseErrorObject, OpenAiResponseId, OpenAiResponseObject,
     OpenAiResponseOutputItem, OpenAiResponseOutputItemStatus, OpenAiResponseProjection,
     OpenAiResponseProjectionStreamRequest, OpenAiResponseReadRequest, OpenAiResponseStatus,
-    OpenAiResponseWaitRequest, OpenAiResponsesMessageRole, OpenAiResponsesProjectionReader,
-    OpenAiResponsesWorkflow, openai_compat_router_with_state, openai_compat_routes,
+    OpenAiResponseUsage, OpenAiResponseWaitRequest, OpenAiResponsesMessageRole,
+    OpenAiResponsesProjectionReader, OpenAiResponsesWorkflow, openai_compat_router_with_state,
+    openai_compat_routes,
 };
+use ironclaw_reborn_openai_compat::{OpenAiCompatCost, OpenAiResponseInputTokensDetails};
 use ironclaw_reborn_openai_compat::{
     OpenAiCompatExternalToolResume, OpenAiCompatExternalToolResumeRequest,
     OpenAiCompatExternalToolSpec, OpenAiCompatExternalToolStore, OpenAiCompatTurnRunRef,
 };
-#[cfg(feature = "root-llm-provider")]
 use ironclaw_reborn_openai_compat::{OpenAiCompatModelCatalog, OpenAiCompatModelEntry};
 use ironclaw_threads::{
     FinalizedAssistantMessageByRunRequest, LoadContextMessagesRequest, MessageKind, MessageStatus,
@@ -62,13 +63,13 @@ use ironclaw_threads::{
 use ironclaw_turns::{
     ExternalToolCatalog, ExternalToolCatalogError, ExternalToolSpec, GateRef, GetRunStateRequest,
     IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator, TurnError,
-    TurnErrorCategory, TurnRunId, TurnScope, TurnStatus,
+    TurnErrorCategory, TurnRunId, TurnScope, TurnStatus, run_profile::LoopModelUsage,
 };
 use sha2::{Digest, Sha256};
 
 use crate::RebornBuildError;
 use crate::RebornRuntime;
-use crate::webui::webui_serve::ProtectedRouteMount;
+use crate::webui::route_mounts::ProtectedRouteMount;
 
 #[cfg(test)]
 mod tests;
@@ -80,6 +81,23 @@ const OPENAI_COMPAT_PENDING_EXTERNAL_TOOL_FALLBACK_DELAY: Duration = Duration::f
 const OPENAI_COMPAT_EXTERNAL_TOOL_RESUME_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const OPENAI_COMPAT_EXTERNAL_TOOL_RESUME_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// OpenAI-compatible conversation bindings must survive a restart, so these
+/// routes need a durable backend. Without one the mount is refused rather than
+/// served over non-durable bindings.
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+pub async fn build_openai_compat_route_mount(
+    _runtime: &RebornRuntime,
+    _tenant_id: TenantId,
+    _default_agent_id: AgentId,
+    _default_project_id: Option<ProjectId>,
+) -> Result<ProtectedRouteMount, RebornBuildError> {
+    Err(RebornBuildError::InvalidConfig {
+        reason: "OpenAI-compatible routes require durable conversation bindings;                  configure a storage backend"
+            .to_string(),
+    })
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub async fn build_openai_compat_route_mount(
     runtime: &RebornRuntime,
     tenant_id: TenantId,
@@ -222,7 +240,6 @@ pub async fn build_openai_compat_route_mount(
     // `GET /v1/models` lists the deployment's configured models from the same
     // LLM-config source the operator WebUI uses. Wired only when the root LLM
     // provider is compiled in; otherwise the route stays fail-closed (501).
-    #[cfg(feature = "root-llm-provider")]
     let router_state = match crate::webui::facade::build_llm_config_service(runtime) {
         Some(llm_config) => {
             let catalog: Arc<dyn OpenAiCompatModelCatalog> =
@@ -242,7 +259,6 @@ pub async fn build_openai_compat_route_mount(
 /// The active selection (if any) is listed first, then every configured
 /// provider's active or default model, de-duplicated by model id while
 /// preserving order. Each entry's `owned_by` is the provider id.
-#[cfg(feature = "root-llm-provider")]
 fn model_entries_from_snapshot(snapshot: &LlmConfigSnapshot) -> Vec<OpenAiCompatModelEntry> {
     let mut candidates: Vec<(String, String)> = Vec::new();
     if let Some(active) = &snapshot.active
@@ -267,19 +283,16 @@ fn model_entries_from_snapshot(snapshot: &LlmConfigSnapshot) -> Vec<OpenAiCompat
 
 /// [`OpenAiCompatModelCatalog`] backed by the runtime's operator LLM-config
 /// service. Lists the deployment's configured models for `GET /v1/models`.
-#[cfg(feature = "root-llm-provider")]
 struct LlmConfigModelCatalog {
     llm_config: Arc<dyn LlmConfigService>,
 }
 
-#[cfg(feature = "root-llm-provider")]
 impl LlmConfigModelCatalog {
     fn new(llm_config: Arc<dyn LlmConfigService>) -> Self {
         Self { llm_config }
     }
 }
 
-#[cfg(feature = "root-llm-provider")]
 #[async_trait]
 impl OpenAiCompatModelCatalog for LlmConfigModelCatalog {
     async fn list_models(
@@ -303,7 +316,6 @@ impl OpenAiCompatModelCatalog for LlmConfigModelCatalog {
     }
 }
 
-#[cfg(feature = "root-llm-provider")]
 fn map_llm_config_error_to_openai(error: LlmConfigServiceError) -> OpenAiCompatHttpError {
     match error {
         LlmConfigServiceError::InvalidRequest { .. } => {
@@ -564,6 +576,38 @@ impl OpenAiResponsesThreadProjectionReader {
             Err(error) if error.category() == TurnErrorCategory::ScopeNotFound => Ok(false),
             Err(error) => Err(map_resume_turn_error(error)),
         }
+    }
+
+    /// Read the run's cumulative token usage from persisted run state and render
+    /// it as an OpenAI-compatible `usage` object (with USD cost). Best-effort:
+    /// returns `None` when no coordinator is wired, the run can't be read, or the
+    /// run reported no usage (replay stubs, usage-less providers). The model is
+    /// priced by the caller's requested model — which, once model selection
+    /// routes it, is also the model that actually ran.
+    async fn read_run_usage(
+        &self,
+        projection_read: &ProjectionReadRequest,
+        actor_scope: &OpenAiCompatActorScope,
+        submitted_run_id: &str,
+        requested_model: &str,
+    ) -> Option<OpenAiResponseUsage> {
+        let coordinator = self.turn_coordinator.as_ref()?;
+        // silent-ok: an unparseable run id means there is no usage to report.
+        let run_id = TurnRunId::parse(submitted_run_id).ok()?;
+        let state = coordinator
+            .get_run_state(GetRunStateRequest {
+                scope: openai_compat_resume_turn_scope(
+                    actor_scope,
+                    projection_read.scope.thread_id.clone(),
+                ),
+                run_id,
+            })
+            .await
+            // silent-ok: best-effort usage read — a missing/unreadable run
+            // state yields no usage object, not a request failure.
+            .ok()?;
+        let usage = state.model_usage?;
+        Some(response_usage_from_model_usage(&usage, requested_model))
     }
 
     /// Project a single response run into OpenAI Responses `output` items: every
@@ -883,6 +927,14 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
                 .run_completed(&request.projection_read, submitted_run_id.clone())
                 .await?
             {
+                let usage = self
+                    .read_run_usage(
+                        &request.projection_read,
+                        &request.actor_scope,
+                        &submitted_run_id,
+                        &request.requested_model,
+                    )
+                    .await;
                 let projection = self
                     .read_run_output(
                         &request.projection_read,
@@ -896,6 +948,7 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
                     request.requested_model,
                     OpenAiResponseStatus::Completed,
                     projection.items,
+                    usage,
                 )));
             }
             let projected = self
@@ -924,12 +977,21 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
                 projection
                     .items
                     .extend(self.pending_external_tool_items(&submitted_run_id).await?);
+                let usage = self
+                    .read_run_usage(
+                        &request.projection_read,
+                        &request.actor_scope,
+                        &submitted_run_id,
+                        &request.requested_model,
+                    )
+                    .await;
                 return Ok(OpenAiResponseProjection::new(response_object(
                     request.public_id,
                     request.mapping.created_at,
                     request.requested_model,
                     OpenAiResponseStatus::Completed,
                     projection.items,
+                    usage,
                 )));
             }
             if self
@@ -954,12 +1016,21 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
                 projection
                     .items
                     .extend(self.pending_external_tool_items(&submitted_run_id).await?);
+                let usage = self
+                    .read_run_usage(
+                        &request.projection_read,
+                        &request.actor_scope,
+                        &submitted_run_id,
+                        &request.requested_model,
+                    )
+                    .await;
                 return Ok(OpenAiResponseProjection::new(response_object(
                     request.public_id,
                     request.mapping.created_at,
                     request.requested_model,
                     OpenAiResponseStatus::Completed,
                     projection.items,
+                    usage,
                 )));
             }
             if let Some(status) = projected.status
@@ -968,12 +1039,21 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
                     OpenAiResponseStatus::Failed | OpenAiResponseStatus::Cancelled
                 )
             {
+                let usage = self
+                    .read_run_usage(
+                        &request.projection_read,
+                        &request.actor_scope,
+                        &submitted_run_id,
+                        &request.requested_model,
+                    )
+                    .await;
                 return Ok(OpenAiResponseProjection::new(response_object(
                     request.public_id,
                     request.mapping.created_at,
                     request.requested_model,
                     status,
                     Vec::new(),
+                    usage,
                 )));
             }
             tokio::time::sleep(self.poll_interval).await;
@@ -1015,14 +1095,25 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
             projection
                 .items
                 .extend(self.pending_external_tool_items(&submitted_run_id).await?);
+            let model = request
+                .requested_model
+                .clone()
+                .unwrap_or_else(|| "reborn".to_string());
+            let usage = self
+                .read_run_usage(
+                    &request.projection_read,
+                    &request.actor_scope,
+                    &submitted_run_id,
+                    &model,
+                )
+                .await;
             return Ok(response_object(
                 request.public_id,
                 request.mapping.created_at,
-                request
-                    .requested_model
-                    .unwrap_or_else(|| "reborn".to_string()),
+                model,
                 OpenAiResponseStatus::Completed,
                 projection.items,
+                usage,
             ));
         }
         let status = match (
@@ -1036,14 +1127,25 @@ impl OpenAiResponsesProjectionReader for OpenAiResponsesThreadProjectionReader {
             (false, Some(status)) => status,
             (false, None) => OpenAiResponseStatus::InProgress,
         };
+        let model = request
+            .requested_model
+            .clone()
+            .unwrap_or_else(|| "reborn".to_string());
+        let usage = self
+            .read_run_usage(
+                &request.projection_read,
+                &request.actor_scope,
+                &submitted_run_id,
+                &model,
+            )
+            .await;
         Ok(response_object(
             request.public_id,
             request.mapping.created_at,
-            request
-                .requested_model
-                .unwrap_or_else(|| "reborn".to_string()),
+            model,
             status,
             projection.items,
+            usage,
         ))
     }
 }
@@ -1388,6 +1490,7 @@ fn response_object(
     model: String,
     status: OpenAiResponseStatus,
     output: Vec<OpenAiResponseOutputItem>,
+    usage: Option<OpenAiResponseUsage>,
 ) -> OpenAiResponseObject {
     let error = if matches!(status, OpenAiResponseStatus::Failed) {
         Some(OpenAiResponseErrorObject::from_kind(
@@ -1405,8 +1508,56 @@ fn response_object(
         output,
         error,
         incomplete_details: None,
-        usage: None,
+        usage,
     }
+}
+
+/// Build the OpenAI-compatible `usage` object from a run's cumulative token
+/// totals, pricing it for the given effective model.
+fn response_usage_from_model_usage(usage: &LoopModelUsage, model: &str) -> OpenAiResponseUsage {
+    // OpenAI reports total input (including cache) as `input_tokens`, with the
+    // cached subset broken out under `input_tokens_details`. `cache_read` is
+    // already a subset of `LoopModelUsage::input_tokens`, so it must NOT be
+    // added again; `cache_creation` is a separate write-side count and is
+    // added on top.
+    let total_input = usage
+        .input_tokens
+        .saturating_add(usage.cache_creation_input_tokens);
+    OpenAiResponseUsage {
+        input_tokens: total_input,
+        output_tokens: usage.output_tokens,
+        total_tokens: total_input.saturating_add(usage.output_tokens),
+        input_tokens_details: (usage.cache_read_input_tokens > 0).then_some(
+            OpenAiResponseInputTokensDetails {
+                cached_tokens: usage.cache_read_input_tokens,
+            },
+        ),
+        cost: response_cost_from_model_usage(usage, model),
+    }
+}
+
+/// Price a run's token usage in USD for the given model. Fresh input and
+/// cache-creation tokens bill at the input rate; cache-read tokens bill at the
+/// provider's cache-read discount; output at the output rate. Unknown models
+/// fall back to the cost table's default (≈GPT-4o), so a new paid model never
+/// silently prices at zero.
+fn response_cost_from_model_usage(usage: &LoopModelUsage, model: &str) -> Option<OpenAiCompatCost> {
+    use ironclaw_common::llm_costs::{format_usd, price_usage};
+
+    let cost = price_usage(
+        model,
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.cache_read_input_tokens,
+        usage.cache_creation_input_tokens,
+    );
+    Some(OpenAiCompatCost {
+        input_cost_usd: format_usd(cost.input_cost),
+        cached_input_cost_usd: format_usd(cost.cached_input_cost),
+        output_cost_usd: format_usd(cost.output_cost),
+        total_cost_usd: format_usd(cost.total_cost),
+        currency: OpenAiCompatCost::USD.to_string(),
+    })
 }
 
 fn thread_scope_from_projection_read(
@@ -1429,9 +1580,9 @@ fn thread_scope_from_projection_read(
 }
 
 fn openai_compat_ledger_filesystem(
-    root: Arc<crate::factory::LocalDevRootFilesystem>,
+    root: Arc<ironclaw_filesystem::CompositeRootFilesystem>,
     tenant_id: &TenantId,
-) -> Result<Arc<ScopedFilesystem<crate::factory::LocalDevRootFilesystem>>, RebornBuildError> {
+) -> Result<Arc<ScopedFilesystem<ironclaw_filesystem::CompositeRootFilesystem>>, RebornBuildError> {
     Ok(Arc::new(ScopedFilesystem::with_fixed_view(
         root,
         MountView::new(vec![MountGrant::new(

@@ -1,8 +1,8 @@
 //! Concurrent CAS-storm regression tests (#5466).
 //!
 //! Drives many genuinely parallel `cas_update` read-modify-write loops —
-//! multi-threaded tokio runtime, `tokio::spawn` per writer — against one
-//! shared snapshot path, per backend. The libSQL variant is the
+//! multi-threaded tokio runtime, `tokio::spawn` per writer and round — against
+//! one shared snapshot path, per backend. The libSQL variant is the
 //! regression pin for #5466: the previous connection-per-operation
 //! policy intermittently failed inside the C library (`SQLITE_MISUSE`,
 //! spurious `disk I/O error`) under exactly this load, and a
@@ -73,7 +73,9 @@ fn scoped<F: RootFilesystem>(root: Arc<F>, target: &str) -> ScopedFilesystem<F> 
     )
 }
 
-/// 16 spawned writers x 100 CAS increments each against one snapshot.
+/// 100 rounds of 16 spawned writers, each performing one CAS increment against
+/// the same snapshot. Keeping rounds explicit bounds each operation's competing
+/// writes below `cas_update`'s retry cap while preserving real contention.
 /// Every `cas_update` must succeed (no backend errors — defect 1 of
 /// #5466) and the final counter must equal `WRITERS * ITERATIONS`
 /// (no lost updates — defect 2).
@@ -81,21 +83,21 @@ async fn run_storm<F: RootFilesystem + 'static>(fs: Arc<ScopedFilesystem<F>>) {
     let scope = ResourceScope::system();
     let path = ScopedPath::new("/counters/state.json").unwrap();
 
-    let mut handles = Vec::new();
-    for _ in 0..WRITERS {
-        let fs = Arc::clone(&fs);
-        let scope = scope.clone();
-        let path = path.clone();
-        handles.push(tokio::spawn(async move {
-            for _ in 0..ITERATIONS {
+    for _ in 0..ITERATIONS {
+        let mut handles = Vec::new();
+        for _ in 0..WRITERS {
+            let fs = Arc::clone(&fs);
+            let scope = scope.clone();
+            let path = path.clone();
+            handles.push(tokio::spawn(async move {
                 cas_update(fs.as_ref(), &scope, &path, decode, encode, increment)
                     .await
                     .expect("concurrent cas_update must not fail");
-            }
-        }));
-    }
-    for handle in handles {
-        handle.await.expect("writer task must not panic");
+            }));
+        }
+        for handle in handles {
+            handle.await.expect("writer task must not panic");
+        }
     }
 
     let stored = fs
@@ -193,8 +195,6 @@ async fn in_memory_concurrent_delete_if_version_storm_has_exactly_one_winner_per
     let fs = Arc::new(scoped(Arc::new(InMemoryBackend::new()), "/engine/counters"));
     run_delete_storm(fs).await;
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn libsql_concurrent_cas_storm_has_no_errors_or_lost_updates() {
     let dir = tempfile::tempdir().unwrap();
@@ -205,8 +205,6 @@ async fn libsql_concurrent_cas_storm_has_no_errors_or_lost_updates() {
     let fs = Arc::new(scoped(root, "/engine/counters"));
     run_storm(fs).await;
 }
-
-#[cfg(feature = "libsql")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn libsql_concurrent_delete_if_version_storm_has_exactly_one_winner_per_round() {
     let dir = tempfile::tempdir().unwrap();
@@ -223,7 +221,6 @@ async fn libsql_concurrent_delete_if_version_storm_has_exactly_one_winner_per_ro
 /// `db_root_filesystem_contract.rs`'s skip-when-unreachable pattern so
 /// environments without Postgres pass vacuously rather than failing CI on
 /// infrastructure this test doesn't own.
-#[cfg(feature = "postgres")]
 async fn connect_postgres_for_storm() -> Option<Arc<ironclaw_filesystem::PostgresRootFilesystem>> {
     if std::env::var("IRONCLAW_SKIP_POSTGRES_TESTS").is_ok() {
         return None;
@@ -243,8 +240,6 @@ async fn connect_postgres_for_storm() -> Option<Arc<ironclaw_filesystem::Postgre
     }
     Some(root)
 }
-
-#[cfg(feature = "postgres")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn postgres_concurrent_cas_storm_has_no_errors_or_lost_updates() {
     let Some(root) = connect_postgres_for_storm().await else {
@@ -256,8 +251,6 @@ async fn postgres_concurrent_cas_storm_has_no_errors_or_lost_updates() {
     let fs = Arc::new(scoped(root, &target));
     run_storm(fs).await;
 }
-
-#[cfg(feature = "postgres")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn postgres_concurrent_delete_if_version_storm_has_exactly_one_winner_per_round() {
     let Some(root) = connect_postgres_for_storm().await else {

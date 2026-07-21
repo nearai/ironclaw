@@ -14,10 +14,13 @@ mod recording_host_runtime;
 mod recording_network_http_egress;
 mod recording_network_http_transport;
 mod recording_runtime_http_egress;
+mod recording_security_audit_sink;
 mod recording_test_capability_port;
 mod static_capability_surface_profile_resolver;
 mod static_network_resolver;
 mod static_secret_store;
+mod trigger_active_run_lookup_host_runtime;
+mod unavailable_project_service;
 
 pub(crate) use empty_identity_context_source::EmptyIdentityContextSource;
 pub(crate) use fixed_runtime_credential_account_resolver::FixedRuntimeCredentialAccountResolver;
@@ -34,6 +37,7 @@ pub(crate) use recording_host_runtime::RecordingHostRuntime;
 pub(crate) use recording_network_http_egress::RecordingNetworkHttpEgress;
 pub(crate) use recording_network_http_transport::RecordingNetworkHttpTransport;
 pub(crate) use recording_runtime_http_egress::RecordingRuntimeHttpEgress;
+pub(crate) use recording_security_audit_sink::RecordingSecurityAuditSink;
 // Consts consumed only by the binary-E2E harness in the parity/QA support tree
 // (unused in bins that don't mount it).
 #[allow(unused_imports)]
@@ -43,3 +47,5 @@ pub(crate) use recording_test_capability_port::{
 pub(crate) use static_capability_surface_profile_resolver::StaticCapabilitySurfaceProfileResolver;
 pub(crate) use static_network_resolver::StaticNetworkResolver;
 pub(crate) use static_secret_store::StaticSecretStore;
+pub(crate) use trigger_active_run_lookup_host_runtime::TriggerActiveRunLookupHostRuntime;
+pub(crate) use unavailable_project_service::UnavailableProjectService;

@@ -1,6 +1,6 @@
 use crate::subagent::directions::DirectionId;
 use async_trait::async_trait;
-use ironclaw_loop_support::{SubagentDefinition, SubagentDefinitionResolver, SubagentKindId};
+use ironclaw_loop_host::{SubagentDefinition, SubagentDefinitionResolver, SubagentKindId};
 use ironclaw_turns::{RunProfileRequest, TurnRunId, run_profile::AgentLoopHostError};
 use serde::{Deserialize, Serialize};
 
@@ -139,14 +139,14 @@ pub fn lookup_flavor(id: SubagentFlavorId) -> Option<&'static SubagentFlavor> {
         .find(|flavor| flavor.id == id)
 }
 
-/// Returns one [`ironclaw_loop_support::SpawnSubagentFlavorDescriptor`] per
+/// Returns one [`ironclaw_loop_host::SpawnSubagentFlavorDescriptor`] per
 /// entry in [`BUILTIN_SUBAGENT_FLAVORS`], in registry order. Derived directly
 /// from the registry — single source of truth, no drift risk.
-pub fn builtin_flavor_catalog() -> Vec<ironclaw_loop_support::SpawnSubagentFlavorDescriptor> {
+pub fn builtin_flavor_catalog() -> Vec<ironclaw_loop_host::SpawnSubagentFlavorDescriptor> {
     BUILTIN_SUBAGENT_FLAVORS
         .iter()
-        .map(|f| ironclaw_loop_support::SpawnSubagentFlavorDescriptor {
-            id: ironclaw_loop_support::SubagentKindId::new(f.id.as_str())
+        .map(|f| ironclaw_loop_host::SpawnSubagentFlavorDescriptor {
+            id: ironclaw_loop_host::SubagentKindId::new(f.id.as_str())
                 .expect("valid SubagentKindId"), // safety: BUILTIN_SUBAGENT_FLAVORS ids are compile-time-constant valid SubagentKindId values
             summary: f.summary.to_string(),
         })
@@ -203,7 +203,7 @@ pub fn parse_flavor_id(value: &str) -> Option<SubagentFlavorId> {
 #[cfg(test)]
 mod tests {
     use crate::subagent::directions::direction_prompt;
-    use ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID;
+    use ironclaw_loop_host::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID;
 
     use super::*;
 
@@ -422,17 +422,16 @@ mod tests {
 
         use async_trait::async_trait;
         use ironclaw_agent_loop::test_support::test_run_context;
-        use ironclaw_host_api::{CapabilityId, RuntimeKind};
-        use ironclaw_loop_support::{
+        use ironclaw_host_api::{CapabilityId, Resolution, ResolutionBatch, RuntimeKind};
+        use ironclaw_loop_host::{
             CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileFilter,
             CapabilitySurfaceProfileResolver, SubagentPromptMaterialSource,
         };
         use ironclaw_turns::run_profile::{
-            AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome,
-            CapabilityDescriptorView, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-            CapabilityResultMessage, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort,
-            LoopDriverId, ProviderToolDefinition, VisibleCapabilityRequest,
-            VisibleCapabilitySurface,
+            AgentLoopHostError, CapabilityBatchInvocation, CapabilityDescriptorView,
+            CapabilityInputRef, CapabilityInvocation, CapabilitySurfaceVersion, ConcurrencyHint,
+            LoopCapabilityPort, LoopDriverId, ProviderToolDefinition, VisibleCapabilityRequest,
+            VisibleCapabilitySurface, resolution,
         };
         use ironclaw_turns::{LoopResultRef, RunProfileId, RunProfileVersion};
 
@@ -526,27 +525,28 @@ mod tests {
             async fn invoke_capability(
                 &self,
                 request: CapabilityInvocation,
-            ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+            ) -> Result<Resolution, AgentLoopHostError> {
                 self.invoked
                     .lock()
                     .expect("invoked lock")
                     .push(request.capability_id.as_str().to_string());
-                Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
-                    result_ref: LoopResultRef::new("result:ok").expect("valid result ref"),
-                    safe_summary: "ok".to_string(),
-                    progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-                    terminate_hint: false,
-                    byte_len: 0,
-                    output_digest: None,
-                }))
+                Ok(resolution::completed(
+                    LoopResultRef::new("result:ok").expect("valid result ref"),
+                    "ok".to_string(),
+                    ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                    false,
+                    0,
+                    None,
+                    None,
+                ))
             }
 
             async fn invoke_capability_batch(
                 &self,
                 _request: CapabilityBatchInvocation,
-            ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-                Ok(CapabilityBatchOutcome {
-                    outcomes: Vec::new(),
+            ) -> Result<ResolutionBatch, AgentLoopHostError> {
+                Ok(ResolutionBatch {
+                    resolutions: Vec::new(),
                     stopped_on_suspension: false,
                 })
             }
@@ -559,7 +559,7 @@ mod tests {
         async fn filter_for_flavor(
             flavor: SubagentFlavorId,
         ) -> (
-            ironclaw_loop_support::CapabilitySurfaceProfileFilter,
+            ironclaw_loop_host::CapabilitySurfaceProfileFilter,
             Arc<HostSurfaceSpy>,
         ) {
             filter_for_flavor_with_base(flavor, CapabilityAllowSet::All).await
@@ -569,7 +569,7 @@ mod tests {
             flavor: SubagentFlavorId,
             base_allow_set: CapabilityAllowSet,
         ) -> (
-            ironclaw_loop_support::CapabilitySurfaceProfileFilter,
+            ironclaw_loop_host::CapabilitySurfaceProfileFilter,
             Arc<HostSurfaceSpy>,
         ) {
             let goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
@@ -618,12 +618,12 @@ mod tests {
             }
         }
 
-        fn is_denied(outcome: &CapabilityOutcome) -> bool {
-            matches!(outcome, CapabilityOutcome::Denied(_))
+        fn is_denied(resolution: &Resolution) -> bool {
+            matches!(resolution, Resolution::Denied(_))
         }
 
         async fn visible_ids(
-            filter: &ironclaw_loop_support::CapabilitySurfaceProfileFilter,
+            filter: &ironclaw_loop_host::CapabilitySurfaceProfileFilter,
         ) -> Vec<String> {
             let mut ids = filter
                 .visible_capabilities(VisibleCapabilityRequest)
@@ -638,7 +638,7 @@ mod tests {
         }
 
         fn definition_ids(
-            filter: &ironclaw_loop_support::CapabilitySurfaceProfileFilter,
+            filter: &ironclaw_loop_host::CapabilitySurfaceProfileFilter,
         ) -> Vec<String> {
             let mut ids = filter
                 .tool_definitions()

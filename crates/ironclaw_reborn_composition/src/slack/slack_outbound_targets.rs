@@ -5,12 +5,8 @@
 
 // arch-exempt: large_file, Slack outbound and personal DM authority tests, plan #5905
 
-#[cfg(test)]
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
-#[cfg(test)]
-use std::sync::RwLock;
 
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_product_adapters::{
@@ -27,7 +23,9 @@ use ironclaw_turns::ReplyTargetBindingRef;
 use thiserror::Error;
 
 use crate::outbound::OutboundDeliveryTargetProvider;
-use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
+use crate::outbound::outbound_preferences::{
+    OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner,
+};
 use crate::slack::slack_channel_routes::{
     SlackChannelRouteError, SlackChannelRouteKey, SlackChannelRouteStore,
 };
@@ -162,100 +160,6 @@ pub(crate) trait SlackPersonalDmTargetStore: Send + Sync + std::fmt::Debug {
         installation_id: &AdapterInstallationId,
         expected_epoch: Option<SlackConnectionEpoch>,
     ) -> Result<usize, SlackPersonalDmTargetError>;
-}
-
-#[cfg(test)]
-#[derive(Debug, Default)]
-pub(crate) struct InMemorySlackPersonalDmTargetStore {
-    targets: RwLock<HashMap<SlackPersonalDmTargetKey, SlackPersonalDmTarget>>,
-}
-
-#[cfg(test)]
-impl InMemorySlackPersonalDmTargetStore {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-}
-
-#[cfg(test)]
-#[async_trait::async_trait]
-impl SlackPersonalDmTargetStore for InMemorySlackPersonalDmTargetStore {
-    async fn load_personal_dm_target(
-        &self,
-        key: &SlackPersonalDmTargetKey,
-    ) -> Result<Option<SlackPersonalDmTarget>, SlackPersonalDmTargetError> {
-        Ok(self
-            .targets
-            .read()
-            .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?
-            .get(key)
-            .cloned())
-    }
-
-    async fn upsert_personal_dm_target(
-        &self,
-        target: SlackPersonalDmTarget,
-    ) -> Result<SlackPersonalDmTarget, SlackPersonalDmTargetError> {
-        self.targets
-            .write()
-            .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?
-            .insert(target.key.clone(), target.clone());
-        Ok(target)
-    }
-
-    async fn upsert_personal_dm_target_for_epoch(
-        &self,
-        target: SlackPersonalDmTarget,
-        _epoch: SlackConnectionEpoch,
-    ) -> Result<SlackPersonalDmTarget, SlackPersonalDmTargetError> {
-        // Test-only store has no lifecycle authority; callers that exercise
-        // epoch fencing use FilesystemSlackHostState.
-        self.targets
-            .write()
-            .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?
-            .insert(target.key.clone(), target.clone());
-        Ok(target)
-    }
-
-    async fn personal_dm_target_installations_for_owner(
-        &self,
-        tenant_id: &TenantId,
-        user_id: &UserId,
-    ) -> Result<Vec<AdapterInstallationId>, SlackPersonalDmTargetError> {
-        let targets = self
-            .targets
-            .read()
-            .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?;
-        let mut installations = targets
-            .keys()
-            .filter(|key| &key.tenant_id == tenant_id && &key.user_id == user_id)
-            .map(|key| key.installation_id.clone())
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        installations.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-        Ok(installations)
-    }
-
-    async fn delete_personal_dm_targets_for_owner(
-        &self,
-        tenant_id: &TenantId,
-        user_id: &UserId,
-        installation_id: &AdapterInstallationId,
-        _expected_epoch: Option<SlackConnectionEpoch>,
-    ) -> Result<usize, SlackPersonalDmTargetError> {
-        let mut targets = self
-            .targets
-            .write()
-            .map_err(|_| SlackPersonalDmTargetError::StoreUnavailable)?;
-        let before = targets.len();
-        targets.retain(|key, _| {
-            !(&key.tenant_id == tenant_id
-                && &key.user_id == user_id
-                && &key.installation_id == installation_id)
-        });
-        Ok(before - targets.len())
-    }
 }
 
 pub(crate) struct SlackPersonalDmTargetProvisioner {
@@ -564,6 +468,14 @@ impl SlackHostBetaOutboundTargetProvider {
                 &self.team_id,
                 &route.channel_id,
             )?,
+            // Owner is the route's resolved subject user in this provider's
+            // configured tenant — the identity the shared channel is bound to,
+            // not merely the caller. The registry drops this entry if it ever
+            // does not match the querying caller.
+            owner: OutboundDeliveryTargetOwner::new(
+                self.tenant_id.clone(),
+                route.subject_user_id.clone(),
+            ),
         })
     }
 
@@ -593,6 +505,13 @@ impl SlackHostBetaOutboundTargetProvider {
                 &target.dm_channel_id,
                 &target.slack_user_id,
             )?,
+            // Owner is the Reborn identity the DM target is keyed to, carried
+            // from the stored target key rather than the caller, so the
+            // registry drops the entry if resolution ever crosses users.
+            owner: OutboundDeliveryTargetOwner::new(
+                target.key.tenant_id.clone(),
+                target.key.user_id.clone(),
+            ),
         })
     }
 
@@ -1122,11 +1041,14 @@ fn validate_slack_id(field: &'static str, value: &str) -> Result<(), SlackPerson
 
 #[cfg(test)]
 mod tests {
+    use ironclaw_filesystem::InMemoryBackend;
+
     use super::*;
     use crate::slack::slack_channel_routes::{
-        InMemorySlackChannelRouteStore, SlackChannelRouteError, SlackChannelRouteKey,
-        SlackChannelRouteListPage,
+        SlackChannelRouteError, SlackChannelRouteKey, SlackChannelRouteListPage,
     };
+    use crate::slack::slack_host_state::FilesystemSlackHostState;
+    use crate::slack::slack_host_state::test_support::in_memory_slack_host_state;
 
     // ── test constants ────────────────────────────────────────────────────────
     const TENANT: &str = "tenant:alpha";
@@ -1166,16 +1088,16 @@ mod tests {
     fn empty_provider() -> SlackHostBetaOutboundTargetProvider {
         SlackHostBetaOutboundTargetProvider::new(
             provider_config(Vec::new()),
-            Arc::new(InMemorySlackChannelRouteStore::new()),
-            Arc::new(InMemorySlackPersonalDmTargetStore::new()),
+            Arc::new(in_memory_slack_host_state(TENANT)),
+            Arc::new(in_memory_slack_host_state(TENANT)),
         )
     }
 
     async fn provider_with_provisioned_dm() -> (
         SlackHostBetaOutboundTargetProvider,
-        Arc<InMemorySlackPersonalDmTargetStore>,
+        Arc<FilesystemSlackHostState<InMemoryBackend>>,
     ) {
-        let store = Arc::new(InMemorySlackPersonalDmTargetStore::new());
+        let store = Arc::new(in_memory_slack_host_state(TENANT));
         let key = SlackPersonalDmTargetKey::new(
             TenantId::new(TENANT).expect("tenant"),
             AdapterInstallationId::new(INSTALLATION).expect("installation"),
@@ -1187,16 +1109,13 @@ mod tests {
             SlackPersonalDmTarget::new(key, SlackUserId::new(SLACK_USER), "D0HOST".to_string())
                 .expect("target");
         store
-            .upsert_personal_dm_target_for_epoch(
-                target,
-                SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new()),
-            )
+            .upsert_personal_dm_target(target)
             .await
             .expect("stores");
         let store_dyn: Arc<dyn SlackPersonalDmTargetStore> = Arc::clone(&store) as _;
         let provider = SlackHostBetaOutboundTargetProvider::new(
             provider_config(Vec::new()),
-            Arc::new(InMemorySlackChannelRouteStore::new()),
+            Arc::new(in_memory_slack_host_state(TENANT)),
             store_dyn,
         );
         (provider, store)
@@ -1415,7 +1334,7 @@ mod tests {
     #[tokio::test]
     async fn slack_list_outbound_delivery_targets_returns_shared_channels_and_personal_dm_together()
     {
-        let store = Arc::new(InMemorySlackPersonalDmTargetStore::new());
+        let store = Arc::new(in_memory_slack_host_state(TENANT));
         let key = SlackPersonalDmTargetKey::new(
             TenantId::new(TENANT).expect("tenant"),
             AdapterInstallationId::new(INSTALLATION).expect("installation"),
@@ -1438,7 +1357,7 @@ mod tests {
         );
         let provider = SlackHostBetaOutboundTargetProvider::new(
             provider_config(vec![shared_route]),
-            Arc::new(InMemorySlackChannelRouteStore::new()),
+            Arc::new(in_memory_slack_host_state(TENANT)),
             store,
         );
 
@@ -1538,7 +1457,7 @@ mod tests {
         let provider = SlackHostBetaOutboundTargetProvider::new(
             provider_config(Vec::new()),
             Arc::new(OversizedPageRouteStore),
-            Arc::new(InMemorySlackPersonalDmTargetStore::new()),
+            Arc::new(in_memory_slack_host_state(TENANT)),
         );
 
         let error = provider
@@ -1556,7 +1475,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_routes_for_subject_returns_only_callers_routes_across_multiple_subjects() {
-        let store = Arc::new(InMemorySlackChannelRouteStore::new());
+        let store = Arc::new(in_memory_slack_host_state(TENANT));
         let tenant_id = TenantId::new(TENANT).expect("tenant");
         let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation");
         let alice = UserId::new(USER).expect("alice");

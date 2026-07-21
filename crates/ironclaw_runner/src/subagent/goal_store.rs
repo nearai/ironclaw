@@ -1,14 +1,11 @@
 use std::collections::{HashMap, VecDeque};
-#[cfg(any(feature = "filesystem-goal-store", test))]
 use std::sync::Arc;
 use std::sync::{Mutex, MutexGuard};
 
 use async_trait::async_trait;
-#[cfg(feature = "filesystem-goal-store")]
 use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FilesystemError, RootFilesystem, ScopedFilesystem,
 };
-#[cfg(feature = "filesystem-goal-store")]
 use ironclaw_host_api::ScopedPath;
 use ironclaw_turns::{TurnRunId, TurnScope};
 use serde::{Deserialize, Serialize};
@@ -63,7 +60,6 @@ pub trait SubagentGoalStore: Send + Sync {
     ) -> Result<(), SubagentGoalStoreError>;
 }
 
-#[cfg(feature = "filesystem-goal-store")]
 fn validate_goal(goal: &SubagentGoal) -> Result<(), SubagentGoalStoreError> {
     let bytes = goal.byte_len();
     if bytes > MAX_GOAL_BYTES {
@@ -75,7 +71,6 @@ fn validate_goal(goal: &SubagentGoal) -> Result<(), SubagentGoalStoreError> {
     Ok(())
 }
 
-#[cfg(feature = "filesystem-goal-store")]
 pub struct FilesystemSubagentGoalStore<F>
 where
     F: RootFilesystem,
@@ -83,7 +78,6 @@ where
     filesystem: Arc<ScopedFilesystem<F>>,
 }
 
-#[cfg(feature = "filesystem-goal-store")]
 impl<F> FilesystemSubagentGoalStore<F>
 where
     F: RootFilesystem,
@@ -99,7 +93,6 @@ where
 // belongs in the choice of `F` at the call site, not in a separate wrapper
 // type.
 
-#[cfg(feature = "filesystem-goal-store")]
 #[async_trait]
 impl<F> SubagentGoalStore for FilesystemSubagentGoalStore<F>
 where
@@ -173,9 +166,8 @@ where
     }
 }
 
-#[cfg(feature = "filesystem-goal-store")]
 #[async_trait]
-impl<F> ironclaw_loop_support::SubagentSpawnGoalStore for FilesystemSubagentGoalStore<F>
+impl<F> ironclaw_loop_host::SubagentSpawnGoalStore for FilesystemSubagentGoalStore<F>
 where
     F: RootFilesystem + 'static,
 {
@@ -183,7 +175,7 @@ where
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
-        goal: ironclaw_loop_support::SubagentGoalRecord,
+        goal: ironclaw_loop_host::SubagentGoalRecord,
     ) -> Result<(), ironclaw_turns::run_profile::AgentLoopHostError> {
         <Self as SubagentGoalStore>::put_goal(
             self,
@@ -209,7 +201,6 @@ where
     }
 }
 
-#[cfg(feature = "filesystem-goal-store")]
 fn goal_path(scope: &TurnScope, run_id: TurnRunId) -> Result<ScopedPath, SubagentGoalStoreError> {
     let mut path = String::from("/turns/subagent-goals");
     if let Some(agent_id) = &scope.agent_id {
@@ -230,7 +221,6 @@ fn goal_path(scope: &TurnScope, run_id: TurnRunId) -> Result<ScopedPath, Subagen
     })
 }
 
-#[cfg(feature = "filesystem-goal-store")]
 fn fs_backend_error(error: FilesystemError) -> SubagentGoalStoreError {
     SubagentGoalStoreError::Backend {
         reason: error.to_string(),
@@ -363,12 +353,12 @@ impl SubagentGoalStore for InMemoryBoundedSubagentGoalStore {
 }
 
 #[async_trait]
-impl ironclaw_loop_support::SubagentSpawnGoalStore for InMemoryBoundedSubagentGoalStore {
+impl ironclaw_loop_host::SubagentSpawnGoalStore for InMemoryBoundedSubagentGoalStore {
     async fn put_goal(
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
-        goal: ironclaw_loop_support::SubagentGoalRecord,
+        goal: ironclaw_loop_host::SubagentGoalRecord,
     ) -> Result<(), ironclaw_turns::run_profile::AgentLoopHostError> {
         self.put(
             scope,
@@ -421,10 +411,8 @@ fn lock(inner: &Mutex<GoalStoreInner>) -> MutexGuard<'_, GoalStoreInner> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "filesystem-goal-store")]
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
-    #[cfg(feature = "filesystem-goal-store")]
     use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 
     fn scope(thread_id: &str) -> TurnScope {
@@ -612,7 +600,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "filesystem-goal-store")]
     fn scoped_goal_filesystem() -> Arc<ScopedFilesystem<InMemoryBackend>> {
         let mounts = MountView::new(vec![MountGrant::new(
             MountAlias::new("/turns").unwrap(),
@@ -626,7 +613,6 @@ mod tests {
         ))
     }
 
-    #[cfg(feature = "filesystem-goal-store")]
     async fn assert_goal_store_contract(store: &dyn SubagentGoalStore) {
         let owner_scope = scope("thread-goal");
         let other_scope = scope("thread-goal-other");
@@ -678,14 +664,12 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "filesystem-goal-store")]
     #[tokio::test]
     async fn filesystem_goal_store_satisfies_subagent_goal_contract() {
         let store = FilesystemSubagentGoalStore::new(scoped_goal_filesystem());
         assert_goal_store_contract(&store).await;
     }
 
-    #[cfg(feature = "filesystem-goal-store")]
     #[test]
     fn filesystem_goal_path_uses_alias_relative_named_scope_axes() {
         let owner_scope = scope("thread-goal-path");
@@ -706,7 +690,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "filesystem-goal-store")]
     #[tokio::test]
     async fn filesystem_goal_store_reopens_over_same_backend() {
         let filesystem = scoped_goal_filesystem();
@@ -732,7 +715,6 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Arc<dyn SubagentGoalStore>>();
         assert_send_sync::<InMemoryBoundedSubagentGoalStore>();
-        #[cfg(feature = "filesystem-goal-store")]
         assert_send_sync::<FilesystemSubagentGoalStore<InMemoryBackend>>();
     }
 }

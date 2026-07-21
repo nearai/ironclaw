@@ -6,11 +6,13 @@
 use super::*;
 
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
-    InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryRunProfileResolver,
-    RunProfileResolver, TurnId, TurnRunId, TurnScope,
+    InMemoryRunProfileResolver, RunProfileResolver, TurnId, TurnRunId, TurnScope,
     run_profile::{InMemoryLoopHostMilestoneSink, RunProfileResolutionRequest},
 };
+
+use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
 
 /// Coverage gap closed: `build_compaction_ports` (see above) resolves a
 /// scope-specific gateway via `self.model_gateway.resolve_for_scope(&run_context.scope)`,
@@ -29,7 +31,7 @@ use ironclaw_turns::{
 /// passes if compaction reaches the scoped gateway.
 #[tokio::test]
 async fn build_compaction_ports_dispatches_through_scope_resolved_gateway() {
-    use ironclaw_loop_support::{
+    use ironclaw_loop_host::{
         HostManagedModelError, HostManagedModelRequest, HostManagedModelResponse,
     };
     use ironclaw_threads::{AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent};
@@ -152,9 +154,9 @@ async fn build_compaction_ports_dispatches_through_scope_resolved_gateway() {
         thread_service,
         thread_scope,
         model_gateway,
-        Arc::new(InMemoryCheckpointStateStore::default()) as Arc<dyn CheckpointStateStore>,
-        Arc::new(ironclaw_turns::InMemoryTurnStateStore::default()) as Arc<dyn TurnStateStore>,
-        Arc::new(InMemoryLoopCheckpointStore::default()) as Arc<dyn LoopCheckpointStore>,
+        in_memory_checkpoint_state_store() as Arc<dyn CheckpointStateStore>,
+        Arc::new(in_memory_turn_state_store()) as Arc<dyn TurnStateStore>,
+        Arc::new(in_memory_turn_state_store()) as Arc<dyn LoopCheckpointStore>,
         Arc::new(InMemoryLoopHostMilestoneSink::default()) as Arc<dyn LoopHostMilestoneSink>,
         TextOnlyLoopHostConfig {
             max_messages: 8,

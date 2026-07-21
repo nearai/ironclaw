@@ -1,3 +1,4 @@
+// arch-exempt: large_file, mechanical InMemoryOutboundStateStore -> FilesystemOutboundStateStore<InMemoryBackend> §4.3 store consolidation, no logic change, plan #6168
 use std::{
     sync::{Arc, atomic::AtomicU64},
     time::Duration,
@@ -20,9 +21,10 @@ use ironclaw_event_streams::{
     SubscriberCapabilities, ThreadLiveProjectionUpdate,
 };
 use ironclaw_events::{DurableEventLog, EventCursor, EventStreamKey, ReadScope};
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_first_party_extension_ports::SkillActivationObserver;
 use ironclaw_host_api::UserId;
-use ironclaw_outbound::InMemoryOutboundStateStore;
+use ironclaw_outbound::FilesystemOutboundStateStore;
 use ironclaw_product_adapters::{
     AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
     CapabilityActivityViewInput, ExternalActorRef, ExternalConversationRef, ProductAdapterError,
@@ -51,19 +53,12 @@ use display_preview::{
 use live_progress::{
     LiveProgressMilestoneSink, LiveSkillActivationObserver, product_items_for_live_update,
 };
-// Crate-visible under `root-llm-provider` so the skill-learning sink can name
-// the publisher type; otherwise a module-private import for internal use only.
-#[cfg(feature = "root-llm-provider")]
+// Crate-visible so the skill-learning sink can name the publisher type.
 pub(crate) use live_progress::LiveProjectionPublisher;
-#[cfg(not(feature = "root-llm-provider"))]
-use live_progress::LiveProjectionPublisher;
 use runtime_replay::{
     DeliveredRuntimePayload, RuntimePayloadCandidate, RuntimePayloadResolution, RuntimePayloads,
     replay_payload_candidates, snapshot_payload_candidates,
 };
-// Only the Slack delivery path (feature-gated) consumes this re-export.
-#[cfg(feature = "slack-v2-host-beta")]
-pub(crate) use turn_events::approval_prompt_context_view;
 use turn_events::{
     FailureExplanationProvider, ModelFailureExplanationProvider, TurnEventBridge, TurnEventDrain,
     TurnEventPayload, turn_status_wire,
@@ -215,7 +210,18 @@ pub(crate) fn build_reborn_projection_services(
         Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
         live_updates.clone(),
         Arc::new(NoExposureProjectionRedactionValidator),
-        Arc::new(InMemoryOutboundStateStore::default()),
+        // §4.3: the local-dev projection bundle's EventStreamManager keeps its
+        // own ephemeral, volatile outbound-delivery bookkeeping — the drop-in
+        // for the deleted throwaway `InMemoryOutboundStateStore::default()`.
+        // `wrap_scoped` over a fresh `InMemoryBackend` mounts `/outbound`; the
+        // durable outbound store is composed separately in the factory.
+        // composition-owned construction site.
+        {
+            #[allow(clippy::disallowed_methods)]
+            Arc::new(FilesystemOutboundStateStore::new(crate::wrap_scoped(
+                Arc::new(InMemoryBackend::new()),
+            )))
+        },
     ));
     RebornProjectionServices {
         event_stream_manager,

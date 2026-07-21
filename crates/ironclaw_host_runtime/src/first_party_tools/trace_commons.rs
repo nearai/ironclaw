@@ -1,3 +1,4 @@
+// arch-exempt: large_file, trace-commons capability family shares one dispatch surface, plan #4539
 //! First-party Trace Commons capabilities: onboard, status, credits, profile token, profile set,
 //! and account login link.
 //!
@@ -570,7 +571,7 @@ fn onboard_success_value(outcome: &OnboardOutcome, consents: &OnboardConsents) -
         "next_steps": "Traces are redacted locally and queued; submission requires meeting \
     the score threshold. Optional second opt-in: to appear on the public community \
     leaderboard, choose a pseudonymous handle and ask the agent to set your public \
-    Trace Commons profile, or run 'ironclaw-reborn traces profile set --handle \
+    Trace Commons profile, or run 'ironclaw traces profile set --handle \
     <pseudonymous-handle>'. Browser/manual profile setup can still use \
     'traces profile token'. \
     Opt out anytime with 'ironclaw traces opt-out'."
@@ -1328,7 +1329,7 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
-    use ironclaw_filesystem::LocalFilesystem;
+    use ironclaw_filesystem::DiskFilesystem;
     use ironclaw_host_api::{CapabilityId, ResourceEstimate, ResourceScope};
     use ironclaw_reborn_traces::contribution::{
         StandingTraceContributionPolicy, TraceCreditReport,
@@ -1358,13 +1359,14 @@ mod tests {
     /// Uses the system scope so no validated user/tenant id is needed.
     fn test_request(input: Value) -> FirstPartyCapabilityRequest {
         FirstPartyCapabilityRequest {
+            run_id: None,
             capability_id: CapabilityId::new(TRACE_COMMONS_ONBOARD_CAPABILITY_ID).unwrap(),
             scope: ResourceScope::system(),
             authenticated_actor_user_id: None,
             estimate: ResourceEstimate::default(),
             mounts: None,
             services: InvocationServices {
-                filesystem: Arc::new(LocalFilesystem::new()),
+                filesystem: Arc::new(DiskFilesystem::new()),
                 runtime_http_egress: None,
                 tool_call_http_egress: None,
                 runtime_secret_material_stager: None,
@@ -1372,6 +1374,7 @@ mod tests {
                 secret_store: None,
                 audit_sink: None,
                 unsafe_raw_diagnostics_allowed: false,
+                post_edit_check: None,
             },
             input,
         }
@@ -1506,6 +1509,11 @@ mod tests {
         assert!(
             !serialized.contains("BEGIN"),
             "output must not contain 'BEGIN' (no PEM key material)"
+        );
+        assert!(
+            serialized.contains("ironclaw traces profile set --handle")
+                && !serialized.contains("ironclaw-reborn"),
+            "next steps must use the canonical CLI command: {serialized}"
         );
 
         // Community URLs absent when None.

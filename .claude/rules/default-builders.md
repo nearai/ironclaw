@@ -1,7 +1,6 @@
 ---
 paths:
   - "crates/**/*.rs"
-  - "src/**/*.rs"
   - "tests/**/*.rs"
 ---
 # Default-Backed Builder Setters

@@ -81,6 +81,70 @@ if [ ! -f "$config_path" ]; then
   trap - EXIT HUP INT TERM
 fi
 
+# One-time volume migration: `config.toml` is now the single source of
+# truth for `[llm.default]`, written only by an explicit act (onboard,
+# `config set`/`models set-provider`, or the WebUI settings page) — never
+# implicitly baked into a shipped default config (see this repo's
+# `docker/reborn/config.toml` comment). Before this change, EVERY shipped
+# profile config (`config.toml`, `config.hosted-single-tenant.toml`,
+# `config.hosted-single-tenant-volume.toml`, `config.production.toml`)
+# baked in the identical `[llm.default]` stub below, and the block above
+# only installs a default config when `$config_path` doesn't exist yet — so
+# a pre-existing Railway volume from before this change still carries that
+# stale baked-in stub verbatim and would otherwise never pick up the new
+# "no implicit slot" behavior. This check strips the section ONLY when it
+# is an EXACT, byte-for-byte match of the known old stub (header + exactly
+# these three fields, immediately followed by a blank line, a new `[section]`
+# header, or EOF) — an operator who has since edited `[llm.default]` in any
+# way (different model, added fields, a deliberately-kept `nearai` pin,
+# etc.) is left completely untouched, matching the entrypoint's existing
+# narrowly-gated legacy-Slack-field migration just below. A backup of the
+# pre-migration file is written alongside as `config.toml.pre-llm-migration`
+# (once — never overwritten by a later boot) before any change is made.
+if [ -f "$config_path" ]; then
+  llm_stub_migration_needed="$(awk '
+    BEGIN { state = 0; found = 0 }
+    /^\[llm\.default\][[:space:]]*$/ { state = 1; next }
+    state == 1 {
+      if ($0 == "provider_id = \"nearai\"") { state = 2; next }
+      state = 0
+    }
+    state == 2 {
+      if ($0 == "model = \"deepseek-ai/DeepSeek-V4-Flash\"") { state = 3; next }
+      state = 0
+    }
+    state == 3 {
+      if ($0 == "api_key_env = \"NEARAI_API_KEY\"") { state = 4; next }
+      state = 0
+    }
+    state == 4 {
+      if ($0 == "" || $0 ~ /^\[/) { found = 1 }
+      state = 0
+    }
+    END {
+      if (state == 4) { found = 1 }
+      print found
+    }
+  ' "$config_path")"
+  if [ "$llm_stub_migration_needed" = "1" ]; then
+    backup_path="${config_path}.pre-llm-migration"
+    if [ ! -f "$backup_path" ]; then
+      cp "$config_path" "$backup_path"
+    fi
+    tmp_config="${config_path}.tmp.$$"
+    trap 'rm -f "$tmp_config"' EXIT HUP INT TERM
+    awk '
+      BEGIN { skip = 0 }
+      /^\[llm\.default\][[:space:]]*$/ { skip = 4; next }
+      skip > 0 { skip--; next }
+      { print }
+    ' "$config_path" > "$tmp_config"
+    mv "$tmp_config" "$config_path"
+    trap - EXIT HUP INT TERM
+    echo "Migrated a stale baked-in [llm.default] stub out of $config_path (backup: $backup_path); LLM environment variables now drive runtime resolution directly. See docker/reborn/config.toml's comment." >&2
+  fi
+fi
+
 if ! is_truthy "${IRONCLAW_REBORN_SLACK_ENABLED:-}" \
   && awk '
     /^[[:space:]]*\[/ {
@@ -162,7 +226,18 @@ then
   esac
 fi
 
-host="${IRONCLAW_REBORN_SERVE_HOST:-127.0.0.1}"
+# Serve-host resolution: an explicit IRONCLAW_REBORN_SERVE_HOST always wins.
+# Otherwise, on Railway (and any platform that sets the RAILWAY_* markers) the
+# container MUST bind 0.0.0.0 or the platform health check / ingress cannot
+# reach it — a loopback bind fails the deploy. Off-Railway (e.g. a local
+# `docker run`) keeps the conservative loopback default.
+if [ -n "${IRONCLAW_REBORN_SERVE_HOST:-}" ]; then
+  host="${IRONCLAW_REBORN_SERVE_HOST}"
+elif railway_runtime_detected; then
+  host="0.0.0.0"
+else
+  host="127.0.0.1"
+fi
 port="${PORT:-${IRONCLAW_REBORN_SERVE_PORT:-3000}}"
 
 resolve_env_placeholder_arg() {
@@ -187,7 +262,7 @@ if [ "$#" -gt 0 ]; then
     original_arg_count=$((original_arg_count - 1))
     set -- "$@" "$arg"
   done
-  exec ironclaw-reborn "$@"
+  exec ironclaw "$@"
 fi
 
 set -- serve --host "$host" --port "$port"
@@ -196,4 +271,4 @@ if is_truthy "${IRONCLAW_REBORN_CONFIRM_HOST_ACCESS:-}"; then
   set -- "$@" --confirm-host-access
 fi
 
-exec ironclaw-reborn "$@"
+exec ironclaw "$@"

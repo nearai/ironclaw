@@ -17,12 +17,12 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem};
+use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::{
     CapabilityId, NetworkPolicy, ProviderToolName, ResourceScope, RuntimeHttpEgressRequest,
     ThreadId,
 };
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     EmptyUserProfileSource, HostIdentityContextSource, HostManagedModelRequest,
     JsonSpawnSubagentInputCodec,
 };
@@ -60,12 +60,11 @@ use ironclaw_threads::{
     ThreadMessageRecord, ThreadScope,
 };
 use ironclaw_turns::{
-    CancelRunRequest, FilesystemTurnStateStore, GateRef, GetLoopCheckpointRequest,
-    GetRunStateRequest, IdempotencyKey, InMemoryCheckpointStateStore, LoopBlockedKind,
-    LoopCheckpointKind, LoopCheckpointStore, ReplyTargetBindingRef, ResumeTurnRequest,
-    RetryTurnRequest, RetryTurnResponse, SanitizedCancelReason, SourceBindingRef, TurnActor,
-    TurnCoordinator, TurnError, TurnRunId, TurnRunRecord, TurnRunState, TurnScope,
-    TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
+    CancelRunRequest, FilesystemTurnStateRowStore, GateRef, GetLoopCheckpointRequest,
+    GetRunStateRequest, IdempotencyKey, LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStore,
+    ReplyTargetBindingRef, ResumeTurnRequest, RetryTurnRequest, RetryTurnResponse,
+    SanitizedCancelReason, SourceBindingRef, TurnActor, TurnCoordinator, TurnError, TurnRunId,
+    TurnRunRecord, TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
     run_profile::{
         CapabilityCallCandidate, CapabilityInputRef, CapabilityInvocation,
         CapabilitySurfaceVersion, LoopHostMilestone, LoopHostMilestoneKind, ParentLoopOutput,
@@ -92,6 +91,8 @@ use crate::reborn_support::test_adapter::{RebornTestIngress, RebornTestProductAd
 
 pub type HarnessWaitConfig = WaitConfig;
 
+use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
+
 pub struct RebornBinaryE2EHarness {
     ingress: RebornTestIngress,
     workflow: DefaultProductWorkflow,
@@ -99,7 +100,7 @@ pub struct RebornBinaryE2EHarness {
     binding: ResolvedBinding,
     thread_scope: ThreadScope,
     turn_scope: TurnScope,
-    turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
+    turn_store: Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>>,
     coordinator: Arc<dyn TurnCoordinator>,
     _product_harness: RebornProductWorkflowHarness,
     thread_harness: RebornThreadHarness,
@@ -122,7 +123,7 @@ pub struct SubmittedTurn {
 
 #[derive(Clone)]
 pub struct RebornHarnessSharedStorage {
-    product_backend: Arc<LocalFilesystem>,
+    product_backend: Arc<DiskFilesystem>,
     product_root: Arc<tempfile::TempDir>,
     thread_backend: Arc<InMemoryBackend>,
     turn_backend: Arc<HarnessTurnStorageBackend>,
@@ -163,7 +164,7 @@ impl RebornBinaryE2EHarness {
         Self::with_model_gateway(
             conversation_id,
             RebornTraceReplayModelGateway::with_responses([
-                ironclaw_loop_support::HostManagedModelResponse::assistant_reply(reply),
+                ironclaw_loop_host::HostManagedModelResponse::assistant_reply(reply),
             ]),
             RecordingTestCapabilityPort::echo(),
         )
@@ -314,8 +315,20 @@ impl RebornBinaryE2EHarness {
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
+        // The production capability port resolves the dispatch scope
+        // owner-first from the turn's real binding subject (this harness
+        // submits as the fixed `"alice"` actor, not the profile's default
+        // `"reborn-e2e-builtin-user"`), so the disabled global auto-approve
+        // setting must be seeded under that SAME resolved subject or the
+        // gate never raises -- mirrors
+        // `with_host_runtime_extension_lifecycle_capabilities`.
+        let subject_user = Self::resolve_default_binding_subject_user(conversation_id).await?;
         let host_runtime = Arc::new(
-            crate::reborn_support::harness::profiles::file::file_tools_requiring_approval().await?,
+            crate::reborn_support::harness::profiles::file::file_tools_requiring_approval_profile_for_user(
+                subject_user.as_str(),
+            )?
+            .build()
+            .await?,
         );
         Self::with_model_gateway_capability_mode(
             conversation_id,
@@ -411,8 +424,26 @@ impl RebornBinaryE2EHarness {
         // fixed profile user makes install-then-remove see "never installed".
         // Mirrors `build_group_capability_with_base` in the group harness.
         let subject_user = Self::resolve_default_binding_subject_user(conversation_id).await?;
+        // Google-OAuth-CONFIGURED variant deliberately, matching the Slack
+        // treatment in `harness/mod.rs`: this tier never represents a
+        // provider-unconfigured instance. The base profile already seeds a
+        // `Configured` google credential account with the full gsuite scope set
+        // (`extension_lifecycle_credential_seeds`), so leaving the composition
+        // signal `google_oauth_configured = false` describes an incoherent
+        // instance — a connected google account on a box where the operator
+        // never ran `config set google.client_id`. The provider-instance
+        // readiness chokepoint added in this PR reads that signal, so the
+        // incoherent combination fails every google-family activation with
+        // `ProviderInstanceNotConfigured` and their capabilities never reach
+        // the model surface.
+        //
+        // The `false` arm keeps its own dedicated coverage — it is NOT weakened
+        // here: `provider_instance_readiness.rs`'s unit tests pin the map, and
+        // `scenario_extension_activation_instance_not_configured.rs` drives the
+        // unconfigured activation failure end-to-end off the base
+        // (non-configured) profile via `group_constructors.rs`.
         let host_runtime = Arc::new(
-            crate::reborn_support::harness::profiles::extension::extension_lifecycle_tools_profile_for_user(
+            crate::reborn_support::harness::profiles::extension::extension_lifecycle_tools_profile_google_oauth_configured_for_user(
                 subject_user.as_str(),
             )?
             .build()
@@ -747,8 +778,10 @@ impl RebornBinaryE2EHarness {
             )
         };
         let turns_scoped_fs = scoped_turns_fs(turn_backend, &binding)?;
-        let turn_store = Arc::new(FilesystemTurnStateStore::new(Arc::clone(&turns_scoped_fs)));
-        let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
+        let turn_store = Arc::new(FilesystemTurnStateRowStore::new(Arc::clone(
+            &turns_scoped_fs,
+        )));
+        let checkpoint_state_store = in_memory_checkpoint_state_store();
         let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
         let milestone_sink =
             Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
@@ -759,7 +792,11 @@ impl RebornBinaryE2EHarness {
             capability_input_resolver,
             capability_result_writer,
             capability_recorder,
-        ) = capability_mode.into_parts(milestone_sink.clone())?;
+        ) = capability_mode.into_parts(
+            milestone_sink.clone(),
+            thread_harness.service.clone() as Arc<dyn SessionThreadService>,
+            Arc::clone(&turn_store),
+        )?;
         // Same shared `ScopedFilesystem` handle the turn store uses (`/turns`
         // mount) — the await-edge tree lives at
         // `/turns/subagent-await-edges/...`, a sibling prefix, per §4.5a's
@@ -769,7 +806,7 @@ impl RebornBinaryE2EHarness {
         let await_edge_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
         let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound(
             Arc::clone(&await_edge_store),
-            await_edge_goal_store.clone() as Arc<dyn ironclaw_loop_support::SubagentSpawnGoalStore>,
+            await_edge_goal_store.clone() as Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
             turn_store.clone() as Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore>,
             capability_result_writer.clone(),
             thread_harness.service.clone(),
@@ -786,6 +823,12 @@ impl RebornBinaryE2EHarness {
             // process. Keep each harness deterministic; scheduler worker-pool
             // concurrency is covered by lower-level runtime tests.
             worker_count: Some(std::num::NonZeroUsize::MIN),
+            // Scripted replay gateways fail deliberately (exhausted steps,
+            // mismatched requests) and must reach Failed in seconds; the
+            // production availability budget would ride those errors through
+            // minutes of backoff. Mirrors the integration group harness's
+            // IRONCLAW_REBORN_MODEL_AVAILABILITY_RETRY_ATTEMPTS=1 pin.
+            planned_model_availability_retry_attempts: std::num::NonZeroU32::new(1),
             ..DefaultPlannedRuntimeConfig::default()
         };
         if exposes_spawn_subagent {
@@ -821,16 +864,16 @@ impl RebornBinaryE2EHarness {
             capability_result_writer,
             subagent_goal_store: await_edge_goal_store,
             subagent_await_edge_writer: await_edge_driver
-                as Arc<dyn ironclaw_loop_support::AwaitEdgeWriter>,
+                as Arc<dyn ironclaw_loop_host::AwaitEdgeWriter>,
             subagent_await_edge_settler: await_edge_resolver
-                as Arc<dyn ironclaw_loop_support::AwaitEdgeSettler>,
+                as Arc<dyn ironclaw_loop_host::AwaitEdgeSettler>,
             subagent_await_edge_evidence: await_edge_store
                 as Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
             subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
             subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
                 capability_input_resolver,
             )),
-            subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
+            subagent_spawn_limits: ironclaw_loop_host::SubagentSpawnLimits::default(),
             loop_exit_evidence: evidence,
             config: runtime_config,
             model_route_resolver: None,
@@ -847,6 +890,7 @@ impl RebornBinaryE2EHarness {
             hook_security_audit_sink: None,
             turn_event_sink: None,
             attachment_read_port: None,
+            gate_record_store: None,
             scheduler_wake_wiring: None,
         })?;
         let binding_service: Arc<dyn ConversationBindingService> =
@@ -885,7 +929,7 @@ impl RebornBinaryE2EHarness {
         binding: ResolvedBinding,
         thread_scope: ThreadScope,
         turn_scope: TurnScope,
-        turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
+        turn_store: Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>>,
         product_harness: RebornProductWorkflowHarness,
         thread_harness: RebornThreadHarness,
         model_gateway: RebornTraceReplayModelGateway,
@@ -1503,8 +1547,8 @@ fn route_kind_for_trigger(trigger: ProductTriggerReason) -> ProductConversationR
     }
 }
 
-pub fn trace_tool_call_response() -> ironclaw_loop_support::HostManagedModelResponse {
-    ironclaw_loop_support::HostManagedModelResponse {
+pub fn trace_tool_call_response() -> ironclaw_loop_host::HostManagedModelResponse {
+    ironclaw_loop_host::HostManagedModelResponse {
         safe_text_deltas: Vec::new(),
         safe_reasoning_deltas: Vec::new(),
         usage: None,

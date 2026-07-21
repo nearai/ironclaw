@@ -14,12 +14,20 @@ pub mod error;
 pub mod options;
 pub mod report;
 
-mod mounts;
-mod source;
 mod target;
-mod v2_model;
+
+mod extension_ownership;
 
 mod convert;
+mod legacy_snapshot;
+mod mounts;
+mod source;
+mod v2_model;
+
+pub use extension_ownership::{
+    ExtensionOwnershipMigrationOptions, ExtensionOwnershipMigrationReport,
+    run_extension_ownership_migration,
+};
 
 pub use error::MigrationError;
 pub use options::{MigrationOptions, SourceDb, TargetStore};

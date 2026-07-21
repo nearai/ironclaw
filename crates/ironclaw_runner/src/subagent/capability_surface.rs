@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_loop_support::{
+use ironclaw_loop_host::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     SubagentPromptMaterialSource,
 };
@@ -73,8 +73,8 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw_agent_loop::test_support::test_run_context;
     use ironclaw_host_api::CapabilityId;
-    use ironclaw_loop_support::CapabilitySurfaceProfileResolver;
-    use ironclaw_loop_support::{
+    use ironclaw_loop_host::CapabilitySurfaceProfileResolver;
+    use ironclaw_loop_host::{
         CapabilityAllowSet, CapabilityResolveError, SubagentPromptMaterial,
         SubagentPromptMaterialSource,
     };
@@ -110,7 +110,7 @@ mod tests {
     struct StaticResolver(CapabilityAllowSet);
 
     #[async_trait]
-    impl ironclaw_loop_support::CapabilitySurfaceProfileResolver for StaticResolver {
+    impl ironclaw_loop_host::CapabilitySurfaceProfileResolver for StaticResolver {
         async fn resolve(
             &self,
             _run_context: &LoopRunContext,
@@ -149,7 +149,7 @@ mod tests {
     struct FailingResolver;
 
     #[async_trait]
-    impl ironclaw_loop_support::CapabilitySurfaceProfileResolver for FailingResolver {
+    impl ironclaw_loop_host::CapabilitySurfaceProfileResolver for FailingResolver {
         async fn resolve(
             &self,
             _run_context: &LoopRunContext,
@@ -238,7 +238,7 @@ mod tests {
             Arc::new(StaticResolver(base.clone())),
             Arc::new(SucceedingSource(SubagentPromptMaterial {
                 direction_markdown: "test".to_string(),
-                goal: ironclaw_loop_support::SubagentPromptGoal {
+                goal: ironclaw_loop_host::SubagentPromptGoal {
                     task: "test".to_string(),
                     handoff: None,
                 },
@@ -262,7 +262,7 @@ mod tests {
             Arc::new(StaticResolver(CapabilityAllowSet::All)),
             Arc::new(SucceedingSource(SubagentPromptMaterial {
                 direction_markdown: "test".to_string(),
-                goal: ironclaw_loop_support::SubagentPromptGoal {
+                goal: ironclaw_loop_host::SubagentPromptGoal {
                     task: "test".to_string(),
                     handoff: None,
                 },

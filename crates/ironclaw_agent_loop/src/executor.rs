@@ -47,12 +47,15 @@ use gates::{AwaitDependentRunGateInput, AwaitDependentRunGateStage, GateInput, G
 #[cfg(test)]
 use input::consume_drainable_inputs;
 use input::{DrainInput, InputStage, InputStep, UserFacingInputDrainMode};
-use loop_exit::{ExitInput, ExitStage};
+use loop_exit::{
+    COMPLETION_NUDGE_LIMIT, ExitInput, ExitStage, completion_nudge_control_message,
+    reply_trailed_off,
+};
 use mapping::{
     batch_policy_kind, blocked_kind, capability_batch_counts, capability_error_class,
     capability_error_failure_category, capability_failure_kind, capability_host_error,
     checkpoint_kind_to_host, honor_retry_alteration, loop_gate_kind, model_error_class,
-    model_error_failure_category, model_preference_to_host, sanitized_strategy_summary_or_fallback,
+    model_error_failure_summary, model_preference_to_host, sanitized_strategy_summary_or_fallback,
 };
 use model::{ModelInput, ModelStage, ModelStep};
 use pipeline::{DefaultExecutorPipeline, ExecutorStage, StageContext};
@@ -73,11 +76,10 @@ use ironclaw_turns::{
 use crate::{
     family::LoopFamily,
     state::{CheckpointKind, LoopExecutionState},
-    strategies::TurnSummary,
+    strategies::{StopKind, TurnSummary},
 };
 
 const MAX_CAPABILITY_RETRIES: usize = 8;
-const MAX_MODEL_RETRIES: usize = 8;
 const MAX_INPUT_DRAIN: usize = 32;
 
 /// Drives the canonical loop tick by consulting a resolved [`LoopFamily`].

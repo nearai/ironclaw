@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ironclaw_loop_support::{SkillBundleId, SkillBundleSource};
+use ironclaw_loop_host::{SkillBundleId, SkillBundleSource};
 use ironclaw_turns::run_profile::LoopRunContext;
 use ironclaw_turns::{AcceptedMessageRef, TurnRunId, TurnScope};
 use thiserror::Error;
@@ -161,7 +161,7 @@ mod tests {
     use std::collections::HashMap;
 
     use async_trait::async_trait;
-    use ironclaw_loop_support::{
+    use ironclaw_loop_host::{
         SkillBundleDescriptor, SkillBundleId, SkillBundleSource, SkillBundleSourceError,
         SkillFilePath, SkillSourceKind,
     };

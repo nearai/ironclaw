@@ -15,7 +15,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex},
 };
 
 use async_trait::async_trait;
@@ -94,56 +94,6 @@ pub trait AutoApproveSettingStore: Send + Sync {
             .get(&key)
             .await?
             .map_or(AUTO_APPROVE_DEFAULT_ENABLED, |record| record.enabled))
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct InMemoryAutoApproveSettingStore {
-    settings: RwLock<HashMap<AutoApproveSettingKey, AutoApproveSettingRecord>>,
-}
-
-impl InMemoryAutoApproveSettingStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-#[async_trait]
-impl AutoApproveSettingStore for InMemoryAutoApproveSettingStore {
-    async fn set(
-        &self,
-        input: AutoApproveSettingInput,
-    ) -> Result<AutoApproveSettingRecord, ToolPermissionStoreError> {
-        let key = AutoApproveSettingKey::from_resource_scope(&input.scope);
-        let mut settings = self
-            .settings
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let now = Utc::now();
-        let created_at = settings
-            .get(&key)
-            .map_or(now, |existing| existing.created_at);
-        let record = AutoApproveSettingRecord {
-            key: key.clone(),
-            enabled: input.enabled,
-            updated_by: input.updated_by,
-            created_at,
-            updated_at: now,
-        };
-        settings.insert(key, record.clone());
-        Ok(record)
-    }
-
-    async fn get(
-        &self,
-        key: &AutoApproveSettingKey,
-    ) -> Result<Option<AutoApproveSettingRecord>, ToolPermissionStoreError> {
-        Ok(self
-            .settings
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(key)
-            .cloned())
     }
 }
 
@@ -388,23 +338,33 @@ mod tests {
         Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
     }
 
+    // The single production store, exercised over the in-memory filesystem
+    // backend — the seam that replaced the deleted `InMemoryAutoApproveSettingStore`.
+    fn memory_store() -> FilesystemAutoApproveSettingStore<InMemoryBackend> {
+        FilesystemAutoApproveSettingStore::new(scoped_fs(
+            Arc::new(InMemoryBackend::new()),
+            "tenant-a",
+            "alice",
+        ))
+    }
+
     #[tokio::test]
-    async fn in_memory_defaults_to_enabled_when_unset() {
-        let store = InMemoryAutoApproveSettingStore::new();
+    async fn defaults_to_enabled_when_unset() {
+        let store = memory_store();
         assert!(store.is_enabled(&scope("alice", None, None)).await.unwrap());
     }
 
     #[tokio::test]
-    async fn in_memory_explicit_disable_is_honored() {
-        let store = InMemoryAutoApproveSettingStore::new();
+    async fn explicit_disable_is_honored() {
+        let store = memory_store();
         let scope = scope("alice", None, None);
         store.set(input(scope.clone(), false)).await.unwrap();
         assert!(!store.is_enabled(&scope).await.unwrap());
     }
 
     #[tokio::test]
-    async fn in_memory_set_get_roundtrip_and_update() {
-        let store = InMemoryAutoApproveSettingStore::new();
+    async fn set_get_roundtrip_and_update() {
+        let store = memory_store();
         let scope = scope("alice", None, None);
 
         let saved = store.set(input(scope.clone(), true)).await.unwrap();
@@ -421,7 +381,7 @@ mod tests {
     async fn setting_is_agent_and_project_agnostic() {
         // A user-level toggle written without agent/project resolves the same
         // way at dispatch time when the runtime scope carries an agent/project.
-        let store = InMemoryAutoApproveSettingStore::new();
+        let store = memory_store();
         store
             .set(input(scope("alice", None, None), true))
             .await
@@ -437,7 +397,7 @@ mod tests {
 
     #[tokio::test]
     async fn setting_isolates_users() {
-        let store = InMemoryAutoApproveSettingStore::new();
+        let store = memory_store();
         store
             .set(input(scope("alice", None, None), true))
             .await

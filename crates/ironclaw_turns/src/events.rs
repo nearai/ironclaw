@@ -7,7 +7,8 @@ use thiserror::Error;
 use ironclaw_host_api::{RuntimeCredentialAuthRequirement, Timestamp, UserId};
 
 use crate::{
-    CapabilityActivityId, GateRef, TurnError, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    CapabilityActivityId, GateKind, GateRef, TurnError, TurnRunId, TurnRunState, TurnScope,
+    TurnStatus,
 };
 
 const MAX_IN_MEMORY_EVENTS: usize = 10_000;
@@ -43,16 +44,21 @@ pub enum TurnBlockedGateKind {
     ExternalTool,
 }
 
+impl From<GateKind> for TurnBlockedGateKind {
+    fn from(kind: GateKind) -> Self {
+        match kind {
+            GateKind::Approval => Self::Approval,
+            GateKind::Auth => Self::Auth,
+            GateKind::Resource => Self::Resource,
+            GateKind::AwaitDependentRun => Self::AwaitDependentRun,
+            GateKind::ExternalTool => Self::ExternalTool,
+        }
+    }
+}
+
 impl TurnBlockedGateKind {
     pub fn from_status(status: TurnStatus) -> Option<Self> {
-        match status {
-            TurnStatus::BlockedApproval => Some(Self::Approval),
-            TurnStatus::BlockedAuth => Some(Self::Auth),
-            TurnStatus::BlockedResource => Some(Self::Resource),
-            TurnStatus::BlockedDependentRun => Some(Self::AwaitDependentRun),
-            TurnStatus::BlockedExternalTool => Some(Self::ExternalTool),
-            _ => None,
-        }
+        GateKind::from_status(status).map(Self::from)
     }
 }
 
@@ -689,6 +695,7 @@ mod tests {
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             resolved_model_route: None,
+            model_usage: None,
             received_at: chrono::Utc::now(),
             checkpoint_id: None,
             gate_ref: Some(GateRef::new("gate:auth-a").expect("gate ref")),
@@ -728,6 +735,7 @@ mod tests {
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             resolved_model_route: None,
+            model_usage: None,
             received_at: chrono::Utc::now(),
             checkpoint_id: None,
             gate_ref: None,

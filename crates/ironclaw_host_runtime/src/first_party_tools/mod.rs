@@ -300,15 +300,22 @@ pub fn builtin_first_party_handlers_for_process_backend(
 
 /// Create handlers for all built-in first-party capabilities using an
 /// explicitly composed trigger repository and trigger-create lifecycle hook.
+///
+/// `active_run_lookup` is required (not `Option`): the caller-scoped
+/// `trigger_list` capability derives its `active_hold` projection from it, so
+/// production wiring must always supply the same lookup the automations
+/// panel uses (#5886).
 pub fn builtin_first_party_handlers_with_trigger_create_hook(
     trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup>,
 ) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
     let mut registry = builtin_first_party_base_registry()?;
     trigger_management::insert_handlers_with_create_hook(
         &mut registry,
         trigger_repository,
         trigger_create_hook,
+        active_run_lookup,
     )?;
     Ok(registry)
 }
@@ -316,11 +323,13 @@ pub fn builtin_first_party_handlers_with_trigger_create_hook(
 pub fn builtin_first_party_handlers_with_trigger_create_hook_for_process_backend(
     trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
     trigger_create_hook: Arc<dyn TriggerCreateHook>,
+    active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup>,
     process_backend: ProcessBackendKind,
 ) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
     let mut registry = builtin_first_party_handlers_with_trigger_create_hook(
         trigger_repository,
         trigger_create_hook,
+        active_run_lookup,
     )?;
     if !process_port_backed_builtins_enabled(process_backend) {
         remove_process_port_backed_builtin_handlers(&mut registry)?;
@@ -462,6 +471,59 @@ fn first_party_capability_manifest(
 pub struct BuiltinFirstPartyTools {
     coding_state: CodingCapabilityState,
     memory_state: memory::MemoryCapabilityState,
+    post_edit_check_seen: crate::post_edit_check::PostEditCheckSeenLines,
+}
+
+impl BuiltinFirstPartyTools {
+    /// Run the operator-configured post-edit check after a SUCCESSFUL
+    /// `write_file` / `apply_patch` and append the advisory `post_edit_check`
+    /// value to the edit's model-visible output. Read-only coding tools never
+    /// trigger it, and it never fails the edit — the edit already succeeded
+    /// when this runs. The invocation-services resolver only supplies
+    /// `services.post_edit_check` when the process policy permits spawning
+    /// through `services.process`, so no placement decision happens here.
+    ///
+    /// Returns `true` when a check process actually ran (completed or timed
+    /// out), so the caller can account for it like a `builtin.shell` spawn.
+    async fn append_post_edit_check(
+        &self,
+        kind: CodingCapabilityKind,
+        request: &FirstPartyCapabilityRequest,
+        output: &mut serde_json::Value,
+    ) -> bool {
+        if !matches!(
+            kind,
+            CodingCapabilityKind::WriteFile | CodingCapabilityKind::ApplyPatch
+        ) {
+            return false;
+        }
+        let Some(service) = &request.services.post_edit_check else {
+            return false;
+        };
+        // Run the check through the resolver-selected, deployment-isolated
+        // process port (tenant sandbox under hosted multi-tenant), NOT
+        // `services.process` (the deployment-blind local port the edit plan
+        // carries), and in the mount that backs the just-edited file (from the
+        // edit result's `path`), so a multi-mount workspace checks the edited
+        // project rather than an arbitrary first writable mount.
+        let edited_scoped_path = output.get("path").and_then(serde_json::Value::as_str);
+        let Some(check) = crate::post_edit_check::run_post_edit_check(
+            &self.post_edit_check_seen,
+            service.process.as_ref(),
+            &request.scope,
+            request.mounts.as_ref(),
+            edited_scoped_path,
+            &service.config,
+        )
+        .await
+        else {
+            return false;
+        };
+        if let Some(object) = output.as_object_mut() {
+            object.insert("post_edit_check".to_string(), check);
+        }
+        true
+    }
 }
 
 #[async_trait]
@@ -474,6 +536,7 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
         normalize_optional_null_sentinels(&mut request);
         let start = Instant::now();
         let mut network_egress_bytes = 0;
+        let mut process_count = 0u32;
         let (output, display_preview) = match request.capability_id.as_str() {
             ECHO_CAPABILITY_ID => (echo::dispatch(&request.input)?, None),
             TIME_CAPABILITY_ID => (time::dispatch(&request.input)?, None),
@@ -552,33 +615,44 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                         RuntimeDispatchErrorKind::UndeclaredCapability,
                     ));
                 };
-                let request = CodingCapabilityRequest::new(
+                let coding_request = CodingCapabilityRequest::new(
                     &request.capability_id,
                     metadata.kind,
                     &request.scope,
+                    request.run_id,
                     request.mounts.as_ref(),
                     Arc::clone(&request.services.filesystem),
                     &request.input,
                 );
-                let result = self
+                let mut result = self
                     .coding_state
-                    .dispatch(&request)
+                    .dispatch(&coding_request)
                     .await
                     .map_err(coding_error)?;
+                if self
+                    .append_post_edit_check(metadata.kind, &request, &mut result.output)
+                    .await
+                {
+                    // The advisory check spawned one process; account for it
+                    // exactly like a `builtin.shell` invocation.
+                    process_count = 1;
+                }
                 (result.output, result.display_preview)
             }
         };
         let wall_clock_ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
         let output_limit_bytes = match request.capability_id.as_str() {
-            HTTP_CAPABILITY_ID | HTTP_SAVE_CAPABILITY_ID => http::MAX_HTTP_OUTPUT_BYTES,
+            HTTP_CAPABILITY_ID => http::MAX_HTTP_OUTPUT_BYTES,
+            HTTP_SAVE_CAPABILITY_ID => FIRST_PARTY_MAX_OUTPUT_BYTES,
             _ => FIRST_PARTY_MAX_OUTPUT_BYTES,
         };
         let output_bytes = bounded_output_bytes(&output, output_limit_bytes).map_err(|error| {
-            if network_egress_bytes > 0 {
+            if network_egress_bytes > 0 || process_count > 0 {
                 error.with_usage(
                     ResourceUsage::default()
                         .set_wall_clock_ms(wall_clock_ms)
-                        .set_network_egress_bytes(network_egress_bytes),
+                        .set_network_egress_bytes(network_egress_bytes)
+                        .set_process_count(process_count),
                 )
             } else {
                 error
@@ -587,7 +661,8 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
         let usage = ResourceUsage::default()
             .set_wall_clock_ms(wall_clock_ms)
             .set_output_bytes(output_bytes)
-            .set_network_egress_bytes(network_egress_bytes);
+            .set_network_egress_bytes(network_egress_bytes)
+            .set_process_count(process_count);
         Ok(FirstPartyCapabilityResult::new(output, usage).with_display_preview(display_preview))
     }
 }

@@ -151,11 +151,26 @@ pub struct OpenAiResponseObject {
     pub usage: Option<OpenAiResponseUsage>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenAiResponseUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub total_tokens: u32,
+    /// Breakdown of the input tokens. OpenAI-standard shape; currently carries
+    /// the cached-token subset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens_details: Option<OpenAiResponseInputTokensDetails>,
+    /// IronClaw extension: computed USD cost for this response. `None` when the
+    /// run reported no usage (e.g. a still-running or replay-stub turn).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<crate::OpenAiCompatCost>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenAiResponseInputTokensDetails {
+    /// Input tokens served from the provider's prompt cache (a subset of
+    /// `input_tokens`).
+    pub cached_tokens: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,29 +1,70 @@
 ---
 paths:
-  - "src/channels/**"
-  - "src/tools/wasm/**"
-  - "src/tools/mcp/**"
-  - "src/bridge/**"
+  - "crates/ironclaw_extensions/**"
+  - "crates/ironclaw_first_party_extensions/**"
+  - "crates/ironclaw_product_adapters/**"
+  - "crates/ironclaw_product_adapter_registry/**"
+  - "crates/ironclaw_reborn_composition/**"
+  - "crates/ironclaw_mcp/**"
+  - "crates/ironclaw_wasm/**"
 ---
-# Discovery vs. Activation
+# Discovery, installation, and activation
 
-**Installed is not active.** These are distinct states with distinct triggers:
+These lifecycle stages are distinct:
 
-- **Discovery** — boot-time scan that enumerates what the user has installed (WASM channels, MCP servers, extensions). Produces a manifest. Side-effect-free.
-- **Activation** — explicit state transition that brings an installed thing into a running state (channel opened, WS connected, hooks registered, credentials bound).
+1. **Discovery** enumerates descriptors and manifests. It is side-effect-free.
+2. **Installation** records an available extension and validates its contract.
+3. **Configuration** binds user-owned settings or credential references without
+   starting execution.
+4. **Activation** registers runtime surfaces and starts explicitly owned
+   background work.
+5. **Execution** occurs only through authorized, mediated capability dispatch.
+6. **Deactivation/removal** stops owned work, unregisters surfaces, and cleans up
+   only data named by the lifecycle contract.
 
-A bug shape has recurred 5× on the WASM channel surface (#2556, #2557, #2558, #2564, #2419): activation-level behavior bound to the discovery scan.
+Discovery must not connect sockets, start pollers, register hooks, request
+credentials, or mutate installation state. Activation must be idempotent and
+must expose failure rather than leaving a half-active record.
+Authentication rejection is a terminal activation failure: transition to an
+explicit failed state and stop reconnect attempts until the credential revision
+changes.
 
-## Rules
+Composition owns startup and shutdown orchestration. Descriptor crates remain
+declarative; runtime lanes execute; product adapters translate product ingress
+and delivery. Do not combine those responsibilities in an extension registry.
 
-1. **Registration of runtime effects happens at activation, not discovery.** Hook registration, websocket spawn, poll task spawn, reconnect loops, long-lived state — none of these may run from `discover()`, `list_installed()`, or boot-time iteration of the manifest.
+Test repeated activation, failed activation rollback, restart reconstruction,
+deactivation, and removal through the production caller. Authentication-failure
+tests must also prove reconnect does not resume without updated credentials.
 
-2. **Auth rejection is terminal until credentials change.** A WASM/MCP channel that fails auth on connect MUST NOT retry in a reconnect loop. It transitions to `AuthFailed` and stays there until a credential-change event (new OAuth token, new bot token) triggers re-activation.
+## Lifecycle ownership rules
 
-3. **`list_installed` vs. `list_active` are separate queries.** Status surfaces and dispatch paths must use the query that matches their intent. A dashboard saying "N channels" must specify which.
+- Manifests describe capabilities and requirements; parsing is not activation.
+- Installation records are durable state. An in-memory registry is a derived
+  execution view, not the source of truth.
+- Configuration stores credential references through secrets/auth contracts;
+  it never copies raw credentials into manifests or runtime state.
+- Activation validates installation, trust, configuration, and runtime support
+  before registering surfaces.
+- Background tasks have one lifecycle owner, cancellation, and bounded restart.
+- Removal cannot race active execution silently. Define whether it denies,
+  drains, cancels, or waits, and test that choice.
+- Authentication rejection enters a terminal failure state and stops reconnect
+  or retry loops until the credential revision changes. Never resume merely
+  because a timer fired, and never hot-loop invalid credentials.
+- Installed, configured, and active are distinct query/status states. Listing an
+  installation must not imply a registered or healthy runtime surface.
+- Restart rehydration reconstructs state through validated constructors and
+  re-checks actor/tenant scope, expiry, revocation, installation state, and
+  runtime support. Do not deserialize a snapshot directly into trusted/active
+  state.
 
-4. **Deactivation unwinds everything activation set up.** When a user disables or uninstalls an extension, every runtime effect must be reversed: hooks removed, WS closed, poll task cancelled, in-flight reconnect aborted, snapshot state dropped. No orphaned tasks.
+Review flags are constructors that start work, discovery functions accepting
+network/secrets/process handles, activation persisting `Active` before wiring
+succeeds, and shutdown paths that drop a handle without awaiting owned work.
 
-5. **Discovery is idempotent and side-effect-free.** Repeated discovery scans produce the same manifest and must not start tasks, open connections, or touch the network.
-
-6. **Snapshot rehydrate must re-validate.** When restoring cached state across a restart (pending auth prompts, leases, gate state), re-run the type's `::new()` constructor AND check domain invariants (not-revoked, not-expired, `thread_id` matches). Stale snapshots cause "ghost" leases and replayed auth. References: PR #2617 `restore_selected_auth_prompt`, PR #2631 paused-lease rehydrate.
+```bash
+rg -n "discover|install|activate|deactivate|remove" \
+  crates/ironclaw_extensions crates/ironclaw_first_party_extensions \
+  crates/ironclaw_reborn_composition crates/ironclaw_product_adapters
+```

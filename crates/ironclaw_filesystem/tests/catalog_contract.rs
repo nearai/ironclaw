@@ -60,14 +60,14 @@ async fn composite_routes_filesystem_operations_to_matching_backend() {
     std::fs::write(memory_dir.path().join("MEMORY.md"), b"remember this").unwrap();
     std::fs::write(project_dir.path().join("README.md"), b"project readme").unwrap();
 
-    let mut memory_backend = LocalFilesystem::new();
+    let mut memory_backend = DiskFilesystem::new();
     memory_backend
         .mount_local(
             VirtualPath::new("/memory").unwrap(),
             HostPath::from_path_buf(memory_dir.path().to_path_buf()),
         )
         .unwrap();
-    let mut project_backend = LocalFilesystem::new();
+    let mut project_backend = DiskFilesystem::new();
     project_backend
         .mount_local(
             VirtualPath::new("/projects").unwrap(),
@@ -92,7 +92,7 @@ async fn composite_routes_filesystem_operations_to_matching_backend() {
         descriptor(
             "/projects",
             "project-files",
-            BackendKind::LocalFilesystem,
+            BackendKind::DiskFilesystem,
             StorageClass::FileContent,
             ContentKind::ProjectFile,
             IndexPolicy::NotIndexed,
@@ -169,7 +169,7 @@ async fn catalog_mounts_are_sorted_for_stable_diagnostics() {
         descriptor(
             "/projects",
             "project-files",
-            BackendKind::LocalFilesystem,
+            BackendKind::DiskFilesystem,
             StorageClass::FileContent,
             ContentKind::ProjectFile,
             IndexPolicy::NotIndexed,
@@ -399,9 +399,9 @@ async fn composite_append_batch_returns_mount_not_found() {
     );
 }
 
-fn empty_local_backend(virtual_root: &str) -> (LocalFilesystem, tempfile::TempDir) {
+fn empty_local_backend(virtual_root: &str) -> (DiskFilesystem, tempfile::TempDir) {
     let dir = tempdir().unwrap();
-    let mut backend = LocalFilesystem::new();
+    let mut backend = DiskFilesystem::new();
     backend
         .mount_local(
             VirtualPath::new(virtual_root).unwrap(),
@@ -441,7 +441,7 @@ fn descriptor(
         // IndexPolicy (catalog hint about how upstream services index path
         // content) is intentionally separate from `Capability::IndexFts` /
         // `Capability::IndexVector` (backend op support for `ensure_index`
-        // / `query` on indexed projections). Test mounts use a LocalFilesystem
+        // / `query` on indexed projections). Test mounts use a DiskFilesystem
         // which doesn't ship those record-plane ops, so the descriptor
         // doesn't claim them — IndexPolicy on the descriptor still drives
         // upstream behavior independently.

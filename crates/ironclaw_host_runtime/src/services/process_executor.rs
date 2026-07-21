@@ -215,6 +215,9 @@ impl ProcessExecutor for RuntimeDispatchProcessExecutor {
         let result = self
             .dispatcher
             .dispatch_json(CapabilityDispatchRequest {
+                // Spawned processes are long-running and outlive loop runs, so
+                // they carry no run-scoped identity.
+                run_id: None,
                 capability_id: request.capability_id,
                 scope: request.scope,
                 authenticated_actor_user_id: request.authenticated_actor_user_id,

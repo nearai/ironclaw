@@ -32,6 +32,20 @@ pub(crate) trait RecoveryStrategy: Send + Sync {
         state: &LoopExecutionState,
         err: &ModelErrorSummary,
     ) -> RecoveryOutcome;
+
+    /// Ceiling on total model-call attempts the executor allows within a
+    /// single model stage before treating continued `Retry` outcomes as a
+    /// strategy contract bug and failing the run.
+    ///
+    /// Implementations MUST return a value large enough that every call-scope
+    /// retry budget they can grant reaches their own `Abort` decision — the
+    /// executor derives its retry-loop bound from this method, so an
+    /// undersized value silently truncates the strategy's budget and loses
+    /// its abort diagnostics. The default is a margin above the built-in
+    /// per-class budget for strategies that abort quickly.
+    fn max_total_model_attempts(&self) -> u32 {
+        16
+    }
 }
 
 /// Compile-time object-safety check.
@@ -189,19 +203,30 @@ pub(crate) enum RetryScope {
 /// - Retries capability transient, unavailable, and internal errors up to
 ///   [`Self::max_attempts_per_class`] times with `Backoff`, then returns a
 ///   model-visible tool error result.
-/// - Retries model transient, unavailable, invalid-output, and internal errors
-///   up to the same budget, then aborts the run.
+/// - Retries model invalid-output errors up to the same budget, then aborts
+///   the run.
+/// - Retries model transient, unavailable, and internal errors on the much
+///   deeper [`Self::max_model_availability_attempts`] budget with a
+///   longer-capped backoff schedule, then aborts the run. Provider outages
+///   (5xx storms) routinely outlast a couple of quick retries; a long-running
+///   agentic turn must ride them out rather than discard all prior work.
 /// - Retries `ContextOverflow` at iteration scope with `ShrinkContext`.
 #[derive(Debug, Clone, Copy)]
 pub struct DefaultRecoveryStrategy {
     /// Max retries per error class before giving up. Default `2`.
     pub max_attempts_per_class: u32,
+    /// Max consecutive retries for availability-class model errors
+    /// (transient / unavailable / internal) before aborting the run.
+    /// Default `12`, which with [`availability_backoff_for`] rides out
+    /// roughly seven minutes of sustained provider failure.
+    pub max_model_availability_attempts: u32,
 }
 
 impl Default for DefaultRecoveryStrategy {
     fn default() -> Self {
         Self {
             max_attempts_per_class: 2,
+            max_model_availability_attempts: 12,
         }
     }
 }
@@ -307,17 +332,31 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
                 retry_or_abort(
                     state,
                     attempt_class,
-                    self.max_attempts_per_class,
+                    self.max_model_availability_attempts,
                     kind,
                     RetryScope::Call,
                     |attempts| {
                         Some(RetryAlteration::Backoff {
-                            delay_ms: backoff_for(attempts),
+                            delay_ms: availability_backoff_for(attempts),
                         })
                     },
                 )
             }
         }
+    }
+
+    fn max_total_model_attempts(&self) -> u32 {
+        // Upper bound on model calls one stage can legitimately issue before
+        // some class reaches its own Abort: the initial call, plus call-scope
+        // invalid-output retries (`max_attempts_per_class`), plus an
+        // availability budget for each availability class (transient /
+        // unavailable / internal — attempts are tracked per class, so a
+        // pathological host can rotate through all three). Context-overflow
+        // retries are iteration-scoped and leave the stage, so they don't
+        // consume this loop. +1 margin keeps the strategy's Abort — with its
+        // failure kind and diagnostics — strictly inside the loop bound.
+        2u32.saturating_add(self.max_attempts_per_class)
+            .saturating_add(self.max_model_availability_attempts.saturating_mul(3))
     }
 }
 
@@ -437,6 +476,18 @@ fn backoff_for(attempt: u32) -> BackoffDelayMs {
     let shift = attempt.min(5);
     let ms = 250u64.saturating_mul(1u64 << shift);
     BackoffDelayMs(ms.min(5_000))
+}
+
+/// Backoff for availability-class model errors: `1s x 2^attempt`, capped at
+/// [`BackoffDelayMs::MAX_DELAY_MS`] (60s).
+///
+/// Paired with `max_model_availability_attempts`, the cumulative schedule
+/// (1+2+4+8+16+32+60·k seconds) rides out a multi-minute provider outage
+/// instead of aborting the run while the provider recovers.
+fn availability_backoff_for(attempt: u32) -> BackoffDelayMs {
+    let shift = attempt.min(6);
+    let ms = 1_000u64.saturating_mul(1u64 << shift);
+    BackoffDelayMs(ms.min(BackoffDelayMs::MAX_DELAY_MS))
 }
 
 /// Strategy hint about WHAT to alter on retry. Prompt-shape alteration is
@@ -767,9 +818,10 @@ mod tests {
         };
 
         use super::super::{
-            CapabilityErrorClass, CapabilityErrorSummary, DefaultRecoveryStrategy, ModelErrorClass,
-            ModelErrorSummary, RecoveryOutcome, RecoveryStrategy, RetryAlteration, RetryScope,
-            SanitizedStrategySummary, backoff_for, capability_error_to_failure_kind,
+            BackoffDelayMs, CapabilityErrorClass, CapabilityErrorSummary, DefaultRecoveryStrategy,
+            ModelErrorClass, ModelErrorSummary, RecoveryOutcome, RecoveryStrategy, RetryAlteration,
+            RetryScope, SanitizedStrategySummary, availability_backoff_for, backoff_for,
+            capability_error_to_failure_kind,
         };
         use crate::state::{LoopExecutionState, RecoveryAttemptClass, RecoveryStrategyState};
         use ironclaw_turns::LoopFailureKind;
@@ -1053,26 +1105,51 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn model_transient_retries_then_aborts_at_budget() {
+        async fn model_availability_errors_retry_well_past_the_generic_budget() {
+            // A provider 5xx storm must not kill the run after a couple of
+            // attempts: availability-class model errors get their own, much
+            // deeper retry budget than the generic per-class default.
             let strategy = DefaultRecoveryStrategy::default();
 
-            let state = state_with_no_attempts();
-            let outcome = strategy
-                .on_model_error(&state, &model_err(ModelErrorClass::Transient))
-                .await;
-            assert!(matches!(
-                outcome,
-                RecoveryOutcome::Retry {
-                    alter: Some(RetryAlteration::Backoff { .. }),
-                    ..
+            for (class, attempt_class) in [
+                (
+                    ModelErrorClass::Transient,
+                    RecoveryAttemptClass::ModelTransient,
+                ),
+                (
+                    ModelErrorClass::Unavailable,
+                    RecoveryAttemptClass::ModelUnavailable,
+                ),
+                (
+                    ModelErrorClass::Internal,
+                    RecoveryAttemptClass::ModelInternal,
+                ),
+            ] {
+                for attempts in 0..strategy.max_model_availability_attempts {
+                    let state = state_with_attempts_for(attempts, attempt_class);
+                    let outcome = strategy.on_model_error(&state, &model_err(class)).await;
+                    assert!(
+                        matches!(
+                            outcome,
+                            RecoveryOutcome::Retry {
+                                alter: Some(RetryAlteration::Backoff { .. }),
+                                ..
+                            }
+                        ),
+                        "{class:?} at attempts={attempts} should retry, got {outcome:?}"
+                    );
                 }
-            ));
 
-            let state = state_with_attempts_for(2, RecoveryAttemptClass::ModelTransient);
-            let outcome = strategy
-                .on_model_error(&state, &model_err(ModelErrorClass::Transient))
-                .await;
-            assert!(matches!(outcome, RecoveryOutcome::Abort { .. }));
+                let state = state_with_attempts_for(
+                    strategy.max_model_availability_attempts,
+                    attempt_class,
+                );
+                let outcome = strategy.on_model_error(&state, &model_err(class)).await;
+                assert!(
+                    matches!(outcome, RecoveryOutcome::Abort { .. }),
+                    "{class:?} past the availability budget should abort, got {outcome:?}"
+                );
+            }
         }
 
         #[tokio::test]
@@ -1192,6 +1269,42 @@ mod tests {
 
             assert!(backoff_for(10).as_u64() <= 5_000);
             assert!(backoff_for(99).as_u64() <= 5_000);
+        }
+
+        #[test]
+        fn availability_backoff_grows_to_the_max_delay_cap() {
+            // Availability retries ride out provider outages: the schedule
+            // must keep growing well past the generic 5s cap and settle at
+            // BackoffDelayMs::MAX_DELAY_MS so a deep retry budget translates
+            // into minutes of ride-out, not seconds.
+            let zero = availability_backoff_for(0);
+            let one = availability_backoff_for(1);
+            assert!(one.as_u64() > zero.as_u64());
+            assert!(availability_backoff_for(4).as_u64() > 5_000);
+            assert_eq!(
+                availability_backoff_for(10).as_u64(),
+                BackoffDelayMs::MAX_DELAY_MS
+            );
+            assert_eq!(
+                availability_backoff_for(99).as_u64(),
+                BackoffDelayMs::MAX_DELAY_MS
+            );
+        }
+
+        #[test]
+        fn availability_retry_budget_outlasts_a_multi_minute_outage() {
+            // The whole point of the deep budget: cumulative sleep across the
+            // availability schedule must cover a sustained multi-minute 5xx
+            // storm (the observed failure mode was ~5-minute provider
+            // outages killing benchmark runs).
+            let strategy = DefaultRecoveryStrategy::default();
+            let total_ms: u64 = (0..strategy.max_model_availability_attempts)
+                .map(|attempt| availability_backoff_for(attempt).as_u64())
+                .sum();
+            assert!(
+                total_ms >= 5 * 60 * 1_000,
+                "cumulative availability backoff {total_ms}ms should cover ≥5 minutes"
+            );
         }
     }
 }

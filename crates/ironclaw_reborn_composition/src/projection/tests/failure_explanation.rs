@@ -1,10 +1,10 @@
 use super::*;
 use ironclaw_runner::failure_categories::{
-    HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY, HOST_STAGE_UNAVAILABLE_CHECKPOINT_CATEGORY,
-    HOST_STAGE_UNAVAILABLE_INPUT_CATEGORY, HOST_STAGE_UNAVAILABLE_MODEL_CATEGORY,
-    HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY, HOST_STAGE_UNAVAILABLE_TRANSCRIPT_CATEGORY,
-    HOST_STAGE_UNAVAILABLE_UNKNOWN_CATEGORY, MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
-    MODEL_CREDITS_EXHAUSTED_CATEGORY,
+    BUDGET_ACCOUNTING_FAILED_CATEGORY, HOST_STAGE_UNAVAILABLE_CAPABILITY_CATEGORY,
+    HOST_STAGE_UNAVAILABLE_CHECKPOINT_CATEGORY, HOST_STAGE_UNAVAILABLE_INPUT_CATEGORY,
+    HOST_STAGE_UNAVAILABLE_MODEL_CATEGORY, HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY,
+    HOST_STAGE_UNAVAILABLE_TRANSCRIPT_CATEGORY, HOST_STAGE_UNAVAILABLE_UNKNOWN_CATEGORY,
+    MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY, MODEL_CREDITS_EXHAUSTED_CATEGORY,
 };
 use ironclaw_turns::LoopFailureKind;
 
@@ -172,7 +172,8 @@ fn failure_summary_covers_every_loop_failure_kind_category() {
     );
 
     for (category, expected_summary) in expected {
-        let summary = crate::failure_summary::reborn_failure_summary_for_category(Some(category));
+        let summary =
+            ironclaw_runner::failure_summary::reborn_failure_summary_for_category(Some(category));
         assert_eq!(summary, expected_summary, "category {category}");
         assert_ne!(summary, GENERIC_FAILURE_SUMMARY, "category {category}");
         assert!(
@@ -192,6 +193,10 @@ fn failure_summary_covers_reborn_failure_category_constants() {
         (
             MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
             "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL, then try again.",
+        ),
+        (
+            BUDGET_ACCOUNTING_FAILED_CATEGORY,
+            "The run failed because resource accounting was temporarily unavailable. Retry the run, and contact support if it keeps happening.",
         ),
         (
             HOST_STAGE_UNAVAILABLE_PROMPT_CATEGORY,
@@ -234,7 +239,7 @@ fn failure_summary_covers_reborn_failure_category_constants() {
 
     for (category, expected_summary) in expected {
         assert_eq!(
-            crate::failure_summary::reborn_failure_summary_for_category(Some(category)),
+            ironclaw_runner::failure_summary::reborn_failure_summary_for_category(Some(category)),
             expected_summary,
             "category {category}"
         );
@@ -276,7 +281,7 @@ fn failure_summary_covers_host_stage_unavailable_categories() {
 
     for (category, expected_summary) in expected {
         assert_eq!(
-            crate::failure_summary::reborn_failure_summary_for_category(Some(category)),
+            ironclaw_runner::failure_summary::reborn_failure_summary_for_category(Some(category)),
             expected_summary,
             "category {category}"
         );
@@ -360,7 +365,8 @@ fn failure_summary_covers_agent_loop_safe_summary_categories() {
     );
 
     for (category, expected_summary) in expected {
-        let summary = crate::failure_summary::reborn_failure_summary_for_category(Some(category));
+        let summary =
+            ironclaw_runner::failure_summary::reborn_failure_summary_for_category(Some(category));
         assert_eq!(summary, expected_summary, "category {category}");
         assert_ne!(summary, GENERIC_FAILURE_SUMMARY, "category {category}");
     }
@@ -368,8 +374,9 @@ fn failure_summary_covers_agent_loop_safe_summary_categories() {
 
 #[test]
 fn failure_summary_uses_safe_generic_fallback_for_unknown_categories() {
-    let summary =
-        crate::failure_summary::reborn_failure_summary_for_category(Some("new_snake_case_code"));
+    let summary = ironclaw_runner::failure_summary::reborn_failure_summary_for_category(Some(
+        "new_snake_case_code",
+    ));
 
     assert_eq!(summary, GENERIC_FAILURE_SUMMARY);
     assert_ne!(summary, "new_snake_case_code");
@@ -380,11 +387,57 @@ async fn assert_failed_run_status_summary(
     failure_category: &str,
     expected_summary: &str,
 ) {
-    assert_failed_run_status_summary_with_explainer(
+    assert_failed_run_status_summary_for_event(
         thread_id,
         failure_category,
+        None,
         expected_summary,
         None,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn webui_event_stream_projects_invalid_model_output_detail_summary() {
+    assert_failed_run_status_summary_for_event(
+        "webui-events-invalid-model-output-detail-thread",
+        "model_invalid_output",
+        Some("model returned an empty assistant response"),
+        "The run failed because the model returned an empty assistant response. Retry the run or choose a different model.",
+        None,
+    )
+    .await;
+}
+
+async fn assert_failed_run_status_summary_with_explainer(
+    thread_id: &str,
+    failure_category: &str,
+    expected_summary: &str,
+    failure_explainer: Option<Arc<dyn FailureExplanationProvider>>,
+) {
+    assert_failed_run_status_summary_for_event(
+        thread_id,
+        failure_category,
+        None,
+        expected_summary,
+        failure_explainer,
+    )
+    .await;
+}
+
+async fn assert_failed_run_status_summary_for_event(
+    thread_id: &str,
+    failure_category: &str,
+    detail: Option<&str>,
+    expected_summary: &str,
+    failure_explainer: Option<Arc<dyn FailureExplanationProvider>>,
+) {
+    assert_failed_run_status_summary_internal(
+        thread_id,
+        failure_category,
+        detail,
+        expected_summary,
+        failure_explainer,
     )
     .await;
 }
@@ -456,9 +509,10 @@ async fn webui_event_stream_projects_retryable_flag_for_failed_run() {
     );
 }
 
-async fn assert_failed_run_status_summary_with_explainer(
+async fn assert_failed_run_status_summary_internal(
     thread_id: &str,
     failure_category: &str,
+    detail: Option<&str>,
     expected_summary: &str,
     failure_explainer: Option<Arc<dyn FailureExplanationProvider>>,
 ) {
@@ -492,7 +546,7 @@ async fn assert_failed_run_status_summary_with_explainer(
                 blocked_gate: None,
                 sanitized_reason: Some(failure_category.to_string()),
                 retryable: None,
-                detail: None,
+                detail: detail.map(str::to_string),
             }],
         }),
         Arc::new(FakeTurnCoordinator {
@@ -551,6 +605,16 @@ async fn webui_event_stream_projects_model_credentials_failure_summary() {
         "webui-events-model-credentials-thread",
         MODEL_CREDENTIALS_UNAVAILABLE_CATEGORY,
         "The run failed because model credentials or provider configuration are invalid. Check the selected provider's API key and base URL, then try again.",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn webui_event_stream_projects_budget_accounting_failure_summary() {
+    assert_failed_run_status_summary(
+        "webui-events-budget-accounting-thread",
+        BUDGET_ACCOUNTING_FAILED_CATEGORY,
+        "The run failed because resource accounting was temporarily unavailable. Retry the run, and contact support if it keeps happening.",
     )
     .await;
 }

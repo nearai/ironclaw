@@ -226,7 +226,7 @@ A test asserting: every `RunFailureReason` resolves to `SecurityStop` **only if*
 | Terminal mapper (Err→HostUnavailable) | `crates/ironclaw_agent_loop/src/executor/mapping.rs:117` (`capability_host_error`) |
 | LoopExit / LoopFailureKind | `crates/ironclaw_turns/src/loop_exit.rs:251,432` |
 | AgentLoopExecutorError | `crates/ironclaw_agent_loop/src/executor.rs:99` |
-| Runtime→loop kind map | `crates/ironclaw_loop_support/src/capability_port.rs:2570` (`runtime_failure_kind_to_loop`) |
+| Runtime→loop kind map | `crates/ironclaw_loop_host/src/capability_port.rs:2570` (`runtime_failure_kind_to_loop`) |
 | Dispatch kind map | `crates/ironclaw_host_runtime/src/production.rs:2068` (`failure_kind_from`), `:2113` (`From<DispatchFailureKind>`) |
 | outbound_delivery defect | `crates/ironclaw_reborn_composition/src/runtime/local_dev/outbound_delivery.rs:108,213,223,575` |
 | sandbox-plan defect | `crates/ironclaw_host_runtime/src/production.rs:1990` |

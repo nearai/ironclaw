@@ -23,10 +23,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use ulid::Ulid;
-
-#[cfg(feature = "libsql")]
 mod libsql;
-#[cfg(feature = "postgres")]
 mod postgres;
 mod trusted_submit;
 mod worker;
@@ -493,8 +490,6 @@ impl TriggerSchedule {
         schedule.validate()?;
         Ok(schedule)
     }
-
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) fn timezone_text(&self) -> &str {
         match self {
             Self::Cron { timezone, .. } | Self::Once { timezone, .. } => timezone.as_str(),
@@ -502,7 +497,6 @@ impl TriggerSchedule {
     }
 
     // Returns (kind, expression, schedule_at)
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) fn to_storage(&self) -> (&'static str, &str, Option<String>) {
         match self {
             Self::Cron { expression, .. } => ("cron", expression.as_str(), None),
@@ -513,8 +507,6 @@ impl TriggerSchedule {
             ),
         }
     }
-
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) fn from_storage(
         kind: &str,
         expression: &str,
@@ -606,19 +598,88 @@ impl TriggerSchedule {
                 timezone,
             } => {
                 let tz = parse_timezone(timezone)?;
-                let next = if tz == Tz::UTC {
-                    parse_cron_schedule(expression)?.after(&after).next()
-                } else {
-                    parse_cron_schedule(expression)?
-                        .after(&after.with_timezone(&tz))
-                        .next()
-                        .map(|dt| dt.with_timezone(&Utc))
-                };
-                Ok(next)
+                let schedule = parse_cron_schedule(expression)?;
+                Ok(next_cron_slot_after(&schedule, &tz, after))
             }
             Self::Once { at, .. } => Ok(if *at > after { Some(*at) } else { None }),
         }
     }
+
+    /// Count elapsed schedule slots in `(after, now]` — not runs the poller
+    /// attempted or skipped, just cron occurrences that have passed (#5886).
+    /// Display-only derivation; stops at `cap` and reports the truncation so
+    /// UIs can render "99+" instead of a false-exact count. `Once` schedules
+    /// have no repeat slots to count.
+    pub fn elapsed_occurrences_between(
+        &self,
+        after: Timestamp,
+        now: Timestamp,
+        cap: u32,
+    ) -> Result<ElapsedOccurrenceCount, TriggerError> {
+        let (expression, timezone) = match self {
+            Self::Once { .. } => {
+                return Ok(ElapsedOccurrenceCount {
+                    count: 0,
+                    capped: false,
+                });
+            }
+            Self::Cron {
+                expression,
+                timezone,
+            } => (expression, timezone),
+        };
+        // Parse the timezone and cron schedule once up front: the loop below
+        // can call next_slot_after up to `cap` times, and re-parsing the same
+        // loop-invariant schedule/timezone on every iteration is wasted work
+        // (#5886 follow-up).
+        let tz = parse_timezone(timezone)?;
+        let schedule = parse_cron_schedule(expression)?;
+
+        let mut count = 0u32;
+        let mut cursor = after;
+        while count < cap {
+            match next_cron_slot_after(&schedule, &tz, cursor) {
+                Some(slot) if slot <= now => {
+                    count += 1;
+                    cursor = slot;
+                }
+                _ => {
+                    return Ok(ElapsedOccurrenceCount {
+                        count,
+                        capped: false,
+                    });
+                }
+            }
+        }
+        let capped =
+            matches!(next_cron_slot_after(&schedule, &tz, cursor), Some(slot) if slot <= now);
+        Ok(ElapsedOccurrenceCount { count, capped })
+    }
+}
+
+/// Cron-branch core of [`TriggerSchedule::next_slot_after`], factored to
+/// accept an already-parsed `Schedule`/`Tz` so callers that need repeated
+/// lookups (e.g. [`TriggerSchedule::elapsed_occurrences_between`]'s loop) can
+/// parse once and reuse it instead of re-parsing the schedule string every
+/// call.
+fn next_cron_slot_after(schedule: &Schedule, tz: &Tz, after: Timestamp) -> Option<Timestamp> {
+    if *tz == Tz::UTC {
+        schedule.after(&after).next()
+    } else {
+        schedule
+            .after(&after.with_timezone(tz))
+            .next()
+            .map(|dt| dt.with_timezone(&Utc))
+    }
+}
+
+/// Result of [`TriggerSchedule::elapsed_occurrences_between`]: `capped` marks
+/// a truncated count (the real number of elapsed occurrences exceeds
+/// `count`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ElapsedOccurrenceCount {
+    pub count: u32,
+    pub capped: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -659,8 +720,6 @@ pub enum TriggerRunHistoryStatus {
     Ok,
     Error,
 }
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn trigger_run_history_status_text(value: TriggerRunHistoryStatus) -> &'static str {
     match value {
         TriggerRunHistoryStatus::Running => "running",
@@ -668,8 +727,6 @@ pub(crate) fn trigger_run_history_status_text(value: TriggerRunHistoryStatus) ->
         TriggerRunHistoryStatus::Error => "error",
     }
 }
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn state_text_codec(value: TriggerState) -> &'static str {
     match value {
         TriggerState::Scheduled => "scheduled",
@@ -677,8 +734,6 @@ pub(crate) fn state_text_codec(value: TriggerState) -> &'static str {
         TriggerState::Completed => "completed",
     }
 }
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn parse_state_codec(value: &str) -> Result<TriggerState, TriggerError> {
     match value {
         "scheduled" => Ok(TriggerState::Scheduled),
@@ -690,15 +745,11 @@ pub(crate) fn parse_state_codec(value: &str) -> Result<TriggerState, TriggerErro
         }),
     }
 }
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn source_kind_text_codec(value: TriggerSourceKind) -> &'static str {
     match value {
         TriggerSourceKind::Schedule => "schedule",
     }
 }
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn parse_source_kind_codec(value: &str) -> Result<TriggerSourceKind, TriggerError> {
     match value {
         "schedule" => Ok(TriggerSourceKind::Schedule),
@@ -708,16 +759,12 @@ pub(crate) fn parse_source_kind_codec(value: &str) -> Result<TriggerSourceKind, 
         }),
     }
 }
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn status_text_codec(value: TriggerRunStatus) -> &'static str {
     match value {
         TriggerRunStatus::Ok => "ok",
         TriggerRunStatus::Error => "error",
     }
 }
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn parse_run_status_codec(value: &str) -> Result<TriggerRunStatus, TriggerError> {
     match value {
         "ok" => Ok(TriggerRunStatus::Ok),
@@ -728,8 +775,6 @@ pub(crate) fn parse_run_status_codec(value: &str) -> Result<TriggerRunStatus, Tr
         }),
     }
 }
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn parse_run_history_status_codec(
     value: &str,
 ) -> Result<TriggerRunHistoryStatus, TriggerError> {
@@ -1264,18 +1309,18 @@ pub trait TriggerRepository: Send + Sync {
 }
 
 /// Feature-gated durable libSQL repository type for composition/test wiring.
-#[cfg(feature = "libsql")]
 pub use libsql::LibSqlTriggerRepository;
 /// Feature-gated durable PostgreSQL repository type for composition/test wiring.
-#[cfg(feature = "postgres")]
 pub use postgres::PostgresTriggerRepository;
 pub use worker::{
+    ACTIVE_HOLD_ELAPSED_OCCURRENCES_CAP, ACTIVE_HOLD_LOOKUP_TIMEOUT, ActiveHoldProjection,
+    ActiveHoldReason, BlockedActiveRunKind, MissingTriggerActiveRunLookup,
     NoopTriggerFireSettlementObserver, TriggerAcceptedFireSettlement, TriggerActiveRunLookup,
     TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerFireSettlementObserver,
     TriggerPollerFailureReason, TriggerPollerFireOutcome, TriggerPollerFireReport,
     TriggerPollerTickReport, TriggerPollerWorker, TriggerPollerWorkerConfig,
     TriggerPollerWorkerDeps, TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter,
-    TrustedTriggerSubmitRequest,
+    TrustedTriggerSubmitRequest, active_hold_projection, active_holds_for_records,
 };
 
 #[derive(Clone, Default)]
@@ -3126,6 +3171,87 @@ mod tests {
     }
 
     #[test]
+    fn elapsed_occurrences_between_counts_cron_slots_exactly() {
+        let schedule = TriggerSchedule::cron("* * * * *").expect("valid cron");
+        let after = Utc.with_ymd_and_hms(2025, 6, 1, 9, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2025, 6, 1, 9, 16, 0).unwrap();
+        let elapsed = schedule
+            .elapsed_occurrences_between(after, now, 99)
+            .expect("count");
+        assert_eq!(
+            elapsed,
+            ElapsedOccurrenceCount {
+                count: 16,
+                capped: false
+            }
+        );
+    }
+
+    #[test]
+    fn elapsed_occurrences_between_reports_cap_truncation() {
+        let schedule = TriggerSchedule::cron("* * * * *").expect("valid cron");
+        let after = Utc.with_ymd_and_hms(2025, 6, 1, 9, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2025, 6, 1, 10, 0, 0).unwrap();
+        let elapsed = schedule
+            .elapsed_occurrences_between(after, now, 5)
+            .expect("count");
+        assert_eq!(
+            elapsed,
+            ElapsedOccurrenceCount {
+                count: 5,
+                capped: true
+            }
+        );
+    }
+
+    #[test]
+    fn elapsed_occurrences_between_exact_cap_window_is_not_capped() {
+        let schedule = TriggerSchedule::cron("* * * * *").expect("valid cron");
+        let after = Utc.with_ymd_and_hms(2025, 6, 1, 9, 0, 0).unwrap();
+        let now = Utc.with_ymd_and_hms(2025, 6, 1, 9, 5, 0).unwrap();
+        let elapsed = schedule
+            .elapsed_occurrences_between(after, now, 5)
+            .expect("count");
+        assert_eq!(
+            elapsed,
+            ElapsedOccurrenceCount {
+                count: 5,
+                capped: false
+            }
+        );
+    }
+
+    #[test]
+    fn elapsed_occurrences_between_zero_window_and_once_schedules_elapse_nothing() {
+        let after = Utc.with_ymd_and_hms(2025, 6, 1, 9, 0, 0).unwrap();
+        let cron = TriggerSchedule::cron("* * * * *").expect("valid cron");
+        let none = cron
+            .elapsed_occurrences_between(after, after, 99)
+            .expect("count");
+        assert_eq!(
+            none,
+            ElapsedOccurrenceCount {
+                count: 0,
+                capped: false
+            }
+        );
+        let once =
+            TriggerSchedule::once(Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap(), "UTC")
+                .expect("valid once");
+        let now = Utc.with_ymd_and_hms(2025, 6, 2, 9, 0, 0).unwrap();
+        let elapsed = once
+            .elapsed_occurrences_between(after, now, 99)
+            .expect("count");
+        assert_eq!(
+            elapsed,
+            ElapsedOccurrenceCount {
+                count: 0,
+                capped: false
+            }
+        );
+    }
+
+    #[test]
     fn once_schedule_next_slot_after_returns_some_when_future() {
         let at = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
         let schedule = TriggerSchedule::once(at, "UTC").expect("valid once");
@@ -3243,8 +3369,6 @@ mod tests {
             other => panic!("expected InvalidSchedule, got {other:?}"),
         }
     }
-
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[test]
     fn once_schedule_storage_round_trip_uses_schedule_at_column() {
         let at = Utc.with_ymd_and_hms(2026, 6, 15, 10, 0, 0).unwrap();

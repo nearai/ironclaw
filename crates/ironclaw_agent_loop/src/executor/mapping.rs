@@ -1,17 +1,17 @@
+use ironclaw_host_api::{Resolution, ToolVerdict};
 use ironclaw_turns::{
     LoopBlockedKind, LoopFailureKind, SanitizedFailure,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, CapabilityFailureKind,
-        CapabilityOutcome, LoopCheckpointKind, LoopGateKind, LoopSafeSummary,
-        sanitize_model_visible_text,
+        LoopCheckpointKind, LoopGateKind, LoopSafeSummary, sanitize_model_visible_text,
     },
 };
 
 use crate::{
     state::CheckpointKind,
     strategies::{
-        BatchPolicy, CapabilityErrorClass, GateKind, ModelErrorClass, ModelPreference,
-        RetryAlteration, SanitizedStrategySummary,
+        BatchPolicy, CapabilityErrorClass, GateKind, ModelErrorClass, ModelErrorSummary,
+        ModelPreference, RetryAlteration, SanitizedStrategySummary,
     },
 };
 
@@ -53,29 +53,24 @@ pub(super) fn batch_policy_kind(policy: BatchPolicy) -> BatchPolicyKind {
     }
 }
 
-pub(super) fn capability_batch_counts(outcomes: &[CapabilityOutcome]) -> (u32, u32, u32, u32) {
+pub(super) fn capability_batch_counts(resolutions: &[Resolution]) -> (u32, u32, u32, u32) {
     let mut result_count = 0;
     let mut denied_count = 0;
     let mut gated_count = 0;
     let mut failed_count = 0;
-    for outcome in outcomes {
-        match outcome {
-            CapabilityOutcome::Completed(_) | CapabilityOutcome::SpawnedChildRun { .. } => {
-                result_count += 1
-            }
-            CapabilityOutcome::Denied(_) => denied_count += 1,
-            CapabilityOutcome::ApprovalRequired { .. }
-            | CapabilityOutcome::AuthRequired { .. }
-            | CapabilityOutcome::ResourceBlocked { .. }
-            // ExternalToolPending: the run parks waiting for the client to submit
-            // tool output — a non-completing, non-failing, non-denied gate.
-            | CapabilityOutcome::ExternalToolPending { .. }
-            | CapabilityOutcome::AwaitDependentRun { .. }
-            // SpawnedProcess: treated as gated — it is a non-completing, non-failing, non-denied
-            // outcome that defers completion to a background process. Grouped with gated to avoid
-            // treating it as completed or failed in batch accounting.
-            | CapabilityOutcome::SpawnedProcess(_) => gated_count += 1,
-            CapabilityOutcome::Failed(_) => failed_count += 1,
+    for resolution in resolutions {
+        // Exhaustive over `Resolution`, no wildcard (§11.9). `Done` splits on its
+        // verdict: `Success`/`ChildSpawned` are results, a `RecoverableFailure` is
+        // a model-visible failure. `Denied` is denied; every `Blocked` gate and
+        // every `Suspended` (process/dependent-run/external-tool) is gated — a
+        // non-completing, non-failing, non-denied outcome that defers completion.
+        match resolution {
+            Resolution::Done(outcome) => match &outcome.verdict {
+                ToolVerdict::Success | ToolVerdict::ChildSpawned { .. } => result_count += 1,
+                ToolVerdict::RecoverableFailure { .. } => failed_count += 1,
+            },
+            Resolution::Denied(_) => denied_count += 1,
+            Resolution::Blocked(_) | Resolution::Suspended(_) => gated_count += 1,
         }
     }
     (result_count, denied_count, gated_count, failed_count)
@@ -98,7 +93,10 @@ pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelError
         AgentLoopHostErrorKind::Internal => Some(ModelErrorClass::Internal),
         AgentLoopHostErrorKind::InvalidOutput => Some(ModelErrorClass::InvalidOutput),
         AgentLoopHostErrorKind::BudgetExceeded => Some(ModelErrorClass::ContextOverflow),
-        AgentLoopHostErrorKind::BudgetAccountingFailed => Some(ModelErrorClass::Unavailable),
+        // Accounting storage failed before the host could establish a
+        // trustworthy budget outcome. Preserve the typed host error instead
+        // of retrying it as a provider availability failure.
+        AgentLoopHostErrorKind::BudgetAccountingFailed => None,
         // Budget approval requirement is a gate, not a transient model
         // error — pass it through unclassified so the loop's gate handling
         // path takes over rather than the recovery strategy.
@@ -158,7 +156,7 @@ pub(super) fn capability_host_error(error: AgentLoopHostError) -> AgentLoopExecu
 
 pub(super) fn capability_error_class(kind: &CapabilityFailureKind) -> CapabilityErrorClass {
     // Runtime capability failures are first dispositioned in
-    // `ironclaw_host_runtime` and adapted by `ironclaw_loop_support`.
+    // `ironclaw_host_runtime` and adapted by `ironclaw_loop_host`.
     // Keep this recovery class mapping aligned with that adapter: retryable
     // runtime kinds must arrive here as Transient/Unavailable/Internal,
     // model-visible kinds as OperationFailed/InputInvalid/PolicyDenied, and
@@ -251,6 +249,13 @@ pub(super) fn model_error_failure_category(
         ModelErrorClass::Unavailable => "model_unavailable",
         ModelErrorClass::Internal => "model_internal",
     })
+}
+
+pub(super) fn model_error_failure_summary(
+    summary: &ModelErrorSummary,
+) -> Result<SanitizedFailure, AgentLoopExecutorError> {
+    Ok(model_error_failure_category(summary.class)?
+        .with_detail(summary.safe_summary.as_str().to_string()))
 }
 
 fn sanitized_failure_category(

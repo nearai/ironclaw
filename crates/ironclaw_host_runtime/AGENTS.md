@@ -17,7 +17,7 @@
 - First-party capabilities: the `FirstPartyCapabilityRegistry`/handler/request/result (`first_party`) and the builtin tool set `BuiltinFirstPartyTools` with capability IDs (echo/time/json/http/shell/read_file/write_file/list_dir/glob/grep/apply_patch) and `builtin_first_party_handlers`/`_package` (`first_party_tools`).
 - Host-owned extension contract discovery: `default_host_api_contract_registry`, `default_host_port_catalog`, `discover_extensions_with_default_host_api_contracts*` (`extension_contracts`). Product-specific manifest contracts are added by the owning composition/product layer.
 - Obligation handling: `BuiltinObligationHandler`/`BuiltinObligationServices`, `ProcessObligationLifecycleStore`, and the secret-injection/network-policy stores (`obligations`).
-- The runtime process port `RuntimeProcessPort`/`LocalHostProcessPort` + command execution types (`process_port`) and memory-context builders (`memory_context`).
+- The runtime process port `RuntimeProcessPort`/`HostProcessPort` + command execution types (`process_port`) and memory-context builders (`memory_context`).
 - Production validation of the trusted turn-run transition port exposed to `ironclaw_runner`; scheduler/executor ownership lives in that runner-side crate.
 - Low-level mediation by composing `ironclaw_network`/`ironclaw_secrets`/`ironclaw_resources` (egress, redaction, secret leases, accounting) — never duplicating that logic in runtime crates.
 - Crate-local public API, tests, and fixtures needed to prove that ownership.

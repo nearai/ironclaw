@@ -6,7 +6,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
-use ironclaw_loop_support::RunCancellationFactory;
+use ironclaw_loop_host::RunCancellationFactory;
 use ironclaw_threads::{
     MessageKind, MessageStatus, SessionThreadService, ThreadHistory, ThreadHistoryRequest,
     ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope,

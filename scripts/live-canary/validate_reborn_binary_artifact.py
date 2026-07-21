@@ -14,6 +14,23 @@ CHECKSUM_NAME = f"{ARCHIVE_NAME}.sha256"
 MANIFEST_NAME = "manifest.json"
 
 
+def _feature_set(value: object, *, field: str) -> set[str]:
+    if isinstance(value, str):
+        features = [feature.strip() for feature in value.split(",")]
+    elif isinstance(value, list) and all(
+        isinstance(feature, str) for feature in value
+    ):
+        features = [feature.strip() for feature in value]
+    else:
+        raise ValueError(f"{field} must be a comma-separated string or string array")
+
+    if not features or any(not feature for feature in features):
+        raise ValueError(f"{field} contains an empty feature")
+    if len(features) != len(set(features)):
+        raise ValueError(f"{field} contains duplicate features")
+    return set(features)
+
+
 def validate_artifact(
     artifact_dir: Path,
     expected_ref: str,
@@ -35,8 +52,16 @@ def validate_artifact(
         raise ValueError("unsupported artifact manifest format")
     if manifest.get("product_ref") != expected_ref:
         raise ValueError("artifact product_ref does not match the requested commit")
-    if manifest.get("features") != expected_features:
-        raise ValueError("artifact feature set does not match live QA")
+    artifact_features = _feature_set(
+        manifest.get("features"), field="artifact features"
+    )
+    required_features = _feature_set(expected_features, field="required features")
+    missing_features = sorted(required_features - artifact_features)
+    if missing_features:
+        raise ValueError(
+            "artifact is missing required live QA features: "
+            + ", ".join(missing_features)
+        )
 
 
 def main() -> int:

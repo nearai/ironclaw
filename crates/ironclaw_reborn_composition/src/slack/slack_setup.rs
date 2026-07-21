@@ -717,8 +717,6 @@ fn map_secret_error(error: SecretStoreError) -> SlackSetupError {
 #[derive(Clone)]
 pub struct SlackPersonalSetupServiceSlot {
     slot: Arc<OnceLock<Arc<SlackSetupService>>>,
-    gate_lifecycle:
-        Arc<OnceLock<crate::slack::slack_personal_oauth::SlackPersonalOAuthGateLifecycle>>,
     redirect_uri: OAuthRedirectUri,
 }
 
@@ -726,7 +724,6 @@ impl SlackPersonalSetupServiceSlot {
     pub fn new(redirect_uri: OAuthRedirectUri) -> Self {
         Self {
             slot: Arc::new(OnceLock::new()),
-            gate_lifecycle: Arc::new(OnceLock::new()),
             redirect_uri,
         }
     }
@@ -739,19 +736,6 @@ impl SlackPersonalSetupServiceSlot {
         self.slot.get().cloned()
     }
 
-    pub(crate) fn fill_gate_lifecycle(
-        &self,
-        lifecycle: crate::slack::slack_personal_oauth::SlackPersonalOAuthGateLifecycle,
-    ) {
-        let _ = self.gate_lifecycle.set(lifecycle);
-    }
-
-    pub(crate) fn gate_lifecycle(
-        &self,
-    ) -> Option<crate::slack::slack_personal_oauth::SlackPersonalOAuthGateLifecycle> {
-        self.gate_lifecycle.get().cloned()
-    }
-
     pub fn redirect_uri(&self) -> &OAuthRedirectUri {
         &self.redirect_uri
     }
@@ -762,10 +746,6 @@ impl fmt::Debug for SlackPersonalSetupServiceSlot {
         formatter
             .debug_struct("SlackPersonalSetupServiceSlot")
             .field("filled", &self.slot.get().is_some())
-            .field(
-                "gate_lifecycle_filled",
-                &self.gate_lifecycle.get().is_some(),
-            )
             .field("redirect_uri", &self.redirect_uri)
             .finish()
     }
@@ -823,7 +803,7 @@ impl SlackPersonalSetupServiceSlot {
             None,
             UserId::new("user:operator").expect("valid test operator"),
             Arc::new(InMemorySlackSetupStore::default()),
-            Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+            Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
         ));
         service
             .save(SlackInstallationSetupUpdate {
@@ -847,7 +827,7 @@ impl SlackPersonalSetupServiceSlot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_secrets::InMemorySecretStore;
+    use ironclaw_secrets::FilesystemSecretStore;
 
     #[derive(Debug, Default)]
     struct MemorySetupStore {
@@ -878,7 +858,7 @@ mod tests {
 
     #[tokio::test]
     async fn save_stores_slack_credentials_in_operator_scope_only() {
-        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let service = SlackSetupService::new(
             TenantId::new("tenant:test").expect("tenant"),
             AgentId::new("agent:test").expect("agent"),
@@ -968,7 +948,7 @@ mod tests {
             Some(ProjectId::new("project:test").expect("project")),
             UserId::new("user:operator").expect("user"),
             Arc::new(MemorySetupStore::default()),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
         );
 
         service
@@ -1028,7 +1008,7 @@ mod tests {
 
     #[tokio::test]
     async fn save_namespaces_operator_scope_slack_credentials_by_tenant() {
-        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let service_a = SlackSetupService::new(
             TenantId::new("tenant:a").expect("tenant"),
             AgentId::new("agent:test").expect("agent"),
@@ -1115,7 +1095,7 @@ mod tests {
             Some(ProjectId::new("project:test").expect("project")),
             UserId::new("user:operator").expect("user"),
             setup_store.clone(),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
         );
         let original = service
             .save(SlackInstallationSetupUpdate {
@@ -1169,7 +1149,7 @@ mod tests {
             Some(ProjectId::new("project:test").expect("project")),
             UserId::new("user:operator").expect("user"),
             Arc::new(MemorySetupStore::default()),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
         );
 
         let error = service
@@ -1201,7 +1181,7 @@ mod tests {
             Some(ProjectId::new("project:test").expect("project")),
             UserId::new("user:operator").expect("user"),
             Arc::new(MemorySetupStore::default()),
-            Arc::new(InMemorySecretStore::new()),
+            Arc::new(FilesystemSecretStore::ephemeral()),
         );
         let original = service
             .save(SlackInstallationSetupUpdate {
@@ -1249,7 +1229,7 @@ mod tests {
     #[tokio::test]
     async fn rollback_failed_activation_save_deletes_superseded_secret_handles() {
         let setup_store = Arc::new(MemorySetupStore::default());
-        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let service = SlackSetupService::new(
             TenantId::new("tenant:test").expect("tenant"),
             AgentId::new("agent:test").expect("agent"),
@@ -1374,7 +1354,7 @@ mod tests {
     #[tokio::test]
     async fn rollback_preserves_inherited_oauth_secret_handle() {
         let setup_store = Arc::new(MemorySetupStore::default());
-        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let service = SlackSetupService::new(
             TenantId::new("tenant:test").expect("tenant"),
             AgentId::new("agent:test").expect("agent"),
@@ -1449,7 +1429,7 @@ mod tests {
 
     #[tokio::test]
     async fn save_rejects_reusing_missing_secret_handles() {
-        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
         let service = SlackSetupService::new(
             TenantId::new("tenant:test").expect("tenant"),
             AgentId::new("agent:test").expect("agent"),

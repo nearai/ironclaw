@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
-#[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_auth::OAuthProviderIdentity;
 use ironclaw_auth::{
     AuthFlowId, AuthProductError, AuthProviderClient, CredentialAccountId, OAuthClientId,
@@ -42,7 +41,6 @@ pub(crate) enum ExchangeScopePolicy {
 pub(crate) enum TokenResponseShape {
     #[default]
     Standard,
-    #[cfg(feature = "slack-v2-host-beta")]
     SlackAuthedUser,
 }
 
@@ -646,7 +644,6 @@ struct TokenResponseBody {
 /// Slack `oauth.v2.access` response. Only the fields needed to extract the user
 /// token are modeled; the workspace bot token (top-level `access_token`) is
 /// intentionally ignored — this provider issues user-token credentials only.
-#[cfg(feature = "slack-v2-host-beta")]
 #[derive(Debug, Deserialize)]
 struct SlackTokenResponseBody {
     #[serde(default)]
@@ -665,21 +662,18 @@ struct SlackTokenResponseBody {
     authed_user: Option<SlackAuthedUser>,
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 #[derive(Debug, Deserialize)]
 struct SlackTokenResponseTeam {
     #[serde(default)]
     id: Option<String>,
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 #[derive(Debug, Deserialize)]
 struct SlackTokenResponseEnterprise {
     #[serde(default)]
     id: Option<String>,
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 #[derive(Debug, Deserialize)]
 struct SlackAuthedUser {
     #[serde(default)]
@@ -700,7 +694,6 @@ fn parse_token_response(
 ) -> Result<OAuthTokenResponse, AuthProductError> {
     match shape {
         TokenResponseShape::Standard => parse_standard_token_response(body),
-        #[cfg(feature = "slack-v2-host-beta")]
         TokenResponseShape::SlackAuthedUser => parse_slack_authed_user_token_response(body),
     }
 }
@@ -727,7 +720,6 @@ fn parse_standard_token_response(body: &[u8]) -> Result<OAuthTokenResponse, Auth
 /// `ok` flag is checked before trusting the payload. Token rotation (when the
 /// app enables it) adds `authed_user.{refresh_token,expires_in}`; both are
 /// carried through when present.
-#[cfg(feature = "slack-v2-host-beta")]
 fn parse_slack_authed_user_token_response(
     body: &[u8],
 ) -> Result<OAuthTokenResponse, AuthProductError> {
@@ -1004,6 +996,7 @@ fn oauth_execution_context(
     resource_scope: ResourceScope,
 ) -> Result<ironclaw_host_api::ExecutionContext, AuthProductError> {
     let context = ironclaw_host_api::ExecutionContext {
+        run_id: None,
         invocation_id: resource_scope.invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,

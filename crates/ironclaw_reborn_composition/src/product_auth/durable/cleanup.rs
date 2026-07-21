@@ -5,7 +5,8 @@ use ironclaw_filesystem::{CasExpectation, RootFilesystem};
 use super::FilesystemAuthProductServices;
 use ironclaw_auth::{
     AuthContinuationEvent, AuthContinuationRef, AuthFlowManager, AuthProductError,
-    CredentialAccountId, CredentialAccountOwnerScope, CredentialAccountStatus, CredentialOwnership,
+    CanceledCleanupFlow, CredentialAccountId, CredentialAccountOwnerScope, CredentialAccountStatus,
+    CredentialOwnership, OAuthCompletionCompensationOutcome, OAuthCompletionCompensationRequest,
     OAuthExchangeCleanupRequest, SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest,
     SecretCleanupService,
 };
@@ -32,6 +33,64 @@ where
         Ok(account_id)
     }
 
+    async fn compensate_oauth_completion(
+        &self,
+        request: OAuthCompletionCompensationRequest,
+    ) -> Result<OAuthCompletionCompensationOutcome, AuthProductError> {
+        let flow = self
+            .get_flow(&request.scope, request.flow_id)
+            .await?
+            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        if flow.status != ironclaw_auth::AuthFlowStatus::Failed
+            || !matches!(
+                flow.continuation,
+                AuthContinuationRef::LifecycleActivation { .. }
+            )
+            || flow.provider != request.provider
+            || flow.credential_account_id != Some(request.credential_account_id)
+            || flow.credential_secret_fingerprint
+                != Some(request.expected_secret_fingerprint.clone())
+        {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+
+        let owner = CredentialAccountOwnerScope::from_scope(&request.scope.to_credential_owner());
+        let lock = self.lock_for(format!("account:{}", request.credential_account_id));
+        let _guard = lock.lock().await;
+        let Some((mut account, version)) = self
+            .read_account(&request.scope, request.credential_account_id)
+            .await?
+        else {
+            drop(_guard);
+            self.clear_oauth_compensation_marker(&request).await?;
+            return Ok(OAuthCompletionCompensationOutcome::AlreadyAbsent);
+        };
+        if !owner.matches(&account) || account.provider != request.provider {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if account.status != CredentialAccountStatus::Revoked
+            && account.secret_fingerprint() != request.expected_secret_fingerprint
+        {
+            drop(_guard);
+            self.clear_oauth_compensation_marker(&request).await?;
+            return Ok(OAuthCompletionCompensationOutcome::Superseded);
+        }
+
+        let version = if account.status == CredentialAccountStatus::Revoked {
+            version
+        } else {
+            account.status = CredentialAccountStatus::Revoked;
+            account.updated_at = Utc::now();
+            self.write_account(&account, CasExpectation::Version(version))
+                .await?
+        };
+        self.purge_revoked_callback_account(account, version)
+            .await?;
+        drop(_guard);
+        self.clear_oauth_compensation_marker(&request).await?;
+        Ok(OAuthCompletionCompensationOutcome::Compensated)
+    }
+
     async fn cleanup_for_lifecycle(
         &self,
         request: SecretCleanupRequest,
@@ -41,13 +100,28 @@ where
         // compensation this closes both interleavings: a callback that wins
         // before cancellation is found by the account scan, while a callback
         // that loses after cancellation rolls back its own late account write.
-        if matches!(request.action, SecretCleanupAction::Uninstall)
-            && let Some(provider) = request.provider.as_ref()
-        {
-            for flow in self
-                .lifecycle_flows_for_owner_provider(&request.scope.resource, provider)
-                .await?
-            {
+        if matches!(request.action, SecretCleanupAction::Uninstall) {
+            let mut flows = Vec::new();
+            if let Some(provider) = request.provider.as_ref() {
+                flows.extend(
+                    self.lifecycle_flows_for_owner_provider(&request.scope.resource, provider)
+                        .await?,
+                );
+            }
+            // Package-keyed selection is independent of the provider selector:
+            // uninstall passes it even when the provider is shared with (and
+            // therefore retained for) another installed extension.
+            if let Some(package) = request.lifecycle_package.as_ref() {
+                for flow in self
+                    .lifecycle_flows_for_owner_package(&request.scope.resource, package)
+                    .await?
+                {
+                    if !flows.iter().any(|existing| existing.id == flow.id) {
+                        flows.push(flow);
+                    }
+                }
+            }
+            for flow in flows {
                 let canceled = match flow.status {
                     status if ironclaw_auth::is_terminal_status(status) => flow,
                     _ => match self.cancel_flow(&flow.scope, flow.id).await {
@@ -74,6 +148,12 @@ where
                             emitted_at: Utc::now(),
                         });
                 }
+                // Name every walked terminal flow so the composition wrapper
+                // can eagerly drop its durable setup PKCE verifier.
+                report.canceled_flows.push(CanceledCleanupFlow {
+                    scope: canceled.scope.clone(),
+                    flow_id: canceled.id,
+                });
             }
         }
 
@@ -187,5 +267,38 @@ where
         }
 
         Ok(report)
+    }
+}
+
+impl<F> FilesystemAuthProductServices<F>
+where
+    F: RootFilesystem + 'static,
+{
+    async fn clear_oauth_compensation_marker(
+        &self,
+        request: &OAuthCompletionCompensationRequest,
+    ) -> Result<(), AuthProductError> {
+        let lock = self.lock_for(format!("flow:{}", request.flow_id));
+        let _guard = lock.lock().await;
+        let (mut flow, version) = self
+            .read_flow(&request.scope, request.flow_id)
+            .await?
+            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        if flow.status != ironclaw_auth::AuthFlowStatus::Failed
+            || flow.provider != request.provider
+            || flow.credential_account_id != Some(request.credential_account_id)
+        {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        match flow.credential_secret_fingerprint.as_ref() {
+            None => return Ok(()),
+            Some(current) if current == &request.expected_secret_fingerprint => {}
+            Some(_) => return Err(AuthProductError::CrossScopeDenied),
+        }
+        flow.credential_secret_fingerprint = None;
+        flow.updated_at = Utc::now();
+        self.write_flow(&request.scope, &flow, CasExpectation::Version(version))
+            .await?;
+        Ok(())
     }
 }

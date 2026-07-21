@@ -198,6 +198,7 @@ impl TurnCoordinator for LifecycleTurnCoordinator {
             resolved_run_profile_id: RunProfileId::default_profile(),
             resolved_run_profile_version: RunProfileVersion::new(1),
             resolved_model_route: None,
+            model_usage: None,
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: Some(self.gate_ref.clone()),
@@ -289,6 +290,7 @@ async fn assert_lifecycle_uninstall_denies_blocked_auth_gate(fail_flow_before_un
             scope: flow_scope.clone(),
             extension_id: ExtensionId::new("github").unwrap(),
             provider: Some(provider()),
+            lifecycle_package: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await
@@ -327,6 +329,7 @@ async fn assert_lifecycle_uninstall_denies_blocked_auth_gate(fail_flow_before_un
             scope: flow_scope,
             extension_id: ExtensionId::new("github").unwrap(),
             provider: Some(provider()),
+            lifecycle_package: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await
@@ -553,6 +556,7 @@ async fn cleanup_credentials_for_lifecycle_uses_facade_and_quarantine_report() {
             scope: owner.clone(),
             extension_id: extension.clone(),
             provider: None,
+            lifecycle_package: None,
             action: SecretCleanupAction::Uninstall,
         })
         .await

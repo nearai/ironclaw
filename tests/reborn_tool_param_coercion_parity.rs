@@ -13,7 +13,7 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     HTTP_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
 };
-use ironclaw_loop_support::{HostManagedModelMessageRole, HostManagedModelResponse};
+use ironclaw_loop_host::{HostManagedModelMessageRole, HostManagedModelResponse};
 use ironclaw_turns::TurnStatus;
 use parity_qa_support::{
     binary_e2e::RebornBinaryE2EHarness,
@@ -208,7 +208,7 @@ async fn reborn_provider_tool_scalar_arguments_are_schema_coerced_before_file_di
     harness.shutdown().await;
 }
 
-fn tool_result_count(request: &ironclaw_loop_support::HostManagedModelRequest) -> usize {
+fn tool_result_count(request: &ironclaw_loop_host::HostManagedModelRequest) -> usize {
     request
         .messages
         .iter()

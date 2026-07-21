@@ -7,7 +7,7 @@ use ironclaw_host_api::{
     InvocationId, RuntimeHttpEgressError, RuntimeHttpEgressResponse, TenantId, UserId,
 };
 use ironclaw_secrets::{
-    InMemorySecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata,
+    FilesystemSecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata,
     SecretStoreError,
 };
 use std::sync::Mutex;
@@ -271,7 +271,7 @@ async fn exchange_uses_dynamic_client_material_and_binds_refresh_secret() {
     let client = HostOAuthProviderClient::new_with_client_material(
         notion_spec(),
         egress.clone(),
-        Arc::new(InMemorySecretStore::new()),
+        Arc::new(FilesystemSecretStore::ephemeral()),
         Arc::new(NoopObligationHandler),
         material_source.clone(),
     )
@@ -304,7 +304,7 @@ async fn refresh_request_uses_stored_refresh_token_and_preserves_scope_fallback(
             br#"{"access_token":"new-access-token","refresh_token":"new-refresh-token","expires_in":3600}"#
                 .to_vec(),
         ));
-    let store = Arc::new(InMemorySecretStore::new());
+    let store = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = sample_scope();
     let refresh_secret = SecretHandle::new("google-refresh-input").unwrap();
     store
@@ -407,7 +407,6 @@ fn fake_digest(value: &str) -> String {
 }
 
 #[test]
-#[cfg(feature = "slack-v2-host-beta")]
 fn slack_authed_user_token_response_extracts_user_token_and_scopes() {
     use secrecy::ExposeSecret;
     let body = br#"{"ok":true,"access_token":"xoxb-bot-token","app_id":"A123","team":{"id":"T123"},"enterprise":{"id":"E123"},"authed_user":{"id":"U1","access_token":"xoxp-user-token","scope":"search:read,users:read","token_type":"user"}}"#;
@@ -427,7 +426,6 @@ fn slack_authed_user_token_response_extracts_user_token_and_scopes() {
 }
 
 #[test]
-#[cfg(feature = "slack-v2-host-beta")]
 fn slack_token_response_rejects_ok_false() {
     let body = br#"{"ok":false,"error":"invalid_code"}"#;
     let error = parse_token_response(body, TokenResponseShape::SlackAuthedUser)
@@ -439,7 +437,6 @@ fn slack_token_response_rejects_ok_false() {
 }
 
 #[test]
-#[cfg(feature = "slack-v2-host-beta")]
 fn slack_token_response_rejects_missing_authed_user() {
     let body = br#"{"ok":true,"access_token":"xoxb-bot-only"}"#;
     let error = parse_token_response(body, TokenResponseShape::SlackAuthedUser)
@@ -830,7 +827,7 @@ async fn refresh_invalid_grant_maps_to_invalid_grant_error() {
         br#"{"error":"invalid_grant","error_description":"Token has been expired or revoked."}"#
             .to_vec(),
     ));
-    let store = Arc::new(InMemorySecretStore::new());
+    let store = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = sample_scope();
     let refresh_secret = SecretHandle::new("google-refresh-revoked").unwrap();
     store
@@ -881,7 +878,7 @@ async fn refresh_5xx_is_transient_and_does_not_classify_as_invalid_grant() {
         500,
         br#"{"error":"server_error"}"#.to_vec(),
     ));
-    let store = Arc::new(InMemorySecretStore::new());
+    let store = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = sample_scope();
     let refresh_secret = SecretHandle::new("google-refresh-5xx").unwrap();
     store
@@ -927,7 +924,7 @@ async fn refresh_error_body_token_string_does_not_appear_in_error_debug() {
     let body =
         br#"{"error":"invalid_grant","error_description":"Token eyJhbGciOiJSUzI1Ni_FAKE has been revoked."}"#;
     let egress = Arc::new(RecordingEgress::with_status(400, body.to_vec()));
-    let store = Arc::new(InMemorySecretStore::new());
+    let store = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = sample_scope();
     let refresh_secret = SecretHandle::new("google-refresh-redact-test").unwrap();
     store

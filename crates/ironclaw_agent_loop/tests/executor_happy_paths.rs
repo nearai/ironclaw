@@ -18,7 +18,7 @@ use ironclaw_turns::{
     },
 };
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn reply_only_completes() {
     let (host, checkpoints) = MockAgentLoopDriverHost::builder()
         .script(ScenarioScript::reply_only("hi"))
@@ -40,7 +40,7 @@ async fn reply_only_completes() {
     checkpoints.assert_sequence(&[(CheckpointKind::BeforeModel, 0), (CheckpointKind::Final, 0)]);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn compaction_failure_continues_with_existing_prompt() {
     let (host, _) = MockAgentLoopDriverHost::builder()
         .script(ScenarioScript::reply_only("hi"))
@@ -66,7 +66,7 @@ async fn compaction_failure_continues_with_existing_prompt() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn compaction_success_updates_state_and_emits_progress() {
     let (host, _) = MockAgentLoopDriverHost::builder()
         .script(ScenarioScript::reply_only("hi"))
@@ -117,7 +117,7 @@ async fn compaction_success_updates_state_and_emits_progress() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn calls_then_reply_completes() {
     let (host, checkpoints) = MockAgentLoopDriverHost::builder()
         .script(ScenarioScript::calls_then_reply("demo.echo"))
@@ -157,7 +157,7 @@ async fn calls_then_reply_completes() {
     assert!(append_position < next_model_position);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn parallel_policy_batches_two_calls_in_one_iteration() {
     let script = ScenarioScript {
         model_responses: VecDeque::from([
@@ -202,7 +202,7 @@ async fn parallel_policy_batches_two_calls_in_one_iteration() {
     }));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn mixed_parallel_batch_blocks_after_recording_completed_results() {
     let script = ScenarioScript {
         model_responses: VecDeque::from([ScriptedModelResponse::Calls(vec![
@@ -261,7 +261,7 @@ async fn mixed_parallel_batch_blocks_after_recording_completed_results() {
     }));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn await_dependent_run_blocks_with_dependent_gate_kind() {
     let script = ScenarioScript {
         model_responses: VecDeque::from([ScriptedModelResponse::Calls(vec![
@@ -303,7 +303,7 @@ async fn await_dependent_run_blocks_with_dependent_gate_kind() {
     ]);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn spawned_child_run_appends_result_ref_and_continues() {
     let child_run_id = TurnRunId::new();
     let script = ScenarioScript {
@@ -351,7 +351,7 @@ async fn spawned_child_run_appends_result_ref_and_continues() {
     }));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn sequential_batch_when_exclusive_present() {
     let script = ScenarioScript {
         model_responses: VecDeque::from([
@@ -396,7 +396,7 @@ async fn sequential_batch_when_exclusive_present() {
     }));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn multiple_turns_complete_after_final_reply() {
     let script = ScenarioScript {
         model_responses: VecDeque::from([
@@ -471,7 +471,7 @@ async fn multiple_turns_complete_after_final_reply() {
 ///   - final state has `force_compact_on_next_iteration == false` and
 ///     `force_compact_initiator == None` (all consumed/cleared)
 ///   - `turns_completed == 3` (CompactionOnly counts per Step 9 finding)
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn executor_proactive_byte_cap_drives_full_compaction_cycle() {
     let script = ScenarioScript {
         model_responses: VecDeque::from([

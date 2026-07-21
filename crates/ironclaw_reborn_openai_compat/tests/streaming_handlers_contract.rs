@@ -1,5 +1,3 @@
-#![cfg(feature = "openai-compat-beta")]
-
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -935,6 +933,8 @@ fn completed_response(public_id: OpenAiResponseId, text: &str) -> OpenAiResponse
             input_tokens: 1,
             output_tokens: text.len() as u32,
             total_tokens: 1 + text.len() as u32,
+            input_tokens_details: None,
+            cost: None,
         }),
     }
 }

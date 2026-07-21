@@ -19,7 +19,7 @@ use ironclaw_turns::{
     },
 };
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn cancel_after_capability_batch_is_consumed_once() {
     let first_signal = LoopCancellationSignal {
         reason_kind: LoopCancelReasonKind::UserRequested,
@@ -61,7 +61,7 @@ async fn cancel_after_capability_batch_is_consumed_once() {
     assert_eq!(host.observe_cancellation(), Some(second_signal));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn repeated_signature_warns_before_allowing_final_reply() {
     let script = ScenarioScript {
         model_responses: VecDeque::from([
@@ -116,7 +116,7 @@ async fn repeated_signature_warns_before_allowing_final_reply() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn repeated_signature_stops_after_rendered_warning_and_no_progress_result() {
     let script =
         ScenarioScript::same_calls_repeated("demo.echo", 4).with_capability_outcomes(vec![
@@ -147,7 +147,7 @@ async fn repeated_signature_stops_after_rendered_warning_and_no_progress_result(
     assert_eq!(repeated_call_warning_prompt_count(&host), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn repeated_signature_made_progress_after_warning_clears_warning_and_continues() {
     let script = ScenarioScript {
         model_responses: VecDeque::from([
@@ -199,7 +199,7 @@ async fn repeated_signature_made_progress_after_warning_clears_warning_and_conti
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn repeated_identical_output_digest_trips_no_progress() {
     // PR3: the same call producing the SAME output (identical content digest)
     // every turn is genuine no-progress — the guard fires (typed
@@ -255,7 +255,7 @@ async fn repeated_identical_output_digest_trips_no_progress() {
     assert_no_progress_typed_failure(&host);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn changing_output_digests_do_not_trip_no_progress() {
     // PR3 counterpart: the SAME call returning DIFFERENT output each turn
     // (polling / pagination that advances) is real progress — every new digest
@@ -314,7 +314,7 @@ async fn changing_output_digests_do_not_trip_no_progress() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn typed_no_progress_results_escape_without_repeated_call_signature() {
     let script = ScenarioScript {
         model_responses: VecDeque::from([
@@ -355,7 +355,7 @@ async fn typed_no_progress_results_escape_without_repeated_call_signature() {
     assert_eq!(host.model_call_count(), 3);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn typed_blocked_results_do_not_escape_via_no_progress() {
     // PR3: blocked/failed results are NOT no-progress (only a repeated identical
     // output is). Three blocked batches (distinct inputs, so no repeated-call
@@ -407,7 +407,7 @@ async fn typed_blocked_results_do_not_escape_via_no_progress() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn repeated_failure_kind_does_not_trigger_no_progress_escape() {
     let (host, _) = MockAgentLoopDriverHost::builder()
         .script(ScenarioScript::same_failure_repeated(
@@ -436,7 +436,7 @@ async fn repeated_failure_kind_does_not_trigger_no_progress_escape() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn chaos_repeated_model_service_drops_report_model_error() {
     let script = ScenarioScript {
         model_responses: (0..8)
@@ -470,7 +470,7 @@ async fn chaos_repeated_model_service_drops_report_model_error() {
     assert!(host.finalized_assistant_messages().is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn invalid_model_output_is_retried_before_accepting_next_valid_reply() {
     let script = ScenarioScript {
         model_responses: VecDeque::from([
@@ -513,7 +513,7 @@ async fn invalid_model_output_is_retried_before_accepting_next_valid_reply() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn recovery_budget_exhaustion_uses_single_call_retry() {
     let script = ScenarioScript::same_failure_repeated("demo.echo", "transient", 1)
         .with_single_call_retry_outcomes(vec![

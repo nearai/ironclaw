@@ -453,9 +453,10 @@ mod tests {
             let _result = sanitizer.sanitize(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
-                "base64 pattern took {}ms on 100KB near-miss (threshold: 100ms)",
-                elapsed.as_millis()
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
+                "base64 pattern took {}ms on 100KB near-miss (budget: {}ms)",
+                elapsed.as_millis(),
+                crate::REDOS_SCAN_BUDGET_MS
             );
         }
 
@@ -470,7 +471,7 @@ mod tests {
             let _result = sanitizer.sanitize(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "eval pattern took {}ms on 100KB input",
                 elapsed.as_millis()
             );
@@ -487,7 +488,7 @@ mod tests {
             let _result = sanitizer.sanitize(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "exec pattern took {}ms on 100KB input",
                 elapsed.as_millis()
             );
@@ -505,7 +506,7 @@ mod tests {
             let _result = sanitizer.sanitize(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "null_byte pattern took {}ms on 100KB input",
                 elapsed.as_millis()
             );
@@ -522,7 +523,7 @@ mod tests {
             let _result = sanitizer.sanitize(&payload);
             let elapsed = start.elapsed();
             assert!(
-                elapsed.as_millis() < 100,
+                elapsed.as_millis() < crate::REDOS_SCAN_BUDGET_MS,
                 "Aho-Corasick scan took {}ms on 100KB clean input",
                 elapsed.as_millis()
             );

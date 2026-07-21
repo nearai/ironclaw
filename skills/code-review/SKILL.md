@@ -4,12 +4,14 @@ version: "2.0.0"
 description: Paranoid architect review of code changes for bugs, security, missing tests, and undocumented assumptions. Works on local git diffs OR a GitHub pull request (e.g. `owner/repo N`). For PRs, can post findings as line-level review comments.
 activation:
   keywords:
-    - "review"
     - "code review"
     - "review changes"
+    - "review diff"
+    - "review pull request"
+    - "review commit"
   patterns:
-    - "(?i)review\\s.*(code|changes|diff|PR|pull request|commit)"
-    - "(?i)(check|look at|inspect)\\s.*(changes|diff|code)"
+    - "(?i)review\\s+(?:(this|my|the|these|that|latest|recent)\\s+)?(code|change|changes|diff|\\bPR\\b|pull request|commit)"
+    - "(?i)(check|look at|inspect)\\s+(this|my|the|these)\\s+(changes|diff|code)"
     - "(?i)review\\s+[a-z0-9._-]+/[a-z0-9._-]+\\s+#?\\d+"
   tags:
     - "code-review"

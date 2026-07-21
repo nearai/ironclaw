@@ -9,22 +9,40 @@ layer = "kernel"
 
 [dependencies]
 async-trait = "0.1"
+# Slice-C `authorize()` derives the provisional `Authorized` witness deadline
+# (`Timestamp = chrono::DateTime<Utc>`) via `Utc::now() + Duration::minutes(5)`.
+chrono = "0.4"
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
+# Storage substrate: the host-private ReplayPayloadStore persists behind a
+# ScopedFilesystem over the shared CAS lane (mirrors run_state's Filesystem*Store).
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_processes = { path = "../ironclaw_processes" }
+# Runtime-policy planner run in-fold by authorize() (§5.3.2/§9). Pure
+# host_api-only crate (depends only on ironclaw_host_api), so no dependency cycle.
+ironclaw_runtime_policy = { path = "../ironclaw_runtime_policy" }
 ironclaw_run_state = { path = "../ironclaw_run_state" }
 ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_trust = { path = "../ironclaw_trust" }
+# Resume-payload vocabulary owner: ReplayPayload embeds CapabilityInputRef and
+# AuthResumeApprovalIdentity from turns (the CapabilityApprovalResume/AuthResume
+# field types) rather than re-typing them.
+ironclaw_turns = { path = "../ironclaw_turns" }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 
 [dev-dependencies]
-chrono = "0.4"
 ironclaw_approvals = { path = "../ironclaw_approvals" }
+# Enables the in-memory-backed capability-lease store constructor for tests only.
+ironclaw_authorization = { path = "../ironclaw_authorization", features = ["test-support"] }
+# Enables the in-memory-backed process store constructors for tests only.
+ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support"] }
+# Enables the in-memory-backed run-state/approval store constructors for tests only.
+ironclaw_run_state = { path = "../ironclaw_run_state", features = ["test-support"] }
 ironclaw_dispatcher = { path = "../ironclaw_dispatcher" }
 ironclaw_events = { path = "../ironclaw_events" }
-ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 tokio = { version = "1", features = ["macros", "rt"] }

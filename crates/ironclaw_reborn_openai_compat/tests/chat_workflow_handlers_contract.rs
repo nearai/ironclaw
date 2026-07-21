@@ -1,5 +1,3 @@
-#![cfg(feature = "openai-compat-beta")]
-
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -1051,6 +1049,8 @@ async fn model_only_tool_call_output_shape_is_preserved() {
                 prompt_tokens: 3,
                 completion_tokens: 5,
                 total_tokens: 8,
+                prompt_tokens_details: None,
+                cost: None,
             }),
             effective_model: Some("gpt-reborn-effective".to_string()),
             internal_refs: Some(

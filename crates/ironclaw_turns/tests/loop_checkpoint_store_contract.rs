@@ -8,9 +8,9 @@ use ironclaw_host_api::{
     AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId, ThreadId,
     VirtualPath,
 };
+use ironclaw_turns::test_support::in_memory_turns_filesystem;
 use ironclaw_turns::{
-    CheckpointSchemaId, FilesystemTurnStateRowStore, FilesystemTurnStateStore,
-    GetLoopCheckpointRequest, InMemoryLoopCheckpointStore, InMemoryTurnStateStore,
+    CheckpointSchemaId, FilesystemTurnStateRowStore, GetLoopCheckpointRequest,
     LoopCheckpointStateRef, LoopCheckpointStore, PutLoopCheckpointRequest, RunProfileVersion,
     TurnId, TurnRunId, TurnScope, run_profile::LoopCheckpointKind,
 };
@@ -99,19 +99,16 @@ async fn assert_loop_checkpoint_store_cross_scope_and_run_miss(
 }
 
 #[tokio::test]
-async fn inmemory_standalone_loop_checkpoint_roundtrip() {
-    let store = InMemoryLoopCheckpointStore::default();
-    assert_loop_checkpoint_store_roundtrip(&store).await;
-    assert_loop_checkpoint_store_cross_scope_and_run_miss(&store).await;
-}
-
-#[tokio::test]
 async fn inmemory_turn_state_loop_checkpoint_roundtrip_and_snapshot() {
-    let store = InMemoryTurnStateStore::default();
+    // WriteThrough store over a shared backend: reopening a second store over
+    // the same durable rows is the rehydration path that replaced the old
+    // `from_persistence_snapshot` reload.
+    let scoped = in_memory_turns_filesystem();
+    let store = FilesystemTurnStateRowStore::new(scoped.clone());
     assert_loop_checkpoint_store_roundtrip(&store).await;
     assert_loop_checkpoint_store_cross_scope_and_run_miss(&store).await;
 
-    let snapshot = store.persistence_snapshot();
+    let snapshot = store.persistence_snapshot().await.unwrap();
     assert_eq!(snapshot.loop_checkpoints.len(), 2);
     assert!(
         snapshot
@@ -121,11 +118,7 @@ async fn inmemory_turn_state_loop_checkpoint_roundtrip_and_snapshot() {
         "loop checkpoint mappings must not use turn_checkpoints"
     );
 
-    let reopened = InMemoryTurnStateStore::from_persistence_snapshot(
-        snapshot,
-        ironclaw_turns::InMemoryTurnStateStoreLimits::default(),
-    )
-    .unwrap();
+    let reopened = FilesystemTurnStateRowStore::new(scoped.clone());
     assert_loop_checkpoint_store_cross_scope_and_run_miss(&reopened).await;
 }
 
@@ -174,7 +167,7 @@ fn snapshot_virtual_path() -> VirtualPath {
 async fn filesystem_turn_state_loop_checkpoint_roundtrip_and_snapshot() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(backend);
-    let store = FilesystemTurnStateStore::new(Arc::clone(&scoped));
+    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
     assert_loop_checkpoint_store_roundtrip(&store).await;
     assert_loop_checkpoint_store_cross_scope_and_run_miss(&store).await;
 
@@ -191,7 +184,7 @@ async fn filesystem_turn_state_loop_checkpoint_roundtrip_and_snapshot() {
     // Reopen against the same scoped filesystem; the persistence snapshot must
     // rehydrate the same loop-checkpoint set without any backend-specific
     // migration step.
-    let reopened = FilesystemTurnStateStore::new(scoped);
+    let reopened = FilesystemTurnStateRowStore::new(scoped);
     let reopened_snapshot = reopened.persistence_snapshot().await.unwrap();
     assert_eq!(reopened_snapshot.loop_checkpoints.len(), 2);
 }
