@@ -133,7 +133,6 @@ fn reborn_other_mode_typename_allowlist_is_frozen() {
         KEYWORDS,
         &is_other_mode_name,
         &[
-            "reborn_inmemory_store_ratchet.rs",
             "reborn_localdev_typename_ratchet.rs",
             "reborn_deployment_mode_typename_ratchet.rs",
         ],

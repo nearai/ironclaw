@@ -73,10 +73,7 @@ fn reborn_localdev_typename_allowlist_is_frozen_and_only_shrinks() {
         &crates_dir,
         KEYWORDS,
         &is_localdev_type,
-        &[
-            "reborn_inmemory_store_ratchet.rs",
-            "reborn_localdev_typename_ratchet.rs",
-        ],
+        &["reborn_localdev_typename_ratchet.rs"],
         &mut found,
     );
 

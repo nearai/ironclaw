@@ -281,7 +281,7 @@ Rationale:
   atomically by the exchange route. Composition also emits
   `Referrer-Policy: no-referrer` as defense in depth.
 - **Logout actually revokes.** `POST /auth/logout` calls
-  `SessionStore::revoke`; the regression in
+  `SignedTokenSessionStore::revoke`; the regression in
   `crates/ironclaw_webui/tests/session_round_trip.rs`
   locks that a post-revoke bearer fails on `/api/webchat/v2/threads`.
 
