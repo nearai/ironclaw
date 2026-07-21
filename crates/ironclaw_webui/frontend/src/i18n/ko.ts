@@ -1056,6 +1056,7 @@ registerPack("ko", {
   // Admin — tabs
   "admin.tab.dashboard": "대시보드",
   "admin.tab.users": "사용자",
+  "admin.tab.configuration": "구성",
   "admin.tab.usage": "사용량",
 
   // Admin — dashboard

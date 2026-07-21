@@ -71,6 +71,7 @@ export const EXTENSIONS_SUB_ROUTES = [
 // components remain in the tree but are not routed).
 export const ADMIN_SUB_ROUTES = [
   { id: "users", labelKey: "admin.tab.users", icon: "lock" },
+  { id: "configuration", labelKey: "admin.tab.configuration", icon: "tool" },
 ];
 
 export const EXPANDABLE_SUB_ROUTES = {

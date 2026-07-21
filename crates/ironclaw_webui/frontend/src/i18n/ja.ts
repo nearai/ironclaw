@@ -1056,6 +1056,7 @@ registerPack("ja", {
   // Admin — tabs
   "admin.tab.dashboard": "ダッシュボード",
   "admin.tab.users": "ユーザー",
+  "admin.tab.configuration": "設定",
   "admin.tab.usage": "使用量",
 
   // Admin — dashboard

@@ -28,6 +28,8 @@ import {
   putUserSecret,
   deleteUserSecret,
   createUserToken,
+  fetchExtensionAdminConfiguration,
+  replaceExtensionAdminConfiguration,
 } from "./admin-api";
 
 // `api.ts` reads a bearer via `sessionStorage.getItem`, which does not
@@ -113,6 +115,33 @@ test("fetchAdminUsers GETs the users route and normalizes id === user_id", async
       { id: "u-2", user_id: "u-2" },
     ],
   );
+});
+
+test("fetchExtensionAdminConfiguration reads every manifest-driven group", async () => {
+  stubFetch(() => ({ groups: [{ group_id: "vendor.example", fields: [] }] }));
+
+  const result = await fetchExtensionAdminConfiguration();
+
+  assert.deepEqual(result, [{ group_id: "vendor.example", fields: [] }]);
+  assert.equal(calls[0].path, "/api/webchat/v2/operator/extension-configuration");
+  assert.equal(calls[0].init.method, undefined);
+});
+
+test("replaceExtensionAdminConfiguration PUTs only descriptor handles and values", async () => {
+  stubFetch(() => ({ group_id: "vendor.example", fields: [] }));
+
+  await replaceExtensionAdminConfiguration("vendor.example/a", [
+    { handle: "client_secret", value: "write-only" },
+  ]);
+
+  assert.equal(
+    calls[0].path,
+    "/api/webchat/v2/operator/extension-configuration/vendor.example%2Fa",
+  );
+  assert.equal(calls[0].init.method, "PUT");
+  assert.deepEqual(jsonBody(calls[0]), {
+    values: [{ handle: "client_secret", value: "write-only" }],
+  });
 });
 
 test("fetchAdminUsers returns an empty list when the response has no users array", async () => {

@@ -4,6 +4,7 @@ import { DashboardTab } from "./components/dashboard-tab";
 import { UsageTab } from "./components/usage-tab";
 import { UserDetail } from "./components/user-detail";
 import { AdminUsersTab } from "./components/users-tab";
+import { AdminConfigurationTab } from "./components/configuration-tab";
 
 export function AdminPage() {
   // Users is the only shipped admin tab in this port; dashboard/usage
@@ -36,6 +37,7 @@ export function AdminPage() {
           selectedUserId={selectedUserId}
           onSelectUser={handleSelectUser}
         />),
+    configuration: (<AdminConfigurationTab />),
     usage: (<UsageTab onSelectUser={handleSelectUser} />),
   };
 

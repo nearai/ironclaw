@@ -1056,6 +1056,7 @@ registerPack("ar", {
   // Admin — tabs
   "admin.tab.dashboard": "لوحة التحكم",
   "admin.tab.users": "المستخدمون",
+  "admin.tab.configuration": "الإعدادات",
   "admin.tab.usage": "الاستخدام",
 
   // Admin — dashboard

@@ -1056,6 +1056,7 @@ registerPack("uk", {
   // Admin — tabs
   "admin.tab.dashboard": "Панель",
   "admin.tab.users": "Користувачі",
+  "admin.tab.configuration": "Конфігурація",
   "admin.tab.usage": "Використання",
 
   // Admin — dashboard

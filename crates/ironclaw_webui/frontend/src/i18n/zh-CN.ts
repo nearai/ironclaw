@@ -1056,6 +1056,7 @@ registerPack("zh-CN", {
   // Admin — tabs
   "admin.tab.dashboard": "仪表盘",
   "admin.tab.users": "用户",
+  "admin.tab.configuration": "配置",
   "admin.tab.usage": "用量",
 
   // Admin — dashboard
