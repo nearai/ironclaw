@@ -5826,10 +5826,10 @@ async fn stream_events_facade_error_emits_redacted_error_event_and_closes() {
     );
 
     let mut body = response.into_body();
-    // Read until we see an `error` event chunk, or the stream closes.
+    // Read until we see a `stream_error` event chunk, or the stream closes.
     let bytes = collect_sse_until(&mut body, Duration::from_secs(2), |buf| {
-        buf.windows(b"event: error".len())
-            .any(|w| w == b"event: error")
+        buf.windows(b"event: stream_error".len())
+            .any(|w| w == b"event: stream_error")
             && buf.windows(2).any(|w| w == b"\n\n")
     })
     .await;
@@ -5837,10 +5837,10 @@ async fn stream_events_facade_error_emits_redacted_error_event_and_closes() {
     let events = parse_sse_events(&bytes);
     let error_event = events
         .iter()
-        .find(|event| event.event.as_deref() == Some("error"))
+        .find(|event| event.event.as_deref() == Some("stream_error"))
         .unwrap_or_else(|| {
             panic!(
-                "expected an SSE `error` event, got: {events:?}; raw: {}",
+                "expected an SSE `stream_error` event, got: {events:?}; raw: {}",
                 String::from_utf8_lossy(&bytes)
             )
         });

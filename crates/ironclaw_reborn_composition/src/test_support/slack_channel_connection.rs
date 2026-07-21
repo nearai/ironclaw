@@ -12,10 +12,11 @@
 //!
 //! [`SlackChannelConnectionTestBundle::connect_personal_user`] mirrors the
 //! successful `slack_personal` OAuth callback
-//! (`slack_host_beta/runtime_setup.rs` — `begin_connection` then
-//! `bind_personal_user_for_epoch_with_rollback`), so integration tests can
-//! drive connect → disconnect → reconnect against durable identity bindings
-//! without a browser or Slack.
+//! (`slack_host_beta/runtime_setup.rs` —
+//! `bind_personal_user_for_epoch_with_rollback`, which stamps the identity
+//! row and records the active connection generation), so integration tests
+//! can drive connect → disconnect → reconnect against durable identity
+//! bindings without a browser or Slack.
 //!
 //! For tests only — gated behind `test-support`, ships zero bytes in
 //! production builds.
@@ -35,7 +36,7 @@ use crate::slack::slack_host_beta::SlackPersonalConnectionScope;
 use crate::slack::slack_host_state::FilesystemSlackHostState;
 use crate::slack::slack_personal_binding::{
     RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingStore, SlackConnectionEpoch,
-    SlackConnectionOwner, SlackPersonalBindingInstallation, SlackPersonalBindingPrincipal,
+    SlackPersonalBindingInstallation, SlackPersonalBindingPrincipal,
     SlackPersonalUserBindingRequest, SlackPersonalUserBindingService,
     SlackUserBindingLifecycleStore,
 };
@@ -69,7 +70,6 @@ pub struct SlackChannelConnectionTestBundle {
     api_app_id: SlackApiAppId,
     facade: Arc<dyn ChannelConnectionFacade>,
     binding_service: SlackPersonalUserBindingService,
-    lifecycle_store: Arc<dyn SlackUserBindingLifecycleStore>,
     user_identity_lookup: Arc<dyn RebornUserIdentityLookup>,
 }
 
@@ -169,37 +169,25 @@ pub fn build_slack_channel_connection_for_test(
         api_app_id,
         facade,
         binding_service,
-        lifecycle_store,
         user_identity_lookup,
     })
 }
 
 impl SlackChannelConnectionTestBundle {
     /// Connect `user_id`'s personal Slack account, mirroring the successful
-    /// `slack_personal` OAuth callback: `begin_connection` on the durable
-    /// lifecycle store, then the same
+    /// `slack_personal` OAuth callback: the same
     /// `bind_personal_user_for_epoch_with_rollback` the production callback
-    /// identity hook calls (`slack_host_beta/runtime_setup.rs`). A fresh
-    /// connection epoch is minted per call, so calling again after a
-    /// disconnect models a real reconnect.
+    /// identity hook calls (`slack_host_beta/runtime_setup.rs`), which both
+    /// stamps the identity row and records the active connection generation.
+    /// The OAuth start path keeps no connection state, so neither does this
+    /// helper. A fresh connection epoch is minted per call, so calling again
+    /// after a disconnect models a real reconnect.
     pub async fn connect_personal_user(
         &self,
         user_id: &UserId,
         slack_user_id: &str,
     ) -> Result<(), String> {
         let epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
-        self.lifecycle_store
-            .begin_connection(
-                &SlackConnectionOwner::new(
-                    self.tenant_id.clone(),
-                    user_id.clone(),
-                    self.installation_id.clone(),
-                ),
-                epoch,
-                chrono::Utc::now() + chrono::Duration::minutes(5),
-            )
-            .await
-            .map_err(|error| error.to_string())?;
         self.binding_service
             .bind_personal_user_for_epoch_with_rollback(
                 SlackPersonalBindingPrincipal {

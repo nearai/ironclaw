@@ -29,9 +29,9 @@ use ironclaw_secrets::SecretStore;
 use thiserror::Error;
 
 use crate::{
-    ExecutionPlan, PostEditCheckConfig, PostEditCheckService, RuntimeProcessPort,
-    RuntimeSecretMaterialStager,
+    PostEditCheckConfig, PostEditCheckService, RuntimeProcessPort, RuntimeSecretMaterialStager,
 };
+use ironclaw_runtime_policy::ExecutionPlan;
 
 /// Concrete host API bindings for an already-authorized invocation.
 ///

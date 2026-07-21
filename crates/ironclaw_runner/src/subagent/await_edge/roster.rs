@@ -2,15 +2,15 @@
 //! unclosed await-edges, discoverable without a global walk over the edge
 //! tree itself (edges are scope-isolated, listed only per-scope, §4.5a).
 //!
-//! Deliberately diverges from this crate's other two scope-listing
-//! precedents on purpose, not by oversight:
-//! - `local_trigger_access/filesystem.rs`'s `ensure_index`/`query()` idiom
-//!   assumes the caller already knows the scope to look up; the roster's
-//!   whole job is discovering scopes the caller does *not* yet know.
-//! - `goal_store.rs`/`local_trigger_access`'s nested `agents/<id>/projects/<id>`
-//!   path convention breaks scope-independent enumeration at any fixed
-//!   `list_dir` depth (round-3 fix, §4.5) — nested markers hide behind
-//!   however many directory levels each scope's optional axes happen to use.
+//! Deliberately diverges from this crate's other scope-listing precedents on
+//! purpose, not by oversight:
+//! - the usual indexed-lookup idiom assumes the caller already knows the scope
+//!   to look up; the roster's whole job is discovering scopes the caller does
+//!   *not* yet know.
+//! - `goal_store.rs`'s nested `agents/<id>/projects/<id>` path convention
+//!   breaks scope-independent enumeration at any fixed `list_dir` depth
+//!   (round-3 fix, §4.5) — nested markers hide behind however many directory
+//!   levels each scope's optional axes happen to use.
 //!
 //! The roster therefore flattens every scope's key into one percent-encoded,
 //! `__`-joined filename (round-3/round-4) and shards those flat filenames

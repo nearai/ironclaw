@@ -10,9 +10,11 @@ Current replay assets include:
 
 - `tests/fixtures/llm_traces/README.md`;
 - `scripts/replay-snap.sh`;
-- `.github/workflows/replay-gate.yml`;
-- `tests/snapshots/`;
-- `tests/support/LIVE_TESTING.md`.
+- `.github/workflows/reborn-tests.yml` (the `Reborn QA recorded fixtures` job
+  + `scripts/ci/check-reborn-qa-fixtures.sh`) — the Reborn recorded-fixture
+  gate that replaced the v1 `replay-gate.yml`;
+- `tests/snapshots/` (the `golden_payload__*.snap` insta snapshots checked by
+  `reborn_integration_golden_payload`).
 
 The existing replay model has two layers:
 

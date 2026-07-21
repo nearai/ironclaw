@@ -2,8 +2,10 @@ use ironclaw_filesystem::FilesystemError;
 use ironclaw_host_api::{ResourceScope, ScopedPath, SecretHandle};
 
 use ironclaw_auth::{
-    AuthFlowId, AuthInteractionId, AuthProductError, AuthSurface, CredentialAccountId,
+    AuthFlowId, AuthInteractionId, AuthProductError, AuthProviderId, AuthSurface,
+    CredentialAccountId,
 };
+use sha2::{Digest as _, Sha256};
 
 pub(super) fn flow_path(
     scope: &ironclaw_auth::AuthProductScope,
@@ -19,6 +21,20 @@ pub(super) fn flow_root(
     scope: &ironclaw_auth::AuthProductScope,
 ) -> Result<ScopedPath, AuthProductError> {
     scoped_path(&format!("{}/flows", product_auth_root(scope)))
+}
+
+pub(super) fn setup_creation_coordination_path(
+    scope: &ironclaw_auth::AuthProductScope,
+    provider: &AuthProviderId,
+) -> Result<ScopedPath, AuthProductError> {
+    // Provider ids are validated public text, not path segments. Hash the
+    // complete id so no provider-controlled punctuation can change the
+    // coordination namespace.
+    let provider_digest = hex::encode(Sha256::digest(provider.as_str().as_bytes()));
+    scoped_path(&format!(
+        "{}/.setup-creation/{provider_digest}.json",
+        flow_root(scope)?.as_str()
+    ))
 }
 
 pub(super) fn surface_sessions_root(

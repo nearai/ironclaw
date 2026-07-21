@@ -42,7 +42,7 @@ The `refs` module owns the OpenAI-compatible identity contract:
 The default router remains fail-closed unless host composition injects
 `OpenAiCompatRouterState::with_chat_completions(...)`.
 `ironclaw_reborn_composition::build_openai_compat_route_mount` performs that
-host wiring for `ironclaw-reborn serve` by mounting the router inside the
+host wiring for `ironclaw serve` by mounting the router inside the
 protected Reborn route stack. The injected `OpenAiChatCompletionsWorkflow`
 handles Chat Completions create and optional projection-backed SSE streaming:
 

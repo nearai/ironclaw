@@ -2,8 +2,9 @@ use async_trait::async_trait;
 use ironclaw_turns::{
     LoopGateRef,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, LoopCheckpointRequest, LoopProgressEvent,
-        LoopSafeSummary, StageCheckpointPayloadRequest,
+        AgentLoopHostError, AgentLoopHostErrorKind, CheckpointSchemaId, LoopCheckpointRequest,
+        LoopProgressEvent, LoopSafeSummary, StageCheckpointPayloadRequest,
+        sanitize_model_visible_text,
     },
 };
 
@@ -70,11 +71,13 @@ impl CheckpointStage {
         let payload = serde_json::to_vec(&state)
             .map_err(|_| AgentLoopExecutorError::CheckpointFailed { stage: kind })?;
         let host_kind = checkpoint_kind_to_host(kind);
+        let schema_id = CheckpointSchemaId::new(crate::state::CHECKPOINT_SCHEMA_ID)
+            .map_err(|_| AgentLoopExecutorError::CheckpointFailed { stage: kind })?;
         let state_ref = ctx
             .host
             .stage_checkpoint_payload(StageCheckpointPayloadRequest {
                 kind: host_kind,
-                schema_id: crate::state::CHECKPOINT_SCHEMA_ID.to_string(),
+                schema_id,
                 payload,
             })
             .await
@@ -213,12 +216,27 @@ fn checkpoint_host_error(
             | AgentLoopHostErrorKind::Internal
             | AgentLoopHostErrorKind::BudgetAccountingFailed
     ) {
-        let detail = error.detail.clone();
+        let raw_summary = error.safe_summary;
+        let (safe_summary, rejected_summary_detail) =
+            match LoopSafeSummary::new(raw_summary.clone()) {
+                Ok(summary) => (summary, None),
+                Err(validation_error) => {
+                    tracing::debug!(
+                        checkpoint_kind = ?kind,
+                        validation_error = %validation_error,
+                        "checkpoint error summary rejected; using fallback"
+                    );
+                    (
+                        LoopSafeSummary::model_gateway_failed(),
+                        Some(sanitize_model_visible_text(raw_summary)),
+                    )
+                }
+            };
+        let detail = error.detail.or(rejected_summary_detail);
         return AgentLoopExecutorError::HostUnavailableWithDiagnostics {
             stage: HostStage::Checkpoint,
             kind: error.kind,
-            safe_summary: LoopSafeSummary::new(error.safe_summary)
-                .unwrap_or_else(|_| LoopSafeSummary::model_gateway_failed()),
+            safe_summary,
             reason_kind: error.reason_kind,
             diagnostic_ref: error.diagnostic_ref,
             detail,

@@ -292,27 +292,36 @@ pub const AUXILIARY_REQUEST_TIMEOUT_SECS: u64 = 30;
 /// longer budget for large audio uploads.
 pub const TRANSCRIPTION_REQUEST_TIMEOUT_SECS: u64 = 120;
 
-/// Base reqwest builder carrying the timeout hygiene every LLM HTTP client
-/// shares: a total-request timeout, a connect-handshake cap, TCP keepalive, and
-/// a bounded idle connection pool.
+/// Base reqwest builder carrying the transport hygiene every LLM HTTP client
+/// shares: a connect-handshake cap, TCP keepalive, and a bounded idle
+/// connection pool.
 ///
-/// This is the single source of truth for those four settings — providers must
+/// This is the single source of truth for those settings — providers must
 /// build their client from this rather than re-applying the values inline, so
-/// the policy can only ever change in one place. The total request timeout is a
-/// parameter because it is legitimately per-call (a turn model stream and a
-/// one-shot OAuth token exchange should not share one budget); callers chain any
-/// site-specific options (`.redirect`, `.resolve_to_addrs`, `.default_headers`,
-/// …) onto the returned builder.
-///
-/// Pass [`DEFAULT_REQUEST_TIMEOUT_SECS`] for primary turn-model calls so the
-/// HTTP layer times out below the Reborn runner lease.
-pub fn hardened_client_builder(request_timeout_secs: u64) -> reqwest::ClientBuilder {
+/// the policy can only ever change in one place. Callers chain any site-specific
+/// options (`.redirect`, `.resolve_to_addrs`, `.default_headers`, …) onto the
+/// returned builder.
+fn hardened_client_builder_base() -> reqwest::ClientBuilder {
     use std::time::Duration;
     reqwest::Client::builder()
-        .timeout(Duration::from_secs(request_timeout_secs))
         .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
         .tcp_keepalive(Duration::from_secs(TCP_KEEPALIVE_SECS))
         .pool_idle_timeout(Duration::from_secs(POOL_IDLE_TIMEOUT_SECS))
+}
+
+/// Hardened client builder for one-shot requests with a total wall-clock
+/// timeout in addition to the shared transport bounds.
+pub fn hardened_client_builder(request_timeout_secs: u64) -> reqwest::ClientBuilder {
+    use std::time::Duration;
+    hardened_client_builder_base().timeout(Duration::from_secs(request_timeout_secs))
+}
+
+/// Hardened client builder for streaming responses whose health is measured by
+/// time-to-first-response and inter-event idle time rather than total wall time.
+/// The caller must apply those two bounds explicitly; a total request timeout
+/// would abort a healthy model that keeps producing output for a long answer.
+pub(crate) fn hardened_streaming_client_builder() -> reqwest::ClientBuilder {
+    hardened_client_builder_base()
 }
 
 /// LLM provider configuration.

@@ -6,9 +6,9 @@
 use super::*;
 
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
-    InMemoryRunProfileResolver, InMemoryTurnStateStore, RunProfileResolver, TurnId, TurnRunId,
-    TurnScope,
+    InMemoryRunProfileResolver, RunProfileResolver, TurnId, TurnRunId, TurnScope,
     run_profile::{InMemoryLoopHostMilestoneSink, RunProfileResolutionRequest},
 };
 
@@ -155,8 +155,8 @@ async fn build_compaction_ports_dispatches_through_scope_resolved_gateway() {
         thread_scope,
         model_gateway,
         in_memory_checkpoint_state_store() as Arc<dyn CheckpointStateStore>,
-        Arc::new(InMemoryTurnStateStore::default()) as Arc<dyn TurnStateStore>,
-        Arc::new(InMemoryTurnStateStore::default()) as Arc<dyn LoopCheckpointStore>,
+        Arc::new(in_memory_turn_state_store()) as Arc<dyn TurnStateStore>,
+        Arc::new(in_memory_turn_state_store()) as Arc<dyn LoopCheckpointStore>,
         Arc::new(InMemoryLoopHostMilestoneSink::default()) as Arc<dyn LoopHostMilestoneSink>,
         TextOnlyLoopHostConfig {
             max_messages: 8,

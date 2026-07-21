@@ -9,7 +9,6 @@ layer = "substrates"
 description = "Reborn loop hook framework: trust-tiered points/kinds/decisions, sealed witness types, dispatcher contract."
 
 [features]
-default = []
 # The crate's dev-only seam. Two things live behind it:
 #
 #  * test-only constructors (e.g., `SanitizedArguments::for_tests`) that bypass

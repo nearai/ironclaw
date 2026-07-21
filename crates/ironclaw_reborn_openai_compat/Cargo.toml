@@ -13,11 +13,6 @@ publish = false
 [package.metadata.ironclaw]
 layer = "products"
 
-[features]
-default = []
-libsql = ["ironclaw_filesystem/libsql"]
-postgres = ["ironclaw_filesystem/postgres"]
-
 [dependencies]
 async-trait = "0.1"
 base64 = "0.22"

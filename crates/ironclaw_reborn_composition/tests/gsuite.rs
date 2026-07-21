@@ -721,15 +721,21 @@ async fn bundled_gsuite_handler_projects_stage_backend_to_first_party_dispatch_b
     let FirstPartyCapabilityError::Dispatch { detail, .. } = error else {
         panic!("expected Dispatch variant");
     };
-    let detail = detail.expect("BackendAuth dispatch error must carry diagnostic detail");
-    let DispatchFailureDetail::Diagnostic { text } = *detail else {
-        panic!("expected Diagnostic detail");
+    let detail = detail.expect("BackendAuth dispatch error must carry remediation detail");
+    // The TRUSTED host-remediation channel: this text is a fixed
+    // `HostRemediationText` constant naming `config set google.client_secret`,
+    // and the untrusted diagnostic channel would collapse it to the
+    // safe-summary placeholder at the host_api boundary (#6299).
+    let DispatchFailureDetail::HostRemediation { text } = *detail else {
+        panic!("expected HostRemediation detail, got {detail:?}");
     };
+    let text = text.as_str();
     assert!(text.contains("rejected"), "text: {text}");
     assert!(
         text.contains("config set google.client_secret"),
         "text: {text}"
     );
+    assert!(text.contains("ironclaw service restart"), "text: {text}");
 }
 
 #[tokio::test]
@@ -769,10 +775,13 @@ async fn bundled_gsuite_handler_returns_not_configured_tool_result_when_no_googl
     let FirstPartyCapabilityError::Dispatch { detail, .. } = error else {
         panic!("expected Dispatch variant");
     };
-    let detail = detail.expect("not-configured error must carry diagnostic detail");
-    let DispatchFailureDetail::Diagnostic { text } = *detail else {
-        panic!("expected Diagnostic detail");
+    let detail = detail.expect("not-configured error must carry remediation detail");
+    // Trusted channel, same rationale as the BackendAuth arm above: a fixed
+    // host-authored `HostRemediationText` constant, not capability output.
+    let DispatchFailureDetail::HostRemediation { text } = *detail else {
+        panic!("expected HostRemediation detail, got {detail:?}");
     };
+    let text = text.as_str();
     assert!(text.contains("not configured"), "text: {text}");
     assert!(text.contains("config set google.client_id"), "text: {text}");
     assert!(

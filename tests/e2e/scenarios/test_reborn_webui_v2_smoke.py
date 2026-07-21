@@ -1742,6 +1742,158 @@ async def test_reborn_v2_timeline_pagination(reborn_v2_server):
         )
 
 
+async def test_reborn_v2_loading_older_messages_preserves_viewport(
+    reborn_v2_server, reborn_v2_browser
+):
+    """Prepending a timeline page keeps the previously visible message anchored."""
+    thread_id = "thread-history-scroll-anchor"
+    first_current_sequence = 21
+    context = await reborn_v2_browser.new_context(
+        viewport={"width": 1280, "height": 720}
+    )
+    page = await context.new_page()
+    await _install_fake_v2_event_source(page)
+
+    async def fulfill_json(route, body) -> None:
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(body),
+        )
+
+    async def handle_session(route) -> None:
+        await fulfill_json(
+            route,
+            {
+                "tenant_id": "reborn-v2-e2e",
+                "user_id": USER_ID,
+                "capabilities": {},
+                "features": {"reborn_projects": False},
+                "attachments": {
+                    "accept": ["text/plain"],
+                    "max_files_per_message": 4,
+                    "max_bytes_per_file": 1048576,
+                    "max_bytes_per_message": 4194304,
+                },
+            },
+        )
+
+    async def handle_threads(route) -> None:
+        await fulfill_json(
+            route,
+            {
+                "threads": [
+                    {
+                        "thread_id": thread_id,
+                        "title": "History scroll anchor regression",
+                        "created_at": "2026-07-20T00:00:00Z",
+                        "updated_at": "2026-07-20T00:00:00Z",
+                    }
+                ],
+                "next_cursor": None,
+            },
+        )
+
+    def timeline_message(sequence: int) -> dict:
+        prefix = (
+            "Current anchor message"
+            if sequence == first_current_sequence
+            else "Timeline message"
+        )
+        return {
+            "message_id": f"history-{sequence}",
+            "kind": "user",
+            "content": f"{prefix} {sequence}",
+            "sequence": sequence,
+            "status": "accepted",
+            "created_at": f"2026-07-20T00:{sequence:02d}:00Z",
+        }
+
+    async def handle_timeline(route) -> None:
+        query = parse_qs(urlparse(route.request.url).query)
+        if query.get("cursor"):
+            await fulfill_json(
+                route,
+                {
+                    "messages": [timeline_message(i) for i in range(1, 21)],
+                    "next_cursor": None,
+                },
+            )
+            return
+        await fulfill_json(
+            route,
+            {
+                "messages": [timeline_message(i) for i in range(21, 41)],
+                "next_cursor": json.dumps(
+                    {"before_message_sequence": first_current_sequence}
+                ),
+            },
+        )
+
+    await page.route("**/api/webchat/v2/session", handle_session)
+    await page.route("**/api/webchat/v2/threads", handle_threads)
+    await page.route(
+        f"**/api/webchat/v2/threads/{thread_id}/timeline**", handle_timeline
+    )
+
+    try:
+        await page.goto(
+            f"{reborn_v2_server}/chat/{thread_id}?token={REBORN_V2_AUTH_TOKEN}"
+        )
+        viewport = page.locator(SEL_V2["message_list_scroll"])
+        anchor = page.locator(SEL_V2["msg_user"]).filter(
+            has_text=f"Current anchor message {first_current_sequence}"
+        )
+        await expect(anchor).to_be_visible(timeout=15000)
+        await expect(
+            page.locator(SEL_V2["message_list_load_older"])
+        ).to_be_attached()
+
+        before_top = await page.evaluate(
+            """({ viewportSelector, loadSelector, anchorText }) => {
+              const viewport = document.querySelector(viewportSelector);
+              const loadButton = document.querySelector(loadSelector);
+              const anchor = Array.from(
+                document.querySelectorAll('[data-testid="msg-user"]')
+              ).find((node) => node.textContent.includes(anchorText));
+              if (!viewport || !loadButton || !anchor) {
+                throw new Error('history scroll fixture did not render');
+              }
+              viewport.scrollTop = 0;
+              const top = anchor.getBoundingClientRect().top
+                - viewport.getBoundingClientRect().top;
+              loadButton.click();
+              return top;
+            }""",
+            {
+                "viewportSelector": SEL_V2["message_list_scroll"],
+                "loadSelector": SEL_V2["message_list_load_older"],
+                "anchorText": f"Current anchor message {first_current_sequence}",
+            },
+        )
+
+        await expect(page.get_by_text("Timeline message 1", exact=True)).to_be_visible(
+            timeout=10000
+        )
+        after_top = await anchor.evaluate(
+            """(node, viewportSelector) => {
+              const viewport = document.querySelector(viewportSelector);
+              if (!viewport) throw new Error('message viewport disappeared');
+              return node.getBoundingClientRect().top
+                - viewport.getBoundingClientRect().top;
+            }""",
+            SEL_V2["message_list_scroll"],
+        )
+
+        assert abs(after_top - before_top) <= 2, (
+            "the previously visible message moved after history prepend: "
+            f"before={before_top}, after={after_top}"
+        )
+        assert await viewport.evaluate("node => node.scrollTop") > 0
+    finally:
+        await context.close()
+
+
 async def test_reborn_v2_sse_streams_run_lifecycle(reborn_v2_server):
     """The SSE stream opens via the `?token=` shim and reports the run reaching completion.
 

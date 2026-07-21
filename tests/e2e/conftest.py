@@ -397,7 +397,7 @@ def ironclaw_binary():
         subprocess.run(
             [
                 "cargo", "build",
-                "-p", "ironclaw",
+                "-p", "ironclaw_legacy",
                 "--bin", "ironclaw-legacy",
                 "--no-default-features",
                 "--features", "libsql",
@@ -415,7 +415,7 @@ def ironclaw_binary():
 
 @pytest.fixture(scope="session")
 def ironclaw_reborn_binary():
-    """Ensure the `ironclaw-reborn` binary is built with the WebChat v2 surface.
+    """Ensure the Reborn `ironclaw` binary is built with the WebChat v2 surface.
 
     Distinct from `ironclaw_binary` (the legacy `ironclaw` web channel): this is
     the Reborn CLI, whose WebUI v2 SPA and `serve` subcommand are compiled
@@ -425,11 +425,11 @@ def ironclaw_reborn_binary():
     target_dir = _cargo_target_dir()
     binary = target_dir / "debug" / "ironclaw"
     if _binary_needs_rebuild(binary):
-        print("Building ironclaw-reborn (this may take a while)...")
+        print("Building Reborn ironclaw (this may take a while)...")
         subprocess.run(
             [
                 "cargo", "build",
-                "-p", "ironclaw_reborn_cli",
+                "-p", "ironclaw",
                 "--bin", "ironclaw",
             ],
             cwd=ROOT,
@@ -445,7 +445,7 @@ def ironclaw_reborn_binary():
 
 @pytest.fixture(scope="session")
 def ironclaw_reborn_openai_compat_binary():
-    """Ensure `ironclaw-reborn` is built for the OpenAI-compatible scenarios.
+    """Ensure Reborn `ironclaw` is built for the OpenAI-compatible scenarios.
 
     The OpenAI-compatible routes are compiled unconditionally, so this builds
     the same binary as the generic Reborn WebUI fixture. It is kept separate so
@@ -468,11 +468,11 @@ def ironclaw_reborn_openai_compat_binary():
         or not stamp.exists()
         or stamp.stat().st_mtime < input_mtime
     ):
-        print("Building ironclaw-reborn (OpenAI-compatible E2E; this may take a while)...")
+        print("Building Reborn ironclaw (OpenAI-compatible E2E; this may take a while)...")
         subprocess.run(
             [
                 "cargo", "build",
-                "-p", "ironclaw_reborn_cli",
+                "-p", "ironclaw",
                 "--bin", "ironclaw",
             ],
             cwd=ROOT,
@@ -671,6 +671,11 @@ async def reset_mock_llm_state(mock_llm_server):
         response.raise_for_status()
         response = await client.post(
             f"{mock_llm_server}/__mock/chat_requests/reset",
+            timeout=10,
+        )
+        response.raise_for_status()
+        response = await client.post(
+            f"{mock_llm_server}/__mock/llm_faults/reset",
             timeout=10,
         )
         response.raise_for_status()

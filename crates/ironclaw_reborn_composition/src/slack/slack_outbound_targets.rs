@@ -23,7 +23,9 @@ use ironclaw_turns::ReplyTargetBindingRef;
 use thiserror::Error;
 
 use crate::outbound::OutboundDeliveryTargetProvider;
-use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
+use crate::outbound::outbound_preferences::{
+    OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner,
+};
 use crate::slack::slack_channel_routes::{
     SlackChannelRouteError, SlackChannelRouteKey, SlackChannelRouteStore,
 };
@@ -466,6 +468,14 @@ impl SlackHostBetaOutboundTargetProvider {
                 &self.team_id,
                 &route.channel_id,
             )?,
+            // Owner is the route's resolved subject user in this provider's
+            // configured tenant — the identity the shared channel is bound to,
+            // not merely the caller. The registry drops this entry if it ever
+            // does not match the querying caller.
+            owner: OutboundDeliveryTargetOwner::new(
+                self.tenant_id.clone(),
+                route.subject_user_id.clone(),
+            ),
         })
     }
 
@@ -495,6 +505,13 @@ impl SlackHostBetaOutboundTargetProvider {
                 &target.dm_channel_id,
                 &target.slack_user_id,
             )?,
+            // Owner is the Reborn identity the DM target is keyed to, carried
+            // from the stored target key rather than the caller, so the
+            // registry drops the entry if resolution ever crosses users.
+            owner: OutboundDeliveryTargetOwner::new(
+                target.key.tenant_id.clone(),
+                target.key.user_id.clone(),
+            ),
         })
     }
 
