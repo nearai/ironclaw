@@ -28,6 +28,8 @@ ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
+ironclaw_secrets = { path = "../ironclaw_secrets" }
+secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
@@ -51,3 +53,6 @@ required-features = ["test-support"]
 
 [[test]]
 name = "admin_configuration_store_contract"
+
+[[test]]
+name = "admin_configuration_service_contract"

@@ -13,6 +13,7 @@
 //! by the binary, never linked here.
 
 pub mod active;
+mod admin_configuration_service;
 mod admin_configuration_store;
 pub mod egress;
 pub mod entrypoint;
@@ -29,6 +30,10 @@ pub mod test_support;
 
 pub use active::{
     ActiveExtension, ActiveSnapshot, Generation, ResolvedToolBinding, SnapshotConflict,
+};
+pub use admin_configuration_service::{
+    AdminConfigurationFieldState, AdminConfigurationGroupState, AdminConfigurationService,
+    AdminConfigurationServiceError, AdminConfigurationSubmittedValue,
 };
 pub use admin_configuration_store::{
     AdminConfigurationCommit, AdminConfigurationIdempotencyKey, AdminConfigurationRecord,

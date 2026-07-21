@@ -3595,6 +3595,8 @@ dependencies = [
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_product_adapters",
+ "ironclaw_secrets",
+ "secrecy",
  "serde",
  "serde_json",
  "sha2 0.11.0",
