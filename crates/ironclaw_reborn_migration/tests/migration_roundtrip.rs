@@ -1190,7 +1190,7 @@ async fn migration_reads_older_optional_tables_without_wit_version() {
         "the migrated memory document must be persisted on disk, not just counted"
     );
     assert!(
-        reborn_entry_count(&dst, "%/system/extensions/.installations/state.json").await >= 1,
+        reborn_entry_count(&dst, "%/system/extensions/.installations/installations/%").await >= 1,
         "the installed tool must be persisted as an extension installation on disk"
     );
 }

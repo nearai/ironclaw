@@ -10,7 +10,7 @@ use ironclaw_extensions::{
     CapabilityVisibility, ExtensionActivationState, ExtensionError, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
     ExtensionLifecycleService, ExtensionManifestRecord, ExtensionManifestRef, ExtensionPackage,
-    InstallationOwner, ManifestHash, ManifestSource,
+    InstallationOwner, ManifestHash, ManifestSource, canonicalize_installation_rows,
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
@@ -216,11 +216,7 @@ pub(crate) async fn restore_extension_lifecycle_state(
     lifecycle_service: &Arc<Mutex<ExtensionLifecycleService>>,
     active_extensions: &ActiveExtensionPublisher,
 ) -> Result<(), ProductWorkflowError> {
-    for installation in installation_store
-        .list_installations()
-        .await
-        .map_err(map_extension_installation_error)?
-    {
+    for installation in canonicalize_persisted_installation_rows(installation_store).await? {
         if remove_retired_internal_installation(installation_store, &installation).await? {
             continue;
         }
@@ -283,6 +279,43 @@ pub(crate) async fn restore_extension_lifecycle_state(
         }
     }
     Ok(())
+}
+
+async fn canonicalize_persisted_installation_rows(
+    installation_store: &Arc<dyn ExtensionInstallationStore>,
+) -> Result<Vec<ExtensionInstallation>, ProductWorkflowError> {
+    let persisted = installation_store
+        .list_installations()
+        .await
+        .map_err(map_extension_installation_error)?;
+    let canonical = canonicalize_installation_rows(persisted.clone())
+        .map_err(map_extension_installation_error)?;
+    if persisted == canonical {
+        return Ok(canonical);
+    }
+
+    for installation in &canonical {
+        installation_store
+            .upsert_installation(installation.clone())
+            .await
+            .map_err(map_extension_installation_error)?;
+    }
+
+    let canonical_ids = canonical
+        .iter()
+        .map(|installation| installation.installation_id().clone())
+        .collect::<BTreeSet<_>>();
+    for installation in persisted {
+        if canonical_ids.contains(installation.installation_id()) {
+            continue;
+        }
+        installation_store
+            .delete_installation(installation.installation_id())
+            .await
+            .map_err(map_extension_installation_error)?;
+    }
+
+    Ok(canonical)
 }
 
 async fn remove_retired_internal_installation(
@@ -2565,6 +2598,8 @@ fn project_installation_owners<I>(
 where
     I: IntoIterator<Item = ExtensionInstallation>,
 {
+    let installations = canonicalize_installation_rows(installations.into_iter().collect())
+        .map_err(map_extension_installation_error)?;
     let mut owners = std::collections::BTreeMap::new();
     for installation in installations {
         let extension_id = installation.extension_id().clone();

@@ -21,7 +21,11 @@ use axum::http::StatusCode;
 use axum::http::{Method, Request};
 use chrono::{DateTime, Utc};
 use ironclaw_events::InMemoryDurableEventLog;
-use ironclaw_extensions::ExtensionInstallationStore;
+use ironclaw_extensions::{
+    CapabilityProviderHostApiContract, ExtensionActivationState, ExtensionInstallation,
+    ExtensionInstallationId, ExtensionInstallationStore, ExtensionManifestRecord,
+    ExtensionManifestRef, HostApiContractRegistry, InstallationOwner,
+};
 use ironclaw_filesystem::{CompositeRootFilesystem, LibSqlRootFilesystem};
 use ironclaw_host_api::{
     AgentId, CapabilityId, EffectKind, ExtensionId, PermissionMode, TenantId, UserId,
@@ -470,27 +474,48 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
     drop(webui);
     runtime.shutdown().await.expect("runtime shuts down");
 
-    let state_path = storage_root.join("system/extensions/.installations/state.json");
-    let mut state: Value = serde_json::from_slice(
-        &std::fs::read(&state_path).expect("read extension installation state"),
+    let store = ironclaw_reborn_composition::test_support::open_local_dev_extension_installation_store_for_test(
+        &storage_root,
     )
-    .expect("extension installation state is JSON");
-    let rows = state["installations"]
-        .as_array()
-        .expect("installations array");
+    .await
+    .expect("open extension installation store");
+    let rows = store
+        .list_installations()
+        .await
+        .expect("list extension installations");
     assert_eq!(rows.len(), 1, "member installs must already share one row");
-    let mut alice_row = rows[0].clone();
-    alice_row["installation_id"] = Value::String("legacy-alice-legacy-members".to_string());
-    alice_row["owner"] = serde_json::json!({"kind": "user", "user_id": "alice"});
-    let mut bob_row = rows[0].clone();
-    bob_row["installation_id"] = Value::String("legacy-bob-legacy-members".to_string());
-    bob_row["owner"] = serde_json::json!({"kind": "user", "user_id": "bob"});
-    state["installations"] = serde_json::json!([alice_row, bob_row]);
-    std::fs::write(
-        &state_path,
-        serde_json::to_vec_pretty(&state).expect("serialize legacy installation state"),
-    )
-    .expect("write legacy installation state");
+    let canonical = rows.into_iter().next().expect("one installation row");
+    store
+        .delete_installation(canonical.installation_id())
+        .await
+        .expect("delete canonical installation row");
+    for (installation_id, owner) in [
+        (
+            "legacy-alice-legacy-members",
+            InstallationOwner::user(alice_id.clone()),
+        ),
+        (
+            "legacy-bob-legacy-members",
+            InstallationOwner::user(bob_id.clone()),
+        ),
+    ] {
+        store
+            .upsert_installation(
+                ExtensionInstallation::new(
+                    ExtensionInstallationId::new(installation_id).expect("valid installation id"),
+                    canonical.extension_id().clone(),
+                    canonical.activation_state(),
+                    canonical.manifest_ref().clone(),
+                    canonical.credential_bindings().to_vec(),
+                    canonical.updated_at(),
+                    owner,
+                )
+                .expect("legacy installation row"),
+            )
+            .await
+            .expect("write legacy installation row");
+    }
+    drop(store);
 
     let rebuilt_input = RebornBuildInput::local_dev("webui-legacy-operator", storage_root.clone())
         .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
@@ -673,54 +698,70 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     drop(webui);
     runtime.shutdown().await.expect("runtime shuts down");
 
-    // Hand-edit the persisted state file the way a standalone v1->Reborn
-    // migration tool would: add a manifest + installation row for an
-    // extension id that has no corresponding materialized catalog package
-    // (no `/system/extensions/<id>/` files were written for it), simulating
-    // a migration that has not yet materialized catalog packages.
-    let state_path = storage_root.join("system/extensions/.installations/state.json");
-    let mut state: Value = serde_json::from_slice(
-        &std::fs::read(&state_path).expect("read extension installation state"),
+    // Seed the same shape a standalone v1->Reborn migration tool would: add a
+    // manifest + installation row for an extension id that has no corresponding
+    // materialized catalog package (no `/system/extensions/<id>/` files were
+    // written for it), simulating a migration that has not yet materialized
+    // catalog packages.
+    let store = ironclaw_reborn_composition::test_support::open_local_dev_extension_installation_store_for_test(
+        &storage_root,
     )
-    .expect("extension installation state is JSON");
-    let manifests = state["manifests"]
-        .as_array()
-        .expect("manifests array")
-        .clone();
-    let mut orphan_manifest = manifests
-        .first()
-        .expect("at least one manifest present")
-        .clone();
-    orphan_manifest["raw_toml"] = Value::String(
-        orphan_manifest["raw_toml"]
-            .as_str()
-            .expect("raw_toml is a string")
-            .replace("catalog-present", "orphan-migrated"),
-    );
-    let mut new_manifests = manifests;
-    new_manifests.push(orphan_manifest);
-    state["manifests"] = Value::Array(new_manifests);
-
-    let installations = state["installations"]
-        .as_array()
-        .expect("installations array")
-        .clone();
-    let mut orphan_row = installations
-        .first()
-        .expect("at least one installation present")
-        .clone();
-    orphan_row["installation_id"] = Value::String("orphan-migrated".to_string());
-    orphan_row["extension_id"] = Value::String("orphan-migrated".to_string());
-    orphan_row["manifest_ref"]["extension_id"] = Value::String("orphan-migrated".to_string());
-    let mut new_installations = installations;
-    new_installations.push(orphan_row);
-    state["installations"] = Value::Array(new_installations);
-
-    std::fs::write(
-        &state_path,
-        serde_json::to_vec_pretty(&state).expect("serialize orphan installation state"),
+    .await
+    .expect("open extension installation store");
+    let catalog_extension_id = ExtensionId::new("catalog-present").expect("extension id");
+    let catalog_manifest = store
+        .get_manifest(&catalog_extension_id)
+        .await
+        .expect("read catalog-present manifest")
+        .expect("catalog-present manifest exists");
+    let catalog_installation = store
+        .list_installations()
+        .await
+        .expect("list extension installations")
+        .into_iter()
+        .find(|installation| installation.extension_id() == &catalog_extension_id)
+        .expect("catalog-present installation exists");
+    let orphan_extension_id = ExtensionId::new("orphan-migrated").expect("extension id");
+    let orphan_raw_toml = catalog_manifest
+        .raw_toml()
+        .replace("catalog-present", orphan_extension_id.as_str());
+    let mut contracts = HostApiContractRegistry::new();
+    contracts
+        .register(Arc::new(
+            CapabilityProviderHostApiContract::new().expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    let orphan_manifest = ExtensionManifestRecord::from_toml_with_contracts(
+        orphan_raw_toml,
+        catalog_manifest.manifest().source,
+        &ironclaw_host_api::HostPortCatalog::empty(),
+        catalog_manifest.manifest_hash().cloned(),
+        &contracts,
     )
-    .expect("write orphan installation state");
+    .expect("orphan manifest parses");
+    store
+        .upsert_manifest(orphan_manifest)
+        .await
+        .expect("write orphan manifest");
+    store
+        .upsert_installation(
+            ExtensionInstallation::new(
+                ExtensionInstallationId::new("orphan-migrated").expect("valid installation id"),
+                orphan_extension_id.clone(),
+                ExtensionActivationState::Installed,
+                ExtensionManifestRef::new(
+                    orphan_extension_id,
+                    catalog_manifest.manifest_hash().cloned(),
+                ),
+                catalog_installation.credential_bindings().to_vec(),
+                catalog_installation.updated_at(),
+                catalog_installation.owner().clone(),
+            )
+            .expect("orphan installation row"),
+        )
+        .await
+        .expect("write orphan installation row");
+    drop(store);
 
     let rebuilt_input = RebornBuildInput::local_dev("webui-orphan-operator", storage_root.clone())
         .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())

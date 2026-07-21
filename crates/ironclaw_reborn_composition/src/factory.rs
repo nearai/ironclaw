@@ -2216,7 +2216,7 @@ fn local_dev_extension_installation_state_path(
         .map(|identity| identity.tenant_id.clone())
         .unwrap_or(default_tenant_id);
     VirtualPath::new(format!(
-        "/tenants/{}/system/extensions/.installations/state.json",
+        "/tenants/{}/system/extensions/.installations",
         tenant_id.as_str()
     ))
     .map_err(|error| RebornBuildError::InvalidConfig {
@@ -2815,23 +2815,27 @@ pub(crate) async fn open_local_dev_slack_host_state_filesystem_for_test(
 /// [`ExtensionInstallationStore`] at an existing local-dev `storage_root`,
 /// paralleling how `assert_reply_persists_after_reopen` opens a fresh libsql
 /// handle rather than reusing the live one. Reuses the production
-/// [`local_dev_project_filesystem`] mounts and [`FilesystemExtensionInstallationStore::default_state_path`]
-/// so the reopen reads the exact on-disk `/system/extensions` state the running
-/// harness wrote (mirrors the production install-store load in
-/// [`build_reborn_services`], above at the `extension_installation_store` binding).
-/// The store's virtual state path has no identity dependency for local-dev
-/// profiles, so no tenant/user context is needed. Tests only; zero bytes in
-/// production builds.
+/// [`build_local_runtime_root_filesystem`] mounts and
+/// [`FilesystemExtensionInstallationStore::default_state_path`] so the reopen
+/// reads the exact durable `/system/extensions/.installations` state the
+/// running harness wrote while extension package files still live on disk
+/// (mirrors the production install-store load in [`build_reborn_services`],
+/// above at the `extension_installation_store` binding). The store's virtual
+/// state path has no identity dependency for local-dev profiles, so no
+/// tenant/user context is needed. Tests only; zero bytes in production builds.
 #[cfg(feature = "test-support")]
 pub(crate) async fn open_local_dev_extension_installation_store_for_test(
     storage_root: &Path,
 ) -> Result<Arc<dyn ExtensionInstallationStore>, RebornBuildError> {
     let workspace_root = storage_root.join("workspace");
-    let filesystem: Arc<dyn RootFilesystem> = Arc::new(local_dev_project_filesystem(
+    let bundle = build_local_runtime_root_filesystem(
         storage_root,
         &workspace_root,
         None,
-    )?);
+        StorageBackendInput::LocalDefault,
+    )
+    .await?;
+    let filesystem: Arc<dyn RootFilesystem> = bundle.filesystem;
     let state_path =
         FilesystemExtensionInstallationStore::default_state_path().map_err(|error| {
             RebornBuildError::InvalidConfig {
@@ -2882,7 +2886,7 @@ pub async fn extension_installation_store_for_migration(
 ) -> Result<Arc<dyn ExtensionInstallationStore>, RebornBuildError> {
     let state_path = match tenant_id {
         Some(tenant_id) => VirtualPath::new(format!(
-            "/tenants/{}/system/extensions/.installations/state.json",
+            "/tenants/{}/system/extensions/.installations",
             tenant_id.as_str()
         ))
         .map_err(|error| RebornBuildError::InvalidConfig {
@@ -3050,6 +3054,18 @@ where
             StorageClass::StructuredRecords,
             ContentKind::StructuredRecord,
             IndexPolicy::NotIndexed,
+            database.capabilities(),
+        )?,
+        Arc::clone(&database),
+    )?;
+    root.mount(
+        local_dev_mount_descriptor(
+            "/system/extensions/.installations",
+            "local-dev-extension-installation-state",
+            BackendKind::DatabaseFilesystem,
+            StorageClass::StructuredRecords,
+            ContentKind::SystemState,
+            IndexPolicy::BackendDefined,
             database.capabilities(),
         )?,
         Arc::clone(&database),
