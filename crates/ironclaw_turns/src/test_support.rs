@@ -27,7 +27,7 @@ use crate::FilesystemTurnStateRowStore;
 /// [`in_memory_turns_filesystem`] and open two stores over it.
 pub fn in_memory_turn_state_store() -> FilesystemTurnStateRowStore<InMemoryBackend> {
     // The lenient (default) mode — the same shape production composition wires
-    // via `FilesystemTurnStateStoreKind::row`.
+    // via `FilesystemTurnStateRowStore::new`.
     FilesystemTurnStateRowStore::new(in_memory_turns_filesystem())
 }
 

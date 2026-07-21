@@ -21,7 +21,8 @@ concurrency:
 
 env:
   # Tests must never touch the real OS keychain (macOS Keychain auth dialog /
-  # Linux Secret Service). Guarded by src/secrets/keychain.rs::os_keychain_suppressed:
+  # Linux Secret Service). Guarded by
+  # crates/ironclaw_secrets/src/keychain.rs::os_keychain_suppressed:
   # cfg!(test) covers unit tests; this covers integration/e2e that link the
   # non-cfg(test) library.
   IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
@@ -32,14 +33,12 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       has_code: ${{ steps.non_pr.outputs.has_code || steps.diff.outputs.has_code }}
-      has_boundary_check: ${{ steps.non_pr.outputs.has_boundary_check || steps.diff.outputs.has_boundary_check }}
       has_reborn_cli: ${{ steps.non_pr.outputs.has_reborn_cli || steps.diff.outputs.has_reborn_cli }}
     steps:
       - id: non_pr
         if: github.event_name == 'push'
         run: |
           echo "has_code=true" >> "$GITHUB_OUTPUT"
-          echo "has_boundary_check=true" >> "$GITHUB_OUTPUT"
           echo "has_reborn_cli=true" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
@@ -54,17 +53,11 @@ jobs:
         run: |
           CHANGED_FILES="$(git diff --name-only "$BASE_SHA"..."$HEAD_SHA")"
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(src/|crates/|channels-src/|tools-src/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile|build\.rs$|\.gitignore$|scripts/ci/|\.githooks/|scripts/check_no_panics\.py$|scripts/check_gateway_boundaries\.py$|\.github/scripts/(pr-labeler|test-pr-labeler)\.sh$|\.github/workflows/code_style\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/|channels-src/|tools-src/|tests/|migrations/|Cargo\.toml$|Cargo\.lock$|Dockerfile|\.gitignore$|scripts/ci/|\.githooks/|scripts/check_no_panics\.py$|\.github/scripts/(pr-labeler|test-pr-labeler)\.sh$|\.github/workflows/code_style\.yml$)'; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_code=false" >> "$GITHUB_OUTPUT"
             echo "No code changes — style checks will be skipped"
-          fi
-
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(scripts/check_gateway_boundaries\.py$|\.github/workflows/code_style\.yml$)'; then
-            echo "has_boundary_check=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_boundary_check=false" >> "$GITHUB_OUTPUT"
           fi
 
           if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/ironclaw_runner/|crates/ironclaw_reborn_cli/|crates/ironclaw_reborn_config/|crates/ironclaw_architecture/tests/reborn_dependency_boundaries\.rs$|Cargo\.toml$|Cargo\.lock$|\.github/dist-build-setup\.yml$|\.github/workflows/(code_style|ironclaw-release|docker|reborn-release-compile)\.yml$)'; then
@@ -112,25 +105,6 @@ jobs:
           components: rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
-
-  gateway-js-syntax:
-    name: Gateway JS syntax
-    needs: changes
-    if: needs.changes.outputs.has_code == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-      - name: Install Node.js
-        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
-        with:
-          node-version: "22"
-      - name: Check gateway JS syntax
-        run: |
-          find crates/ironclaw_gateway/static/js -type f -name '*.js' \
-            -exec node --check {} +
 
   webui-v2-js-lint:
     name: WebUI v2 JS lint (no-undef)
@@ -245,6 +219,7 @@ jobs:
           scripts/ci/test-check-hermetic-env.sh
           scripts/ci/test-classify-test-scope.sh
           scripts/ci/test-package-feature-flags.sh
+          scripts/ci/test-reborn-crate-test-buckets.sh
           bash .github/scripts/test-pr-labeler.sh
 
   clippy:
@@ -409,24 +384,6 @@ jobs:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
         run: python3 scripts/check_no_panics.py --base "$BASE_SHA" --head HEAD
 
-  gateway-boundaries:
-    name: Gateway platform/feature boundaries
-    needs: changes
-    if: needs.changes.outputs.has_code == 'true' || needs.changes.outputs.has_boundary_check == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.12"
-      - name: Check that platform/ has no back-edges into handlers/ or features/
-        run: python3 scripts/check_gateway_boundaries.py
-      - name: Self-test the boundary script
-        run: python3 scripts/check_gateway_boundaries.py test
-
   composition-budget:
     name: Composition mass ratchet
     needs: changes
@@ -459,7 +416,6 @@ jobs:
       - changes
       - clippy-matrix
       - format
-      - gateway-js-syntax
       - clippy
       - clippy-windows
       - deny-check
@@ -467,7 +423,6 @@ jobs:
       - static-checks
       - reborn-cli-smoke
       - no-panics
-      - gateway-boundaries
       - composition-budget
       - webui-v2-js-lint
     steps:
@@ -493,12 +448,10 @@ jobs:
 
           for job_result in \
             "format=${{ needs.format.result }}" \
-            "gateway-js-syntax=${{ needs.gateway-js-syntax.result }}" \
             "clippy=${{ needs.clippy.result }}" \
             "deny-check=${{ needs.deny-check.result }}" \
             "tracked-ignored-files=${{ needs.tracked-ignored-files.result }}" \
             "static-checks=${{ needs.static-checks.result }}" \
-            "gateway-boundaries=${{ needs.gateway-boundaries.result }}" \
             "composition-budget=${{ needs.composition-budget.result }}" \
             "webui-v2-js-lint=${{ needs.webui-v2-js-lint.result }}"; do
             name="${job_result%%=*}"

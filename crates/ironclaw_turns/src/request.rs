@@ -2,9 +2,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AcceptedMessageRef, GateRef, IdempotencyKey, ProductTurnContext, ReplyTargetBindingRef,
-    RunProfileRequest, SanitizedCancelReason, SourceBindingRef, TurnActor, TurnRunId, TurnScope,
-    TurnStatus,
+    AcceptedMessageRef, GateKind, GateRef, IdempotencyKey, ProductTurnContext,
+    ReplyTargetBindingRef, RunProfileRequest, SanitizedCancelReason, SourceBindingRef, TurnActor,
+    TurnRunId, TurnScope, TurnStatus,
 };
 
 pub type TurnTimestamp = DateTime<Utc>;
@@ -48,15 +48,21 @@ impl ResumeTurnPrecondition {
         matches!(self, Self::AnyBlockedGate)
     }
 
-    pub fn required_status(&self) -> Option<TurnStatus> {
+    /// The gate kind this precondition requires, or `None` for the default
+    /// `AnyBlockedGate` (which accepts any blocked-gate status).
+    pub fn gate_kind(&self) -> Option<GateKind> {
         match self {
             Self::AnyBlockedGate => None,
-            Self::BlockedApprovalGate => Some(TurnStatus::BlockedApproval),
-            Self::BlockedAuthGate => Some(TurnStatus::BlockedAuth),
-            Self::BlockedResourceGate => Some(TurnStatus::BlockedResource),
-            Self::BlockedDependentRunGate => Some(TurnStatus::BlockedDependentRun),
-            Self::BlockedExternalToolGate => Some(TurnStatus::BlockedExternalTool),
+            Self::BlockedApprovalGate => Some(GateKind::Approval),
+            Self::BlockedAuthGate => Some(GateKind::Auth),
+            Self::BlockedResourceGate => Some(GateKind::Resource),
+            Self::BlockedDependentRunGate => Some(GateKind::AwaitDependentRun),
+            Self::BlockedExternalToolGate => Some(GateKind::ExternalTool),
         }
+    }
+
+    pub fn required_status(&self) -> Option<TurnStatus> {
+        self.gate_kind().map(GateKind::blocked_status)
     }
 }
 

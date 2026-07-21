@@ -42,7 +42,7 @@ use ironclaw_triggers::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, CancelRunRequest,
-    CheckpointSchemaId, FilesystemTurnStateStoreKind, GateRef, GetLoopCheckpointRequest,
+    CheckpointSchemaId, FilesystemTurnStateRowStore, GateRef, GetLoopCheckpointRequest,
     GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver, LoopCheckpointKind,
     LoopCheckpointStore, PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnPrecondition,
     ResumeTurnRequest, RunProfileRequest, RunProfileVersion, SanitizedCancelReason,
@@ -417,11 +417,9 @@ where
         MountPermissions::read_write_list_delete(),
     )])?;
     let scoped = Arc::new(ScopedFilesystem::with_fixed_view(fs, mounts));
-    let store = match backend {
-        BackendName::Libsql => FilesystemTurnStateStoreKind::row(scoped),
-        BackendName::Postgres => FilesystemTurnStateStoreKind::row(scoped),
-    };
-    Ok(Arc::new(store))
+    // Both backends run the one production turn-state store; `backend` only
+    // varies the durable filesystem mounted underneath `scoped` (above).
+    Ok(Arc::new(FilesystemTurnStateRowStore::new(scoped)))
 }
 
 struct ControlPlaneStores {

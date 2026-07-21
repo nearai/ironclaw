@@ -88,18 +88,14 @@ tempfile = "3"
 # frozen v1 reader) — skips gracefully when Docker is unavailable, same
 # pattern as `ironclaw_reborn_composition`/`ironclaw_triggers`.
 testcontainers-modules = { version = "0.12", features = ["postgres"] }
-# Dev-only: `tests/migration_roundtrip.rs` seeds its v1 fixture through the
-# real v1 write path (actual INSERT/migration code, not raw SQL) for fidelity —
-# the fixture must look exactly like what a real v1 install produces. This is
-# a test-fixture concern, not a production dependency: `[dependencies]` above
-# has no `ironclaw_legacy` edge, so this does not need a
-# `LAYER_MATRIX_EXCEPTIONS` entry (that check filters to `kind == "normal"`
-# dependencies; see `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs`
-# `is_normal_dependency`). When `src/` is actually deleted under Tier B, this
-# fixture setup needs rewriting to raw SQL against the frozen schema instead.
-ironclaw = { package = "ironclaw_legacy", path = "../..", default-features = false, features = [
-    "libsql",
-] }
+# `tests/migration_roundtrip.rs` seeds its v1 fixture with raw SQL against a
+# frozen snapshot of the v1 schema (`tests/fixtures/legacy_v1_schema.sql`,
+# formerly `src/db/libsql_migrations.rs`) — the `ironclaw_legacy` (`src/`)
+# monolith was deleted under Tier B, so there is no longer a real v1 write
+# path to seed through. The fixture re-encrypts its seeded secret with the
+# same AES-256-GCM + HKDF-SHA256 scheme (via the `aes-gcm`/`hkdf`/`sha2`
+# `[dependencies]` above) so the migration's frozen decrypt path
+# (`src/legacy_snapshot/secrets.rs`) can read it back.
 
 # Docker-free acceptance test: seeds a rich v1+engine-v2 libSQL fixture, runs the
 # migration, and asserts the round-trip + the exact gap set.

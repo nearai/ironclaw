@@ -60,7 +60,7 @@ use ironclaw_threads::{
     ThreadMessageRecord, ThreadScope,
 };
 use ironclaw_turns::{
-    CancelRunRequest, FilesystemTurnStateStore, GateRef, GetLoopCheckpointRequest,
+    CancelRunRequest, FilesystemTurnStateRowStore, GateRef, GetLoopCheckpointRequest,
     GetRunStateRequest, IdempotencyKey, LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStore,
     ReplyTargetBindingRef, ResumeTurnRequest, RetryTurnRequest, RetryTurnResponse,
     SanitizedCancelReason, SourceBindingRef, TurnActor, TurnCoordinator, TurnError, TurnRunId,
@@ -100,7 +100,7 @@ pub struct RebornBinaryE2EHarness {
     binding: ResolvedBinding,
     thread_scope: ThreadScope,
     turn_scope: TurnScope,
-    turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
+    turn_store: Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>>,
     coordinator: Arc<dyn TurnCoordinator>,
     _product_harness: RebornProductWorkflowHarness,
     thread_harness: RebornThreadHarness,
@@ -778,7 +778,9 @@ impl RebornBinaryE2EHarness {
             )
         };
         let turns_scoped_fs = scoped_turns_fs(turn_backend, &binding)?;
-        let turn_store = Arc::new(FilesystemTurnStateStore::new(Arc::clone(&turns_scoped_fs)));
+        let turn_store = Arc::new(FilesystemTurnStateRowStore::new(Arc::clone(
+            &turns_scoped_fs,
+        )));
         let checkpoint_state_store = in_memory_checkpoint_state_store();
         let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
         let milestone_sink =
@@ -927,7 +929,7 @@ impl RebornBinaryE2EHarness {
         binding: ResolvedBinding,
         thread_scope: ThreadScope,
         turn_scope: TurnScope,
-        turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
+        turn_store: Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>>,
         product_harness: RebornProductWorkflowHarness,
         thread_harness: RebornThreadHarness,
         model_gateway: RebornTraceReplayModelGateway,
