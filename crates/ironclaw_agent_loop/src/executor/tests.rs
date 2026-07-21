@@ -3524,9 +3524,16 @@ async fn model_checkpoint_and_transcript_kinds_fail_with_precise_categories() {
 
         match exit {
             LoopExit::Failed(failed) => {
-                assert_eq!(failed.reason_kind, expected_failure_kind, "kind for {kind:?}");
+                assert_eq!(
+                    failed.reason_kind, expected_failure_kind,
+                    "kind for {kind:?}"
+                );
                 let summary = failed.safe_summary.expect("failure summary");
-                assert_eq!(summary.category(), expected_category, "category for {kind:?}");
+                assert_eq!(
+                    summary.category(),
+                    expected_category,
+                    "category for {kind:?}"
+                );
             }
             other => panic!("expected {kind:?} failed exit, got {other:?}"),
         }
