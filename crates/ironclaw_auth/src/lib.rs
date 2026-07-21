@@ -53,10 +53,9 @@ pub use engine::keepalive::{
     KeepaliveSweepHandle, KeepaliveSweepSettings, LeaderOutcome, spawn_keepalive_sweep,
 };
 pub use engine::{
-    ApiKeyFieldValue, ApiKeySubmission, ApiKeySubmitRequest, AuthEngine, AuthEngineDeps,
-    AuthRecipeResolver, DCR_CLIENT_HANDLE_PREFIX, EngineCallbackBase,
+    AuthEngine, AuthEngineDeps, AuthRecipeResolver, DCR_CLIENT_HANDLE_PREFIX, EngineCallbackBase,
     EngineClientCredentialsSource, EngineOAuthClientMaterial, PrepareOAuthFlowRequest,
-    PreparedOAuthFlow, ResolvedVendorAuthRecipe, RevokeGrantRequest, StaticAuthRecipeResolver,
+    PreparedOAuthFlow, ResolvedVendorAuthRecipe, StaticAuthRecipeResolver,
 };
 pub use error::{AuthErrorCode, AuthProductError};
 pub use fakes::InMemoryAuthProductServices;
@@ -81,9 +80,8 @@ pub use oauth::{
     GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_MODIFY_SCOPE,
     GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE, GOOGLE_PROVIDER_ID, OAuthCallbackState,
     OAuthCallbackStateKind, OAuthClientId, OAuthProviderIdentity, OAuthProviderIdentitySubject,
-    OAuthRedirectUri, OAuthState, OAuthTokenResponse, PkceCodeChallenge, SLACK_PROVIDER_ID,
-    authorization_code_hash, opaque_state_hash, pkce_s256_challenge, pkce_verifier_hash,
-    scope_text,
+    OAuthRedirectUri, OAuthState, OAuthTokenResponse, PkceCodeChallenge, authorization_code_hash,
+    opaque_state_hash, pkce_s256_challenge, pkce_verifier_hash, scope_text,
 };
 pub use provider::{
     AuthProviderClient, OAuthAuthorizationCode, OAuthProviderCallbackRequest,

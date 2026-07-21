@@ -32,11 +32,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ApiKeyRecipe, OAuth2CodeRecipe, PkceMode, RecipeClientCredentials, ResourceScope,
-    RuntimeCredentialTarget, RuntimeHttpEgress, SecretHandle, VendorAuthRecipe,
+    OAuth2CodeRecipe, PkceMode, RecipeClientCredentials, ResourceScope, RuntimeHttpEgress,
+    VendorAuthRecipe,
 };
-use ironclaw_secrets::{SecretMaterial, SecretStore};
-use secrecy::{ExposeSecret, SecretString};
+use ironclaw_secrets::SecretStore;
+use secrecy::SecretString;
 use url::Url;
 
 use crate::{
@@ -217,37 +217,6 @@ impl fmt::Debug for PreparedOAuthFlow {
     }
 }
 
-/// One submitted `api_key` field value.
-pub struct ApiKeyFieldValue {
-    pub handle: SecretHandle,
-    pub value: SecretString,
-}
-
-/// `api_key` submission for a vendor: store the recipe's fields, run the
-/// optional validation probe.
-pub struct ApiKeySubmitRequest {
-    pub vendor: String,
-    pub scope: AuthProductScope,
-    pub fields: Vec<ApiKeyFieldValue>,
-}
-
-/// Result of a successful `api_key` submission.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ApiKeySubmission {
-    pub provider: AuthProviderId,
-    pub stored_handles: Vec<SecretHandle>,
-    pub probe_ran: bool,
-}
-
-/// Revocation input: the grant's stored token handles.
-#[derive(Debug, Clone)]
-pub struct RevokeGrantRequest {
-    pub vendor: String,
-    pub scope: AuthProductScope,
-    pub access_secret: Option<SecretHandle>,
-    pub refresh_secret: Option<SecretHandle>,
-}
-
 /// The recipe-driven auth engine. Implements [`AuthProviderClient`] so the
 /// existing durable flow/grant/account services drive it unchanged.
 pub struct AuthEngine {
@@ -303,14 +272,6 @@ impl AuthEngine {
         match resolved.recipe {
             VendorAuthRecipe::Oauth2Code(recipe) => Ok((recipe, resolved.token_exchange_resource)),
             VendorAuthRecipe::ApiKey(_) => Err(AuthProductError::MalformedConfig),
-        }
-    }
-
-    fn api_key_recipe(&self, vendor: &str) -> Result<ApiKeyRecipe, AuthProductError> {
-        let resolved = self.resolved_recipe(vendor)?;
-        match resolved.recipe {
-            VendorAuthRecipe::ApiKey(recipe) => Ok(recipe),
-            VendorAuthRecipe::Oauth2Code(_) => Err(AuthProductError::MalformedConfig),
         }
     }
 
@@ -399,230 +360,6 @@ impl AuthEngine {
             pkce_verifier_hash: verifier_hash,
             pkce_verifier,
         })
-    }
-
-    /// Store the recipe's `api_key` fields and run the optional validation
-    /// probe through host egress (AUTH-11). A failed probe deletes the stored
-    /// fields so no half-configured credential survives.
-    pub async fn submit_api_key(
-        &self,
-        request: ApiKeySubmitRequest,
-    ) -> Result<ApiKeySubmission, AuthProductError> {
-        let recipe = self.api_key_recipe(&request.vendor)?;
-        recipe
-            .validate()
-            .map_err(|_| AuthProductError::MalformedConfig)?;
-        let provider = AuthProviderId::new(request.vendor.clone())?;
-
-        let mut submitted: BTreeMap<&str, &ApiKeyFieldValue> = BTreeMap::new();
-        for field in &request.fields {
-            if submitted.insert(field.handle.as_str(), field).is_some() {
-                return Err(AuthProductError::invalid_request(
-                    "api_key field handles must be unique",
-                ));
-            }
-        }
-        for declared in &recipe.fields {
-            let value = submitted.get(declared.handle.as_str()).ok_or_else(|| {
-                AuthProductError::invalid_request("api_key submission is missing a declared field")
-            })?;
-            if value.value.expose_secret().trim().is_empty() {
-                return Err(AuthProductError::invalid_request(
-                    "api_key field values must not be empty",
-                ));
-            }
-        }
-        if submitted.len() != recipe.fields.len() {
-            return Err(AuthProductError::invalid_request(
-                "api_key submission carries undeclared fields",
-            ));
-        }
-
-        // Probe FIRST with the submitted value; only store on success so a
-        // rejected key never lands in the secret store.
-        let mut probe_ran = false;
-        if let Some(probe) = &recipe.validation {
-            probe_ran = true;
-            let field = submitted
-                .get(probe.inject.handle.as_str())
-                .ok_or(AuthProductError::MalformedConfig)?;
-            let mut headers = Vec::new();
-            let mut url = probe.url.as_str().to_string();
-            match &probe.inject.target {
-                RuntimeCredentialTarget::Header { name, prefix } => {
-                    headers.push((
-                        name.clone(),
-                        format!(
-                            "{}{}",
-                            prefix.as_deref().unwrap_or_default(),
-                            field.value.expose_secret()
-                        ),
-                    ));
-                }
-                RuntimeCredentialTarget::QueryParam { name } => {
-                    let mut parsed =
-                        Url::parse(&url).map_err(|_| AuthProductError::MalformedConfig)?;
-                    parsed
-                        .query_pairs_mut()
-                        .append_pair(name, field.value.expose_secret());
-                    url = parsed.to_string();
-                }
-                RuntimeCredentialTarget::PathPlaceholder { .. }
-                | RuntimeCredentialTarget::BodyJsonPointer { .. } => {
-                    return Err(AuthProductError::MalformedConfig);
-                }
-            }
-            let response = self
-                .execute_vendor_get(&request.scope.resource, &url, headers)
-                .await?;
-            if !probe.success_status.contains(&response.status) {
-                tracing::debug!(
-                    vendor = request.vendor,
-                    status = response.status,
-                    "api_key validation probe rejected the submitted key"
-                );
-                return Err(AuthProductError::ProviderDenied);
-            }
-        }
-
-        let mut stored_handles = Vec::new();
-        for field in &request.fields {
-            self.secret_store
-                .put(
-                    request.scope.resource.clone(),
-                    field.handle.clone(),
-                    SecretMaterial::from(field.value.expose_secret().to_string()),
-                    None,
-                )
-                .await
-                .map_err(http::map_secret_store_error)?;
-            stored_handles.push(field.handle.clone());
-        }
-
-        Ok(ApiKeySubmission {
-            provider,
-            stored_handles,
-            probe_ran,
-        })
-    }
-
-    /// Best-effort remote revocation per the recipe, then local secret
-    /// deletion. Idempotent: absent secrets and vendor "already revoked"
-    /// responses succeed (AUTH-6).
-    pub async fn revoke_grant(&self, request: RevokeGrantRequest) -> Result<(), AuthProductError> {
-        let (recipe, _resource) = match self.oauth2_recipe(&request.vendor) {
-            Ok(resolved) => resolved,
-            // An api_key vendor (or an unknown one) has no remote revocation;
-            // local deletion below is the whole operation.
-            Err(_) => {
-                self.delete_grant_secrets(&request).await;
-                return Ok(());
-            }
-        };
-        if let Some(revoke) = &recipe.revoke {
-            let token_param = revoke.token_param.as_deref().unwrap_or("token");
-            let client = self
-                .oauth_client_material(
-                    &request.scope.resource,
-                    &request.vendor,
-                    &recipe,
-                    None,
-                    false,
-                )
-                .await
-                .ok();
-            for handle in [&request.refresh_secret, &request.access_secret]
-                .into_iter()
-                .flatten()
-            {
-                let Some(token) = self
-                    .read_secret_if_present(&request.scope.resource, handle)
-                    .await?
-                else {
-                    continue; // already deleted — revocation is idempotent
-                };
-                let (headers, body) = {
-                    let mut form = url::form_urlencoded::Serializer::new(String::new());
-                    form.append_pair(token_param, token.expose_secret());
-                    let mut headers = vec![(
-                        "content-type".to_string(),
-                        "application/x-www-form-urlencoded".to_string(),
-                    )];
-                    if let Some(client) = &client {
-                        match recipe.exchange_auth {
-                            ironclaw_host_api::TokenExchangeAuth::PostBody => {
-                                form.append_pair("client_id", client.client_id.as_str());
-                                if let Some(secret) = &client.client_secret {
-                                    form.append_pair("client_secret", secret.expose_secret());
-                                }
-                            }
-                            ironclaw_host_api::TokenExchangeAuth::Basic => {
-                                headers.push(http::basic_auth_header(
-                                    &client.client_id,
-                                    client.client_secret.as_ref(),
-                                ));
-                            }
-                        }
-                    }
-                    (headers, form.finish().into_bytes())
-                };
-                // RFC 7009: the server responds 200 even for invalid tokens;
-                // treat any response (including 4xx) as done — revocation must
-                // not wedge removal. 5xx/network is reported for retry.
-                match self
-                    .execute_credential_post(
-                        &request.scope.resource,
-                        revoke.endpoint.as_str(),
-                        headers,
-                        body,
-                    )
-                    .await
-                {
-                    Ok(response) if (500..600).contains(&response.status) => {
-                        return Err(AuthProductError::BackendUnavailable);
-                    }
-                    Ok(_) => {}
-                    Err(error) => return Err(error),
-                }
-            }
-        }
-        self.delete_grant_secrets(&request).await;
-        Ok(())
-    }
-
-    async fn delete_grant_secrets(&self, request: &RevokeGrantRequest) {
-        for handle in [&request.access_secret, &request.refresh_secret]
-            .into_iter()
-            .flatten()
-        {
-            if let Err(error) = self
-                .secret_store
-                .delete(&request.scope.resource, handle)
-                .await
-            {
-                tracing::debug!(
-                    secret_store_reason = error.stable_reason(),
-                    "grant secret deletion failed during revoke"
-                );
-            }
-        }
-    }
-
-    async fn read_secret_if_present(
-        &self,
-        scope: &ResourceScope,
-        handle: &SecretHandle,
-    ) -> Result<Option<SecretString>, AuthProductError> {
-        let lease = match self.secret_store.lease_once(scope, handle).await {
-            Ok(lease) => lease,
-            Err(error) if error.is_unknown_secret() || error.is_expired() => return Ok(None),
-            Err(error) => return Err(http::map_secret_store_error(error)),
-        };
-        self.secret_store
-            .consume(scope, lease.id)
-            .await
-            .map(Some)
-            .map_err(http::map_secret_store_error)
     }
 }
 

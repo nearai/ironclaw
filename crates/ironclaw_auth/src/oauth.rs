@@ -43,13 +43,6 @@ pub const GOOGLE_GMAIL_SEND_SCOPE: &str = "https://www.googleapis.com/auth/gmail
 /// Permission to modify Gmail messages and drafts.
 pub const GOOGLE_GMAIL_MODIFY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.modify";
 
-/// Reborn auth provider id (credential authority namespace) for Slack
-/// user-token OAuth accounts.
-///
-/// The provider id matches the unified `slack` extension id on purpose: a
-/// `ProviderId` names who issued the credential, not which extension uses it.
-pub const SLACK_PROVIDER_ID: &str = "slack";
-
 /// URL-safe S256 PKCE code challenge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PkceCodeChallenge(String);

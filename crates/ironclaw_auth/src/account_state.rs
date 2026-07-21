@@ -35,35 +35,6 @@ pub enum AuthAccountState {
     Expired,
 }
 
-impl AuthAccountState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Disconnected => "disconnected",
-            Self::Authenticating => "authenticating",
-            Self::Connected => "connected",
-            Self::Expired => "expired",
-        }
-    }
-
-    /// Whether a transition from `self` to `next` is legal (overview §6.3).
-    ///
-    /// Disconnect and removal delete the account synchronously and project to
-    /// `Disconnected`; there is no observable `Revoking` window.
-    pub fn can_transition_to(self, next: AuthAccountState) -> bool {
-        use AuthAccountState::*;
-        matches!(
-            (self, next),
-            (Disconnected, Authenticating)
-                | (Authenticating, Connected)   // callback ok
-                | (Authenticating, Disconnected) // TTL / denied / error
-                | (Connected, Expired)          // refresh failure / expiry
-                | (Connected, Disconnected)     // disconnect / removal
-                | (Expired, Disconnected)       // disconnect / removal
-                | (Expired, Authenticating) // re-auth from expired
-        )
-    }
-}
-
 /// Typed reason for the last transition into a non-`connected` state. The
 /// wire carries exactly these categories; vendor response bodies are never
 /// stored here.
@@ -74,14 +45,10 @@ pub enum AuthAccountLastError {
     FlowExpired,
     /// The vendor denied authorization (user declined or scopes rejected).
     VendorDenied,
-    /// Token exchange with the vendor failed.
-    ExchangeFailed,
     /// On-demand refresh failed transiently.
     RefreshFailed,
     /// The vendor permanently revoked the grant (`invalid_grant`).
     GrantRevoked,
-    /// The `api_key` validation probe rejected the stored key.
-    ValidationProbeFailed,
     /// The credential was removed or never configured.
     CredentialMissing,
 }
@@ -146,35 +113,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn auth_account_state_wire_form_matches_str() {
+    fn auth_account_state_wire_form_is_stable() {
         for (state, expected) in [
             (AuthAccountState::Disconnected, "disconnected"),
             (AuthAccountState::Authenticating, "authenticating"),
             (AuthAccountState::Connected, "connected"),
             (AuthAccountState::Expired, "expired"),
         ] {
-            assert_eq!(state.as_str(), expected);
             assert_eq!(
                 serde_json::to_value(state).unwrap(),
                 serde_json::Value::String(expected.to_string())
             );
         }
-    }
-
-    #[test]
-    fn legal_transitions_only() {
-        use AuthAccountState::*;
-        assert!(Disconnected.can_transition_to(Authenticating));
-        assert!(Authenticating.can_transition_to(Connected));
-        assert!(Authenticating.can_transition_to(Disconnected));
-        assert!(Connected.can_transition_to(Expired));
-        assert!(Connected.can_transition_to(Disconnected));
-        assert!(Expired.can_transition_to(Disconnected));
-        assert!(Expired.can_transition_to(Authenticating));
-        // Illegal jumps.
-        assert!(!Disconnected.can_transition_to(Connected));
-        assert!(!Connected.can_transition_to(Authenticating));
-        assert!(!Expired.can_transition_to(Connected));
     }
 
     #[test]

@@ -12,16 +12,15 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use ironclaw_auth::{
-    ApiKeyFieldValue, ApiKeySubmitRequest, AuthChallenge, AuthContinuationRef, AuthEngine,
-    AuthEngineDeps, AuthFlowId, AuthFlowKind, AuthFlowManager, AuthProductError, AuthProductScope,
-    AuthProviderClient, AuthProviderId, AuthSurface, AuthorizationCodeHash, CredentialAccountId,
-    CredentialAccountLabel, EngineCallbackBase, EngineClientCredentialsSource,
-    EngineOAuthClientMaterial, InMemoryAuthProductServices, NewAuthFlow, OAuthAuthorizationCode,
-    OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackInput, OAuthClientId,
-    OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
-    OAuthProviderRefreshRequest, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret,
-    PrepareOAuthFlowRequest, ProviderCallbackOutcome, ProviderScope, ResolvedVendorAuthRecipe,
-    RevokeGrantRequest, StaticAuthRecipeResolver,
+    AuthChallenge, AuthContinuationRef, AuthEngine, AuthEngineDeps, AuthFlowId, AuthFlowKind,
+    AuthFlowManager, AuthProductError, AuthProductScope, AuthProviderClient, AuthProviderId,
+    AuthSurface, AuthorizationCodeHash, CredentialAccountId, CredentialAccountLabel,
+    EngineCallbackBase, EngineClientCredentialsSource, EngineOAuthClientMaterial,
+    InMemoryAuthProductServices, NewAuthFlow, OAuthAuthorizationCode, OAuthAuthorizationUrl,
+    OAuthCallbackClaimRequest, OAuthCallbackInput, OAuthClientId, OAuthProviderCallbackRequest,
+    OAuthProviderExchange, OAuthProviderExchangeContext, OAuthProviderRefreshRequest,
+    OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret, PrepareOAuthFlowRequest,
+    ProviderCallbackOutcome, ProviderScope, ResolvedVendorAuthRecipe, StaticAuthRecipeResolver,
 };
 use ironclaw_host_api::{
     InvocationId, RecipeClientCredentials, ResourceScope, RuntimeHttpEgress,
@@ -1174,199 +1173,6 @@ async fn refresh_invalid_grant_is_a_typed_permanent_failure() {
     assert!(
         matches!(error, AuthProductError::InvalidGrant),
         "invalid_grant maps to the typed permanent-revocation error, got {error:?}"
-    );
-}
-
-#[tokio::test]
-async fn revoke_is_idempotent_and_best_effort() {
-    let row = synthetic_recipe(
-        "acme",
-        &format!(
-            "{}\n[revoke]\nendpoint = \"https://auth.acme.example/revoke\"\ntoken_param = \"token_value\"\n",
-            acme_recipe_toml("")
-        ),
-    );
-    let harness = Harness::new(vec![row]);
-    let scope = test_scope();
-    let access = SecretHandle::new("acme-access").unwrap();
-    let refresh = SecretHandle::new("acme-refresh").unwrap();
-    for (handle, value) in [(&access, "at-1"), (&refresh, "rt-1")] {
-        harness
-            .secrets
-            .put(
-                scope.resource.clone(),
-                handle.clone(),
-                SecretString::from(value.to_string()),
-                None,
-            )
-            .await
-            .unwrap();
-    }
-    // The vendor answers 400 for the second token (already revoked) — still done.
-    harness.server.script(
-        "https://auth.acme.example/revoke",
-        200,
-        serde_json::json!({}),
-    );
-    harness.server.script(
-        "https://auth.acme.example/revoke",
-        400,
-        serde_json::json!({"error":"invalid_token"}),
-    );
-
-    let request = RevokeGrantRequest {
-        vendor: "acme".to_string(),
-        scope: scope.clone(),
-        access_secret: Some(access.clone()),
-        refresh_secret: Some(refresh.clone()),
-    };
-    harness
-        .engine
-        .revoke_grant(request.clone())
-        .await
-        .expect("revoke");
-    let revoke_calls = harness
-        .server
-        .requests_for("https://auth.acme.example/revoke");
-    assert_eq!(revoke_calls.len(), 2, "one revocation per stored token");
-    let revoked: Vec<String> = revoke_calls
-        .iter()
-        .filter_map(|call| call.form().get("token_value").cloned())
-        .collect();
-    assert!(revoked.contains(&"at-1".to_string()));
-    assert!(revoked.contains(&"rt-1".to_string()));
-    // Local secrets are deleted.
-    assert!(
-        harness
-            .secrets
-            .metadata(&scope.resource, &access)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        harness
-            .secrets
-            .metadata(&scope.resource, &refresh)
-            .await
-            .unwrap()
-            .is_none()
-    );
-
-    // Second revoke: secrets are gone — idempotent success, no vendor calls.
-    harness
-        .engine
-        .revoke_grant(request)
-        .await
-        .expect("second revoke is a no-op");
-    assert_eq!(
-        harness
-            .server
-            .requests_for("https://auth.acme.example/revoke")
-            .len(),
-        2,
-        "no further vendor calls once the grant is gone"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// AUTH-11: api_key rows (github probe, nearai no-probe)
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn api_key_probe_validates_through_host_egress_before_storing() {
-    let harness = Harness::new(vec![manifest_recipe("github", "github")]);
-    let scope = test_scope();
-    harness.server.script(
-        "https://api.github.com/user",
-        200,
-        serde_json::json!({"login":"octocat"}),
-    );
-    let submission = harness
-        .engine
-        .submit_api_key(ApiKeySubmitRequest {
-            vendor: "github".to_string(),
-            scope: scope.clone(),
-            fields: vec![ApiKeyFieldValue {
-                handle: SecretHandle::new("github_runtime_token").unwrap(),
-                value: SecretString::from("ghp_test_token".to_string()),
-            }],
-        })
-        .await
-        .expect("probe passes");
-    assert!(submission.probe_ran);
-    assert_eq!(submission.stored_handles.len(), 1);
-    // The probe injected the submitted key per the recipe's injection shape.
-    let probe = &harness.server.requests_for("https://api.github.com/user")[0];
-    assert_eq!(probe.header("authorization"), Some("Bearer ghp_test_token"));
-    // Stored under the recipe-declared handle.
-    assert_eq!(
-        harness
-            .secret_value(
-                &scope.resource,
-                &SecretHandle::new("github_runtime_token").unwrap()
-            )
-            .await
-            .as_deref(),
-        Some("ghp_test_token")
-    );
-}
-
-#[tokio::test]
-async fn api_key_probe_failure_stores_nothing() {
-    let harness = Harness::new(vec![manifest_recipe("github", "github")]);
-    let scope = test_scope();
-    harness
-        .server
-        .script("https://api.github.com/user", 401, serde_json::json!({}));
-    let error = harness
-        .engine
-        .submit_api_key(ApiKeySubmitRequest {
-            vendor: "github".to_string(),
-            scope: scope.clone(),
-            fields: vec![ApiKeyFieldValue {
-                handle: SecretHandle::new("github_runtime_token").unwrap(),
-                value: SecretString::from("ghp_bad_token".to_string()),
-            }],
-        })
-        .await
-        .expect_err("probe failure rejects the submission");
-    assert_eq!(error.code(), ironclaw_auth::AuthErrorCode::ProviderDenied);
-    assert!(
-        harness
-            .secrets
-            .metadata(
-                &scope.resource,
-                &SecretHandle::new("github_runtime_token").unwrap()
-            )
-            .await
-            .unwrap()
-            .is_none(),
-        "a rejected key must never be stored"
-    );
-}
-
-#[tokio::test]
-async fn api_key_without_probe_stores_directly() {
-    let harness = Harness::new(vec![manifest_recipe("nearai-mcp", "nearai")]);
-    let scope = test_scope();
-    let submission = harness
-        .engine
-        .submit_api_key(ApiKeySubmitRequest {
-            vendor: "nearai".to_string(),
-            scope: scope.clone(),
-            fields: vec![ApiKeyFieldValue {
-                handle: SecretHandle::new("llm_nearai_api_key").unwrap(),
-                value: SecretString::from("nearai-key".to_string()),
-            }],
-        })
-        .await
-        .expect("store without probe");
-    assert!(!submission.probe_ran);
-    assert_eq!(
-        harness.server.request_count(),
-        0,
-        "no probe declared, no egress"
     );
 }
 
