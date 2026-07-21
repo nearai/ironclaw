@@ -1,5 +1,6 @@
 import type { Preview } from "@storybook/react-vite";
 import { withThemeByDataAttribute } from "@storybook/addon-themes";
+import { ironclawTheme } from "./ironclaw-theme";
 import "./storybook.css";
 
 const preview: Preview = {
@@ -15,7 +16,7 @@ const preview: Preview = {
     // Canvas background follows --v2-canvas via the theme decorator;
     // Storybook's own background switcher would fight it.
     backgrounds: { disable: true },
-    docs: { toc: true },
+    docs: { toc: true, theme: ironclawTheme },
     options: {
       storySort: {
         order: [
