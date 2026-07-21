@@ -1,7 +1,7 @@
-import { Icon } from "../../../design-system/icons";
-import { Badge } from "../../../design-system/badge";
-import { Card } from "../../../design-system/card";
-import { SelectMenu } from "../../../design-system/select-menu";
+import { Icon } from "@ironclaw/design-system";
+import { Badge } from "@ironclaw/design-system";
+import { Card } from "@ironclaw/design-system";
+import { SelectMenu } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import { useTools } from "../hooks/useTools";
 import { matchesSearch } from "../lib/settings-search";
@@ -63,7 +63,7 @@ function AutoApproveCard({ settings, onSave, savedKeys, isLoading }) {
   return (
     <Card padding="md" className="flex items-center justify-between gap-6">
       <div className="min-w-0">
-        <h3 className="text-sm font-semibold text-[var(--v2-text-strong)]">
+        <h3 className="text-sm font-medium text-[var(--v2-text-strong)]">
           {label}
         </h3>
         <p className="mt-1 text-sm text-[var(--v2-text-muted)]">

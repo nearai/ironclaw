@@ -1,7 +1,7 @@
 import React from "react";
 import { useT } from "../lib/i18n";
 import { useNavigate } from "react-router";
-import { Icon } from "../design-system/icons";
+import { Icon } from "@ironclaw/design-system";
 
 /* ⌘K / Ctrl+K launcher: jump to a thread, start a new chat, navigate to a
    section, or toggle the theme. Pure frontend — drives existing routes and
@@ -84,7 +84,7 @@ export function CommandPalette({ open, onClose, threadsState, onNewChat, onToggl
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center p-4 pt-[12vh]" role="dialog" aria-modal="true" aria-label={t("command.dialogLabel")}>
       <button type="button" aria-label={t("common.close")} onClick={onClose} className="absolute inset-0 bg-black/50"></button>
-      <div className="relative w-full max-w-lg overflow-hidden rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] shadow-[0_30px_60px_-20px_rgba(0,0,0,0.8)]">
+      <div className="relative w-full max-w-lg overflow-hidden rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] shadow-[var(--v2-shadow-modal)]">
         <div className="flex items-center gap-2 border-b border-[var(--v2-panel-border)] px-3">
           <Icon name="search" className="h-4 w-4 text-[var(--v2-text-faint)]" />
           <input
@@ -106,7 +106,7 @@ export function CommandPalette({ open, onClose, threadsState, onNewChat, onToggl
             return (
               <React.Fragment key={command.id}>
                 {showGroup &&
-                (<li key={`g-${command.group}`} className="px-2 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--v2-text-faint)]">{command.group}</li>)}
+                (<li key={`g-${command.group}`} className="px-2 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wider text-[var(--v2-text-faint)]">{command.group}</li>)}
                 <li>
                   <button
                     type="button"

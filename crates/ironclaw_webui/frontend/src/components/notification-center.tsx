@@ -1,10 +1,10 @@
 import { useNavigate } from "react-router";
 import { createPortal } from "react-dom";
-import { Button } from "../design-system/button";
-import { Icon } from "../design-system/icons";
+import { Button } from "@ironclaw/design-system";
+import { Icon } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../lib/i18n";
-import { cn } from "../utils/cn";
+import { cn } from "@ironclaw/design-system";
 
 function NotificationRow({ message, unread, onOpen }) {
   const t = useT();
@@ -28,7 +28,7 @@ function NotificationRow({ message, unread, onOpen }) {
       </span>
       <span className="min-w-0">
         <span className="flex items-center gap-2">
-          <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--v2-text-strong)]">
+          <span className="min-w-0 flex-1 truncate text-sm font-medium text-[var(--v2-text-strong)]">
             {message.title}
           </span>
           {unread &&
@@ -121,13 +121,13 @@ export function NotificationCenter({ state }) {
             tabIndex={-1}
             className={cn(
               "fixed inset-x-0 bottom-0 z-[9999] max-h-[78dvh] overflow-hidden",
-              "rounded-t-[16px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] shadow-[0_24px_70px_-24px_rgba(0,0,0,0.8)]",
+              "rounded-t-[16px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] shadow-[var(--v2-shadow-menu)]",
               "lg:inset-auto lg:right-12 lg:top-16 lg:w-[24rem] lg:max-h-[min(70vh,32rem)] lg:rounded-[12px]"
             )}
           >
             <div className="flex items-center justify-between gap-3 border-b border-[var(--v2-panel-border)] px-4 py-3">
               <div className="min-w-0">
-                <h2 className="text-sm font-semibold text-[var(--v2-text-strong)]">
+                <h2 className="text-sm font-medium text-[var(--v2-text-strong)]">
                   {t("notifications.title")}
                 </h2>
                 <p className="mt-0.5 text-xs text-[var(--v2-text-muted)]">
@@ -152,7 +152,7 @@ export function NotificationCenter({ state }) {
               {messages.length === 0
                 ? (
                     <div className="px-4 py-8 text-center">
-                      <div className="text-sm font-semibold text-[var(--v2-text-strong)]">
+                      <div className="text-sm font-medium text-[var(--v2-text-strong)]">
                         {t("notifications.emptyTitle")}
                       </div>
                       <div className="mt-1 text-sm text-[var(--v2-text-muted)]">

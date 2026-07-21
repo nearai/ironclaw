@@ -1,4 +1,4 @@
-import { EmptyPanel, Panel } from "../../../design-system/primitives";
+import { EmptyPanel, Input, Panel, Select } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import { RoutineRow } from "./routine-row";
 
@@ -43,17 +43,17 @@ export function RoutinesList({
       <Panel className="p-4 sm:p-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">
+            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">
               {t("routines.explorer")}
             </div>
-            <h2 className="mt-2 text-2xl font-semibold tracking-tight text-iron-100">
+            <h2 className="mt-2 text-2xl font-medium tracking-tight text-[var(--v2-text-strong)]">
               {t("routines.title")}
             </h2>
-            <p className="mt-2 max-w-2xl text-sm leading-6 text-iron-300">
+            <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--v2-text-muted)]">
               {t("routines.description")}
             </p>
           </div>
-          <div className="flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300">
+          <div className="flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">
             <span>{routines.length} visible</span>
             <span>/</span>
             <span>{isRefreshing ? "refreshing" : "live"}</span>
@@ -61,19 +61,19 @@ export function RoutinesList({
         </div>
 
         <div className="mt-5 grid gap-3 md:grid-cols-[minmax(0,1fr)_220px]">
-          <input
+          <Input
+            size="lg"
             value={search}
             onInput={(event) => onSearchChange(event.currentTarget.value)}
             placeholder="Search routine name, trigger, or action"
-            className="h-11 rounded-md border border-iron-700 bg-iron-950/90 px-3 text-sm text-iron-100 outline-none focus:border-signal/45"
           />
-          <select
+          <Select
+            size="lg"
             value={statusFilter}
             onChange={(event) => onStatusFilterChange(event.currentTarget.value)}
-            className="v2-select h-11 rounded-md border border-iron-700 bg-iron-950/90 px-3 text-sm text-iron-100 outline-none focus:border-signal/45"
           >
             {FILTERS.map((filter) => (<option key={filter.value} value={filter.value}>{filter.label}</option>))}
-          </select>
+          </Select>
         </div>
       </Panel>
 

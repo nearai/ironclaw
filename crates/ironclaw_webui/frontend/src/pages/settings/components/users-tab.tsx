@@ -1,8 +1,8 @@
-import { Button } from "../../../design-system/button";
-import { Badge } from "../../../design-system/badge";
-import { Card } from "../../../design-system/card";
-import { Icon } from "../../../design-system/icons";
-import { Input, FormField, Label } from "../../../design-system/input";
+import { Button } from "@ironclaw/design-system";
+import { Badge } from "@ironclaw/design-system";
+import { Card } from "@ironclaw/design-system";
+import { Icon } from "@ironclaw/design-system";
+import { Input, FormField, Label } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { useUsers } from "../hooks/useUsers";
@@ -163,7 +163,7 @@ export function UsersTab({ searchQuery = "" }) {
       <Card padding="lg">
         <div className="flex items-center gap-3">
           <Icon name="lock" className="h-5 w-5 text-[var(--v2-text-faint)]" />
-          <h3 className="text-lg font-semibold text-[var(--v2-text-strong)]">
+          <h3 className="text-lg font-medium text-[var(--v2-text-strong)]">
             {t("users.adminRequired")}
           </h3>
         </div>

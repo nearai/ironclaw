@@ -1,6 +1,6 @@
 import { useT } from "../../../lib/i18n";
-import { Button } from "../../../design-system/button";
-import { EmptyPanel, Panel, StatusPill } from "../../../design-system/primitives";
+import { Button, Input, Select } from "@ironclaw/design-system";
+import { EmptyPanel, Panel, StatusPill } from "@ironclaw/design-system";
 import { formatMissionDate, missionTone } from "../lib/missions-presenters";
 
 function buildStatusOptions(t) {
@@ -17,13 +17,13 @@ function FilterSelect({ value, onChange, children, label }) {
   return (
     <label className="min-w-[160px] flex-1 sm:flex-none">
       <span className="sr-only">{label}</span>
-      <select
+      <Select
+        size="lg"
         value={value}
         onChange={(event) => onChange(event.currentTarget.value)}
-        className="v2-select h-11 w-full rounded-md border border-iron-700 bg-iron-800/70 px-3 text-sm text-iron-100 outline-none focus:border-signal/40"
       >
         {children}
-      </select>
+      </Select>
     </label>
   );
 }
@@ -37,28 +37,28 @@ function MissionRow({ mission, selectedMissionId, onSelectMission, onOpenProject
       className={[
         "w-full rounded-xl border p-4 text-left",
         selected
-          ? "border-signal/35 bg-signal/10"
-          : "border-iron-700 bg-iron-800/50 hover:border-signal/25 hover:bg-iron-800/80",
+          ? "border-[var(--v2-accent)]/35 bg-[var(--v2-accent-soft)]"
+          : "border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] hover:border-[var(--v2-accent)]/25 hover:bg-[var(--v2-surface-muted)]",
       ].join(" ")}
     >
       <button type="button" onClick={() => onSelectMission(mission.id)} className="block w-full text-left">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
-              <div className="min-w-0 truncate text-lg font-semibold text-iron-100">{mission.name}</div>
+              <div className="min-w-0 truncate text-lg font-medium text-[var(--v2-text-strong)]">{mission.name}</div>
               <StatusPill tone={missionTone(mission.status)} label={mission.status} />
             </div>
-            <p className="mt-2 line-clamp-2 text-sm leading-6 text-iron-300">{mission.goal || t("missions.noGoal")}</p>
+            <p className="mt-2 line-clamp-2 text-sm leading-6 text-[var(--v2-text-muted)]">{mission.goal || t("missions.noGoal")}</p>
           </div>
-          <div className="shrink-0 text-right font-mono text-[11px] uppercase tracking-[0.14em] text-iron-400">
+          <div className="shrink-0 text-right font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-faint)]">
             <div>{mission.cadence_description || mission.cadence_type || "manual"}</div>
             <div className="mt-1">{t("missions.threadCount", { count: mission.thread_count || 0 })}</div>
           </div>
         </div>
       </button>
 
-      <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-iron-700 pt-3">
-        <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-iron-400">
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-[var(--v2-panel-border)] pt-3">
+        <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-faint)]">
           {t("missions.updated", { value: formatMissionDate(mission.updated_at) })}
         </span>
         <Button
@@ -95,20 +95,21 @@ export function MissionsList({
     <Panel className="p-4 sm:p-5">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("missions.title")}</div>
-          <h1 className="mt-2 text-3xl font-semibold tracking-tight text-iron-100">{t("missions.subtitle")}</h1>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-iron-300">
+          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{t("missions.title")}</div>
+          <h1 className="mt-2 text-3xl font-medium tracking-tight text-[var(--v2-text-strong)]">{t("missions.subtitle")}</h1>
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--v2-text-muted)]">
             {t("missions.summary", { missions: totalMissions, projects: projectOptions.length })}
           </p>
         </div>
       </div>
 
       <div className="mt-5 flex flex-wrap gap-3">
-        <input
+        <Input
+          size="lg"
           value={search}
           onChange={(event) => onSearchChange(event.currentTarget.value)}
           placeholder={t("missions.searchPlaceholder")}
-          className="h-11 min-w-[220px] flex-1 rounded-md border border-iron-700 bg-iron-800/70 px-3 text-sm text-iron-100 outline-none placeholder:text-iron-400 focus:border-signal/40"
+          className="min-w-[220px] flex-1"
         />
         <FilterSelect value={statusFilter} onChange={onStatusFilterChange} label={t("missions.filter.status")}>
           {statusOptions.map((status) => (<option key={status.value} value={status.value}>{status.label}</option>))}

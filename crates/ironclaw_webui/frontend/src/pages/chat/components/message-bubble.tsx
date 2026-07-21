@@ -1,7 +1,7 @@
 import React from "react";
 import { MarkdownRenderer } from "./markdown-renderer";
 import { ToolActivity } from "./tool-activity";
-import { Icon } from "../../../design-system/icons";
+import { Icon } from "@ironclaw/design-system";
 import { toast } from "../../../lib/toast";
 import { ProjectFileChips } from "./project-file-chips";
 import { AttachmentChip } from "./attachment-chip";
@@ -21,12 +21,14 @@ import {
    disclosure (see ThinkingDisclosure). */
 const ROLE_STYLES = {
   [CHAT_MESSAGE_ROLES.USER]:
-    "ml-auto rounded-[18px] border border-signal/25 bg-signal/10 px-4 py-3 text-iron-100",
-  [CHAT_MESSAGE_ROLES.ASSISTANT]: "mr-auto px-1 text-iron-100",
+    "ml-auto rounded-[18px] border border-[var(--v2-accent)]/25 bg-[var(--v2-accent-soft)] px-4 py-3 text-[var(--v2-text-strong)]",
+  [CHAT_MESSAGE_ROLES.ASSISTANT]: "mr-auto px-1 text-[var(--v2-text-strong)]",
   [CHAT_MESSAGE_ROLES.SYSTEM]:
-    "mx-auto rounded-[18px] border border-copper/20 bg-copper/10 px-4 py-3 text-center text-copper",
+    "mx-auto rounded-[18px] border border-[var(--v2-warning-text)]/20 bg-[var(--v2-warning-soft)] px-4 py-3 text-center text-[var(--v2-warning-text)]",
+  // The trailing `text-red-200` is pinned by message-bubble.test.ts
+  // ("error role should align with the assistant-side chat stream").
   [CHAT_MESSAGE_ROLES.ERROR]:
-    "mr-auto rounded-[18px] border border-red-400/25 bg-red-500/10 px-4 py-3 text-left text-red-200",
+    "mr-auto rounded-[18px] border border-[var(--v2-danger-text)]/25 bg-[var(--v2-danger-soft)] px-4 py-3 text-left text-red-200",
 };
 
 type MessageBubbleProps = {
@@ -55,7 +57,7 @@ function ThinkingDisclosure({ content }: { content?: string }) {
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open ? "true" : "false"}
-        className="v2-button inline-flex items-center gap-1.5 border-0 bg-transparent px-1 py-1 text-xs font-medium text-iron-400 hover:text-iron-200"
+        className="v2-button inline-flex items-center gap-1.5 border-0 bg-transparent px-1 py-1 text-xs font-medium text-[var(--v2-text-faint)] hover:text-[var(--v2-text)]"
       >
         <Icon name="spark" className="h-3.5 w-3.5" />
         <span>{open ? t("chat.hideReasoning") : t("chat.reasoning")}</span>
@@ -66,7 +68,7 @@ function ThinkingDisclosure({ content }: { content?: string }) {
       </button>
       {open &&
       (
-        <div className="mt-1 border-l-2 border-white/10 pl-3 text-iron-300">
+        <div className="mt-1 border-l-2 border-[var(--v2-panel-border)] pl-3 text-[var(--v2-text-muted)]">
           <MarkdownRenderer content={content} className="text-[13px]" />
         </div>
       )}
@@ -164,11 +166,11 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
         <div className="flex flex-wrap gap-2">
           {imgs.map((img, i) =>
             img.data_url
-              ? (<img key={i} src={img.data_url} className="max-h-64 rounded-lg border border-iron-700 object-cover" alt={t("chat.generatedImageAlt")} />)
+              ? (<img key={i} src={img.data_url} className="max-h-64 rounded-lg border border-[var(--v2-panel-border)] object-cover" alt={t("chat.generatedImageAlt")} />)
               : (
-                  <div key={i} className="rounded-lg border border-iron-700 bg-iron-900/70 px-4 py-3 text-sm text-iron-200">
+                  <div key={i} className="rounded-lg border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] px-4 py-3 text-sm text-[var(--v2-text)]">
                     <div>{t("chat.generatedImageUnavailable")}</div>
-                    {img.path && (<div className="mt-1 font-mono text-xs text-iron-300">{img.path}</div>)}
+                    {img.path && (<div className="mt-1 font-mono text-xs text-[var(--v2-text-muted)]">{img.path}</div>)}
                   </div>
                 )
           )}
@@ -229,7 +231,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
             : (<div className="v2-wrap-anywhere whitespace-pre-wrap break-words"><span className={contentOpacityClass}>{content}</span></div>)}
 
           {status === "error" && (
-            <div className={["mt-2 flex flex-wrap items-center gap-2 text-xs text-red-300", contentOpacityClass].join(" ")}>
+            <div className={["mt-2 flex flex-wrap items-center gap-2 text-xs text-[var(--v2-danger-text)]", contentOpacityClass].join(" ")}>
               <span>{error}</span>
             </div>
           )}
@@ -284,7 +286,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
                 onClick={copy}
                 title={copied ? t("common.copied") : t("chat.copyMessage")}
                 aria-label={copied ? t("common.copied") : t("chat.copyMessage")}
-                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 hover:text-iron-100"
+                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 hover:text-[var(--v2-text-strong)]"
               >
                 <Icon name={copied ? "check" : "copy"} className="h-3.5 w-3.5" />
               </button>
@@ -297,7 +299,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
                 title={artifactDownloading ? t("common.loading") : t("common.download")}
                 aria-label={artifactDownloading ? t("common.loading") : t("common.download")}
                 data-testid="download-run-artifact"
-                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 hover:text-iron-100 disabled:opacity-50"
+                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 hover:text-[var(--v2-text-strong)] disabled:opacity-50"
               >
                 <Icon name="download" className="h-3.5 w-3.5" />
               </button>
@@ -308,7 +310,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
                 onClick={() => onRetry?.(message)}
                 title={t("chat.retryMessage")}
                 aria-label={t("chat.retryMessage")}
-                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 text-red-300 hover:text-red-200"
+                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 text-[var(--v2-danger-text)] hover:bg-[var(--v2-danger-soft)]"
               >
                 <Icon name="retry" className="h-3.5 w-3.5" />
               </button>

@@ -15,16 +15,16 @@ export function ProviderLoginStatus({ login }) {
       {t("onboarding.nearaiWaiting")}
     </div>)}
     {nearaiError &&
-    (<div className="text-center text-xs text-red-300">{nearaiError}</div>)}
+    (<div className="text-center text-xs text-[var(--v2-danger-text)]">{nearaiError}</div>)}
 
     {codexCode &&
     (<div
-      className="mx-auto max-w-md rounded-lg border border-[var(--v2-border)] bg-[var(--v2-surface-raised)] p-4 text-center"
+      className="mx-auto max-w-md rounded-lg border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] p-4 text-center"
     >
       <div className="text-xs text-[var(--v2-text-muted)]">
         {t("onboarding.codexEnterCode")}
       </div>
-      <div className="mt-2 font-mono text-2xl font-semibold tracking-[0.3em] text-[var(--v2-text-strong)]">
+      <div className="mt-2 font-mono text-2xl font-medium tracking-[0.3em] text-[var(--v2-text-strong)]">
         {codexCode.userCode}
       </div>
       <a
@@ -41,7 +41,7 @@ export function ProviderLoginStatus({ login }) {
       {t("onboarding.codexWaiting")}
     </div>)}
     {codexError &&
-    (<div className="text-center text-xs text-red-300">{codexError}</div>)}
+    (<div className="text-center text-xs text-[var(--v2-danger-text)]">{codexError}</div>)}
     </>
   );
 }

@@ -1,5 +1,5 @@
-import { Badge } from "../../../design-system/badge";
-import { Card } from "../../../design-system/card";
+import { Badge } from "@ironclaw/design-system";
+import { Card } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import { INFERENCE_FIELDS } from "../lib/settings-schema";
 import { filterSettingsSections, matchesSearch } from "../lib/settings-search";
@@ -73,7 +73,7 @@ export function InferenceTab({
           <div className="rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3">
             <div className="text-xs text-[var(--v2-text-muted)]">{t("inference.backend")}</div>
             <div className="mt-1 flex items-center gap-2">
-              <span className="font-mono text-lg font-semibold text-[var(--v2-text-strong)]">{backend || t("inference.none")}</span>
+              <span className="font-mono text-lg font-medium text-[var(--v2-text-strong)]">{backend || t("inference.none")}</span>
               {hasActiveProvider
                 ? (<Badge tone="positive" label={t("inference.active")} size="sm" />)
                 : (<Badge tone="muted" label={t("llm.notConfigured")} size="sm" />)}
@@ -81,7 +81,7 @@ export function InferenceTab({
           </div>
           <div className="rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3">
             <div className="text-xs text-[var(--v2-text-muted)]">{t("inference.model")}</div>
-            <div className="mt-1 font-mono text-lg font-semibold text-[var(--v2-text-strong)]">
+            <div className="mt-1 font-mono text-lg font-medium text-[var(--v2-text-strong)]">
               {model || t("inference.none")}
             </div>
           </div>

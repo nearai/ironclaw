@@ -9,15 +9,15 @@ const SERVER_LEVELS = ["trace", "debug", "info", "warn", "error"];
 
 const LEVEL_COLORS = {
   trace: "text-[var(--v2-text-muted)]",
-  debug: "text-[color-mix(in_srgb,var(--v2-accent)_80%,white)]",
+  debug: "text-[var(--v2-info-text)]",
   info: "text-[var(--v2-text-strong)]",
-  warn: "text-yellow-400",
-  error: "text-red-400",
+  warn: "text-[var(--v2-warning-text)]",
+  error: "text-[var(--v2-danger-text)]",
 };
 
 const LEVEL_BG = {
-  warn: "bg-yellow-500/5",
-  error: "bg-red-500/8",
+  warn: "bg-[color-mix(in_srgb,var(--v2-warning-text)_5%,transparent)]",
+  error: "bg-[color-mix(in_srgb,var(--v2-danger-text)_8%,transparent)]",
 };
 
 function LogEntry({ entry }) {
@@ -62,14 +62,14 @@ function LogEntry({ entry }) {
         ].join(" ")}
       >
         <span className="text-[var(--v2-text-muted)] tabular-nums">{ts}</span>
-        <span className={["font-semibold uppercase", levelColor].join(" ")}>
+        <span className={["font-medium uppercase", levelColor].join(" ")}>
           {entry.level}
         </span>
         <span className="truncate text-[var(--v2-text-muted)]">{entry.target}</span>
         <span
           data-testid="logs-entry-message"
           className={[
-            "min-w-0 text-[var(--v2-text-base)]",
+            "min-w-0 text-[var(--v2-text)]",
             expanded ? "whitespace-pre-wrap break-all" : "truncate",
           ].join(" ")}
         >
@@ -91,7 +91,7 @@ function LogEntry({ entry }) {
                 className="inline-flex max-w-full items-center gap-1 rounded-[6px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] px-2 py-0.5"
               >
                 <span>{t(item.labelKey)}</span>
-                <span className="max-w-[18rem] truncate text-[var(--v2-text-base)]">{item.value}</span>
+                <span className="max-w-[18rem] truncate text-[var(--v2-text)]">{item.value}</span>
               </span>
             )
           )}
@@ -124,7 +124,7 @@ function ScopeChip({ label, value, scopeKey }) {
       title={`${label}: ${value}`}
     >
       <span className="uppercase tracking-[0.08em]">{label}</span>
-      <span className="max-w-[18rem] truncate text-[var(--v2-text-base)]">{value}</span>
+      <span className="max-w-[18rem] truncate text-[var(--v2-text)]">{value}</span>
     </span>
   );
 }
@@ -192,7 +192,7 @@ export function LogsPage() {
           value={targetFilter}
           onInput={(e) => setTargetFilter(e.currentTarget.value)}
           placeholder={t("logs.filterTarget")}
-          className="h-8 min-w-[10rem] flex-1 rounded-[8px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] px-3 text-xs text-[var(--v2-text-base)] placeholder:text-[var(--v2-text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--v2-accent)]"
+          className="h-8 min-w-[10rem] flex-1 rounded-[8px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-muted)] px-3 text-xs text-[var(--v2-text)] placeholder:text-[var(--v2-text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--v2-accent)]"
         />
 
         <div className="flex items-center gap-2 ml-auto">
@@ -268,7 +268,7 @@ export function LogsPage() {
             />
             <span className="ml-auto tabular-nums">
               {t("logs.entryCount", { count: totalCount })}
-              {paused ? (<span className="ml-1 text-yellow-400">{t("logs.pausedBadge")}</span>) : null}
+              {paused ? (<span className="ml-1 text-[var(--v2-warning-text)]">{t("logs.pausedBadge")}</span>) : null}
             </span>
           </div>
         )}
@@ -283,7 +283,7 @@ export function LogsPage() {
         {error && hasEntries
           ? (
               <div
-                className="sticky top-0 z-10 border-b border-red-500/25 bg-red-950/70 px-4 py-2 text-xs text-red-100 backdrop-blur"
+                className="sticky top-0 z-10 border-b border-[color-mix(in_srgb,var(--v2-danger-text)_25%,transparent)] bg-[var(--v2-danger-soft)] px-4 py-2 text-xs text-[var(--v2-danger-text)] backdrop-blur"
               >
                 {t("error.loadFailed", {
                   what: t("nav.logs"),
@@ -304,7 +304,7 @@ export function LogsPage() {
           : error && !hasEntries
           ? (
               <div
-                className="flex h-full items-center justify-center px-6 text-center text-sm text-red-300"
+                className="flex h-full items-center justify-center px-6 text-center text-sm text-[var(--v2-danger-text)]"
               >
                 {t("error.loadFailed", {
                   what: t("nav.logs"),

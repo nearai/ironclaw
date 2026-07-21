@@ -1,5 +1,5 @@
-import { Badge } from "../../../design-system/badge";
-import { Card } from "../../../design-system/card";
+import { Badge } from "@ironclaw/design-system";
+import { Card } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import { useChannels } from "../hooks/useChannels";
 import { matchesSearch } from "../lib/settings-search";

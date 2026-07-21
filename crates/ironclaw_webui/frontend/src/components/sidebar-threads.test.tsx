@@ -21,9 +21,11 @@ vi.mock("react-router", async () => {
   };
 });
 
-vi.mock("../design-system/icons", async () => {
+vi.mock("@ironclaw/design-system", async (importOriginal) => {
+  const actual = await importOriginal<object>();
   const { createElement } = await import("react");
   return {
+    ...actual,
     Icon: ({ name, className }) =>
       createElement("span", { className, "data-icon": name }),
   };

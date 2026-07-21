@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { Icon } from "../../../design-system/icons";
+import { Icon } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 
@@ -8,7 +8,7 @@ import { useT } from "../../../lib/i18n";
 const DOT_STYLE = {
   running: "bg-[var(--v2-accent)] animate-[v2-breathe_1.6s_ease-in-out_infinite]",
   success: "bg-[var(--v2-positive-text)]",
-  declined: "bg-iron-400",
+  declined: "bg-[var(--v2-text-faint)]",
   error: "bg-[var(--v2-danger-text)]",
 };
 
@@ -96,7 +96,9 @@ export function ToolRun({ tools }) {
         aria-expanded={expanded ? "true" : "false"}
         className={[
           "v2-button flex w-full min-w-0 items-center gap-2 border-0 bg-transparent px-1 py-1.5 text-left text-sm",
-          hasError ? "text-[var(--v2-danger-text)]" : "text-iron-400 hover:text-iron-200",
+          hasError
+            ? "text-[var(--v2-danger-text)]"
+            : "text-[var(--v2-text-faint)] hover:text-[var(--v2-text)]",
         ].join(" ")}
       >
         <Icon name="layers" className="h-4 w-4 shrink-0" />
@@ -152,25 +154,25 @@ function ToolActivityCard({ activity, nested = false }) {
       aria-expanded={expanded ? "true" : "false"}
       aria-controls={controlsId}
       data-testid="tool-activity-toggle"
-      className="v2-button flex w-full min-w-0 items-center gap-2.5 border-0 border-b border-iron-700/40 bg-transparent px-1 py-2 text-left text-sm"
+      className="v2-button flex w-full min-w-0 items-center gap-2.5 border-0 border-b border-[var(--v2-panel-border)] bg-transparent px-1 py-2 text-left text-sm"
     >
       <span className={["h-2 w-2 shrink-0 rounded-full", dotClass].join(" ")} />
-      <span className="shrink-0 font-mono text-[11px] uppercase tracking-wide text-iron-300"
+      <span className="shrink-0 font-mono text-[11px] uppercase tracking-wide text-[var(--v2-text-muted)]"
         >{t(statusLabelKey(toolStatus))}</span
       >
-      <span className="min-w-0 truncate font-mono text-[13px] font-medium text-iron-100"
+      <span className="min-w-0 truncate font-mono text-[13px] font-medium text-[var(--v2-text-strong)]"
         >{toolName}</span
       >
       {toolDetail &&
-      (<span className="min-w-0 truncate font-mono text-xs text-iron-400"
+      (<span className="min-w-0 truncate font-mono text-xs text-[var(--v2-text-faint)]"
         >{toolDetail}</span
       >)}
       <span className="ml-auto flex shrink-0 items-center gap-2">
         {hasDuration &&
-        (<span className="font-mono text-[11px] text-iron-300">{toolDurationMs}ms</span>)}
+        (<span className="font-mono text-[11px] text-[var(--v2-text-muted)]">{toolDurationMs}ms</span>)}
         <Icon
           name="chevron"
-          className={["h-3.5 w-3.5 text-iron-400", expanded ? "rotate-180" : ""].join(" ")}
+          className={["h-3.5 w-3.5 text-[var(--v2-text-faint)]", expanded ? "rotate-180" : ""].join(" ")}
         />
       </span>
     </button>
@@ -186,7 +188,7 @@ function ToolActivityCard({ activity, nested = false }) {
       {!nested &&
       (
         <div
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/10 bg-iron-800 text-iron-100"
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] text-[var(--v2-text-strong)]"
         >
           <Icon name="tool" className="h-4 w-4" />
         </div>
@@ -247,7 +249,7 @@ function ToolDetailPanel({
     return (
       <div
         id={controlsId}
-        className="v2-wrap-anywhere rounded-b-lg border-x border-b border-iron-700/40 bg-iron-950 px-3 py-2 font-mono text-xs text-iron-400"
+        className="v2-wrap-anywhere rounded-b-lg border-x border-b border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)] px-3 py-2 font-mono text-xs text-[var(--v2-text-faint)]"
       >
         {t("tool.noDetail")}
       </div>
@@ -260,7 +262,7 @@ function ToolDetailPanel({
       data-testid="tool-activity-detail"
       className="min-w-0 overflow-hidden rounded-b-lg border-x border-b border-iron-700/40 bg-iron-950"
     >
-      <div className="flex min-w-0 items-center gap-1 overflow-x-auto border-b border-iron-700/40 px-2 pt-1.5">
+      <div className="flex min-w-0 items-center gap-1 overflow-x-auto border-b border-[var(--v2-panel-border)] px-2 pt-1.5">
         {tabs.map(
           (tab) => (
             <button
@@ -270,8 +272,8 @@ function ToolDetailPanel({
               className={[
                 "v2-button rounded-t-md px-2.5 py-1 font-mono text-[11px]",
                 active === tab.id
-                  ? "bg-iron-900 text-iron-100"
-                  : "text-iron-400 hover:text-iron-200",
+                  ? "bg-[var(--v2-surface)] text-[var(--v2-text-strong)]"
+                  : "text-[var(--v2-text-faint)] hover:text-[var(--v2-text)]",
               ].join(" ")}
             >
               {tab.label}
@@ -290,7 +292,7 @@ function ToolDetailPanel({
       </div>
       <div className="min-w-0 overflow-hidden p-3 text-xs">
         {active === "details" &&
-        (<div className="v2-wrap-anywhere whitespace-pre-wrap text-iron-200">{toolDetail}</div>)}
+        (<div className="v2-wrap-anywhere whitespace-pre-wrap text-[var(--v2-text)]">{toolDetail}</div>)}
         {active === "params" &&
         (<pre className={[PRE_WRAP_CLASS, "text-iron-100"].join(" ")}>{toolParameters}</pre>)}
         {active === "result" && (<ToolResult text={toolResultPreview} />)}
@@ -317,7 +319,7 @@ function ToolResult({ text }) {
     return (<img
       src={value}
       alt={t("tool.resultAlt")}
-      className="max-h-72 max-w-full rounded-lg border border-iron-700 object-contain"
+      className="max-h-72 max-w-full rounded-lg border border-[var(--v2-panel-border)] object-contain"
     />);
   }
 
@@ -345,7 +347,7 @@ function ToolResult({ text }) {
               {columns.map(
                 (col) => (<th
                   key={col}
-                  className="border-b border-iron-700/60 bg-iron-900 px-2 py-1 font-semibold text-iron-100"
+                  className="border-b border-[var(--v2-panel-border)] bg-[var(--v2-surface)] px-2 py-1 font-medium text-[var(--v2-text-strong)]"
                 >{col}</th>)
               )}
             </tr>
@@ -356,7 +358,7 @@ function ToolResult({ text }) {
                 {columns.map(
                   (col) => (<td
                     key={col}
-                    className="border-b border-iron-700/40 px-2 py-1 text-iron-200"
+                    className="border-b border-[var(--v2-panel-border)] px-2 py-1 text-[var(--v2-text)]"
                   >{formatCell(row[col])}</td>)
                 )}
               </tr>)

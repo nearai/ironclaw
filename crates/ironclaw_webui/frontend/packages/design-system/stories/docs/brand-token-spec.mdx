@@ -1,0 +1,167 @@
+import { Meta } from "@storybook/addon-docs/blocks";
+import { Button } from "../../src/button";
+import { Badge } from "../../src/badge";
+
+<Meta title="Docs/Brand token spec" />
+
+export const Swatch = ({ value, label, dark }) => (
+  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+    <span
+      style={{
+        width: 22,
+        height: 22,
+        borderRadius: 6,
+        background: value,
+        border: "1px solid rgba(0,0,0,0.12)",
+        display: "inline-block",
+        flexShrink: 0,
+      }}
+    />
+    <code style={{ fontSize: 12 }}>{label ?? value}</code>
+  </span>
+);
+
+export const PillarRow = ({ name, tokens, example, notes }) => (
+  <tr>
+    <td style={{ whiteSpace: "nowrap", fontWeight: 500 }}>{name}</td>
+    <td>{tokens}</td>
+    <td style={{ minWidth: 220 }}>{example}</td>
+    <td>{notes}</td>
+  </tr>
+);
+
+# Brand token spec
+
+This is the piece other NEAR surfaces (near.com, market.near.ai, Datrix)
+can build against so we all stay coherent. Everything below is a `--v2-*`
+custom property — the machine-readable catalog is `tokens.ts`, and live
+values render under Tokens/Reference.
+
+## What "adopting the system" means
+
+A surface is on-brand when it:
+
+1. imports (or mirrors) the `--v2-*` custom properties from
+   `@ironclaw/design-system/tokens.css`,
+2. picks colors by role (`--v2-accent`, `--v2-text-muted`), never from a
+   palette,
+3. uses the structural scales (radius, control density, spacing, type)
+   instead of restating values,
+4. themes by swapping token values under `[data-theme="…"]` — components
+   and layouts stay identical across themes.
+
+## Brand pillars
+
+The pillars, with the real components rendered next to their tokens:
+
+<table>
+  <thead>
+    <tr>
+      <th>Pillar</th>
+      <th>Token(s)</th>
+      <th>Live</th>
+      <th>Notes</th>
+    </tr>
+  </thead>
+  <tbody>
+    <PillarRow
+      name="Brand blue"
+      tokens={<><code>--v2-accent</code> / <code>--v2-accent-strong</code></>}
+      example={
+        <span style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+          <Swatch value="#2882c8" />
+          <Swatch value="#1f6ca8" />
+        </span>
+      }
+      notes={
+        <>Matches ironclaw.com. Dark theme lifts it to <Swatch value="#4ca7e6" />.</>
+      }
+    />
+    <PillarRow
+      name="Action ramp"
+      tokens={<code>--v2-btn-primary-bg(-hover)</code>}
+      example={<Button>Save changes</Button>}
+      notes="The signature primary-button treatment: radial blue ramp with a hover glow. One per view."
+    />
+    <PillarRow
+      name="Ink"
+      tokens={<><code>--v2-ink</code> / <code>--v2-text-strong</code></>}
+      example={
+        <span style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <Swatch value="#090909" />
+          <span style={{ color: "#090909", fontSize: 20, fontWeight: 600 }}>Aa</span>
+        </span>
+      }
+      notes="Near-black, never pure black, so text sits comfortably on the cool canvas."
+    />
+    <PillarRow
+      name="Canvas"
+      tokens={<code>--v2-canvas</code>}
+      example={
+        <span style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+          <Swatch value="#f5f5f7" />
+          <Swatch value="#09090b" />
+        </span>
+      }
+      notes="Cool paper in light; a zinc field in dark."
+    />
+    <PillarRow
+      name="Type"
+      tokens={<code>--font-sans</code>}
+      example={
+        <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          <span style={{ fontSize: 16 }}>Geist for interface text</span>
+          <code style={{ fontSize: 13 }}>Geist Mono for data</code>
+        </span>
+      }
+      notes="Newsreader covers the occasional editorial serif moment."
+    />
+    <PillarRow
+      name="Tag language"
+      tokens={<><code>--v2-font-pixel</code> + <code>.v2-tag-face</code></>}
+      example={<Badge tone="accent" label="Beta" />}
+      notes={<>Uppercase 11px labels with 0.08em tracking — the "IronClaw stamp". Pixel face where vendored, Geist Mono fallback.</>}
+    />
+    <PillarRow
+      name="Status set"
+      tokens={<code>--v2-positive/warning/danger/info-*</code>}
+      example={
+        <span style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <Badge tone="success" label="Success" />
+          <Badge tone="info" label="Running" />
+          <Badge tone="warning" label="Degraded" />
+          <Badge tone="danger" label="Failed" />
+        </span>
+      }
+      notes="One hue per status, always as a text + fill pair. The mapping lives in STATUS_CANON."
+    />
+  </tbody>
+</table>
+
+## Theming mechanics
+
+- Light values live on `:root`; dark overrides live under
+  `:root[data-theme="dark"]`. Structural tokens (radius, spacing, type,
+  motion, z) don't change per theme.
+- A new surface can re-theme with a single token file and zero component
+  changes. The `soft` theme in this Storybook (theme toolbar → *soft*) is
+  the proof: warm paper neutrals, espresso ink, a calmer accent, rounder
+  radii, softer elevation — all from
+  `@ironclaw/design-system/themes/soft.css`.
+- The `@theme` block in `tokens.css` maps legacy Tailwind color utilities
+  (`--color-iron-*`, `--color-signal`, …) onto the tokens. That's a
+  migration bridge for old code, not something new code should use.
+
+## Open brand decisions
+
+Still undecided — current values are good defaults and deliberately easy
+to swap:
+
+1. **Typeface.** Geist works but has little flair. Is there an IronClaw
+   face (or a pairing) with more character?
+2. **Icon library.** Same question for the in-house stroke set + lucide.
+3. **IronClaw vs NEAR AI.** Does IronClaw stand as its own brand outside
+   near.ai? The answer shapes the accent, the tag language, and how far we
+   align with near.com.
+4. **How soft is soft?** The *soft* theme shows the Claude-ish direction —
+   how far product and marketing surfaces should move is open.

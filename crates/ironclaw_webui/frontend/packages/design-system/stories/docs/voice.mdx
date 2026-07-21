@@ -1,0 +1,50 @@
+import { Meta } from "@storybook/addon-docs/blocks";
+
+<Meta title="Docs/Voice & copy" />
+
+# Voice & copy
+
+We're moving toward a softer tone — human, plain-spoken, closer to how
+Claude's product copy reads than to edgy tech branding. None of this is
+final brand language; it's the working guidance until the brand jam
+settles things.
+
+## Principles
+
+1. **Say what happens, in the user's words.** "Drafts replies for routine
+   email" — not "leverages LLM inference for message synthesis."
+2. **The agent proposes; the user decides.** Copy around automations keeps
+   agency with the user: *Suggest*, *Review*, *Approve*. Don't imply the
+   system acted on its own when it didn't.
+3. **Calm status language.** `Success`, `Running`, `Warning`, `Failed`,
+   `Paused`. No exclamation marks, no alarm-speak. A failed run is a fact,
+   not an emergency.
+4. **Sentence case everywhere** — buttons, labels, menus, tabs. The only
+   uppercase in the system is the pixel tag face on badges and eyebrows,
+   and that's typography, not voice.
+5. **Short verbs on buttons.** `Save`, `Connect Google`, `Run now`,
+   `Delete`. Destructive confirms restate the object ("Delete this
+   automation?") and the button repeats the verb. Never "OK" or "Yes".
+6. **Empty states teach.** Name the value and the next step ("Connect a
+   tool and the agent will start suggesting automations"), not just
+   "No data".
+7. **Numbers are content.** Stats, durations, and schedules stay exact and
+   render in mono/tabular contexts — "128 runs", "every weekday at 8:00am".
+
+## Built-in component strings
+
+`Modal` (close) and `ConfirmDialog` (cancel) carry built-in strings that
+default to English. Localized hosts bridge their translator via
+`DesignSystemI18nProvider`; the keys are `common.close` and
+`common.cancel`.
+
+## Microcopy patterns
+
+| Surface | Pattern | Example |
+|---|---|---|
+| Primary CTA | verb + object | `Create automation` |
+| Confirmation title | question restating the object | `Delete this automation?` |
+| Confirmation body | the consequence, plainly | `"Morning digest" will stop running immediately. This cannot be undone.` |
+| Hint text | why it matters, one sentence | `Shown in the sidebar and page titles.` |
+| Error text | what happened + what to do | `This token has expired. Generate a new one in Settings.` |
+| Badge label | one word from the status canon | `Running` |

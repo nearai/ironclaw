@@ -1,4 +1,4 @@
-import { StatusPill } from "../../../design-system/primitives";
+import { StatusPill } from "@ironclaw/design-system";
 import { formatRoutineDate } from "../lib/routines-presenters";
 
 function runTone(status) {
@@ -10,7 +10,7 @@ function runTone(status) {
 export function RoutineRecentRuns({ runs }) {
   if (!runs?.length) {
     return (
-      <div className="rounded-xl border border-iron-700 bg-iron-950/40 p-4 text-sm text-iron-300">
+      <div className="rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)]/40 p-4 text-sm text-[var(--v2-text-muted)]">
         No runs recorded yet.
       </div>
     );
@@ -20,15 +20,15 @@ export function RoutineRecentRuns({ runs }) {
     <div className="space-y-3">
       {runs.map(
         (run) => (
-          <div key={run.id} className="rounded-xl border border-iron-700 bg-iron-950/40 p-4">
+          <div key={run.id} className="rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)]/40 p-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <StatusPill tone={runTone(run.status)} label={run.status} />
-              <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-iron-400">
+              <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-faint)]">
                 {formatRoutineDate(run.started_at)}
               </span>
             </div>
             {run.result_summary &&
-            (<p className="mt-3 text-sm leading-6 text-iron-300">{run.result_summary}</p>)}
+            (<p className="mt-3 text-sm leading-6 text-[var(--v2-text-muted)]">{run.result_summary}</p>)}
           </div>
         )
       )}

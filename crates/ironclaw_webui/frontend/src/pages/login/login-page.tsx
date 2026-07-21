@@ -1,12 +1,12 @@
 import { useForm } from "react-hook-form";
-import { Button } from "../../design-system/button";
-import { Card } from "../../design-system/card";
-import { Input, FormField } from "../../design-system/input";
-import { Icon } from "../../design-system/icons";
-import { useInterfaceTheme } from "../../design-system/theme";
+import { Button } from "@ironclaw/design-system";
+import { Card } from "@ironclaw/design-system";
+import { Input, FormField } from "@ironclaw/design-system";
+import { Icon } from "@ironclaw/design-system";
+import { useInterfaceTheme } from "@ironclaw/design-system";
 import { useT } from "../../lib/i18n";
+import { cn } from "@ironclaw/design-system";
 import { isLocalDevOrigin } from "../../lib/browser-origin";
-import { cn } from "../../utils/cn";
 import { OAuthProviderButtons } from "./components/oauth-provider-buttons";
 import { useOAuthProviders } from "./hooks/useOAuthProviders";
 
@@ -50,7 +50,7 @@ export function LoginPage({ initialToken, error, oauthRedirectAfter = "/", onSub
             {t("login.tagline")}
           </p>
           <h1
-            className="text-5xl font-semibold leading-none tracking-[-0.04em] text-[var(--v2-text-strong)]"
+            className="text-5xl font-medium leading-none tracking-[-0.04em] text-[var(--v2-text-strong)]"
           >
             {t("login.console")}
           </h1>

@@ -13,9 +13,9 @@
 import React from "react";
 import { Link } from "react-router";
 import { useT } from "../../../lib/i18n";
-import { Button } from "../../../design-system/button";
-import { Badge } from "../../../design-system/badge";
-import { Icon } from "../../../design-system/icons";
+import { Button } from "@ironclaw/design-system";
+import { Badge } from "@ironclaw/design-system";
+import { Icon } from "@ironclaw/design-system";
 import { classifyRisk } from "../lib/approval-risk";
 
 const APPROVAL_PAYLOAD_PREVIEW_LIMIT = 480;
@@ -90,13 +90,13 @@ export function ApprovalCard({
   return (
     <div
       data-testid="approval-card"
-      className="mx-auto max-w-lg rounded-xl border border-copper/30 bg-copper/10 p-4"
+      className="mx-auto max-w-lg rounded-xl border border-[var(--v2-warning-text)]/30 bg-[var(--v2-warning-soft)] p-4"
     >
       <div className="mb-3 flex items-center gap-2">
-        <span className="grid h-8 w-8 place-items-center rounded-md border border-copper/25 bg-copper/10 text-copper">
+        <span className="grid h-8 w-8 place-items-center rounded-md border border-[var(--v2-warning-text)]/25 bg-[var(--v2-warning-soft)] text-[var(--v2-warning-text)]">
           <Icon name="lock" className="h-4 w-4" />
         </span>
-        <span className="font-semibold text-white">{t("approval.title")}</span>
+        <span className="font-medium text-[var(--v2-text-strong)]">{t("approval.title")}</span>
         <Badge
           tone={risk.tone}
           label={t(risk.key)}
@@ -106,24 +106,24 @@ export function ApprovalCard({
         />
       </div>
       {toolName &&
-      (<div className="mb-1 break-all font-mono text-sm font-medium text-iron-100">{toolName}</div>)}
+      (<div className="mb-1 break-all font-mono text-sm font-medium text-[var(--v2-text-strong)]">{toolName}</div>)}
       {description &&
-      (<div className="mb-3 break-words text-sm text-iron-200">{description}</div>)}
+      (<div className="mb-3 break-words text-sm text-[var(--v2-text)]">{description}</div>)}
       {approvalDetails.length > 0
         ? (
-            <dl className={`mb-2 ${payloadMaxHeight} overflow-y-auto rounded-md border border-iron-800 bg-iron-950/80 text-xs`}>
+            <dl className={`mb-2 ${payloadMaxHeight} overflow-y-auto rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)]/80 text-xs`}>
               {approvalDetails.map(
                 (detail) => (
-                  <div key={detail.label} className="grid gap-1 border-b border-iron-800/70 px-3 py-2 last:border-b-0 sm:grid-cols-[7rem_1fr]">
-                    <dt className="font-medium text-iron-400">{detail.labelKey ? t(detail.labelKey) : detail.label}</dt>
-                    <dd className="min-w-0 whitespace-pre-wrap break-all font-mono text-iron-100">{approvalPayloadPreview(detail.value, expandedPayload)}</dd>
+                  <div key={detail.label} className="grid gap-1 border-b border-[var(--v2-panel-border)] px-3 py-2 last:border-b-0 sm:grid-cols-[7rem_1fr]">
+                    <dt className="font-medium text-[var(--v2-text-faint)]">{detail.labelKey ? t(detail.labelKey) : detail.label}</dt>
+                    <dd className="min-w-0 whitespace-pre-wrap break-all font-mono text-[var(--v2-text-strong)]">{approvalPayloadPreview(detail.value, expandedPayload)}</dd>
                   </div>
                 ),
               )}
             </dl>
           )
         : parameters &&
-          (<pre className={`mb-2 ${payloadMaxHeight} overflow-auto whitespace-pre-wrap break-all rounded-md bg-iron-950 p-2 font-mono text-xs text-iron-100`}>{approvalPayloadPreview(parameters, expandedPayload)}</pre>)}
+          (<pre className={`mb-2 ${payloadMaxHeight} overflow-auto whitespace-pre-wrap break-all rounded-md bg-[var(--v2-canvas-strong)] p-2 font-mono text-xs text-[var(--v2-text-strong)]`}>{approvalPayloadPreview(parameters, expandedPayload)}</pre>)}
 
       {longPayload &&
       (
@@ -140,7 +140,7 @@ export function ApprovalCard({
 
       {allowAlways &&
       (
-        <label className="mb-3 flex items-center gap-2 text-xs text-iron-200">
+        <label className="mb-3 flex items-center gap-2 text-xs text-[var(--v2-text)]">
           <input
             type="checkbox"
             checked={always}

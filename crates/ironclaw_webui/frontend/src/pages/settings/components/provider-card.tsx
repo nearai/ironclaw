@@ -1,7 +1,7 @@
-import { Button } from "../../../design-system/button";
-import { Badge } from "../../../design-system/badge";
-import { Card } from "../../../design-system/card";
-import { Icon } from "../../../design-system/icons";
+import { Button } from "@ironclaw/design-system";
+import { Badge } from "@ironclaw/design-system";
+import { Card } from "@ironclaw/design-system";
+import { Icon } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import {
@@ -171,7 +171,7 @@ export function ProviderCard({
             ].join(" ")}
           />
           <span className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-            <span className="min-w-0 truncate text-sm font-semibold text-[var(--v2-text-strong)]">
+            <span className="min-w-0 truncate text-sm font-medium text-[var(--v2-text-strong)]">
               {provider.name || provider.id}
             </span>
             <span className="font-mono text-[11px] text-[var(--v2-text-faint)]">{provider.id}</span>

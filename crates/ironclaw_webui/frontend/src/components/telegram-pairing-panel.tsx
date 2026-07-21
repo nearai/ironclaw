@@ -2,7 +2,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import QRCode from "qrcode";
 import React from "react";
-import { Button } from "../design-system/button";
+import { Button } from "@ironclaw/design-system";
 import { useT } from "../lib/i18n";
 import { notifyChannelConnected } from "../lib/channel-connection-events";
 import {
@@ -237,7 +237,7 @@ export function TelegramPairingPanel({ compact = false }) {
 
   const containerClass = compact
     ? "mt-3"
-    : "mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4";
+    : "mt-3 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-4";
 
   if (connected) {
     return (
@@ -250,12 +250,12 @@ export function TelegramPairingPanel({ compact = false }) {
           onClick={disconnect}
           disabled={isDisconnecting}
           data-testid="telegram-disconnect"
-          className="mt-2 text-xs text-iron-400 underline underline-offset-2 hover:text-iron-200 disabled:cursor-not-allowed disabled:opacity-60"
+          className="mt-2 text-xs text-[var(--v2-text-faint)] underline underline-offset-2 hover:text-[var(--v2-text)] disabled:cursor-not-allowed disabled:opacity-60"
         >
           {t("telegramPairing.disconnect")}
         </button>
         {error &&
-        (<p role="alert" className="mt-2 text-xs leading-5 text-red-300">{error}</p>)}
+        (<p role="alert" className="mt-2 text-xs leading-5 text-[var(--v2-danger-text)]">{error}</p>)}
       </div>
     );
   }
@@ -266,7 +266,7 @@ export function TelegramPairingPanel({ compact = false }) {
         {error
           ? (
               <div className="space-y-2">
-                <p role="alert" className="text-xs leading-5 text-red-300">{error}</p>
+                <p role="alert" className="text-xs leading-5 text-[var(--v2-danger-text)]">{error}</p>
                 <Button
                   variant="secondary"
                   size="sm"
@@ -287,10 +287,10 @@ export function TelegramPairingPanel({ compact = false }) {
     return (
       <div data-testid="telegram-pairing-panel" className={containerClass}>
         {!compact &&
-        (<h4 className="mb-2 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
+        (<h4 className="mb-2 font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-accent-text)]">
           {t("telegramPairing.title")}
         </h4>)}
-        <p data-testid="telegram-pairing-expired" className="text-xs leading-5 text-iron-300">
+        <p data-testid="telegram-pairing-expired" className="text-xs leading-5 text-[var(--v2-text-muted)]">
           {t("telegramPairing.expired")}
         </p>
         <Button
@@ -304,7 +304,7 @@ export function TelegramPairingPanel({ compact = false }) {
           {t("telegramPairing.getNewCode")}
         </Button>
         {error &&
-        (<p role="alert" className="mt-2 text-xs leading-5 text-red-300">{error}</p>)}
+        (<p role="alert" className="mt-2 text-xs leading-5 text-[var(--v2-danger-text)]">{error}</p>)}
       </div>
     );
   }
@@ -314,10 +314,10 @@ export function TelegramPairingPanel({ compact = false }) {
   return (
     <div data-testid="telegram-pairing-panel" className={containerClass}>
       {!compact &&
-      (<h4 className="mb-2 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
+      (<h4 className="mb-2 font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-accent-text)]">
         {t("telegramPairing.title")}
       </h4>)}
-      <p className="mb-3 text-xs leading-5 text-iron-300">{t("telegramPairing.instructions")}</p>
+      <p className="mb-3 text-xs leading-5 text-[var(--v2-text-muted)]">{t("telegramPairing.instructions")}</p>
 
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
         {qrDataUrl &&
@@ -325,14 +325,14 @@ export function TelegramPairingPanel({ compact = false }) {
           <img
             src={qrDataUrl}
             alt={t("telegramPairing.qrAlt")}
-            className="h-36 w-36 shrink-0 rounded-md border border-white/[0.06] bg-white p-1"
+            className="h-36 w-36 shrink-0 rounded-md border border-[var(--v2-panel-border)] bg-white p-1"
           />
         )}
         <div className="min-w-0 flex-1 space-y-2">
           <div className="flex flex-wrap items-center gap-2">
             <span
               data-testid="telegram-pairing-code"
-              className="font-mono text-xl tracking-[0.18em] text-iron-100"
+              className="font-mono text-xl tracking-[0.18em] text-[var(--v2-text-strong)]"
             >
               {pending.code}
             </span>
@@ -365,12 +365,12 @@ export function TelegramPairingPanel({ compact = false }) {
               onClick={() => copyText("username", `@${botUsername}`)}
               title={t("telegramPairing.copyUsername")}
               data-testid="telegram-bot-username"
-              className="font-mono text-xs text-iron-300 underline-offset-2 hover:text-iron-100 hover:underline"
+              className="font-mono text-xs text-[var(--v2-text-muted)] underline-offset-2 hover:text-[var(--v2-text-strong)] hover:underline"
             >
               {copiedTarget === "username" ? t("common.copiedToClipboard") : `@${botUsername}`}
             </button>
           )}
-          <p data-testid="telegram-pairing-countdown" className="text-[11px] text-iron-400">
+          <p data-testid="telegram-pairing-countdown" className="text-[11px] text-[var(--v2-text-faint)]">
             {t("telegramPairing.expiresIn", {
               time: formatPairingCountdown(expiresAtMs - now),
             })}
@@ -378,7 +378,7 @@ export function TelegramPairingPanel({ compact = false }) {
         </div>
       </div>
       {error &&
-      (<p role="alert" className="mt-3 text-xs leading-5 text-red-300">{error}</p>)}
+      (<p role="alert" className="mt-3 text-xs leading-5 text-[var(--v2-danger-text)]">{error}</p>)}
     </div>
   );
 }

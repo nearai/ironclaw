@@ -1,0 +1,52 @@
+<!-- Brand faces for the manager chrome (sidebar/toolbar) so the theme's
+     fontBase actually resolves to Geist, matching the preview. -->
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link
+  href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap"
+  rel="stylesheet"
+/>
+<style>
+  /* IronClaw polish on manager chrome that the theme API doesn't reach.
+     Values mirror tokens.css (light). */
+
+  /* Sidebar group headings read like the app's eyebrow labels. */
+  #storybook-explorer-menu button[data-action="collapse-root"],
+  .sidebar-subheading {
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #999999; /* --v2-text-faint */
+  }
+
+  /* Brand title: app wordmark weight, ink color. */
+  .sidebar-header a {
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    color: #090909; /* --v2-ink */
+  }
+</style>
+<script>
+  // Storybook's stock cog glyph (@storybook/icons CogIcon) draws its inner
+  // ring as an open arc — at 14px it reads as a broken stroke. Keep the
+  // stock icon but close the ring: swap only that inner path's geometry
+  // for a clean donut (outer r=3, inner r=2, same center).
+  (function () {
+    var FIXED_RING =
+      "M7 4a3 3 0 1 0 0 6 3 3 0 0 0 0-6Zm0 1a2 2 0 1 1 0 4 2 2 0 0 1 0-4Z";
+    function closeCogRing() {
+      document
+        .querySelectorAll('path[d^="M5.586 5.586"]')
+        .forEach(function (path) {
+          path.setAttribute("d", FIXED_RING);
+          path.setAttribute("fill-rule", "evenodd");
+        });
+    }
+    closeCogRing();
+    new MutationObserver(closeCogRing).observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+    });
+  })();
+</script>

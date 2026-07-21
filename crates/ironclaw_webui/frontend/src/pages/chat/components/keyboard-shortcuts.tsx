@@ -1,5 +1,5 @@
 import { useT } from "../../../lib/i18n";
-import { Icon } from "../../../design-system/icons";
+import { Icon } from "@ironclaw/design-system";
 
 const SHORTCUTS = [
   { keys: ["Enter"], descKey: "shortcuts.send" },
@@ -26,13 +26,13 @@ export function KeyboardShortcuts({ open, onClose }) {
         className="absolute inset-0 bg-black/50"
       ></button>
       <div
-        className="relative w-full max-w-md rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] p-5 shadow-[0_30px_60px_-20px_rgba(0,0,0,0.8)]"
+        className="relative w-full max-w-md rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] p-5 shadow-[var(--v2-shadow-modal)]"
       >
         <div className="mb-4 flex items-center gap-2">
           <span className="grid h-8 w-8 place-items-center rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] text-[var(--v2-text-muted)]">
             <Icon name="bolt" className="h-4 w-4" />
           </span>
-          <h2 className="text-base font-semibold text-[var(--v2-text-strong)]">
+          <h2 className="text-base font-medium text-[var(--v2-text-strong)]">
             {t("shortcuts.title")}
           </h2>
           <button

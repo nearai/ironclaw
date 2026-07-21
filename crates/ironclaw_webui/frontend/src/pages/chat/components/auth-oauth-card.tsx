@@ -26,8 +26,8 @@
  */
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Button } from "../../../design-system/button";
-import { Icon } from "../../../design-system/icons";
+import { Button } from "@ironclaw/design-system";
+import { Icon } from "@ironclaw/design-system";
 import { openAuthPopup } from "../../../lib/product-auth-oauth-events";
 import { AuthGateShell } from "./auth-gate-shell";
 
@@ -182,7 +182,7 @@ export function AuthOauthCard({ gate, onCancel }) {
       {error &&
       (
         <div
-          className="mt-3 rounded-md border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200"
+          className="mt-3 rounded-md border border-[var(--v2-danger-text)]/20 bg-[var(--v2-danger-soft)] px-3 py-2 text-xs text-[var(--v2-danger-text)]"
           role="alert"
         >
           {error}
@@ -191,7 +191,7 @@ export function AuthOauthCard({ gate, onCancel }) {
       {closedNotice &&
       (
         <div
-          className="mt-3 rounded-md border border-amber-400/25 bg-amber-500/10 px-3 py-2 text-xs text-amber-200"
+          className="mt-3 rounded-md border border-[var(--v2-warning-text)]/25 bg-[var(--v2-warning-soft)] px-3 py-2 text-xs text-[var(--v2-warning-text)]"
           role="status"
         >
           The {providerLabel} authorization window closed before you finished

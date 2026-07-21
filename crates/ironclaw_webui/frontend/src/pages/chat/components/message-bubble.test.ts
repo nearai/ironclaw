@@ -24,9 +24,11 @@ vi.mock("./tool-activity", async () => {
   };
 });
 
-vi.mock("../../../design-system/icons", async () => {
+vi.mock("@ironclaw/design-system", async (importOriginal) => {
+  const actual = await importOriginal<object>();
   const { createElement } = await import("react");
   return {
+    ...actual,
     Icon: ({ name, className }) =>
       createElement("span", { className, "data-icon": name }),
   };
@@ -64,6 +66,15 @@ const messageBubbleSource = readFileSync(
 );
 const appCssSource = readFileSync(
   new URL("../../../styles/app.css", import.meta.url),
+  "utf8",
+);
+// --v2-* token definitions moved into the design-system package
+// (tokens.css); app.css keeps the component-level chat styling.
+const tokensCssSource = readFileSync(
+  new URL(
+    "../../../../packages/design-system/src/tokens.css",
+    import.meta.url,
+  ),
   "utf8",
 );
 
@@ -151,7 +162,7 @@ test("markdown body and code blocks inherit readable message sizing", () => {
 
 test("conversation bubbles use mobile-safe shared widths and wrap long user tokens", () => {
   assert.match(
-    appCssSource,
+    tokensCssSource,
     /--v2-chat-readable-max-width:\s*[^;]+;/,
     "chat readable width should be defined once as a CSS token",
   );

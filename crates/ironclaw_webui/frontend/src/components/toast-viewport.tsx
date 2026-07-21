@@ -5,7 +5,7 @@ import hotToast, {
   type Toast,
   type ToastType,
 } from "react-hot-toast";
-import { Icon } from "../design-system/icons";
+import { Icon } from "@ironclaw/design-system";
 import { useT } from "../lib/i18n";
 
 const INFO_TONE = "border-[var(--v2-panel-border)] text-[var(--v2-text)]";
@@ -42,7 +42,7 @@ export function ToastViewport() {
           {...item.ariaProps}
           data-testid="toast"
           className={[
-            "pointer-events-auto flex items-center gap-2 rounded-xl border bg-[var(--v2-surface)] px-3.5 py-2.5 text-sm shadow-[0_20px_40px_-20px_rgba(0,0,0,0.7)] transition-opacity",
+            "pointer-events-auto flex items-center gap-2 rounded-xl border bg-[var(--v2-surface)] px-3.5 py-2.5 text-sm shadow-[var(--v2-shadow-menu)] transition-opacity",
             item.visible ? "opacity-100" : "opacity-0",
             TONE[item.type],
           ].join(" ")}

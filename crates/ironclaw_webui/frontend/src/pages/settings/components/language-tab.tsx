@@ -1,4 +1,4 @@
-import { Card } from "../../../design-system/card";
+import { Card } from "@ironclaw/design-system";
 import { AVAILABLE_LANGUAGES, useI18n, useT } from "../../../lib/i18n";
 import { matchesSearch } from "../lib/settings-search";
 import { SettingsSearchEmpty } from "./settings-search-empty";
@@ -32,7 +32,7 @@ export function LanguageTab({ searchQuery = "" }) {
       <div className="mt-5 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-4">
         <div className="text-xs text-[var(--v2-text-muted)]">{t("lang.current")}</div>
         <div className="mt-1 flex items-baseline gap-2">
-          <span className="text-lg font-semibold text-[var(--v2-text-strong)]">{current.native}</span>
+          <span className="text-lg font-medium text-[var(--v2-text-strong)]">{current.native}</span>
           <span className="font-mono text-xs text-[var(--v2-text-faint)]">{current.name}</span>
         </div>
       </div>

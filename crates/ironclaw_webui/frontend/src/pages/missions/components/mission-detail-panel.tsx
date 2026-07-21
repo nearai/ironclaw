@@ -1,14 +1,14 @@
 import { useT } from "../../../lib/i18n";
-import { Button } from "../../../design-system/button";
-import { EmptyPanel, Panel, StatusPill } from "../../../design-system/primitives";
+import { Button } from "@ironclaw/design-system";
+import { EmptyPanel, Panel, StatusPill } from "@ironclaw/design-system";
 import { MarkdownRenderer } from "../../chat/components/markdown-renderer";
 import { formatMissionDate, missionTone } from "../lib/missions-presenters";
 
 function MetaCard({ label, value }) {
   return (
-    <div className="rounded-xl border border-white/8 bg-iron-950/60 p-3">
-      <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-iron-300">{label}</div>
-      <div className="mt-2 text-sm leading-6 text-white">{value}</div>
+    <div className="rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)]/60 p-3">
+      <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{label}</div>
+      <div className="mt-2 text-sm leading-6 text-[var(--v2-text-strong)]">{value}</div>
     </div>
   );
 }
@@ -70,13 +70,13 @@ export function MissionDetailPanel({
       <Panel className="p-4 sm:p-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
-            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("missions.dossier")}</div>
-            <h2 className="mt-2 text-2xl font-semibold tracking-tight text-white">{mission.name}</h2>
+            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{t("missions.dossier")}</div>
+            <h2 className="mt-2 text-2xl font-medium tracking-tight text-[var(--v2-text-strong)]">{mission.name}</h2>
             {mission.project && (
               <button
                 type="button"
                 onClick={() => onOpenProject(mission.project.id)}
-                className="mt-2 text-sm text-signal underline-offset-4 hover:underline"
+                className="mt-2 text-sm text-[var(--v2-accent-text)] underline-offset-4 hover:underline"
               >
                 {mission.project.name}
               </button>
@@ -104,16 +104,16 @@ export function MissionDetailPanel({
       </Panel>
 
       <Panel className="p-4 sm:p-5">
-        <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("missions.brief")}</div>
-        <div className="mt-4 text-sm leading-6 text-iron-200">
+        <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{t("missions.brief")}</div>
+        <div className="mt-4 text-sm leading-6 text-[var(--v2-text)]">
           <MarkdownRenderer content={mission.goal || t("missions.noGoal")} />
         </div>
       </Panel>
 
       {mission.current_focus && (
         <Panel className="p-4 sm:p-5">
-          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("missions.currentFocus")}</div>
-          <div className="mt-4 text-sm leading-6 text-iron-200">
+          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{t("missions.currentFocus")}</div>
+          <div className="mt-4 text-sm leading-6 text-[var(--v2-text)]">
             <MarkdownRenderer content={mission.current_focus} />
           </div>
         </Panel>
@@ -121,8 +121,8 @@ export function MissionDetailPanel({
 
       {mission.success_criteria && (
         <Panel className="p-4 sm:p-5">
-          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("missions.successCriteria")}</div>
-          <div className="mt-4 text-sm leading-6 text-iron-200">
+          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{t("missions.successCriteria")}</div>
+          <div className="mt-4 text-sm leading-6 text-[var(--v2-text)]">
             <MarkdownRenderer content={mission.success_criteria} />
           </div>
         </Panel>
@@ -130,17 +130,17 @@ export function MissionDetailPanel({
 
       {mission.threads?.length ? (
         <Panel className="p-4 sm:p-5">
-          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("missions.spawnedThreads")}</div>
+          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">{t("missions.spawnedThreads")}</div>
           <div className="mt-4 space-y-3">
             {mission.threads.map((thread) => (
               <button
                 key={thread.id}
                 type="button"
                 onClick={() => onOpenThread(thread)}
-                className="w-full rounded-xl border border-white/8 bg-iron-950/60 p-4 text-left hover:border-signal/30 hover:bg-white/[0.05]"
+                className="w-full rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)]/60 p-4 text-left hover:border-[var(--v2-accent)]/30 hover:bg-[var(--v2-surface-muted)]"
               >
                 <div className="flex items-center justify-between gap-3">
-                  <div className="min-w-0 truncate text-sm font-semibold text-white">{thread.title || thread.goal}</div>
+                  <div className="min-w-0 truncate text-sm font-medium text-[var(--v2-text-strong)]">{thread.title || thread.goal}</div>
                   <StatusPill tone={missionTone(thread.state === "Running" ? "Active" : thread.state === "Failed" ? "Failed" : "Completed")} label={thread.state} />
                 </div>
               </button>

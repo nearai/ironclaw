@@ -1,7 +1,7 @@
-import { Icon } from "../design-system/icons";
+import { Icon } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../lib/i18n";
-import { cn } from "../utils/cn";
+import { cn } from "@ironclaw/design-system";
 
 function profileName(profile) {
   return profile?.display_name || profile?.email || profile?.id || "IronClaw";
@@ -34,7 +34,7 @@ export function SidebarFooter({ theme, toggleTheme, profile, onSignOut }) {
       (
         <div
           className={cn(
-            "absolute bottom-full left-3 right-3 mb-2 rounded-[10px] border p-3 shadow-lg",
+            "absolute bottom-full left-3 right-3 mb-2 rounded-[10px] border p-3 shadow-[var(--v2-shadow-menu)]",
             "border-[var(--v2-panel-border)] bg-[var(--v2-surface)]"
           )}
         >
@@ -59,7 +59,7 @@ export function SidebarFooter({ theme, toggleTheme, profile, onSignOut }) {
         title={name}
       >
         <div
-          className="grid h-8 w-8 shrink-0 overflow-hidden rounded-full bg-[var(--v2-accent-soft)] text-[11px] font-bold text-[var(--v2-accent-text)]"
+          className="grid h-8 w-8 shrink-0 overflow-hidden rounded-full bg-[var(--v2-accent-soft)] text-[11px] font-semibold text-[var(--v2-accent-text)]"
         >
           {profile?.avatar_url
           ? (<img

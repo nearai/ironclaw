@@ -1,131 +1,47 @@
 @import "tailwindcss";
-@source "../";
+@import "@ironclaw/design-system/tokens.css";
 
-@theme {
-  --font-sans: "Geist", "Inter", "SF Pro Display", "Helvetica Neue",
-    ui-sans-serif, system-ui, sans-serif;
-  --font-serif: "Newsreader", "Lyon Text", "Instrument Serif", georgia, serif;
-  --font-mono: "Geist Mono", "SF Mono", "JetBrains Mono", ui-monospace,
-    monospace;
-  --color-iron-950: var(--v2-canvas-strong);
-  --color-iron-900: var(--v2-surface);
-  --color-iron-800: var(--v2-surface-soft);
-  --color-iron-700: var(--v2-panel-border);
-  --color-iron-400: var(--v2-text-faint);
-  --color-iron-300: var(--v2-text-muted);
-  --color-iron-200: var(--v2-text);
-  --color-iron-100: var(--v2-text-strong);
-  --color-signal: var(--v2-accent-text);
-  --color-copper: var(--v2-warning-text);
-  --color-mint: var(--v2-accent-text);
-}
+/* Tailwind class sources: the app tree plus the workspace design-system
+   package (its components carry their own Tailwind classes). */
+@source "../";
+@source "../../packages/design-system/src";
+
 
 /* ════════════════════════════════════════════════════════════════════
    app.css — design tokens + global resets only.
    All component-level visual styling lives in JS design-system files.
    ════════════════════════════════════════════════════════════════════ */
 
-/* ── Light theme ─────────────────────────────────────────────────── */
-:root {
-  color-scheme: light;
+/* ══ Token provenance ═════════════════════════════════════════════
+   Values are BACKFILLED from the design explorations, which are the
+   source of truth for the new aesthetic (they win over the legacy
+   webui styling wherever they disagree):
 
-  /* Canvas / surfaces */
-  --v2-canvas:        #f4f7fb;
-  --v2-canvas-strong: #ffffff;
-  --v2-surface:       #ffffff;
-  --v2-surface-soft:  #eef4fa;
-  --v2-surface-muted: #e4edf5;
+   1. `achal/nux` — gateway restyle (theme.css + surface CSS):
+      zinc-dark palette, brand-blue action ramp (ironclaw.com
+      parity), Geist Pixel Square tag language, layered shadow
+      scale, and the restrained motion system (durations + easings).
+   2. `private-assistant` `achal/chat-first` onboarding prototype:
+      corroborates the direction; where it disagrees with nux
+      (monochrome primary, shadcn radii) nux wins as the more
+      recent, IronClaw-branded treatment. See DESIGN_SYSTEM.md
+      "Provenance & reconciliation" for the decisions.
+   ═══════════════════════════════════════════════════════════════ */
 
-  /* Card tokens — used by Card component */
-  --v2-card-bg:     rgba(255, 255, 255, 0.92);
-  --v2-card-border: rgba(19, 45, 68, 0.12);
-  --v2-card-shadow: none;
-
-  /* Panel border (nav items, dividers, form borders) */
-  --v2-panel-border: rgba(19, 45, 68, 0.12);
-
-  /* Rail (input bg in dark) */
-  --v2-rail:    #edf3f8;
-  --v2-input-bg: #ffffff;
-
-  /* Typography */
-  --v2-text:        #243244;
-  --v2-text-strong: #0f1720;
-  --v2-text-muted:  #5f7183;
-  --v2-text-faint:  #8a9aab;
-  --v2-inverse:     #ffffff;
-  --v2-ink:         #0f1720;
-  --v2-chat-readable-max-width: 85%;
-
-  /* Controls */
-  --v2-select-chevron: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20width%3D%2712%27%20height%3D%2712%27%20viewBox%3D%270%200%2012%2012%27%20fill%3D%27none%27%20stroke%3D%27%235f7183%27%20stroke-width%3D%271.8%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27%3E%3Cpath%20d%3D%27M2.5%204.5%206%208l3.5-3.5%27/%3E%3C/svg%3E");
-
-  /* Accent — signal blue */
-  --v2-accent:       #2e9de2;
-  --v2-accent-strong:#1678bd;
-  --v2-accent-soft:  rgba(76, 167, 230, 0.12);
-  --v2-accent-text:  #10649e;
-
-  /* Semantic colours */
-  --v2-positive-soft: rgba(32, 210, 154, 0.13);
-  --v2-positive-text: #087a5d;
-  --v2-warning-soft:  rgba(245, 193, 91, 0.18);
-  --v2-warning-text:  #8b5b00;
-  --v2-danger-soft:   rgba(255, 100, 128, 0.12);
-  --v2-danger-text:   #b42342;
-  --v2-info-soft:     rgba(76, 167, 230, 0.12);
-  --v2-info-text:     #146fae;
-
-  background: var(--v2-canvas);
+/* ── Brand faces not covered by vendor.sh's Google Fonts pull ────── */
+/* Geist Pixel Square — the stylistic face for uppercase tags/labels
+   (nux tag language, ironclaw.com parity). The woff2 is vendored from
+   the achal/nux gateway; declared here (not fonts.css) because
+   vendor.sh regenerates fonts.css. */
+@font-face {
+  font-family: "Geist Pixel Square";
+  src: url("/v2/vendor/fonts/GeistPixel-Square.woff2") format("woff2");
+  font-weight: 500;
+  font-display: swap;
 }
 
-/* ── Dark theme ─────────────────────────────────────────────────── */
-:root[data-theme="dark"] {
-  color-scheme: dark;
 
-  --v2-canvas:        var(--bg-canvas, #111114);
-  --v2-canvas-strong: #0d0d10;
-  --v2-surface:       var(--bg-surface, #1b1b1f);
-  --v2-surface-soft:  var(--bg-surface-subtle, rgba(255, 255, 255, 0.03));
-  --v2-surface-muted: rgba(255, 255, 255, 0.07);
 
-  /* Card tokens in dark: transparent border + drop shadow */
-  --v2-card-bg:     #1b1b1f;
-  --v2-card-border: rgba(255, 255, 255, 0);
-  --v2-card-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
-
-  --v2-panel-border: rgba(255, 255, 255, 0.1);
-
-  --v2-rail:     #151519;
-  --v2-input-bg: #151519;
-
-  --v2-text:        rgba(255, 255, 255, 0.82);
-  --v2-text-strong: var(--text-primary, #ffffff);
-  --v2-text-muted:  var(--text-secondary, rgba(255, 255, 255, 0.6));
-  --v2-text-faint:  var(--text-tertiary, rgba(255, 255, 255, 0.45));
-  --v2-inverse:     var(--text-inverse, #111111);
-  --v2-ink:         var(--accent-primary, #4ca7e6);
-
-  --v2-select-chevron: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20width%3D%2712%27%20height%3D%2712%27%20viewBox%3D%270%200%2012%2012%27%20fill%3D%27none%27%20stroke%3D%27%23ffffff%27%20stroke-opacity%3D%270.55%27%20stroke-width%3D%271.8%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27%3E%3Cpath%20d%3D%27M2.5%204.5%206%208l3.5-3.5%27/%3E%3C/svg%3E");
-
-  --v2-accent:        var(--accent-primary,        #4ca7e6);
-  --v2-accent-strong: var(--accent-primary-strong, #2882c8);
-  --v2-accent-soft:   rgba(76, 167, 230, 0.14);
-  --v2-accent-text:   var(--text-brand,            #8fc8f2);
-
-  --v2-positive-soft: rgba(32, 210, 154, 0.13);
-  --v2-positive-text: var(--text-positive, #20d29a);
-  --v2-warning-soft:  rgba(245, 193, 91, 0.14);
-  --v2-warning-text:  var(--accent-warning, #f5c15b);
-  --v2-danger-soft:   rgba(255, 100, 128, 0.13);
-  --v2-danger-text:   var(--text-danger, #ff6480);
-  --v2-info-soft:     rgba(76, 167, 230, 0.14);
-  --v2-info-text:     var(--accent-primary-soft, #8fc8f2);
-}
-
-:root[data-theme="light"] {
-  color-scheme: light;
-}
 
 /* ── Global resets ───────────────────────────────────────────────── */
 
@@ -151,9 +67,16 @@ body {
   color: var(--v2-text);
 }
 
-/* Font inheritance for form elements */
-button, input, select, textarea {
-  font: inherit;
+/* Font inheritance for form elements.
+   IMPORTANT: layered as `base` — unlayered author CSS outranks every
+   Tailwind layer (v4 emits utilities inside @layer utilities), so an
+   unlayered `font: inherit` here silently vetoed the design-system
+   font-size/weight utilities on <button>/<input> (buttons rendered at
+   the inherited 15px/400 instead of their tokenized control scale). */
+@layer base {
+  button, input, select, textarea {
+    font: inherit;
+  }
 }
 
 button {
@@ -185,13 +108,6 @@ input:focus, select:focus, textarea:focus {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--v2-accent) 28%, transparent);
 }
 
-/* ── Animation keyframes ─────────────────────────────────────────── */
-
-@keyframes v2-breathe {
-  0%, 100% { opacity: 1; }
-  50%       { opacity: 0.35; }
-}
-
 /* ── Scrollbars ──────────────────────────────────────────────────── */
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }
@@ -217,8 +133,12 @@ input:focus, select:focus, textarea:focus {
 .text-iron-400,
 .text-iron-700                         { color: var(--v2-text-muted) !important; }
 
-.text-signal, .text-mint,
+.text-signal,
 [class~="hover:text-signal"]:hover     { color: var(--v2-accent-text) !important; }
+/* mint = success green (see STATUS_CANON). Previously mis-aliased to
+   the blue accent alongside `signal`, which rendered success/connected
+   states in blue. */
+.text-mint                             { color: var(--v2-positive-text) !important; }
 .text-copper                           { color: var(--v2-warning-text) !important; }
 .text-red-200, .text-red-300,
 [class~="hover:text-red-200"]:hover    { color: var(--v2-danger-text) !important; }
@@ -240,7 +160,8 @@ input:focus, select:focus, textarea:focus {
 }
 
 [class~="bg-signal"],[class~="bg-signal/60"] {
-  background-color: var(--v2-accent) !important; color: #ffffff !important;
+  background-color: var(--v2-accent) !important;
+  color: var(--v2-on-accent) !important;
 }
 [class~="bg-signal/10"],[class~="bg-signal/12"],[class~="bg-signal/15"],
 [class~="hover:bg-signal/10"]:hover,[class~="hover:bg-signal/15"]:hover {
@@ -298,8 +219,8 @@ input:focus, select:focus, textarea:focus {
     color-mix(in srgb, var(--v2-surface-muted) 64%, var(--v2-accent-soft)),
     var(--v2-surface-muted)
   );
-  animation: none;
-  border-radius: 6px;
+  animation: v2-skeleton-shimmer 1.6s var(--v2-ease-in-out) infinite;
+  border-radius: var(--v2-radius-xs);
 }
 
 @keyframes v2-skeleton-shimmer {
@@ -348,7 +269,7 @@ input:focus, select:focus, textarea:focus {
 
 /* Page-level animation wrapper */
 .v2-page-entrance {
-  animation: none;
+  animation: v2-page-in var(--v2-duration-base) var(--v2-ease-out-expo);
 }
 @keyframes v2-page-in {
   from { opacity: 0; transform: translateY(6px); }
@@ -357,44 +278,40 @@ input:focus, select:focus, textarea:focus {
 
 /* Breathing dot indicator */
 .v2-breathing-dot {
-  animation: none;
+  animation: v2-breathe var(--v2-duration-breathe) var(--v2-ease-in-out) infinite;
 }
 
 /* ── Motion policy ───────────────────────────────────────────────── */
-/* The v2 UI is intended to be fully static: no CSS transitions/animations. */
-*, *::before, *::after {
-  animation: none !important;
-  transition: none !important;
-}
+/* Backfilled from the nux exploration: motion is purposeful and
+   restrained, not decorative. Rules:
+   - Every duration/easing comes from the --v2-duration-* /
+     --v2-ease-* tokens — no raw ms values or ad-hoc cubic-beziers.
+   - Hover/focus feedback: instant/fast + ease. Surface entrances
+     (panels, sheets): base + ease-out-expo. Springs are reserved
+     for small playful pops (badges, chips), never layout.
+   - Ambient loops are limited to work indicators: typing dots,
+     spinner, breathe, skeleton shimmer.
+   - Everything is suppressed under prefers-reduced-motion below. */
 
-/* The typing indicator is the single intentional exception: the three dots
-   loop to signal the assistant is working. The class selector outranks the
-   universal `*` rule above (both !important), so the animation survives.
-   Suppressed again under prefers-reduced-motion to respect that opt-out. */
 @keyframes v2-typing-bounce {
   0%, 80%, 100% { transform: translateY(0);    opacity: 0.45; }
   40%           { transform: translateY(-4px); opacity: 1; }
 }
 .v2-typing-dot {
-  animation: v2-typing-bounce 1.4s ease-in-out infinite !important;
+  animation: v2-typing-bounce var(--v2-duration-typing) var(--v2-ease-standard) infinite;
 }
-.v2-typing-dot:nth-child(2) { animation-delay: 0.15s !important; }
-.v2-typing-dot:nth-child(3) { animation-delay: 0.3s  !important; }
-
-/* Refresh / in-flight spinner. Like the typing dots, this is an intentional
-   exception to the static-motion policy above: the class selector + !important
-   outranks the universal `animation: none` rule so a loading control can spin.
-   Suppressed under prefers-reduced-motion. */
-@keyframes v2-spin {
-  to { transform: rotate(360deg); }
-}
-.v2-spin {
-  animation: v2-spin 0.8s linear infinite !important;
-}
+.v2-typing-dot:nth-child(2) { animation-delay: 0.15s; }
+.v2-typing-dot:nth-child(3) { animation-delay: 0.3s; }
 
 @media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+  /* Redundant with the blanket rule above, but kept explicit: the typing
+     dot is the one intentional ambient loop, and webui_v2_serve.rs guards
+     this exact opt-out (static_typing_dot_animation_respects_reduced_motion). */
   .v2-typing-dot { animation: none !important; }
-  .v2-spin { animation: none !important; }
 }
 
 /* ── Markdown body ───────────────────────────────────────────────── */
@@ -405,16 +322,19 @@ input:focus, select:focus, textarea:focus {
   overflow-wrap: anywhere;
 }
 .markdown-body h1,.markdown-body h2,.markdown-body h3,.markdown-body h4 {
-  margin-top: 1em; margin-bottom: 0.5em; font-weight: 600;
+  margin-top: 1em; margin-bottom: 0.5em; font-weight: 500;
   color: var(--v2-text-strong);
 }
+/* Weight ceiling is semibold: browser-default bold on strong/b reads
+   too heavy in Geist. */
+.markdown-body strong,.markdown-body b { font-weight: 600; }
 .markdown-body                { font-size: 1em; line-height: 1.7; }
 .markdown-body p              { margin-bottom: 0.8em; line-height: inherit; }
 .markdown-body ul,.markdown-body ol { margin-bottom: 0.75em; padding-left: 1.5em; }
 .markdown-body li             { margin-bottom: 0.25em; }
 .markdown-body code {
   font-family: "Geist Mono","SF Mono","JetBrains Mono",ui-monospace,monospace;
-  font-size: 0.9em; background: var(--v2-surface-muted);
+  font-size: 0.9em; background: var(--v2-code-bg);
   padding: 0.15em 0.4em; border-radius: 4px;
   overflow-wrap: anywhere;
 }
@@ -426,7 +346,7 @@ input:focus, select:focus, textarea:focus {
   overflow: hidden;
 }
 .markdown-body pre {
-  background: var(--v2-surface-soft); border: 1px solid var(--v2-panel-border);
+  background: var(--v2-code-bg); border: 1px solid var(--v2-panel-border);
   border-radius: 8px; box-sizing: border-box; width: 100%; max-width: 100%;
   min-width: 0; padding: 0.75em 1em;
   overflow-x: auto; white-space: pre; margin-bottom: 0.75em;
@@ -453,7 +373,7 @@ input:focus, select:focus, textarea:focus {
   border: 1px solid var(--v2-panel-border); padding: 0.4em 0.6em; text-align: left;
   overflow-wrap: anywhere;
 }
-.markdown-body th { background: var(--v2-surface-soft); font-weight: 600; }
+.markdown-body th { background: var(--v2-surface-soft); font-weight: 500; }
 .markdown-body hr { border: 0; border-top: 1px solid var(--v2-panel-border); margin: 1em 0; }
 .markdown-body pre code { color: var(--v2-text); }
 .markdown-body pre code.hljs {

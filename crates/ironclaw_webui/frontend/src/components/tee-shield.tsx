@@ -1,8 +1,8 @@
-import { Button } from "../design-system/button";
-import { Icon } from "../design-system/icons";
+import { Button } from "@ironclaw/design-system";
+import { Icon } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../lib/i18n";
-import { cn } from "../utils/cn";
+import { cn } from "@ironclaw/design-system";
 import { useTeeAttestation } from "../hooks/useTeeAttestation";
 
 const SUMMARY_FIELDS = [
@@ -56,7 +56,7 @@ export function TeeShield() {
           className={cn(
             "absolute right-0 top-full z-40 mt-2 w-[min(22rem,calc(100vw-2rem))]",
             "rounded-[14px] border border-[var(--v2-panel-border)]",
-            "bg-[var(--v2-surface)] p-3 shadow-[0_18px_48px_rgba(0,0,0,0.35)]"
+            "bg-[var(--v2-surface)] p-3 shadow-[var(--v2-shadow-menu)]"
           )}
         >
           <div className="flex items-center gap-2">
@@ -64,7 +64,7 @@ export function TeeShield() {
               <Icon name="shield" className="h-4 w-4" />
             </span>
             <div className="min-w-0">
-              <div className="text-sm font-semibold text-[var(--v2-text-strong)]">
+              <div className="text-sm font-medium text-[var(--v2-text-strong)]">
                 {t("tee.title")}
               </div>
               <div className="text-xs text-[var(--v2-text-muted)]">
@@ -77,7 +77,7 @@ export function TeeShield() {
             {rows.map(
               (row) => (
                 <div key={row.label} className="rounded-[10px] bg-[var(--v2-surface-soft)] px-3 py-2">
-                  <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--v2-text-faint)]">
+                  <div className="text-[10px] font-medium uppercase tracking-[0.12em] text-[var(--v2-text-faint)]">
                     {row.label}
                   </div>
                   <div className="mt-1 break-all font-mono text-[11px] text-[var(--v2-text)]">

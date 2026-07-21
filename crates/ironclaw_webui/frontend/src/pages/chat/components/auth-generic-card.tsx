@@ -5,7 +5,7 @@
  * step must be completed elsewhere and offers a cancel action.
  */
 import { useT } from "../../../lib/i18n";
-import { Button } from "../../../design-system/button";
+import { Button } from "@ironclaw/design-system";
 import { AuthGateShell } from "./auth-gate-shell";
 
 export function AuthGenericCard({ gate, onCancel }) {
@@ -19,7 +19,7 @@ export function AuthGenericCard({ gate, onCancel }) {
       challengeKind="other"
     >
       <form onSubmit={(event) => event.preventDefault()}>
-        <div className="mb-3 text-sm text-iron-200">
+        <div className="mb-3 text-sm text-[var(--v2-text)]">
           {t("authGate.unsupportedChallenge")}
         </div>
         <div className="flex flex-wrap gap-2">

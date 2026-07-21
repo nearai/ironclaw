@@ -1,0 +1,56 @@
+/* Storybook preview-iframe stylesheet.
+   Mirrors the minimal host-shell setup a consumer performs: Tailwind,
+   the package tokens, and (for the theme toggle) the soft exploration
+   theme. Class sources cover the package src and the stories. */
+@import "tailwindcss";
+@import "../src/tokens.css";
+@import "../src/themes/soft.css";
+
+@source "../src";
+@source "../stories";
+
+body {
+  margin: 0;
+  background: var(--v2-canvas);
+  color: var(--v2-text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Docs pages render stories inside a white docs shell; keep each story
+   block on the token canvas so both themes read correctly. */
+.docs-story {
+  background: var(--v2-canvas);
+}
+
+/* Docs shell typography: Storybook pins its own stack (Nunito Sans) on
+   docs prose, overriding the body font — force the brand stack. Scoped
+   to prose/table elements so story canvases (.docs-story) keep their
+   component-level font choices (e.g. the pixel tag face). */
+.sbdocs :is(h1, h2, h3, h4, h5, h6, p, li, td, th) {
+  font-family: var(--font-sans) !important;
+}
+.sbdocs :is(code, pre) {
+  font-family: var(--font-mono) !important;
+}
+
+/* Tailwind preflight strips list markers; restore them for docs prose. */
+.sbdocs ul:not([class]) {
+  list-style: disc;
+  padding-left: 1.25em;
+}
+.sbdocs ol:not([class]) {
+  list-style: decimal;
+  padding-left: 1.25em;
+}
+
+/* Weight ceiling is semibold (600): Storybook's docs typography defaults
+   to bold+ headings, which reads too heavy in Geist. Titles/headings drop
+   to 600, everything Storybook sets to 600 reads as medium. */
+.sbdocs :is(h1, h2, strong, b) {
+  font-weight: 600 !important;
+}
+.sbdocs :is(h3, h4, h5, h6) {
+  font-weight: 500 !important;
+}

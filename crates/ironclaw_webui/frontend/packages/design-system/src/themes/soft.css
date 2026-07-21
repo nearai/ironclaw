@@ -1,0 +1,98 @@
+/* ════════════════════════════════════════════════════════════════════
+   soft.css — EXPLORATION theme, not a shipped default.
+
+   The "softer tone" direction from the Jul 17 product design review:
+   marketing is aligning on a softer, more human voice (Claude /
+   littlebird-style reference points) and this theme lets stakeholders
+   see the entire component set under that treatment via the Storybook
+   theme toggle (light / dark / soft).
+
+   Token overrides only — no component changes. The exploration keeps
+   IronClaw's structure (control scale, spacing, type sizes) and swaps:
+   - neutrals: cool zinc → warm paper/cream ramp
+   - ink: blue-black → warm espresso
+   - accent: signal blue stays the action color but shifts one step
+     warmer/muted (less "tech dominant", still unmistakably IronClaw)
+   - radii: one step rounder across the scale
+   - shadows: lower contrast, larger diffusion — surfaces "rest" rather
+     than "float"
+   Activate with data-theme="soft" on <html>.
+   ════════════════════════════════════════════════════════════════════ */
+
+:root[data-theme="soft"] {
+  color-scheme: light;
+
+  /* Canvas / surfaces — warm paper instead of cool grey */
+  --v2-canvas:        #faf9f5;
+  --v2-canvas-strong: #fffefb;
+  --v2-surface:       #fffefb;
+  --v2-surface-soft:  #f4f2ec;
+  --v2-surface-muted: #eceade;
+
+  --v2-card-bg:     #fffefb;
+  --v2-card-border: rgba(63, 56, 44, 0.1);
+  --v2-card-shadow: 0 1px 2px rgba(63, 56, 44, 0.05);
+
+  --v2-shadow-menu:  0 6px 18px rgba(63, 56, 44, 0.09), 0 1px 2px rgba(63, 56, 44, 0.04);
+  --v2-shadow-modal: 0 20px 48px -12px rgba(63, 56, 44, 0.14), 0 2px 8px rgba(63, 56, 44, 0.05);
+
+  --v2-panel-border: rgba(63, 56, 44, 0.11);
+
+  --v2-rail:     #f4f2ec;
+  --v2-input-bg: #fffefb;
+  --v2-code-bg:  #f1efe7;
+
+  --v2-shadow-sm: 0 1px 2px rgba(63, 56, 44, 0.05), 0 1px 3px rgba(63, 56, 44, 0.03);
+  --v2-shadow-md: 0 5px 14px rgba(63, 56, 44, 0.07), 0 2px 4px rgba(63, 56, 44, 0.03);
+  --v2-shadow-lg: 0 25px 50px -12px rgba(63, 56, 44, 0.09);
+
+  --v2-glass-bg:   rgba(255, 254, 251, 0.85);
+
+  /* Typography — warm espresso ink */
+  --v2-text:        #33302a;
+  --v2-text-strong: #201d18;
+  --v2-text-muted:  #6b6558;
+  --v2-text-faint:  #a39d8e;
+  --v2-inverse:     #fffefb;
+  --v2-ink:         #201d18;
+
+  /* Accent — the brand blue, one step warmer and less saturated.
+     Still blue (this is IronClaw), but it reads calmer on paper. */
+  --v2-accent:        #3d7fb4;
+  --v2-accent-strong: #326897;
+  --v2-accent-soft:   rgba(61, 127, 180, 0.1);
+  --v2-accent-text:   #35719f;
+
+  /* Semantic status — desaturated a step to sit on the warm field */
+  --v2-positive-soft: rgba(22, 133, 96, 0.1);
+  --v2-positive-text: #168560;
+  --v2-warning-soft:  rgba(190, 116, 30, 0.12);
+  --v2-warning-text:  #b06c1c;
+  --v2-danger-soft:   rgba(191, 61, 48, 0.1);
+  --v2-danger-text:   #bf3d30;
+  --v2-info-soft:     rgba(58, 106, 191, 0.1);
+  --v2-info-text:     #3a6abf;
+
+  /* Radii — one step rounder (softer silhouette, same scale shape) */
+  --v2-radius-xs:   8px;
+  --v2-radius-sm:   10px;
+  --v2-radius-md:   12px;
+  --v2-radius-lg:   18px;
+  --v2-radius-xl:   22px;
+  --v2-radius-2xl:  26px;
+
+  /* Action ramp — flattened: soft solid instead of the radial gradient */
+  --v2-btn-primary-bg:
+    radial-gradient(ellipse 100% 100% at 50% 130%, #4d90c4 0%, #3d7fb4 65%);
+  --v2-btn-primary-bg-hover:
+    radial-gradient(ellipse 200% 220% at 50% 110%, #5b9ecf 0%, #3d7fb4 60%);
+  --v2-btn-primary-border: rgba(61, 127, 180, 0.6);
+  --v2-btn-secondary-border: rgba(61, 127, 180, 0.45);
+  --v2-btn-secondary-bg: rgba(61, 127, 180, 0.05);
+  --v2-shadow-accent-hover: 0 24px 24px -20px rgba(61, 127, 180, 0.4);
+
+  --v2-scrim:      rgba(32, 29, 24, 0.45);
+  --v2-scrim-soft: rgba(32, 29, 24, 0.25);
+
+  background: var(--v2-canvas);
+}

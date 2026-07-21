@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { useNavigate, useParams } from "react-router";
-import { Button } from "../../design-system/button";
-import { EmptyPanel } from "../../design-system/primitives";
+import { Button } from "@ironclaw/design-system";
+import { EmptyPanel } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../../lib/i18n";
 import { JobActivityTab } from "./components/job-activity-tab";
@@ -19,9 +19,12 @@ function FeedbackBanner({ result, onDismiss }) {
   if (!result) return null;
 
   const tone = {
-    success: "border-mint/30 bg-mint/10 text-mint",
-    error: "border-red-400/30 bg-red-500/10 text-red-200",
-    info: "border-signal/30 bg-signal/10 text-signal",
+    success:
+      "border-[color-mix(in_srgb,var(--v2-positive-text)_30%,var(--v2-panel-border))] bg-[var(--v2-positive-soft)] text-[var(--v2-positive-text)]",
+    error:
+      "border-[color-mix(in_srgb,var(--v2-danger-text)_34%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] text-[var(--v2-danger-text)]",
+    info:
+      "border-[color-mix(in_srgb,var(--v2-accent-text)_30%,var(--v2-panel-border))] bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]",
   };
 
   return (
@@ -215,7 +218,7 @@ export function JobsPage() {
           {jobsState.error &&
           (
             <div
-              className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
+              className="rounded-xl border border-[color-mix(in_srgb,var(--v2-danger-text)_34%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-4 py-3 text-sm text-[var(--v2-danger-text)]"
             >
               {jobsState.error.message}
             </div>

@@ -1,7 +1,7 @@
 // @ts-nocheck
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Panel, StatCard } from "../../../design-system/primitives";
+import { Panel, StatCard } from "@ironclaw/design-system";
 import { useUsage } from "../hooks/useAdminUsage";
 import {
   formatCost,
@@ -21,9 +21,9 @@ const PERIODS = [
 function UsageBar({ value, max }) {
   const pct = max > 0 ? (value / max) * 100 : 0;
   return (
-    <div className="h-2 w-full overflow-hidden rounded-full bg-white/[0.06]">
+    <div className="h-2 w-full overflow-hidden rounded-full bg-[var(--v2-surface-soft)]">
       <div
-        className="h-full rounded-full bg-signal/50"
+        className="h-full rounded-full bg-[color-mix(in_srgb,var(--v2-accent)_50%,transparent)]"
         style={{ width: `${Math.max(pct, 1)}%` }}
       />
     </div>
@@ -56,7 +56,7 @@ export function UsageTab({ onSelectUser }) {
     <div className="space-y-5">
       <Panel className="p-5 sm:p-6">
         <div className="mb-5 flex items-center justify-between">
-          <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.usage.overview")}</h3>
+          <h3 className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">{t("admin.usage.overview")}</h3>
           <div className="flex gap-1">
             {PERIODS.map(
               (p) => (
@@ -66,8 +66,8 @@ export function UsageTab({ onSelectUser }) {
                   className={[
                     "rounded-md px-3 py-1.5 text-[11px] font-medium",
                     period === p.value
-                      ? "border border-signal/35 bg-signal/10 text-white"
-                      : "border border-transparent text-iron-300 hover:text-white",
+                      ? "border border-[color-mix(in_srgb,var(--v2-accent)_35%,transparent)] bg-[var(--v2-accent-soft)] text-[var(--v2-text-strong)]"
+                      : "border border-transparent text-[var(--v2-text-muted)] hover:text-[var(--v2-text-strong)]",
                   ].join(" ")}
                 >
                   {p.label}
@@ -78,7 +78,7 @@ export function UsageTab({ onSelectUser }) {
         </div>
 
         {entries.length === 0
-          ? (<p className="py-4 text-sm text-iron-300">{t("admin.usage.noData")}</p>)
+          ? (<p className="py-4 text-sm text-[var(--v2-text-muted)]">{t("admin.usage.noData")}</p>)
           : (
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                 <StatCard label={t("admin.usage.totalCalls")} value={totals.calls.toLocaleString()} tone="muted" />
@@ -91,35 +91,35 @@ export function UsageTab({ onSelectUser }) {
 
       {byUser.length > 0 && (
         <Panel className="p-5 sm:p-6">
-          <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.usage.perUser")}</h3>
+          <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">{t("admin.usage.perUser")}</h3>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b border-white/10 text-left">
-                  <th className="pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300">{t("admin.usage.user")}</th>
-                  <th className="pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300">{t("admin.usage.calls")}</th>
-                  <th className="hidden pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300 sm:table-cell">{t("admin.usage.input")}</th>
-                  <th className="hidden pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300 sm:table-cell">{t("admin.usage.output")}</th>
-                  <th className="pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300">{t("admin.usage.cost")}</th>
-                  <th className="hidden pb-3 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300 md:table-cell" />
+                <tr className="border-b border-[var(--v2-panel-border)] text-left">
+                  <th className="pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">{t("admin.usage.user")}</th>
+                  <th className="pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">{t("admin.usage.calls")}</th>
+                  <th className="hidden pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)] sm:table-cell">{t("admin.usage.input")}</th>
+                  <th className="hidden pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)] sm:table-cell">{t("admin.usage.output")}</th>
+                  <th className="pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">{t("admin.usage.cost")}</th>
+                  <th className="hidden pb-3 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)] md:table-cell" />
                 </tr>
               </thead>
               <tbody>
                 {byUser.map(
                   (u) => (
-                    <tr key={u.user_id} className="border-b border-white/[0.06] last:border-0">
+                    <tr key={u.user_id} className="border-b border-[var(--v2-panel-border)] last:border-0">
                       <td className="py-3 pr-4">
                         <button
                           onClick={() => onSelectUser(u.user_id)}
-                          className="font-mono text-xs text-signal hover:underline"
+                          className="font-mono text-xs text-[var(--v2-accent-text)] hover:underline"
                         >
                           {truncateId(u.user_id)}
                         </button>
                       </td>
-                      <td className="py-3 pr-4 font-mono text-xs text-iron-300">{u.calls.toLocaleString()}</td>
-                      <td className="hidden py-3 pr-4 font-mono text-xs text-iron-300 sm:table-cell">{formatTokenCount(u.input_tokens)}</td>
-                      <td className="hidden py-3 pr-4 font-mono text-xs text-iron-300 sm:table-cell">{formatTokenCount(u.output_tokens)}</td>
-                      <td className="py-3 pr-4 font-mono text-xs text-iron-100">{formatCost(u.cost.toFixed(2))}</td>
+                      <td className="py-3 pr-4 font-mono text-xs text-[var(--v2-text-muted)]">{u.calls.toLocaleString()}</td>
+                      <td className="hidden py-3 pr-4 font-mono text-xs text-[var(--v2-text-muted)] sm:table-cell">{formatTokenCount(u.input_tokens)}</td>
+                      <td className="hidden py-3 pr-4 font-mono text-xs text-[var(--v2-text-muted)] sm:table-cell">{formatTokenCount(u.output_tokens)}</td>
+                      <td className="py-3 pr-4 font-mono text-xs text-[var(--v2-text-strong)]">{formatCost(u.cost.toFixed(2))}</td>
                       <td className="hidden py-3 md:table-cell">
                         <UsageBar value={u.cost} max={maxCost} />
                       </td>
@@ -134,27 +134,27 @@ export function UsageTab({ onSelectUser }) {
 
       {byModel.length > 0 && (
         <Panel className="p-5 sm:p-6">
-          <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.usage.perModel")}</h3>
+          <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]">{t("admin.usage.perModel")}</h3>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b border-white/10 text-left">
-                  <th className="pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300">{t("admin.usage.model")}</th>
-                  <th className="pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300">{t("admin.usage.calls")}</th>
-                  <th className="hidden pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300 sm:table-cell">{t("admin.usage.input")}</th>
-                  <th className="hidden pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300 sm:table-cell">{t("admin.usage.output")}</th>
-                  <th className="pb-3 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300">{t("admin.usage.cost")}</th>
+                <tr className="border-b border-[var(--v2-panel-border)] text-left">
+                  <th className="pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">{t("admin.usage.model")}</th>
+                  <th className="pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">{t("admin.usage.calls")}</th>
+                  <th className="hidden pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)] sm:table-cell">{t("admin.usage.input")}</th>
+                  <th className="hidden pb-3 pr-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)] sm:table-cell">{t("admin.usage.output")}</th>
+                  <th className="pb-3 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">{t("admin.usage.cost")}</th>
                 </tr>
               </thead>
               <tbody>
                 {byModel.map(
                   (m) => (
-                    <tr key={m.model} className="border-b border-white/[0.06] last:border-0">
-                      <td className="py-3 pr-4 font-mono text-xs text-iron-100">{m.model}</td>
-                      <td className="py-3 pr-4 font-mono text-xs text-iron-300">{m.calls.toLocaleString()}</td>
-                      <td className="hidden py-3 pr-4 font-mono text-xs text-iron-300 sm:table-cell">{formatTokenCount(m.input_tokens)}</td>
-                      <td className="hidden py-3 pr-4 font-mono text-xs text-iron-300 sm:table-cell">{formatTokenCount(m.output_tokens)}</td>
-                      <td className="py-3 font-mono text-xs text-iron-100">{formatCost(m.cost.toFixed(2))}</td>
+                    <tr key={m.model} className="border-b border-[var(--v2-panel-border)] last:border-0">
+                      <td className="py-3 pr-4 font-mono text-xs text-[var(--v2-text-strong)]">{m.model}</td>
+                      <td className="py-3 pr-4 font-mono text-xs text-[var(--v2-text-muted)]">{m.calls.toLocaleString()}</td>
+                      <td className="hidden py-3 pr-4 font-mono text-xs text-[var(--v2-text-muted)] sm:table-cell">{formatTokenCount(m.input_tokens)}</td>
+                      <td className="hidden py-3 pr-4 font-mono text-xs text-[var(--v2-text-muted)] sm:table-cell">{formatTokenCount(m.output_tokens)}</td>
+                      <td className="py-3 font-mono text-xs text-[var(--v2-text-strong)]">{formatCost(m.cost.toFixed(2))}</td>
                     </tr>
                   )
                 )}

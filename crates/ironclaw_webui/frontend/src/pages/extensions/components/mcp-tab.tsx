@@ -18,8 +18,8 @@ export function McpTab({
   if (mcpServers.length === 0 && mcpRegistry.length === 0) {
     return (
       <div className="v2-panel rounded-[18px] p-6 sm:p-8">
-        <h3 className="text-lg font-semibold text-white">{t("extensions.emptyMcpTitle")}</h3>
-        <p className="mt-2 max-w-md text-sm leading-6 text-iron-300">
+        <h3 className="text-lg font-medium text-[var(--v2-text-strong)]">{t("extensions.emptyMcpTitle")}</h3>
+        <p className="mt-2 max-w-md text-sm leading-6 text-[var(--v2-text-muted)]">
           {t("extensions.emptyMcpDesc")}
         </p>
       </div>
@@ -32,7 +32,7 @@ export function McpTab({
       (
         <div className="v2-panel rounded-[18px] p-5 sm:p-6">
           <h3
-            className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
+            className="mb-4 font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-accent-text)]"
           >
             {t("mcp.installed")}
           </h3>
@@ -56,7 +56,7 @@ export function McpTab({
       (
         <div className="v2-panel rounded-[18px] p-5 sm:p-6">
           <h3
-            className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal"
+            className="mb-4 font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-accent-text)]"
           >
             {t("mcp.available")}
           </h3>

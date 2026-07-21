@@ -1,7 +1,7 @@
 import { NavLink } from "react-router";
 import React from "react";
-import { Icon } from "../design-system/icons";
-import { ConfirmDialog } from "../design-system/confirm-dialog";
+import { Icon } from "@ironclaw/design-system";
+import { ConfirmDialog } from "@ironclaw/design-system";
 import { useT } from "../lib/i18n";
 import { getPinnedIds, subscribePins, togglePin } from "../lib/pin-store";
 import { deleteThreadErrorMessage } from "../lib/thread-errors";
@@ -21,7 +21,7 @@ import {
   threadActivityIso,
 } from "../lib/thread-meta";
 import { displaySidebarTitle } from "../lib/thread-title";
-import { cn } from "../utils/cn";
+import { cn } from "@ironclaw/design-system";
 
 /* Single source of truth for how a thread state renders in the sidebar.
  *
@@ -202,7 +202,7 @@ function ThreadGroup({ label, items, activeThreadId, states, pinnedIds, onSelect
   if (items.length === 0) return null;
   return (
     <div className="flex flex-col gap-1">
-      <span className="px-3 pt-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--v2-text-faint)]">
+      <span className="px-3 pt-1 text-[10px] font-medium uppercase tracking-wider text-[var(--v2-text-faint)]">
         {label}
       </span>
       {items.map(
@@ -282,7 +282,7 @@ export function SidebarThreads({
         className="flex w-full items-center gap-1 rounded-[6px] px-2 py-1.5 hover:bg-[var(--v2-surface-muted)]"
       >
         <span
-          className="flex-1 text-left text-[11px] font-semibold uppercase tracking-wider text-[var(--v2-text-faint)]"
+          className="flex-1 text-left text-[11px] font-medium uppercase tracking-wider text-[var(--v2-text-faint)]"
         >
           {t("chat.conversations")}
         </span>

@@ -1,7 +1,7 @@
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Button } from "../../../design-system/button";
-import { EmptyPanel, Panel } from "../../../design-system/primitives";
+import { Button } from "@ironclaw/design-system";
+import { EmptyPanel, Panel } from "@ironclaw/design-system";
 import { formatJobDate } from "../lib/jobs-presenters";
 
 const FILTERS = [
@@ -27,28 +27,28 @@ function EventCard({ event }) {
 
   if (type === "tool_use" || type === "tool_result") {
     return (
-      <details className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3">
-        <summary className="cursor-pointer list-none text-sm font-semibold text-white">
+      <details className="rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3">
+        <summary className="cursor-pointer list-none text-sm font-medium text-[var(--v2-text-strong)]">
           {type === "tool_use" ? data.tool_name || "Tool call" : data.tool_name || "Tool result"}
         </summary>
-        <pre className="mt-3 overflow-x-auto whitespace-pre-wrap rounded-md bg-iron-950/90 p-3 font-mono text-xs leading-6 text-iron-200">{prettyJson(type === "tool_use" ? data.input : data.output || data.error || data)}</pre>
+        <pre className="mt-3 overflow-x-auto whitespace-pre-wrap rounded-md bg-[var(--v2-code-bg)] p-3 font-mono text-xs leading-6 text-[var(--v2-text)]">{prettyJson(type === "tool_use" ? data.input : data.output || data.error || data)}</pre>
       </details>
     );
   }
 
   if (type === "message") {
     return (
-      <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3">
-        <div className="font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300">{data.role || "assistant"}</div>
-        <div className="mt-2 text-sm leading-6 text-iron-100">{data.content || ""}</div>
+      <div className="rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3">
+        <div className="font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]">{data.role || "assistant"}</div>
+        <div className="mt-2 text-sm leading-6 text-[var(--v2-text-strong)]">{data.content || ""}</div>
       </div>
     );
   }
 
   return (
-    <div className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3">
-      <div className="font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300">{type.replace(/_/g, " ")}</div>
-      <div className="mt-2 text-sm leading-6 text-iron-100">{data.message || data.status || prettyJson(data)}</div>
+    <div className="rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-4 py-3">
+      <div className="font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]">{type.replace(/_/g, " ")}</div>
+      <div className="mt-2 text-sm leading-6 text-[var(--v2-text-strong)]">{data.message || data.status || prettyJson(data)}</div>
     </div>
   );
 }
@@ -89,30 +89,30 @@ export function JobActivityTab({ job, events, onSendPrompt, isSendingPrompt }) {
     <Panel className="p-5 sm:p-6">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div>
-          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">Event stream</div>
-          <h3 className="mt-2 text-xl font-semibold text-white">Job activity</h3>
-          <p className="mt-2 text-sm leading-6 text-iron-300">Persisted events are refreshed automatically so operators can follow tool calls, prompts, and worker output.</p>
+          <div className="font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]">Event stream</div>
+          <h3 className="mt-2 text-xl font-medium text-[var(--v2-text-strong)]">Job activity</h3>
+          <p className="mt-2 text-sm leading-6 text-[var(--v2-text-muted)]">Persisted events are refreshed automatically so operators can follow tool calls, prompts, and worker output.</p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <select
             value={filter}
             onChange={(event) => setFilter(event.currentTarget.value)}
-            className="v2-select h-10 rounded-md border border-white/10 bg-iron-950/90 px-3 text-sm text-white outline-none focus:border-signal/45"
+            className="v2-select h-10 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 text-sm text-[var(--v2-text-strong)] outline-none focus:border-[var(--v2-accent)]"
           >
             {FILTERS.map((option) => (<option key={option.value} value={option.value}>{option.label}</option>))}
           </select>
-          <label className="flex items-center gap-2 text-sm text-iron-300">
+          <label className="flex items-center gap-2 text-sm text-[var(--v2-text-muted)]">
             <input type="checkbox" checked={autoScroll} onChange={(event) => setAutoScroll(event.target.checked)} />
             Auto-scroll
           </label>
         </div>
       </div>
 
-      <div ref={terminalRef} className="mt-5 max-h-[56vh] space-y-3 overflow-y-auto rounded-[18px] border border-white/10 bg-iron-950/78 p-4">
+      <div ref={terminalRef} className="mt-5 max-h-[56vh] space-y-3 overflow-y-auto rounded-[18px] border border-[var(--v2-panel-border)] bg-[var(--v2-canvas-strong)]/78 p-4">
         {filteredEvents.length
           ? filteredEvents.map((event) => (
               <div key={event.id || `${event.event_type}-${event.created_at}`}>
-                <div className="mb-2 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300">{formatJobDate(event.created_at)}</div>
+                <div className="mb-2 font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]">{formatJobDate(event.created_at)}</div>
                 <EventCard event={event} />
               </div>
             ))
@@ -136,7 +136,7 @@ export function JobActivityTab({ job, events, onSendPrompt, isSendingPrompt }) {
               }
             }}
             placeholder={t("job.followupPlaceholder")}
-            className="h-11 rounded-md border border-white/10 bg-iron-950/90 px-3 text-sm text-white outline-none focus:border-signal/45"
+            className="h-11 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 text-sm text-[var(--v2-text-strong)] outline-none focus:border-[var(--v2-accent)]"
           />
           <Button variant="secondary" disabled={isSendingPrompt} onClick={() => handleSend(true)}>{t("common.done")}</Button>
           <Button variant="primary" disabled={isSendingPrompt} onClick={() => handleSend(false)}>{t("common.send")}</Button>

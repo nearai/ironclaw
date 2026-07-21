@@ -1,5 +1,6 @@
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from "react-router";
 import React from "react";
+import { DesignSystemI18nProvider } from "@ironclaw/design-system";
 import { useT } from "../lib/i18n";
 import { useAuthSession } from "./auth";
 import { defaultRoute } from "./routes";
@@ -17,6 +18,7 @@ import { ExtensionsPage } from "../pages/extensions/extensions-page";
 import { SettingsPage } from "../pages/settings/settings-page";
 import { AdminPage } from "../pages/admin/admin-page";
 import { LogsPage } from "../pages/logs/logs-page";
+import { PlaygroundPage } from "../pages/playground/playground-page";
 
 function AuthLoading() {
   const t = useT();
@@ -99,11 +101,20 @@ function AdminRoute({ auth }) {
 
 export function App() {
   const auth = useAuthSession();
+  // Bridge the app's translator into the design-system package (its
+  // Modal/ConfirmDialog built-in strings default to English otherwise).
+  const t = useT();
 
   return (
+    <DesignSystemI18nProvider t={t}>
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={(<LoginPage auth={auth} />)} />
+        {/* Design-system workbench. Lives outside the authenticated
+            layout (like /login) so it renders full-bleed with no app
+            chrome. Static reference surface only: it makes no API
+            calls and exposes no data. See DESIGN_SYSTEM.md. */}
+        <Route path="/playground" element={(<PlaygroundPage />)} />
         <Route path="/" element={(<AuthenticatedLayout auth={auth} />)}>
           <Route index element={(<Navigate to={defaultRoute} replace />)} />
           <Route path="overview" element={(<Navigate to={defaultRoute} replace />)} />
@@ -134,5 +145,6 @@ export function App() {
         <Route path="*" element={(<Navigate to={defaultRoute} replace />)} />
       </Routes>
     </BrowserRouter>
+    </DesignSystemI18nProvider>
   );
 }

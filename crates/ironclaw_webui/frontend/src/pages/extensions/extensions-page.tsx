@@ -1,6 +1,6 @@
 import { Navigate, useParams } from "react-router";
 import React from "react";
-import { ConfirmDialog } from "../../design-system/confirm-dialog";
+import { ConfirmDialog } from "@ironclaw/design-system";
 import { useT } from "../../lib/i18n";
 import { ActionToast } from "./components/action-toast";
 import { ChannelsTab } from "./components/channels-tab";
@@ -31,7 +31,7 @@ function CatalogErrorBanner({ isCatalogError = true, isRefetching, onRetry }) {
       className={`rounded-lg border px-4 py-4 ${toneClass}`}
       role="alert"
     >
-      <p className="text-sm font-semibold">{t(titleKey)}</p>
+      <p className="text-sm font-medium">{t(titleKey)}</p>
       <p className="mt-1 text-sm">{t(descriptionKey)}</p>
       <button
         type="button"
@@ -119,7 +119,7 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
               (i) => (
                 <div
                   key={i}
-                  className="flex items-center justify-between border-t border-white/[0.06] py-4 first:border-0"
+                  className="flex items-center justify-between border-t border-[var(--v2-panel-border)] py-4 first:border-0"
                 >
                   <div>
                     <div className="v2-skeleton h-4 w-40 rounded" />

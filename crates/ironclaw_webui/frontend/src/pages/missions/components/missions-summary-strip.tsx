@@ -1,5 +1,5 @@
 import { useT } from "../../../lib/i18n";
-import { Panel, StatusPill } from "../../../design-system/primitives";
+import { Panel, StatCard } from "@ironclaw/design-system";
 
 function buildCards(t) {
   return [
@@ -17,17 +17,18 @@ export function MissionsSummaryStrip({ summary }) {
     <Panel className="p-4 sm:p-5">
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         {cards.map((card) => (
-          <div key={card.key} className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
-            <div className="flex items-start justify-between gap-3">
-              <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{card.label}</div>
-              <StatusPill tone={card.tone} label={card.key} />
-            </div>
-            <div className="mt-4 text-3xl font-semibold tracking-tight text-white">{summary[card.key] || 0}</div>
-            <p className="mt-2 text-sm leading-6 text-iron-300">
-              {card.key === "total"
+          <div key={card.key} className="rounded-2xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-4">
+            <StatCard
+              label={card.label}
+              value={summary[card.key] || 0}
+              tone={card.tone}
+              badgeLabel={card.key}
+              detail={card.key === "total"
                 ? t("missions.summary.completedFailed", { completed: summary.completed || 0, failed: summary.failed || 0 })
                 : t("missions.summary.acrossProjects")}
-            </p>
+              showDivider={false}
+              className="px-0 py-0"
+            />
           </div>
         ))}
       </div>

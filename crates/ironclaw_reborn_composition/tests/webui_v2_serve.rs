@@ -2687,8 +2687,14 @@ async fn static_typing_dot_animation_respects_reduced_motion() {
     // deferred e2e scaffold.
     let body = served_app_stylesheet().await;
 
+    // The animation is token-driven on this branch (PR #5563): duration
+    // and easing come from --v2-duration-typing / --v2-ease-standard
+    // rather than literal `1.4s ease-in-out`, so the minified rule keeps
+    // the var() references.
     assert!(
-        body.contains("animation:1.4s ease-in-out infinite v2-typing-bounce"),
+        body.contains(
+            "animation:v2-typing-bounce var(--v2-duration-typing) var(--v2-ease-standard) infinite"
+        ),
         "typing dots must animate by default",
     );
     assert!(

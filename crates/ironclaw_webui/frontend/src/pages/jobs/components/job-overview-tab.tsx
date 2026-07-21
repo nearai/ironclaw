@@ -1,4 +1,4 @@
-import { EmptyPanel, FlowList, Panel, StatusPill } from "../../../design-system/primitives";
+import { EmptyPanel, FlowList, Panel, StatusPill } from "@ironclaw/design-system";
 import { MarkdownRenderer } from "../../chat/components/markdown-renderer";
 import {
   formatDuration,
@@ -9,9 +9,9 @@ import {
 
 function MetaItem({ label, value }) {
   return (
-    <div className="border-t border-white/10 py-4">
-      <div className="font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300">{label}</div>
-      <div className="mt-2 text-sm leading-6 text-white">{value || "Not available"}</div>
+    <div className="border-t border-[var(--v2-panel-border)] py-4">
+      <div className="font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]">{label}</div>
+      <div className="mt-2 text-sm leading-6 text-[var(--v2-text-strong)]">{value || "Not available"}</div>
     </div>
   );
 }
@@ -27,8 +27,8 @@ export function JobOverviewTab({ job }) {
       <Panel className="p-5 sm:p-6">
         <div className="flex items-center justify-between gap-4">
           <div>
-            <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">Execution context</div>
-            <h3 className="mt-2 text-xl font-semibold text-white">Timing, state, and runtime shape</h3>
+            <div className="font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]">Execution context</div>
+            <h3 className="mt-2 text-xl font-medium text-[var(--v2-text-strong)]">Timing, state, and runtime shape</h3>
           </div>
           <StatusPill tone={statusToneForState(job.state)} label={stateLabel(job.state)} />
         </div>
@@ -45,18 +45,18 @@ export function JobOverviewTab({ job }) {
 
       <div className="space-y-5">
         <Panel className="p-5 sm:p-6">
-          <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">Description</div>
-          <h3 className="mt-2 text-xl font-semibold text-white">Mission brief</h3>
+          <div className="font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]">Description</div>
+          <h3 className="mt-2 text-xl font-medium text-[var(--v2-text-strong)]">Mission brief</h3>
           {job.description
-            ? (<MarkdownRenderer content={job.description} className="mt-4 text-sm leading-7 text-iron-200" />)
-            : (<p className="mt-4 text-sm leading-6 text-iron-300">This job did not record a long-form description.</p>)}
+            ? (<MarkdownRenderer content={job.description} className="mt-4 text-sm leading-7 text-[var(--v2-text)]" />)
+            : (<p className="mt-4 text-sm leading-6 text-[var(--v2-text-muted)]">This job did not record a long-form description.</p>)}
         </Panel>
 
         {transitions.length
           ? (
               <Panel className="p-5 sm:p-6">
-                <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">Transitions</div>
-                <h3 className="mt-2 text-xl font-semibold text-white">State timeline</h3>
+                <div className="font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-text-muted)]">Transitions</div>
+                <h3 className="mt-2 text-xl font-medium text-[var(--v2-text-strong)]">State timeline</h3>
                 <div className="mt-3">
                   <FlowList items={transitions} />
                 </div>

@@ -1,0 +1,6 @@
+{
+  "crates/ironclaw_webui/frontend/src/pages/chat/components/activity-run.tsx": 2,
+  "crates/ironclaw_webui/frontend/src/pages/chat/components/message-bubble.tsx": 3,
+  "crates/ironclaw_webui/frontend/src/pages/chat/components/tool-activity.tsx": 6,
+  "crates/ironclaw_webui/frontend/src/pages/onboarding/provider-logos.tsx": 4
+}

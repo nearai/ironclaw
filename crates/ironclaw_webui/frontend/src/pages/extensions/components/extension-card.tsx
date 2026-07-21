@@ -1,8 +1,8 @@
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Badge } from "../../../design-system/badge";
-import { Button } from "../../../design-system/button";
-import { Icon } from "../../../design-system/icons";
+import { Badge } from "@ironclaw/design-system";
+import { Button } from "@ironclaw/design-system";
+import { Icon } from "@ironclaw/design-system";
 import {
   KIND_LABELS,
   STATE_TONES,
@@ -68,7 +68,7 @@ function OverflowMenu({ actions, isBusy }) {
       (
         <div
           role="menu"
-          className="absolute right-0 top-8 z-10 min-w-[156px] rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] p-1 shadow-[0_20px_40px_-20px_rgba(0,0,0,0.7)]"
+          className="absolute right-0 top-8 z-10 min-w-[156px] rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] p-1 shadow-[var(--v2-shadow-menu)]"
         >
           {actions.map(
             (action) => (
@@ -221,7 +221,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
     >
       <div className="flex items-start gap-2">
         <Badge tone={tone} label={label} size="sm" />
-        <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--v2-text-strong)]">
+        <span className="min-w-0 flex-1 truncate text-sm font-medium text-[var(--v2-text-strong)]">
           {displayName}
         </span>
         {overflowActions.length > 0 &&
@@ -249,7 +249,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
 
       {onboardingHint &&
       (
-        <div className="mt-2 rounded-md border border-white/12 bg-white/[0.04] px-3 py-2 text-xs leading-5 text-[var(--v2-text-muted)]">
+        <div className="mt-2 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2 text-xs leading-5 text-[var(--v2-text-muted)]">
           {onboardingHint}
         </div>
       )}
@@ -309,7 +309,7 @@ export function RegistryCard({ entry, onInstall = null, isBusy, statusLabel = un
           label={statusLabel || t("extensions.state.available") || "available"}
           size="sm"
         />
-        <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--v2-text-strong)]">
+        <span className="min-w-0 flex-1 truncate text-sm font-medium text-[var(--v2-text-strong)]">
           {displayName}
         </span>
       </div>

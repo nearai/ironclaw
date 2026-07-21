@@ -1,8 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import React from "react";
-import { Panel, StatusPill } from "../../../design-system/primitives";
-import { Button } from "../../../design-system/button";
-import { Icon } from "../../../design-system/icons";
+import { Panel, StatusPill } from "@ironclaw/design-system";
+import { Button } from "@ironclaw/design-system";
+import { Icon } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import {
   fetchAttachmentBlob,
@@ -87,7 +87,7 @@ export function ProjectFilesystemPanel({ threadId }) {
   const header = (
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div className="flex items-center gap-2">
-        <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">
+        <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--v2-text-muted)]">
           {t("projects.files.label")}
         </div>
         <StatusPill tone="muted" label={t("workspace.readOnly")} />
@@ -107,7 +107,7 @@ export function ProjectFilesystemPanel({ threadId }) {
     return (
       <Panel className="p-4 sm:p-5">
         {header}
-        <div className="mt-4 rounded-[16px] border border-dashed border-white/10 px-4 py-8 text-sm leading-6 text-iron-300">
+        <div className="mt-4 rounded-[16px] border border-dashed border-[var(--v2-panel-border)] px-4 py-8 text-sm leading-6 text-[var(--v2-text-muted)]">
           {t("projects.files.noFilesYet")}
         </div>
       </Panel>
@@ -118,11 +118,11 @@ export function ProjectFilesystemPanel({ threadId }) {
     <Panel className="p-4 sm:p-5">
       {header}
 
-      <div className="mt-3 flex min-w-0 flex-wrap items-center gap-1.5 font-mono text-xs text-iron-400">
+      <div className="mt-3 flex min-w-0 flex-wrap items-center gap-1.5 font-mono text-xs text-[var(--v2-text-faint)]">
         <button
           type="button"
           onClick={() => setPath(undefined)}
-          className="text-signal hover:underline"
+          className="text-[var(--v2-accent-text)] hover:underline"
         >
           {t("projects.files.root")}
         </button>
@@ -134,7 +134,7 @@ export function ProjectFilesystemPanel({ threadId }) {
               <button
                 type="button"
                 onClick={() => setPath(target)}
-                className="max-w-[160px] truncate text-signal hover:underline"
+                className="max-w-[160px] truncate text-[var(--v2-accent-text)] hover:underline"
               >
                 {segment}
               </button>
@@ -145,13 +145,13 @@ export function ProjectFilesystemPanel({ threadId }) {
 
       {downloadError &&
       (
-        <div className="mt-3 rounded-xl border border-red-400/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+        <div className="mt-3 rounded-xl border border-[color-mix(in_srgb,var(--v2-danger-text)_34%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-3 py-2 text-xs text-[var(--v2-danger-text)]">
           {downloadError}
         </div>
       )}
       {listing.error &&
       (
-        <div className="mt-3 rounded-xl border border-red-400/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+        <div className="mt-3 rounded-xl border border-[color-mix(in_srgb,var(--v2-danger-text)_34%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-3 py-2 text-xs text-[var(--v2-danger-text)]">
           {listing.error.message}
         </div>
       )}
@@ -171,13 +171,13 @@ export function ProjectFilesystemPanel({ threadId }) {
                   data-testid="project-filesystem-entry"
                   data-entry-kind={entry.kind}
                   data-entry-path={entry.path}
-                  className="flex w-full items-center gap-3 rounded-[12px] border border-transparent px-3 py-2 text-left hover:border-white/10 hover:bg-white/[0.04]"
+                  className="flex w-full items-center gap-3 rounded-[12px] border border-transparent px-3 py-2 text-left hover:border-[var(--v2-panel-border)] hover:bg-[var(--v2-surface-muted)]"
                 >
                   <Icon
                     name={entry.kind === "directory" ? "folder" : "file"}
-                    className="h-4 w-4 shrink-0 text-iron-300"
+                    className="h-4 w-4 shrink-0 text-[var(--v2-text-muted)]"
                   />
-                  <span className="min-w-0 flex-1 truncate text-sm text-white">{entry.name}</span>
+                  <span className="min-w-0 flex-1 truncate text-sm text-[var(--v2-text-strong)]">{entry.name}</span>
                   {entry.kind === "directory"
                     ? (<Icon name="chevron" className="h-3.5 w-3.5 shrink-0 -rotate-90 text-[var(--v2-text-muted)]" />)
                     : (<Icon name="download" className="h-3.5 w-3.5 shrink-0 text-[var(--v2-text-muted)]" />)}
@@ -185,7 +185,7 @@ export function ProjectFilesystemPanel({ threadId }) {
               )
             )
           : (
-              <div className="rounded-[16px] border border-dashed border-white/10 px-4 py-8 text-sm leading-6 text-iron-300">
+              <div className="rounded-[16px] border border-dashed border-[var(--v2-panel-border)] px-4 py-8 text-sm leading-6 text-[var(--v2-text-muted)]">
                 {t("projects.files.folderEmpty")}
               </div>
             )}

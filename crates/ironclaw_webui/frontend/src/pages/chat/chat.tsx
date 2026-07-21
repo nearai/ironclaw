@@ -310,7 +310,7 @@ export function Chat({
         {historyLoadError &&
         (
           <div
-            className="mx-4 mt-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300"
+            className="mx-4 mt-3 rounded-lg border border-[color-mix(in_srgb,var(--v2-danger-text)_34%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-4 py-3 text-sm text-[var(--v2-danger-text)]"
             role="alert"
           >
             {t(historyLoadError)}
@@ -432,7 +432,7 @@ export function Chat({
               <div
                 data-testid="busy-gate-notice"
                 role="status"
-                className="mx-auto mt-3 max-w-lg rounded-lg border border-copper/25 bg-copper/10 px-4 py-3 text-center text-sm leading-6 text-copper"
+                className="mx-auto mt-3 max-w-lg rounded-lg border border-[var(--v2-warning-text)]/25 bg-[var(--v2-warning-soft)] px-4 py-3 text-center text-sm leading-6 text-[var(--v2-warning-text)]"
               >
                 {busyGateNotice.content}
               </div>

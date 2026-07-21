@@ -125,26 +125,26 @@ const TreeNode = React.memo(function WorkspaceTreeNode({
           if (event.target !== event.currentTarget) return;
           onTreeItemKeyDown(event, entry, isExpanded);
         }}
-        className="outline-none focus-visible:ring-2 focus-visible:ring-signal/70 focus-visible:ring-inset"
+        className="outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-accent)]/70 focus-visible:ring-inset"
       >
         <div
           className={[
-            "flex min-h-8 w-full cursor-pointer items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-white/[0.05] hover:text-white",
+            "flex min-h-8 w-full cursor-pointer items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-text-strong)]",
             selectedPath === entry.path
-              ? "bg-signal/10 text-signal shadow-[inset_2px_0_0_currentColor]"
-              : "text-iron-200",
+              ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)] shadow-[inset_2px_0_0_currentColor]"
+              : "text-[var(--v2-text)]",
           ].join(" ")}
           style={{ paddingLeft: `${8 + depth * 16}px` }}
         >
           <span aria-hidden="true" className={["w-3 text-[10px]", isExpanded ? "rotate-90" : ""].join(" ")}>{">"}</span>
-          <span className="min-w-0 truncate font-semibold">{displayName}</span>
+          <span className="min-w-0 truncate font-medium">{displayName}</span>
         </div>
         {isExpanded && (
           <div role="group" className="space-y-1">
             {childQuery.isLoading
-              ? (<div role="status" className="px-4 py-2 text-xs text-iron-400">{t("workspace.loading")}</div>)
+              ? (<div role="status" className="px-4 py-2 text-xs text-[var(--v2-text-faint)]">{t("workspace.loading")}</div>)
               : childQuery.isError
-              ? (<div role="alert" className="px-4 py-2 text-xs text-red-300">{t("workspace.unableOpenDirectory")}</div>)
+              ? (<div role="alert" className="px-4 py-2 text-xs text-[var(--v2-danger-text)]">{t("workspace.unableOpenDirectory")}</div>)
               : children.map((child, index) => (
                   <TreeNode
                     key={child.path}
@@ -190,10 +190,10 @@ const TreeNode = React.memo(function WorkspaceTreeNode({
       }}
       onKeyDown={(event) => onTreeItemKeyDown(event, entry, false)}
       className={[
-        "flex min-h-8 w-full cursor-pointer items-center gap-2 rounded-md px-2 text-left text-sm outline-none focus-visible:ring-2 focus-visible:ring-signal/70 focus-visible:ring-inset",
+        "flex min-h-8 w-full cursor-pointer items-center gap-2 rounded-md px-2 text-left text-sm outline-none focus-visible:ring-2 focus-visible:ring-[var(--v2-accent)]/70 focus-visible:ring-inset",
         selectedPath === entry.path
-          ? "bg-signal/10 text-signal shadow-[inset_2px_0_0_currentColor]"
-          : "text-iron-300 hover:bg-white/[0.05] hover:text-white",
+          ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)] shadow-[inset_2px_0_0_currentColor]"
+          : "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-soft)] hover:text-[var(--v2-text-strong)]",
       ].join(" ")}
       style={{ paddingLeft: `${24 + depth * 16}px` }}
     >
@@ -457,7 +457,7 @@ export function WorkspaceTree({
   }
 
   if (!rootEntries.length) {
-    return (<div className="px-4 py-8 text-sm text-iron-300">{t("workspace.noFiles")}</div>);
+    return (<div className="px-4 py-8 text-sm text-[var(--v2-text-muted)]">{t("workspace.noFiles")}</div>);
   }
 
   // Mounts (the tree roots) are always shown so the picker never disappears;

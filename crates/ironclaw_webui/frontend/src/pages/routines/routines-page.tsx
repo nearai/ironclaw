@@ -1,5 +1,5 @@
 import { useNavigate, useParams } from "react-router";
-import { Button } from "../../design-system/button";
+import { Button } from "@ironclaw/design-system";
 import React from "react";
 import { FeedbackBanner } from "../projects/components/feedback-banner";
 import { RoutineDetailPanel } from "./components/routine-detail-panel";
@@ -101,7 +101,7 @@ export function RoutinesPage() {
           {routinesState.error &&
           (
             <div
-              className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
+              className="rounded-xl border border-[color-mix(in_srgb,var(--v2-danger-text)_34%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-4 py-3 text-sm text-[var(--v2-danger-text)]"
             >
               {routinesState.error.message}
             </div>

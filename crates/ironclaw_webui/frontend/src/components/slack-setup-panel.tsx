@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Button } from "../design-system/button";
+import { Button } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../lib/i18n";
 import { getSlackSetup, saveSlackSetup, slackSetupError } from "../lib/slack-setup-api";
@@ -106,13 +106,13 @@ export function SlackSetupPanel({ action, setupQuery }) {
     (status?.oauth_client_secret_configured || !form.oauth_client_id.trim() || form.oauth_client_secret.trim());
 
   return (
-    <div className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
+    <div className="mt-3 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-4">
       <div className="mb-3 flex items-start justify-between gap-3">
         <div>
-          <h4 className="font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
+          <h4 className="font-mono text-[11px] uppercase tracking-[var(--v2-tracking-caps)] text-[var(--v2-accent-text)]">
             {copy.title}
           </h4>
-          <p className="mt-2 text-xs leading-5 text-iron-300">
+          <p className="mt-2 text-xs leading-5 text-[var(--v2-text-muted)]">
             {copy.instructions}
           </p>
         </div>
@@ -209,11 +209,11 @@ export function SlackSetupPanel({ action, setupQuery }) {
           {saveMutation.isPending ? t("common.saving") : copy.submitLabel}
         </Button>
         {setupQuery.isError &&
-        (<p className="text-xs text-red-300">
+        (<p className="text-xs text-[var(--v2-danger-text)]">
           {slackSetupError(setupQuery.error, copy.errorMessage)}
         </p>)}
         {saveMutation.isError &&
-        (<p className="text-xs text-red-300">
+        (<p className="text-xs text-[var(--v2-danger-text)]">
           {slackSetupError(saveMutation.error, copy.errorMessage)}
         </p>)}
         {saveMutation.isSuccess &&
@@ -264,7 +264,7 @@ function textInput(label, value, onChange, placeholder = "", help = null, t = nu
         value={value}
         onChange={onChange}
         placeholder={placeholder}
-        className="h-9 w-full min-w-0 rounded-md border border-white/12 bg-white/[0.04] px-3 font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
+        className="h-9 w-full min-w-0 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 font-mono text-sm text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)] focus:border-[var(--v2-accent)]"
       />
       <FieldHint help={help} t={t} />
     </label>
@@ -283,7 +283,7 @@ function secretInput(label, value, onChange, configured, help = null, t = null) 
         value={value}
         onChange={onChange}
         placeholder={configured ? translateOptional(t, "slackSetup.placeholder.keepSecret", "") : ""}
-        className="h-9 w-full min-w-0 rounded-md border border-white/12 bg-white/[0.04] px-3 text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
+        className="h-9 w-full min-w-0 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 text-sm text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)] focus:border-[var(--v2-accent)]"
       />
       <FieldHint help={help} t={t} />
     </label>
@@ -295,10 +295,10 @@ function FieldHint({ help, t }) {
   const body = help.bodyKey ? translateOptional(t, help.bodyKey, help.body) : help.body;
   const example = help.exampleKey ? translateOptional(t, help.exampleKey, help.example) : help.example;
   return (
-    <p className="mt-1.5 min-h-8 text-[11px] leading-4 text-iron-400">
+    <p className="mt-1.5 min-h-8 text-[11px] leading-4 text-[var(--v2-text-faint)]">
       <span className="block">{body}</span>
       {example &&
-      (<span className="mt-0.5 block font-mono text-iron-300">{example}</span>)}
+      (<span className="mt-0.5 block font-mono text-[var(--v2-text-muted)]">{example}</span>)}
     </p>
   );
 }

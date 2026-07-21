@@ -3,10 +3,10 @@ import { Navigate, useNavigate, useOutletContext } from "react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import React from "react";
 import { useT } from "../../lib/i18n";
-import { Badge } from "../../design-system/badge";
-import { Button } from "../../design-system/button";
-import { Card } from "../../design-system/card";
-import { Icon } from "../../design-system/icons";
+import { Badge } from "@ironclaw/design-system";
+import { Button } from "@ironclaw/design-system";
+import { Card } from "@ironclaw/design-system";
+import { Icon } from "@ironclaw/design-system";
 import { ProviderDialog } from "../settings/components/provider-dialog";
 import { ProviderLoginStatus } from "../settings/components/provider-login-status";
 import { useProviderManagementActions } from "../settings/hooks/useProviderManagementActions";
@@ -95,7 +95,7 @@ function NearAiSetupMenu({ provider, isBusy, login, t, onSetUp }) {
       (
         <div
           role="menu"
-          className="absolute right-0 top-10 z-20 min-w-[176px] rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] p-1 shadow-[0_20px_40px_-20px_rgba(0,0,0,0.7)]"
+          className="absolute right-0 top-10 z-20 min-w-[176px] rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] p-1 shadow-[var(--v2-shadow-menu)]"
         >
           {menuItems.map(
             (item) => (
@@ -153,7 +153,7 @@ function FeaturedProviderRow({ entry, provider, configured, isBusy, login, t, on
         <ProviderLogo id={entry.id} name={name} />
         <div className="min-w-0">
           <div className="flex items-center gap-2">
-            <span className="truncate text-sm font-semibold text-[var(--v2-text-strong)]">{name}</span>
+            <span className="truncate text-sm font-medium text-[var(--v2-text-strong)]">{name}</span>
             {configured &&
             (<Badge tone="positive" label={t("onboarding.ready")} size="sm" />)}
           </div>
@@ -238,7 +238,7 @@ function OperatorOnboardingPage() {
     <div className="h-full overflow-y-auto">
       <div className="mx-auto flex min-h-full max-w-2xl flex-col justify-center gap-6 p-6">
         <div className="text-center">
-          <h1 className="text-2xl font-semibold text-[var(--v2-text-strong)]">
+          <h1 className="text-2xl font-medium text-[var(--v2-text-strong)]">
             {t("onboarding.title")}
           </h1>
           <p className="mt-2 text-sm text-[var(--v2-text-muted)]">{t("onboarding.subtitle")}</p>

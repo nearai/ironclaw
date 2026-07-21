@@ -1,13 +1,13 @@
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Card } from "../../../design-system/card";
+import { Card, Switch } from "@ironclaw/design-system";
 
 function SavedIndicator({ visible }) {
   const t = useT();
   if (!visible) return null;
   return (
     <span
-      className="font-mono text-[11px] text-mint"
+      className="font-mono text-[11px] text-[var(--v2-positive-text)]"
       role="status"
     >
       {t("tools.saved")}
@@ -17,28 +17,11 @@ function SavedIndicator({ visible }) {
 
 function Toggle({ checked, onChange, label }) {
   return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
+    <Switch
+      checked={checked}
+      onCheckedChange={onChange}
       aria-label={label}
-      onClick={() => onChange(!checked)}
-      className={[
-        "relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border",
-        checked
-          ? "border-signal/40 bg-signal/30"
-          : "border-white/15 bg-white/[0.06]",
-      ].join(" ")}
-    >
-      <span
-        className={[
-          "pointer-events-none inline-block h-5 w-5 rounded-full",
-          checked
-            ? "translate-x-5 bg-signal"
-            : "translate-x-0 bg-iron-300",
-        ].join(" ")}
-      />
-    </button>
+    />
   );
 }
 
@@ -72,11 +55,11 @@ export function SettingsField({ field, value, onSave, isSaved }) {
   );
 
   return (
-    <div className="flex items-start justify-between gap-6 border-t border-white/[0.06] py-4 first:border-0 first:pt-0">
+    <div className="flex items-start justify-between gap-6 border-t border-[var(--v2-panel-border)] py-4 first:border-0 first:pt-0">
       <div className="min-w-0 flex-1">
-        <div className="text-sm font-medium text-iron-200">{label}</div>
+        <div className="text-sm font-medium text-[var(--v2-text)]">{label}</div>
         {description &&
-        (<div className="mt-1 text-xs leading-5 text-iron-300">{description}</div>)}
+        (<div className="mt-1 text-xs leading-5 text-[var(--v2-text-muted)]">{description}</div>)}
       </div>
 
       <div className="flex shrink-0 items-center gap-3">
@@ -97,7 +80,7 @@ export function SettingsField({ field, value, onSave, isSaved }) {
                   handleCommit(e.currentTarget.value);
                 }}
                 aria-label={label}
-                className="v2-select h-9 rounded-md border border-white/12 bg-white/[0.04] px-3 text-sm text-iron-100 outline-none focus:border-signal/45"
+                className="v2-select h-9 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 text-sm text-[var(--v2-text-strong)] outline-none focus:border-[var(--v2-accent)]"
               >
                 <option value="">{t("tools.default")}</option>
                 {field.options.map(
@@ -117,7 +100,7 @@ export function SettingsField({ field, value, onSave, isSaved }) {
                 max={field.max !== undefined ? String(field.max) : undefined}
                 placeholder={t("tools.default")}
                 aria-label={label}
-                className="h-9 w-36 rounded-md border border-white/12 bg-white/[0.04] px-3 text-right font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
+                className="h-9 w-36 rounded-md border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] px-3 text-right font-mono text-sm text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)] focus:border-[var(--v2-accent)]"
               />
             )}
         <SavedIndicator visible={isSaved} />
