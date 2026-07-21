@@ -27,18 +27,27 @@ async fn telegram_dm_slack_install_gates_with_action_needed_notice_not_silence()
     // slack OAuth gate, so the post-resume entry and the follow-up-turn entry
     // may stay unconsumed depending on how the gate resolves — both are
     // scripted so neither outcome can starve the trace.
-    let stack = build_journey_stack([
-        RebornScriptedReply::tool_call(
-            "builtin.extension_install",
-            json!({"extension_id": "slack"}),
-        ),
-        RebornScriptedReply::tool_call(
-            "builtin.extension_activate",
-            json!({"extension_id": "slack"}),
-        ),
-        RebornScriptedReply::text("slack is connected"),
-        RebornScriptedReply::text("still here"),
-    ])
+    let stack = build_journey_stack_customized(
+        [
+            RebornScriptedReply::tool_call(
+                "builtin.extension_install",
+                json!({"extension_id": "slack"}),
+            ),
+            RebornScriptedReply::tool_call(
+                "builtin.extension_activate",
+                json!({"extension_id": "slack"}),
+            ),
+            RebornScriptedReply::text("slack is connected"),
+            RebornScriptedReply::text("still here"),
+        ],
+        |input| {
+            // Reach the per-user credential gate while leaving the OAuth
+            // challenge provider unwired so the channel takes the deny arm.
+            input
+                .with_slack_host_beta_enabled(true)
+                .with_slack_personal_oauth_redirect_uri_configured(true)
+        },
+    )
     .await;
 
     let secret = admin_save(&stack).await;

@@ -55,7 +55,9 @@ export function useSkills() {
           auto_activate_learned: enabled,
         };
       });
-      queryClient.invalidateQueries({ queryKey: ["skills"] });
+      // Keep the active view on the mutation-confirmed value while marking the
+      // cached list stale for the next normal refresh.
+      queryClient.invalidateQueries({ queryKey: ["skills"], refetchType: "none" });
     },
   });
 

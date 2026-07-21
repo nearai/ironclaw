@@ -620,7 +620,10 @@ where
         accumulate_usage(&mut usage, initialize.usage);
         if let Some(error) = initialize.response.error {
             return Err(McpClientError::client(response_error(
-                McpResponseErrorCause::JsonRpcError { code: error.code },
+                McpResponseErrorCause::JsonRpcError {
+                    code: error.code,
+                    message: error.message,
+                },
             )));
         }
         self.store_session(
@@ -645,7 +648,10 @@ where
         self.update_session_id(session_key, initialized.session_id.clone())?;
         if let Some(error) = initialized.response.error {
             return Err(McpClientError::client(response_error(
-                McpResponseErrorCause::JsonRpcError { code: error.code },
+                McpResponseErrorCause::JsonRpcError {
+                    code: error.code,
+                    message: error.message,
+                },
             )));
         }
         Ok(usage)
@@ -703,7 +709,10 @@ where
         self.update_session_id(&session_key, call.session_id.clone())?;
         if let Some(error) = call.response.error {
             return Err(McpClientError::client(response_error(
-                McpResponseErrorCause::JsonRpcError { code: error.code },
+                McpResponseErrorCause::JsonRpcError {
+                    code: error.code,
+                    message: error.message,
+                },
             )));
         }
         let output = call.response.result.ok_or_else(|| {
@@ -760,7 +769,10 @@ where
         self.update_session_id(&session_key, tools.session_id.clone())?;
         if let Some(error) = tools.response.error {
             return Err(McpClientError::client(response_error(
-                McpResponseErrorCause::JsonRpcError { code: error.code },
+                McpResponseErrorCause::JsonRpcError {
+                    code: error.code,
+                    message: error.message,
+                },
             )));
         }
         let result = tools.response.result.ok_or_else(|| {
@@ -779,15 +791,13 @@ struct McpJsonRpcResponse {
     error: Option<JsonRpcErrorInfo>,
 }
 
-/// Secret-free view of a JSON-RPC `error` object surfaced for diagnostics.
-/// Only the standardized protocol `code` is retained: the server-provided
-/// `message` is untrusted free text (it can echo request args, paths, provider
-/// diagnostics, or credential-shaped values) and is deliberately dropped rather
-/// than carried toward the model-visible reason. Length-bounding is not
-/// redaction, so the message is never captured here.
+/// Bounded view of a JSON-RPC `error` object surfaced through the private
+/// model-visible cause channel. The server-provided `message` remains untrusted:
+/// it is scrubbed at the model-visible diagnostic seam before reaching the model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct JsonRpcErrorInfo {
     code: Option<i64>,
+    message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1013,16 +1023,17 @@ fn parse_mcp_json_rpc_value(
     })
 }
 
-/// Extract a bounded, secret-free view of a JSON-RPC `error` object. Returns
+/// Extract a bounded view of a JSON-RPC `error` object. Returns
 /// `None` when no `error` member is present. A non-object `error` member still
 /// counts as an error, but carries no structured code/message.
 fn parse_json_rpc_error_info(error: Option<&Value>) -> Option<JsonRpcErrorInfo> {
     let error = error?;
-    // Only the standardized protocol `code` is captured. The server-provided
-    // `message` is untrusted free text and is intentionally not read, so it can
-    // never flow into the model-visible reason.
     let code = error.get("code").and_then(Value::as_i64);
-    Some(JsonRpcErrorInfo { code })
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .map(bound_mcp_reason_detail);
+    Some(JsonRpcErrorInfo { code, message })
 }
 
 fn parse_tools_list_result(value: &Value) -> Result<Vec<HostedMcpDiscoveredTool>, String> {
@@ -1235,9 +1246,9 @@ fn accumulate_usage(total: &mut ResourceUsage, usage: ResourceUsage) {
 
 /// Maximum byte length for a diagnostic reason string surfaced to the
 /// runtime/model. These tokens carry protocol codes, HTTP statuses, and
-/// bounded JSON-RPC messages — never raw secrets, credentials, or full
-/// response bodies — but caller-shaped JSON-RPC `message` text could be
-/// arbitrarily long, so every reason is capped.
+/// bounded JSON-RPC messages through a private cause channel. They are still
+/// untrusted and may contain secrets until the downstream model-visible scrub
+/// seam processes them, so every reason is capped here as defense in depth.
 const MAX_MCP_REASON_BYTES: usize = 512;
 
 /// Bound an untrusted diagnostic fragment to [`MAX_MCP_REASON_BYTES`],
@@ -1295,14 +1306,17 @@ impl McpRequestDeniedCause {
 }
 
 /// Per-cause response-side failure tokens. Each carries a stable prefix plus
-/// bounded, secret-free diagnostic detail (HTTP status, JSON-RPC code/message,
-/// parse-failure cause).
+/// bounded diagnostic detail (HTTP status, JSON-RPC code/message,
+/// parse-failure cause) for the private model-visible cause channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum McpResponseErrorCause {
     /// Non-2xx HTTP status from the MCP endpoint.
     HttpStatus(u16),
     /// JSON-RPC `error` object with code and bounded message.
-    JsonRpcError { code: Option<i64> },
+    JsonRpcError {
+        code: Option<i64>,
+        message: Option<String>,
+    },
     /// Response body failed JSON parsing.
     ParseFailed(String),
     /// A successful response carried no `result` field.
@@ -1324,15 +1338,14 @@ impl McpResponseErrorCause {
     fn into_reason(self) -> String {
         match self {
             Self::HttpStatus(status) => format!("mcp_http_status_{status}"),
-            Self::JsonRpcError { code } => {
-                // The untrusted server-provided `message` is deliberately NOT
-                // included: MCP servers can echo request args, paths, provider
-                // diagnostics, or credential-shaped values, and this reason is a
-                // stable, model-visible token. The standardized protocol `code`
-                // is the safe diagnostic; length-bounding is not redaction.
+            Self::JsonRpcError { code, message } => {
                 let mut reason = String::from("mcp_jsonrpc_error");
                 if let Some(code) = code {
                     reason.push_str(&format!(" code={code}"));
+                }
+                if let Some(message) = message {
+                    reason.push_str(": ");
+                    reason.push_str(&message);
                 }
                 reason
             }
@@ -1987,16 +2000,17 @@ mod tests {
         let error = parsed.error.expect("error object captured");
 
         // Drive the same reason construction the call sites use.
-        let reason = response_error(McpResponseErrorCause::JsonRpcError { code: error.code });
+        let reason = response_error(McpResponseErrorCause::JsonRpcError {
+            code: error.code,
+            message: error.message,
+        });
         assert!(
             reason.contains("-32601"),
             "reason should carry the standardized protocol code: {reason}"
         );
-        // The untrusted server-provided message must NOT leak into the
-        // model-visible reason (MCP servers can echo secrets/args/paths).
         assert!(
-            !reason.contains("Method not found"),
-            "raw server message must not leak into the reason: {reason}"
+            reason.contains("Method not found"),
+            "backend diagnostic should reach the private cause channel: {reason}"
         );
         assert!(reason.starts_with("mcp_jsonrpc_error"));
     }
@@ -2008,7 +2022,11 @@ mod tests {
         let parsed = parse_mcp_response(&response, Some(4)).expect("parse non-object error");
         let error = parsed.error.expect("error present even when non-object");
         assert_eq!(error.code, None);
-        let reason = response_error(McpResponseErrorCause::JsonRpcError { code: error.code });
+        assert_eq!(error.message, None);
+        let reason = response_error(McpResponseErrorCause::JsonRpcError {
+            code: error.code,
+            message: error.message,
+        });
         assert_eq!(reason, "mcp_jsonrpc_error");
     }
 

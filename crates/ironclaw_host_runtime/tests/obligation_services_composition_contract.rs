@@ -260,7 +260,7 @@ impl CapabilityDispatcher for ObligationAwareDispatcher {
             .await
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::NetworkDenied,
-                safe_summary: None,
+                model_visible_cause: None,
             })?;
         assert_eq!(egress_response.status, 200);
 

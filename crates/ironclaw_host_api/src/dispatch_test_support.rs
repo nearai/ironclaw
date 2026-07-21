@@ -98,7 +98,7 @@ impl TestDispatcher {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .pop_front()
-                .expect("TestDispatcher scripted queue exhausted")
+                .expect("TestDispatcher scripted queue exhausted") // safety: test-only scripted double; over-dispatch is a test-authoring error, not a production path
         })
     }
 

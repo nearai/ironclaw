@@ -58,12 +58,16 @@ async fn migrate_user_identities(
     users.extend(src.distinct_users().await?);
 
     for user in users {
-        let identities = src.db.list_identities_for_user(&user).await.map_err(|e| {
-            MigrationError::ReadSource {
-                domain: "user_identities".into(),
-                reason: e.to_string(),
+        let identities = match src.db.list_identities_for_user(&user).await {
+            Ok(identities) => identities,
+            Err(e) if crate::source::is_missing_table_error(&e.to_string()) => Vec::new(),
+            Err(e) => {
+                return Err(MigrationError::ReadSource {
+                    domain: "user_identities".into(),
+                    reason: e.to_string(),
+                });
             }
-        })?;
+        };
         if identities.is_empty() {
             continue;
         }
@@ -229,9 +233,7 @@ async fn read_channel_identities(
         let client = pool.get().await.map_err(|e| read_err(&e))?;
         let rows = match client.query(sql, &[]).await {
             Ok(rows) => rows,
-            Err(e) if crate::source::is_missing_table_error(&e.to_string()) => {
-                return Ok(Vec::new());
-            }
+            Err(e) if crate::source::is_missing_postgres_table_error(&e) => return Ok(Vec::new()),
             Err(e) => return Err(read_err(&e)),
         };
         let mut out = Vec::new();

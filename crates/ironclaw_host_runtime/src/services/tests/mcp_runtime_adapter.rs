@@ -66,6 +66,57 @@ async fn mcp_adapter_maps_executor_auth_required_to_dispatch_auth_required() {
     }
 }
 
+#[tokio::test]
+async fn mcp_adapter_preserves_executor_failure_cause() {
+    // Regression (Phase 1): an MCP dispatch failure's raw cause — including
+    // path/JSON delimiters — must ride the model-visible-cause channel so the
+    // model-visible Diagnostic downstream keeps it instead of collapsing to a
+    // bare failure category.
+    let raw = "MCP client failed at /tmp/{socket}";
+    let adapter = McpRuntimeAdapter::from_executor(Arc::new(FailingMcpExecutor {
+        reason: raw.to_string(),
+    }));
+    let descriptor = test_descriptor(RuntimeKind::Mcp, Vec::new());
+    let filesystem = DiskFilesystem::new();
+    let governor = InMemoryResourceGovernor::new();
+    let package = test_package(MCP_MANIFEST, "test");
+    let policy = policy_with(
+        FilesystemBackendKind::HostWorkspace,
+        ProcessBackendKind::LocalHost,
+        NetworkMode::DirectLogged,
+        SecretMode::ScrubbedEnv,
+    );
+
+    let result = adapter
+        .dispatch_json(RuntimeAdapterRequest {
+            run_id: None,
+            package: &package,
+            descriptor: &descriptor,
+            filesystem: &filesystem,
+            governor: &governor,
+            runtime_policy: &policy,
+            capability_id: &descriptor.id,
+            scope: sample_scope(),
+            authenticated_actor_user_id: None,
+            estimate: ResourceEstimate::default(),
+            mounts: None,
+            resource_reservation: None,
+            input: json!({"query": "fail through adapter"}),
+        })
+        .await;
+
+    match result {
+        Err(DispatchError::Mcp {
+            model_visible_cause,
+            ..
+        }) => {
+            let summary = model_visible_cause.expect("MCP cause should be retained");
+            assert!(summary.contains(raw), "unexpected cause: {summary}");
+        }
+        other => panic!("expected MCP dispatch failure, got {other:?}"),
+    }
+}
+
 const MCP_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
 id = "test"
 name = "Test MCP"
@@ -90,6 +141,23 @@ output_schema_ref = "schemas/test-mcp/search.output.v1.json"
 
 struct AuthRequiredMcpExecutor {
     requirement: RuntimeCredentialAuthRequirement,
+}
+
+struct FailingMcpExecutor {
+    reason: String,
+}
+
+#[async_trait]
+impl McpExecutor for FailingMcpExecutor {
+    async fn execute_extension_json(
+        &self,
+        _governor: &dyn ResourceGovernor,
+        _request: McpExecutionRequest<'_>,
+    ) -> Result<McpExecutionResult, McpError> {
+        Err(McpError::Client {
+            reason: self.reason.clone(),
+        })
+    }
 }
 
 #[async_trait]

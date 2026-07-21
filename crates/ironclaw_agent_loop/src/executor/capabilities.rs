@@ -40,7 +40,7 @@ use super::{
     capability_is_visible, capability_summary, clear_matching_pending_auth_resume,
     clear_matching_pending_external_tool_resume, failed_exit, honor_retry_alteration,
     model_visible_capability_failure_observation, push_call_signature_once, push_completed_result,
-    sanitized_strategy_summary,
+    sanitized_strategy_summary_or_fallback,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -509,34 +509,58 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
 fn capability_failed_summary(
     error_kind: &CapabilityFailureKind,
     safe_summary: String,
-) -> Result<SanitizedStrategySummary, AgentLoopExecutorError> {
+) -> SanitizedStrategySummary {
     prefixed_capability_summary(
         format!("capability failed with {}: ", error_kind.as_str()),
         safe_summary,
     )
 }
 
-fn capability_denied_summary(
-    reason_kind: &str,
-    safe_summary: String,
-) -> Result<SanitizedStrategySummary, AgentLoopExecutorError> {
+fn capability_denied_summary(reason_kind: &str, safe_summary: String) -> SanitizedStrategySummary {
     prefixed_capability_summary(
         format!("capability denied with {reason_kind}: "),
         safe_summary,
     )
 }
 
-fn prefixed_capability_summary(
-    prefix: String,
-    safe_summary: String,
-) -> Result<SanitizedStrategySummary, AgentLoopExecutorError> {
+fn prefixed_capability_summary(prefix: String, safe_summary: String) -> SanitizedStrategySummary {
     let safe_summary = strategy_safe_capability_summary_detail(safe_summary);
-    let detail = sanitized_strategy_summary(safe_summary)?;
+    // Fail soft: a capability summary that fails strict validation degrades to
+    // a fixed fallback instead of aborting the run. The real cause still rides
+    // the model-visible Diagnostic detail via the paired observation, so no
+    // information is lost by degrading the card summary here.
+    let (detail, _) = sanitized_strategy_summary_or_fallback(
+        safe_summary,
+        "the tool failure details were redacted",
+    );
     let detail = truncate_summary_detail(
         detail.as_str(),
         MAX_SAFE_SUMMARY_BYTES.saturating_sub(prefix.len()),
     );
-    sanitized_strategy_summary(format!("{prefix}{detail}"))
+    // The combined summary must also fail soft: the prefix itself can trip the
+    // validator (`Failed(Authorization)` yields "capability failed with
+    // authorization: ", and "authorization:" is a banned marker). A recoverable
+    // tool failure must never turn terminal because of its own card label.
+    let (summary, _) = sanitized_strategy_summary_or_fallback(
+        format!("{prefix}{detail}"),
+        "the tool failure details were redacted",
+    );
+    summary
+}
+
+/// Extract the secret-scrubbed model-visible diagnostic text from a tool
+/// observation, if any, so a terminal capability failure can carry the real
+/// cause on `SanitizedFailure.detail` for the failure explainer.
+fn model_observation_diagnostic_detail(
+    observation: Option<&ModelVisibleToolObservation>,
+) -> Option<String> {
+    match observation.map(|observation| &observation.detail) {
+        Some(ToolObservationDetail::GenericFailure {
+            detail: Some(detail),
+            ..
+        }) => Some(detail.clone()),
+        _ => None,
+    }
 }
 
 fn strategy_safe_capability_summary_detail(safe_summary: String) -> String {
@@ -647,7 +671,7 @@ impl CapabilityStage {
                         safe_summary: capability_failed_summary(
                             &failure.error_kind,
                             failure.safe_summary,
-                        )?,
+                        ),
                         diagnostic_ref: None,
                     };
                     self.handle_capability_error(
@@ -675,7 +699,7 @@ impl CapabilityStage {
                     .unwrap_or_default();
                 let summary = CapabilityErrorSummary {
                     class: CapabilityErrorClass::PolicyDenied,
-                    safe_summary: capability_denied_summary(reason, safe_summary)?,
+                    safe_summary: capability_denied_summary(reason, safe_summary),
                     diagnostic_ref: None,
                 };
                 self.handle_capability_error(ctx, state, call, summary, None, capability_batch)
@@ -878,6 +902,8 @@ impl CapabilityStage {
                     failure_kind,
                 } => {
                     state.recovery_state = recovery;
+                    let terminal_detail =
+                        model_observation_diagnostic_detail(model_observation.as_ref());
                     append_blocked_capability_error_result(
                         ctx.host,
                         &mut state,
@@ -896,6 +922,10 @@ impl CapabilityStage {
                     let checked = CheckpointStage
                         .write(ctx, state, CheckpointKind::Final)
                         .await?;
+                    let mut safe_failure = capability_error_failure_category(summary.class)?;
+                    if let Some(detail) = terminal_detail {
+                        safe_failure = safe_failure.with_detail(detail);
+                    }
                     return Ok(BatchStep::Exit(failed_exit(
                         ctx.host,
                         checked.state,
@@ -903,7 +933,7 @@ impl CapabilityStage {
                         Some(checked.checkpoint_id),
                         FailedExitDetails {
                             diagnostic_ref: summary.diagnostic_ref.clone(),
-                            safe_summary: Some(capability_error_failure_category(summary.class)?),
+                            safe_summary: Some(safe_failure),
                             explanation_message_ref,
                         },
                     )?));
@@ -1015,7 +1045,7 @@ impl CapabilityStage {
                                 safe_summary: capability_failed_summary(
                                     &failure.error_kind,
                                     failure.safe_summary,
-                                )?,
+                                ),
                                 diagnostic_ref: None,
                             };
                         }
@@ -1034,6 +1064,7 @@ impl CapabilityStage {
             }
         }
 
+        let terminal_detail = model_observation_diagnostic_detail(model_observation.as_ref());
         append_blocked_capability_error_result(
             ctx.host,
             &mut state,
@@ -1053,6 +1084,10 @@ impl CapabilityStage {
         let checked = CheckpointStage
             .write(ctx, state, CheckpointKind::Final)
             .await?;
+        let mut safe_failure = capability_error_failure_category(summary.class)?;
+        if let Some(detail) = terminal_detail {
+            safe_failure = safe_failure.with_detail(detail);
+        }
         Ok(BatchStep::Exit(failed_exit(
             ctx.host,
             checked.state,
@@ -1060,7 +1095,7 @@ impl CapabilityStage {
             Some(checked.checkpoint_id),
             FailedExitDetails {
                 diagnostic_ref: summary.diagnostic_ref.clone(),
-                safe_summary: Some(capability_error_failure_category(summary.class)?),
+                safe_summary: Some(safe_failure),
                 explanation_message_ref,
             },
         )?))
@@ -1582,7 +1617,12 @@ async fn append_spawned_child_result(
     input: ChildResultAppendInput,
     capability_batch: &mut CapabilityBatchTurnSummary,
 ) -> Result<(), AgentLoopExecutorError> {
-    let safe_summary = sanitized_strategy_summary(input.safe_summary)?.into_inner();
+    // Keep this write seam fail-soft even though `Resolution` normally arrives
+    // with a validated `SafeSummary`: a malformed adapter value must degrade the
+    // label, not end the run.
+    let (safe_summary, _) =
+        sanitized_strategy_summary_or_fallback(input.safe_summary, "spawned a child run");
+    let safe_summary = safe_summary.into_inner();
     let result = CapabilityResultMessage {
         result_ref: input.result_ref,
         safe_summary,
@@ -1819,13 +1859,25 @@ mod tests {
     #[test]
     fn prefixed_capability_summary_does_not_underflow_when_prefix_is_too_long() {
         let prefix = "x".repeat(MAX_SAFE_SUMMARY_BYTES + 1);
-        let result = prefixed_capability_summary(prefix, "detail".to_string());
+        let summary = prefixed_capability_summary(prefix, "detail".to_string());
 
-        assert!(matches!(
-            result,
-            Err(AgentLoopExecutorError::PlannerContract { detail })
-                if detail == "host returned unsafe strategy summary"
-        ));
+        // An oversized combination degrades to the fixed fallback instead of
+        // becoming a terminal PlannerContract error.
+        assert_eq!(summary.as_str(), "the tool failure details were redacted");
+    }
+
+    #[test]
+    fn prefixed_capability_summary_degrades_marker_bearing_prefix_without_borking() {
+        // Regression: `Failed(Authorization)` builds the prefix "capability
+        // failed with authorization: ", whose "authorization:" substring is a
+        // banned marker — this used to return a terminal PlannerContract error
+        // before the model ever saw the tool failure.
+        let summary = capability_failed_summary(
+            &CapabilityFailureKind::Authorization,
+            "the provider token has expired".to_string(),
+        );
+
+        assert_eq!(summary.as_str(), "the tool failure details were redacted");
     }
 
     #[test]
@@ -1833,8 +1885,7 @@ mod tests {
         let summary = prefixed_capability_summary(
             "capability failed with invalid_input: ".to_string(),
             INPUT_ENCODE_HUMAN_SUMMARY.to_string(),
-        )
-        .expect("fixed input encode summary should be strategy-safe");
+        );
 
         assert_eq!(
             summary.as_str(),

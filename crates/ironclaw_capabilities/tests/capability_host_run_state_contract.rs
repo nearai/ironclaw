@@ -961,7 +961,7 @@ async fn capability_host_revokes_claimed_lease_when_dispatch_fails_after_resume(
     let dispatcher = TestDispatcher::responding(|_, _| {
         Err(DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Backend,
-            safe_summary: None,
+            model_visible_cause: None,
         })
     });
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();

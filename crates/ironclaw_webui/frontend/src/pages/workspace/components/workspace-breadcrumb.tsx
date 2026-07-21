@@ -13,7 +13,10 @@ export function WorkspaceBreadcrumb({ path, onNavigate }) {
   let current = "";
 
   return (
-    <div className="flex min-w-0 flex-wrap items-center gap-2 font-mono text-sm">
+    <nav
+      aria-label={t("workspace.breadcrumbRoot")}
+      className="flex min-w-0 flex-wrap items-center gap-2 font-mono text-sm"
+    >
       <button
         type="button"
         onClick={() => onNavigate("/workspace")}
@@ -39,6 +42,6 @@ export function WorkspaceBreadcrumb({ path, onNavigate }) {
           </>
         );
       })}
-    </div>
+    </nav>
   );
 }
