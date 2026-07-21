@@ -41,7 +41,9 @@ export function useAdminUsers() {
     queryClient.invalidateQueries({ queryKey: ["admin", "users"] });
   const refreshUser = (userId, user) => {
     if (userId && user?.id === userId) {
-      queryClient.setQueryData(["admin", "user", userId], user);
+      queryClient.setQueryData(["admin", "user", userId], (currentUser) =>
+        currentUser ? { ...currentUser, ...user } : user,
+      );
     }
     const invalidations = [invalidateUsers()];
     if (userId) {

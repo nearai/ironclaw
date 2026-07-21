@@ -35,6 +35,7 @@ export function UserDetail({ userId, onBack }) {
   const adminState = useAdminUsers();
   return (
     <UserDetailView
+      key={userId}
       onBack={onBack}
       userQuery={userQuery}
       usageQuery={usageQuery}

@@ -151,10 +151,10 @@ function loadUsersView(harness) {
   );
 }
 
-function loadDetailView(harness) {
+function loadDetailModule(harness) {
   return runVmModuleForTest(
     "./user-detail.tsx",
-    ["UserDetailView"],
+    ["UserDetail", "UserDetailView"],
     {
       React: harness.React,
       useT: () => translate,
@@ -181,8 +181,22 @@ function loadDetailView(harness) {
         : t("admin.users.actionFailed", { message: error.message }),
     },
     import.meta.url,
-  ).UserDetailView;
+  );
 }
+
+function loadDetailView(harness) {
+  return loadDetailModule(harness).UserDetailView;
+}
+
+test("user detail view is keyed by user id so local state resets between users", () => {
+  const harness = createReactHarness();
+  const { UserDetail } = loadDetailModule(harness);
+
+  const rendered = UserDetail({ userId: "user-2", onBack: () => {} });
+
+  assert.equal(rendered.type.name, "UserDetailView");
+  assert.equal(rendered.props.key, "user-2");
+});
 
 test("users list shows activate and role failures and disables actions while pending", () => {
   const harness = createReactHarness();
