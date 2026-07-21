@@ -11,6 +11,7 @@
 use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry};
 use ironclaw_host_api::{CapabilityId, PackageSource};
 use ironclaw_trust::{TrustDecision, TrustPolicy, TrustPolicyInput};
+use tracing::debug;
 
 /// Why trust classification refused to produce a `TrustDecision`.
 ///
@@ -75,9 +76,13 @@ pub(crate) fn evaluate_invocation_trust(
         return Err(TrustEvaluationError::ConflictingPackageDescriptor);
     }
     let input = trust_policy_input_for_local_manifest(package)?;
-    trust_policy
-        .evaluate(&input)
-        .map_err(|_| TrustEvaluationError::Policy)
+    trust_policy.evaluate(&input).map_err(|error| {
+        // The kernel→host mapping collapses this to `Policy`; log the bound
+        // `TrustError` so the underlying policy refusal is recoverable
+        // server-side. `debug!` avoids corrupting the REPL/TUI.
+        debug!(%error, "host trust policy evaluation refused a decision");
+        TrustEvaluationError::Policy
+    })
 }
 
 fn trust_policy_input_for_local_manifest(
@@ -89,7 +94,13 @@ fn trust_policy_input_for_local_manifest(
             package.manifest_digest(),
             None,
         )
-        .map_err(|_| TrustEvaluationError::TrustInput)
+        .map_err(|error| {
+            // Collapsed to `TrustInput` for the host mapping; log the bound
+            // `ExtensionError` so the manifest defect is recoverable
+            // server-side. `debug!` avoids corrupting the REPL/TUI.
+            debug!(%error, "could not build trust policy input from package manifest");
+            TrustEvaluationError::TrustInput
+        })
 }
 
 fn local_manifest_source(package: &ExtensionPackage) -> PackageSource {

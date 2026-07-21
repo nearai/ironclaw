@@ -87,6 +87,13 @@ struct PendingClaimAfterAuth<'r> {
     leases: &'r dyn CapabilityLeaseStore,
     grant_id: CapabilityGrantId,
     fingerprint: InvocationFingerprint,
+    /// The approval lease's frozen expiry, carried from the full grant so the
+    /// sealed witness never outlives the approval that authorized it. `None`
+    /// when the grant declares no `expires_at`. Threaded through even though the
+    /// claim is deferred past authorization: the seal is minted before the
+    /// claim, so the expiry must travel on the pending-claim spec rather than
+    /// being read back from a not-yet-claimed lease.
+    grant_expiry: Option<Timestamp>,
 }
 
 /// Encodes the three mutually-exclusive approval-lease states that
@@ -1184,6 +1191,11 @@ where
         // `authorize_dispatch_with_trust` returns Allow.  Deferring the claim
         // preserves the original contract: a Deny leaves the lease Active.
         let grant_id = lease.grant.id;
+        // Carry the lease expiry onto the pending-claim spec so the sealed
+        // witness minted in `authorize_resumed` is bounded by the approval that
+        // authorized it (the claim, and thus a readable claimed lease, happens
+        // only after the seal).
+        let grant_expiry = lease.grant.constraints.expires_at;
 
         self.dispatch_resumed_capability(ResumedDispatchParams {
             run_state,
@@ -1198,6 +1210,7 @@ where
                 leases: capability_leases,
                 grant_id,
                 fingerprint: invocation_fingerprint,
+                grant_expiry,
             }),
         })
         .await
@@ -2403,13 +2416,17 @@ where
                 )
                 .await;
         }
-        // The claimed approval lease's expiry is a reachable frozen fact only for
-        // an `AlreadyClaimed` lease (which carries the full grant); `PendingClaim`
-        // holds only the grant id and `NoPriorLease` none. Combined with any
-        // adopted persistent-grant expiry, the seal takes the shortest-lived.
+        // The claimed approval lease's expiry is a reachable frozen fact for an
+        // `AlreadyClaimed` lease (which carries the full grant) and for a
+        // `PendingClaim` (whose spec carries the grant expiry threaded from the
+        // full lease at construction, since the claim is deferred past this
+        // seal); `NoPriorLease` has none. Combined with any adopted
+        // persistent-grant expiry, the seal takes the shortest-lived so the
+        // witness never outlives the approval that authorized it.
         let claimed_lease_expiry = match &params.lease_state {
             ResumedLeaseState::AlreadyClaimed(_, lease) => lease.grant.constraints.expires_at,
-            ResumedLeaseState::PendingClaim(_) | ResumedLeaseState::NoPriorLease => None,
+            ResumedLeaseState::PendingClaim(pending) => pending.grant_expiry,
+            ResumedLeaseState::NoPriorLease => None,
         };
         let frozen_deadline = [adopted_grant_expiry, claimed_lease_expiry]
             .into_iter()
@@ -2945,8 +2962,16 @@ fn trust_error_to_invocation_error(
 /// `runtime_policy_failure`.
 fn runtime_policy_error_to_invocation_error(
     capability_id: &CapabilityId,
-    _error: PlannerError,
+    error: PlannerError,
 ) -> CapabilityInvocationError {
+    // The model-visible denial collapses to `PolicyDenied`; log the bound
+    // planner refusal so which fail-closed backend rule fired stays recoverable
+    // server-side. `debug!` (never `info!`/`warn!`) to avoid REPL corruption.
+    debug!(
+        capability_id = %capability_id,
+        %error,
+        "runtime-policy planner refused capability dispatch (fail-closed)"
+    );
     CapabilityInvocationError::AuthorizationDenied {
         capability: capability_id.clone(),
         reason: DenyReason::PolicyDenied,
@@ -3651,5 +3676,225 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
         let after = chrono::Utc::now();
         assert!(fallback >= before + WITNESS_DEFAULT_TTL);
         assert!(fallback <= after + WITNESS_DEFAULT_TTL);
+    }
+
+    // --- Resume-path witness deadline (`PendingClaim` lease expiry) ---
+
+    // Lease store double for the resume fold. `authorize_resumed` never touches
+    // the store on the Allow path — the approval-lease claim is deferred to the
+    // dispatch tail — so every method here is unreachable under this test.
+    struct UnusedLeaseStore;
+
+    #[async_trait::async_trait]
+    impl CapabilityLeaseStore for UnusedLeaseStore {
+        async fn issue(
+            &self,
+            _lease: CapabilityLease,
+        ) -> Result<CapabilityLease, ironclaw_authorization::CapabilityLeaseError> {
+            unimplemented!("authorize_resumed does not issue leases")
+        }
+
+        async fn revoke(
+            &self,
+            _scope: &ResourceScope,
+            _lease_id: CapabilityGrantId,
+        ) -> Result<CapabilityLease, ironclaw_authorization::CapabilityLeaseError> {
+            unimplemented!("authorize_resumed does not revoke leases")
+        }
+
+        async fn get(
+            &self,
+            _scope: &ResourceScope,
+            _lease_id: CapabilityGrantId,
+        ) -> Option<CapabilityLease> {
+            unimplemented!("authorize_resumed does not read leases")
+        }
+
+        async fn claim(
+            &self,
+            _scope: &ResourceScope,
+            _lease_id: CapabilityGrantId,
+            _invocation_fingerprint: &InvocationFingerprint,
+        ) -> Result<CapabilityLease, ironclaw_authorization::CapabilityLeaseError> {
+            unimplemented!("the pending-claim claim is deferred to the dispatch tail")
+        }
+
+        async fn consume(
+            &self,
+            _scope: &ResourceScope,
+            _lease_id: CapabilityGrantId,
+        ) -> Result<CapabilityLease, ironclaw_authorization::CapabilityLeaseError> {
+            unimplemented!("authorize_resumed does not consume leases")
+        }
+
+        async fn begin_dispatch_claimed(
+            &self,
+            _scope: &ResourceScope,
+            _lease_id: CapabilityGrantId,
+            _invocation_fingerprint: &InvocationFingerprint,
+        ) -> Result<CapabilityLease, ironclaw_authorization::CapabilityLeaseError> {
+            unimplemented!("authorize_resumed does not transition leases")
+        }
+
+        async fn abort_dispatch_claimed(
+            &self,
+            _scope: &ResourceScope,
+            _lease_id: CapabilityGrantId,
+        ) -> Result<CapabilityLease, ironclaw_authorization::CapabilityLeaseError> {
+            unimplemented!("authorize_resumed does not transition leases")
+        }
+
+        async fn leases_for_scope(&self, _scope: &ResourceScope) -> Vec<CapabilityLease> {
+            unimplemented!("authorize_resumed does not enumerate leases")
+        }
+
+        async fn active_leases_for_context(
+            &self,
+            _context: &ExecutionContext,
+        ) -> Vec<CapabilityLease> {
+            unimplemented!("authorize_resumed does not enumerate leases")
+        }
+    }
+
+    // Run-state double for the resume fold. `authorize_resumed` touches run
+    // state only on its error paths (`fail_run_if_configured`); the Allow path
+    // under test never calls it.
+    struct UnusedRunStateStore;
+
+    #[async_trait::async_trait]
+    impl RunStateStore for UnusedRunStateStore {
+        async fn start(
+            &self,
+            _start: RunStart,
+        ) -> Result<ironclaw_run_state::RunRecord, RunStateError> {
+            unimplemented!("authorize_resumed Allow path does not mutate run state")
+        }
+
+        async fn block_approval(
+            &self,
+            _scope: &ResourceScope,
+            _invocation_id: InvocationId,
+            _approval: ironclaw_host_api::approval::ApprovalRequest,
+        ) -> Result<ironclaw_run_state::RunRecord, RunStateError> {
+            unimplemented!("authorize_resumed Allow path does not mutate run state")
+        }
+
+        async fn block_auth(
+            &self,
+            _scope: &ResourceScope,
+            _invocation_id: InvocationId,
+            _error_kind: String,
+        ) -> Result<ironclaw_run_state::RunRecord, RunStateError> {
+            unimplemented!("authorize_resumed Allow path does not mutate run state")
+        }
+
+        async fn complete(
+            &self,
+            _scope: &ResourceScope,
+            _invocation_id: InvocationId,
+        ) -> Result<ironclaw_run_state::RunRecord, RunStateError> {
+            unimplemented!("authorize_resumed Allow path does not mutate run state")
+        }
+
+        async fn fail(
+            &self,
+            _scope: &ResourceScope,
+            _invocation_id: InvocationId,
+            _error_kind: String,
+        ) -> Result<ironclaw_run_state::RunRecord, RunStateError> {
+            unimplemented!("authorize_resumed Allow path does not mutate run state")
+        }
+
+        async fn get(
+            &self,
+            _scope: &ResourceScope,
+            _invocation_id: InvocationId,
+        ) -> Result<Option<ironclaw_run_state::RunRecord>, RunStateError> {
+            unimplemented!("authorize_resumed Allow path does not read run state")
+        }
+
+        async fn records_for_scope(
+            &self,
+            _scope: &ResourceScope,
+        ) -> Result<Vec<ironclaw_run_state::RunRecord>, RunStateError> {
+            unimplemented!("authorize_resumed Allow path does not read run state")
+        }
+    }
+
+    // A `resume_json` (`PendingClaim`) resume must seal the witness deadline
+    // bounded by the approval lease's expiry — threaded onto the pending-claim
+    // spec because the claim is deferred past the seal — NOT the 5-minute
+    // default TTL, so a held witness can never outlive the approval that
+    // authorized it. The resume seal is a forward-looking artifact discarded
+    // before `resume_json` returns, so no public caller surfaces it; this drives
+    // the private `authorize_resumed` fold directly (crate-tier per testing.md,
+    // integration harness cannot reach the discarded witness).
+    #[tokio::test]
+    async fn resumed_pending_claim_seals_witness_deadline_from_lease_expiry() {
+        // A lease expiry well inside the bounded 5-minute default window, so a
+        // fallback to the default TTL would be observably wrong.
+        let lease_expiry = chrono::Utc::now() + chrono::Duration::seconds(30);
+        assert!(lease_expiry < chrono::Utc::now() + WITNESS_DEFAULT_TTL);
+
+        let registry = echo_registry();
+        let dispatcher = UnusedDispatcher;
+        let authorizer = AllowAuthorizer;
+        let trust_policy = StaticTrustPolicy;
+        let runtime_policy = permissive_runtime_policy();
+        let policy_facts = SatisfiedPolicyFacts;
+        let host = CapabilityHost::new(
+            &registry,
+            &dispatcher,
+            &authorizer,
+            &trust_policy,
+            &runtime_policy,
+            &policy_facts,
+        );
+
+        let request = allow_request();
+        let capability_id = request.capability_id.clone();
+        let estimate = request.estimate.clone();
+        let input = request.input.clone();
+        let context = request.context.clone();
+        let scope = context.resource_scope.clone();
+        let invocation_id = context.invocation_id;
+        let descriptor = registry
+            .get_capability(&capability_id)
+            .expect("echo.say is registered");
+
+        let leases = UnusedLeaseStore;
+        let run_state = UnusedRunStateStore;
+        let fingerprint =
+            InvocationFingerprint::for_dispatch(&scope, &capability_id, &estimate, &input).unwrap();
+
+        let params = ResumedDispatchParams {
+            run_state: &run_state,
+            scope,
+            invocation_id,
+            capability_id,
+            estimate,
+            input,
+            authorized_context: context,
+            descriptor,
+            lease_state: ResumedLeaseState::PendingClaim(PendingClaimAfterAuth {
+                leases: &leases,
+                grant_id: CapabilityGrantId::new(),
+                fingerprint,
+                grant_expiry: Some(lease_expiry),
+            }),
+        };
+
+        let fold = host.authorize_resumed(&params).await.unwrap();
+        let AuthorizeFold::Authorized(fold) = fold else {
+            panic!("expected an allowed resume authorization");
+        };
+        let Some(AuthorizeResult::Authorized(authorized)) = &fold.result else {
+            panic!("a sealable resume must mint an Authorized witness");
+        };
+        assert_eq!(
+            authorized.deadline(),
+            lease_expiry,
+            "the sealed witness deadline must be bounded by the approval lease expiry, not the default TTL"
+        );
     }
 }
