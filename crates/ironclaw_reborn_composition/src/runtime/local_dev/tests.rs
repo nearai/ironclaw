@@ -2000,6 +2000,7 @@ mod tests {
                 EffectKind::SpawnProcess,
                 EffectKind::ExecuteCode,
                 EffectKind::Network,
+                EffectKind::UseSecret,
                 EffectKind::ExternalWrite
             ]
         );

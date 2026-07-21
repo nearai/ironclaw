@@ -54,6 +54,12 @@ use axum::http::{Request, StatusCode};
 use chrono::Utc;
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
+use ironclaw_host_api::{
+    CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, CorrelationId, EffectKind,
+    ExecutionContext, ExtensionId, GrantConstraints, InvocationId, MountView, NetworkPolicy,
+    Principal, ResourceEstimate, ResourceScope, RuntimeKind, TrustClass,
+};
+use ironclaw_host_runtime::{RuntimeCapabilityOutcome, RuntimeCapabilityRequest};
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse,
@@ -393,6 +399,15 @@ impl VendorIngress {
         body: &str,
         headers: Vec<(&'static str, String)>,
     ) -> StatusCode {
+        self.post_with_body(route, body, headers).await.0
+    }
+
+    async fn post_with_body(
+        &self,
+        route: &str,
+        body: &str,
+        headers: Vec<(&'static str, String)>,
+    ) -> (StatusCode, String) {
         let mut builder = Request::builder().method("POST").uri(route);
         for (name, value) in headers {
             builder = builder.header(name, value);
@@ -405,8 +420,13 @@ impl VendorIngress {
             .await
             .expect("router responds");
         let status = response.status();
-        let _ = response.into_body().collect().await.expect("body collects");
-        status
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body collects")
+            .to_bytes();
+        (status, String::from_utf8_lossy(&body).into_owned())
     }
 
     /// Await every spawned post-admission observer — the full outbound
@@ -513,10 +533,10 @@ async fn assert_delivered_attempt(services: &RebornServices, scope: &TurnScope) 
     );
 }
 
-/// Await the PRODUCTION assembly's snapshot reconcile: activation publishes
-/// a new generation, the assembly's watch loop registers the extension's
-/// inbound wiring, and the per-extension binding service becomes readable.
-/// Bounded — a missing registration is a test failure, never a hang.
+/// Await the production assembly's reconcile: deployment discovery or an
+/// active-snapshot change registers the extension's inbound wiring, and the
+/// per-extension binding service becomes readable. Bounded — a missing
+/// registration is a test failure, never a hang.
 async fn wait_for_production_registration(
     assembly: &Arc<GenericChannelHostAssembly>,
     services: &RebornServices,
@@ -535,7 +555,7 @@ async fn wait_for_production_registration(
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "the production assembly must register `{extension_id}`'s ingress after activation"
+            "the production assembly must register `{extension_id}`'s ingress"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -547,6 +567,356 @@ fn reborn_services(group: &RebornIntegrationGroup) -> &RebornServices {
         .expect("host-runtime capability harness")
         .reborn_services_for_test()
         .expect("composed reborn services")
+}
+
+async fn configure_admin_group(
+    group: &RebornIntegrationGroup,
+    group_id: &str,
+    values: serde_json::Value,
+) {
+    let services = reborn_services(group);
+    // `extension_delivery()` composes its local runtime with this service
+    // label as the tenant operator. Its ordinary capability executor uses a
+    // distinct user to prove caller scoping, so admin ingress must deliberately
+    // use the composition owner rather than that executor identity.
+    let operator_user_id = ironclaw_host_api::UserId::new("reborn-e2e-extension-lifecycle-tools")
+        .expect("delivery profile operator user id");
+    let capability_id = CapabilityId::new("builtin.admin_configuration_replace")
+        .expect("admin configuration capability id");
+    let product_ingress = ExtensionId::new("ironclaw_webui").expect("product ingress id");
+    let invocation_id = InvocationId::new();
+    let scope = ResourceScope {
+        // Admin configuration is deployment/tenant shared. The delivery
+        // profile uses the default Reborn runtime identity; the separate
+        // scripted turn harness intentionally lives under `tenant-itest` and
+        // must not select which deployment receives operator configuration.
+        tenant_id: ironclaw_host_api::TenantId::new("reborn-cli")
+            .expect("delivery profile deployment tenant id"),
+        user_id: operator_user_id.clone(),
+        agent_id: Some(
+            ironclaw_host_api::AgentId::new("reborn-cli-agent")
+                .expect("delivery profile deployment agent id"),
+        ),
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id,
+    };
+    let context = ExecutionContext {
+        invocation_id,
+        correlation_id: CorrelationId::new(),
+        process_id: None,
+        parent_process_id: None,
+        tenant_id: scope.tenant_id.clone(),
+        user_id: operator_user_id.clone(),
+        authenticated_actor_user_id: Some(operator_user_id),
+        agent_id: scope.agent_id.clone(),
+        project_id: scope.project_id.clone(),
+        mission_id: None,
+        thread_id: None,
+        run_id: None,
+        extension_id: product_ingress.clone(),
+        runtime: RuntimeKind::FirstParty,
+        trust: TrustClass::Sandbox,
+        grants: CapabilitySet {
+            grants: vec![CapabilityGrant {
+                id: CapabilityGrantId::new(),
+                capability: capability_id.clone(),
+                grantee: Principal::Extension(product_ingress),
+                issued_by: Principal::HostRuntime,
+                constraints: GrantConstraints {
+                    allowed_effects: vec![
+                        EffectKind::ReadFilesystem,
+                        EffectKind::WriteFilesystem,
+                        EffectKind::DeleteFilesystem,
+                        EffectKind::UseSecret,
+                    ],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
+            }],
+        },
+        mounts: MountView::default(),
+        resource_scope: scope,
+    };
+    context
+        .validate()
+        .expect("admin capability context validates");
+    let outcome = services
+        .host_runtime
+        .as_ref()
+        .expect("host runtime")
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context,
+            capability_id,
+            ResourceEstimate::default(),
+            json!({
+                "group_id": group_id,
+                "expected_revision": 0,
+                "values": values,
+            }),
+        ))
+        .await
+        .expect("admin configuration dispatch completes");
+    assert!(
+        matches!(outcome, RuntimeCapabilityOutcome::Completed(_)),
+        "admin configuration must complete through the authorized runtime, got {outcome:?}"
+    );
+}
+
+async fn assert_extension_has_no_user_installation(services: &RebornServices, extension_id: &str) {
+    let installations = services
+        .extension_installation_store_for_test()
+        .expect("local extension installation store")
+        .list_installations()
+        .await
+        .expect("list extension installations");
+    assert!(
+        installations
+            .iter()
+            .all(|installation| installation.extension_id().as_str() != extension_id),
+        "admin configuration must not create or activate a user installation for {extension_id}"
+    );
+}
+
+fn start_channel_host_assembly(
+    services: &RebornServices,
+    inbound: &RebornIntegrationHarness,
+) -> Arc<GenericChannelHostAssembly> {
+    services
+        .start_channel_host_assembly_for_test(ChannelHostAssemblyTestWiring {
+            thread_service: inbound
+                .thread_service_for_test()
+                .expect("group thread service"),
+            turn_coordinator: inbound.turn_coordinator_for_test(),
+            identity: ChannelHostIdentity {
+                tenant_id: inbound.binding.tenant_id.clone(),
+                agent_id: inbound.binding.agent_id.clone().expect("binding agent id"),
+                project_id: inbound.binding.project_id.clone(),
+                operator_user_id: inbound
+                    .binding
+                    .subject_user_id
+                    .clone()
+                    .expect("binding subject user id"),
+            },
+            run_delivery_settings: fast_delivery_settings(),
+        })
+        .expect("production channel host assembly starts")
+}
+
+#[tokio::test]
+async fn admin_configured_slack_unconnected_dm_gets_connect_notice_without_installation_or_turn() {
+    let group = RebornIntegrationGroup::extension_delivery()
+        .await
+        .expect("delivery group builds");
+    let services = reborn_services(&group);
+    let inbound = group
+        .thread("conv-admin-slack-unconnected")
+        .script([RebornScriptedReply::text("must stay unused")])
+        .build()
+        .await
+        .expect("inbound thread builds");
+    assert_extension_has_no_user_installation(services, "slack").await;
+    let assembly = start_channel_host_assembly(services, &inbound);
+    let _binding = wait_for_production_registration(&assembly, services, "slack").await;
+    let ingress = VendorIngress::production(
+        services
+            .extension_ingress_parts()
+            .expect("composition built generic ingress"),
+    );
+
+    let unconfigured_body = "{}";
+    let unconfigured_timestamp = now_unix().to_string();
+    let unconfigured_signature = slack_signature(&unconfigured_timestamp, unconfigured_body);
+    let (unconfigured_status, unconfigured_response) = ingress
+        .post_with_body(
+            SLACK_ROUTE,
+            unconfigured_body,
+            vec![
+                ("X-Slack-Signature", unconfigured_signature),
+                ("X-Slack-Request-Timestamp", unconfigured_timestamp),
+            ],
+        )
+        .await;
+    assert_eq!(
+        unconfigured_status,
+        StatusCode::UNAUTHORIZED,
+        "the manifest route must exist but fail closed before admin configuration: {unconfigured_response}"
+    );
+
+    configure_admin_group(
+        &group,
+        "extension.slack",
+        json!([
+            {"handle": "slack_bot_token", "value": SLACK_BOT_TOKEN},
+            {"handle": "slack_signing_secret", "value": String::from_utf8_lossy(SLACK_SIGNING_SECRET)},
+            {"handle": "slack_team_id", "value": "T-A"},
+            {"handle": "slack_api_app_id", "value": "A-ITEST"},
+            {"handle": "slack_installation_id", "value": SLACK_INSTALLATION},
+            {"handle": "slack_bot_user_id", "value": "U-BOT"},
+            {"handle": "slack_oauth_client_id", "value": "slack-oauth-client"},
+            {"handle": "slack_oauth_client_secret", "value": "slack-oauth-secret"}
+        ]),
+    )
+    .await;
+    assert_extension_has_no_user_installation(services, "slack").await;
+    let message = "admin-configured Slack DM must not reach the agent";
+    let body = json!({
+        "type": "event_callback",
+        "event_id": "Ev-admin-slack-unconnected",
+        "team_id": "T-A",
+        "event": {
+            "type": "message",
+            "user": "U-UNCONNECTED",
+            "channel": "D-UNCONNECTED",
+            "channel_type": "im",
+            "text": message,
+            "ts": "1710000500.000100"
+        }
+    })
+    .to_string();
+    let timestamp = now_unix().to_string();
+    let signature = slack_signature(&timestamp, &body);
+    let (status, response_body) = ingress
+        .post_with_body(
+            SLACK_ROUTE,
+            &body,
+            vec![
+                ("X-Slack-Signature", signature),
+                ("X-Slack-Request-Timestamp", timestamp),
+            ],
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "admin-configured Slack route response: {response_body}"
+    );
+    ingress.drain().await;
+    let notice = ChannelConnectionNoticePolicy::generic("Slack");
+    assert!(
+        inbound
+            .captured_network_requests_for_test()
+            .iter()
+            .any(|request| {
+                request.url.ends_with("/api/chat.postMessage")
+                    && String::from_utf8_lossy(&request.body)
+                        .contains(notice.connect_required.as_str())
+            }),
+        "the unconnected Slack DM must receive the manifest/generic connect notice"
+    );
+    assert!(
+        inbound
+            .assert_model_request_contains(message)
+            .await
+            .is_err(),
+        "the unconnected Slack DM must not admit an agent turn"
+    );
+    assert_extension_has_no_user_installation(services, "slack").await;
+}
+
+#[tokio::test]
+async fn admin_configured_telegram_unconnected_dm_gets_connect_notice_without_installation_or_turn()
+{
+    let group = RebornIntegrationGroup::extension_delivery()
+        .await
+        .expect("delivery group builds");
+    let services = reborn_services(&group);
+    let inbound = group
+        .thread("conv-admin-telegram-unconnected")
+        .script([RebornScriptedReply::text("must stay unused")])
+        .build()
+        .await
+        .expect("inbound thread builds");
+    assert_extension_has_no_user_installation(services, "telegram").await;
+    let assembly = start_channel_host_assembly(services, &inbound);
+    let _binding = wait_for_production_registration(&assembly, services, "telegram").await;
+    let ingress = VendorIngress::production(
+        services
+            .extension_ingress_parts()
+            .expect("composition built generic ingress"),
+    );
+
+    let (unconfigured_status, unconfigured_response) = ingress
+        .post_with_body(
+            TELEGRAM_ROUTE,
+            "{}",
+            vec![(
+                "X-Telegram-Bot-Api-Secret-Token",
+                TELEGRAM_WEBHOOK_SECRET.to_string(),
+            )],
+        )
+        .await;
+    assert_eq!(
+        unconfigured_status,
+        StatusCode::UNAUTHORIZED,
+        "the manifest route must exist but fail closed before admin configuration: {unconfigured_response}"
+    );
+
+    configure_admin_group(
+        &group,
+        "extension.telegram",
+        json!([
+            {"handle": "telegram_bot_token", "value": TELEGRAM_BOT_TOKEN},
+            {"handle": "telegram_webhook_secret", "value": TELEGRAM_WEBHOOK_SECRET},
+            {"handle": "telegram_webhook_url", "value": "https://hooks.example.test/webhooks/extensions/telegram/updates"},
+            {"handle": "bot_username", "value": "itest_admin_bot"}
+        ]),
+    )
+    .await;
+    assert_extension_has_no_user_installation(services, "telegram").await;
+    let message = "admin-configured Telegram DM must not reach the agent";
+    let body = json!({
+        "update_id": 7001,
+        "message": {
+            "message_id": 7011,
+            "date": 1710000000,
+            "text": message,
+            "from": {"id": 700700, "is_bot": false, "first_name": "Pat"},
+            "chat": {"id": 700700, "type": "private"}
+        }
+    })
+    .to_string();
+    let (status, response_body) = ingress
+        .post_with_body(
+            TELEGRAM_ROUTE,
+            &body,
+            vec![(
+                "X-Telegram-Bot-Api-Secret-Token",
+                TELEGRAM_WEBHOOK_SECRET.to_string(),
+            )],
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "admin-configured Telegram route response: {response_body}"
+    );
+    ingress.drain().await;
+    let notice = ChannelConnectionNoticePolicy::generic("Telegram");
+    assert!(
+        inbound
+            .captured_network_requests_for_test()
+            .iter()
+            .any(|request| {
+                request.url.ends_with("/sendMessage")
+                    && String::from_utf8_lossy(&request.body)
+                        .contains(notice.connect_required.as_str())
+            }),
+        "the unconnected Telegram DM must receive the manifest/generic connect notice"
+    );
+    assert!(
+        inbound
+            .assert_model_request_contains(message)
+            .await
+            .is_err(),
+        "the unconnected Telegram DM must not admit an agent turn"
+    );
+    assert_extension_has_no_user_installation(services, "telegram").await;
 }
 
 /// The Slack outbound proof (OUT-1/2/5 + ING-11 read half): a signed DM

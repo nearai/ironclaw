@@ -219,8 +219,8 @@ pub struct RebornBuildInput {
 }
 
 /// One channel extension's binary-assembled vendor binding
-/// (extension-runtime DEL-7): the channel adapter for a non-`first_party`
-/// runtime plus the composition extras the generic channel host consumes.
+/// (extension-runtime DEL-7): the adapter linked into this deployment plus
+/// the composition extras the generic channel host consumes.
 /// Supplied through [`RebornBuildInput::with_channel_extension_bindings`] by
 /// the assembling binary — composition itself never names a concrete
 /// extension crate.
@@ -228,7 +228,7 @@ pub struct RebornBuildInput {
 pub struct ChannelExtensionBinding {
     /// The extension id the manifest declares (also the adapter id).
     pub extension_id: String,
-    /// The channel adapter implementation bound at activation.
+    /// The channel adapter implementation linked into the deployment.
     pub adapter: std::sync::Arc<dyn ironclaw_product_adapters::ChannelAdapter>,
     /// Protocol-specific inbound payload reclassification (gate-resolution
     /// replies), registered on the channel host assembly.

@@ -591,9 +591,10 @@ impl IngressSecretsPort for StaticIngressSecrets {
 
 // ── The composed router parts + serve mount ─────────────────────────────────
 
-/// The composed generic ingress: the router (over the active snapshot) plus
-/// the registration surface. Built once by composition; the serve layer
-/// mounts [`extension_ingress_route_mount`] over it.
+/// The composed generic ingress: the deployment-first router (with an active
+/// snapshot compatibility fallback) plus the registration surface. Built once
+/// by composition; the serve layer mounts [`extension_ingress_route_mount`]
+/// over it.
 #[derive(Clone)]
 pub struct ExtensionIngressParts {
     pub router: Arc<ExtensionIngressRouter>,
@@ -603,24 +604,29 @@ pub struct ExtensionIngressParts {
     pub reply_context: Arc<dyn ironclaw_extension_host::ingress::ReplyContextStore>,
 }
 
-/// Build the generic ingress router over the generic host's snapshot watch.
+/// Build the generic ingress router over deployment bindings and the generic
+/// host's compatibility snapshot watch.
 /// `reply_context` is the durable ING-11 store (production: the
 /// filesystem-backed [`crate::extension_host::reply_contexts::FilesystemReplyContextStore`],
 /// so contexts stored before admission survive a restart to delivery time).
 pub(crate) fn build_extension_ingress(
     watch: ironclaw_extension_host::SnapshotWatch,
+    deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
     reply_context: Arc<dyn ironclaw_extension_host::ingress::ReplyContextStore>,
 ) -> ExtensionIngressParts {
     let registry = Arc::new(ExtensionIngressRegistry::default());
-    let router = Arc::new(ExtensionIngressRouter::new(
-        watch,
-        ironclaw_extension_host::ingress::ExtensionIngressRouterDeps {
-            secrets: Arc::clone(&registry) as Arc<dyn IngressSecretsPort>,
-            sink: Arc::clone(&registry) as Arc<dyn InboundSink>,
-            reply_context: Arc::clone(&reply_context),
-        },
-        ironclaw_extension_host::ingress::IngressRouterConfig::default(),
-    ));
+    let router = Arc::new(
+        ExtensionIngressRouter::new(
+            watch,
+            ironclaw_extension_host::ingress::ExtensionIngressRouterDeps {
+                secrets: Arc::clone(&registry) as Arc<dyn IngressSecretsPort>,
+                sink: Arc::clone(&registry) as Arc<dyn InboundSink>,
+                reply_context: Arc::clone(&reply_context),
+            },
+            ironclaw_extension_host::ingress::IngressRouterConfig::default(),
+        )
+        .with_deployment_channels(deployment_channels),
+    );
     ExtensionIngressParts {
         router,
         registry,
@@ -679,7 +685,8 @@ mod serve_mount {
     };
 
     /// Build the single `PublicRouteMount` serving every extension channel's
-    /// ingress. Mounted once; the route table follows the active snapshot.
+    /// ingress. Mounted once; route resolution follows deployment bindings
+    /// first and active snapshot bindings second.
     pub fn extension_ingress_route_mount(
         parts: &ExtensionIngressParts,
     ) -> Result<PublicRouteMount, crate::RebornBuildError> {

@@ -1,16 +1,18 @@
 //! Generic per-extension channel host assembly (extension-runtime §5.3–§5.5).
 //!
 //! [`GenericChannelHostAssembly`] reconciles the [`ExtensionIngressRegistry`]
-//! against the generic host's ACTIVE snapshot: every active extension whose
-//! resolved contract declares an inbound channel ingress gets one
-//! registration — a dynamic verification-secrets port over the
+//! against manifest-declared deployment channels plus an active-snapshot
+//! compatibility lane. Every discovered extension whose resolved contract
+//! declares inbound channel ingress gets one registration — a dynamic
+//! verification-secrets port over the
 //! `[channel.config]` secret storage plus a [`GenericChannelInboundSink`]
 //! over a per-extension `DefaultProductWorkflow` (durable idempotency ledger
 //! and durable conversation binding at extension-keyed storage roots),
 //! observed by the generic run-delivery observer when the composed runtime
-//! has a delivery coordinator. Activation registers, deactivation
-//! unregisters, and replacement is race-safe with in-flight requests (the
-//! registry swaps `Arc` entries under one lock).
+//! has a delivery coordinator. Deployment registrations remain independent
+//! of user activation; active-only registrations follow lifecycle changes.
+//! Replacement is race-safe with in-flight requests (the registry swaps
+//! `Arc` entries under one lock).
 //!
 //! Vendor residue that is not yet host-generic enters only through
 //! [`ChannelExtras`]: an inbound payload classifier (gate-resolution
@@ -18,16 +20,16 @@
 //! an optional storage-root override for a channel whose durable state
 //! predates the generic root scheme.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use ironclaw_conversations::RebornFilesystemConversationServices;
-use ironclaw_extension_host::SnapshotWatch;
 use ironclaw_extension_host::active::{ActiveExtension, ActiveSnapshot};
 use ironclaw_extension_host::ingress::{
     IngressPortError, IngressSecretsPort, VerificationCandidate,
 };
+use ironclaw_extension_host::{DeploymentChannelBinding, DeploymentChannelRegistry, SnapshotWatch};
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::recipe::IngressVerificationRecipe;
 use ironclaw_host_api::{
@@ -253,6 +255,7 @@ pub(crate) struct ChannelHostDeliveryDeps {
 /// Everything the assembly composes per-extension graphs from.
 pub(crate) struct GenericChannelHostDeps {
     pub(crate) watch: SnapshotWatch,
+    pub(crate) deployment_channels: Arc<DeploymentChannelRegistry>,
     pub(crate) registry: Arc<ExtensionIngressRegistry>,
     pub(crate) channel_config: Arc<ChannelConfigService>,
     pub(crate) workflow_state: Arc<dyn ChannelWorkflowStateFactory>,
@@ -276,11 +279,11 @@ pub(crate) struct GenericChannelHostDeps {
 
 /// What the assembly last reconciled for one extension id.
 enum ReconciledChannel {
-    /// Assembly-built generic graph for exactly this active-set entry.
+    /// Assembly-built generic graph for exactly this channel source.
     Generic {
-        active: Arc<ActiveExtension>,
+        source: HostedChannelSource,
         #[cfg(feature = "test-support")]
-        binding: Arc<dyn ConversationBindingService>,
+        conversation_binding: Arc<dyn ConversationBindingService>,
         /// The post-admission observer registered with the sink (test seam:
         /// gate-resolution acks arriving from non-channel surfaces are
         /// injected through the SAME observer instance the sink drives).
@@ -290,13 +293,52 @@ enum ReconciledChannel {
     /// Nothing registered for this entry (unmanaged registration, no
     /// verification recipe, or a build failure already logged); skipped
     /// until the active-set entry changes.
-    Untouched { active: Arc<ActiveExtension> },
+    Untouched { source: HostedChannelSource },
+}
+
+#[derive(Clone)]
+enum HostedChannelSource {
+    Deployment(Arc<DeploymentChannelBinding>),
+    Active(Arc<ActiveExtension>),
+}
+
+impl HostedChannelSource {
+    fn extension_id(&self) -> &str {
+        match self {
+            Self::Deployment(binding) => &binding.extension_id,
+            Self::Active(active) => &active.extension_id,
+        }
+    }
+
+    fn installation_id(&self) -> &str {
+        match self {
+            // Deployment ingress is not a user installation. Its stable
+            // host-owned identity is the extension id itself.
+            Self::Deployment(binding) => &binding.extension_id,
+            Self::Active(active) => &active.installation_id,
+        }
+    }
+
+    fn resolved(&self) -> &ironclaw_extensions::ResolvedExtensionManifest {
+        match self {
+            Self::Deployment(binding) => binding.resolved.as_ref(),
+            Self::Active(active) => active.resolved.as_ref(),
+        }
+    }
+
+    fn same_source(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Deployment(left), Self::Deployment(right)) => Arc::ptr_eq(left, right),
+            (Self::Active(left), Self::Active(right)) => Arc::ptr_eq(left, right),
+            _ => false,
+        }
+    }
 }
 
 struct BuiltGenericChannelGraph {
     registration: ChannelIngressRegistration,
     #[cfg(feature = "test-support")]
-    binding: Arc<dyn ConversationBindingService>,
+    conversation_binding: Arc<dyn ConversationBindingService>,
     #[cfg(feature = "test-support")]
     observer: Option<Arc<dyn PostAdmissionObserver>>,
 }
@@ -469,31 +511,36 @@ impl GenericChannelHostAssembly {
             .unwrap_or_default()
     }
 
-    /// Reconcile the ingress registry against one snapshot: register newly
-    /// active inbound channels, rebuild changed ones, unregister deactivated
-    /// ones. Untouched active-set entries (`Arc`-identical across
-    /// generations) are skipped, so an unrelated activation never rebuilds a
-    /// sibling channel's graph.
+    /// Reconcile deployment-owned channels plus the active-snapshot
+    /// compatibility set. Deployment bindings win for the same extension id,
+    /// so user install/deactivation never removes an operator-owned route.
     async fn reconcile(&self, snapshot: Arc<ActiveSnapshot>) {
         let mut reconciled = self.reconciled.lock().await;
 
-        let mut active_channels: BTreeSet<String> = BTreeSet::new();
+        let mut desired: BTreeMap<String, HostedChannelSource> = BTreeMap::new();
+        for extension_id in self.deps.deployment_channels.extension_ids() {
+            if let Some(binding) = self.deps.deployment_channels.extension(&extension_id) {
+                desired.insert(extension_id, HostedChannelSource::Deployment(binding));
+            }
+        }
         for extension_id in snapshot.extension_ids() {
             if let Some(active) = snapshot.extension(&extension_id)
                 && let Some(channel) = active.resolved.channel.as_ref()
                 && channel.inbound
                 && channel.ingress.is_some()
             {
-                active_channels.insert(extension_id);
+                desired
+                    .entry(extension_id)
+                    .or_insert(HostedChannelSource::Active(active));
             }
         }
 
-        let deactivated: Vec<String> = reconciled
+        let removed_sources: Vec<String> = reconciled
             .iter()
-            .filter(|(extension_id, _)| !active_channels.contains(*extension_id))
+            .filter(|(extension_id, _)| !desired.contains_key(*extension_id))
             .map(|(extension_id, _)| extension_id.clone())
             .collect();
-        for extension_id in deactivated {
+        for extension_id in removed_sources {
             if let Some(ReconciledChannel::Generic { .. }) = reconciled.remove(&extension_id)
                 && let Some(removed) = self.deps.registry.unregister_managed(&extension_id)
             {
@@ -501,21 +548,20 @@ impl GenericChannelHostAssembly {
             }
         }
 
-        for extension_id in active_channels {
-            let Some(active) = snapshot.extension(&extension_id) else {
-                continue;
-            };
+        for (extension_id, source) in desired {
             match reconciled.get(&extension_id) {
-                Some(ReconciledChannel::Generic { active: last, .. })
-                | Some(ReconciledChannel::Untouched { active: last })
-                    if Arc::ptr_eq(last, &active) =>
+                Some(ReconciledChannel::Generic {
+                    source: previous, ..
+                })
+                | Some(ReconciledChannel::Untouched { source: previous })
+                    if previous.same_source(&source) =>
                 {
                     continue;
                 }
                 _ => {}
             }
             let extras = self.stored_extras(&extension_id);
-            match self.build_generic_graph(&active, &extras).await {
+            match self.build_generic_graph(&source, &extras).await {
                 Ok(Some(graph)) => {
                     match self
                         .deps
@@ -529,9 +575,9 @@ impl GenericChannelHostAssembly {
                             reconciled.insert(
                                 extension_id.clone(),
                                 ReconciledChannel::Generic {
-                                    active,
+                                    source,
                                     #[cfg(feature = "test-support")]
-                                    binding: graph.binding,
+                                    conversation_binding: graph.conversation_binding,
                                     #[cfg(feature = "test-support")]
                                     observer: graph.observer,
                                 },
@@ -540,7 +586,7 @@ impl GenericChannelHostAssembly {
                         ManagedRegistrationOutcome::SkippedUnmanaged => {
                             reconciled.insert(
                                 extension_id.clone(),
-                                ReconciledChannel::Untouched { active },
+                                ReconciledChannel::Untouched { source },
                             );
                         }
                     }
@@ -553,7 +599,7 @@ impl GenericChannelHostAssembly {
                     );
                     reconciled.insert(
                         extension_id.clone(),
-                        ReconciledChannel::Untouched { active },
+                        ReconciledChannel::Untouched { source },
                     );
                 }
                 Err(reason) => {
@@ -565,7 +611,7 @@ impl GenericChannelHostAssembly {
                     );
                     reconciled.insert(
                         extension_id.clone(),
-                        ReconciledChannel::Untouched { active },
+                        ReconciledChannel::Untouched { source },
                     );
                 }
             }
@@ -577,10 +623,10 @@ impl GenericChannelHostAssembly {
     /// durable workflow, and (with a coordinator) the run-delivery observer.
     async fn build_generic_graph(
         &self,
-        active: &ActiveExtension,
+        source: &HostedChannelSource,
         extras: &StoredChannelExtras,
     ) -> Result<Option<BuiltGenericChannelGraph>, String> {
-        let Some(channel) = active.resolved.channel.as_ref() else {
+        let Some(channel) = source.resolved().channel.as_ref() else {
             return Ok(None);
         };
         let Some(ingress) = channel.ingress.as_ref() else {
@@ -595,13 +641,13 @@ impl GenericChannelHostAssembly {
 
         let secrets = Arc::new(ChannelConfigIngressSecrets {
             channel_config: Arc::clone(&self.deps.channel_config),
-            extension_id: ExtensionId::new(&active.extension_id)
+            extension_id: ExtensionId::new(source.extension_id())
                 .map_err(|error| format!("invalid extension id: {error}"))?,
             handle: secret_handle.clone(),
-            installation_id: active.installation_id.clone(),
+            installation_id: source.installation_id().to_string(),
         });
 
-        let (binding, workflow_state) = self.build_binding(active, extras).await?;
+        let (binding, workflow_state) = self.build_binding(source, extras).await?;
 
         let inbound = Arc::new(DefaultInboundTurnService::new(
             Arc::clone(&binding),
@@ -624,17 +670,17 @@ impl GenericChannelHostAssembly {
         }
 
         let observer = match &self.deps.delivery {
-            Some(delivery) => Some(self.build_observer(active, delivery, Arc::clone(&binding))?),
+            Some(delivery) => Some(self.build_observer(source, delivery, Arc::clone(&binding))?),
             None => None,
         };
 
-        let adapter_id = ProductAdapterId::new(&active.extension_id)
+        let adapter_id = ProductAdapterId::new(source.extension_id())
             .map_err(|error| format!("invalid adapter id: {error}"))?;
         let pairing = self
             .deps
             .channel_pairing
             .as_ref()
-            .and_then(|registry| registry.get(&active.extension_id))
+            .and_then(|registry| registry.get(source.extension_id()))
             .map(|service| {
                 service
                     as Arc<dyn crate::extension_host::extension_ingress::ChannelPairingInterceptor>
@@ -665,7 +711,7 @@ impl GenericChannelHostAssembly {
         Ok(Some(BuiltGenericChannelGraph {
             registration,
             #[cfg(feature = "test-support")]
-            binding,
+            conversation_binding: binding,
             #[cfg(feature = "test-support")]
             observer: observer.map(|observer| observer as Arc<dyn PostAdmissionObserver>),
         }))
@@ -675,14 +721,14 @@ impl GenericChannelHostAssembly {
     /// the extension's storage roots, bound under the deployment identity.
     async fn build_binding(
         &self,
-        active: &ActiveExtension,
+        source: &HostedChannelSource,
         extras: &StoredChannelExtras,
     ) -> Result<(Arc<dyn ConversationBindingService>, ChannelWorkflowState), String> {
         let identity = &self.deps.identity;
         let roots = match &extras.storage_roots {
             Some(roots) => roots.clone(),
             None => {
-                default_channel_workflow_storage_roots(&identity.tenant_id, &active.extension_id)?
+                default_channel_workflow_storage_roots(&identity.tenant_id, source.extension_id())?
             }
         };
         let ledger_scope = ResourceScope {
@@ -696,9 +742,9 @@ impl GenericChannelHostAssembly {
         };
         let workflow_state = self.deps.workflow_state.build(&roots, ledger_scope).await?;
 
-        let adapter_id = ProductAdapterId::new(&active.extension_id)
+        let adapter_id = ProductAdapterId::new(source.extension_id())
             .map_err(|error| format!("invalid adapter id: {error}"))?;
-        let installation_id = AdapterInstallationId::new(&active.installation_id)
+        let installation_id = AdapterInstallationId::new(source.installation_id())
             .map_err(|error| format!("invalid installation id: {error}"))?;
         // Auth-declaring channel extensions resolve verified inbound actors
         // through the generic installation-scoped identity bindings written
@@ -711,15 +757,15 @@ impl GenericChannelHostAssembly {
             .deps
             .channel_pairing
             .as_ref()
-            .is_some_and(|registry| registry.get(&active.extension_id).is_some());
+            .is_some_and(|registry| registry.get(source.extension_id()).is_some());
         let actor_user_resolver: Arc<dyn ProductActorUserResolver> = match (
             self.deps.identity_lookup.as_ref(),
-            active.resolved.auth.first(),
+            source.resolved().auth.first(),
         ) {
             (Some(lookup), Some(auth)) => Arc::new(
                 crate::provider_identity::ProviderIdentityActorResolver::for_any_actor_kind(
                     auth.vendor.as_str(),
-                    active.extension_id.as_str(),
+                    source.extension_id(),
                     Arc::clone(lookup),
                 ),
             ),
@@ -729,8 +775,8 @@ impl GenericChannelHostAssembly {
             // actors fail closed instead of inheriting the operator.
             (Some(lookup), None) if pairing_extension => Arc::new(
                 crate::provider_identity::ProviderIdentityActorResolver::for_any_actor_kind(
-                    active.extension_id.as_str(),
-                    active.extension_id.as_str(),
+                    source.extension_id(),
+                    source.extension_id(),
                     Arc::clone(lookup),
                 ),
             ),
@@ -753,8 +799,8 @@ impl GenericChannelHostAssembly {
             match &extras.subject_route_resolver {
                 Some(resolver) => Some(Arc::clone(resolver)),
                 None => {
-                    let handles = active
-                        .resolved
+                    let handles = source
+                        .resolved()
                         .channel
                         .as_ref()
                         .map(|channel| {
@@ -763,7 +809,7 @@ impl GenericChannelHostAssembly {
                         })
                         .unwrap_or_default();
                     if handles.declared() {
-                        let extension_id = ExtensionId::new(&active.extension_id)
+                        let extension_id = ExtensionId::new(source.extension_id())
                             .map_err(|error| format!("invalid extension id: {error}"))?;
                         Some(Arc::new(
                             crate::extension_host::channel_subject_routes::
@@ -812,14 +858,14 @@ impl GenericChannelHostAssembly {
     /// conversations, adapted onto the sink's post-admission seam.
     fn build_observer(
         &self,
-        active: &ActiveExtension,
+        source: &HostedChannelSource,
         delivery: &ChannelHostDeliveryDeps,
         binding: Arc<dyn ConversationBindingService>,
     ) -> Result<Arc<RunDeliveryPostAdmissionObserver>, String> {
         let identity = &self.deps.identity;
         let notice_thread_id = ThreadId::new(format!(
             "{extension_id}-channel-notices",
-            extension_id = active.extension_id
+            extension_id = source.extension_id()
         ))
         .map_err(|error| format!("invalid channel-notice thread id: {error}"))?;
         let fallback_notice_scope = TurnScope::new_with_owner(
@@ -837,7 +883,7 @@ impl GenericChannelHostAssembly {
             route_store: Arc::clone(&delivery.route_store),
             communication_preferences: Arc::clone(&delivery.communication_preferences),
             coordinator: Arc::clone(&delivery.coordinator),
-            extension_id: active.extension_id.clone(),
+            extension_id: source.extension_id().to_string(),
             fallback_notice_scope,
             approval_context: delivery.approval_context.clone(),
             blocked_auth_prompts: delivery.blocked_auth_prompts.clone(),
@@ -847,9 +893,9 @@ impl GenericChannelHostAssembly {
             .deps
             .channel_pairing
             .as_ref()
-            .and_then(|registry| registry.get(&active.extension_id))
+            .and_then(|registry| registry.get(source.extension_id()))
             .map(|service| service.connection_notices().clone())
-            .unwrap_or_else(|| ChannelConnectionNoticePolicy::generic(&active.resolved.name));
+            .unwrap_or_else(|| ChannelConnectionNoticePolicy::generic(&source.resolved().name));
         let observer = Arc::new(RunDeliveryObserver::with_settings_and_connection_notices(
             services,
             delivery.settings,
@@ -871,7 +917,10 @@ impl GenericChannelHostAssembly {
     ) -> Option<Arc<dyn ConversationBindingService>> {
         let reconciled = self.reconciled.try_lock().ok()?;
         match reconciled.get(extension_id)? {
-            ReconciledChannel::Generic { binding, .. } => Some(Arc::clone(binding)),
+            ReconciledChannel::Generic {
+                conversation_binding,
+                ..
+            } => Some(Arc::clone(conversation_binding)),
             _ => None,
         }
     }

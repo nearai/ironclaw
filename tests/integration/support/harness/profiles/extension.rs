@@ -706,6 +706,7 @@ pub(crate) fn extension_delivery_tools_profile() -> HarnessResult<ToolsProfile> 
         .with_native_extension_factory(Arc::new(TelegramFixtureFactory))
         .with_account_setup_descriptor(telegram_account_setup_descriptor())
         .with_channel_extension_binding(slack_channel_extension_binding())
+        .with_channel_extension_binding(telegram_channel_extension_binding())
         .with_recording_network_egress(network_egress);
     Ok(profile)
 }
@@ -731,6 +732,15 @@ fn slack_channel_extension_binding() -> ironclaw_reborn_composition::ChannelExte
         preference_target_codec: Some(Arc::new(
             ironclaw_slack_extension::SlackPreferenceTargetCodec,
         )),
+    }
+}
+
+fn telegram_channel_extension_binding() -> ironclaw_reborn_composition::ChannelExtensionBinding {
+    ironclaw_reborn_composition::ChannelExtensionBinding {
+        extension_id: "telegram".to_string(),
+        adapter: Arc::new(ironclaw_telegram_extension::TelegramChannelAdapter::default()),
+        inbound_payload_classifier: None,
+        preference_target_codec: None,
     }
 }
 

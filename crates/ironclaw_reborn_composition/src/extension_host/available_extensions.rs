@@ -82,6 +82,9 @@ pub(crate) enum AvailableExtensionAssetContent {
 pub(crate) struct AvailableExtensionPackage {
     pub(crate) package_ref: LifecyclePackageRef,
     pub(crate) manifest_toml: String,
+    /// The validated runtime contract compiled alongside `manifest_toml`.
+    /// Catalog projections read this value directly and never reparse raw TOML.
+    pub(crate) resolved_manifest: Arc<ironclaw_extensions::ResolvedExtensionManifest>,
     /// The loader-supplied [`ManifestSource`] this package was validated
     /// under. Carried so install/migration re-parses (`prepare_install`,
     /// `prepare_manifest_migration`) validate with the SAME source the
@@ -458,41 +461,12 @@ impl AvailableExtensionCatalog {
     /// manifest, including packages that have not been installed. The package
     /// source stamp is preserved during re-resolution, so an uploaded bundle
     /// cannot gain host-bundled authority through this read-only projection.
-    pub(crate) fn admin_configuration_uses(
-        &self,
-    ) -> Result<Vec<AdminConfigurationCatalogUse>, ProductWorkflowError> {
-        let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
-            ProductWorkflowError::InvalidBindingRequest {
-                reason: format!(
-                    "host port catalog rejected admin-configuration projection: {error}"
-                ),
-            }
-        })?;
-        let contracts = product_extension_host_api_contract_registry().map_err(|error| {
-            ProductWorkflowError::InvalidBindingRequest {
-                reason: format!(
-                    "host API contracts rejected admin-configuration projection: {error}"
-                ),
-            }
-        })?;
+    pub(crate) fn admin_configuration_uses(&self) -> Vec<AdminConfigurationCatalogUse> {
         let mut uses = Vec::new();
         for package in &self.packages {
-            let record = ExtensionManifestRecord::from_toml(
-                &package.manifest_toml,
-                package.source,
-                &host_ports,
-                None,
-                &contracts,
-            )
-            .map_err(|error| ProductWorkflowError::InvalidBindingRequest {
-                reason: format!(
-                    "available extension manifest failed admin-configuration projection ({}): {error}",
-                    package.package_ref.id
-                ),
-            })?;
             uses.extend(
-                record
-                    .resolved()
+                package
+                    .resolved_manifest
                     .admin_configuration
                     .iter()
                     .cloned()
@@ -503,7 +477,19 @@ impl AvailableExtensionCatalog {
                     }),
             );
         }
-        Ok(uses)
+        uses
+    }
+
+    /// Resolved deployment manifests for host-owned surfaces. This is a
+    /// read-only projection of the available catalog; it does not install or
+    /// activate any package.
+    pub(crate) fn resolved_manifests(
+        &self,
+    ) -> Vec<Arc<ironclaw_extensions::ResolvedExtensionManifest>> {
+        self.packages
+            .iter()
+            .map(|package| Arc::clone(&package.resolved_manifest))
+            .collect()
     }
 }
 
@@ -701,6 +687,7 @@ fn bundled_extension_package(
     Ok(AvailableExtensionPackage {
         package_ref,
         manifest_toml: record.raw_toml().to_string(),
+        resolved_manifest: Arc::new(record.resolved().clone()),
         source: ManifestSource::HostBundled,
         package,
         cleanup_requirements: Vec::new(),
@@ -1004,6 +991,7 @@ where
             package.id.as_str(),
         )?,
         manifest_toml: record.raw_toml().to_string(),
+        resolved_manifest: Arc::new(record.resolved().clone()),
         // Everything discovered on the filesystem is `InstalledLocal`, per
         // the `ManifestSource` contract ("Locally installed extension under
         // `/system/extensions/`"). `HostBundled` — the only tier eligible
@@ -1352,7 +1340,7 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
     #[test]
     fn admin_configuration_projection_includes_uninstalled_bundled_packages() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
-        let uses = catalog.admin_configuration_uses().unwrap();
+        let uses = catalog.admin_configuration_uses();
 
         for (package_id, group_id) in [
             ("slack", "extension.slack"),
@@ -2499,6 +2487,18 @@ output_schema_ref = "schemas/write.output.json"
             &capability_provider_contracts(),
         )
         .expect("manifest");
+        let resolved_manifest = Arc::new(
+            ExtensionManifestRecord::from_toml(
+                MANIFEST,
+                ManifestSource::HostBundled,
+                &HostPortCatalog::empty(),
+                None,
+                &capability_provider_contracts(),
+            )
+            .expect("resolved manifest")
+            .resolved()
+            .clone(),
+        );
         let package = ExtensionPackage::from_manifest(
             manifest,
             VirtualPath::new("/system/extensions/fixture").unwrap(),
@@ -2508,6 +2508,7 @@ output_schema_ref = "schemas/write.output.json"
             package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
                 .unwrap(),
             manifest_toml: MANIFEST.to_string(),
+            resolved_manifest,
             source: ManifestSource::HostBundled,
             package,
             cleanup_requirements: Vec::new(),

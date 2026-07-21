@@ -380,6 +380,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     let host = slack_test_extension_host().await;
     let ingress = build_extension_ingress(
         host.snapshot_watch(),
+        Arc::new(ironclaw_extension_host::DeploymentChannelRegistry::default()),
         Arc::new(
             crate::extension_host::reply_contexts::FilesystemReplyContextStore::new(
                 Arc::new(InMemoryBackend::new()),
@@ -411,6 +412,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     let channel_config = configured_channel_config().await;
     let deps = GenericChannelHostDeps {
         watch: host.snapshot_watch(),
+        deployment_channels: Arc::new(ironclaw_extension_host::DeploymentChannelRegistry::default()),
         registry: Arc::clone(&ingress.registry),
         channel_config: Arc::clone(&channel_config),
         workflow_state: Arc::new(FilesystemChannelWorkflowStateFactory::new(Arc::new(

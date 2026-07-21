@@ -16,10 +16,13 @@
 //! [`ChannelConfigReactivation`]. Stored secret values are never echoed
 //! back: [`ChannelConfigService::status`] reports presence only.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_extensions::{ExtensionInstallationStore, ExtensionManifestRecord};
+use ironclaw_extensions::{
+    ExtensionInstallationStore, ExtensionManifestRecord, ResolvedExtensionManifest,
+};
 use ironclaw_host_api::{ExtensionId, RecipeSecretField, ResourceScope, SecretHandle};
 use ironclaw_product_workflow::{ProductWorkflowError, RebornServicesError};
 use ironclaw_secrets::{SecretMaterial, SecretStore};
@@ -71,6 +74,7 @@ pub(crate) struct ChannelConfigService {
     secret_scope: ResourceScope,
     reactivation: Arc<dyn ChannelConfigReactivation>,
     admin_configuration: Option<AdminConfigurationConsumer>,
+    available_manifests: BTreeMap<ExtensionId, Arc<ResolvedExtensionManifest>>,
 }
 
 #[derive(Clone)]
@@ -92,6 +96,7 @@ impl ChannelConfigService {
             secret_scope,
             reactivation,
             admin_configuration: None,
+            available_manifests: BTreeMap::new(),
         }
     }
 
@@ -101,6 +106,21 @@ impl ChannelConfigService {
         scope: ResourceScope,
     ) -> Self {
         self.admin_configuration = Some(AdminConfigurationConsumer { service, scope });
+        self
+    }
+
+    /// Attach the read-only available-catalog projection used by
+    /// deployment-owned channel ingress. This does not create an extension
+    /// installation; it only lets generic configuration consumers resolve
+    /// manifest-declared admin fields before a user installs the extension.
+    pub(crate) fn with_available_manifests(
+        mut self,
+        manifests: impl IntoIterator<Item = Arc<ResolvedExtensionManifest>>,
+    ) -> Self {
+        self.available_manifests = manifests
+            .into_iter()
+            .map(|manifest| (manifest.id.clone(), manifest))
+            .collect();
         self
     }
 
@@ -130,6 +150,26 @@ impl ChannelConfigService {
             .as_ref()
             .map(|channel| channel.config.fields.clone())
             .unwrap_or_default())
+    }
+
+    async fn resolved_manifest(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<Arc<ResolvedExtensionManifest>, ChannelConfigError> {
+        if let Some(record) = self
+            .installation_store
+            .get_manifest(extension_id)
+            .await
+            .map_err(storage_error)?
+        {
+            return Ok(Arc::new(record.resolved().clone()));
+        }
+        self.available_manifests
+            .get(extension_id)
+            .cloned()
+            .ok_or_else(|| ChannelConfigError::NotInstalled {
+                extension_id: extension_id.as_str().to_string(),
+            })
     }
 
     /// Save submitted `(handle, value)` pairs. Handles must be declared by
@@ -232,23 +272,17 @@ impl ChannelConfigService {
         handle: &SecretHandle,
     ) -> Result<Option<SecretMaterial>, ChannelConfigError> {
         if let Some(admin) = &self.admin_configuration {
-            let manifest = self.manifest(extension_id).await?;
-            if let Some(descriptor) =
-                manifest
-                    .resolved()
-                    .admin_configuration
+            let manifest = self.resolved_manifest(extension_id).await?;
+            if let Some(descriptor) = manifest.admin_configuration.iter().find(|descriptor| {
+                descriptor
+                    .fields
                     .iter()
-                    .find(|descriptor| {
-                        descriptor
-                            .fields
-                            .iter()
-                            .any(|field| field.secret && field.handle == *handle)
-                    })
-                && let Some(material) = admin
-                    .service
-                    .secret_material(&admin.scope, &descriptor.group_id, handle)
-                    .await
-                    .map_err(admin_configuration_error)?
+                    .any(|field| field.secret && field.handle == *handle)
+            }) && let Some(material) = admin
+                .service
+                .secret_material(&admin.scope, &descriptor.group_id, handle)
+                .await
+                .map_err(admin_configuration_error)?
             {
                 return Ok(Some(material));
             }
@@ -275,24 +309,18 @@ impl ChannelConfigService {
         handle: &str,
     ) -> Result<Option<String>, ChannelConfigError> {
         if let Some(admin) = &self.admin_configuration {
-            let manifest = self.manifest(extension_id).await?;
+            let manifest = self.resolved_manifest(extension_id).await?;
             let handle = SecretHandle::new(handle).map_err(storage_error)?;
-            if let Some(descriptor) =
-                manifest
-                    .resolved()
-                    .admin_configuration
+            if let Some(descriptor) = manifest.admin_configuration.iter().find(|descriptor| {
+                descriptor
+                    .fields
                     .iter()
-                    .find(|descriptor| {
-                        descriptor
-                            .fields
-                            .iter()
-                            .any(|field| !field.secret && field.handle == handle)
-                    })
-                && let Some(value) = admin
-                    .service
-                    .non_secret_value(&admin.scope, &descriptor.group_id, &handle)
-                    .await
-                    .map_err(admin_configuration_error)?
+                    .any(|field| !field.secret && field.handle == handle)
+            }) && let Some(value) = admin
+                .service
+                .non_secret_value(&admin.scope, &descriptor.group_id, &handle)
+                .await
+                .map_err(admin_configuration_error)?
             {
                 return Ok(Some(value));
             }
@@ -317,19 +345,20 @@ impl ChannelConfigService {
         &self,
         handle: &str,
     ) -> Result<Option<secrecy::SecretString>, ChannelConfigError> {
-        let manifests = self
+        let installed_manifests = self
             .installation_store
             .list_manifests()
             .await
             .map_err(storage_error)?;
         let typed_handle = SecretHandle::new(handle).map_err(storage_error)?;
         if let Some(admin) = &self.admin_configuration {
-            for record in &manifests {
-                let Some((descriptor, field)) = record
-                    .resolved()
-                    .admin_configuration
-                    .iter()
-                    .find_map(|descriptor| {
+            let available = self.available_manifests.values().cloned();
+            let installed = installed_manifests
+                .iter()
+                .map(|record| Arc::new(record.resolved().clone()));
+            for manifest in available.chain(installed) {
+                let Some((descriptor, field)) =
+                    manifest.admin_configuration.iter().find_map(|descriptor| {
                         descriptor
                             .fields
                             .iter()
@@ -360,7 +389,7 @@ impl ChannelConfigService {
                 }
             }
         }
-        for record in manifests {
+        for record in installed_manifests {
             let Some(channel) = record.resolved().channel.as_ref() else {
                 continue;
             };
@@ -398,7 +427,7 @@ impl ChannelConfigService {
         &self,
         extension_id: &ExtensionId,
     ) -> Result<Vec<(String, String)>, ChannelConfigError> {
-        let manifest = self.manifest(extension_id).await?;
+        let manifest = self.resolved_manifest(extension_id).await?;
         let mut effective = self
             .installation_store
             .channel_config(extension_id)
@@ -407,10 +436,10 @@ impl ChannelConfigService {
         let Some(admin) = &self.admin_configuration else {
             return Ok(effective);
         };
-        let Some(channel) = manifest.resolved().channel.as_ref() else {
+        let Some(channel) = manifest.channel.as_ref() else {
             return Ok(effective);
         };
-        for descriptor in &manifest.resolved().admin_configuration {
+        for descriptor in &manifest.admin_configuration {
             for field in descriptor.fields.iter().filter(|field| {
                 !field.secret
                     && channel
@@ -446,9 +475,8 @@ impl ChannelConfigService {
         &self,
         extension_id: &ExtensionId,
     ) -> Result<Vec<ChannelConfigFieldStatus>, ChannelConfigError> {
-        let manifest = self.manifest(extension_id).await?;
+        let manifest = self.resolved_manifest(extension_id).await?;
         let descriptors = manifest
-            .resolved()
             .channel
             .as_ref()
             .map(|channel| channel.config.fields.clone())
@@ -464,17 +492,12 @@ impl ChannelConfigService {
         let mut statuses = Vec::with_capacity(descriptors.len());
         for field in descriptors {
             let admin_provided = if let Some(admin) = &self.admin_configuration
-                && let Some(descriptor) =
-                    manifest
-                        .resolved()
-                        .admin_configuration
+                && let Some(descriptor) = manifest.admin_configuration.iter().find(|descriptor| {
+                    descriptor
+                        .fields
                         .iter()
-                        .find(|descriptor| {
-                            descriptor
-                                .fields
-                                .iter()
-                                .any(|admin_field| admin_field.handle == field.handle)
-                        }) {
+                        .any(|admin_field| admin_field.handle == field.handle)
+                }) {
                 admin
                     .service
                     .get(&admin.scope, &descriptor.group_id)

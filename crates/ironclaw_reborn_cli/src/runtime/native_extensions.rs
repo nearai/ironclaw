@@ -19,25 +19,32 @@ pub(crate) fn bundled_native_extension_factories() -> Vec<Arc<dyn NativeExtensio
     vec![Arc::new(TelegramExtensionFactory)]
 }
 
-/// Channel-adapter bindings for channel extensions whose runtime is NOT
-/// `first_party` (extension-runtime P6): Slack's WASM-runtime package cannot
-/// ride a native factory, so the binary supplies its channel adapter plus
-/// the composition extras (gate-reply classifier + preference-target codec)
-/// as build input. Composition never names a concrete extension crate.
+/// Deployment channel-adapter bindings. These are independent of native tool
+/// loading: the host mounts manifest-declared ingress before any user
+/// installation exists, so every deployment channel adapter is linked here.
+/// Composition never names a concrete extension crate.
 pub(crate) fn bundled_channel_extension_bindings() -> Vec<ChannelExtensionBinding> {
-    vec![ChannelExtensionBinding {
-        extension_id: "slack".to_string(),
-        adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
-        inbound_payload_classifier: Some(Arc::new(|message| {
-            ironclaw_slack_extension::classify_interaction_resolution(
-                &message.text,
-                message.trigger,
-            )
-        })),
-        preference_target_codec: Some(Arc::new(
-            ironclaw_slack_extension::SlackPreferenceTargetCodec,
-        )),
-    }]
+    vec![
+        ChannelExtensionBinding {
+            extension_id: "slack".to_string(),
+            adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
+            inbound_payload_classifier: Some(Arc::new(|message| {
+                ironclaw_slack_extension::classify_interaction_resolution(
+                    &message.text,
+                    message.trigger,
+                )
+            })),
+            preference_target_codec: Some(Arc::new(
+                ironclaw_slack_extension::SlackPreferenceTargetCodec,
+            )),
+        },
+        ChannelExtensionBinding {
+            extension_id: "telegram".to_string(),
+            adapter: Arc::new(TelegramChannelAdapter::default()),
+            inbound_payload_classifier: None,
+            preference_target_codec: None,
+        },
+    ]
 }
 
 /// `runtime.service = "telegram.extension/v1"` — the Telegram channel
@@ -89,5 +96,10 @@ mod tests {
             .expect("the binary supplies the slack channel binding");
         assert!(slack.inbound_payload_classifier.is_some());
         assert!(slack.preference_target_codec.is_some());
+        let telegram = bindings
+            .iter()
+            .find(|binding| binding.extension_id == "telegram")
+            .expect("the binary supplies the telegram deployment channel binding");
+        assert!(telegram.inbound_payload_classifier.is_none());
     }
 }

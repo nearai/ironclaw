@@ -201,7 +201,7 @@ fn local_dev_test_support_interaction_service_accessors_return_none_without_loca
 }
 
 #[tokio::test]
-async fn runtime_channel_identity_bind_waits_for_activation_snapshot_before_dm_provisioning() {
+async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activation() {
     let root = tempfile::tempdir().expect("tempdir");
     let network_egress = Arc::new(SlackDmOpenNetworkEgress::default());
     let build_input = RebornBuildInput::local_dev(
@@ -289,35 +289,17 @@ async fn runtime_channel_identity_bind_waits_for_activation_snapshot_before_dm_p
     .expect("Slack callback maps to the installed channel extension");
     drop(rollback);
 
-    // Give the spawned production post-bind hook a deterministic turn
-    // while Slack is still absent from the generic host snapshot. The old
-    // one-shot implementation exits here and can never provision later.
-    tokio::task::yield_now().await;
-    tokio::task::yield_now().await;
     let dm_targets = local_runtime
         .channel_dm_target_store
         .as_ref()
         .expect("channel DM-target store");
-    assert!(
-        dm_targets
-            .load("slack", &operator)
-            .await
-            .expect("load pre-activation DM target")
-            .is_none(),
-        "OAuth binding alone must not fabricate a target before activation"
-    );
-
-    extension_management
-        .activate_with_prechecked_credentials_for_test(slack_ref, ExtensionActivationMode::Static)
-        .await
-        .expect("activate Slack and publish the generic host snapshot");
 
     let record = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             if let Some(record) = dm_targets
                 .load("slack", &operator)
                 .await
-                .expect("load post-activation DM target")
+                .expect("load deployment-owned DM target")
             {
                 break record;
             }
@@ -325,8 +307,19 @@ async fn runtime_channel_identity_bind_waits_for_activation_snapshot_before_dm_p
         }
     })
     .await
-    .expect("activation publication should unblock DM provisioning");
+    .expect("deployment channel should provision before user activation");
     assert_eq!(record.target["conversation_id"], "D-RUNTIME-RACE");
+    assert_eq!(network_egress.calls.load(Ordering::SeqCst), 1);
+
+    extension_management
+        .activate_with_prechecked_credentials_for_test(slack_ref, ExtensionActivationMode::Static)
+        .await
+        .expect("activate Slack and publish the generic host snapshot");
+
+    // Deployment registration wins over the compatibility activation snapshot,
+    // so activation must not create a second delivery binding or provider call.
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
     assert_eq!(network_egress.calls.load(Ordering::SeqCst), 1);
 }
 

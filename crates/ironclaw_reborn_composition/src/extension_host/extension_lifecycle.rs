@@ -4156,7 +4156,12 @@ team_id = "/team/id"
             .clone()
             .try_into()
             .expect("connectable channel fixture manifest lowers to a package manifest");
-        fixture_extension_package_from_parsed_manifest(manifest_toml, "acmechat", manifest)
+        fixture_extension_package_from_parsed_manifest(
+            manifest_toml,
+            "acmechat",
+            manifest,
+            Arc::new(record.resolved().clone()),
+        )
     }
 
     /// Recording double for the §6.4 per-caller disconnect the removal path
@@ -9715,14 +9720,32 @@ output_schema_ref = "schemas/search.output.json"
         manifest_toml: &str,
         root_id: &str,
     ) -> AvailableExtensionPackage {
+        let contracts = capability_provider_contracts();
         let manifest = ExtensionManifest::parse(
             manifest_toml,
             ManifestSource::HostBundled,
             &HostPortCatalog::empty(),
-            &capability_provider_contracts(),
+            &contracts,
         )
         .expect("fixture manifest");
-        fixture_extension_package_from_parsed_manifest(manifest_toml, root_id, manifest)
+        let resolved_manifest = Arc::new(
+            ExtensionManifestRecord::from_toml(
+                manifest_toml,
+                ManifestSource::HostBundled,
+                &HostPortCatalog::empty(),
+                None,
+                &contracts,
+            )
+            .expect("resolved fixture manifest")
+            .resolved()
+            .clone(),
+        );
+        fixture_extension_package_from_parsed_manifest(
+            manifest_toml,
+            root_id,
+            manifest,
+            resolved_manifest,
+        )
     }
 
     fn fixture_extension_package_from_manifest_with_product_adapter_contracts(
@@ -9743,13 +9766,31 @@ output_schema_ref = "schemas/search.output.json"
             &contracts,
         )
         .expect("fixture manifest");
-        fixture_extension_package_from_parsed_manifest(manifest_toml, root_id, manifest)
+        let resolved_manifest = Arc::new(
+            ExtensionManifestRecord::from_toml(
+                manifest_toml,
+                ManifestSource::HostBundled,
+                &HostPortCatalog::empty(),
+                None,
+                &contracts,
+            )
+            .expect("resolved fixture manifest")
+            .resolved()
+            .clone(),
+        );
+        fixture_extension_package_from_parsed_manifest(
+            manifest_toml,
+            root_id,
+            manifest,
+            resolved_manifest,
+        )
     }
 
     fn fixture_extension_package_from_parsed_manifest(
         manifest_toml: &str,
         root_id: &str,
         manifest: ExtensionManifest,
+        resolved_manifest: Arc<ironclaw_extensions::ResolvedExtensionManifest>,
     ) -> AvailableExtensionPackage {
         let root =
             VirtualPath::new(format!("/system/extensions/{root_id}")).expect("extension root");
@@ -9759,6 +9800,7 @@ output_schema_ref = "schemas/search.output.json"
             package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, root_id)
                 .expect("fixture package ref"),
             manifest_toml: manifest_toml.to_string(),
+            resolved_manifest,
             source: ManifestSource::HostBundled,
             package,
             cleanup_requirements: Vec::new(),

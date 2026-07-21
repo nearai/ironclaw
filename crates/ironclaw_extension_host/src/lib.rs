@@ -15,6 +15,7 @@
 pub mod active;
 mod admin_configuration_service;
 mod admin_configuration_store;
+pub mod deployment_channels;
 pub mod egress;
 pub mod entrypoint;
 pub mod ingress;
@@ -40,6 +41,9 @@ pub use admin_configuration_store::{
     AdminConfigurationRequestDigest, AdminConfigurationReservation,
     AdminConfigurationReserveOutcome, AdminConfigurationStoreError, AdminConfigurationValueRef,
     FilesystemAdminConfigurationStore,
+};
+pub use deployment_channels::{
+    DeploymentChannelBinding, DeploymentChannelRegistry, DeploymentChannelRegistryError,
 };
 pub use entrypoint::{
     BindContext, BindError, ExtensionBindings, ExtensionEntrypoint, check_binding,

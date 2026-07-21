@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use ironclaw_extensions::{
     ExtensionAssetPath, ExtensionManifestRecord, ExtensionPackage, ExtensionRuntimeV2,
     ManifestSource,
@@ -241,6 +243,7 @@ pub(crate) fn imported_extension_package(
             package.id.as_str(),
         )?,
         manifest_toml: record.raw_toml().to_string(),
+        resolved_manifest: Arc::new(record.resolved().clone()),
         source: ManifestSource::InstalledLocal,
         package,
         cleanup_requirements: Vec::new(),

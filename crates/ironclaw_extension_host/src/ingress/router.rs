@@ -12,10 +12,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use ironclaw_extensions::ResolvedExtensionManifest;
 use ironclaw_host_api::{ChannelIngressDescriptor, ChannelIngressMethod, SecretHandle};
-use ironclaw_product_adapters::{InboundOutcome, NormalizedInboundMessage, VerifiedInbound};
+use ironclaw_product_adapters::{
+    ChannelAdapter, InboundOutcome, NormalizedInboundMessage, VerifiedInbound,
+};
 
 use crate::active::ActiveExtension;
+use crate::deployment_channels::{DeploymentChannelBinding, DeploymentChannelRegistry};
 use crate::lifecycle::SnapshotWatch;
 
 use super::verifier::{IngressHeaders, VerificationCandidate, verify_recipe};
@@ -190,6 +194,7 @@ pub struct ExtensionIngressRouterDeps {
 /// channel ingress; resolution is per request through the snapshot watch.
 pub struct ExtensionIngressRouter {
     watch: SnapshotWatch,
+    deployment_channels: Arc<DeploymentChannelRegistry>,
     deps: ExtensionIngressRouterDeps,
     config: IngressRouterConfig,
     rate: RateLimiter,
@@ -203,24 +208,44 @@ impl ExtensionIngressRouter {
     ) -> Self {
         Self {
             watch,
+            deployment_channels: Arc::new(DeploymentChannelRegistry::default()),
             deps,
             rate: RateLimiter::new(config.rate_limit),
             config,
         }
     }
 
+    /// Resolve manifest-declared deployment ingress independently of the
+    /// user-installation active snapshot.
+    pub fn with_deployment_channels(
+        mut self,
+        deployment_channels: Arc<DeploymentChannelRegistry>,
+    ) -> Self {
+        self.deployment_channels = deployment_channels;
+        self
+    }
+
     /// Handle one request following the pinned order. Never panics; never
     /// returns 2xx before the durable admission commit.
     pub async fn handle(&self, request: IngressRequest) -> IngressResponse {
-        // 1. Match against the ACTIVE snapshot (no HTTP rebuild on swap).
-        let snapshot = self.watch.current();
-        let Some(active) =
-            snapshot.resolve_channel_ingress(&request.extension_id, &request.route_suffix)
-        else {
+        // 1. Match deployment ingress first. User activation remains a
+        // compatibility source for extensions not linked into the deployment
+        // registry; it is not required for operator-configured channels.
+        let binding = self
+            .deployment_channels
+            .resolve_channel_ingress(&request.extension_id, &request.route_suffix)
+            .map(ResolvedIngressBinding::Deployment)
+            .or_else(|| {
+                self.watch
+                    .current()
+                    .resolve_channel_ingress(&request.extension_id, &request.route_suffix)
+                    .map(ResolvedIngressBinding::Active)
+            });
+        let Some(binding) = binding else {
             return IngressResponse::error(404, "unknown_route");
         };
-        let Some(ingress) = active
-            .resolved
+        let Some(ingress) = binding
+            .resolved()
             .channel
             .as_ref()
             .and_then(|channel| channel.ingress.as_ref())
@@ -244,7 +269,7 @@ impl ExtensionIngressRouter {
         let deadline = self.config.request_deadline;
         match tokio::time::timeout(
             deadline,
-            self.verify_and_dispatch(&request, &active, ingress),
+            self.verify_and_dispatch(&request, &binding, ingress),
         )
         .await
         {
@@ -262,7 +287,7 @@ impl ExtensionIngressRouter {
     async fn verify_and_dispatch(
         &self,
         request: &IngressRequest,
-        active: &Arc<ActiveExtension>,
+        binding: &ResolvedIngressBinding,
         ingress: &ChannelIngressDescriptor,
     ) -> IngressResponse {
         // 4. Verification recipe execution — host-side, before the adapter.
@@ -270,8 +295,8 @@ impl ExtensionIngressRouter {
             .deps
             .secrets
             .verification_candidates(
-                &active.extension_id,
-                &active.installation_id,
+                binding.extension_id(),
+                binding.installation_hint(),
                 ingress.verification.secret_handle(),
             )
             .await
@@ -279,7 +304,7 @@ impl ExtensionIngressRouter {
             Ok(candidates) => candidates,
             Err(error) => {
                 tracing::debug!(
-                    extension_id = %active.extension_id,
+                    extension_id = %binding.extension_id(),
                     error = %error,
                     "extension ingress verification secrets unavailable"
                 );
@@ -300,7 +325,7 @@ impl ExtensionIngressRouter {
             Ok(verified) => verified,
             Err(failure) => {
                 tracing::debug!(
-                    extension_id = %active.extension_id,
+                    extension_id = %binding.extension_id(),
                     failure = %failure,
                     "extension ingress verification rejected"
                 );
@@ -311,7 +336,7 @@ impl ExtensionIngressRouter {
 
         // 5. adapter.inbound — pure, panic-isolated; verification headers are
         //    consumed by the host and never forwarded.
-        let Some(channel) = active.channel.clone() else {
+        let Some(channel) = binding.adapter() else {
             return IngressResponse::error(404, "unknown_route");
         };
         let forwarded_headers: Vec<(String, String)> = request
@@ -327,7 +352,7 @@ impl ExtensionIngressRouter {
             .collect();
         let outcome = {
             let inbound = VerifiedInbound {
-                extension_id: &active.extension_id,
+                extension_id: binding.extension_id(),
                 installation_id: &verified.installation_id,
                 body: &request.body,
                 headers: &forwarded_headers,
@@ -336,7 +361,7 @@ impl ExtensionIngressRouter {
                 Ok(Ok(outcome)) => outcome,
                 Ok(Err(error)) => {
                     tracing::debug!(
-                        extension_id = %active.extension_id,
+                        extension_id = %binding.extension_id(),
                         error = %error,
                         "channel adapter rejected verified inbound request"
                     );
@@ -344,7 +369,7 @@ impl ExtensionIngressRouter {
                 }
                 Err(_) => {
                     tracing::warn!(
-                        extension_id = %active.extension_id,
+                        extension_id = %binding.extension_id(),
                         "channel adapter panicked on verified inbound request"
                     );
                     return IngressResponse::error(503, "temporarily_unavailable");
@@ -358,7 +383,7 @@ impl ExtensionIngressRouter {
             InboundOutcome::Respond(response) => {
                 if response.validate().is_err() || !(200..=299).contains(&response.status) {
                     tracing::warn!(
-                        extension_id = %active.extension_id,
+                        extension_id = %binding.extension_id(),
                         "channel adapter immediate response violated host bounds"
                     );
                     return IngressResponse::error(500, "adapter");
@@ -370,7 +395,7 @@ impl ExtensionIngressRouter {
                 }
             }
             InboundOutcome::Messages(messages) => {
-                self.admit_messages(active, &verified.installation_id, messages)
+                self.admit_messages(binding.extension_id(), &verified.installation_id, messages)
                     .await
             }
         }
@@ -378,7 +403,7 @@ impl ExtensionIngressRouter {
 
     async fn admit_messages(
         &self,
-        active: &Arc<ActiveExtension>,
+        extension_id: &str,
         installation_id: &str,
         messages: Vec<NormalizedInboundMessage>,
     ) -> IngressResponse {
@@ -388,7 +413,7 @@ impl ExtensionIngressRouter {
         for message in messages {
             if let Err(error) = message.validate() {
                 tracing::debug!(
-                    extension_id = %active.extension_id,
+                    extension_id,
                     error = %error,
                     "channel adapter emitted an out-of-bounds normalized message"
                 );
@@ -399,13 +424,13 @@ impl ExtensionIngressRouter {
             // coordinator reads it back for source-route replies.
             if let Some(context) = &message.reply_context {
                 let key = ReplyContextKey {
-                    extension_id: active.extension_id.clone(),
+                    extension_id: extension_id.to_string(),
                     installation_id: installation_id.to_string(),
                     conversation: message.conversation.conversation_fingerprint(),
                 };
                 if let Err(error) = self.deps.reply_context.put(key, context.clone()).await {
                     tracing::debug!(
-                        extension_id = %active.extension_id,
+                        extension_id,
                         error = %error,
                         "reply context store unavailable"
                     );
@@ -417,7 +442,7 @@ impl ExtensionIngressRouter {
                 .deps
                 .sink
                 .admit(InboundAdmission {
-                    extension_id: active.extension_id.clone(),
+                    extension_id: extension_id.to_string(),
                     installation_id: installation_id.to_string(),
                     message,
                 })
@@ -426,7 +451,7 @@ impl ExtensionIngressRouter {
                 Ok(InboundAdmissionAck::Accepted) | Ok(InboundAdmissionAck::Duplicate) => {}
                 Err(error) if error.retryable => {
                     tracing::debug!(
-                        extension_id = %active.extension_id,
+                        extension_id,
                         error = %error,
                         "inbound admission failed retryably"
                     );
@@ -434,7 +459,7 @@ impl ExtensionIngressRouter {
                 }
                 Err(error) => {
                     tracing::debug!(
-                        extension_id = %active.extension_id,
+                        extension_id,
                         error = %error,
                         "inbound admission rejected permanently"
                     );
@@ -443,6 +468,44 @@ impl ExtensionIngressRouter {
             }
         }
         IngressResponse::ok()
+    }
+}
+
+enum ResolvedIngressBinding {
+    Deployment(Arc<DeploymentChannelBinding>),
+    Active(Arc<ActiveExtension>),
+}
+
+impl ResolvedIngressBinding {
+    fn extension_id(&self) -> &str {
+        match self {
+            Self::Deployment(binding) => &binding.extension_id,
+            Self::Active(active) => &active.extension_id,
+        }
+    }
+
+    fn installation_hint(&self) -> &str {
+        match self {
+            // Deployment ingress has no user installation. The secrets port
+            // returns the authoritative installation identity with the
+            // successful verification candidate.
+            Self::Deployment(binding) => &binding.extension_id,
+            Self::Active(active) => &active.installation_id,
+        }
+    }
+
+    fn resolved(&self) -> &ResolvedExtensionManifest {
+        match self {
+            Self::Deployment(binding) => binding.resolved.as_ref(),
+            Self::Active(active) => active.resolved.as_ref(),
+        }
+    }
+
+    fn adapter(&self) -> Option<Arc<dyn ChannelAdapter>> {
+        match self {
+            Self::Deployment(binding) => Some(Arc::clone(&binding.adapter)),
+            Self::Active(active) => active.channel.clone(),
+        }
     }
 }
 

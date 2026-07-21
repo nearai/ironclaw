@@ -1,6 +1,6 @@
 //! Composition wiring for the generic delivery coordinator (§5.4): the
-//! snapshot-backed channel resolver (generation-pinned adapter + policy
-//! egress from ONE snapshot read) and the ingress `reply_context` read half
+//! deployment-first channel resolver (with an active-snapshot compatibility
+//! fallback) and the ingress `reply_context` read half
 //! (ING-11). All delivery semantics live in
 //! `ironclaw_product_workflow::DeliveryCoordinator`; this module only
 //! implements its ports over the extension host.
@@ -8,32 +8,71 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_extension_host::SnapshotWatch;
 use ironclaw_extension_host::egress::{
     ChannelEgressTransport, DeclaredChannelEgress, PolicyEnforcedChannelEgress,
 };
 use ironclaw_extension_host::ingress::{ReplyContextKey, ReplyContextStore};
+use ironclaw_extension_host::{DeploymentChannelRegistry, SnapshotWatch};
 use ironclaw_product_workflow::{
     ChannelDeliveryResolver, DeliveryReplyContextSource, ResolvedChannelDelivery,
 };
 
-/// Resolves one extension's delivery half from the active snapshot: the
-/// bound channel adapter plus a policy-enforced egress built from the SAME
-/// snapshot read, so an in-flight delivery survives an upgrade on the `Arc`s
-/// it resolved.
+/// Resolves one extension's delivery half from its deployment binding, or
+/// from the active snapshot for compatibility with dynamically supplied
+/// channels. Both paths return owned `Arc`s so in-flight delivery survives a
+/// later registry or snapshot change.
 pub(crate) struct SnapshotChannelDeliveryResolver {
     watch: SnapshotWatch,
+    deployment_channels: Arc<DeploymentChannelRegistry>,
     transport: Arc<dyn ChannelEgressTransport>,
 }
 
 impl SnapshotChannelDeliveryResolver {
     pub(crate) fn new(watch: SnapshotWatch, transport: Arc<dyn ChannelEgressTransport>) -> Self {
-        Self { watch, transport }
+        Self {
+            watch,
+            deployment_channels: Arc::new(DeploymentChannelRegistry::default()),
+            transport,
+        }
+    }
+
+    pub(crate) fn with_deployment_channels(
+        mut self,
+        deployment_channels: Arc<DeploymentChannelRegistry>,
+    ) -> Self {
+        self.deployment_channels = deployment_channels;
+        self
     }
 }
 
 impl ChannelDeliveryResolver for SnapshotChannelDeliveryResolver {
     fn resolve_channel_delivery(&self, extension_id: &str) -> Option<ResolvedChannelDelivery> {
+        if let Some(extension) = self.deployment_channels.extension(extension_id) {
+            let declared: Vec<DeclaredChannelEgress> = extension
+                .resolved
+                .channel
+                .as_ref()
+                .map(|channel| {
+                    channel
+                        .egress
+                        .iter()
+                        .map(DeclaredChannelEgress::from_descriptor)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let egress = Arc::new(PolicyEnforcedChannelEgress::new(
+                extension.extension_id.clone(),
+                extension.extension_id.clone(),
+                declared,
+                Arc::clone(&self.transport),
+            ));
+            return Some(ResolvedChannelDelivery {
+                extension_id: extension.extension_id.clone(),
+                installation_id: extension.extension_id.clone(),
+                adapter: Arc::clone(&extension.adapter),
+                egress,
+            });
+        }
         let snapshot = self.watch.current();
         let extension = snapshot.extension(extension_id)?;
         let adapter = extension.channel.clone()?;

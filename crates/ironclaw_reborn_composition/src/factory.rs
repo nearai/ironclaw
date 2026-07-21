@@ -428,10 +428,13 @@ pub struct RebornServices {
     /// are consumed by `build_reborn_runtime` when the channel host assembly
     /// starts.
     pub(crate) channel_extension_bindings: Vec<crate::input::ChannelExtensionBinding>,
+    /// Manifest-declared deployment channel surfaces, independent of user
+    /// installation/activation state.
+    pub(crate) deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
     /// The composed generic channel ingress (extension-runtime P4): the
-    /// router over the active snapshot plus the per-extension registration
-    /// surface. `None` on composition paths that do not build the generic
-    /// extension host.
+    /// deployment-first router plus its active-snapshot compatibility lane and
+    /// per-extension registration surface. `None` on composition paths that do
+    /// not build the generic extension host.
     pub(crate) extension_ingress:
         Option<crate::extension_host::extension_ingress::ExtensionIngressParts>,
     /// Pairing services for `WebGeneratedCode` channel extensions, built
@@ -441,12 +444,13 @@ pub struct RebornServices {
         Option<Arc<crate::extension_host::channel_pairing::ChannelPairingRegistry>>,
     /// The generic delivery coordinator (extension-runtime §5.4): the sole
     /// writer of outbound delivery state, resolving channel adapters +
-    /// policy egress from the active snapshot. `None` when the composition
-    /// path builds no channel egress transport.
+    /// policy egress from deployment bindings or the active compatibility
+    /// snapshot. `None` when the composition path builds no channel egress
+    /// transport.
     pub(crate) delivery_coordinator: Option<Arc<ironclaw_product_workflow::DeliveryCoordinator>>,
-    /// The snapshot-backed channel delivery resolver behind the coordinator,
+    /// The deployment-first channel delivery resolver behind the coordinator,
     /// exposed separately for host flows (e.g. DM target provisioning) that
-    /// need one generation-pinned adapter + egress read outside a delivery.
+    /// need one stable adapter + egress read outside a delivery.
     // Consumed by the DM-provisioning re-point in the deletion slice.
     #[allow(dead_code)]
     pub(crate) channel_delivery_resolver:
@@ -685,8 +689,9 @@ impl RebornServices {
     }
 
     /// Start the generic channel host assembly (extension-runtime P6 S2):
-    /// the per-extension inbound-channel reconcile loop over the generic
-    /// host's active snapshot. `None` when this composition path has no
+    /// the per-extension inbound-channel reconcile loop over deployment
+    /// bindings and the generic host's active compatibility snapshot. `None`
+    /// when this composition path has no
     /// generic host, no ingress registry, or no `[channel.config]` service
     /// — there is nothing to reconcile against. The run-delivery observer
     /// half follows the delivery coordinator's availability: without a
@@ -741,6 +746,7 @@ impl RebornServices {
             crate::extension_host::channel_host::GenericChannelHostAssembly::start(
                 GenericChannelHostDeps {
                     watch: generic_host.snapshot_watch(),
+                    deployment_channels: Arc::clone(&self.deployment_channels),
                     registry: Arc::clone(&ingress.registry),
                     channel_config,
                     workflow_state,
@@ -782,7 +788,7 @@ impl RebornServices {
         })
     }
 
-    /// The snapshot-backed channel delivery resolver behind the coordinator.
+    /// The deployment-first channel delivery resolver behind the coordinator.
     #[allow(dead_code)]
     pub(crate) fn channel_delivery_resolver(
         &self,
@@ -1578,6 +1584,9 @@ impl RebornServices {
             local_dev_wasm_runtime_credential_provider_captured: false,
             credential_refresh_worker: CredentialRefreshWorkerReady::Absent,
             channel_extension_bindings: Vec::new(),
+            deployment_channels: Arc::new(
+                ironclaw_extension_host::DeploymentChannelRegistry::default(),
+            ),
             extension_ingress: None,
             channel_pairing: None,
             delivery_coordinator: None,
@@ -2141,12 +2150,38 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             reason: format!("first-party extension catalog could not be loaded: {error}"),
         })?,
     );
-    let admin_configuration_uses =
-        available_extensions
-            .admin_configuration_uses()
-            .map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("admin configuration catalog could not be projected: {error}"),
-            })?;
+    let admin_configuration_uses = available_extensions.admin_configuration_uses();
+    let available_manifests = available_extensions.resolved_manifests();
+    let deployment_bindings = available_manifests
+        .iter()
+        .filter(|manifest| {
+            manifest
+                .channel
+                .as_ref()
+                .is_some_and(|channel| channel.inbound && channel.ingress.is_some())
+        })
+        .filter_map(|manifest| {
+            channel_extension_bindings
+                .iter()
+                .find(|binding| binding.extension_id == manifest.id.as_str())
+                .map(|binding| {
+                    ironclaw_extension_host::DeploymentChannelBinding::new(
+                        Arc::clone(manifest),
+                        Arc::clone(&binding.adapter),
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("deployment channel registry could not be built: {error}"),
+        })?;
+    let deployment_channels = Arc::new(
+        ironclaw_extension_host::DeploymentChannelRegistry::try_new(deployment_bindings).map_err(
+            |error| RebornBuildError::InvalidConfig {
+                reason: format!("deployment channel registry could not be built: {error}"),
+            },
+        )?,
+    );
     let admin_configuration_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
     let admin_configuration = Arc::new(
         AdminConfigurationService::new(
@@ -2267,7 +2302,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         .with_admin_configuration(
             Arc::clone(&admin_configuration),
             channel_egress_scope.clone(),
-        ),
+        )
+        .with_available_manifests(available_manifests.clone()),
     );
     extension_management.attach_channel_config(&channel_config_service);
     channel_config_credential_slot.fill(Arc::clone(&channel_config_service));
@@ -2362,7 +2398,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     // Generic extension host (extension-runtime P2): loaders over the fully
     // configured runtime lanes, hydrated from the facade's durable state.
     // From here extension dispatch resolves from the host's active snapshot;
-    // the registry lane serves built-ins only.
+    // channel ingress and delivery additionally resolve manifest-declared
+    // deployment bindings independently of user lifecycle state.
     let channel_host_wiring = {
         let reserved_capability_ids: std::collections::BTreeSet<_> = services
             .shared_extension_registry()
@@ -2445,6 +2482,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         // the host's snapshot watch; the serve layer mounts it once.
         let ingress_parts = crate::extension_host::extension_ingress::build_extension_ingress(
             generic.host.snapshot_watch(),
+            Arc::clone(&deployment_channels),
             Arc::new(
                 crate::extension_host::reply_contexts::FilesystemReplyContextStore::new(
                     Arc::clone(&fold_filesystem),
@@ -2593,7 +2631,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                         crate::extension_host::channel_delivery::SnapshotChannelDeliveryResolver::new(
                             generic.host.snapshot_watch(),
                             transport,
-                        ),
+                        )
+                        .with_deployment_channels(Arc::clone(&deployment_channels)),
                     );
                 let coordinator = Arc::new(ironclaw_product_workflow::DeliveryCoordinator::new(
                     Arc::clone(&store_graph.local_runtime.outbound_state)
@@ -2642,6 +2681,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         // Local-dev is single-user; no cross-owner enumeration or leader lock needed.
         credential_refresh_worker: CredentialRefreshWorkerReady::Absent,
         channel_extension_bindings,
+        deployment_channels,
         extension_ingress: channel_host_wiring.extension_ingress,
         channel_pairing: channel_pairing_registry,
         delivery_coordinator: channel_host_wiring.delivery_coordinator,
@@ -5508,6 +5548,7 @@ where
         // The production composition path does not build the generic
         // extension host yet; the generic ingress mounts with it.
         channel_extension_bindings: Vec::new(),
+        deployment_channels: Arc::new(ironclaw_extension_host::DeploymentChannelRegistry::default()),
         extension_ingress: None,
         channel_pairing: None,
         delivery_coordinator: None,
