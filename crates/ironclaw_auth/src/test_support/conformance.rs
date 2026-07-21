@@ -181,10 +181,12 @@ async fn lifecycle_processing_replays_and_uncommitted_failure_rejects(
         .claim_oauth_callback(scope, request.clone())
         .await
         .unwrap_or_else(|error| panic!("[{CASE}] first claim: {error:?}"));
-    let duplicate = flows
-        .claim_oauth_callback(scope, request)
-        .await
-        .expect("a lifecycle flow already Processing accepts an idempotent replay");
+    let duplicate = match flows.claim_oauth_callback(scope, request).await {
+        Ok(record) => record,
+        Err(error) => {
+            panic!("[{CASE}] Processing lifecycle replay must be idempotent: {error:?}")
+        }
+    };
     assert_eq!(
         duplicate.state,
         AuthFlowState::Processing,
