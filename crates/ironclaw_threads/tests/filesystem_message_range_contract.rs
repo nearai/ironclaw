@@ -1,9 +1,15 @@
 //! Focused filesystem range and summary-index contract tests.
 
-use std::sync::Arc;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
+use async_trait::async_trait;
 use ironclaw_filesystem::{
-    CasExpectation, Entry, InMemoryBackend, RootFilesystem, ScopedFilesystem,
+    BackendCapabilities, CasExpectation, DirEntry, Entry, EventRecord, FileStat, FilesystemError,
+    Filter, InMemoryBackend, Page, RecordVersion, RootFilesystem, ScopedFilesystem, SeqNo,
+    VersionedEntry,
 };
 use ironclaw_host_api::{
     AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, ScopedPath, TenantId,
@@ -12,10 +18,98 @@ use ironclaw_host_api::{
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AppendFinalizedAssistantMessageRequest, BoundedThreadMessages,
     BoundedThreadMessagesRequest, CreateSummaryArtifactRequest, EnsureThreadRequest,
-    FilesystemSessionThreadService, MessageContent, SessionThreadError, SessionThreadService,
-    SummaryKind, SummaryModelContextPolicy, ThreadMessageId, ThreadMessageRangeRequest,
-    ThreadScope,
+    FilesystemSessionThreadService, MessageContent, MessageStatus, RedactMessageRequest,
+    SessionThreadError, SessionThreadService, SummaryKind, SummaryModelContextPolicy,
+    ThreadMessageId, ThreadMessageRangeRequest, ThreadScope,
 };
+
+#[tokio::test]
+async fn filesystem_store_bounded_read_uses_bounded_append_tail() {
+    let backend = Arc::new(TailTrackingBackend::new());
+    let scoped = scoped_threads_fs_at(Arc::clone(&backend), "tenant-tail-bound", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("tail-bound");
+    let thread_id = ThreadId::new("thread-tail-bound").unwrap();
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    for index in 0..3 {
+        service
+            .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+                scope: scope.clone(),
+                thread_id: thread_id.clone(),
+                turn_run_id: format!("run-{index}"),
+                content: MessageContent::text(format!("reply {index}")),
+            })
+            .await
+            .unwrap();
+    }
+    backend.reset_tail_observations();
+
+    let result = service
+        .list_thread_messages_bounded(BoundedThreadMessagesRequest {
+            scope,
+            thread_id,
+            max_messages: 2,
+            max_bytes: 1024 * 1024,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result, BoundedThreadMessages::LimitExceeded);
+    assert_eq!(backend.tail_calls(), 0, "bounded reads must not call tail");
+    assert_eq!(backend.tail_bounded_limits(), vec![3]);
+}
+
+#[tokio::test]
+async fn filesystem_store_bounded_read_deduplicates_shadowed_append_before_message_cap() {
+    let fixture = RangeFixture::new("fs-bounded-shadow", "tenant-bounded-shadow").await;
+    let finalized = fixture
+        .service
+        .append_finalized_assistant_message(AppendFinalizedAssistantMessageRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            turn_run_id: "run-shadow".into(),
+            content: MessageContent::text("secret answer"),
+        })
+        .await
+        .unwrap();
+    fixture
+        .service
+        .redact_message(RedactMessageRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            message_id: finalized.message_id,
+            redaction_ref: "redaction/shadow".into(),
+        })
+        .await
+        .unwrap();
+
+    let result = fixture
+        .service
+        .list_thread_messages_bounded(BoundedThreadMessagesRequest {
+            scope: fixture.scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            max_messages: 1,
+            max_bytes: 1024 * 1024,
+        })
+        .await
+        .unwrap();
+
+    let BoundedThreadMessages::Complete(messages) = result else {
+        panic!("the one logical message must fit despite its stale append event");
+    };
+    assert_eq!(messages.messages.len(), 1);
+    assert_eq!(messages.messages[0].message_id, finalized.message_id);
+    assert_eq!(messages.messages[0].status, MessageStatus::Redacted);
+}
 
 #[tokio::test]
 async fn filesystem_store_bounded_read_rejects_before_materializing_the_full_thread() {
@@ -255,6 +349,103 @@ async fn filesystem_store_summary_creation_falls_back_when_sequence_index_has_ga
 
     assert_eq!(summary.start_sequence, 2);
     assert_eq!(summary.end_sequence, 3);
+}
+
+struct TailTrackingBackend {
+    inner: InMemoryBackend,
+    tail_calls: AtomicUsize,
+    tail_bounded_limits: Mutex<Vec<usize>>,
+}
+
+impl TailTrackingBackend {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryBackend::new(),
+            tail_calls: AtomicUsize::new(0),
+            tail_bounded_limits: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn reset_tail_observations(&self) {
+        self.tail_calls.store(0, Ordering::SeqCst);
+        self.tail_bounded_limits.lock().unwrap().clear();
+    }
+
+    fn tail_calls(&self) -> usize {
+        self.tail_calls.load(Ordering::SeqCst)
+    }
+
+    fn tail_bounded_limits(&self) -> Vec<usize> {
+        self.tail_bounded_limits.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for TailTrackingBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
+        self.inner.append(path, payload).await
+    }
+
+    async fn tail(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+    ) -> Result<Vec<EventRecord>, FilesystemError> {
+        self.tail_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.tail(path, from).await
+    }
+
+    async fn tail_bounded(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+        max_records: usize,
+    ) -> Result<Vec<EventRecord>, FilesystemError> {
+        self.tail_bounded_limits.lock().unwrap().push(max_records);
+        self.inner.tail_bounded(path, from, max_records).await
+    }
+
+    async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
+        self.inner.reserve_sequence(path).await
+    }
 }
 
 struct RangeFixture {

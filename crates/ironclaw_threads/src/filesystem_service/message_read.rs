@@ -1,5 +1,7 @@
 //! Shared transcript materialization for bounded and ordinary filesystem reads.
 
+use std::collections::HashSet;
+
 use ironclaw_filesystem::{
     FilesystemError, FilesystemOperation, Filter, Page, RootFilesystem, SeqNo,
 };
@@ -38,6 +40,22 @@ impl MessageReadBudget {
         }
         self.remaining_messages -= 1;
         self.remaining_bytes -= bytes;
+        true
+    }
+
+    fn consume_bytes(&mut self, bytes: usize) -> bool {
+        if bytes > self.remaining_bytes {
+            return false;
+        }
+        self.remaining_bytes -= bytes;
+        true
+    }
+
+    fn consume_message(&mut self) -> bool {
+        if self.remaining_messages == 0 {
+            return false;
+        }
+        self.remaining_messages -= 1;
         true
     }
 }
@@ -163,17 +181,19 @@ where
         budget: Option<MessageReadBudget>,
     ) -> Result<MessageReadResult, SessionThreadError> {
         if let Some(mut remaining) = budget {
+            let existing_ids: HashSet<_> =
+                messages.iter().map(|message| message.message_id).collect();
             let Some(mut event_messages) = self
-                .read_message_append_events_with_budget(scope, thread_id, &mut remaining)
+                .read_message_append_events_with_budget(
+                    scope,
+                    thread_id,
+                    &existing_ids,
+                    &mut remaining,
+                )
                 .await?
             else {
                 return Ok(MessageReadResult::LimitExceeded);
             };
-            event_messages.retain(|event| {
-                !messages
-                    .iter()
-                    .any(|existing| existing.message_id == event.message_id)
-            });
             messages.append(&mut event_messages);
         } else {
             self.merge_message_append_events(scope, thread_id, &mut messages)
@@ -187,12 +207,19 @@ where
         &self,
         scope: &ThreadScope,
         thread_id: &ThreadId,
+        existing_ids: &HashSet<crate::ThreadMessageId>,
         budget: &mut MessageReadBudget,
     ) -> Result<Option<Vec<ThreadMessageRecord>>, SessionThreadError> {
         let path = message_append_log_path(scope, thread_id)?;
+        let max_events = budget.remaining_messages.saturating_add(existing_ids.len());
         let events = match self
             .filesystem
-            .tail(&scope.to_resource_scope(), &path, SeqNo::ZERO)
+            .tail_bounded(
+                &scope.to_resource_scope(),
+                &path,
+                SeqNo::ZERO,
+                max_events.saturating_add(1),
+            )
             .await
         {
             Ok(events) => events,
@@ -203,15 +230,26 @@ where
             | Err(FilesystemError::NotFound { .. }) => return Ok(Some(Vec::new())),
             Err(error) => return Err(error.into()),
         };
+        if events.len() > max_events {
+            return Ok(None);
+        }
         let mut messages = Vec::with_capacity(events.len().min(budget.remaining_messages));
         for event in events {
-            if !budget.consume(event.payload.len()) {
+            // Charge every physical append payload against the byte budget so
+            // stale shadow records cannot defeat the allocation ceiling. The
+            // logical message budget is charged only after file-authoritative
+            // deduplication below.
+            if !budget.consume_bytes(event.payload.len()) {
                 return Ok(None);
             }
             let message = deserialize::<ThreadMessageRecord>(&event.payload)?;
-            if &message.thread_id == thread_id {
-                messages.push(message);
+            if &message.thread_id != thread_id || existing_ids.contains(&message.message_id) {
+                continue;
             }
+            if !budget.consume_message() {
+                return Ok(None);
+            }
+            messages.push(message);
         }
         Ok(Some(messages))
     }
