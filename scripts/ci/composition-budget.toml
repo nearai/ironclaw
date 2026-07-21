@@ -75,4 +75,4 @@ observed_date = "2026-07-16"
 # baseline without lowering the mass ratchet; future work must shrink again.
 arc_dyn_ceiling = 1122
 arc_dyn_tolerance = 15
-arc_dyn_observed = 1122
+arc_dyn_observed = 1129

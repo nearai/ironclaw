@@ -297,6 +297,47 @@ impl CapabilityDispatcher for RecordingDispatcher {
     }
 }
 
+// The shared `CapabilityDispatcher` double. Re-exported so every test file that
+// does `use support::*` gets it without importing the feature-gated module path.
+pub use ironclaw_host_api::dispatch_test_support::TestDispatcher;
+
+/// The standard success dispatch result, echoing the request's capability id,
+/// scope, and estimate — the exact shape the retired hand-rolled
+/// `RecordingDispatcher` returned.
+pub fn ok_dispatch_result(request: &CapabilityDispatchRequest) -> CapabilityDispatchResult {
+    dispatch_result_with_output(request, json!({"ok": true}))
+}
+
+/// Like [`ok_dispatch_result`] but with a caller-supplied output payload — the
+/// replacement for the retired `OutputDispatcher`.
+pub fn dispatch_result_with_output(
+    request: &CapabilityDispatchRequest,
+    output: serde_json::Value,
+) -> CapabilityDispatchResult {
+    CapabilityDispatchResult {
+        capability_id: request.capability_id.clone(),
+        provider: extension_id(),
+        runtime: RuntimeKind::Wasm,
+        output,
+        display_preview: None,
+        usage: ResourceUsage::default(),
+        receipt: ResourceReceipt {
+            id: ResourceReservationId::new(),
+            scope: request.scope.clone(),
+            status: ReservationStatus::Reconciled,
+            estimate: request.estimate.clone(),
+            actual: Some(ResourceUsage::default()),
+        },
+    }
+}
+
+/// Drop-in replacement for the retired `RecordingDispatcher`: records every
+/// dispatched request and returns the standard success result. Assert on it via
+/// `.recorded()` / `.call_count()` / `.last_request()`.
+pub fn recording_dispatcher() -> TestDispatcher {
+    TestDispatcher::responding(|request, _| Ok(ok_dispatch_result(request)))
+}
+
 pub struct ApprovalAuthorizer;
 
 #[async_trait]

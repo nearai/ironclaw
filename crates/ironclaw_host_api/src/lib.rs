@@ -40,6 +40,8 @@ pub mod capability_profile;
 pub mod channel;
 pub mod decision;
 pub mod dispatch;
+#[cfg(feature = "test-support")]
+pub mod dispatch_test_support;
 mod dotted_id;
 pub mod error;
 pub mod failure;

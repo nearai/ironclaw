@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::{
-    DirEntry, DiskFilesystem, FileStat, FileType, FilesystemError, FilesystemOperation,
-    RootFilesystem,
+    DirEntry, DiskFilesystem, Fault, FaultInjecting, FileStat, FileType, FilesystemError,
+    FilesystemOperation, RootFilesystem,
 };
 use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
@@ -142,10 +142,13 @@ async fn builtin_coding_list_and_grep_skip_entries_when_stat_fails() {
     std::fs::write(temp.path().join("skip.rs"), "needle\n").unwrap();
 
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
-    let runtime = runtime_with_filesystem(StatFailureFilesystem {
-        inner: filesystem,
-        fail_suffix: "/skip.rs",
-    });
+    let runtime = runtime_with_filesystem(
+        FaultInjecting::new(filesystem).with_fault(
+            Fault::on(FilesystemOperation::Stat)
+                .path("/skip.rs")
+                .backend("injected stat failure"),
+        ),
+    );
     let context = execution_context_with_mounts(coding_capability_ids(), mounts);
 
     let listed = invoke_with_context(
@@ -176,10 +179,13 @@ async fn builtin_coding_grep_skips_entries_when_read_fails_during_directory_sear
     std::fs::write(temp.path().join("skip.rs"), "needle\n").unwrap();
 
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
-    let runtime = runtime_with_filesystem(ReadFailureFilesystem {
-        inner: filesystem,
-        fail_suffix: "/skip.rs",
-    });
+    let runtime = runtime_with_filesystem(
+        FaultInjecting::new(filesystem).with_fault(
+            Fault::on(FilesystemOperation::ReadFile)
+                .path("/skip.rs")
+                .backend("injected read failure"),
+        ),
+    );
     let context = execution_context_with_mounts(coding_capability_ids(), mounts);
 
     let grepped = invoke_with_context(
@@ -200,10 +206,13 @@ async fn builtin_coding_grep_fails_on_explicit_file_read_error() {
     std::fs::write(temp.path().join("fail.rs"), "needle\n").unwrap();
 
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
-    let runtime = runtime_with_filesystem(ReadFailureFilesystem {
-        inner: filesystem,
-        fail_suffix: "/fail.rs",
-    });
+    let runtime = runtime_with_filesystem(
+        FaultInjecting::new(filesystem).with_fault(
+            Fault::on(FilesystemOperation::ReadFile)
+                .path("/fail.rs")
+                .backend("injected read failure"),
+        ),
+    );
     let context = execution_context_with_mounts(coding_capability_ids(), mounts);
 
     let error = invoke_with_context(
@@ -1820,41 +1829,6 @@ fn mounted_filesystem(path: &Path, permissions: MountPermissions) -> (DiskFilesy
     (filesystem, mounts)
 }
 
-struct StatFailureFilesystem {
-    inner: DiskFilesystem,
-    fail_suffix: &'static str,
-}
-
-#[async_trait]
-impl RootFilesystem for StatFailureFilesystem {
-    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.inner.list_dir(path).await
-    }
-
-    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        if path.as_str().ends_with(self.fail_suffix) {
-            return Err(FilesystemError::Backend {
-                path: path.clone(),
-                operation: FilesystemOperation::Stat,
-                reason: "injected stat failure".to_string(),
-            });
-        }
-        self.inner.stat(path).await
-    }
-
-    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
-        self.inner.read_file(path).await
-    }
-
-    async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
-        self.inner.write_file(path, bytes).await
-    }
-
-    async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        self.inner.create_dir_all(path).await
-    }
-}
-
 struct StatLenOverrideFilesystem {
     inner: DiskFilesystem,
     suffix: &'static str,
@@ -1888,41 +1862,15 @@ impl RootFilesystem for StatLenOverrideFilesystem {
     }
 }
 
-struct ReadFailureFilesystem {
-    inner: DiskFilesystem,
-    fail_suffix: &'static str,
-}
-
-#[async_trait]
-impl RootFilesystem for ReadFailureFilesystem {
-    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.inner.list_dir(path).await
-    }
-
-    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        self.inner.stat(path).await
-    }
-
-    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
-        if path.as_str().ends_with(self.fail_suffix) {
-            return Err(FilesystemError::Backend {
-                path: path.clone(),
-                operation: FilesystemOperation::ReadFile,
-                reason: "injected read failure".to_string(),
-            });
-        }
-        self.inner.read_file(path).await
-    }
-
-    async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
-        self.inner.write_file(path, bytes).await
-    }
-
-    async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        self.inner.create_dir_all(path).await
-    }
-}
-
+/// KEPT (not folded to `ironclaw_filesystem::FaultInjecting`): the coding
+/// `write_file`/`apply_patch` tools call `create_dir_all` on the target's parent
+/// before writing (see `coding::paths::create_parent_dir_unless_sensitive`).
+/// `FaultInjecting` gates only the unified entry/event ops and leaves the legacy
+/// `create_dir_all` at its trait default, which returns `Unsupported` instead of
+/// delegating to the inner `DiskFilesystem` — the tool maps that to
+/// `FilesystemDenied`/`Authorization`, masking the injected write fault. This
+/// delegator forwards `create_dir_all` to the real backend and faults only
+/// `write_file`, preserving the `Backend` assertion.
 struct WriteFailureFilesystem {
     inner: DiskFilesystem,
     fail_suffix: &'static str,
@@ -1942,7 +1890,7 @@ impl RootFilesystem for WriteFailureFilesystem {
         self.inner.read_file(path).await
     }
 
-    async fn write_file(&self, path: &VirtualPath, _bytes: &[u8]) -> Result<(), FilesystemError> {
+    async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
         if path.as_str().ends_with(self.fail_suffix) {
             return Err(FilesystemError::Backend {
                 path: path.clone(),
@@ -1950,7 +1898,7 @@ impl RootFilesystem for WriteFailureFilesystem {
                 reason: "disk full".to_string(),
             });
         }
-        self.inner.write_file(path, _bytes).await
+        self.inner.write_file(path, bytes).await
     }
 
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
@@ -1958,6 +1906,11 @@ impl RootFilesystem for WriteFailureFilesystem {
     }
 }
 
+/// KEPT (not folded to `ironclaw_filesystem::FaultInjecting`): this fake returns
+/// [`FilesystemError::BackendInfrastructure`], a variant `FaultKind` cannot
+/// express (it covers only `Backend`/`BackendBusy`/`NotFound`/`Unsupported`).
+/// Folding it would change the injected error and lose the
+/// `BackendInfrastructure -> Backend` mapping this test pins.
 struct ReadInfrastructureFailureFilesystem {
     inner: DiskFilesystem,
     fail_suffix: &'static str,
