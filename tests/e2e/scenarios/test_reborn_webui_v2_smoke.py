@@ -211,11 +211,9 @@ async def test_reborn_v2_serves_shell_and_gates_auth(reborn_v2_server, reborn_v2
 
 
 async def test_reborn_v2_session_check_failure_blocks_app_and_retries(
-    reborn_v2_server, reborn_v2_browser
+    reborn_v2_page,
 ):
     """A transient session failure keeps the bearer but never renders anonymous-scoped UI."""
-    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
-    page = await context.new_page()
     session_requests = 0
 
     async def handle_session(route) -> None:
@@ -247,38 +245,32 @@ async def test_reborn_v2_session_check_failure_blocks_app_and_retries(
             ),
         )
 
-    await page.route("**/api/webchat/v2/session", handle_session)
+    await reborn_v2_page.route("**/api/webchat/v2/session", handle_session)
+    await reborn_v2_page.reload()
 
-    try:
-        await page.goto(f"{reborn_v2_server}/?token={REBORN_V2_AUTH_TOKEN}")
+    error = reborn_v2_page.locator(SEL_V2["session_check_error"])
+    await expect(error).to_be_visible(timeout=15000)
+    await expect(error).to_contain_text("Couldn't verify your session")
+    await expect(error).to_contain_text("Your sign-in is still saved")
+    await expect(reborn_v2_page.locator(SEL_V2["chat_composer"])).to_have_count(0)
+    await expect(reborn_v2_page.locator(SEL_V2["login_token"])).to_have_count(0)
+    assert await reborn_v2_page.evaluate(
+        "() => sessionStorage.getItem('ironclaw_token')"
+    ) == REBORN_V2_AUTH_TOKEN
+    assert session_requests == 1
 
-        error = page.locator(SEL_V2["session_check_error"])
-        await expect(error).to_be_visible(timeout=15000)
-        await expect(error).to_contain_text("Couldn't verify your session")
-        await expect(page.locator(SEL_V2["chat_composer"])).to_have_count(0)
-        await expect(page.locator(SEL_V2["login_token"])).to_have_count(0)
-        assert await page.evaluate(
-            "() => sessionStorage.getItem('ironclaw_token')"
-        ) == REBORN_V2_AUTH_TOKEN
-        assert session_requests == 1
-
-        await page.locator(SEL_V2["session_check_retry"]).click()
-        await expect(page.locator(SEL_V2["chat_composer"])).to_be_visible(timeout=15000)
-        await expect(error).to_have_count(0)
-        assert session_requests >= 2
-    finally:
-        await context.close()
+    await reborn_v2_page.locator(SEL_V2["session_check_retry"]).click()
+    await expect(reborn_v2_page.locator(SEL_V2["chat_composer"])).to_be_visible(
+        timeout=15000
+    )
+    await expect(error).to_have_count(0)
+    assert session_requests >= 2
 
 
 async def test_reborn_v2_session_check_failure_allows_sign_out(
-    reborn_v2_server, reborn_v2_browser
+    reborn_v2_page,
 ):
     """A user can clear a saved bearer when session verification stays unavailable."""
-    context = await reborn_v2_browser.new_context(
-        viewport={"width": 1280, "height": 720}
-    )
-    page = await context.new_page()
-
     async def fail_session_check(route) -> None:
         await route.fulfill(
             status=503,
@@ -291,27 +283,28 @@ async def test_reborn_v2_session_check_failure_allows_sign_out(
         # still exercising the SPA's local sign-out path end to end.
         await route.fulfill(status=204)
 
-    await page.route("**/api/webchat/v2/session", fail_session_check)
-    await page.route("**/auth/logout", handle_logout)
+    await reborn_v2_page.route("**/api/webchat/v2/session", fail_session_check)
+    await reborn_v2_page.route("**/auth/logout", handle_logout)
+    await reborn_v2_page.reload()
 
-    try:
-        await page.goto(f"{reborn_v2_server}/?token={REBORN_V2_AUTH_TOKEN}")
-        await expect(
-            page.locator(SEL_V2["session_check_error"])
-        ).to_be_visible(timeout=15000)
+    await expect(
+        reborn_v2_page.locator(SEL_V2["session_check_error"])
+    ).to_be_visible(timeout=15000)
 
-        await page.locator(SEL_V2["session_check_sign_out"]).click()
+    await reborn_v2_page.locator(SEL_V2["session_check_sign_out"]).click()
 
-        await expect(page.locator(SEL_V2["login_token"])).to_be_visible(
-            timeout=15000
-        )
-        await page.wait_for_url(re.compile(r".*/login(?:[?#].*)?$"), timeout=15000)
-        assert await page.evaluate(
-            "() => sessionStorage.getItem('ironclaw_token')"
-        ) is None
-        await expect(page.locator(SEL_V2["session_check_error"])).to_have_count(0)
-    finally:
-        await context.close()
+    await expect(reborn_v2_page.locator(SEL_V2["login_token"])).to_be_visible(
+        timeout=15000
+    )
+    await reborn_v2_page.wait_for_url(
+        re.compile(r".*/login(?:[?#].*)?$"), timeout=15000
+    )
+    assert await reborn_v2_page.evaluate(
+        "() => sessionStorage.getItem('ironclaw_token')"
+    ) is None
+    await expect(
+        reborn_v2_page.locator(SEL_V2["session_check_error"])
+    ).to_have_count(0)
 
 
 async def test_reborn_v2_legacy_paths_redirect_to_root(
