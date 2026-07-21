@@ -36,6 +36,7 @@ pub mod identity_context;
 mod input_port;
 mod input_queue;
 mod model_capability_view;
+mod model_visible_scrub;
 mod prompt_context_budget;
 mod skill_bundle_context_source;
 mod skill_bundle_source;
@@ -92,6 +93,7 @@ pub use identity_context::{
 pub use input_port::HostQueueLoopInputPort;
 pub use input_queue::{HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError};
 pub use ironclaw_turns::run_profile::PromptContextTokenBudget;
+pub use model_visible_scrub::scrub_model_visible_detail;
 pub use skill_bundle_context_source::SkillBundleContextSource;
 pub use skill_bundle_source::{
     SkillBundleDescriptor, SkillBundleId, SkillBundleProvenance, SkillBundleSource,
@@ -209,10 +211,12 @@ pub fn raw_agent_loop_host_error(
         "agent loop host error mapped to safe summary"
     );
     // Carry the raw cause to the model as a secret-scrubbed diagnostic. Only
-    // secret VALUES are redacted; paths/codes/raw error text reach the model so
-    // it can retry or explain. The word/delimiter ban is NOT applied here.
+    // secret VALUES are redacted (via the full leak-detector registry + prefix
+    // matcher) and any injection payload is fenced; paths/codes/raw error text
+    // reach the model so it can retry or explain. The word/delimiter ban is NOT
+    // applied here.
     let mut error = AgentLoopHostError::new(kind, safe_summary);
-    let scrubbed = sanitize_model_visible_text(raw_detail);
+    let scrubbed = scrub_model_visible_detail(raw_detail);
     if !scrubbed.trim().is_empty() {
         error = error.with_detail(scrubbed);
     }
@@ -747,19 +751,24 @@ where
         request: AppendCapabilityResultRef,
     ) -> Result<LoopMessageRef, AgentLoopHostError> {
         validate_thread_scope_for_run(&self.thread_scope, &self.run_context)?;
-        let safe_summary = LoopSafeSummary::new(request.safe_summary).map_err(|_| {
-            AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
-                "tool result reference summary is not safe",
-            )
-        })?;
-        let safe_summary =
-            ToolResultSafeSummary::new(safe_summary.as_str().to_string()).map_err(|_| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::InvalidInvocation,
-                    "tool result reference summary is not safe",
-                )
-            })?;
+        // Fail soft on a summary that trips either strict validator: the
+        // summary is only the inline label for the result reference (the model
+        // sees the real output via the result ref / observation), so a
+        // malformed label must not end the run
+        // (.claude/rules/agent-loop-capabilities.md Invariant 1). Degrade to a
+        // fixed host-authored marker; the raw text stays out of the transcript.
+        let safe_summary = LoopSafeSummary::new(request.safe_summary)
+            .and_then(|summary| {
+                ToolResultSafeSummary::new(summary.as_str().to_string())
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap_or_else(|reason| {
+                tracing::debug!(
+                    %reason,
+                    "tool result summary failed strict validation; degrading to redaction marker"
+                );
+                ToolResultSafeSummary::redacted_tool_result_summary()
+            });
         let model_observation = request
             .model_observation
             .and_then(|observation| match observation.validate() {
@@ -1903,13 +1912,14 @@ impl HostManagedModelError {
         self
     }
 
-    /// Attach a model-visible detail, scrubbing credential-looking tokens via
-    /// [`ironclaw_turns::run_profile::sanitize_model_visible_text`] before it is
-    /// stored. Use when the raw cause has not already been sanitized.
+    /// Attach a model-visible detail, hardening it via
+    /// [`crate::scrub_model_visible_detail`] first: secret VALUES are redacted
+    /// through the full leak-detector registry + prefix matcher, and any
+    /// surviving injection payload is fenced as untrusted external content. Use
+    /// when the raw cause has not already been sanitized (e.g. a provider HTTP
+    /// body).
     pub fn safe_with_detail(mut self, detail: impl Into<String>) -> Self {
-        self.detail = Some(ironclaw_turns::run_profile::sanitize_model_visible_text(
-            detail.into(),
-        ));
+        self.detail = Some(crate::scrub_model_visible_detail(detail));
         self
     }
 
@@ -2215,11 +2225,28 @@ fn transcript_write_error(error: SessionThreadError) -> AgentLoopHostError {
 }
 
 fn model_gateway_error(error: HostManagedModelError) -> AgentLoopHostError {
-    let safe_summary = if LoopSafeSummary::new(error.safe_summary.clone()).is_ok() {
-        error.safe_summary
-    } else {
-        safe_model_summary(error.kind).to_string()
-    };
+    // Phase 2: the host-managed *model provider* summary is the highest-leak-risk
+    // error string in the system — provider errors routinely embed prompt text,
+    // tool input, host paths, and keys. When it fails strict card validation the
+    // summary degrades to a fixed category sentence, but the rejected cause is no
+    // longer dropped: it rides the model-visible detail channel through the
+    // hardened scrubber (`scrub_model_visible_detail` — full leak-detector
+    // registry redaction of secret VALUES + injection fencing). Descriptive cause
+    // text (paths, status codes) survives so the failure explainer can describe
+    // the real fault; secret values and injection payloads do not. A genuine
+    // structured `error.detail`, which producers already scrub deliberately, wins
+    // over the rejected-summary fallback.
+    let (safe_summary, rejected_summary_detail) =
+        match LoopSafeSummary::new(error.safe_summary.clone()) {
+            Ok(_) => (error.safe_summary, None),
+            Err(_) => {
+                tracing::debug!("host-managed model summary rejected; using fixed fallback");
+                (
+                    safe_model_summary(error.kind).to_string(),
+                    Some(scrub_model_visible_detail(error.safe_summary)),
+                )
+            }
+        };
     let mut host_error = AgentLoopHostError::new(model_error_kind(error.kind), safe_summary);
     if let Some(reason_kind) = error.reason_kind {
         host_error = host_error.with_reason_kind(reason_kind);
@@ -2227,7 +2254,9 @@ fn model_gateway_error(error: HostManagedModelError) -> AgentLoopHostError {
     if let Some(gate_ref) = error.gate_ref {
         host_error = host_error.with_gate_ref(gate_ref);
     }
-    if let Some(detail) = error.detail {
+    // `error.detail` is already producer-scrubbed; fall back to the scrubbed
+    // rejected summary only when there is no structured detail.
+    if let Some(detail) = error.detail.or(rejected_summary_detail) {
         host_error = host_error.with_detail(detail);
     }
     host_error
@@ -2366,6 +2395,71 @@ mod tests {
         assert!(!host_error.safe_summary.contains("System tool"));
         assert!(!host_error.safe_summary.contains("secret"));
         assert!(!host_error.safe_summary.contains("/private/path"));
+    }
+
+    #[test]
+    fn model_gateway_error_carries_rejected_summary_as_scrubbed_detail() {
+        // Phase 2 (item 4): a provider summary that fails strict card validation
+        // (path/delimiter-bearing) is no longer dropped — it rides the
+        // model-visible detail channel, secret VALUES redacted, injection fenced.
+        let error = HostManagedModelError::safe(
+            HostManagedModelErrorKind::Unavailable,
+            concat!(
+                "provider 500 at /host/route with ghp",
+                "_012345678901234567890123456789012345",
+                " body"
+            ),
+        );
+
+        let host_error = model_gateway_error(error);
+
+        // Card summary degrades to the fixed category sentence.
+        assert_eq!(host_error.safe_summary, "model service is unavailable");
+        let detail = host_error
+            .detail
+            .expect("rejected summary should ride detail");
+        // Secret value redacted, descriptive cause (path) preserved.
+        assert!(
+            !detail.contains(concat!("ghp", "_012345678901234567890123456789012345", "")),
+            "credential token must be redacted: {detail}"
+        );
+        assert!(
+            detail.contains("/host/route"),
+            "path must survive on detail: {detail}"
+        );
+    }
+
+    #[test]
+    fn model_visible_detail_path_survives_but_never_reaches_public_projection() {
+        // Phase 2 (item 3): a detail carrying a path and a credential token must
+        // (a) scrub the token at ingestion, (b) preserve the path to the model,
+        // and (c) expose NEITHER on the public projection surface.
+        let raw = concat!(
+            "read_file failed at /workspace/config.json using \
+                   ghp",
+            "_012345678901234567890123456789012345",
+            ""
+        );
+        let detail = scrub_model_visible_detail(raw);
+        assert!(
+            !detail.contains(concat!("ghp", "_012345678901234567890123456789012345", "")),
+            "token must be scrubbed at ingestion: {detail}"
+        );
+        assert!(
+            detail.contains("/workspace/config.json"),
+            "path must survive: {detail}"
+        );
+
+        let failure = ironclaw_turns::SanitizedFailure::new("host_unavailable")
+            .expect("category")
+            .with_detail(detail.clone());
+        assert_eq!(failure.detail(), Some(detail.as_str()));
+
+        // Public projection strips the whole detail channel — neither the path
+        // nor any redaction marker reaches the browser.
+        let public = failure.public_projection();
+        assert_eq!(public.detail(), None);
+        assert_eq!(public.category(), "host_unavailable");
     }
 
     #[test]

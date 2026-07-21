@@ -227,7 +227,8 @@ async fn dispatcher_emits_redacted_runtime_error_kind_for_adapter_failure() {
     assert!(matches!(
         err,
         DispatchError::Script {
-            kind: RuntimeDispatchErrorKind::ExitFailure
+            kind: RuntimeDispatchErrorKind::ExitFailure,
+            ..
         }
     ));
 

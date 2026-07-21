@@ -33,6 +33,7 @@ pub mod loop_driver_host;
 pub mod loop_exit_applier;
 pub mod milestone_events;
 mod model_failure_mapping;
+mod model_gateway_error_mapping;
 pub mod model_routes;
 pub mod planned_driver;
 pub mod planned_driver_factory;

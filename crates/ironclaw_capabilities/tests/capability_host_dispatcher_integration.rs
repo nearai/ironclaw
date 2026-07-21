@@ -402,7 +402,7 @@ impl RuntimeExecutor<DiskFilesystem, InMemoryResourceGovernor> for RecordingRunt
                 .reserve(request.scope, request.estimate)
                 .map_err(|_| DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::Resource,
-                    safe_summary: None,
+                    model_visible_cause: None,
                 })?,
         };
         let output_bytes = usage.output_bytes;
@@ -411,7 +411,7 @@ impl RuntimeExecutor<DiskFilesystem, InMemoryResourceGovernor> for RecordingRunt
             .reconcile(reservation.id, usage.clone())
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
-                safe_summary: None,
+                model_visible_cause: None,
             })?;
         Ok(RuntimeAdapterResult {
             output,

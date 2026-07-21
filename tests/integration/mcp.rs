@@ -168,13 +168,13 @@ async fn assert_mcp_tool_called_fails_when_no_mcp_call_ran() {
 /// `driver_unavailable`. Distinct wire path from the 5xx case below: this trips
 /// the client's JSON-RPC error-field guard, not its HTTP status gate.
 #[tokio::test]
-async fn mcp_tool_call_error_surfaces_recoverable_failed() {
+async fn mcp_tool_call_error_cause_reaches_next_model_request() {
     let server = start_mock_mcp_server(vec![MockToolResponse {
         name: "search".to_string(),
         content: serde_json::json!({"results": []}),
     }])
     .await;
-    server.set_tool_call_error(-32602, "unknown tool");
+    server.set_tool_call_error(-32602, "distinctive-mcp-cause-5965");
 
     let h = RebornIntegrationHarness::test_default()
         .script([
@@ -194,6 +194,9 @@ async fn mcp_tool_call_error_surfaces_recoverable_failed() {
     h.assert_tool_error(ToolErrorClass::Failed, "backend")
         .await
         .expect("JSON-RPC error surfaced as a model-visible Failed tool error");
+    h.assert_model_request_contains("distinctive-mcp-cause-5965")
+        .await
+        .expect("MCP backend cause reached the next captured model request");
     h.assert_reply_contains("done")
         .await
         .expect("run recovered and finalized (not terminal driver_unavailable)");

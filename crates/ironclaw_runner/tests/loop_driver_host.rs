@@ -477,7 +477,12 @@ async fn text_only_host_factory_sanitizes_gateway_error_summaries() {
         .gateway
         .set_response(Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::PolicyDenied,
-            "RAW_PROVIDER_SECRET invalid api key sk-provider-secret /host/path tool_input",
+            concat!(
+                "RAW_PROVIDER_SECRET invalid api key sk-provider-secret \
+             ghp",
+                "_012345678901234567890123456789012345",
+                " /host/path tool_input"
+            ),
         )));
     let host = fixture.build_host().await;
     let prompt_bundle = host
@@ -504,6 +509,7 @@ async fn text_only_host_factory_sanitizes_gateway_error_summaries() {
         .await
         .unwrap_err();
 
+    // The card summary still degrades to the fixed category sentence.
     assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
     assert_eq!(error.safe_summary, "model profile is not permitted");
     let wire = format!(
@@ -512,16 +518,33 @@ async fn text_only_host_factory_sanitizes_gateway_error_summaries() {
         error,
         serde_json::to_string(&fixture.milestones()).unwrap()
     );
+    // Phase 2 (item 4): the rejected provider summary now rides the
+    // model-visible `detail` channel through the hardened scrubber. Secret
+    // VALUES, credential tokens, sentinel markers, and raw prompt text must
+    // NEVER appear anywhere on the error/milestone wire.
     for forbidden in [
         "RAW_PROVIDER_SECRET",
         "RAW_PROMPT_TEXT_SENTINEL",
-        "invalid api key",
         "sk-provider-secret",
-        "/host/path",
-        "tool_input",
+        concat!("ghp", "_012345678901234567890123456789012345", ""),
     ] {
         assert!(!wire.contains(forbidden), "model error leaked {forbidden}");
     }
+    // The descriptive cause (path, category words) DOES survive on the
+    // model-visible detail so the failure explainer can describe the fault —
+    // this is stripped only at the public projection boundary
+    // (`SanitizedFailure::public_projection`), not here.
+    let detail = error
+        .detail
+        .expect("rejected provider cause should ride detail");
+    assert!(
+        detail.contains("/host/path"),
+        "path cause must survive: {detail}"
+    );
+    assert!(
+        detail.contains("tool_input"),
+        "descriptive cause must survive: {detail}"
+    );
 }
 
 #[tokio::test]

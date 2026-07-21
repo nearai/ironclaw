@@ -378,18 +378,33 @@ pub enum DispatchError {
         required_secrets: Vec<SecretHandle>,
         credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
     },
+    /// MCP dispatch failure. `model_visible_cause` carries the raw backend cause —
+    /// it is NOT yet display/model-safe: secret VALUES are scrubbed downstream
+    /// at the model-visible Diagnostic seam (`scrub_model_visible_detail`),
+    /// and display surfaces run their own redaction. Do not log or surface it
+    /// directly.
     #[error("MCP dispatch failed: {kind}")]
-    Mcp { kind: RuntimeDispatchErrorKind },
+    Mcp {
+        kind: RuntimeDispatchErrorKind,
+        model_visible_cause: Option<String>,
+    },
+    /// Script dispatch failure. Same `model_visible_cause` contract as [`Self::Mcp`]:
+    /// raw cause, scrubbed downstream — not directly displayable.
     #[error("script dispatch failed: {kind}")]
-    Script { kind: RuntimeDispatchErrorKind },
-    /// WASM guest dispatch failure. `safe_summary` carries the stable,
-    /// host-sanitized error code a structured guest error declared (e.g. a
-    /// Slack `channel_not_found`), so the model-visible failure keeps its
-    /// actionable cause instead of collapsing to the kind's generic sentence.
+    Script {
+        kind: RuntimeDispatchErrorKind,
+        model_visible_cause: Option<String>,
+    },
+    /// WASM guest dispatch failure. `model_visible_cause` carries the best available
+    /// cause: the stable, host-sanitized error code a structured guest error
+    /// declared (e.g. a Slack `channel_not_found`) when present, otherwise the
+    /// raw error text (secret VALUES are scrubbed downstream at the
+    /// model-visible Diagnostic seam), so the failure keeps its actionable
+    /// cause instead of collapsing to the kind's generic sentence.
     #[error("WASM dispatch failed: {kind}")]
     Wasm {
         kind: RuntimeDispatchErrorKind,
-        safe_summary: Option<String>,
+        model_visible_cause: Option<String>,
     },
     #[error("first-party dispatch failed: {kind}")]
     FirstParty {
@@ -457,8 +472,8 @@ impl fmt::Debug for DispatchError {
                     ),
                 )
                 .finish(),
-            Self::Mcp { kind } => f.debug_struct("Mcp").field("kind", kind).finish(),
-            Self::Script { kind } => f.debug_struct("Script").field("kind", kind).finish(),
+            Self::Mcp { kind, .. } => f.debug_struct("Mcp").field("kind", kind).finish(),
+            Self::Script { kind, .. } => f.debug_struct("Script").field("kind", kind).finish(),
             Self::Wasm { kind, .. } => f.debug_struct("Wasm").field("kind", kind).finish(),
             Self::FirstParty { kind, .. } => {
                 f.debug_struct("FirstParty").field("kind", kind).finish()
@@ -489,8 +504,8 @@ impl DispatchError {
             Self::MissingRuntimeBackend { .. } => DispatchFailureKind::MissingRuntimeBackend,
             Self::UnsupportedRuntime { .. } => DispatchFailureKind::UnsupportedRuntime,
             Self::AuthRequired { .. } => DispatchFailureKind::AuthRequired,
-            Self::Mcp { kind }
-            | Self::Script { kind }
+            Self::Mcp { kind, .. }
+            | Self::Script { kind, .. }
             | Self::Wasm { kind, .. }
             | Self::FirstParty { kind, .. } => DispatchFailureKind::Runtime(*kind),
         }
@@ -508,8 +523,8 @@ impl DispatchError {
             Self::MissingRuntimeBackend { .. } => "missing_runtime_backend",
             Self::UnsupportedRuntime { .. } => "unsupported_runtime",
             Self::AuthRequired { .. } => "auth_required",
-            Self::Mcp { kind }
-            | Self::Script { kind }
+            Self::Mcp { kind, .. }
+            | Self::Script { kind, .. }
             | Self::Wasm { kind, .. }
             | Self::FirstParty { kind, .. } => kind.event_kind(),
         }

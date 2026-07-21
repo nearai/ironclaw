@@ -1678,11 +1678,21 @@ fn host_runtime_spawn_input_for_capability(
     Ok(SpawnInputPreparation::Ready(value))
 }
 
+/// Shared default leak detector for the model-visible-cause belt. Building one
+/// compiles the registry regex set + prefix matcher, so it is memoized rather
+/// than rebuilt on every failure (retry storms would otherwise pay it per call).
+fn model_visible_cause_scrubber() -> &'static ironclaw_safety::LeakDetector {
+    static DETECTOR: std::sync::LazyLock<ironclaw_safety::LeakDetector> =
+        std::sync::LazyLock::new(ironclaw_safety::LeakDetector::new);
+    &DETECTOR
+}
+
 fn failure_from(
     error: CapabilityInvocationError,
     capability_id: CapabilityId,
 ) -> RuntimeCapabilityFailure {
     let kind = failure_kind_from(&error);
+    let raw_cause = raw_failure_cause(&error);
     let message = sanitized_failure_message(&error);
     let detail = match error {
         CapabilityInvocationError::Dispatch {
@@ -1700,7 +1710,24 @@ fn failure_from(
     if let Some(detail) = detail {
         failure = failure.with_detail(detail);
     }
+    if let Some(raw_cause) = raw_cause {
+        // Registry-scrubbed here (belt); the loop-support Diagnostic seam
+        // re-scrubs and injection-fences fail-closed (suspenders). Never
+        // rendered in Debug, run-state rows, or runtime events.
+        let (scrubbed, _) = model_visible_cause_scrubber().redact_all_secrets(&raw_cause);
+        failure = failure.with_model_visible_cause(scrubbed);
+    }
     failure
+}
+
+/// The raw descriptive cause for the model-visible Diagnostic channel, before
+/// any public-surface gating.
+fn raw_failure_cause(error: &CapabilityInvocationError) -> Option<String> {
+    use CapabilityInvocationError::Dispatch;
+    match error {
+        Dispatch { safe_summary, .. } => safe_summary.clone(),
+        _ => None,
+    }
 }
 
 /// Preserve a host-authored failure reason that the strict loop safe-summary
@@ -1737,9 +1764,9 @@ fn rejected_summary_diagnostic(
 ///
 /// Variants that wrap inner errors (`Lease`, `RunState`, `Process`,
 /// `InvocationFingerprint`) or that surface free-form storage/runtime
-/// strings are mapped to fixed, infrastructure-opaque labels. Variants whose
-/// `Display` impl is itself stable (capability id + enum discriminator) flow
-/// through unchanged.
+/// strings are mapped to fixed, infrastructure-opaque labels. Dispatch causes
+/// remain raw at this host-internal layer so loop support can split them into
+/// a strict fallback card summary and a secret-value-scrubbed Diagnostic.
 fn sanitized_failure_message(error: &CapabilityInvocationError) -> Option<String> {
     use CapabilityInvocationError::*;
     match error {
@@ -1779,13 +1806,19 @@ fn dispatch_failure_message(
     safe_summary: Option<&str>,
     kind: ironclaw_host_api::DispatchFailureKind,
 ) -> String {
-    // Prefer a host-authored safe summary; otherwise fall back to a plain
-    // human sentence for the failure category rather than the stable category
-    // token (e.g. "the tool input could not be encoded" instead of
-    // "dispatch failed: InputEncode").
+    // This message is the PUBLIC label: persisted into run-state rows and
+    // published on the runtime event sink before any downstream validation
+    // (reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surfaces
+    // pins the boundary). It fails closed: only summaries that pass the strict
+    // loop-summary validation (host-authored sentences, sanitized guest error
+    // codes) pass through; wild raw causes degrade to the kind's fixed
+    // sentence. The full descriptive cause is NOT lost — it rides the private
+    // `model_visible_cause` channel to the model-visible Diagnostic seam.
     safe_summary
-        .and_then(|summary| LoopSafeSummary::new(summary).ok())
-        .map(|summary| summary.to_string())
+        .and_then(|summary| {
+            ironclaw_turns::run_profile::LoopSafeSummary::new(summary.to_string()).ok()
+        })
+        .map(|summary| summary.as_str().to_string())
         .unwrap_or_else(|| kind.human_summary().to_string())
 }
 
@@ -2351,18 +2384,57 @@ mod tests {
     }
 
     #[test]
-    fn sanitized_failure_message_rejects_unsafe_dispatch_safe_summary() {
+    fn sanitized_failure_message_retains_dispatch_cause_for_detail_consumer() {
+        // The public message fails CLOSED: it is persisted into run-state rows
+        // and published on the runtime event sink, so a wild raw cause (paths,
+        // tokens) degrades to the kind's fixed sentence. The descriptive cause
+        // is not lost — failure_from carries it (registry-scrubbed) on the
+        // in-process-only model_visible_cause channel for the Diagnostic seam.
+        let secret = concat!("ghp_", "012345678901234567890123456789012345");
+        let raw = format!("read_file failed at /workspace/config using {secret}");
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
-            safe_summary: Some("read_file failed for path workspace api_key.txt".to_string()),
+            safe_summary: Some(raw),
             detail: None,
         };
 
         let message = sanitized_failure_message(&error).expect("dispatch produces a message");
-        // The unsafe safe_summary is rejected, so the message falls back to the
-        // host-authored human summary for the kind (not the raw category token).
-        assert_eq!(message, "the tool operation failed");
-        assert!(!message.contains("api_key"));
+        assert_eq!(
+            message,
+            RuntimeDispatchErrorKind::OperationFailed.human_summary(),
+            "wild raw cause must degrade the public message to the kind sentence"
+        );
+
+        let failure = failure_from(error, CapabilityId::new("demo.read_file").unwrap());
+        let cause = failure
+            .model_visible_cause
+            .as_deref()
+            .expect("raw cause must ride the model-visible channel");
+        assert!(
+            cause.contains("read_file failed at /workspace/config"),
+            "descriptive cause (paths included) must survive for the model: {cause}"
+        );
+        assert!(
+            !cause.contains(secret),
+            "registry secret must be scrubbed from the model-visible cause: {cause}"
+        );
+        let rendered = format!("{failure:?}");
+        assert!(
+            !rendered.contains("/workspace/config") && !rendered.contains(secret),
+            "Debug must not render the model-visible cause: {rendered}"
+        );
+
+        // A host-authored, validation-clean summary still passes through to
+        // the public message unchanged.
+        let clean = CapabilityInvocationError::Dispatch {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+            safe_summary: Some("trigger_create input failed validation".to_string()),
+            detail: None,
+        };
+        assert_eq!(
+            sanitized_failure_message(&clean).as_deref(),
+            Some("trigger_create input failed validation")
+        );
     }
 
     #[test]
