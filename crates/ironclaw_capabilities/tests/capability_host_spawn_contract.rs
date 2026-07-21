@@ -1,4 +1,7 @@
-use std::sync::Mutex;
+use std::sync::{
+    Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 use async_trait::async_trait;
 use ironclaw_approvals::*;
@@ -298,6 +301,306 @@ async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
     assert_eq!(consumed.status, CapabilityLeaseStatus::Consumed);
 }
 
+// Finding (IronLoop, §5.3.2), resume-SPAWN path: an approved spawn whose lease
+// expired between approval and resume must fail CLOSED at the witness-consume
+// gate — the sealed witness is bounded by the claimed lease's `expires_at`, so a
+// past expiry makes `dispatch_inputs_from_witness` fail before `ProcessManager::
+// spawn`. Previously the expiry was only noticed on the later lease consume, so
+// an expired-lease resume-spawn could start a process. Drives the production
+// `resume_spawn_json` caller. The real filesystem lease store rejects an expired
+// lease at match/claim (so the path is unreachable through it); an
+// `ExpiredApprovalLeaseStore` double bypasses that gate — exactly as the
+// in-`host.rs` `expired_resume_witness_dispatches_nothing_fails_run_and_revokes_lease`
+// unit does — so the witness-consume fail-close is what is exercised.
+#[tokio::test]
+async fn capability_host_resume_spawn_fails_closed_on_expired_lease_witness() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = recording_dispatcher();
+    let process_manager = RecordingProcessManager::default();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
+    let leases = ExpiredApprovalLeaseStore::default();
+    let block_host = capability_host(&registry, &dispatcher, &SpawnApprovalAuthorizer)
+        .with_process_manager(&process_manager)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let mut context = execution_context(CapabilitySet::default());
+    context.authenticated_actor_user_id = Some(UserId::new("slack-alice").unwrap());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "approved background"});
+
+    block_host
+        .spawn_json(CapabilitySpawnRequest {
+            context: context.clone(),
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+        })
+        .await
+        .unwrap_err();
+    let approval_id = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .approval_request_id
+        .unwrap();
+
+    // Approve with an already-past `expires_at`: the issued lease's expiry is the
+    // frozen fact the sealed witness deadline is bounded by, so the witness is
+    // expired the moment it is consumed on the resume.
+    let past_expiry = chrono::Utc::now() - chrono::Duration::minutes(1);
+    let lease = ApprovalResolver::new(&approval_requests, &leases)
+        .approve_spawn(
+            &scope,
+            approval_id,
+            LeaseApproval {
+                issued_by: Principal::HostRuntime,
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::SpawnProcess],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: Some(past_expiry),
+                    max_invocations: Some(1),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    // Always-allow spawn authorizer that ALSO obliges a resource reservation, so
+    // authorization passes and the resume reaches the witness-consume gate under
+    // test with a non-empty prepared `obligation_outcome` (a grant-aware
+    // authorizer would deny the expired lease grant one step earlier — a
+    // different fail-close). Mirrors the in-`host.rs` unit's `AllowAuthorizer`.
+    let reservation_id = ResourceReservationId::new();
+    let resume_authorizer =
+        ObligatingSpawnAuthorizer::new(vec![Obligation::ReserveResources { reservation_id }]);
+    // Recording handler so the witness-expiry cleanup's `abort_obligations` is
+    // observable: `prepare` stages a reservation, `abort` records the release.
+    let handler = RecordingSpawnObligationHandler::with_reservation(ResourceReservation {
+        id: reservation_id,
+        scope: scope.clone(),
+        estimate: ResourceEstimate::default(),
+    });
+    let resume_host = capability_host(&registry, &dispatcher, &resume_authorizer)
+        .with_process_manager(&process_manager)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases)
+        .with_obligation_handler(&handler);
+
+    let error = resume_host
+        .resume_spawn_json(CapabilityResumeRequest {
+            context,
+            approval_request_id: approval_id,
+            capability_id: capability_id(),
+            estimate,
+            input,
+        })
+        .await
+        .unwrap_err();
+
+    // Terminal fail-closed denial carrying the internal-invariant reason.
+    assert!(
+        matches!(
+            error,
+            CapabilityInvocationError::AuthorizationDenied {
+                reason: DenyReason::InternalInvariantViolation,
+                ..
+            }
+        ),
+        "expired-lease resume-spawn must fail closed with InternalInvariantViolation, got {error:?}"
+    );
+    // No process was ever started, and the runtime was not dispatched inline.
+    assert!(dispatcher.call_count() == 0);
+    assert!(
+        !process_manager.has_start(),
+        "an expired-lease resume-spawn must NOT start a process"
+    );
+    // The run transitioned to Failed with the witness-expiry error kind.
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.error_kind.as_deref(), Some("WitnessExpired"));
+    // The lease was claimed (claim-before-witness ordering) and then REVOKED by
+    // the terminal expiry cleanup — never consumed.
+    assert!(
+        *leases.claimed.lock().unwrap(),
+        "the resume-spawn tail must claim the lease before the witness check"
+    );
+    assert_eq!(
+        *leases.revoked.lock().unwrap(),
+        Some(lease.grant.id),
+        "an expired-lease resume-spawn must REVOKE the claimed lease (terminal), not consume it"
+    );
+    // The prepared reservation was staged and then RELEASED via the obligation
+    // abort path (`dispatch_inputs_from_witness` → `abort_obligations`), not
+    // leaked.
+    assert!(
+        handler.prepared(),
+        "the resume-spawn tail must prepare the reservation obligation before the witness check"
+    );
+    assert!(
+        handler.aborted(),
+        "an expired-lease resume-spawn must ABORT the prepared reservation obligation, not leak it"
+    );
+}
+
+// Finding (IronLoop, §5.3.2), resume-SPAWN path: an approved, non-expired
+// spawn-resume whose `ExecutionContext` carries neither `origin` nor `run_id`
+// (so `resolved_origin()` is `None`) must fail CLOSED at the spawn gate — deny
+// with `InternalInvariantViolation`, start NO process, fail the run, AND revoke
+// the already-claimed lease so a terminal refusal does not strand it. Every
+// production ingress stamps an origin, so an origin-less resume is not a real
+// ingress and an un-attributable process start must not proceed. Drives the
+// production `resume_spawn_json` caller. Uses the SAME setup as
+// `capability_host_resumes_approved_spawn_and_consumes_matching_lease` (the
+// control shape, whose context resolves an origin) with the origin/run_id
+// stripped from the resume context.
+#[tokio::test]
+async fn capability_host_resume_spawn_fails_closed_on_origin_less_context() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = recording_dispatcher();
+    let process_manager = RecordingProcessManager::default();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
+    let leases = in_memory_backed_capability_lease_store();
+    let block_host = capability_host(&registry, &dispatcher, &SpawnApprovalAuthorizer)
+        .with_process_manager(&process_manager)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests);
+    let mut context = execution_context(CapabilitySet::default());
+    context.authenticated_actor_user_id = Some(UserId::new("slack-alice").unwrap());
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "approved background"});
+
+    block_host
+        .spawn_json(CapabilitySpawnRequest {
+            context: context.clone(),
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+        })
+        .await
+        .unwrap_err();
+    let approval_id = run_state
+        .get(&scope, invocation_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .approval_request_id
+        .unwrap();
+    // Approve with no expiry so the deny is unambiguously the origin-less
+    // fail-close, not an expiry-based one.
+    let lease = ApprovalResolver::new(&approval_requests, &leases)
+        .approve_spawn(
+            &scope,
+            approval_id,
+            LeaseApproval {
+                issued_by: Principal::HostRuntime,
+                constraints: GrantConstraints {
+                    allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::SpawnProcess],
+                    mounts: MountView::default(),
+                    network: NetworkPolicy::default(),
+                    secrets: Vec::new(),
+                    resource_ceiling: None,
+                    expires_at: None,
+                    max_invocations: Some(1),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    // Always-allow spawn authorizer that ALSO obliges a resource reservation, so
+    // the resume claims the lease, prepares a non-empty `obligation_outcome`, and
+    // reaches the origin-less fail-close with a staged reservation to release.
+    let reservation_id = ResourceReservationId::new();
+    let resume_authorizer =
+        ObligatingSpawnAuthorizer::new(vec![Obligation::ReserveResources { reservation_id }]);
+    // Recording handler so the fail-close's `abort_obligations` is observable:
+    // `prepare` stages a reservation, `abort` records the release.
+    let handler = RecordingSpawnObligationHandler::with_reservation(ResourceReservation {
+        id: reservation_id,
+        scope: scope.clone(),
+        estimate: ResourceEstimate::default(),
+    });
+    let resume_host = capability_host(&registry, &dispatcher, &resume_authorizer)
+        .with_process_manager(&process_manager)
+        .with_run_state(&run_state)
+        .with_approval_requests(&approval_requests)
+        .with_capability_leases(&leases)
+        .with_obligation_handler(&handler);
+
+    // Strip every ingress origin fact from the resume context: no `origin` and no
+    // `run_id`, so `resolved_origin()` is `None`. The membrane-sealed actor is
+    // left set to prove the deny is the origin-less fail-close, not a missing
+    // actor or an actor mismatch.
+    let mut origin_less = context.clone();
+    origin_less.origin = None;
+    origin_less.run_id = None;
+    assert!(
+        origin_less.resolved_origin().is_none(),
+        "test fixture must be origin-less for this to exercise the fail-close"
+    );
+
+    let error = resume_host
+        .resume_spawn_json(CapabilityResumeRequest {
+            context: origin_less,
+            approval_request_id: approval_id,
+            capability_id: capability_id(),
+            estimate,
+            input,
+        })
+        .await
+        .unwrap_err();
+
+    // Terminal fail-closed denial carrying the internal-invariant reason.
+    assert!(
+        matches!(
+            error,
+            CapabilityInvocationError::AuthorizationDenied {
+                reason: DenyReason::InternalInvariantViolation,
+                ..
+            }
+        ),
+        "origin-less resume-spawn must fail closed with InternalInvariantViolation, got {error:?}"
+    );
+    // No process was ever started, and the runtime was not dispatched inline.
+    assert!(dispatcher.call_count() == 0);
+    assert!(
+        !process_manager.has_start(),
+        "an origin-less resume-spawn must NOT start a process"
+    );
+    // The run transitioned to Failed with the authorization-denied error kind.
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.error_kind.as_deref(), Some("AuthorizationDenied"));
+    // The claimed lease is revoked (terminal), not left Claimed or consumed.
+    assert_eq!(
+        leases.get(&scope, lease.grant.id).await.unwrap().status,
+        CapabilityLeaseStatus::Revoked,
+        "an origin-less resume-spawn must REVOKE the claimed lease"
+    );
+    // The prepared reservation was staged and then RELEASED via the fail-close's
+    // `abort_obligations` call (MEDIUM finding #4) — the origin-less denial must
+    // not leak the reservation / staged handoff.
+    assert!(
+        handler.prepared(),
+        "the resume-spawn tail must prepare the reservation obligation before the origin check"
+    );
+    assert!(
+        handler.aborted(),
+        "the origin-less fail-close must ABORT the prepared reservation obligation, not leak it"
+    );
+}
+
 #[tokio::test]
 async fn capability_host_denies_spawn_when_trust_ceiling_omits_spawn_effect() {
     let registry = registry_with_echo_capability();
@@ -395,6 +698,226 @@ async fn capability_host_spawns_authorized_process_without_dispatching_inline() 
     assert_eq!(start.runtime, RuntimeKind::Wasm);
     assert_eq!(start.input, json!({"message": "background"}));
     assert_eq!(result.process.process_id, start.process_id);
+}
+
+/// Lease-store double for the expired-witness resume-spawn test. Unlike the real
+/// filesystem store, it does NOT filter or reject on expiry: it returns the
+/// issued lease from `active_leases_for_context` and lets `claim` succeed even
+/// though `expires_at` is in the past, so `resume_spawn_json` reaches the
+/// witness-consume gate that is the code under test (the real store rejects an
+/// expired lease at match/claim, hiding that gate). Records the single `claim`
+/// and the single terminal `revoke`; `consume` must never be reached on the
+/// expiry path. Mirrors `ClaimRecordingLeaseStore` in `host.rs`, extended with
+/// `issue`/`active_leases_for_context` so the full `resume_spawn_json` caller can
+/// find and claim the lease.
+#[derive(Default)]
+struct ExpiredApprovalLeaseStore {
+    lease: Mutex<Option<CapabilityLease>>,
+    claimed: Mutex<bool>,
+    revoked: Mutex<Option<CapabilityGrantId>>,
+}
+
+impl ExpiredApprovalLeaseStore {
+    fn stored(&self) -> CapabilityLease {
+        self.lease
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .expect("lease must be issued before it is read")
+    }
+
+    fn stored_as_vec(&self) -> Vec<CapabilityLease> {
+        self.lease
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .into_iter()
+            .collect()
+    }
+}
+
+#[async_trait]
+impl CapabilityLeaseStore for ExpiredApprovalLeaseStore {
+    async fn issue(&self, lease: CapabilityLease) -> Result<CapabilityLease, CapabilityLeaseError> {
+        *self
+            .lease
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(lease.clone());
+        Ok(lease)
+    }
+
+    async fn revoke(
+        &self,
+        _scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        *self
+            .revoked
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(lease_id);
+        let mut lease = self.stored();
+        lease.status = CapabilityLeaseStatus::Revoked;
+        Ok(lease)
+    }
+
+    async fn get(
+        &self,
+        _scope: &ResourceScope,
+        _lease_id: CapabilityGrantId,
+    ) -> Option<CapabilityLease> {
+        Some(self.stored())
+    }
+
+    async fn claim(
+        &self,
+        _scope: &ResourceScope,
+        _lease_id: CapabilityGrantId,
+        _invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        *self
+            .claimed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        let mut lease = self.stored();
+        // Bypass the real store's expiry gate: the whole point is to reach the
+        // witness-consume check with a claimed-but-expired lease.
+        lease.status = CapabilityLeaseStatus::Claimed;
+        Ok(lease)
+    }
+
+    async fn consume(
+        &self,
+        _scope: &ResourceScope,
+        _lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        unimplemented!("an expired resume-spawn witness must fail before the lease consume")
+    }
+
+    async fn begin_dispatch_claimed(
+        &self,
+        _scope: &ResourceScope,
+        _lease_id: CapabilityGrantId,
+        _invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        unimplemented!("resume-spawn does not use dispatch-claimed transitions")
+    }
+
+    async fn abort_dispatch_claimed(
+        &self,
+        _scope: &ResourceScope,
+        _lease_id: CapabilityGrantId,
+    ) -> Result<CapabilityLease, CapabilityLeaseError> {
+        unimplemented!("resume-spawn does not use dispatch-claimed transitions")
+    }
+
+    async fn leases_for_scope(&self, _scope: &ResourceScope) -> Vec<CapabilityLease> {
+        self.stored_as_vec()
+    }
+
+    async fn active_leases_for_context(&self, _context: &ExecutionContext) -> Vec<CapabilityLease> {
+        // Deliberately ignores expiry so the expired lease is still matched by
+        // `matching_approval_lease` — the real store would filter it out.
+        self.stored_as_vec()
+    }
+}
+
+/// Always-allow spawn authorizer that attaches a fixed obligation set on the
+/// spawn path, so `prepare_obligations` produces a non-empty `obligation_outcome`
+/// the fail-close branches then abort. Dispatch is denied (unused on this path).
+/// Mirrors `ObligatingAuthorizer` in `capability_obligation_handler_contract.rs`,
+/// scoped to the spawn arm the resume-spawn fail-close tests exercise.
+struct ObligatingSpawnAuthorizer {
+    obligations: Vec<Obligation>,
+}
+
+impl ObligatingSpawnAuthorizer {
+    fn new(obligations: Vec<Obligation>) -> Self {
+        Self { obligations }
+    }
+}
+
+#[async_trait]
+impl TrustAwareCapabilityDispatchAuthorizer for ObligatingSpawnAuthorizer {
+    async fn authorize_dispatch_with_trust(
+        &self,
+        _context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+        _trust_decision: &ironclaw_trust::TrustDecision,
+    ) -> Decision {
+        Decision::Deny {
+            reason: DenyReason::MissingGrant,
+        }
+    }
+
+    async fn authorize_spawn_with_trust(
+        &self,
+        _context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+        _trust_decision: &ironclaw_trust::TrustDecision,
+    ) -> Decision {
+        Decision::Allow {
+            obligations: Obligations::new(self.obligations.clone()).unwrap(),
+        }
+    }
+}
+
+/// Obligation handler that stages a reservation on `prepare` and records the
+/// `abort` release, so the resume-spawn fail-close paths can PROVE the prepared
+/// obligation was aborted (not leaked). Models `EffectObligationHandler` in
+/// `capability_obligation_handler_contract.rs`, adding a `prepared` flag.
+struct RecordingSpawnObligationHandler {
+    reservation: Option<ResourceReservation>,
+    prepared: AtomicBool,
+    aborted: AtomicBool,
+}
+
+impl RecordingSpawnObligationHandler {
+    fn with_reservation(reservation: ResourceReservation) -> Self {
+        Self {
+            reservation: Some(reservation),
+            prepared: AtomicBool::new(false),
+            aborted: AtomicBool::new(false),
+        }
+    }
+
+    fn prepared(&self) -> bool {
+        self.prepared.load(Ordering::SeqCst)
+    }
+
+    fn aborted(&self) -> bool {
+        self.aborted.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl CapabilityObligationHandler for RecordingSpawnObligationHandler {
+    async fn satisfy(
+        &self,
+        _request: CapabilityObligationRequest<'_>,
+    ) -> Result<(), CapabilityObligationError> {
+        Ok(())
+    }
+
+    async fn prepare(
+        &self,
+        _request: CapabilityObligationRequest<'_>,
+    ) -> Result<CapabilityObligationOutcome, CapabilityObligationError> {
+        self.prepared.store(true, Ordering::SeqCst);
+        Ok(CapabilityObligationOutcome {
+            mounts: None,
+            resource_reservation: self.reservation.clone(),
+        })
+    }
+
+    async fn abort(
+        &self,
+        _request: CapabilityObligationAbortRequest<'_>,
+    ) -> Result<(), CapabilityObligationError> {
+        self.aborted.store(true, Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 #[derive(Default)]

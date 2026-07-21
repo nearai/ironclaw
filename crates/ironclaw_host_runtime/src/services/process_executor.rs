@@ -1,7 +1,9 @@
 use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityDispatchRequest, CapabilityDispatcher, RuntimeKind};
+use ironclaw_host_api::{
+    CapabilityDispatchRequest, CapabilityDispatcher, RuntimeKind, RuntimeLane,
+};
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_processes::{
     ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult, ProcessExecutor,
@@ -224,6 +226,17 @@ impl ProcessExecutor for RuntimeDispatchProcessExecutor {
                 estimate: request.estimate,
                 mounts: Some(request.mounts),
                 resource_reservation: request.resource_reservation,
+                // Bind the detached process dispatch to the lane the spawn
+                // authorization approved (§5.3.2, finding C — mutable-registry
+                // TOCTOU). This executor holds no `Authorized` witness (it
+                // forwards an already-authorized, long-running process request),
+                // but `request.runtime` is the `RuntimeKind` captured in the
+                // `ProcessStart` from the authorized descriptor at spawn time, so
+                // the pinned lane is derivable from it. The dispatcher re-resolves
+                // the descriptor lane from its hot registry and fails closed if an
+                // extension update moved the capability onto a different lane
+                // between spawn authorization and this detached run.
+                pinned_lane: RuntimeLane::from_runtime_kind(request.runtime),
                 input: request.input,
             })
             .await
@@ -454,6 +467,69 @@ mod tests {
         assert_eq!(calls[0].authenticated_actor_user_id, Some(actor));
         assert_eq!(calls[0].scope, expected_scope);
         assert_eq!(calls[0].capability_id, expected_capability_id);
+    }
+
+    #[tokio::test]
+    async fn runtime_dispatch_executor_pins_authorized_lane_for_toctou_guard() {
+        // Finding (IronLoop, §5.3.2 finding C): the detached process re-dispatch
+        // must pin the lane the SPAWN AUTHORIZED — derived from `request.runtime`,
+        // the `RuntimeKind` captured in the `ProcessStart` from the authorized
+        // descriptor — not `None`. Otherwise the dispatcher's lane check is a
+        // no-op on this path, and an extension update between spawn authorization
+        // and this detached run could move the capability onto a different lane
+        // that then executes under the original mounts/reservation/trust.
+        // safety: in-memory test dispatcher, no external capability executed.
+        let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
+        let executor = RuntimeDispatchProcessExecutor::new(dispatcher.clone());
+        // Script runtime → `RuntimeLane::Process` is the authorized lane.
+        let request = sample_process_request("demo.background", RuntimeKind::Script);
+
+        executor.execute(request).await.unwrap();
+
+        let calls = dispatcher.recorded();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].pinned_lane,
+            Some(RuntimeLane::Process),
+            "detached process dispatch must pin the authorized lane, not None"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_dispatch_executor_fails_closed_on_registry_lane_swap() {
+        // With the lane pinned (above), a post-spawn registry update that moves
+        // the capability to a different lane makes the dispatcher return
+        // `LaneMismatch` — no replacement executor runs. The detached process
+        // must surface that as a failure (fail closed), not swallow it.
+        // safety: in-memory test dispatcher; the closure returns before any
+        // capability executes.
+        let dispatcher = Arc::new(TestDispatcher::responding(|req, _| {
+            // The process path pins the authorized (Script → Process) lane; model
+            // the dispatcher detecting that the hot registry now resolves Wasm.
+            let authorized = req
+                .pinned_lane
+                .expect("detached process dispatch must pin a lane for the TOCTOU guard");
+            Err(DispatchError::LaneMismatch {
+                capability: req.capability_id.clone(),
+                authorized,
+                resolved: RuntimeLane::Wasm,
+            })
+        }));
+        let executor = RuntimeDispatchProcessExecutor::new(dispatcher);
+        let request = sample_process_request("demo.background", RuntimeKind::Script);
+
+        let error = executor.execute(request).await.unwrap_err();
+
+        assert_eq!(
+            error.kind,
+            DispatchError::LaneMismatch {
+                capability: CapabilityId::new("demo.background").unwrap(),
+                authorized: RuntimeLane::Process,
+                resolved: RuntimeLane::Wasm,
+            }
+            .event_kind(),
+            "a post-authorization lane swap must fail the detached process closed"
+        );
     }
 
     #[test]

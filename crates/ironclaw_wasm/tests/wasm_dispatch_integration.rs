@@ -957,6 +957,7 @@ fn dispatch_request(capability: &str, input: Value) -> CapabilityDispatchRequest
             .set_output_bytes(10_000),
         mounts: None,
         resource_reservation: None,
+        pinned_lane: None,
         input,
     }
 }

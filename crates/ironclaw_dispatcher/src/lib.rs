@@ -200,6 +200,35 @@ where
         let provider = resolved.provider.clone();
         let runtime = resolved.runtime;
 
+        // Bind dispatch to the lane the authorization pinned into the witness
+        // (§5.3.2, mutable-registry TOCTOU). The descriptor + lane resolved above
+        // came from a FRESH `self.registry.snapshot()`, so an extension update
+        // between authorize and dispatch can move the descriptor onto a different
+        // runtime lane. If the authorization pinned a lane, fail closed on a
+        // mismatch — never execute a replacement runtime on mounts, a reservation,
+        // and trust prepared for the old lane. A `None` pin (witness-free/legacy
+        // dispatch, or a host-internal `System` descriptor with no lane) skips the
+        // check, so the common path is byte-identical. Same-lane descriptor-content
+        // swaps (which keep this lane equal) are the residual gap tracked in #6434.
+        if let Some(pinned) = request.pinned_lane
+            && pinned != lane
+        {
+            let error = DispatchError::LaneMismatch {
+                capability: capability_id.clone(),
+                authorized: pinned,
+                resolved: lane,
+            };
+            self.emit_dispatch_failure(
+                scope,
+                capability_id,
+                Some(descriptor.provider.clone()),
+                Some(runtime),
+                &error,
+            )
+            .await?;
+            return Err(error);
+        }
+
         self.emit_event(RuntimeEvent::runtime_selected(
             scope.clone(),
             capability_id.clone(),

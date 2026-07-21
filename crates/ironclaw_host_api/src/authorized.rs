@@ -169,8 +169,15 @@ impl Authorized {
 
     /// Whether the witness has outlived its facts. `dispatch()` after this must
     /// fail closed with `HostFailure::Permanent` (§5.3.2).
+    ///
+    /// Expiry is **inclusive** (`now >= deadline`): the witness is expired at the
+    /// exact deadline instant, not one tick past it. The deadline is derived from
+    /// the shortest-lived frozen fact — an approval/credential lease — and leases
+    /// expire inclusively (`expires_at <= now`). An exclusive check here would let
+    /// a resume dispatch the side effect at `now == deadline` and only observe the
+    /// already-expired lease on the later `consume` (IronLoop finding, #6436).
     pub fn is_expired(&self, now: Timestamp) -> bool {
-        now > self.deadline
+        now >= self.deadline
     }
 
     /// Consume the witness into its parts for the dispatch lane, failing closed
@@ -198,6 +205,31 @@ impl Authorized {
     /// Never `Drop`.
     pub fn abort(self) -> Option<ResourceReservation> {
         self.reservation
+    }
+
+    /// Re-seal this witness against the authoritative obligation outcome the
+    /// resume tail prepares *after* the approval lease is claimed, preserving the
+    /// invocation, lane, and deadline it was originally sealed with.
+    ///
+    /// The resume fold (`authorize_resumed`) seals a *provisional* (empty) outcome
+    /// before the claim because the resume paths' claim-before-dispatch ordering
+    /// prepares the real mounts/reservation only post-claim (§5.3.2). The tail
+    /// then calls this to swap in the actual prepared outcome so the witness it
+    /// consumes carries the real dispatch inputs — matching the invoke/spawn
+    /// witnesses, which seal the real outcome in place. Kernel-only (it needs an
+    /// [`AuthorizationGrant`]); the deadline is preserved verbatim, never extended,
+    /// so a re-seal cannot lengthen a held witness's validity window.
+    pub fn reseal_with_outcome(
+        self,
+        _grant: AuthorizationGrant,
+        mounts: Option<MountView>,
+        reservation: Option<ResourceReservation>,
+    ) -> Self {
+        Self {
+            mounts,
+            reservation,
+            ..self
+        }
     }
 }
 

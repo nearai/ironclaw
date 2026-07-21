@@ -154,6 +154,7 @@ mod tests {
             estimate: ResourceEstimate::default(),
             mounts: None,
             resource_reservation: None,
+            pinned_lane: None,
             input: json!({}),
         }
     }

@@ -83,7 +83,11 @@ fn authorized_is_lane_bound_and_carries_its_invocation() {
 fn deadline_fails_closed_past_the_frozen_facts() {
     let auth = seal_one(ts(1000));
     assert!(!auth.is_expired(ts(999)));
-    assert!(!auth.is_expired(ts(1000))); // boundary: not yet expired at the deadline
+    // Boundary: expiry is INCLUSIVE — the witness is expired at the exact
+    // deadline instant, matching approval-lease `expires_at <= now` semantics
+    // (the deadline is derived from the lease). An exclusive check would let a
+    // resume dispatch at `now == deadline` and only see the expired lease after.
+    assert!(auth.is_expired(ts(1000)));
     assert!(auth.is_expired(ts(1001)));
 }
 
