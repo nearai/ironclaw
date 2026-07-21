@@ -189,7 +189,7 @@ fn tool_call_http_egress_returns_network_error_when_partial_response_is_missing(
 }
 
 #[tokio::test]
-async fn host_http_egress_consumes_staged_obligation_secret_once() {
+async fn host_http_egress_borrows_staged_obligation_secret_for_repeated_requests() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -244,31 +244,19 @@ async fn host_http_egress_consumes_staged_obligation_secret_once() {
         .execute(request.clone())
         .await
         .expect("staged secret should be injected through host egress");
-
-    {
-        let requests = network_recorder.lock().unwrap();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(
-            requests[0]
-                .headers
-                .iter()
-                .find(|(name, _)| name == "authorization"),
-            Some(&(
-                "authorization".to_string(),
-                "Bearer sk-staged-secret".to_string()
-            ))
-        );
-    }
-
-    let error = service
+    service
         .execute(request)
         .await
-        .expect_err("staged secret must not be reusable");
-    assert!(matches!(
-        error,
-        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
-    ));
-    assert_eq!(network_recorder.lock().unwrap().len(), 1);
+        .expect("the invocation should borrow its staged secret again");
+
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests.iter().all(|request| {
+        request
+            .headers
+            .iter()
+            .any(|(name, value)| name == "authorization" && value == "Bearer sk-staged-secret")
+    }));
 }
 
 #[test]
@@ -340,7 +328,7 @@ fn host_http_egress_records_injected_credentials_in_zeroizing_network_request() 
 fn require_zeroize_on_drop<T: ?Sized + zeroize::ZeroizeOnDrop>(_: &T) {}
 
 #[tokio::test]
-async fn host_http_egress_consumes_secret_staged_by_builtin_obligation_handler() {
+async fn host_http_egress_uses_secret_staged_by_builtin_obligation_handler() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -418,7 +406,7 @@ async fn host_http_egress_consumes_secret_staged_by_builtin_obligation_handler()
             timeout_ms: None,
         })
         .await
-        .expect("host egress should consume material staged by the obligation handler");
+        .expect("host egress should borrow material staged by the obligation handler");
 
     let requests = network_recorder.lock().unwrap();
     assert_eq!(requests.len(), 1);
@@ -531,7 +519,7 @@ async fn host_http_egress_reuses_staged_secret_for_multiple_targets_in_one_reque
 }
 
 #[tokio::test]
-async fn host_http_egress_restores_staged_secret_when_later_injection_target_fails() {
+async fn host_http_egress_keeps_staged_secret_when_later_injection_target_fails() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -631,7 +619,7 @@ async fn host_http_egress_restores_staged_secret_when_later_injection_target_fai
             timeout_ms: None,
         })
         .await
-        .expect("staged secret should be restored after target-application failure");
+        .expect("staged secret should remain available after target-application failure");
 
     let requests = network_recorder.lock().unwrap();
     assert_eq!(requests.len(), 1);
@@ -1027,7 +1015,7 @@ async fn host_http_egress_does_not_take_staged_secret_for_other_handle() {
 }
 
 #[tokio::test]
-async fn host_http_egress_removes_staged_secret_before_network_errors() {
+async fn host_http_egress_redacts_borrowed_secret_from_network_errors() {
     let network = RecordingNetwork::err(NetworkHttpError::Transport {
         reason: "upstream rejected sk-staged-secret".to_string(),
         request_bytes: 12,
@@ -1074,7 +1062,7 @@ async fn host_http_egress_removes_staged_secret_before_network_errors() {
             timeout_ms: None,
         })
         .await
-        .expect_err("network error should be sanitized after staged injection is consumed");
+        .expect_err("network error should be sanitized after staged credential injection");
 
     assert!(matches!(
         error,

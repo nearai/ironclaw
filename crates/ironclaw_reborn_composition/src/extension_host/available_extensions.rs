@@ -78,6 +78,18 @@ const GOOGLE_SLIDES_WASM_MODULE: &[u8] = include_bytes!(
 );
 const GMAIL_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/gmail/manifest.toml");
+pub(crate) const COMPACT_GOOGLE_CAPABILITIES_ENABLED_ENV: &str =
+    "IRONCLAW_COMPACT_GOOGLE_CAPABILITIES_ENABLED";
+const COMPACT_GOOGLE_CAPABILITY_IDS: [&str; 8] = [
+    "gmail.fetch_message_summaries",
+    "google-calendar.agenda",
+    "google-calendar.daily_brief",
+    "google-calendar.meeting_prep",
+    "google-docs.read_excerpt",
+    "google-drive.find_files_compact",
+    "google-drive.recent_files",
+    "google-sheets.preview",
+];
 const NOTION_MCP_MANIFEST: &str =
     include_str!("../../../ironclaw_first_party_extensions/assets/notion-mcp/manifest.toml");
 const WEB_ACCESS_MANIFEST: &str =
@@ -312,9 +324,16 @@ fn credential_requirements(
             };
             let handle = requirement.handle.as_str().to_string();
             if let Some(seen) = groups.iter_mut().find(|seen| {
-                seen.handle == handle
-                    && seen.provider == provider
+                seen.provider == provider
                     && can_merge_lifecycle_credential_setup(&seen.setup, &setup)
+                    && (seen.handle == handle
+                        || matches!(
+                            (&seen.setup, &setup),
+                            (
+                                LifecycleExtensionCredentialSetup::OAuth { .. },
+                                LifecycleExtensionCredentialSetup::OAuth { .. }
+                            )
+                        ))
             }) {
                 seen.required |= requirement.required;
                 merge_lifecycle_credential_setup(&mut seen.setup, setup);
@@ -551,7 +570,7 @@ fn nearai_mcp_package(
 }
 
 fn google_calendar_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package(
+    bundled_google_extension_package(
         "google-calendar",
         "Google Calendar",
         GOOGLE_CALENDAR_MANIFEST,
@@ -560,7 +579,7 @@ fn google_calendar_package() -> Result<AvailableExtensionPackage, ProductWorkflo
 }
 
 fn google_docs_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package(
+    bundled_google_extension_package(
         "google-docs",
         "Google Docs",
         GOOGLE_DOCS_MANIFEST,
@@ -569,7 +588,7 @@ fn google_docs_package() -> Result<AvailableExtensionPackage, ProductWorkflowErr
 }
 
 fn google_drive_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package(
+    bundled_google_extension_package(
         "google-drive",
         "Google Drive",
         GOOGLE_DRIVE_MANIFEST,
@@ -578,7 +597,7 @@ fn google_drive_package() -> Result<AvailableExtensionPackage, ProductWorkflowEr
 }
 
 fn google_sheets_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package(
+    bundled_google_extension_package(
         "google-sheets",
         "Google Sheets",
         GOOGLE_SHEETS_MANIFEST,
@@ -596,7 +615,67 @@ fn google_slides_package() -> Result<AvailableExtensionPackage, ProductWorkflowE
 }
 
 fn gmail_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    bundled_extension_package("gmail", "Gmail", GMAIL_MANIFEST, gmail_assets())
+    bundled_google_extension_package("gmail", "Gmail", GMAIL_MANIFEST, gmail_assets())
+}
+
+fn bundled_google_extension_package(
+    id: &str,
+    label: &str,
+    manifest_toml: &str,
+    mut assets: Vec<AvailableExtensionAsset>,
+) -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    let manifest_toml = google_manifest_for_compact_capabilities(
+        manifest_toml,
+        compact_google_capabilities_enabled_from_value(
+            ironclaw_common::env_helpers::env_or_override(COMPACT_GOOGLE_CAPABILITIES_ENABLED_ENV)
+                .as_deref(),
+        ),
+    )?;
+    let manifest_asset = assets
+        .iter_mut()
+        .find(|asset| asset.path == "manifest.toml")
+        .ok_or_else(|| map_binding_error(format!("bundled {label} assets omit manifest.toml")))?;
+    manifest_asset.content =
+        AvailableExtensionAssetContent::Bytes(manifest_toml.as_bytes().to_vec());
+    bundled_extension_package(id, label, &manifest_toml, assets)
+}
+
+fn compact_google_capabilities_enabled_from_value(value: Option<&str>) -> bool {
+    !value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        )
+    })
+}
+
+fn google_manifest_for_compact_capabilities(
+    manifest_toml: &str,
+    enabled: bool,
+) -> Result<String, ProductWorkflowError> {
+    if enabled {
+        return Ok(manifest_toml.to_string());
+    }
+    let mut manifest: Value = toml::from_str(manifest_toml).map_err(|error| {
+        map_binding_error(format!(
+            "bundled Google manifest TOML parse failed: {error}"
+        ))
+    })?;
+    let capabilities = manifest
+        .get_mut("capabilities")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| map_binding_error("bundled Google manifest lacks capabilities"))?;
+    capabilities.retain(|capability| {
+        capability
+            .get("id")
+            .and_then(Value::as_str)
+            .is_none_or(|id| !COMPACT_GOOGLE_CAPABILITY_IDS.contains(&id))
+    });
+    toml::to_string(&manifest).map_err(|error| {
+        map_binding_error(format!(
+            "bundled Google manifest TOML render failed: {error}"
+        ))
+    })
 }
 
 fn slack_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
@@ -1156,6 +1235,42 @@ fn google_calendar_assets() -> Vec<AvailableExtensionAsset> {
             ),
         ),
         bytes_asset(
+            "schemas/google-calendar/agenda.input.v1.json",
+            include_bytes!(
+                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/agenda.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/agenda.output.v1.json",
+            include_bytes!(
+                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/agenda.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/daily_brief.input.v1.json",
+            include_bytes!(
+                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/daily_brief.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/daily_brief.output.v1.json",
+            include_bytes!(
+                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/daily_brief.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/meeting_prep.input.v1.json",
+            include_bytes!(
+                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/meeting_prep.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/google-calendar/meeting_prep.output.v1.json",
+            include_bytes!(
+                "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/meeting_prep.output.v1.json"
+            ),
+        ),
+        bytes_asset(
             "schemas/google-calendar/get_event.input.v1.json",
             include_bytes!(
                 "../../../ironclaw_first_party_extensions/assets/google-calendar/schemas/google-calendar/get_event.input.v1.json"
@@ -1252,6 +1367,24 @@ fn google_calendar_assets() -> Vec<AvailableExtensionAsset> {
             ),
         ),
         bytes_asset(
+            "prompts/google-calendar/agenda.md",
+            include_bytes!(
+                "../../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/agenda.md"
+            ),
+        ),
+        bytes_asset(
+            "prompts/google-calendar/daily_brief.md",
+            include_bytes!(
+                "../../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/daily_brief.md"
+            ),
+        ),
+        bytes_asset(
+            "prompts/google-calendar/meeting_prep.md",
+            include_bytes!(
+                "../../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/meeting_prep.md"
+            ),
+        ),
+        bytes_asset(
             "prompts/google-calendar/get_event.md",
             include_bytes!(
                 "../../../ironclaw_first_party_extensions/assets/google-calendar/prompts/google-calendar/get_event.md"
@@ -1342,7 +1475,7 @@ macro_rules! google_wasm_assets {
 }
 
 fn google_docs_assets() -> Vec<AvailableExtensionAsset> {
-    google_wasm_assets!(
+    let mut assets = google_wasm_assets!(
         "google-docs",
         GOOGLE_DOCS_MANIFEST,
         "google_docs_tool.wasm",
@@ -1351,6 +1484,7 @@ fn google_docs_assets() -> Vec<AvailableExtensionAsset> {
             "create_document",
             "get_document",
             "read_content",
+            "read_excerpt",
             "insert_text",
             "delete_content",
             "replace_text",
@@ -1360,7 +1494,14 @@ fn google_docs_assets() -> Vec<AvailableExtensionAsset> {
             "create_list",
             "batch_update"
         ]
-    )
+    );
+    assets.push(bytes_asset(
+        "schemas/google-docs/read_excerpt.output.v1.json",
+        include_bytes!(
+            "../../../ironclaw_first_party_extensions/assets/google-docs/schemas/google-docs/read_excerpt.output.v1.json"
+        ),
+    ));
+    assets
 }
 
 fn google_drive_assets() -> Vec<AvailableExtensionAsset> {
@@ -1371,6 +1512,8 @@ fn google_drive_assets() -> Vec<AvailableExtensionAsset> {
         GOOGLE_DRIVE_WASM_MODULE,
         [
             "list_files",
+            "find_files_compact",
+            "recent_files",
             "get_file",
             "download_file",
             "upload_file",
@@ -1396,6 +1539,7 @@ fn google_sheets_assets() -> Vec<AvailableExtensionAsset> {
             "create_spreadsheet",
             "get_spreadsheet",
             "read_values",
+            "preview",
             "batch_read_values",
             "write_values",
             "append_values",
@@ -1568,6 +1712,18 @@ fn gmail_assets() -> Vec<AvailableExtensionAsset> {
             ),
         ),
         bytes_asset(
+            "schemas/gmail/fetch_message_summaries.input.v1.json",
+            include_bytes!(
+                "../../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/fetch_message_summaries.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/gmail/fetch_message_summaries.output.v1.json",
+            include_bytes!(
+                "../../../ironclaw_first_party_extensions/assets/gmail/schemas/gmail/fetch_message_summaries.output.v1.json"
+            ),
+        ),
+        bytes_asset(
             "prompts/gmail/list_messages.md",
             include_bytes!(
                 "../../../ironclaw_first_party_extensions/assets/gmail/prompts/gmail/list_messages.md"
@@ -1601,6 +1757,12 @@ fn gmail_assets() -> Vec<AvailableExtensionAsset> {
             "prompts/gmail/trash_message.md",
             include_bytes!(
                 "../../../ironclaw_first_party_extensions/assets/gmail/prompts/gmail/trash_message.md"
+            ),
+        ),
+        bytes_asset(
+            "prompts/gmail/fetch_message_summaries.md",
+            include_bytes!(
+                "../../../ironclaw_first_party_extensions/assets/gmail/prompts/gmail/fetch_message_summaries.md"
             ),
         ),
     ]
@@ -1811,6 +1973,68 @@ mod tests {
         BackendCapabilities, DirEntry, Fault, FaultInjecting, FileStat, FilesystemError,
         FilesystemOperation, InMemoryBackend,
     };
+
+    #[test]
+    fn compact_google_capability_flag_defaults_on_and_recognizes_false_values() {
+        assert!(compact_google_capabilities_enabled_from_value(None));
+        assert!(compact_google_capabilities_enabled_from_value(Some("true")));
+        for value in ["0", "false", "NO", " off "] {
+            assert!(!compact_google_capabilities_enabled_from_value(Some(value)));
+        }
+    }
+
+    #[test]
+    fn disabled_compact_google_capabilities_preserve_legacy_manifest_tools() {
+        for (manifest, compact_ids, legacy_id) in [
+            (
+                GMAIL_MANIFEST,
+                &["gmail.fetch_message_summaries"][..],
+                "gmail.list_messages",
+            ),
+            (
+                GOOGLE_CALENDAR_MANIFEST,
+                &[
+                    "google-calendar.agenda",
+                    "google-calendar.daily_brief",
+                    "google-calendar.meeting_prep",
+                ][..],
+                "google-calendar.list_events",
+            ),
+            (
+                GOOGLE_DOCS_MANIFEST,
+                &["google-docs.read_excerpt"][..],
+                "google-docs.read_content",
+            ),
+            (
+                GOOGLE_DRIVE_MANIFEST,
+                &[
+                    "google-drive.find_files_compact",
+                    "google-drive.recent_files",
+                ][..],
+                "google-drive.list_files",
+            ),
+            (
+                GOOGLE_SHEETS_MANIFEST,
+                &["google-sheets.preview"][..],
+                "google-sheets.read_values",
+            ),
+        ] {
+            let filtered = google_manifest_for_compact_capabilities(manifest, false)
+                .expect("Google manifest filters");
+            let parsed: Value = toml::from_str(&filtered).expect("filtered manifest parses");
+            let ids = parsed["capabilities"]
+                .as_array()
+                .expect("capabilities")
+                .iter()
+                .filter_map(|capability| capability["id"].as_str())
+                .collect::<HashSet<_>>();
+
+            assert!(ids.contains(legacy_id), "legacy capability {legacy_id}");
+            for compact_id in compact_ids {
+                assert!(!ids.contains(compact_id), "compact capability {compact_id}");
+            }
+        }
+    }
     use ironclaw_host_api::{
         EffectKind, HostPortCatalog, PermissionMode, RuntimeCredentialAccountSetup,
         RuntimeCredentialRequirementSource,

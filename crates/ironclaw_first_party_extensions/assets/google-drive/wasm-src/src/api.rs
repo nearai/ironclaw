@@ -163,6 +163,73 @@ pub fn list_files(
     })
 }
 
+/// Search/list files with compact fields intended for model context.
+pub fn find_files_compact(
+    query: Option<&str>,
+    page_size: u32,
+    order_by: Option<&str>,
+    corpora: &str,
+    drive_id: Option<&str>,
+    page_token: Option<&str>,
+) -> Result<CompactFilesResult, String> {
+    let result = list_files(
+        query,
+        page_size.clamp(1, 100),
+        order_by.or(Some("modifiedTime desc")),
+        corpora,
+        drive_id,
+        page_token,
+    )?;
+    Ok(compact_files_result(result))
+}
+
+/// Return recently modified files with compact fields intended for model context.
+pub fn recent_files(
+    page_size: u32,
+    corpora: &str,
+    drive_id: Option<&str>,
+    page_token: Option<&str>,
+) -> Result<CompactFilesResult, String> {
+    find_files_compact(
+        Some("trashed = false"),
+        page_size,
+        Some("modifiedTime desc"),
+        corpora,
+        drive_id,
+        page_token,
+    )
+}
+
+fn compact_files_result(result: ListFilesResult) -> CompactFilesResult {
+    CompactFilesResult {
+        files: result.files.into_iter().map(compact_file).collect(),
+        next_page_token: result.next_page_token,
+    }
+}
+
+fn compact_file(file: DriveFile) -> CompactDriveFile {
+    let owner = file.owners.first().and_then(|owner| {
+        owner
+            .display_name
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .or_else(|| (!owner.email.is_empty()).then_some(owner.email.as_str()))
+            .map(str::to_owned)
+    });
+    CompactDriveFile {
+        id: file.id,
+        name: file.name,
+        mime_type: file.mime_type,
+        modified_time: file.modified_time,
+        web_view_link: file.web_view_link,
+        is_folder: file.is_folder,
+        shared: file.shared,
+        owned_by_me: file.owned_by_me,
+        trashed: file.trashed,
+        owner,
+    }
+}
+
 /// Get file metadata.
 pub fn get_file(file_id: &str) -> Result<FileResult, String> {
     let path = format!(
@@ -635,5 +702,19 @@ mod tests {
         // Multi-GB sizes must parse (u64), not overflow `usize` on wasm32 and
         // silently skip the guard.
         assert!(declared_oversize_message(Some("5000000000")).is_some());
+    }
+
+    #[test]
+    fn compact_file_omits_owner_when_name_and_email_are_empty() {
+        let file = parse_file(&serde_json::json!({
+            "id": "file-1",
+            "name": "Untitled",
+            "mimeType": "text/plain",
+            "owners": [{}]
+        }));
+
+        let compact = serde_json::to_value(compact_file(file)).unwrap();
+
+        assert!(compact.get("owner").is_none());
     }
 }

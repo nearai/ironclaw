@@ -41,5 +41,6 @@ url = "2"
 # Dev-only: coding-tool tests re-run the loop-boundary safe-summary validator
 # (`LoopSafeSummary`) to pin that dispatch failure reasons survive it.
 ironclaw_turns = { path = "../ironclaw_turns" }
+jsonschema = { version = "0.46", default-features = false }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "time"] }

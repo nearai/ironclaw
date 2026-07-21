@@ -9,6 +9,34 @@ use crate::types::*;
 
 const DOCS_API_BASE: &str = "https://docs.googleapis.com/v1/documents";
 const GOOGLE_API_AUTH_REQUIRED_ERROR: &str = "google_api_error_status_401";
+const MAX_EXCERPT_CHARS: usize = 20_000;
+const MAX_OUTLINE_ITEMS: usize = 64;
+const MAX_OUTLINE_TITLE_CHARS: usize = 200;
+
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct TestApiCall {
+    pub(crate) method: String,
+    pub(crate) url: String,
+    pub(crate) body: Option<String>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_API_RESPONSE: std::cell::RefCell<Option<Result<String, String>>> = const { std::cell::RefCell::new(None) };
+    static TEST_API_CALLS: std::cell::RefCell<Vec<TestApiCall>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(crate) fn stub_api_response(response: Result<String, String>) {
+    TEST_API_RESPONSE.with(|slot| *slot.borrow_mut() = Some(response));
+    TEST_API_CALLS.with(|calls| calls.borrow_mut().clear());
+}
+
+#[cfg(test)]
+pub(crate) fn take_test_api_calls() -> Vec<TestApiCall> {
+    TEST_API_CALLS.with(|calls| std::mem::take(&mut *calls.borrow_mut()))
+}
 
 /// Make a Google Docs API call.
 fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, String> {
@@ -26,6 +54,18 @@ fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, Stri
 
     let body_bytes = body.map(|b| b.as_bytes().to_vec());
 
+    #[cfg(test)]
+    if let Some(response) = TEST_API_RESPONSE.with(|slot| slot.borrow_mut().take()) {
+        TEST_API_CALLS.with(|calls| {
+            calls.borrow_mut().push(TestApiCall {
+                method: method.to_string(),
+                url,
+                body: body.map(str::to_string),
+            });
+        });
+        return response;
+    }
+
     host::log(
         host::LogLevel::Debug,
         &format!("Google Docs API: {} {}", method, url),
@@ -34,7 +74,11 @@ fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, Stri
     let response = host::http_request(method, &url, headers, body_bytes.as_deref(), None)?;
 
     if response.status < 200 || response.status >= 300 {
-        return Err(api_status_error("Google Docs", response.status, &response.body));
+        return Err(api_status_error(
+            "Google Docs",
+            response.status,
+            &response.body,
+        ));
     }
 
     if response.body.is_empty() {
@@ -160,6 +204,69 @@ pub fn read_content(document_id: &str) -> Result<ReadContentResult, String> {
     })
 }
 
+/// Read a bounded document excerpt, starting near the first query match when provided.
+pub fn read_excerpt(
+    document_id: &str,
+    query: Option<&str>,
+    start_char: usize,
+    max_chars: usize,
+    include_outline: bool,
+) -> Result<ReadExcerptResult, String> {
+    let path = url_encode(document_id);
+
+    let response = api_call("GET", &path, None)?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&response).map_err(|e| format!("Failed to parse response: {}", e))?;
+
+    let content = required_body_content(&parsed)?;
+    let mut text = String::new();
+    let mut outline = Vec::new();
+    let mut outline_truncated = false;
+    extract_text_from_elements(content, &mut text);
+    if include_outline {
+        let mut offset = 0;
+        outline_truncated = extract_outline_from_elements(content, &mut offset, &mut outline);
+    }
+
+    let total_chars = text.chars().count();
+    let max_chars = max_chars.clamp(1, MAX_EXCERPT_CHARS);
+    let start_char = query
+        .and_then(|needle| query_char_offset(&text, needle))
+        .unwrap_or(start_char)
+        .min(total_chars);
+    let end_char = start_char.saturating_add(max_chars).min(total_chars);
+    let excerpt = slice_chars(&text, start_char, end_char);
+
+    let document_id = parsed["documentId"]
+        .as_str()
+        .ok_or_else(|| "Google Docs response missing documentId".to_string())?
+        .to_string();
+    let title = parsed["title"]
+        .as_str()
+        .ok_or_else(|| "Google Docs response missing title".to_string())?
+        .to_string();
+
+    Ok(ReadExcerptResult {
+        document_id,
+        title,
+        excerpt,
+        start_char,
+        end_char,
+        total_chars,
+        truncated_before: start_char > 0,
+        truncated_after: end_char < total_chars,
+        outline,
+        outline_truncated,
+    })
+}
+
+fn required_body_content(document: &serde_json::Value) -> Result<&[serde_json::Value], String> {
+    document["body"]["content"]
+        .as_array()
+        .map(Vec::as_slice)
+        .ok_or_else(|| "Google Docs response missing body.content".to_string())
+}
+
 /// Recursively extract plain text from structural elements.
 fn extract_text_from_elements(elements: &[serde_json::Value], out: &mut String) {
     for el in elements {
@@ -195,6 +302,102 @@ fn extract_text_from_elements(elements: &[serde_json::Value], out: &mut String) 
             }
         }
     }
+}
+
+fn extract_outline_from_elements(
+    elements: &[serde_json::Value],
+    offset: &mut usize,
+    out: &mut Vec<DocumentOutlineItem>,
+) -> bool {
+    let mut truncated = false;
+    for el in elements {
+        if let Some(para) = el.get("paragraph") {
+            let before = *offset;
+            let text = paragraph_text(para);
+            let style = para["paragraphStyle"]["namedStyleType"]
+                .as_str()
+                .unwrap_or("");
+            if let Some(style) = DocumentOutlineStyle::from_named_style(style) {
+                let title = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                if !title.is_empty() {
+                    if out.len() < MAX_OUTLINE_ITEMS {
+                        let (title, title_truncated) = truncate_chars(&title, MAX_OUTLINE_TITLE_CHARS);
+                        truncated |= title_truncated;
+                        out.push(DocumentOutlineItem {
+                            title,
+                            style,
+                            char_offset: before,
+                        });
+                    } else {
+                        truncated = true;
+                    }
+                }
+            }
+            *offset = offset.saturating_add(text.chars().count());
+        }
+        if let Some(table) = el.get("table") {
+            if let Some(rows) = table["tableRows"].as_array() {
+                for row in rows {
+                    if let Some(cells) = row["tableCells"].as_array() {
+                        for cell in cells {
+                            if let Some(cell_content) = cell["content"].as_array() {
+                                truncated |= extract_outline_from_elements(cell_content, offset, out);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(table_of_contents) = el.get("tableOfContents") {
+            if let Some(content) = table_of_contents["content"].as_array() {
+                truncated |= extract_outline_from_elements(content, offset, out);
+            }
+        }
+    }
+    truncated
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> (String, bool) {
+    let mut chars = value.chars();
+    let truncated = chars.clone().nth(max_chars).is_some();
+    (chars.by_ref().take(max_chars).collect(), truncated)
+}
+
+fn paragraph_text(paragraph: &serde_json::Value) -> String {
+    paragraph["elements"]
+        .as_array()
+        .map(|elements| {
+            elements
+                .iter()
+                .filter_map(|element| element["textRun"]["content"].as_str())
+                .collect::<String>()
+        })
+        .unwrap_or_default()
+}
+
+fn query_char_offset(text: &str, query: &str) -> Option<usize> {
+    if query.is_empty() {
+        return None;
+    }
+    let query_lower = query.to_lowercase();
+    let folded_chars: Vec<(usize, char)> = text
+        .chars()
+        .enumerate()
+        .flat_map(|(char_offset, ch)| ch.to_lowercase().map(move |folded| (char_offset, folded)))
+        .collect();
+    let folded_text = folded_chars.iter().map(|(_, ch)| *ch).collect::<String>();
+    let byte_offset = folded_text.find(&query_lower)?;
+    let folded_char_offset = folded_text[..byte_offset].chars().count();
+    folded_chars
+        .get(folded_char_offset)
+        .map(|(char_offset, _)| *char_offset)
+}
+
+fn slice_chars(text: &str, start: usize, end: usize) -> String {
+    text.chars()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect()
 }
 
 /// Insert text at a position.
@@ -575,5 +778,54 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err, "invalid foreground_color hex: #GG0000");
+    }
+
+    #[test]
+    fn query_char_offset_handles_non_ascii_case_folding() {
+        assert_eq!(query_char_offset("Intro CAFÉ notes", "café"), Some(6));
+    }
+
+    #[test]
+    fn required_body_content_rejects_missing_or_malformed_content() {
+        for document in [
+            serde_json::json!({}),
+            serde_json::json!({"body": {"content": null}}),
+            serde_json::json!({"body": {"content": {}}}),
+        ] {
+            assert_eq!(
+                required_body_content(&document),
+                Err("Google Docs response missing body.content".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn outline_caps_items_and_title_length_and_reports_truncation() {
+        let elements = (0..=MAX_OUTLINE_ITEMS)
+            .map(|index| {
+                serde_json::json!({
+                    "paragraph": {
+                        "paragraphStyle": {"namedStyleType": "HEADING_1"},
+                        "elements": [{
+                            "textRun": {
+                                "content": if index == 0 {
+                                    "x".repeat(MAX_OUTLINE_TITLE_CHARS + 1)
+                                } else {
+                                    format!("Heading {index}")
+                                }
+                            }
+                        }]
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut offset = 0;
+        let mut outline = Vec::new();
+
+        let truncated = extract_outline_from_elements(&elements, &mut offset, &mut outline);
+
+        assert!(truncated);
+        assert_eq!(outline.len(), MAX_OUTLINE_ITEMS);
+        assert_eq!(outline[0].title.chars().count(), MAX_OUTLINE_TITLE_CHARS);
     }
 }

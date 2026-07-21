@@ -224,6 +224,22 @@ EXTENSION_SEARCH_CAPABILITY_ID = "builtin.extension_search"
 EXTENSION_INSTALL_CAPABILITY_ID = "builtin.extension_install"
 EXTENSION_ACTIVATE_CAPABILITY_ID = "builtin.extension_activate"
 OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID = "builtin.outbound_delivery_targets_list"
+COMPACT_GOOGLE_CAPABILITY_IDS = {
+    "gmail.fetch_message_summaries",
+    "google-calendar.agenda",
+    "google-calendar.daily_brief",
+    "google-calendar.meeting_prep",
+    "google-docs.read_excerpt",
+    "google-drive.find_files_compact",
+    "google-drive.recent_files",
+    "google-sheets.preview",
+}
+DISCOVERY_CAPABILITY_IDS = {
+    "tool_search",
+    "tool_describe",
+    "tool_call",
+    "capability_info",
+}
 QA_7C_BUG_LOGGING_SHEET_TITLE = "bug logging Google Sheet"
 SLACK_EXTENSION_REQUIREMENT = {
     "package_id": "slack",
@@ -1360,6 +1376,87 @@ def _record_replayed_submission_identity(
     observed["submission_identity"] = identity
 
 
+async def _capture_run_metrics(
+    ctx: LiveQaContext,
+    submission_identity: dict[str, object],
+) -> dict[str, object]:
+    import httpx
+
+    thread_id = str(submission_identity.get("thread_id") or "")
+    run_id = str(submission_identity.get("run_id") or "")
+    if not thread_id or not run_id:
+        raise AssertionError("run metrics require a submitted thread_id and run_id")
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(
+            f"{ctx.base_url}/api/webchat/v2/threads/{thread_id}/runs/{run_id}/artifact",
+            headers={"Authorization": f"Bearer {AUTH_TOKEN}"},
+        )
+    if response.status_code != 200:
+        raise AssertionError(
+            f"run artifact metrics returned HTTP {response.status_code}"
+        )
+    artifact = response.json()
+    if not isinstance(artifact, dict):
+        raise AssertionError("run artifact metrics response was not an object")
+    return _run_metrics_from_artifact(artifact)
+
+
+def _run_metrics_from_artifact(artifact: dict[str, object]) -> dict[str, object]:
+    run = artifact.get("run")
+    messages = artifact.get("messages")
+    if not isinstance(run, dict) or not isinstance(messages, list):
+        raise AssertionError("run artifact metrics omitted run or messages")
+
+    tool_calls: list[str] = []
+    provider_turn_ids: set[str] = set()
+    tool_result_chars = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        tool_call = message.get("tool_call")
+        if not isinstance(tool_call, dict):
+            continue
+        capability_id = str(tool_call.get("capability_id") or "")
+        if capability_id:
+            tool_calls.append(capability_id)
+        provider_turn_id = str(tool_call.get("provider_turn_id") or "")
+        if provider_turn_id:
+            provider_turn_ids.add(provider_turn_id)
+        tool_result_chars += len(str(message.get("content") or ""))
+
+    usage = run.get("usage")
+    safe_usage = {
+        key: int(usage.get(key) or 0)
+        for key in (
+            "input_tokens",
+            "output_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        )
+    } if isinstance(usage, dict) else {}
+    google_calls = [
+        capability_id
+        for capability_id in tool_calls
+        if capability_id.startswith(
+            ("gmail.", "google-calendar.", "google-docs.", "google-drive.", "google-sheets.")
+        )
+    ]
+    return {
+        "tool_calls": tool_calls,
+        "tool_call_count": len(tool_calls),
+        "google_tool_call_count": len(google_calls),
+        "compact_google_tool_call_count": sum(
+            capability_id in COMPACT_GOOGLE_CAPABILITY_IDS for capability_id in tool_calls
+        ),
+        "discovery_tool_call_count": sum(
+            capability_id in DISCOVERY_CAPABILITY_IDS for capability_id in tool_calls
+        ),
+        "provider_turns_with_tools": len(provider_turn_ids),
+        "tool_result_chars": tool_result_chars,
+        "usage": safe_usage,
+    }
+
+
 def _routine_confirmation_follow_up_for_text(
     text: str,
     *,
@@ -1408,6 +1505,7 @@ async def _live_chat_case(
     expose_full_reply_text: bool = False,
     enforce_marker: bool = True,
     capture_submission_identity: bool = False,
+    capture_run_metrics: bool = False,
 ) -> ProbeResult:
     from playwright.async_api import expect
 
@@ -1436,7 +1534,7 @@ async def _live_chat_case(
             return False
 
     async def submit_prompt(page: object, composer: object) -> bool:
-        if not capture_submission_identity:
+        if not (capture_submission_identity or capture_run_metrics):
             await composer.fill(prompt)  # type: ignore[attr-defined]
             await composer.press("Enter")  # type: ignore[attr-defined]
             return True
@@ -1572,6 +1670,11 @@ async def _live_chat_case(
             enforce_marker=enforce_marker,
         )
         _record_assistant_reply_wait_result(observed, reply)
+        if capture_run_metrics:
+            identity = observed.get("submission_identity")
+            if not isinstance(identity, dict):
+                raise AssertionError("run metrics require captured submission identity")
+            observed["run_metrics"] = await _capture_run_metrics(ctx, identity)
         if expose_full_reply_text:
             # In-memory hand-off to the calling case; the case pops it before
             # the details dict is persisted into artifacts.
@@ -1698,6 +1801,7 @@ async def _live_chat_with_extensions_case(
     timeout: float = 240.0,
     extra_details: dict[str, object] | None = None,
     forbidden_text: list[str] | None = None,
+    capture_run_metrics: bool = False,
 ) -> ProbeResult:
     return await _live_chat_case(
         ctx,
@@ -1709,6 +1813,7 @@ async def _live_chat_with_extensions_case(
         timeout=timeout,
         extra_details=extra_details,
         forbidden_text=forbidden_text,
+        capture_run_metrics=capture_run_metrics,
     )
 
 
@@ -4118,6 +4223,117 @@ async def case_qa_2d_calendar_prep_live_chat(ctx: LiveQaContext) -> ProbeResult:
         ],
         prompt=_qa_sheet_prompt("qa_2d_calendar_prep_live_chat"),
         timeout=300.0,
+    )
+
+
+_GOOGLE_BENCHMARK_EXTENSIONS = {
+    "gmail": {"package_id": "gmail", "display_name": "Gmail", "required_tools": []},
+    "calendar": {
+        "package_id": "google-calendar",
+        "display_name": "Google Calendar",
+        "required_tools": [],
+    },
+    "docs": {
+        "package_id": "google-docs",
+        "display_name": "Google Docs",
+        "required_tools": [],
+    },
+    "drive": {
+        "package_id": "google-drive",
+        "display_name": "Google Drive",
+        "required_tools": [],
+    },
+    "sheets": {
+        "package_id": "google-sheets",
+        "display_name": "Google Sheets",
+        "required_tools": [],
+    },
+}
+
+
+async def _compact_google_benchmark_case(
+    ctx: LiveQaContext,
+    *,
+    case_name: str,
+    prompt: str,
+    required_text: list[str],
+    extensions: list[str],
+) -> ProbeResult:
+    return await _live_chat_with_extensions_case(
+        ctx,
+        case_name=case_name,
+        prompt=prompt,
+        marker=None,
+        required_text=required_text,
+        extensions=[_GOOGLE_BENCHMARK_EXTENSIONS[name] for name in extensions],
+        timeout=300.0,
+        capture_run_metrics=True,
+        extra_details={"benchmark": "compact_google_capabilities"},
+    )
+
+
+async def case_benchmark_google_email_digest(ctx: LiveQaContext) -> ProbeResult:
+    return await _compact_google_benchmark_case(
+        ctx,
+        case_name="benchmark_google_email_digest",
+        prompt=(
+            "Give me a concise digest of my five most recent emails. Include the sender, "
+            "subject, and one-sentence summary for each. Do not ask me which Gmail tool to use."
+        ),
+        required_text=["email|message|inbox|subject"],
+        extensions=["gmail"],
+    )
+
+
+async def case_benchmark_google_daily_brief(ctx: LiveQaContext) -> ProbeResult:
+    return await _compact_google_benchmark_case(
+        ctx,
+        case_name="benchmark_google_daily_brief",
+        prompt=(
+            "Give me a concise brief for today that combines my calendar agenda with "
+            "important recent emails. Do not ask me which Google tools to use."
+        ),
+        required_text=["calendar|meeting|schedule|event", "email|message|inbox"],
+        extensions=["calendar", "gmail"],
+    )
+
+
+async def case_benchmark_google_meeting_prep(ctx: LiveQaContext) -> ProbeResult:
+    return await _compact_google_benchmark_case(
+        ctx,
+        case_name="benchmark_google_meeting_prep",
+        prompt=(
+            "Prepare me for my next meeting using its calendar details and any relevant "
+            "Google Drive or Docs context. Give me a concise briefing and do not ask which tools to use."
+        ),
+        required_text=["meeting|calendar|event"],
+        extensions=["calendar", "drive", "docs"],
+    )
+
+
+async def case_benchmark_google_document_lookup(ctx: LiveQaContext) -> ProbeResult:
+    return await _compact_google_benchmark_case(
+        ctx,
+        case_name="benchmark_google_document_lookup",
+        prompt=(
+            "Find the most relevant recently modified Google Drive document about strategy "
+            "and summarize the relevant section. Do not ask me which tools to use."
+        ),
+        required_text=["strategy|document|doc|drive|file"],
+        extensions=["drive", "docs"],
+    )
+
+
+async def case_benchmark_google_sheet_preview(ctx: LiveQaContext) -> ProbeResult:
+    return await _compact_google_benchmark_case(
+        ctx,
+        case_name="benchmark_google_sheet_preview",
+        prompt=(
+            "Inspect the Google spreadsheet named ABC and summarize its headers and a small "
+            "sample of its rows. Do not modify it and do not ask which tools to use."
+        ),
+        required_text=["ABC|sheet|spreadsheet|row|column|header"],
+        extensions=["drive", "sheets"],
     )
 
 
@@ -7815,6 +8031,46 @@ CASES: dict[str, CaseSpec] = {
     ),
     "qa_2f_calendar_prep_email_delivery": CaseSpec(
         case_qa_2f_calendar_prep_email_delivery,
+        requires_google_product_auth=True,
+        requires_google_runtime_access=True,
+        default_enabled=False,
+    ),
+    "benchmark_google_email_digest": CaseSpec(
+        case_benchmark_google_email_digest,
+        tier="behavioral",
+        blocking=False,
+        requires_google_product_auth=True,
+        requires_google_runtime_access=True,
+        default_enabled=False,
+    ),
+    "benchmark_google_daily_brief": CaseSpec(
+        case_benchmark_google_daily_brief,
+        tier="behavioral",
+        blocking=False,
+        requires_google_product_auth=True,
+        requires_google_runtime_access=True,
+        default_enabled=False,
+    ),
+    "benchmark_google_meeting_prep": CaseSpec(
+        case_benchmark_google_meeting_prep,
+        tier="behavioral",
+        blocking=False,
+        requires_google_product_auth=True,
+        requires_google_runtime_access=True,
+        default_enabled=False,
+    ),
+    "benchmark_google_document_lookup": CaseSpec(
+        case_benchmark_google_document_lookup,
+        tier="behavioral",
+        blocking=False,
+        requires_google_product_auth=True,
+        requires_google_runtime_access=True,
+        default_enabled=False,
+    ),
+    "benchmark_google_sheet_preview": CaseSpec(
+        case_benchmark_google_sheet_preview,
+        tier="behavioral",
+        blocking=False,
         requires_google_product_auth=True,
         requires_google_runtime_access=True,
         default_enabled=False,

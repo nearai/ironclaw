@@ -1,0 +1,82 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Gmail fetch_message_summaries output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "query",
+    "labelIds",
+    "resultSizeEstimate",
+    "nextPageToken",
+    "messages",
+    "messageCount",
+    "unreadCount",
+    "partialFailures"
+  ],
+  "properties": {
+    "kind": { "const": "ironclaw#gmailMessageSummaries" },
+    "query": { "type": ["string", "null"] },
+    "labelIds": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "resultSizeEstimate": { "type": ["integer", "null"], "minimum": 0 },
+    "nextPageToken": { "type": ["string", "null"] },
+    "messages": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/messageSummary" }
+    },
+    "messageCount": { "type": "integer", "minimum": 0 },
+    "unreadCount": { "type": "integer", "minimum": 0 },
+    "partialFailures": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/partialFailure" }
+    }
+  },
+  "definitions": {
+    "messageSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "threadId",
+        "from",
+        "to",
+        "subject",
+        "date",
+        "snippet",
+        "bodyPreview",
+        "labelIds",
+        "isUnread"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "threadId": { "type": "string" },
+        "from": { "type": "string" },
+        "to": { "type": "string" },
+        "subject": { "type": "string" },
+        "date": { "type": "string" },
+        "snippet": { "type": "string" },
+        "bodyPreview": { "type": "string" },
+        "labelIds": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "isUnread": { "type": "boolean" }
+      }
+    },
+    "partialFailure": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "scope": { "type": "string" },
+        "messageId": { "type": "string" },
+        "status": { "type": "integer", "minimum": 100, "maximum": 599 },
+        "reason": { "type": ["string", "null"] }
+      },
+      "required": ["status", "reason"],
+      "anyOf": [{ "required": ["scope"] }, { "required": ["messageId"] }]
+    }
+  }
+}

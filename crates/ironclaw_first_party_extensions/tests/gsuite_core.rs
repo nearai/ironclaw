@@ -15,11 +15,13 @@ use ironclaw_auth::{
     InMemoryAuthProductServices, NewCredentialAccount,
 };
 use ironclaw_first_party_extensions::{
-    CALENDAR_ADD_ATTENDEES_CAPABILITY_ID, CALENDAR_CREATE_EVENT_CAPABILITY_ID,
+    CALENDAR_ADD_ATTENDEES_CAPABILITY_ID, CALENDAR_AGENDA_CAPABILITY_ID,
+    CALENDAR_CREATE_EVENT_CAPABILITY_ID, CALENDAR_DAILY_BRIEF_CAPABILITY_ID,
     CALENDAR_DELETE_EVENT_CAPABILITY_ID, CALENDAR_FIND_FREE_SLOTS_CAPABILITY_ID,
     CALENDAR_GET_EVENT_CAPABILITY_ID, CALENDAR_LIST_CALENDARS_CAPABILITY_ID,
-    CALENDAR_LIST_EVENTS_CAPABILITY_ID, CALENDAR_SET_REMINDER_CAPABILITY_ID,
-    CALENDAR_UPDATE_EVENT_CAPABILITY_ID, GMAIL_CREATE_DRAFT_CAPABILITY_ID,
+    CALENDAR_LIST_EVENTS_CAPABILITY_ID, CALENDAR_MEETING_PREP_CAPABILITY_ID,
+    CALENDAR_SET_REMINDER_CAPABILITY_ID, CALENDAR_UPDATE_EVENT_CAPABILITY_ID,
+    GMAIL_CREATE_DRAFT_CAPABILITY_ID, GMAIL_FETCH_MESSAGE_SUMMARIES_CAPABILITY_ID,
     GMAIL_GET_MESSAGE_CAPABILITY_ID, GMAIL_LIST_MESSAGES_CAPABILITY_ID,
     GMAIL_REPLY_TO_MESSAGE_CAPABILITY_ID, GMAIL_SEND_MESSAGE_CAPABILITY_ID,
     GMAIL_TRASH_MESSAGE_CAPABILITY_ID, GSUITE_OUTPUT_BYTES_LIMIT, GSUITE_PROVIDER_SCOPES,
@@ -30,7 +32,7 @@ use ironclaw_first_party_extensions::{
 use ironclaw_host_api::{
     ExtensionId, InvocationId, NetworkMethod, NetworkScheme,
     RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED, ResourceScope, RuntimeDispatchErrorKind,
-    RuntimeHttpEgressError, SecretHandle, UserId,
+    RuntimeHttpEgressError, RuntimeHttpEgressResponse, SecretHandle, UserId,
 };
 use serde_json::json;
 use support::*;
@@ -48,7 +50,16 @@ fn gsuite_packages_declare_calendar_and_gmail_capabilities() {
         .iter()
         .map(|package| package.capabilities.len())
         .sum::<usize>();
-    assert_eq!(capability_count, 15);
+    assert_eq!(capability_count, 19);
+
+    let capability_ids = packages
+        .iter()
+        .flat_map(|package| package.capabilities.iter().map(|capability| capability.id))
+        .collect::<Vec<_>>();
+    assert!(capability_ids.contains(&CALENDAR_AGENDA_CAPABILITY_ID));
+    assert!(capability_ids.contains(&CALENDAR_DAILY_BRIEF_CAPABILITY_ID));
+    assert!(capability_ids.contains(&CALENDAR_MEETING_PREP_CAPABILITY_ID));
+    assert!(capability_ids.contains(&GMAIL_FETCH_MESSAGE_SUMMARIES_CAPABILITY_ID));
 }
 
 #[test]
@@ -213,6 +224,183 @@ async fn calendar_list_events_defaults_to_upcoming_ordered_request() {
     assert!(url.contains("timeMin="));
     assert!(url.contains("maxResults=25"));
     assert!(!url.contains("timeMax="));
+}
+
+#[tokio::test]
+async fn calendar_daily_brief_combines_agenda_and_gmail_attention() {
+    let scope = scope();
+    let auth = auth_with_google_account(
+        &scope,
+        vec![
+            provider_scope(GOOGLE_CALENDAR_READONLY_SCOPE),
+            provider_scope(GOOGLE_GMAIL_READONLY_SCOPE),
+        ],
+    )
+    .await;
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json(json!({
+            "kind": "calendar#events",
+            "items": [{
+                "id": "standup",
+                "summary": "Daily standup",
+                "description": "Review launch blockers",
+                "start": { "dateTime": "2026-05-21T09:00:00Z" },
+                "end": { "dateTime": "2026-05-21T09:30:00Z" }
+            }]
+        })),
+        RecordingEgress::json(json!({
+            "resultSizeEstimate": 12,
+            "messages": [{ "id": "msg-1", "threadId": "thread-1" }]
+        })),
+        RecordingEgress::json(json!({
+            "id": "msg-1",
+            "threadId": "thread-1",
+            "labelIds": ["INBOX", "UNREAD"],
+            "snippet": "Please review the launch blocker before standup.",
+            "payload": {
+                "headers": [
+                    { "name": "From", "value": "Boss <boss@example.com>" },
+                    { "name": "To", "value": "Alice <alice@example.com>" },
+                    { "name": "Subject", "value": "Launch blocker" },
+                    { "name": "Date", "value": "Thu, 21 May 2026 08:00:00 +0000" }
+                ]
+            }
+        })),
+    ]));
+
+    let output = dispatch_ok(
+        auth,
+        scope,
+        CALENDAR_DAILY_BRIEF_CAPABILITY_ID,
+        json!({
+            "time_min": "2026-05-21T00:00:00Z",
+            "time_max": "2026-05-22T00:00:00Z",
+            "max_events": 2,
+            "email_query": "is:unread from:boss@example.com",
+            "email_max_results": 1
+        }),
+        egress.clone(),
+    )
+    .await;
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[0].url.contains("/calendars/primary/events"));
+    assert!(requests[0].url.contains("maxResults=2"));
+    assert!(requests[1].url.contains("/users/me/messages"));
+    assert!(requests[1].url.contains("q=is%3Aunread"));
+    assert!(requests[1].url.contains("maxResults=1"));
+    assert!(
+        requests[2]
+            .url
+            .ends_with("/users/me/messages/msg-1?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date")
+    );
+
+    let body = &output["body"];
+    assert_eq!(body["kind"], "ironclaw#googleCalendarDailyBrief");
+    assert_eq!(body["agenda"]["eventCount"], 1);
+    assert_eq!(body["agenda"]["events"][0]["summary"], "Daily standup");
+    assert_eq!(body["emailAttention"]["messageCount"], 1);
+    assert_eq!(body["emailAttention"]["unreadCount"], 1);
+    assert_eq!(
+        body["emailAttention"]["messages"][0]["subject"],
+        "Launch blocker"
+    );
+}
+
+#[tokio::test]
+async fn calendar_daily_brief_gmail_failures_match_the_output_schema() {
+    let scope = scope();
+    let auth = auth_with_google_account(
+        &scope,
+        vec![
+            provider_scope(GOOGLE_CALENDAR_READONLY_SCOPE),
+            provider_scope(GOOGLE_GMAIL_READONLY_SCOPE),
+        ],
+    )
+    .await;
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json(json!({"items": []})),
+        RecordingEgress::json(json!({
+            "messages": [{"id": "msg-1", "threadId": "thread-1"}]
+        })),
+        RecordingEgress::json_status(503, json!({"error": {"status": "UNAVAILABLE"}})),
+    ]));
+
+    let output = dispatch_ok(
+        auth,
+        scope,
+        CALENDAR_DAILY_BRIEF_CAPABILITY_ID,
+        json!({"email_max_results": 1}),
+        egress,
+    )
+    .await;
+    let body = &output["body"];
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../assets/google-calendar/schemas/google-calendar/daily_brief.output.v1.json"
+    ))
+    .unwrap();
+    let validator = jsonschema::validator_for(&schema).expect("daily brief schema compiles");
+
+    assert!(
+        validator.is_valid(body),
+        "daily brief output must accept Gmail per-message failures: {body}"
+    );
+    assert_eq!(body["partialFailures"][0]["source"], "gmail");
+    assert_eq!(body["partialFailures"][0]["messageId"], "msg-1");
+}
+
+#[tokio::test]
+async fn gmail_message_summaries_borrows_one_credential_for_parallel_metadata_requests() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_READONLY_SCOPE)]).await;
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json(json!({
+            "resultSizeEstimate": 3,
+            "messages": [
+                {"id": "msg-1", "threadId": "thread-1"},
+                {"id": "msg-2", "threadId": "thread-2"},
+                {"id": "msg-3", "threadId": "thread-3"}
+            ]
+        })),
+        gmail_metadata_response("msg-1", "First"),
+        gmail_metadata_response("msg-2", "Second"),
+        gmail_metadata_response("msg-3", "Third"),
+    ]));
+    let capability_id = capability_id(GMAIL_FETCH_MESSAGE_SUMMARIES_CAPABILITY_ID);
+
+    let result = GsuiteExecutor::new(
+        auth.clone(),
+        auth,
+        FailOnNthCallStager::fail_on_second_call(),
+    )
+    .dispatch(GsuiteDispatchRequest {
+        capability_id: &capability_id,
+        scope: &scope,
+        input: &json!({"max_results": 3}),
+        runtime_http_egress: egress.clone(),
+    })
+    .await
+    .expect("Gmail list and metadata fan-out should share one staged credential");
+
+    assert_eq!(result.output["body"]["messageCount"], 3);
+    assert_eq!(egress.requests().len(), 4);
+}
+
+fn gmail_metadata_response(message_id: &str, subject: &str) -> RuntimeHttpEgressResponse {
+    RecordingEgress::json(json!({
+        "id": message_id,
+        "threadId": format!("thread-{message_id}"),
+        "labelIds": ["INBOX"],
+        "snippet": format!("Summary for {subject}"),
+        "payload": {
+            "headers": [
+                {"name": "From", "value": "sender@example.com"},
+                {"name": "Subject", "value": subject}
+            ]
+        }
+    }))
 }
 
 #[tokio::test]
@@ -2124,12 +2312,7 @@ async fn add_attendees_reports_failed_initial_get_network_usage() {
 }
 
 #[tokio::test]
-async fn add_attendees_restages_credential_before_patch() {
-    // P2 regression: the staged-obligation store is one-shot.
-    // execute_add_attendees makes GET then PATCH; without restaging, the PATCH
-    // fires with no credential. We use FailOnNthCallStager to verify the second
-    // staging call happens — if it doesn't happen, the dispatch succeeds instead
-    // of returning AuthRequired.
+async fn add_attendees_borrows_the_invocation_credential_for_get_and_patch() {
     let scope = scope();
     let auth = auth_with_google_account(
         &scope,
@@ -2145,13 +2328,10 @@ async fn add_attendees_restages_credential_before_patch() {
             }),
             50,
         ),
-        // PATCH response — would succeed, but stager fails before we get here
         RecordingEgress::json_with_request_bytes(json!({"id": "evt-1", "updated": true}), 80),
     ]));
 
-    // Stager succeeds on first call (for GET), fails AuthRequired on second call (for PATCH).
-    // Without the P2 fix, the second staging call never happens and dispatch succeeds.
-    let error = GsuiteExecutor::new(
+    let result = GsuiteExecutor::new(
         auth.clone(),
         auth,
         FailOnNthCallStager::fail_on_second_call(),
@@ -2167,21 +2347,11 @@ async fn add_attendees_restages_credential_before_patch() {
         runtime_http_egress: egress.clone(),
     })
     .await
-    .expect_err("second staging should fail with AuthRequired before PATCH fires");
+    .expect("GET and PATCH should share the invocation-scoped credential");
 
-    assert!(
-        error.is_auth_required(),
-        "stager auth-required on PATCH restage must surface as AuthRequired; got {error:?}"
-    );
-    // Only the GET fired; PATCH was blocked by staging failure
+    assert_eq!(egress.requests().len(), 2, "GET and PATCH must both run");
     assert_eq!(
-        egress.requests().len(),
-        1,
-        "PATCH must not fire after staging failure; egress count should be 1 (GET only)"
-    );
-    assert_eq!(
-        error.usage().map(|u| u.network_egress_bytes),
-        Some(50),
-        "GET network bytes must be reported even when PATCH staging fails"
+        result.usage.network_egress_bytes, 130,
+        "both requests must contribute to network accounting"
     );
 }

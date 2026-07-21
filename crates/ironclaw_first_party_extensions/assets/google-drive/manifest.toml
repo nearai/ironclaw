@@ -38,6 +38,34 @@ prompt_doc_ref = "prompts/google-drive/get_file.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+id = "google-drive.find_files_compact"
+description = "Search or list Drive files with compact metadata for context-efficient file discovery."
+effects = ["dispatch_capability", "network", "use_secret"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/drive.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/drive.readonly"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-drive/find_files_compact.input.v1.json"
+output_schema_ref = "schemas/google-drive/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-drive/find_files_compact.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
+id = "google-drive.recent_files"
+description = "List recently modified Drive files with compact metadata."
+effects = ["dispatch_capability", "network", "use_secret"]
+runtime_credentials = [
+  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/drive.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/drive.readonly"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/google-drive/recent_files.input.v1.json"
+output_schema_ref = "schemas/google-drive/raw_output.v1.json"
+prompt_doc_ref = "prompts/google-drive/recent_files.md"
+required_host_ports = ["host.runtime.http_egress"]
+
+[[capabilities]]
 id = "google-drive.download_file"
 description = "Download a file's content as text — including binary documents (PDF, PPTX, DOCX, XLSX), which are converted to extracted text automatically — or export a Google Workspace file. No shell or separate downloader needed."
 effects = ["dispatch_capability", "network", "use_secret"]

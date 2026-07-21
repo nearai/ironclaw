@@ -39,7 +39,7 @@ use crate::{
     http_body::{RuntimeHttpBodyStore, UnsupportedRuntimeHttpBodyStore},
 };
 
-/// Default maximum lifetime for one-shot runtime secret material staged in memory.
+/// Default maximum lifetime for invocation-scoped runtime secret material staged in memory.
 pub(crate) const DEFAULT_RUNTIME_SECRET_INJECTION_TTL: Duration = Duration::from_secs(300);
 
 #[derive(Debug)]

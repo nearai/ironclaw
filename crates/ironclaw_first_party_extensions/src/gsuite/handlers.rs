@@ -39,6 +39,7 @@ use crate::latency::{
 };
 
 mod calendar_list_events;
+mod context_tools;
 
 pub const CALENDAR_LIST_CALENDARS_CAPABILITY_ID: &str = "google-calendar.list_calendars";
 pub const CALENDAR_LIST_EVENTS_CAPABILITY_ID: &str = "google-calendar.list_events";
@@ -49,6 +50,9 @@ pub const CALENDAR_UPDATE_EVENT_CAPABILITY_ID: &str = "google-calendar.update_ev
 pub const CALENDAR_DELETE_EVENT_CAPABILITY_ID: &str = "google-calendar.delete_event";
 pub const CALENDAR_ADD_ATTENDEES_CAPABILITY_ID: &str = "google-calendar.add_attendees";
 pub const CALENDAR_SET_REMINDER_CAPABILITY_ID: &str = "google-calendar.set_reminder";
+pub const CALENDAR_AGENDA_CAPABILITY_ID: &str = "google-calendar.agenda";
+pub const CALENDAR_DAILY_BRIEF_CAPABILITY_ID: &str = "google-calendar.daily_brief";
+pub const CALENDAR_MEETING_PREP_CAPABILITY_ID: &str = "google-calendar.meeting_prep";
 
 pub const GMAIL_LIST_MESSAGES_CAPABILITY_ID: &str = "gmail.list_messages";
 pub const GMAIL_GET_MESSAGE_CAPABILITY_ID: &str = "gmail.get_message";
@@ -56,6 +60,7 @@ pub const GMAIL_SEND_MESSAGE_CAPABILITY_ID: &str = "gmail.send_message";
 pub const GMAIL_CREATE_DRAFT_CAPABILITY_ID: &str = "gmail.create_draft";
 pub const GMAIL_REPLY_TO_MESSAGE_CAPABILITY_ID: &str = "gmail.reply_to_message";
 pub const GMAIL_TRASH_MESSAGE_CAPABILITY_ID: &str = "gmail.trash_message";
+pub const GMAIL_FETCH_MESSAGE_SUMMARIES_CAPABILITY_ID: &str = "gmail.fetch_message_summaries";
 
 const CALENDAR_API_BASE: &str = "https://www.googleapis.com/calendar/v3";
 const GMAIL_API_BASE: &str = "https://gmail.googleapis.com/gmail/v1";
@@ -255,9 +260,7 @@ impl GsuiteExecutor {
         );
 
         let execute_primary_started_at = gsuite_latency_started_at();
-        let (response, network_egress_bytes) = match execution
-            .execute(&request, &credential, self.credential_stager.as_ref())
-            .await
+        let (response, network_egress_bytes) = match execution.execute(&request, &credential).await
         {
             Ok(CapabilityExecutionOutcome::Response {
                 response,
@@ -410,10 +413,7 @@ impl GsuiteExecutor {
                 );
 
                 let execute_retry_started_at = gsuite_latency_started_at();
-                match retry_execution
-                    .execute(&request, &refreshed, self.credential_stager.as_ref())
-                    .await
-                {
+                match retry_execution.execute(&request, &refreshed).await {
                     Ok(CapabilityExecutionOutcome::Response {
                         response,
                         network_egress_bytes: retry_network_egress_bytes,
@@ -666,6 +666,10 @@ enum CapabilityExecution {
         body: Vec<u8>,
     },
     CalendarListEvents(calendar_list_events::CalendarEventsQuery),
+    CalendarAgenda(context_tools::CalendarAgendaInput),
+    CalendarDailyBrief(context_tools::CalendarDailyBriefInput),
+    CalendarMeetingPrep(context_tools::CalendarMeetingPrepInput),
+    GmailFetchMessageSummaries(context_tools::GmailFetchMessageSummariesInput),
     AddAttendees(CalendarAddAttendeesInput),
 }
 
@@ -684,7 +688,6 @@ impl CapabilityExecution {
         self,
         request: &GsuiteDispatchRequest<'_>,
         credential: &GoogleCredential,
-        stager: &dyn GsuiteCredentialStager,
     ) -> Result<CapabilityExecutionOutcome, GsuiteDispatchError> {
         match self {
             Self::Single { method, url, body } => {
@@ -697,11 +700,22 @@ impl CapabilityExecution {
                 Ok(response_outcome(response, network_egress_bytes))
             }
             Self::CalendarListEvents(input) => {
-                calendar_list_events::execute(request, credential, stager, input).await
+                calendar_list_events::execute(request, credential, input).await
             }
-            Self::AddAttendees(input) => {
-                execute_add_attendees(request, credential, stager, input).await
+            Self::CalendarAgenda(input) => {
+                context_tools::execute_calendar_agenda(request, credential, input).await
             }
+            Self::CalendarDailyBrief(input) => {
+                context_tools::execute_calendar_daily_brief(request, credential, input).await
+            }
+            Self::CalendarMeetingPrep(input) => {
+                context_tools::execute_calendar_meeting_prep(request, credential, input).await
+            }
+            Self::GmailFetchMessageSummaries(input) => {
+                context_tools::execute_gmail_fetch_message_summaries(request, credential, input)
+                    .await
+            }
+            Self::AddAttendees(input) => execute_add_attendees(request, credential, input).await,
         }
     }
 }
@@ -709,7 +723,6 @@ impl CapabilityExecution {
 async fn execute_add_attendees(
     request: &GsuiteDispatchRequest<'_>,
     credential: &GoogleCredential,
-    stager: &dyn GsuiteCredentialStager,
     input: CalendarAddAttendeesInput,
 ) -> Result<CapabilityExecutionOutcome, GsuiteDispatchError> {
     let url = input.event_path.url();
@@ -739,23 +752,6 @@ async fn execute_add_attendees(
         .cloned()
         .unwrap_or_default();
     let attendees = merge_attendees(existing, input.attendees);
-    // Re-stage before the PATCH: the staged-obligation store is one-shot,
-    // so the GET egress consumed the first injection. Stage again so the
-    // PATCH egress has its credential available.
-    stager
-        .stage(GsuiteCredentialStageRequest {
-            source_scope: &credential.access_secret_scope,
-            target_scope: request.scope,
-            capability_id: request.capability_id,
-            access_secret: &access_secret,
-        })
-        .await
-        .map_err(|error| {
-            add_network_usage(
-                map_stage_error(error, access_secret.clone()),
-                network_egress_bytes,
-            )
-        })?;
     let mut patch = runtime_request(
         request,
         access_secret,
@@ -867,12 +863,24 @@ fn capability_execution(
             CapabilityExecution::AddAttendees(CalendarAddAttendeesInput::parse(input)?)
         }
         Operation::CalendarSetReminder => single(calendar_set_reminder_request(input)?),
+        Operation::CalendarAgenda => {
+            CapabilityExecution::CalendarAgenda(context_tools::CalendarAgendaInput::parse(input)?)
+        }
+        Operation::CalendarDailyBrief => CapabilityExecution::CalendarDailyBrief(
+            context_tools::CalendarDailyBriefInput::parse(input)?,
+        ),
+        Operation::CalendarMeetingPrep => CapabilityExecution::CalendarMeetingPrep(
+            context_tools::CalendarMeetingPrepInput::parse(input)?,
+        ),
         Operation::GmailListMessages => single(gmail_list_messages_request(input)?),
         Operation::GmailGetMessage => single(gmail_get_message_request(input)?),
         Operation::GmailSendMessage => single(gmail_send_message_request(input)?),
         Operation::GmailCreateDraft => single(gmail_create_draft_request(input)?),
         Operation::GmailReplyToMessage => single(gmail_reply_to_message_request(input)?),
         Operation::GmailTrashMessage => single(gmail_trash_message_request(input)?),
+        Operation::GmailFetchMessageSummaries => CapabilityExecution::GmailFetchMessageSummaries(
+            context_tools::GmailFetchMessageSummariesInput::parse(input)?,
+        ),
     })
 }
 

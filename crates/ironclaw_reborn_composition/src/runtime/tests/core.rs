@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_auth::{GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE};
+use ironclaw_auth::{
+    GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE,
+};
 
 #[test]
 fn persistent_grantee_resolver_maps_outbound_delivery_target_set_to_synthetic_provider() {
@@ -5134,6 +5136,7 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension(
         [
             GOOGLE_CALENDAR_EVENTS_SCOPE.to_string(),
             GOOGLE_CALENDAR_READONLY_SCOPE.to_string(),
+            GOOGLE_GMAIL_READONLY_SCOPE.to_string(),
         ]
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>()

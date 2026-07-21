@@ -17,7 +17,8 @@
 //!   completes its run without an error-shaped tool result.
 //! - **Phase 4 — one correctly-scoped Google account serves both packages.**
 //!   After the wrongly-scoped account is revoked and a fresh `google`
-//!   account with calendar+drive scopes exists, both activations complete —
+//!   account with calendar+drive scopes plus Gmail readonly (required by the
+//!   Calendar package's daily-brief capability) exists, both activations complete —
 //!   the credential-appears → activation-completes arm, and the
 //!   one-account-many-extensions shape.
 //!
@@ -92,14 +93,18 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
                 calendar_state.credential_requirements
             )
         })?;
-    for expected_scope in [GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_CALENDAR_EVENTS_SCOPE] {
+    for expected_scope in [
+        GOOGLE_CALENDAR_READONLY_SCOPE,
+        GOOGLE_CALENDAR_EVENTS_SCOPE,
+        GOOGLE_GMAIL_READONLY_SCOPE,
+    ] {
         if !calendar_requirement
             .provider_scopes
             .iter()
             .any(|scope| scope == expected_scope)
         {
             return Err(format!(
-                "the parked requirement must carry the SELECTED capability's calendar \
+                "the parked requirement must carry the Calendar package's required \
                  scopes (what the OAuth card renders); missing {expected_scope}; got {:?}",
                 calendar_requirement.provider_scopes
             )
@@ -190,7 +195,8 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // ── Phase 4: one correctly-scoped google account unlocks BOTH packages ──
     // Retire the gmail-scoped account so account selection is unambiguous,
     // then connect a fresh google account carrying the calendar+drive scopes
-    // (what completing the real popup would have granted).
+    // plus Gmail readonly for the Calendar daily brief (what completing the
+    // real popup would have granted).
     let calendar_restore = g
         .thread("google-family-calendar-restore")
         .script([
@@ -214,6 +220,7 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
                 GOOGLE_CALENDAR_EVENTS_SCOPE,
                 GOOGLE_DRIVE_READONLY_SCOPE,
                 GOOGLE_DRIVE_SCOPE,
+                GOOGLE_GMAIL_READONLY_SCOPE,
             ],
         )
         .await?;

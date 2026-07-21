@@ -23,6 +23,8 @@ use ironclaw_reborn_composition::{
 };
 use serde_json::json;
 
+const EXPECTED_HOST_NATIVE_GSUITE_CAPABILITIES: usize = 19;
+
 #[derive(Default)]
 struct RecordingEgress {
     requests: Mutex<Vec<RuntimeHttpEgressRequest>>,
@@ -296,7 +298,7 @@ async fn bundled_gsuite_packages_are_host_bundled_but_not_registered_by_default(
         .iter()
         .map(|package| package.capabilities.len())
         .sum::<usize>();
-    assert_eq!(capability_count, 15);
+    assert_eq!(capability_count, EXPECTED_HOST_NATIVE_GSUITE_CAPABILITIES);
 }
 
 #[tokio::test]
@@ -361,6 +363,22 @@ async fn bundled_gsuite_asset_manifests_match_package_specs() {
                     .iter()
                     .map(|scope| (*scope).to_string())
                     .collect::<Vec<_>>();
+                let mut runtime_credentials = vec![(
+                    spec.credential_handle.to_string(),
+                    ironclaw_auth::GOOGLE_PROVIDER_ID.to_string(),
+                    required_scopes.clone(),
+                    required_scopes.clone(),
+                    spec.credential_host_pattern.to_string(),
+                )];
+                if capability.id == "google-calendar.daily_brief" {
+                    runtime_credentials.push((
+                        "gmail_account".to_string(),
+                        ironclaw_auth::GOOGLE_PROVIDER_ID.to_string(),
+                        required_scopes.clone(),
+                        required_scopes.clone(),
+                        "gmail.googleapis.com".to_string(),
+                    ));
+                }
                 (
                     capability.id.to_string(),
                     capability.effects.to_vec(),
@@ -377,13 +395,7 @@ async fn bundled_gsuite_asset_manifests_match_package_specs() {
                         "prompts/{}/{}.md",
                         spec.schema_prefix, capability.short_name
                     )),
-                    vec![(
-                        spec.credential_handle.to_string(),
-                        ironclaw_auth::GOOGLE_PROVIDER_ID.to_string(),
-                        required_scopes.clone(),
-                        required_scopes,
-                        spec.credential_host_pattern.to_string(),
-                    )],
+                    runtime_credentials,
                 )
             })
             .collect::<Vec<_>>();
@@ -582,7 +594,10 @@ async fn bundled_gsuite_handlers_register_all_gsuite_capabilities() {
         })
         .collect::<Vec<_>>();
 
-    assert_eq!(expected_capability_ids.len(), 15);
+    assert_eq!(
+        expected_capability_ids.len(),
+        EXPECTED_HOST_NATIVE_GSUITE_CAPABILITIES
+    );
     for capability_id in expected_capability_ids {
         assert!(
             registry.contains_handler(&cap_id(&capability_id)),

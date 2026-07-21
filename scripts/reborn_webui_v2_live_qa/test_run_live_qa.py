@@ -7578,10 +7578,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIsNotNone(match, "Reborn WebUI v2 live QA job missing")
 
         shard_case_lines = re.findall(r"^\s+cases:\s*(\S+)\s*$", match.group("body"), re.M)
-        self.assertEqual(len(shard_case_lines), 12)
+        self.assertEqual(len(shard_case_lines), 14)
+        scheduled_shard_lines = shard_case_lines[:12]
         sharded_cases = [
             case_name
-            for line in shard_case_lines
+            for line in scheduled_shard_lines
             for case_name in line.split(",")
             if case_name
         ]
@@ -7590,20 +7591,23 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(sharded_cases, selected_cases)
         self.assertIn("qa_10g_slack_last_message_sent", sharded_cases)
         self.assertIn("qa_10g_slack_last_message_sent_global", sharded_cases)
-        # QA 9/10 are promoted: no shard in the matrix is dispatch_only any
-        # more, so every shard (qa-9/qa-10 included) runs on the 3-hourly
-        # schedule and on a default cases=all dispatch. The resolve-step
-        # guard itself stays for any FUTURE expected-red shard.
+        benchmark_cases = {
+            "benchmark_google_email_digest",
+            "benchmark_google_daily_brief",
+            "benchmark_google_meeting_prep",
+            "benchmark_google_document_lookup",
+            "benchmark_google_sheet_preview",
+        }
+        self.assertEqual(set(shard_case_lines[12].split(",")), benchmark_cases)
+        self.assertEqual(set(shard_case_lines[13].split(",")), benchmark_cases)
         matrix_match = re.search(
             r"(?ms)^\s+include:\n(?P<matrix>.*?)^\s+env:", match.group("body")
         )
         self.assertIsNotNone(matrix_match, "live QA shard matrix missing")
-        self.assertNotIn(
-            "dispatch_only",
-            matrix_match.group("matrix"),
-            "no live QA shard is dispatch_only; qa-9/qa-10 are promoted into "
-            "the cron rotation — only add dispatch_only for a NEW "
-            "expected-red shard",
+        self.assertEqual(
+            matrix_match.group("matrix").count("dispatch_only: true"),
+            2,
+            "only the compact Google A/B arms should be dispatch-only",
         )
         self.assertIn(
             "Shard is dispatch_only; skipping on schedule.",
@@ -7625,7 +7629,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             for case_name in line.split(",")
             if case_name.strip()
         ]
-        self.assertEqual(all_shard_cases, selected_cases)
+        self.assertEqual(
+            all_shard_cases,
+            selected_cases + shard_case_lines[12].split(","),
+        )
         self.assertIn(
             "Unknown Reborn WebUI v2 live QA case",
             match.group("body"),
@@ -7648,6 +7655,14 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             workflow,
         )
         self.assertIn("(authorized trigger)", workflow)
+        self.assertEqual(
+            workflow.count(
+                "inputs.cases || vars.REBORN_WEBUI_V2_LIVE_QA_CASES || 'all', "
+                "'benchmark_google_'"
+            ),
+            2,
+            "benchmark comparison and upload must use the shard case fallback",
+        )
         self.assertIn("- prepare-reborn-webui-v2-live-qa", match.group("body"))
         self.assertIn(
             "- preflight-reborn-webui-v2-google-oauth",
@@ -7800,9 +7815,13 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(manifest["qa_sheet"]["url"], sheet_url)
         self.assertEqual(manifest["qa_sheet"]["tab"], "Automated")
         cases = {case["case"]: case for case in manifest["cases"]}
+        benchmark_cases = {
+            name for name in cases if name.startswith("benchmark_google_")
+        }
         self.assertTrue(
-            set(cases).issubset(run_live_qa.QA_SHEET_CASES),
-            f"manifest cases must come from the QA spreadsheet: {sorted(cases)}",
+            (set(cases) - benchmark_cases).issubset(run_live_qa.QA_SHEET_CASES),
+            "non-benchmark manifest cases must come from the QA spreadsheet: "
+            f"{sorted(set(cases) - benchmark_cases)}",
         )
         self.assertTrue(cases["qa_2d_calendar_prep_live_chat"]["implemented"])
         self.assertEqual(
@@ -9125,6 +9144,63 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 result["details"]["preflight"]["setup_api"]["missing"],
                 ["bot_token"],
             )
+
+
+class CompactGoogleBenchmarkTests(unittest.TestCase):
+    def test_cases_are_dispatch_only_nonblocking_google_probes(self):
+        names = [
+            "benchmark_google_email_digest",
+            "benchmark_google_daily_brief",
+            "benchmark_google_meeting_prep",
+            "benchmark_google_document_lookup",
+            "benchmark_google_sheet_preview",
+        ]
+
+        for name in names:
+            case = run_live_qa.CASES[name]
+            self.assertEqual(case.tier, "behavioral")
+            self.assertFalse(case.blocking)
+            self.assertFalse(case.default_enabled)
+            self.assertTrue(case.requires_google_product_auth)
+            self.assertTrue(case.requires_google_runtime_access)
+
+    def test_run_artifact_metrics_separate_google_compact_and_discovery_calls(self):
+        artifact = {
+            "run": {
+                "usage": {
+                    "input_tokens": 1200,
+                    "output_tokens": 80,
+                    "cache_read_input_tokens": 200,
+                    "cache_creation_input_tokens": 0,
+                }
+            },
+            "messages": [
+                {
+                    "content": "search result",
+                    "tool_call": {
+                        "capability_id": "tool_search",
+                        "provider_turn_id": "turn-1",
+                    },
+                },
+                {
+                    "content": "five summaries",
+                    "tool_call": {
+                        "capability_id": "gmail.fetch_message_summaries",
+                        "provider_turn_id": "turn-2",
+                    },
+                },
+            ],
+        }
+
+        metrics = run_live_qa._run_metrics_from_artifact(artifact)
+
+        self.assertEqual(metrics["tool_call_count"], 2)
+        self.assertEqual(metrics["google_tool_call_count"], 1)
+        self.assertEqual(metrics["compact_google_tool_call_count"], 1)
+        self.assertEqual(metrics["discovery_tool_call_count"], 1)
+        self.assertEqual(metrics["provider_turns_with_tools"], 2)
+        self.assertEqual(metrics["tool_result_chars"], 27)
+        self.assertEqual(metrics["usage"], artifact["run"]["usage"])
 
 
 class RunCaseWithRetriesTests(unittest.TestCase):

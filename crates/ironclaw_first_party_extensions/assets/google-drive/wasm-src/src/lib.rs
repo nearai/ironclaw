@@ -13,6 +13,8 @@
 //! # Supported Actions
 //!
 //! - `list_files`: Search/list files with Drive query syntax and corpora selection
+//! - `find_files_compact`: Search/list files with compact metadata output
+//! - `recent_files`: List recently modified files with compact metadata output
 //! - `get_file`: Get file metadata
 //! - `download_file`: Download file content as text (exports Google Docs/Sheets)
 //! - `upload_file`: Upload a text file (multipart)
@@ -88,6 +90,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
     let params = params_with_action(params, action_name)?;
     let action: GoogleDriveAction =
         serde_json::from_value(params).map_err(|e| format!("Invalid parameters: {}", e))?;
+    validate_action(&action)?;
 
     crate::near::agent::host::log(
         crate::near::agent::host::LogLevel::Debug,
@@ -107,6 +110,40 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
                 query.as_deref(),
                 page_size,
                 order_by.as_deref(),
+                &corpora,
+                drive_id.as_deref(),
+                page_token.as_deref(),
+            )?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())?
+        }
+
+        GoogleDriveAction::FindFilesCompact {
+            query,
+            page_size,
+            order_by,
+            corpora,
+            drive_id,
+            page_token,
+        } => {
+            let result = api::find_files_compact(
+                query.as_deref(),
+                page_size,
+                order_by.as_deref(),
+                &corpora,
+                drive_id.as_deref(),
+                page_token.as_deref(),
+            )?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())?
+        }
+
+        GoogleDriveAction::RecentFiles {
+            page_size,
+            corpora,
+            drive_id,
+            page_token,
+        } => {
+            let result = api::recent_files(
+                page_size,
                 &corpora,
                 drive_id.as_deref(),
                 page_token.as_deref(),
@@ -218,6 +255,8 @@ fn action_from_context(context: Option<&str>) -> Result<&'static str, String> {
         serde_json::from_str(context).map_err(|_| "invalid_invocation_context".to_string())?;
     match context.capability_id.as_str() {
         "google-drive.list_files" => Ok("list_files"),
+        "google-drive.find_files_compact" => Ok("find_files_compact"),
+        "google-drive.recent_files" => Ok("recent_files"),
         "google-drive.get_file" => Ok("get_file"),
         "google-drive.download_file" => Ok("download_file"),
         "google-drive.upload_file" => Ok("upload_file"),
@@ -250,6 +289,64 @@ fn params_with_action(params: &str, action: &str) -> Result<serde_json::Value, S
         serde_json::Value::String(action.to_string()),
     );
     Ok(params)
+}
+
+fn validate_compact_list_scope(corpora: &str, drive_id: Option<&str>) -> Result<(), String> {
+    if !matches!(corpora, "user" | "domain" | "drive" | "allDrives") {
+        return Err("invalid corpora".to_string());
+    }
+    if corpora == "drive" && drive_id.is_none_or(str::is_empty) {
+        return Err("drive_id is required when corpora is drive".to_string());
+    }
+    Ok(())
+}
+
+fn validate_action(action: &GoogleDriveAction) -> Result<(), String> {
+    match action {
+        GoogleDriveAction::FindFilesCompact {
+            corpora, drive_id, ..
+        }
+        | GoogleDriveAction::RecentFiles {
+            corpora, drive_id, ..
+        } => validate_compact_list_scope(corpora, drive_id.as_deref()),
+        _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_capabilities_reject_invalid_corpora_before_egress() {
+        for capability_id in [
+            "google-drive.find_files_compact",
+            "google-drive.recent_files",
+        ] {
+            let context = serde_json::json!({"capability_id": capability_id}).to_string();
+            let error = execute_inner(r#"{"corpora":"invalid"}"#, Some(&context)).unwrap_err();
+
+            assert_eq!(error, "invalid corpora");
+        }
+    }
+
+    #[test]
+    fn compact_capabilities_require_drive_id_for_shared_drive_corpus() {
+        for capability_id in [
+            "google-drive.find_files_compact",
+            "google-drive.recent_files",
+        ] {
+            let context = serde_json::json!({"capability_id": capability_id}).to_string();
+            let error = execute_inner(r#"{"corpora":"drive"}"#, Some(&context)).unwrap_err();
+
+            assert_eq!(error, "drive_id is required when corpora is drive");
+        }
+    }
+
+    #[test]
+    fn compact_list_scope_allows_personal_corpus_without_drive_id() {
+        assert_eq!(validate_compact_list_scope("user", None), Ok(()));
+    }
 }
 
 export!(GoogleDriveTool);
