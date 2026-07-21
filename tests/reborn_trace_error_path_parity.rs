@@ -85,20 +85,34 @@ async fn reborn_trace_error_path_parity() {
 /// advertised by the active surface. The harness exposes only write_file, then
 /// the trace asks for read_file, so `provider_tool_calls_response` must fail
 /// before any provider tool call is registered or invoked.
+///
+/// Contract update (#6284 item 1): an unadvertised-capability reference is a
+/// stale/invalid model request, which is now model-fixable — the loop retries
+/// at iteration scope with a rebuilt capability surface before failing. The
+/// script therefore supplies the same unadvertised call for the initial
+/// attempt plus both retries, and the exhausted run fails with the precise
+/// `model_stale_request` category instead of the old opaque
+/// `host_stage_unavailable_model`. Rejection-before-invocation is unchanged:
+/// no attempt ever reaches the capability port.
 #[tokio::test]
 async fn reborn_trace_unadvertised_capability_is_rejected() {
     let read_file = CapabilityId::new(READ_FILE_CAPABILITY_ID).expect("valid capability id");
+    let unadvertised_call = |call_id: &str| RebornModelReplayStep::ProviderToolCalls {
+        calls: vec![RebornScriptedProviderToolCall::new(
+            read_file.clone(),
+            call_id,
+            serde_json::json!({
+                "path": "/workspace/should-not-be-visible.txt",
+            }),
+        )],
+        expected_tool_results: Vec::new(),
+    };
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
-        RebornModelReplayStep::ProviderToolCalls {
-            calls: vec![RebornScriptedProviderToolCall::new(
-                read_file,
-                "call_read_file_unadvertised",
-                serde_json::json!({
-                    "path": "/workspace/should-not-be-visible.txt",
-                }),
-            )],
-            expected_tool_results: Vec::new(),
-        },
+        // Initial attempt plus both iteration-scoped stale-request retries,
+        // exhausting DefaultRecoveryStrategy::max_attempts_per_class (2).
+        unadvertised_call("call_read_file_unadvertised"),
+        unadvertised_call("call_read_file_unadvertised_retry_1"),
+        unadvertised_call("call_read_file_unadvertised_retry_2"),
     ]);
     let mut harness = RebornBinaryE2EHarness::with_host_runtime_write_only(
         "room-trace-unadvertised-capability",
@@ -117,12 +131,12 @@ async fn reborn_trace_unadvertised_capability_is_rejected() {
         .await
         .expect("failed run");
     // WS-3 upgraded the opaque `driver_unavailable` category to a
-    // stage-scoped `host_stage_unavailable_*` category so the failure is
-    // actionable and retryable. An unadvertised capability surfaces as a
-    // model-stage host-unavailable failure.
+    // stage-scoped category; #6284 item 1 upgraded it again to the precise,
+    // model-fixable `model_stale_request` after in-loop surface-rebuild
+    // retries exhaust.
     assert_eq!(
         state.failure.expect("failure category").category(),
-        "host_stage_unavailable_model"
+        "model_stale_request"
     );
 
     assert!(

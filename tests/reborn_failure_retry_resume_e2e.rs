@@ -29,19 +29,34 @@ use parity_qa_support::{
 use reborn_support::doubles::RecordingTestCapabilityPort;
 use serde_json::json;
 
-/// First model call fails (provider rejects the request); the run must end as a
-/// sanitized, retryable `Failed`. Retrying resumes from the `BeforeModel`
-/// checkpoint and the second (resumed) model call succeeds, completing the run.
+/// The model stage repeatedly rejects the composed request until the in-loop
+/// stale-request retry budget is exhausted; the run must end as a sanitized,
+/// retryable `Failed`. Retrying resumes from the `BeforeModel` checkpoint and
+/// the resumed model call succeeds, completing the run.
+///
+/// Contract update (#6284 item 1): `InvalidRequest` maps to
+/// `InvalidInvocation`, which is no longer an immediate model-stage
+/// host-unavailable bork. The loop first retries at iteration scope with a
+/// rebuilt capability surface and prompt bundle (a single provider blip now
+/// self-heals in-run without any user-visible failure), and only after the
+/// retry budget exhausts does it fail — with the precise `model_stale_request`
+/// category instead of the old opaque `host_stage_unavailable_model`. The old
+/// single-error script therefore recovers in-loop; exhausting the budget
+/// (initial call + two retries) is what pins the failure-then-manual-retry
+/// path this test protects.
 #[tokio::test]
 async fn reborn_model_failure_is_retryable_and_retry_resumes_to_completion() {
+    let stale_request_error = || RebornModelReplayStep::ModelError {
+        kind: HostManagedModelErrorKind::InvalidRequest,
+        message: "model provider rejected the request".to_string(),
+    };
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
-        // First model call: the provider rejects the request. This maps to a
-        // model-stage host-unavailable failure with no internal retry loop.
-        RebornModelReplayStep::ModelError {
-            kind: HostManagedModelErrorKind::InvalidRequest,
-            message: "model provider rejected the request".to_string(),
-        },
-        // The retry's resumed model call succeeds with a final reply.
+        // Initial call plus both iteration-scoped stale-request retries fail,
+        // exhausting DefaultRecoveryStrategy::max_attempts_per_class (2).
+        stale_request_error(),
+        stale_request_error(),
+        stale_request_error(),
+        // The manual retry's resumed model call succeeds with a final reply.
         RebornModelReplayStep::Response {
             response: HostManagedModelResponse::assistant_reply("Recovered: here is your answer."),
             expected_tool_results: Vec::new(),
@@ -68,7 +83,7 @@ async fn reborn_model_failure_is_retryable_and_retry_resumes_to_completion() {
         .expect("failed run");
     assert_failure_lane_alignment(
         &failed,
-        "host_stage_unavailable_model",
+        "model_stale_request",
         FailureLane::Retriable,
         RetryDisposition::Auto,
     );
@@ -111,8 +126,8 @@ async fn reborn_model_failure_is_retryable_and_retry_resumes_to_completion() {
         .await
         .expect("recovered reply persisted to the thread");
 
-    // Both scripted steps were consumed: the failing call and the recovered
-    // retry call.
+    // All scripted steps were consumed: the initial call, both exhausted
+    // in-loop stale-request retries, and the recovered manual-retry call.
     assert_eq!(harness.remaining_model_responses(), 0);
 
     harness.shutdown().await;
