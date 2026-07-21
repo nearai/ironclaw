@@ -103,6 +103,7 @@ pub const ALL_RUN_FAILURE_CATEGORIES: &[&str] = &[
     "model_unavailable",
     "model_internal",
     "model_invalid_output",
+    "model_stale_request",
     // Capability recovery categories
     "capability_transient",
     "capability_permanent",

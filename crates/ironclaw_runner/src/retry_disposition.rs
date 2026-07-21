@@ -81,6 +81,10 @@ fn is_auto_retriable_category(category: &str) -> bool {
             | "model_transient"
             | "model_unavailable"
             | "model_internal"
+            // Stale surface/prompt-bundle race: the in-loop rebuild budget was
+            // exhausted, but a fresh re-drive rebuilds the surface from scratch
+            // (audit §7 puts scope/surface faults in the Retriable/Auto lane).
+            | "model_stale_request"
             // Tool / capability transients
             | "capability_transient"
             | "capability_unavailable"
@@ -135,6 +139,7 @@ mod tests {
             "lease_expired",
             "model_transient",
             "model_unavailable",
+            "model_stale_request",
             "capability_transient",
             "transcript_write_failed",
             "context_build_failed",

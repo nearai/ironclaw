@@ -1642,7 +1642,7 @@ fn host_runtime_spawn_input_for_capability(
     }
     let plan = match serde_json::from_value::<SandboxProcessPlan>(input) {
         Ok(plan) => plan,
-        Err(_) => {
+        Err(error) => {
             return Ok(SpawnInputPreparation::ModelInputRejected(
                 RuntimeCapabilityFailure::new(
                     capability_id.clone(),
@@ -1650,13 +1650,17 @@ fn host_runtime_spawn_input_for_capability(
                     Some(
                         "process sandbox capability input must be a SandboxProcessPlan".to_string(),
                     ),
-                ),
+                )
+                // The parse cause ("missing field `run`", …) rides the
+                // model-visible Diagnostic channel — scrubbed at the loop
+                // seam — so the model can correct the plan shape on retry.
+                .with_model_visible_cause(error.to_string()),
             ));
         }
     };
     let plan = match ValidatedSandboxProcessPlan::new(plan) {
         Ok(plan) => plan,
-        Err(_) => {
+        Err(error) => {
             return Ok(SpawnInputPreparation::ModelInputRejected(
                 RuntimeCapabilityFailure::new(
                     capability_id.clone(),
@@ -1665,7 +1669,10 @@ fn host_runtime_spawn_input_for_capability(
                         "process sandbox capability input failed SandboxProcessPlan validation"
                             .to_string(),
                     ),
-                ),
+                )
+                // `ProcessSandboxPlanError` names the offending field and rule
+                // ("run command must not be empty"); carry it to the model.
+                .with_model_visible_cause(error.to_string()),
             ));
         }
     };
@@ -2306,6 +2313,15 @@ mod tests {
                     failure.disposition(),
                     crate::CapabilityFailureDisposition::ModelVisibleToolError
                 );
+                // The serde cause must ride the model-visible Diagnostic channel
+                // so the model learns WHAT is malformed, not just that it is.
+                let cause = failure
+                    .model_visible_cause()
+                    .expect("malformed plan rejection must carry the parse cause");
+                assert!(
+                    cause.contains("missing field"),
+                    "cause must name the missing field, got: {cause}"
+                );
             }
             SpawnInputPreparation::Ready(_) => {
                 panic!("malformed plan must be rejected as model-visible InvalidInput")
@@ -2329,6 +2345,15 @@ mod tests {
                 assert_eq!(
                     failure.disposition(),
                     crate::CapabilityFailureDisposition::ModelVisibleToolError
+                );
+                // The validation cause must ride the model-visible Diagnostic
+                // channel so the model learns which field broke which rule.
+                let cause = failure
+                    .model_visible_cause()
+                    .expect("invalid plan rejection must carry the validation cause");
+                assert!(
+                    cause.contains("run command must not be empty"),
+                    "cause must name the offending field and rule, got: {cause}"
                 );
             }
             SpawnInputPreparation::Ready(_) => {
