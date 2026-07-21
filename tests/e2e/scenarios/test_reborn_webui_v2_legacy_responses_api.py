@@ -55,9 +55,13 @@ def _response_output_text(response: dict) -> str:
 
 async def _create_response(client: httpx.AsyncClient, path="/v1/responses", **payload):
     response = None
+    # Retry transient statuses: 429 under load, and 502/503/504 when the first
+    # request races the backend/LLM warm-up (a cold-start 503 was flaking this
+    # smoke). Any non-transient status breaks immediately.
+    transient_statuses = {429, 502, 503, 504}
     for attempt in range(6):
         response = await client.post(path, json={"model": "default", **payload})
-        if response.status_code != 429:
+        if response.status_code not in transient_statuses:
             break
         await asyncio.sleep(1 + attempt * 0.5)
     assert response is not None
