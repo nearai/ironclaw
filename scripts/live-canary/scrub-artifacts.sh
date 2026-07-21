@@ -63,6 +63,17 @@ is_redactable_artifact() {
   local file="$1"
   local base
   base="$(basename "${file}")"
+  # Per-case LLM trace recordings (reborn-webui-v2-live-qa `llm-traces/*.json`)
+  # are captured LLM I/O harvested for fixture curation. Matched by their
+  # `llm-traces/` directory (the basename is an arbitrary case name) so that
+  # under strict scrub any token-shaped material is redacted in place rather
+  # than the whole trace being deleted. Token-shape regexes only — no content
+  # normalization or identifier scrubbing beyond the shared patterns above.
+  case "${file}" in
+    */llm-traces/*.json)
+      return 0
+      ;;
+  esac
   case "${base}" in
     *.log|*.jsonl|summary.md|env-summary.txt|trace-fixture-status.txt|auth-canary-junit.xml|results.json|case-manifest.json|preflight.json|preflight.*.json|browser-summary.json|browser-events.jsonl)
       return 0

@@ -768,6 +768,26 @@ def server_env(
     return env
 
 
+def case_llm_trace_env(output_dir: Path, case_name: str) -> dict[str, str]:
+    """Per-case env that makes the spawned ``ironclaw serve`` record a
+    replayable ``LlmTrace`` for this case.
+
+    The lane restarts a fresh serve process per case (see ``run_cases``), so a
+    per-case ``IRONCLAW_TRACE_OUTPUT`` path attributes every trace to exactly one
+    case with no timestamp/turn correlation needed. Recording flushes
+    incrementally after each model step, so the trace still lands even though the
+    process is signalled (not gracefully drained) at case teardown. These traces
+    are harvested as CI artifacts for fixture curation and cross-run drift
+    detection; the harness does not replay them in-line."""
+    trace_path = output_dir / "llm-traces" / f"{case_name}.json"
+    trace_path.parent.mkdir(parents=True, exist_ok=True)
+    return {
+        "IRONCLAW_RECORD_TRACE": "1",
+        "IRONCLAW_TRACE_OUTPUT": str(trace_path),
+        "IRONCLAW_TRACE_MODEL_NAME": f"reborn-qa-{case_name}",
+    }
+
+
 async def start_reborn_server(
     binary: Path,
     reborn_home: Path,
@@ -8513,11 +8533,18 @@ async def run_cases(args: argparse.Namespace) -> int:
                 flush=True,
             )
             continue
+        # Merge per-case trace-recording env over the prepared home env without
+        # mutating `prepared_home.env` (reused below for the context and Slack
+        # setup). This is what switches on replayable per-case LlmTrace capture.
+        server_extra_env = {
+            **prepared_home.env,
+            **case_llm_trace_env(args.output_dir, name),
+        }
         proc, base_url = await start_reborn_server(
             binary,
             prepared_home.path,
             args.output_dir,
-            prepared_home.env,
+            server_extra_env,
         )
         if not first_base_url:
             first_base_url = base_url

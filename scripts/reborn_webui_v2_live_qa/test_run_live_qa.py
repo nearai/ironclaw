@@ -8894,6 +8894,95 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             )
             self.assertEqual(green_explanation["successful_cases"], 2)
 
+    def test_run_cases_enables_per_case_llm_trace_recording(self):
+        # Pins the wiring through the caller: each per-case `ironclaw serve`
+        # spawn must be handed IRONCLAW_RECORD_TRACE plus a per-case
+        # IRONCLAW_TRACE_OUTPUT path, so the harvested LlmTrace files are
+        # attributable to exactly one case. A helper-only test would not prove
+        # the env actually reaches `start_reborn_server`.
+        captured_envs: dict[str, dict[str, str]] = {}
+
+        async def fake_case(_ctx: run_live_qa.LiveQaContext) -> run_live_qa.ProbeResult:
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode="live",
+                success=True,
+                latency_ms=1,
+                details={},
+            )
+
+        async def fake_start_reborn_server(
+            _binary: Path,
+            reborn_home: Path,
+            _output_dir: Path,
+            env: dict[str, str],
+        ):
+            captured_envs[reborn_home.name] = env
+            return object(), f"http://127.0.0.1/{reborn_home.name}"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_dir = root / "out"
+            binary = root / "ironclaw"
+            binary.touch()
+            args = argparse.Namespace(
+                all_cases=False,
+                non_telegram_qa_cases=False,
+                case=["case_a", "case_b"],
+                output_dir=output_dir,
+                reborn_home=root / "missing-source-home",
+                skip_build=True,
+                require_slack_live=False,
+            )
+            cases = {
+                "case_a": run_live_qa.CaseSpec(fake_case),
+                "case_b": run_live_qa.CaseSpec(fake_case),
+            }
+            env = {
+                "LIVE_OPENAI_COMPATIBLE_API_KEY": "fake-live-llm-key",
+                "REBORN_WEBUI_V2_LIVE_QA_LLM_API_KEY_ENV": "LIVE_OPENAI_COMPATIBLE_API_KEY",
+            }
+
+            with (
+                patch.dict(os.environ, env, clear=False),
+                patch.object(run_live_qa, "CASES", cases),
+                patch.object(run_live_qa, "QA_SHEET_CASES", {}),
+                patch.object(run_live_qa, "_reborn_binary", return_value=binary),
+                patch.object(
+                    run_live_qa,
+                    "start_reborn_server",
+                    side_effect=fake_start_reborn_server,
+                ),
+                patch.object(run_live_qa, "stop_process"),
+            ):
+                status = asyncio.run(run_live_qa.run_cases(args))
+
+            self.assertEqual(status, 0)
+            for case_name in ("case_a", "case_b"):
+                server_env = captured_envs[case_name]
+                self.assertEqual(server_env["IRONCLAW_RECORD_TRACE"], "1")
+                self.assertEqual(
+                    server_env["IRONCLAW_TRACE_OUTPUT"],
+                    str(output_dir / "llm-traces" / f"{case_name}.json"),
+                )
+                self.assertEqual(
+                    server_env["IRONCLAW_TRACE_MODEL_NAME"],
+                    f"reborn-qa-{case_name}",
+                )
+                # The recording env is merged over — not in place of — the
+                # prepared-home env (materialized LLM key survives).
+                self.assertEqual(
+                    server_env["LIVE_OPENAI_COMPATIBLE_API_KEY"],
+                    "fake-live-llm-key",
+                )
+            # Attribution is per-case: distinct output paths per case.
+            self.assertNotEqual(
+                captured_envs["case_a"]["IRONCLAW_TRACE_OUTPUT"],
+                captured_envs["case_b"]["IRONCLAW_TRACE_OUTPUT"],
+            )
+            # The per-case trace directory is created eagerly by the helper.
+            self.assertTrue((output_dir / "llm-traces").is_dir())
+
     def test_run_cases_blocks_slack_connect_without_personal_product_auth(self):
         async def fake_case(_ctx: run_live_qa.LiveQaContext) -> run_live_qa.ProbeResult:
             raise AssertionError("case should not run without Slack personal auth")

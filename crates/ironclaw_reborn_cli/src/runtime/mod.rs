@@ -588,7 +588,13 @@ pub(crate) fn build_runtime_input_with_options(
                     base_url = %llm.base_url().unwrap_or_default(),
                     "resolved LLM selection for Reborn runtime"
                 );
-                runtime_input = runtime_input.with_resolved_llm(llm);
+                // Opt-in LLM trace recording (`IRONCLAW_RECORD_TRACE`). The
+                // serve/run turn provider is built via `wrap_swappable_gateway`,
+                // which never wires `RecordingLlm` itself; this seam attaches the
+                // recorder factory over the gateway's swappable provider so the
+                // live QA lane can harvest replayable per-case traces. No-op when
+                // the env var is unset (production default).
+                runtime_input = runtime_input.with_resolved_llm(llm.with_env_trace_recording());
             }
             None => {
                 tracing::warn!(

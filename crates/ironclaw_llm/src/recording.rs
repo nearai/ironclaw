@@ -937,13 +937,37 @@ impl RecordingLlm {
         };
         let json = serde_json::to_string_pretty(&trace).map_err(std::io::Error::other)?;
         tokio::fs::write(&self.output_path, json).await?;
-        tracing::info!(
+        // `debug!` (not `info!`): `complete`/`complete_with_tools` call this
+        // after every step (see `flush_after_step`), so an `info!` here would
+        // fire once per LLM call and corrupt the REPL/TUI (see the logging rule
+        // in CLAUDE.md). Explicit end-of-session `flush()` callers are equally
+        // fine at debug level.
+        tracing::debug!(
             steps = steps.len(),
             memory_docs = memory_snapshot.len(),
             path = %self.output_path.display(),
             "Flushed LLM trace recording"
         );
         Ok(())
+    }
+
+    /// Persist the accumulated trace after a step is recorded.
+    ///
+    /// The runtime serve path never holds the recorder handle to call
+    /// [`flush`](Self::flush) at shutdown (and the process is signalled, not
+    /// gracefully drained), so recording flushes eagerly after each step. Every
+    /// flush rewrites the whole `TraceFile`, so the on-disk file is identical to
+    /// what a single end-of-session `flush()` would have written — only the
+    /// write frequency changes. A flush failure must never fail the underlying
+    /// LLM call, so it is logged and swallowed here.
+    async fn flush_after_step(&self) {
+        if let Err(err) = self.flush().await {
+            tracing::debug!(
+                error = %err,
+                path = %self.output_path.display(),
+                "incremental LLM trace flush failed; continuing"
+            );
+        }
     }
 
     /// Extract new user messages, tool results, and build request hint.
@@ -1054,6 +1078,7 @@ impl LlmProvider for RecordingLlm {
             },
             expected_tool_results: tool_results,
         });
+        self.flush_after_step().await;
 
         Ok(response)
     }
@@ -1108,6 +1133,7 @@ impl LlmProvider for RecordingLlm {
         };
 
         self.steps.lock().await.push(step);
+        self.flush_after_step().await;
         Ok(response)
     }
 
@@ -1198,6 +1224,33 @@ mod tests {
             }
             _ => panic!("Expected Text response"),
         }
+    }
+
+    #[tokio::test]
+    async fn complete_flushes_incrementally_without_explicit_flush() {
+        // The serve/run turn path never holds the recorder handle to call
+        // `flush()` at shutdown, and the process is signalled (not gracefully
+        // drained), so the trace must land from the per-step incremental flush
+        // alone. Keep the tempdir alive past the completion so the file survives
+        // to be read (unlike `make_recorder`, whose tempdir drops immediately).
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("incremental_trace.json");
+        let stub = Arc::new(StubLlm::new("recorded answer"));
+        let recorder = RecordingLlm::new(stub, path.clone(), "incremental-test".to_string());
+
+        recorder
+            .complete(CompletionRequest::new(vec![ChatMessage::user("question")]))
+            .await
+            .expect("stubbed completion succeeds");
+
+        // No `recorder.flush().await` here — the file must already exist.
+        let written = std::fs::read_to_string(&path)
+            .expect("incremental flush must write the trace with no explicit flush() call");
+        let trace: TraceFile = serde_json::from_str(&written).expect("trace file parses");
+        assert!(
+            !trace.steps.is_empty(),
+            "the completed model call must be persisted as a trace step"
+        );
     }
 
     #[tokio::test]
