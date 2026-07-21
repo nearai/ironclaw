@@ -31,6 +31,16 @@ use super::{
 /// downgraded to `Abort` with the validator's failure kind (`DriverBug`) so
 /// the run fails through the standard abort path.
 fn enforce_gate_outcome_contract(outcome: GateOutcome, kind: GateKind) -> GateOutcome {
+    // AwaitDependentRun is exempt on BOTH paths that can carry it (the
+    // dedicated `AwaitDependentRunGateStage` and the coalesced shared-gate
+    // route through `GateStage`): its skip arm is pinned as intentionally
+    // reachable for external-policy gate resolvers, and the validator-vs-test
+    // contradiction is flagged for owner review in the loop-failure matrix
+    // (§5a.1 note). Enforcing on only one path would make the same strategy
+    // outcome diverge by batch shape.
+    if kind == GateKind::AwaitDependentRun {
+        return outcome;
+    }
     match outcome.validate_for_gate_kind(kind) {
         Ok(()) => outcome,
         Err(failure_kind) => {

@@ -2842,12 +2842,18 @@ fn sandbox_plan_input_error(summary: &'static str, cause: &str) -> ProviderArgum
 }
 
 /// Rewrite a plan parse/validation cause into `SafeSummary`-compatible text:
-/// backticks become quotes (serde field names stay readable), other banned
-/// payload/path delimiters and control characters become spaces, and the result
-/// is bounded. Returns `None` when nothing legible remains.
+/// the cause first passes the shared model-visible scrub (leak-detector
+/// registry + injection fencing — the same boundary every other runtime
+/// diagnostic crosses via `model_visible_diagnostic_text`), then backticks
+/// become quotes (serde field names stay readable), other banned payload/path
+/// delimiters and control characters become spaces, and the result is
+/// bounded. Returns `None` when nothing legible remains. A cause carrying
+/// credential-marker words can still degrade to the placeholder at the
+/// `SafeSummary` squeeze — that is the fail-closed contract, not a bug.
 fn safe_sandbox_plan_cause(raw: &str) -> Option<String> {
     const MAX_BYTES: usize = 400;
-    let sanitized: String = raw
+    let scrubbed = crate::scrub_model_visible_detail(raw);
+    let sanitized: String = scrubbed
         .chars()
         .map(|character| match character {
             '`' => '\'',
