@@ -1174,6 +1174,14 @@ where
     /// filesystem. Backs the WebUI project surface for production profiles where
     /// `local_runtime` is None; mirrors the local substrate's `project_service`.
     pub(crate) project_service: Arc<dyn ProjectService>,
+    /// Trigger conversation services over the production scoped filesystem.
+    /// Mirrors the local substrate's `trigger_conversation_services`: it backs
+    /// the production trigger poller's prompt materializer and trusted-ingress
+    /// submitter (binding + session-thread + actor-pairing roles). Built eagerly
+    /// in `build_backend_production` — production is always durable, so there is
+    /// no `OnceCell` lazy-init arm like the local substrate carries.
+    pub(crate) trigger_conversation_services:
+        ironclaw_conversations::RebornFilesystemConversationServices,
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -5320,6 +5328,18 @@ where
         ));
     let project_service: Arc<dyn ProjectService> =
         Arc::new(RebornProjectService::new(project_repository));
+    // Trigger conversation services over the production scoped filesystem —
+    // the substrate-agnostic trigger poller (`runtime.rs`) sources the
+    // materializer/submitter/pairing roles from here for production profiles,
+    // exactly as the local substrate serves them from its own conversation
+    // services. Built eagerly (production is always durable); the underlying
+    // `InboundTurnError` cause is preserved in the mapped build error.
+    let trigger_conversation_services =
+        RebornFilesystemConversationServices::new(Arc::clone(&stores.scoped_filesystem))
+            .await
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("trigger conversation services unavailable: {error}"),
+            })?;
     let production_runtime_graph = Arc::new(RebornProductionRuntimeStoreGraph {
         scoped_filesystem: Arc::clone(&stores.scoped_filesystem),
         extension_registry: Arc::clone(&extension_registry),
@@ -5334,6 +5354,7 @@ where
         audit_log,
         admin_secret_provisioner,
         project_service,
+        trigger_conversation_services,
     });
     let production_runtime = production_runtime_services(production_runtime_graph);
     // Same store-backed lookup the WebUI automations panel builds via
