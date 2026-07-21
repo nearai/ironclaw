@@ -1,0 +1,25 @@
+/* Storybook preview-iframe stylesheet.
+   Mirrors the minimal host-shell setup a consumer performs: Tailwind,
+   the package tokens, and (for the theme toggle) the soft exploration
+   theme. Class sources cover the package src and the stories. */
+@import "tailwindcss";
+@import "../src/tokens.css";
+@import "../src/themes/soft.css";
+
+@source "../src";
+@source "../stories";
+
+body {
+  margin: 0;
+  background: var(--v2-canvas);
+  color: var(--v2-text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Docs pages render stories inside a white docs shell; keep each story
+   block on the token canvas so both themes read correctly. */
+.docs-story {
+  background: var(--v2-canvas);
+}

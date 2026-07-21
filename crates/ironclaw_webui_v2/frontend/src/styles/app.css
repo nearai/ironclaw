@@ -108,13 +108,6 @@ input:focus, select:focus, textarea:focus {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--v2-accent) 28%, transparent);
 }
 
-/* ── Animation keyframes ─────────────────────────────────────────── */
-
-@keyframes v2-breathe {
-  0%, 100% { opacity: 1; }
-  50%       { opacity: 0.35; }
-}
-
 /* ── Scrollbars ──────────────────────────────────────────────────── */
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }
@@ -251,16 +244,6 @@ input:focus, select:focus, textarea:focus {
   -webkit-tap-highlight-color: transparent;
 }
 
-/* Pixel-face tag/label language (nux). Small uppercase stylistic
-   labels — badges, kickers, section eyebrows — set in Geist Pixel
-   Square with wide tracking. One utility instead of ad-hoc rules. */
-.v2-tag-face {
-  font-family: var(--v2-font-pixel);
-  text-transform: uppercase;
-  letter-spacing: var(--v2-tracking-tag);
-  font-weight: 500;
-}
-
 /* Consistent select chevron + inset (native chevrons sit too tight). */
 .v2-select {
   -webkit-appearance: none;
@@ -320,14 +303,6 @@ input:focus, select:focus, textarea:focus {
 .v2-typing-dot:nth-child(2) { animation-delay: 0.15s; }
 .v2-typing-dot:nth-child(3) { animation-delay: 0.3s; }
 
-/* Refresh / in-flight spinner. */
-@keyframes v2-spin {
-  to { transform: rotate(360deg); }
-}
-.v2-spin {
-  animation: v2-spin var(--v2-duration-spin) linear infinite;
-}
-
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation: none !important;
@@ -337,7 +312,6 @@ input:focus, select:focus, textarea:focus {
      dot is the one intentional ambient loop, and webui_v2_serve.rs guards
      this exact opt-out (static_typing_dot_animation_respects_reduced_motion). */
   .v2-typing-dot { animation: none !important; }
-  .v2-spin { animation: none !important; }
 }
 
 /* ── Markdown body ───────────────────────────────────────────────── */

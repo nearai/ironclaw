@@ -1,0 +1,64 @@
+import { Meta } from "@storybook/addon-docs/blocks";
+
+<Meta title="Docs/Brand token spec" />
+
+# Brand token spec
+
+The extraction requested in the product design review: the brand-relevant
+tokens, guidelines, and theming mechanics that other NEAR surfaces —
+**near.com**, **market.near.ai**, **Datrix** — can adopt or map against so
+the ecosystems stay coherent. The full machine-readable catalog lives in
+`tokens.ts`; live values render under Tokens/Reference.
+
+## What "adopting the system" means
+
+A surface is brand-aligned when it:
+
+1. imports (or mirrors) the `--v2-*` custom properties from
+   `@ironclaw/design-system/tokens.css`,
+2. draws every color from a semantic token — role-based (`--v2-accent`,
+   `--v2-text-muted`), never palette-based,
+3. uses the structural scales (radius, control density, spacing, type)
+   rather than restating values,
+4. themes by swapping token values under `[data-theme="…"]` — components
+   and layouts never change per theme.
+
+## Brand pillars
+
+| Pillar | Token(s) | Value (light) | Notes |
+|---|---|---|---|
+| Brand blue | `--v2-accent` / `--v2-accent-strong` | `#2882c8` / `#1f6ca8` | ironclaw.com parity; dark theme lifts to `#4ca7e6` |
+| Action ramp | `--v2-btn-primary-bg(-hover)` | radial blue gradient | the signature primary-button treatment + hover glow |
+| Ink | `--v2-ink` / `--v2-text-strong` | `#090909` | near-black, never pure black on the warm canvas |
+| Canvas | `--v2-canvas` | `#f5f5f7` | cool paper in light; zinc `#09090b` field in dark |
+| Type | `--font-sans` | Geist | Geist Mono for data; Newsreader for editorial serif moments |
+| Tag language | `--v2-font-pixel` + `.v2-tag-face` | Geist Pixel Square | uppercase 11px labels, 0.08em tracking — the "IronClaw stamp" |
+| Status set | `--v2-positive/warning/danger/info-*` | see Status canon | one hue per status, text+fill pairs |
+
+## Theming mechanics
+
+- Light values live on `:root`; dark overrides under
+  `:root[data-theme="dark"]`. Structural tokens (radius, spacing, type,
+  motion, z) are theme-independent.
+- A new brand surface can re-theme **entirely with a token file** — the
+  `soft` exploration theme in this Storybook (theme toolbar → *soft*) does
+  exactly that: warm paper neutrals, espresso ink, calmer accent, rounder
+  radii, softer elevation, zero component changes
+  (`@ironclaw/design-system/themes/soft.css`).
+- Legacy Tailwind color utilities map onto the tokens via the `@theme`
+  block in `tokens.css` (`--color-iron-*`, `--color-signal`, …) — a
+  migration bridge, not an API for new code.
+
+## Open brand decisions (for the jam session)
+
+Flagged in the review as *not yet decided* — the current values are good
+defaults, deliberately swap-able:
+
+1. **Typeface**: Geist is the working default; it has little flair — is
+   there an IronClaw face (or pairing) with more character?
+2. **Icon library**: the in-house stroke set + lucide-react; same question.
+3. **IronClaw vs NEAR AI brand relationship**: does IronClaw live as its
+   own brand outside near.ai, and what does that imply for the accent,
+   the tag language, and near.com/near.ai design-language alignment?
+4. **Softer tone**: how far toward the Claude-like warmth (see the *soft*
+   theme) should product and marketing surfaces move?

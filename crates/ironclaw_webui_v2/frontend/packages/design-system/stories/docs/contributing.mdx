@@ -1,0 +1,61 @@
+import { Meta } from "@storybook/addon-docs/blocks";
+
+<Meta title="Docs/Contributing" />
+
+# Contributing
+
+The rules that make small UI changes safe to delegate — to a human in a
+hurry or to an agent. Condensed from `crates/ironclaw_webui_v2/DESIGN_SYSTEM.md`
+(the full document carries provenance and reconciliation history).
+
+## The rules
+
+1. **Colors come from tokens.** Never a raw hex, `rgb()`, or a legacy alias
+   utility (`text-white`, `text-iron-*`, `bg-signal`, …). The repo's token
+   ratchet (`scripts/check-design-tokens.mjs`) fails CI when a file gains a
+   raw color; the baseline only goes down. `color-mix(...)` over `--v2-*`
+   vars is sanctioned. Beware: the compat shim remaps `text-white` to the
+   theme ink — on an accent fill use `text-[var(--v2-on-accent)]`.
+2. **Control heights come from the density scale.** Interactive controls
+   share `--v2-control-h-sm/md/lg` (28/32/36px) and the matching paddings so
+   mixed rows always align. Don't invent a height.
+3. **Radii, spacing, type sizes, z-index: pick a step.** Each scale is
+   enumerated in Tokens/Reference. If a step seems missing, that's a design
+   conversation, not an arbitrary value.
+4. **Status colors follow the canon.** One mapping from status words to
+   semantic tokens (`STATUS_CANON` in `tokens.ts`). Text, dot, and progress
+   fill draw from the same pair — never mix hues.
+5. **Motion is token-driven and restrained.** Pick a `--v2-duration-*` +
+   `--v2-ease-*` pair (or `MOTION_DURATION` for motion/react). Entrances
+   ease out; exits are quicker than entrances; nothing bounces on pointer or
+   keyboard interactions. The only ambient loops are typing / spin /
+   breathe / skeleton shimmer. Everything must respect
+   `prefers-reduced-motion`.
+6. **Focus is instant.** Focus rings are never transitioned. Hover feedback
+   is a fast color/border shift with no movement.
+7. **Third-party brand colors** (Gmail red, Slack aubergine, …) are
+   intentionally outside the semantic system — use them only inside the
+   brand mark itself, never for UI chrome.
+8. **New components sit on Radix when a primitive exists.** Accessibility
+   comes from the primitive; the component contributes tokenized styling
+   and API shape. Follow the shadcn pattern already in the package (CVA +
+   `cn()`).
+
+## Adding a component
+
+1. Build it in `src/` on the relevant Radix primitive, styled with
+   Tailwind + `--v2-*` tokens.
+2. Export it from `src/index.ts` (the barrel is the public API).
+3. Add a story file in `stories/components/` covering every variant and
+   state, with `argTypes` for the props.
+4. If it introduces a new token, add the value to `tokens.css` (both
+   themes), catalog it in `tokens.ts`, and let `tokens.test.ts` pin the
+   contract.
+5. Run the checks: `pnpm typecheck && pnpm test` here, plus the app build
+   and token ratchet at the frontend root.
+
+## Testing in product
+
+The WebUI `/playground` route renders the full component set inside the
+real app shell — use it to sanity-check a component against the actual
+canvas, chrome, and both themes before shipping.

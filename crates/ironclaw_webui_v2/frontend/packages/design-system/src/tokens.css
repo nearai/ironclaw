@@ -326,3 +326,36 @@
 :root[data-theme="light"] {
   color-scheme: light;
 }
+
+/* ── Component support styles ────────────────────────────────────── */
+/* The handful of classes/keyframes the packaged components reference
+   beyond Tailwind utilities. Shipped with the tokens so a consumer's
+   single tokens.css import fully supports the components. */
+
+/* Pixel-face tag/label language (nux). Small uppercase stylistic
+   labels — badges, kickers, section eyebrows — set in Geist Pixel
+   Square with wide tracking. One utility instead of ad-hoc rules. */
+.v2-tag-face {
+  font-family: var(--v2-font-pixel);
+  text-transform: uppercase;
+  letter-spacing: var(--v2-tracking-tag);
+  font-weight: 500;
+}
+
+/* Live badge dot breathing loop (Badge success/positive tones). */
+@keyframes v2-breathe {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.35; }
+}
+
+/* Refresh / in-flight spinner (Spinner component). */
+@keyframes v2-spin {
+  to { transform: rotate(360deg); }
+}
+.v2-spin {
+  animation: v2-spin var(--v2-duration-spin) linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .v2-spin { animation: none !important; }
+}

@@ -13,5 +13,5 @@
     "target": "ES2022",
     "types": ["react", "react-dom"]
   },
-  "include": ["src"]
+  "include": ["src", "stories", ".storybook"]
 }

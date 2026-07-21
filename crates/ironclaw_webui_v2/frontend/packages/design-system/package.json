@@ -9,6 +9,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./tokens.css": "./src/tokens.css",
+    "./themes/soft.css": "./src/themes/soft.css",
     "./tokens": "./src/tokens.ts",
     "./motion": "./src/motion.ts",
     "./package.json": "./package.json"
@@ -30,11 +31,18 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@storybook/addon-a11y": "^10.5.3",
+    "@storybook/addon-docs": "^10.5.3",
+    "@storybook/addon-themes": "^10.5.3",
+    "@storybook/react-vite": "^10.5.3",
+    "@tailwindcss/vite": "4.3.2",
     "@types/react": "19.2.17",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.3",
     "react": "19.1.0",
     "react-dom": "19.1.0",
+    "storybook": "^10.5.3",
+    "tailwindcss": "4.3.2",
     "typescript": "6.0.3",
     "vite": "8.1.3"
   },
