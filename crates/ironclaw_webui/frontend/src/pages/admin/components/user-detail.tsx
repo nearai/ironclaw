@@ -57,8 +57,10 @@ export function UserDetailView({ onBack, userQuery, usageQuery, adminState }) {
     activateError,
     isUpdating,
     updateError,
+    resetUpdate,
     isDeleting,
     deleteError,
+    resetDelete,
     resetActionErrors,
   } = adminState;
 
@@ -123,14 +125,14 @@ export function UserDetailView({ onBack, userQuery, usageQuery, adminState }) {
 
   const beginDelete = () => {
     if (isActionPending) return;
-    resetActionErrors?.();
+    resetDelete?.();
     setConfirmDelete(true);
   };
 
   const closeDelete = () => {
     if (isDeleting) return;
     setConfirmDelete(false);
-    resetActionErrors?.();
+    resetDelete?.();
   };
 
   const handleDelete = async () => {
@@ -147,7 +149,7 @@ export function UserDetailView({ onBack, userQuery, usageQuery, adminState }) {
 
   const handleRoleChange = (nextRole) => {
     if (isActionPending) return;
-    resetActionErrors?.();
+    resetUpdate?.();
     setRole(nextRole);
   };
 
@@ -293,7 +295,7 @@ export function UserDetailView({ onBack, userQuery, usageQuery, adminState }) {
               </p>
             )}
             <div className="mt-5 flex justify-end gap-2">
-              <Button variant="ghost" disabled={isDeleting} onClick={closeDelete}>{t("admin.users.cancel")}</Button>
+              <Button data-testid="admin-user-delete-cancel" variant="ghost" disabled={isDeleting} onClick={closeDelete}>{t("admin.users.cancel")}</Button>
               <Button
                 variant="danger"
                 loading={isDeleting}

@@ -99,14 +99,17 @@ function baseAdminState(overrides = {}) {
     isUpdating: false,
     updateError: null,
     updatingUserId: null,
+    resetUpdate: () => {},
     deleteUser: async () => {},
     isDeleting: false,
     deleteError: null,
     deletingUserId: null,
+    resetDelete: () => {},
     suspendUser: async () => {},
     isSuspending: false,
     suspendError: null,
     suspendingUserId: null,
+    resetSuspend: () => {},
     activateUser: async () => {},
     isActivating: false,
     activateError: null,
@@ -233,9 +236,13 @@ test("suspend failure stays in the confirmation dialog with retry context", asyn
   const lastAdminError = Object.assign(new Error("Conflict (last_admin)"), {
     payload: { field: "last_admin" },
   });
+  const suspendedUserIds = [];
   const adminState = baseAdminState({
     suspendError: lastAdminError,
-    suspendUser: async () => { throw new Error("cannot suspend last admin"); },
+    suspendUser: async (userId) => {
+      suspendedUserIds.push(userId);
+      throw new Error("cannot suspend last admin");
+    },
   });
 
   let rendered = harness.render(View, { onSelectUser: () => {}, adminState });
@@ -247,9 +254,72 @@ test("suspend failure stays in the confirmation dialog with retry context", asyn
   assert.ok(collectScalars(modal).includes("admin.users.lastAdminRequired"));
 
   await findByTestId(modal, "admin-user-confirm-submit").props.onClick();
+  assert.deepEqual(suspendedUserIds, ["user-1"]);
   rendered = harness.render(View, { onSelectUser: () => {}, adminState });
   modal = ConfirmModal(findByType(rendered, ConfirmModal).props);
   assert.ok(findByTestId(modal, "admin-user-confirm-dialog"));
+});
+
+test("opening and cancelling suspend preserves unrelated action errors", () => {
+  const harness = createReactHarness();
+  const { AdminUsersTabView: View, ConfirmModal, UserRow } = loadUsersView(harness);
+  let resetActionCalls = 0;
+  let resetSuspendCalls = 0;
+  const adminState = baseAdminState({
+    updateError: new Error("cannot demote last admin"),
+    resetActionErrors: () => { resetActionCalls += 1; },
+    resetSuspend: () => { resetSuspendCalls += 1; },
+  });
+
+  let rendered = harness.render(View, { onSelectUser: () => {}, adminState });
+  const row = UserRow(findByType(rendered, UserRow).props);
+  findByTestId(row, "admin-user-suspend").props.onClick();
+  assert.equal(resetActionCalls, 0);
+  assert.equal(resetSuspendCalls, 1);
+
+  rendered = harness.render(View, { onSelectUser: () => {}, adminState });
+  assert.ok(findByTestId(rendered, "admin-user-action-error"));
+  findByType(rendered, ConfirmModal).props.onCancel();
+  assert.equal(resetActionCalls, 0);
+  assert.equal(resetSuspendCalls, 2);
+
+  rendered = harness.render(View, { onSelectUser: () => {}, adminState });
+  assert.ok(findByTestId(rendered, "admin-user-action-error"));
+  assert.equal(findByType(rendered, ConfirmModal), null);
+});
+
+test("opening and cancelling delete preserves unrelated action errors", () => {
+  const harness = createReactHarness();
+  const View = loadDetailView(harness);
+  let resetActionCalls = 0;
+  let resetDeleteCalls = 0;
+  const adminState = baseAdminState({
+    updateError: new Error("cannot demote last admin"),
+    resetActionErrors: () => { resetActionCalls += 1; },
+    resetDelete: () => { resetDeleteCalls += 1; },
+  });
+  const props = {
+    onBack: () => {},
+    userQuery: { isLoading: false, error: null, data: baseAdminState().users[0] },
+    usageQuery: { data: { usage: [] } },
+    adminState,
+  };
+
+  let rendered = harness.render(View, props);
+  assert.ok(findByTestId(rendered, "admin-user-detail-role-error"));
+  findByTestId(rendered, "admin-user-detail-delete").props.onClick();
+  assert.equal(resetActionCalls, 0);
+  assert.equal(resetDeleteCalls, 1);
+
+  rendered = harness.render(View, props);
+  assert.ok(findByTestId(rendered, "admin-user-detail-role-error"));
+  findByTestId(rendered, "admin-user-delete-cancel").props.onClick();
+  assert.equal(resetActionCalls, 0);
+  assert.equal(resetDeleteCalls, 2);
+
+  rendered = harness.render(View, props);
+  assert.ok(findByTestId(rendered, "admin-user-detail-role-error"));
+  assert.equal(findByTestId(rendered, "admin-user-delete-dialog"), null);
 });
 
 test("user detail surfaces status and role failures", () => {

@@ -60,6 +60,11 @@ test("admin user hook exposes pending and error state for every management actio
   assert.equal(state.activateError.message, "activate failed");
   assert.equal(state.activatingUserId, "user-activate");
 
+  state.resetUpdate();
+  state.resetDelete();
+  state.resetSuspend();
+  assert.deepEqual(resetCalls, [1, 2, 3]);
+
   state.resetActionErrors();
-  assert.deepEqual(resetCalls, [1, 2, 3, 4]);
+  assert.deepEqual(resetCalls, [1, 2, 3, 1, 2, 3, 4]);
 });

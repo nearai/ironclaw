@@ -247,7 +247,7 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
     resetCreate,
     updateUser, suspendUser, activateUser,
     isUpdating, updateError, updatingUserId,
-    isSuspending, suspendError, suspendingUserId,
+    isSuspending, suspendError, suspendingUserId, resetSuspend,
     isActivating, activateError, activatingUserId,
     resetActionErrors,
     newToken, clearToken,
@@ -264,7 +264,7 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
   const actionError = activateError || updateError;
 
   const handleSuspend = (id) => {
-    resetActionErrors?.();
+    resetSuspend?.();
     setConfirm({
       userId: id,
       title: t("admin.users.suspendTitle"),
@@ -307,7 +307,7 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
   const closeConfirm = () => {
     if (isSuspending) return;
     setConfirm(null);
-    resetActionErrors?.();
+    resetSuspend?.();
   };
 
   if (query.isLoading) {
