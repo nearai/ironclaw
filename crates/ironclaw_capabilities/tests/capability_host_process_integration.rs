@@ -194,6 +194,82 @@ async fn capability_host_spawn_fails_closed_on_unsupported_obligations_before_pr
     assert_eq!(run.error_kind.as_deref(), Some("UnsupportedObligations"));
 }
 
+// Finding (§5.2.1/§5.3.2), spawn path: an ALLOWED but origin-less spawn (no
+// `origin` AND no `run_id`, so `resolved_origin()` is `None`) must fail CLOSED at
+// the authorize-spawn fold — deny with `InternalInvariantViolation`, mint no
+// witness, start NO process, and fail the run. Every production ingress stamps an
+// origin, so an origin-less allowed context is not a real ingress and an
+// un-attributable process start must not proceed. Drives the production
+// `spawn_json` caller so the invariant cannot silently regress.
+#[tokio::test]
+async fn origin_less_spawn_denied_starts_no_process_and_fails_run() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = recording_dispatcher();
+    let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+    let process_services = ProcessServices::in_memory();
+    let executor = Arc::new(RecordingSuccessExecutor::default());
+    let process_manager = process_services.background_manager(Arc::clone(&executor));
+    let authorizer = SpawnOnlyAuthorizer;
+    let host = capability_host(&registry, &dispatcher, &authorizer)
+        .with_run_state(&run_state)
+        .with_process_manager(&process_manager);
+
+    // An otherwise-allowed spawn context stripped of every ingress origin fact:
+    // `execution_context` stamps a `run_id`, so removing it (and leaving `origin`
+    // unset) makes `resolved_origin()` return `None`.
+    let mut context = execution_context(CapabilitySet {
+        grants: vec![spawn_grant()],
+    });
+    context.run_id = None;
+    assert!(
+        context.resolved_origin().is_none(),
+        "test fixture must be origin-less for this to exercise the fail-close"
+    );
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+
+    let err = host
+        .spawn_json(CapabilitySpawnRequest {
+            context,
+            capability_id: capability_id(),
+            estimate: ResourceEstimate::default(),
+            input: json!({"message":"must not spawn"}),
+        })
+        .await
+        .unwrap_err();
+
+    // Terminal fail-closed denial carrying the internal-invariant reason.
+    assert!(
+        matches!(
+            err,
+            CapabilityInvocationError::AuthorizationDenied {
+                reason: DenyReason::InternalInvariantViolation,
+                ..
+            }
+        ),
+        "origin-less spawn must fail closed with InternalInvariantViolation, got {err:?}"
+    );
+    // No runtime dispatch and no process start.
+    assert_eq!(dispatcher.call_count(), 0);
+    assert!(
+        executor.take_request_opt().is_none(),
+        "an origin-less spawn must NOT start a process"
+    );
+    assert!(
+        process_services
+            .process_store()
+            .records_for_scope(&scope)
+            .await
+            .unwrap()
+            .is_empty(),
+        "no ProcessStart may be issued on the origin-less fail-close"
+    );
+    // The run record started by the authorize-spawn fold transitioned to Failed.
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.error_kind.as_deref(), Some("AuthorizationDenied"));
+}
+
 #[derive(Default)]
 struct RecordingSuccessExecutor {
     request: Mutex<Option<ProcessExecutionRequest>>,

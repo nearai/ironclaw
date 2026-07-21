@@ -4801,4 +4801,217 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
             "an expired resume witness must fail the run"
         );
     }
+
+    // Finding (§5.2.1/§5.3.2): an ALLOWED but origin-less invocation (no `origin`
+    // AND no `run_id`, so `resolved_origin()` is `None`) must fail CLOSED at the
+    // authorize fold — deny with `InternalInvariantViolation`, mint no witness,
+    // dispatch NOTHING, and fail the run. Every production ingress stamps an
+    // origin (the loop stamps `run_id` → `LoopRun`), so an origin-less allowed
+    // context is not a real ingress and an un-attributable dispatch must not
+    // proceed. Drives the production `invoke_json` caller so the invariant cannot
+    // silently regress.
+    #[tokio::test]
+    async fn origin_less_invoke_denied_dispatches_nothing_and_fails_run() {
+        let registry = echo_registry();
+        // A recording dispatcher that must never fire on the origin-less path. Its
+        // responder returns an error so a regression (dispatch actually firing) is
+        // caught by the `call_count() == 0` assertion, not masked by a success.
+        let dispatcher =
+            ironclaw_host_api::dispatch_test_support::TestDispatcher::responding(|req, _| {
+                Err(DispatchError::UnknownCapability {
+                    capability: req.capability_id.clone(),
+                })
+            });
+        let authorizer = AllowAuthorizer;
+        let trust_policy = StaticTrustPolicy;
+        let runtime_policy = permissive_runtime_policy();
+        let policy_facts = SatisfiedPolicyFacts;
+        let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+        let host = CapabilityHost::new(
+            &registry,
+            &dispatcher,
+            &authorizer,
+            &trust_policy,
+            &runtime_policy,
+            &policy_facts,
+        )
+        .with_run_state(&run_state);
+
+        // An otherwise-allowed request stripped of every ingress origin fact: no
+        // `origin` and no `run_id`, so `resolved_origin()` is `None`. The
+        // membrane-sealed actor is deliberately left set to prove the deny is the
+        // origin-less fail-close, not a missing actor.
+        let mut request = allow_request();
+        request.context.origin = None;
+        request.context.run_id = None;
+        assert!(
+            request.context.resolved_origin().is_none(),
+            "test fixture must be origin-less for this to exercise the fail-close"
+        );
+        let scope = request.context.resource_scope.clone();
+        let invocation_id = request.context.invocation_id;
+
+        let error = host.invoke_json(request).await.unwrap_err();
+
+        // Terminal fail-closed denial carrying the internal-invariant reason.
+        assert!(
+            matches!(
+                error,
+                CapabilityInvocationError::AuthorizationDenied {
+                    reason: DenyReason::InternalInvariantViolation,
+                    ..
+                }
+            ),
+            "origin-less invoke must fail closed with InternalInvariantViolation, got {error:?}"
+        );
+        // The side effect must NOT be dispatched — no witness was minted.
+        assert_eq!(
+            dispatcher.call_count(),
+            0,
+            "an origin-less invoke must NOT dispatch the side effect"
+        );
+        // The run record started by the authorize fold transitioned to Failed.
+        let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+        assert_eq!(
+            run.status,
+            ironclaw_run_state::RunStatus::Failed,
+            "an origin-less invoke must fail the run"
+        );
+        assert_eq!(
+            run.error_kind.as_deref(),
+            Some("AuthorizationDenied"),
+            "the origin-less fail-close records the AuthorizationDenied error kind"
+        );
+    }
+
+    // Finding (§5.2.1/§5.3.2), auth-resume claimed-lease cleanup path: an ALLOWED
+    // but origin-less resume that carries an already-`Claimed` approval lease
+    // (`AlreadyClaimed`, advanced to `Dispatching` in the `auth_resume_json`
+    // preamble) must fail CLOSED at the authorize fold — deny with
+    // `InternalInvariantViolation`, dispatch NOTHING, fail the run, AND revoke the
+    // already-claimed lease so a terminal refusal does not strand it. Drives the
+    // whole resume tail (`dispatch_resumed_capability`) so the fail-close and the
+    // lease revoke cannot silently regress; the `Deny`-arm lease cleanup the
+    // neighboring resume tests assert is mirrored here for the origin-less arm.
+    #[tokio::test]
+    async fn origin_less_resume_denies_dispatches_nothing_fails_run_and_revokes_claimed_lease() {
+        let registry = echo_registry();
+        // A recording dispatcher that must never fire on the origin-less path.
+        let dispatcher =
+            ironclaw_host_api::dispatch_test_support::TestDispatcher::responding(|req, _| {
+                Err(DispatchError::UnknownCapability {
+                    capability: req.capability_id.clone(),
+                })
+            });
+        let authorizer = AllowAuthorizer;
+        let trust_policy = StaticTrustPolicy;
+        let runtime_policy = permissive_runtime_policy();
+        let policy_facts = SatisfiedPolicyFacts;
+        let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+
+        // Origin-less: strip both `origin` and `run_id` from an otherwise-allowed
+        // request so `resolved_origin()` is `None`.
+        let mut request = allow_request();
+        request.context.origin = None;
+        request.context.run_id = None;
+        assert!(request.context.resolved_origin().is_none());
+        let capability_id = request.capability_id.clone();
+        let estimate = request.estimate.clone();
+        let input = request.input.clone();
+        let context = request.context.clone();
+        let scope = context.resource_scope.clone();
+        let invocation_id = context.invocation_id;
+
+        // Start + block the run so the terminal fail transition has a record to
+        // move to `Failed` (the auth-resume preamble leaves it BlockedAuth).
+        run_state
+            .start(RunStart {
+                invocation_id,
+                scope: scope.clone(),
+                capability_id: capability_id.clone(),
+                authenticated_actor_user_id: context.authenticated_actor_user_id.clone(),
+            })
+            .await
+            .unwrap();
+        run_state
+            .block_auth(&scope, invocation_id, "AuthRequired".to_string())
+            .await
+            .unwrap();
+
+        let host = CapabilityHost::new(
+            &registry,
+            &dispatcher,
+            &authorizer,
+            &trust_policy,
+            &runtime_policy,
+            &policy_facts,
+        )
+        .with_run_state(&run_state);
+
+        let descriptor = registry
+            .get_capability(&capability_id)
+            .expect("echo.say is registered");
+        // A prior approval lease already `Claimed` in the preamble, with a future
+        // expiry so the deny is unambiguously the origin-less fail-close, not an
+        // expiry-based one.
+        let leases = ClaimRecordingLeaseStore {
+            grant_id: CapabilityGrantId::new(),
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+            capability_id: capability_id.clone(),
+            claimed: std::sync::Mutex::new(false),
+            revoked: std::sync::Mutex::new(None),
+        };
+        let expected_grant_id = leases.grant_id;
+        let claimed_lease = leases.lease(&scope);
+
+        let params = ResumedDispatchParams {
+            run_state: &run_state,
+            scope: scope.clone(),
+            invocation_id,
+            capability_id,
+            estimate,
+            input,
+            authorized_context: context,
+            descriptor,
+            lease_state: ResumedLeaseState::AlreadyClaimed(&leases, Box::new(claimed_lease)),
+        };
+
+        let error = host.dispatch_resumed_capability(params).await.unwrap_err();
+
+        // Terminal fail-closed denial carrying the internal-invariant reason.
+        assert!(
+            matches!(
+                error,
+                CapabilityInvocationError::AuthorizationDenied {
+                    reason: DenyReason::InternalInvariantViolation,
+                    ..
+                }
+            ),
+            "origin-less resume must fail closed with InternalInvariantViolation, got {error:?}"
+        );
+        // No side effect, and the deferred lease claim never ran (the fail-close
+        // returns before the claim-before-dispatch tail).
+        assert_eq!(
+            dispatcher.call_count(),
+            0,
+            "an origin-less resume must NOT dispatch the side effect"
+        );
+        assert!(
+            !*leases.claimed.lock().unwrap(),
+            "the fail-close returns before the resume claim-before-dispatch tail"
+        );
+        // The already-claimed lease is revoked (terminal), not stranded Dispatching.
+        assert_eq!(
+            *leases.revoked.lock().unwrap(),
+            Some(expected_grant_id),
+            "an origin-less resume must REVOKE the already-claimed lease"
+        );
+        // The run failed.
+        let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+        assert_eq!(
+            run.status,
+            ironclaw_run_state::RunStatus::Failed,
+            "an origin-less resume must fail the run"
+        );
+    }
 }
