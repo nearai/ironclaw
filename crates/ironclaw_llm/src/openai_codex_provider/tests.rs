@@ -1,3 +1,5 @@
+//! Session-specific provider loopback tests.
+
 use std::collections::HashMap;
 
 use super::*;

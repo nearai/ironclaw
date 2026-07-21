@@ -991,7 +991,7 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[path = "openai_codex_provider_session_tests.rs"]
+#[path = "openai_codex_provider/tests.rs"]
 mod session_tests;
 
 #[cfg(test)]
