@@ -18,6 +18,7 @@ covered at the crate tier; here every lifecycle/delete user stays a `member`,
 which can never strand the tenant's admins.
 """
 
+import re
 import uuid
 
 import httpx
@@ -295,6 +296,124 @@ async def test_admin_token_visibility_matches_user_creation_lifecycle(
                 f"{ADMIN_BASE}/users/{created_user_id}"
             )
             assert cleanup.status_code == 200, cleanup.text
+
+
+async def test_admin_configuration_renders_uninstalled_manifest_groups_and_keeps_secrets_write_only(
+    admin_client, reborn_v2_page, reborn_v2_server
+):
+    """Fresh deployments expose manifest configuration without installing extensions.
+
+    This is a served-browser regression for the zero-install admin route: the
+    real ``ironclaw serve`` router and SPA must render deployment-owned Slack,
+    Telegram, and Google configuration before any user installs those packages.
+    Saving a write-only value must not turn the admin surface into an extension
+    lifecycle surface or echo the secret after the page reloads.
+    """
+    installed = await admin_client.get("/api/webchat/v2/extensions")
+    assert installed.status_code == 200, installed.text
+    assert installed.json()["extensions"] == [], installed.text
+
+    page = reborn_v2_page
+    await page.goto(f"{reborn_v2_server}/chat?token={REBORN_V2_AUTH_TOKEN}")
+    await page.get_by_role("link", name="Admin", exact=True).click()
+    await page.get_by_role("link", name="Configuration", exact=True).click()
+
+    await expect(
+        page.get_by_role("heading", name="Extension configuration", exact=True)
+    ).to_be_visible(timeout=15000)
+    await expect(
+        page.get_by_text(
+            "Saving values does not install, connect, activate, or remove an extension.",
+            exact=False,
+        )
+    ).to_be_visible()
+
+    group_names = [
+        "Slack deployment configuration",
+        "Telegram deployment configuration",
+        "Google OAuth client credentials",
+    ]
+    for group_name in group_names:
+        await expect(
+            page.get_by_role("heading", name=group_name, exact=True)
+        ).to_be_visible()
+
+    groups = page.get_by_test_id("admin-configuration-group")
+    assert await groups.count() == len(group_names)
+    for index in range(await groups.count()):
+        assert "· installed" not in await groups.nth(index).inner_text()
+
+    google_group = groups.filter(
+        has=page.get_by_role(
+            "heading", name="Google OAuth client credentials", exact=True
+        )
+    )
+    await expect(google_group).to_have_count(1)
+
+    client_id = f"e2e-google-client-{uuid.uuid4().hex}"
+    client_secret = f"e2e-google-secret-{uuid.uuid4().hex}"
+    client_id_input = google_group.get_by_label(
+        re.compile(r"^Google OAuth client ID")
+    )
+    client_secret_input = google_group.get_by_label(
+        re.compile(r"^Google OAuth client secret")
+    )
+    assert await client_secret_input.get_attribute("type") == "password"
+    await client_id_input.fill(client_id)
+    await client_secret_input.fill(client_secret)
+
+    async with page.expect_response(
+        lambda response: response.request.method == "PUT"
+        and response.url.endswith(
+            "/api/webchat/v2/operator/extension-configuration/vendor.google"
+        )
+    ) as save_info:
+        await google_group.get_by_role(
+            "button", name="Save configuration", exact=True
+        ).click()
+    save_response = await save_info.value
+    assert save_response.status == 200
+    assert client_secret not in await save_response.text()
+    await expect(
+        google_group.get_by_text("Configuration saved.", exact=True)
+    ).to_be_visible(timeout=15000)
+    await expect(client_secret_input).to_have_value("")
+
+    async with page.expect_response(
+        lambda response: response.request.method == "GET"
+        and response.url.endswith(
+            "/api/webchat/v2/operator/extension-configuration"
+        )
+    ) as reload_info:
+        await page.reload()
+    reload_response = await reload_info.value
+    assert reload_response.status == 200
+    assert client_secret not in await reload_response.text()
+
+    await expect(
+        page.get_by_role("heading", name="Extension configuration", exact=True)
+    ).to_be_visible(timeout=15000)
+    google_group = page.get_by_test_id("admin-configuration-group").filter(
+        has=page.get_by_role(
+            "heading", name="Google OAuth client credentials", exact=True
+        )
+    )
+    await expect(google_group.get_by_text("Configured", exact=True)).to_be_visible()
+    await expect(
+        google_group.get_by_label(re.compile(r"^Google OAuth client ID"))
+    ).to_have_value(client_id)
+    await expect(
+        google_group.get_by_label(re.compile(r"^Google OAuth client secret"))
+    ).to_have_value("")
+    await expect(
+        google_group.get_by_text(
+            "Configured. Leave blank to keep the stored value.", exact=True
+        )
+    ).to_be_visible()
+    assert client_secret not in await page.locator("body").inner_text()
+    await expect(
+        page.get_by_role("button", name=re.compile(r"^Install", re.IGNORECASE))
+    ).to_have_count(0)
 
 
 async def test_update_user_profile(admin_client, test_user):
