@@ -16,6 +16,17 @@ pub struct CancellationPolicy {
     pub require_checkpoint_before_cancel: bool,
 }
 
+impl CancellationPolicy {
+    /// Cancellable without requiring a pre-cancel checkpoint — the shared
+    /// interactive / legacy-interactive cancellation policy.
+    pub(crate) fn interactive() -> Self {
+        Self {
+            allow_cancel: true,
+            require_checkpoint_before_cancel: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointPolicy {
     pub require_before_model: bool,
@@ -37,6 +48,23 @@ fn default_require_final_checkpoint() -> bool {
     true
 }
 
+impl CheckpointPolicy {
+    /// The interactive-coding tier checkpoint policy, shared by the interactive
+    /// profile and its legacy-persisted reconstruction: gate before side effects
+    /// and blocks (not before every model call), a 64 KiB cap, no final
+    /// checkpoint, no no-reply completion.
+    pub(crate) fn interactive() -> Self {
+        Self {
+            require_before_model: false,
+            require_before_side_effect: true,
+            require_before_block: true,
+            max_checkpoint_bytes: 64 * 1024,
+            require_final_checkpoint: false,
+            allow_no_reply_completion: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceBudgetPolicy {
     pub tier: ResourceBudgetTier,
@@ -44,10 +72,33 @@ pub struct ResourceBudgetPolicy {
     pub max_capability_invocations: u32,
 }
 
+impl ResourceBudgetPolicy {
+    /// The interactive-coding tier resource budget, shared by the interactive
+    /// profile and its legacy-persisted reconstruction.
+    pub(crate) fn interactive() -> Self {
+        Self {
+            tier: ResourceBudgetTier::from_trusted_static("interactive_standard"),
+            max_model_calls: 32,
+            max_capability_invocations: 64,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeProfileConstraints {
     pub allow_raw_runtime_backend_selection: bool,
     pub allow_broad_capability_surface: bool,
+}
+
+impl RuntimeProfileConstraints {
+    /// No raw runtime-backend selection and no broad capability surface — the
+    /// locked default every built-in profile uses.
+    pub(crate) fn locked() -> Self {
+        Self {
+            allow_raw_runtime_backend_selection: false,
+            allow_broad_capability_surface: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
