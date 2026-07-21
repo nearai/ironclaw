@@ -175,8 +175,7 @@ where
         let Some(versioned) = self.filesystem.get(scope, path).await.map_err(fs_error)? else {
             return Ok(None);
         };
-        let value = serde_json::from_slice(&versioned.entry.body)
-            .map_err(|_| AuthProductError::BackendUnavailable)?;
+        let value = decode_durable_record(&versioned.entry.body, "product-auth record")?;
         Ok(Some((value, versioned.version)))
     }
 
@@ -188,9 +187,7 @@ where
         let Some(versioned) = self.filesystem.get(scope, path).await.map_err(fs_error)? else {
             return Ok(None);
         };
-        serde_json::from_slice(&versioned.entry.body)
-            .map(Some)
-            .map_err(|_| AuthProductError::BackendUnavailable)
+        decode_durable_record(&versioned.entry.body, "credential account").map(Some)
     }
 
     async fn write_record<T>(
@@ -203,7 +200,7 @@ where
     where
         T: Serialize,
     {
-        let body = serde_json::to_vec(value).map_err(|_| AuthProductError::BackendUnavailable)?;
+        let body = encode_durable_record(value, "product-auth record")?;
         let entry = Entry::bytes(body).with_content_type(ContentType::json());
         self.filesystem
             .put(scope, path, entry, cas)
@@ -245,13 +242,9 @@ where
             self.filesystem.as_ref(),
             &scope.resource,
             &path,
-            |bytes: &[u8]| {
-                serde_json::from_slice::<AuthFlowRecord>(bytes)
-                    .map_err(|_| AuthProductError::BackendUnavailable)
-            },
+            |bytes: &[u8]| decode_durable_record::<AuthFlowRecord>(bytes, "auth flow"),
             |record: &AuthFlowRecord| {
-                let body =
-                    serde_json::to_vec(record).map_err(|_| AuthProductError::BackendUnavailable)?;
+                let body = encode_durable_record(record, "auth flow")?;
                 Ok(Entry::bytes(body).with_content_type(ContentType::json()))
             },
             |current: Option<AuthFlowRecord>| {
@@ -1006,10 +999,46 @@ fn map_auth_cas_error(error: CasUpdateError<AuthProductError>) -> AuthProductErr
     match error {
         CasUpdateError::Apply(error) => error,
         CasUpdateError::Backend(error) => fs_error(error),
-        CasUpdateError::Timeout
-        | CasUpdateError::RetriesExhausted
-        | CasUpdateError::CasUnsupported => AuthProductError::BackendUnavailable,
+        CasUpdateError::Timeout | CasUpdateError::RetriesExhausted => {
+            AuthProductError::BackendUnavailable
+        }
+        CasUpdateError::CasUnsupported => AuthProductError::MalformedConfig,
     }
+}
+
+fn decode_durable_record<T>(bytes: &[u8], record_kind: &'static str) -> Result<T, AuthProductError>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_slice(bytes).map_err(|error| {
+        tracing::error!(
+            record_kind,
+            error_category = ?error.classify(),
+            error_line = error.line(),
+            error_column = error.column(),
+            "durable auth record decode failed"
+        );
+        AuthProductError::CorruptRecord
+    })
+}
+
+fn encode_durable_record<T>(
+    value: &T,
+    record_kind: &'static str,
+) -> Result<Vec<u8>, AuthProductError>
+where
+    T: Serialize,
+{
+    serde_json::to_vec(value).map_err(|error| {
+        tracing::error!(
+            record_kind,
+            error_category = ?error.classify(),
+            error_line = error.line(),
+            error_column = error.column(),
+            "durable auth record encode failed"
+        );
+        AuthProductError::CorruptRecord
+    })
 }
 
 use ironclaw_auth::{credential_status_for_completed_flow, scope_matches};

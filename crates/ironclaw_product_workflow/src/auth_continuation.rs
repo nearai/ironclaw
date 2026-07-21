@@ -74,9 +74,7 @@ impl ProductAuthTurnGateResumeDispatcher {
             Err(TurnError::ScopeNotFound) => return Ok(AuthResolutionDispatchOutcome::Ignored),
             Err(error) => return Err(map_auth_resolution_error(error)),
         };
-        if state.status != TurnStatus::BlockedAuth
-            || state.gate_ref.as_ref() != Some(&gate_resolution_ref)
-        {
+        if !is_parked_on_auth_gate(&state, &gate_resolution_ref) {
             return Ok(AuthResolutionDispatchOutcome::Ignored);
         }
 
@@ -92,6 +90,14 @@ impl ProductAuthTurnGateResumeDispatcher {
             resolution_outcome_key(resolution.outcome),
         );
         let idempotency_key = idempotency_key_for_binding(&binding_id)?;
+
+        let resume_disposition = match resolution.outcome {
+            AuthFlowOutcome::Authorized { .. } | AuthFlowOutcome::UserAborted => None,
+            AuthFlowOutcome::ProviderDenied => Some(GateResumeDisposition::Denied),
+            AuthFlowOutcome::Expired | AuthFlowOutcome::Failed { .. } => {
+                Some(GateResumeDisposition::Error)
+            }
+        };
 
         match resolution.outcome {
             AuthFlowOutcome::UserAborted => {
@@ -116,16 +122,7 @@ impl ProductAuthTurnGateResumeDispatcher {
                     }
                 }
             }
-            outcome => {
-                let resume_disposition = match outcome {
-                    AuthFlowOutcome::Authorized { .. } => None,
-                    AuthFlowOutcome::ProviderDenied => Some(GateResumeDisposition::Denied),
-                    AuthFlowOutcome::Expired | AuthFlowOutcome::Failed { .. } => {
-                        Some(GateResumeDisposition::Error)
-                    }
-                    // The outer match handles this arm with exact cancellation.
-                    AuthFlowOutcome::UserAborted => None,
-                };
+            _ => {
                 let result = self
                     .turn_coordinator
                     .resume_turn(ResumeTurnRequest {
@@ -176,16 +173,17 @@ impl ProductAuthTurnGateResumeDispatcher {
             .await;
         match current {
             Err(TurnError::ScopeNotFound) => Ok(AuthResolutionDispatchOutcome::Ignored),
-            Ok(state)
-                if state.status != TurnStatus::BlockedAuth
-                    || state.gate_ref.as_ref() != Some(gate_ref) =>
-            {
+            Ok(state) if !is_parked_on_auth_gate(&state, gate_ref) => {
                 Ok(AuthResolutionDispatchOutcome::Ignored)
             }
             Ok(_) => Err(map_auth_resolution_error(error)),
             Err(read_error) => Err(map_auth_resolution_error(read_error)),
         }
     }
+}
+
+fn is_parked_on_auth_gate(state: &ironclaw_turns::TurnRunState, gate_ref: &GateRef) -> bool {
+    state.status == TurnStatus::BlockedAuth && state.gate_ref.as_ref() == Some(gate_ref)
 }
 
 fn map_auth_resolution_error(error: TurnError) -> ProductWorkflowError {

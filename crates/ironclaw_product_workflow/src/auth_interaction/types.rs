@@ -27,6 +27,7 @@ pub enum AuthInteractionRejectionKind {
     InvalidCallbackRef,
     UnsupportedResult,
     FlowUnavailable,
+    CorruptState,
     InvalidBindingRef,
 }
 
@@ -44,6 +45,7 @@ impl AuthInteractionRejectionKind {
             Self::InvalidCallbackRef => "callback reference is invalid",
             Self::UnsupportedResult => "auth interaction result is not supported",
             Self::FlowUnavailable => "auth interaction service is unavailable",
+            Self::CorruptState => "auth interaction state is corrupt",
             Self::InvalidBindingRef => "auth resume binding is invalid",
         }
     }
@@ -60,6 +62,7 @@ impl AuthInteractionRejectionKind {
             | Self::UnsupportedResult
             | Self::InvalidBindingRef => ProductWorkflowRejectionKind::InvalidRequest,
             Self::FlowUnavailable => ProductWorkflowRejectionKind::Unavailable,
+            Self::CorruptState => ProductWorkflowRejectionKind::Unavailable,
         }
     }
 
@@ -69,6 +72,7 @@ impl AuthInteractionRejectionKind {
             Self::CrossScopeDenied => 403,
             Self::AmbiguousAuth | Self::StaleAuth => 409,
             Self::FlowUnavailable => 503,
+            Self::CorruptState => 500,
             Self::InvalidGateRef
             | Self::InvalidCredentialRef
             | Self::InvalidCallbackRef

@@ -116,6 +116,12 @@ fn map_auth_error(error: crate::RebornAuthProductError) -> RebornServicesError {
             503,
             error.retryable,
         ),
+        AuthErrorCode::CorruptRecord => services_error(
+            RebornServicesErrorCode::Internal,
+            RebornServicesErrorKind::ServiceUnavailable,
+            500,
+            false,
+        ),
         AuthErrorCode::AccountSelectionRequired
         | AuthErrorCode::ProviderIdentityAlreadyConnected
         | AuthErrorCode::ConnectionConflict => services_error(

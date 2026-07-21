@@ -677,7 +677,7 @@ impl RebornIntegrationHarness {
     /// filter is blind to the OTHER class's prefix and to executor-synthesized
     /// raw planner summaries (e.g. the gate-declined "auth gate denied by
     /// user"), which persist with no class prefix — the bypass
-    /// `short_circuit_denied_resume`'s own test documents. Residual gap
+    /// `short_circuit_gate_resume`'s own test documents. Residual gap
     /// (accepted): an error persisted with no observation AND a novel
     /// unprefixed summary evades both arms.
     ///

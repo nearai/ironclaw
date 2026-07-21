@@ -21,6 +21,8 @@ pub enum AuthErrorCode {
     AccountSelectionRequired,
     #[error("backend_unavailable")]
     BackendUnavailable,
+    #[error("corrupt_record")]
+    CorruptRecord,
     #[error("provider_identity_already_connected")]
     ProviderIdentityAlreadyConnected,
     #[error("connection_conflict")]
@@ -63,6 +65,10 @@ pub enum AuthProductError {
     AccountSelectionRequired,
     #[error("backend unavailable")]
     BackendUnavailable,
+    /// A durable auth record cannot be decoded or encoded. This is permanent
+    /// for the current record and must not be presented as a retryable outage.
+    #[error("durable auth record is corrupt")]
+    CorruptRecord,
     #[error("provider identity is already connected")]
     ProviderIdentityAlreadyConnected,
     #[error("auth backend configuration is malformed")]
@@ -98,6 +104,7 @@ impl AuthProductError {
             Self::CredentialMissing => AuthErrorCode::CredentialMissing,
             Self::AccountSelectionRequired => AuthErrorCode::AccountSelectionRequired,
             Self::BackendUnavailable => AuthErrorCode::BackendUnavailable,
+            Self::CorruptRecord => AuthErrorCode::CorruptRecord,
             Self::ProviderIdentityAlreadyConnected => {
                 AuthErrorCode::ProviderIdentityAlreadyConnected
             }

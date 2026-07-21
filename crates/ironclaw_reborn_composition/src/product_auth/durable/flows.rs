@@ -9,9 +9,10 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration as StdDuration;
 
 use super::domain::{
-    PreparedCallbackFlow, prepare_callback_flow, update_account_from_exchange,
-    update_account_from_request, validate_bound_update_authority, validate_callback_claim,
-    validate_flow_update_binding, validate_manual_token_flow, validate_selection_flow,
+    PreparedCallbackFlow, is_idempotent_lifecycle_callback_replay, prepare_callback_flow,
+    update_account_from_exchange, update_account_from_request, validate_bound_update_authority,
+    validate_callback_claim, validate_flow_update_binding, validate_manual_token_flow,
+    validate_selection_flow,
 };
 use super::paths::setup_creation_coordination_path;
 use super::{FilesystemAuthProductServices, credential_status_for_completed_flow, scope_matches};
@@ -300,7 +301,8 @@ where
                 if matches!(
                     record.state,
                     AuthFlowState::Resolved(AuthFlowOutcome::Authorized { .. })
-                ) {
+                ) || is_idempotent_lifecycle_callback_replay(record)
+                {
                     return Ok(());
                 }
                 record.state = AuthFlowState::Processing;
@@ -943,20 +945,78 @@ where
             }
         }
 
+        let CallbackAccountRollback::Revoke = rollback else {
+            return Err(AuthProductError::BackendConflict);
+        };
+        let cleanup_account_id = CredentialAccountId::new();
+        // Preserve a durable, revoked cleanup pointer before mutating the
+        // callback account. If every bounded revoke attempt fails, lifecycle
+        // cleanup can still find and purge the exchanged secret handles.
+        let cleanup_account = self
+            .stage_callback_secret_cleanup(
+                cleanup_account_id,
+                callback_account.scope.clone(),
+                callback_account.provider.clone(),
+                callback_account.label.clone(),
+                callback_account.access_secret.clone(),
+                callback_account.refresh_secret.clone(),
+            )
+            .await;
+
         account.status = CredentialAccountStatus::Revoked;
         account.updated_at = Utc::now();
-        let version = match self
-            .write_account(&account, CasExpectation::Version(version))
-            .await
-        {
+        let mut revoke_attempts = 0;
+        let revoke_result = loop {
+            match self
+                .write_account(&account, CasExpectation::Version(version))
+                .await
+            {
+                Err(AuthProductError::BackendUnavailable) if revoke_attempts < 2 => {
+                    revoke_attempts += 1;
+                }
+                result => break result,
+            }
+        };
+        let version = match revoke_result {
             Ok(version) => version,
             // Another process changed the account after our version check. It
             // now owns cleanup or a newer connection; do not clobber it.
-            Err(AuthProductError::BackendConflict) => return Ok(()),
-            Err(error) => return Err(error),
+            Err(AuthProductError::BackendConflict) => {
+                cleanup_account?;
+                return Ok(());
+            }
+            Err(error) => {
+                cleanup_account?;
+                tracing::warn!(
+                    account_id = %account_id,
+                    cleanup_account_id = %cleanup_account_id,
+                    error_code = ?error.code(),
+                    "retaining failed OAuth callback rollback for lifecycle cleanup"
+                );
+                return Err(error);
+            }
         };
 
-        self.purge_revoked_callback_account(account, version).await
+        match self.purge_revoked_callback_account(account, version).await {
+            Ok(()) => {
+                if let Ok((cleanup, cleanup_version)) = cleanup_account
+                    && let Err(error) = self
+                        .clear_callback_secret_cleanup(cleanup, cleanup_version)
+                        .await
+                {
+                    tracing::warn!(
+                        cleanup_account_id = %cleanup_account_id,
+                        error_code = ?error.code(),
+                        "retaining cleared OAuth rollback marker for lifecycle cleanup"
+                    );
+                }
+                Ok(())
+            }
+            Err(error) => {
+                cleanup_account?;
+                Err(error)
+            }
+        }
     }
 
     async fn stage_replaced_callback_secrets(

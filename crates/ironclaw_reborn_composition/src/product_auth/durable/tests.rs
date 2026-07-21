@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use chrono::{Duration, Utc};
 use ironclaw_filesystem::{
-    BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError,
+    BackendCapabilities, CasExpectation, ContentType, DirEntry, Entry, FileStat, FilesystemError,
     InMemoryBackend, RecordVersion, RootFilesystem, ScopedFilesystem, VersionedEntry,
 };
 use ironclaw_host_api::{
@@ -33,11 +33,11 @@ use ironclaw_auth::{
     AuthSessionId, AuthSurface, AuthorizationCodeHash, CredentialAccountChoiceRequest,
     CredentialAccountLabel, CredentialAccountListRequest, CredentialAccountLookupRequest,
     CredentialAccountRecordSource, CredentialAccountSelectionRequest, CredentialAccountService,
-    CredentialAccountStatus, CredentialOwnership, ManualTokenCompletionInput,
-    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthAuthorizationUrl,
-    OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
-    OAuthProviderExchange, OpaqueStateHash, PkceVerifierHash, ProviderScope, SecretSubmitRequest,
-    TurnRunRef,
+    CredentialAccountStatus, CredentialOwnership, CredentialSecretFingerprint, LifecyclePackageRef,
+    ManualTokenCompletionInput, ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount,
+    OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
+    OAuthCallbackInput, OAuthProviderExchange, OpaqueStateHash, PkceVerifierHash, ProviderScope,
+    SecretSubmitRequest, TurnRunRef,
 };
 
 fn test_scope() -> AuthProductScope {
@@ -64,6 +64,55 @@ fn test_service(
     secret_store: Arc<dyn SecretStore>,
 ) -> FilesystemAuthProductServices<InMemoryBackend> {
     FilesystemAuthProductServices::new(filesystem, secret_store)
+}
+
+#[tokio::test]
+async fn corrupt_flow_record_is_a_non_retryable_corruption_error() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let scope = test_scope();
+    let service = test_service(Arc::clone(&filesystem), secret_store);
+    let flow = service
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                    .expect("authorization URL"),
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: None,
+            pkce_verifier_hash: None,
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .expect("flow");
+    let path = super::paths::flow_path(&scope, flow.id).expect("flow path");
+    let (_, version) = service
+        .read_flow(&scope, flow.id)
+        .await
+        .expect("read flow")
+        .expect("flow exists");
+    filesystem
+        .put(
+            &scope.resource,
+            &path,
+            Entry::bytes(br#"{"state": "broken""#.to_vec()).with_content_type(ContentType::json()),
+            CasExpectation::Version(version),
+        )
+        .await
+        .expect("replace flow with corrupt bytes");
+
+    let error = service
+        .cancel_flow(&scope, flow.id)
+        .await
+        .expect_err("corrupt record cannot be updated");
+    assert_eq!(error, AuthProductError::CorruptRecord);
+    assert_ne!(error.code(), AuthErrorCode::BackendUnavailable);
 }
 
 /// Returns the same first two flow-root listings before either caller may
@@ -150,7 +199,7 @@ struct PausedAccountPutBackend {
     flow_list_reached: Notify,
     resume_flow_list: Notify,
     fail_next_flow_get: AtomicBool,
-    fail_account_put_path_fragment: std::sync::Mutex<Option<(String, usize)>>,
+    fail_account_put_path_fragment: std::sync::Mutex<Option<(String, usize, usize)>>,
 }
 
 impl PausedAccountPutBackend {
@@ -216,8 +265,20 @@ impl PausedAccountPutBackend {
         account_id: CredentialAccountId,
         successful_matches_before_failure: usize,
     ) {
-        *self.fail_account_put_path_fragment.lock().unwrap() =
-            Some((account_id.to_string(), successful_matches_before_failure));
+        self.fail_account_puts_for_after(account_id, successful_matches_before_failure, 1);
+    }
+
+    fn fail_account_puts_for_after(
+        &self,
+        account_id: CredentialAccountId,
+        successful_matches_before_failure: usize,
+        failures: usize,
+    ) {
+        *self.fail_account_put_path_fragment.lock().unwrap() = Some((
+            account_id.to_string(),
+            successful_matches_before_failure,
+            failures,
+        ));
     }
 }
 
@@ -244,14 +305,18 @@ impl RootFilesystem for PausedAccountPutBackend {
             let matches = path.as_str().contains("/accounts/")
                 && fragment
                     .as_ref()
-                    .is_some_and(|(fragment, _)| path.as_str().contains(fragment));
+                    .is_some_and(|(fragment, _, _)| path.as_str().contains(fragment));
             if !matches {
                 false
             } else if fragment
                 .as_ref()
-                .is_some_and(|(_, remaining)| *remaining == 0)
+                .is_some_and(|(_, successes, _)| *successes == 0)
             {
-                *fragment = None;
+                let (_, _, failures) = fragment.as_mut().unwrap();
+                *failures -= 1;
+                if *failures == 0 {
+                    *fragment = None;
+                }
                 true
             } else {
                 fragment.as_mut().unwrap().1 -= 1;
@@ -2223,6 +2288,68 @@ async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
 }
 
 #[tokio::test]
+async fn filesystem_lifecycle_callback_replay_preserves_failed_committed_flow() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let scope = test_scope();
+    let service = test_service(filesystem, secret_store);
+    let mut flow = service
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                    .expect("authorization URL"),
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+            continuation: AuthContinuationRef::LifecycleActivation {
+                package_ref: LifecyclePackageRef::new("google-extension").expect("package ref"),
+            },
+            update_binding: None,
+            opaque_state_hash: Some(state_hash("lifecycle-state")),
+            pkce_verifier_hash: Some(pkce_hash("lifecycle-pkce")),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .expect("flow");
+    let (_, version) = service
+        .read_flow(&scope, flow.id)
+        .await
+        .expect("read flow")
+        .expect("flow exists");
+    flow.state = AuthFlowState::Resolved(AuthFlowOutcome::Failed {
+        error: AuthErrorCode::TokenExchangeFailed,
+    });
+    flow.credential_secret_fingerprint =
+        Some(CredentialSecretFingerprint::new("c".repeat(64)).expect("credential fingerprint"));
+    service
+        .write_flow(&scope, &flow, CasExpectation::Version(version))
+        .await
+        .expect("persist failed committed lifecycle flow");
+
+    let replay = service
+        .claim_oauth_callback(
+            &scope,
+            OAuthCallbackClaimRequest {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash("lifecycle-state"),
+                provider: google_provider(),
+                pkce_verifier_hash: pkce_hash("lifecycle-pkce"),
+            },
+        )
+        .await
+        .expect("committed lifecycle callback replay remains idempotent");
+
+    assert_eq!(replay.state, flow.state);
+    assert_eq!(
+        replay.credential_secret_fingerprint,
+        flow.credential_secret_fingerprint
+    );
+}
+
+#[tokio::test]
 async fn filesystem_second_instance_expires_stranded_processing_flow() {
     let filesystem = test_filesystem();
     let first = test_service(
@@ -2286,6 +2413,15 @@ async fn filesystem_second_instance_expires_stranded_processing_flow() {
 
 #[tokio::test]
 async fn filesystem_oauth_callback_canceled_after_flow_read_cannot_leave_configured_account() {
+    assert_oauth_callback_canceled_after_flow_read(false).await;
+}
+
+#[tokio::test]
+async fn filesystem_oauth_callback_rollback_failure_leaves_durable_cleanup_marker() {
+    assert_oauth_callback_canceled_after_flow_read(true).await;
+}
+
+async fn assert_oauth_callback_canceled_after_flow_read(fail_rollback_write: bool) {
     use ironclaw_auth::{SecretCleanupAction, SecretCleanupRequest, SecretCleanupService as _};
 
     let (filesystem, backend) = paused_account_put_filesystem();
@@ -2398,6 +2534,12 @@ async fn filesystem_oauth_callback_canceled_after_flow_read_cannot_leave_configu
         .await
         .expect("disconnect cleanup must finish before the callback account write");
 
+    let account_id = CredentialAccountId::from_uuid(flow.id.as_uuid());
+    if fail_rollback_write {
+        // The paused first write creates the callback account. Fail every
+        // bounded rollback attempt after that write succeeds.
+        backend.fail_account_puts_for_after(account_id, 1, 3);
+    }
     backend.fail_next_flow_get();
     backend.resume_account_put();
     let callback_error = callback
@@ -2406,7 +2548,6 @@ async fn filesystem_oauth_callback_canceled_after_flow_read_cannot_leave_configu
         .expect_err("canceled flow must reject callback completion");
     assert_eq!(callback_error, AuthProductError::BackendUnavailable);
 
-    let account_id = CredentialAccountId::from_uuid(flow.id.as_uuid());
     let account = cleanup_service
         .get_account(CredentialAccountLookupRequest::new(
             scope.clone(),
@@ -2415,9 +2556,38 @@ async fn filesystem_oauth_callback_canceled_after_flow_read_cannot_leave_configu
         .await
         .unwrap()
         .expect("the failed callback account remains as a durable tombstone");
-    assert_eq!(account.status, CredentialAccountStatus::Revoked);
-    assert_eq!(account.access_secret, Some(access_handle.clone()));
-    assert!(account.refresh_secret.is_none());
+    if fail_rollback_write {
+        assert_eq!(account.status, CredentialAccountStatus::Configured);
+        let page = cleanup_service
+            .list_accounts(CredentialAccountListRequest::new(
+                scope.clone(),
+                google_provider(),
+            ))
+            .await
+            .expect("list cleanup marker");
+        let cleanup_id = page
+            .accounts
+            .iter()
+            .find_map(|candidate| {
+                (candidate.id != account_id && candidate.status == CredentialAccountStatus::Revoked)
+                    .then_some(candidate.id)
+            })
+            .expect("rollback failure retains a revoked cleanup marker");
+        let cleanup = cleanup_service
+            .get_account(CredentialAccountLookupRequest::new(
+                scope.clone(),
+                cleanup_id,
+            ))
+            .await
+            .expect("read cleanup marker")
+            .expect("cleanup marker exists");
+        assert_eq!(cleanup.access_secret, Some(access_handle.clone()));
+        assert_eq!(cleanup.refresh_secret, Some(refresh_handle.clone()));
+    } else {
+        assert_eq!(account.status, CredentialAccountStatus::Revoked);
+        assert_eq!(account.access_secret, Some(access_handle.clone()));
+        assert!(account.refresh_secret.is_none());
+    }
     assert!(
         concrete_secret_store
             .metadata(&scope.resource, &access_handle)
@@ -2426,24 +2596,37 @@ async fn filesystem_oauth_callback_canceled_after_flow_read_cannot_leave_configu
             .is_some(),
         "failed deletion must leave the handle retryable on the revoked account"
     );
-    assert!(
+    assert_eq!(
         concrete_secret_store
             .metadata(&scope.resource, &refresh_handle)
             .await
             .unwrap()
-            .is_none(),
-        "successful refresh-token deletion must be persisted"
+            .is_some(),
+        fail_rollback_write,
+        "only a failed rollback retains the refresh token for cleanup retry"
     );
 
-    let selection_error = cleanup_service
-        .select_unique_configured_account(CredentialAccountSelectionRequest::new(
-            scope.clone(),
-            google_provider(),
-        ))
-        .await
-        .expect_err("failed callback account must never be selectable");
-    assert_eq!(selection_error, AuthProductError::CredentialMissing);
+    if !fail_rollback_write {
+        let selection_error = cleanup_service
+            .select_unique_configured_account(CredentialAccountSelectionRequest::new(
+                scope.clone(),
+                google_provider(),
+            ))
+            .await
+            .expect_err("failed callback account must never be selectable");
+        assert_eq!(selection_error, AuthProductError::CredentialMissing);
+    }
 
+    if fail_rollback_write {
+        let first_cleanup = cleanup_service
+            .cleanup_for_lifecycle(cleanup_request.clone())
+            .await;
+        assert_eq!(
+            first_cleanup,
+            Err(AuthProductError::BackendUnavailable),
+            "the injected secret deletion failure must leave the cleanup marker retryable"
+        );
+    }
     cleanup_service
         .cleanup_for_lifecycle(cleanup_request)
         .await
@@ -2456,6 +2639,7 @@ async fn filesystem_oauth_callback_canceled_after_flow_read_cannot_leave_configu
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(retried.status, CredentialAccountStatus::Revoked);
     assert!(retried.access_secret.is_none());
     assert!(retried.refresh_secret.is_none());
     assert!(

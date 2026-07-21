@@ -82,7 +82,7 @@ async fn github_auth_gate_denied_resume_completes_without_loop() {
              re-dispatch)",
         );
 
-    // `short_circuit_denied_resume` (capabilities.rs ~1149) persists a raw
+    // `short_circuit_gate_resume` (capabilities.rs ~1149) persists a raw
     // planner summary bypassing the "capability denied with " prefix, so
     // `assert_tool_error(Denied, ..)` can't express this; use the raw-summary
     // assertion instead.
@@ -90,6 +90,52 @@ async fn github_auth_gate_denied_resume_completes_without_loop() {
         .assert_tool_error_summary_contains("auth gate denied by user")
         .await
         .expect("the deny short-circuit's planner summary was persisted");
+}
+
+/// A failed or expired OAuth flow releases the exact auth gate with an error
+/// disposition. That disposition must terminate the parked invocation as a
+/// model-visible authentication failure instead of re-dispatching the same
+/// missing-credential call into a fresh auth gate.
+#[tokio::test]
+async fn github_auth_gate_error_resume_completes_without_reblocking() {
+    let group = RebornIntegrationGroup::live_auth_gate()
+        .await
+        .expect("auth-gate group builds");
+    let harness = group
+        .thread("conv-auth-gate-error")
+        .script([
+            RebornScriptedReply::tool_call(
+                "github.create_issue",
+                serde_json::json!({"owner": "o", "repo": "r", "title": "t", "body": "b"}),
+            ),
+            RebornScriptedReply::text("the authentication flow failed; please reconnect"),
+        ])
+        .build()
+        .await
+        .expect("thread builds");
+
+    let (run_id, gate_ref) = harness
+        .submit_turn_until_auth_blocked("file an issue")
+        .await
+        .expect("run blocks on an auth gate");
+
+    harness
+        .resume_failed_auth_gate(run_id, &gate_ref)
+        .await
+        .expect("failed auth flow resumes the exact gate");
+    harness
+        .wait_for_status(run_id, TurnStatus::Completed)
+        .await
+        .expect("failed auth resume completes without re-blocking");
+
+    harness
+        .assert_no_tool_error(ToolErrorClass::Failed, "backend")
+        .await
+        .expect("failed auth resume must not re-dispatch the parked capability");
+    harness
+        .assert_tool_error_summary_contains("auth flow failed or expired")
+        .await
+        .expect("the auth failure is persisted for model recovery");
 }
 
 /// W4-AUTHGATE-WIRE (flagship): a GitHub capability with a valid credential

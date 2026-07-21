@@ -1465,7 +1465,7 @@ impl RebornIntegrationHarness {
     /// Deny a blocked AUTH gate and resume the run (user-declines path). Unlike
     /// [`deny_gate`](Self::deny_gate) (approval gates resolve a persisted
     /// request), auth gates have no such store entry, so this resumes directly
-    /// with `GateResumeDisposition::Denied` — `short_circuit_denied_resume`
+    /// with `GateResumeDisposition::Denied` — `short_circuit_gate_resume`
     /// then surfaces a model-visible gate-declined failure instead of
     /// re-dispatching (which would re-block on the missing credential forever).
     ///
@@ -1481,6 +1481,26 @@ impl RebornIntegrationHarness {
             run_id,
             gate_ref.clone(),
             Some(GateResumeDisposition::Denied),
+            ResumeTurnPrecondition::BlockedAuthGate,
+        )
+        .await
+    }
+
+    /// Resume a blocked auth gate after its credential flow failed or expired.
+    /// The executor must surface a model-visible authentication failure without
+    /// re-dispatching the still-uncredentialed capability into another gate.
+    pub async fn resume_failed_auth_gate(
+        &self,
+        run_id: TurnRunId,
+        gate_ref: &GateRef,
+    ) -> HarnessResult<()> {
+        if !gate_ref.as_str().starts_with("gate:auth-") {
+            return Err(format!("expected an auth gate ref, got {gate_ref:?}").into());
+        }
+        self.resume_run(
+            run_id,
+            gate_ref.clone(),
+            Some(GateResumeDisposition::Error),
             ResumeTurnPrecondition::BlockedAuthGate,
         )
         .await

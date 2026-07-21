@@ -192,8 +192,8 @@ impl PendingApprovalResume {
 /// `approval_request_id`/`correlation_id` options into a typed all-or-none
 /// value: both sub-fields are present together or neither is.
 ///
-/// When `disposition` is `Some(Denied)`, the executor surfaces a model-visible
-/// gate-declined failure for the parked call and SKIPS re-dispatch; in that
+/// When `disposition` is terminal (`Denied` or `Error`), the executor surfaces
+/// a model-visible failure for the parked call and SKIPS re-dispatch; in that
 /// case `resume_token` is unused.
 ///
 /// Field-name note: each pending-resume type scopes `disposition` to ONE
@@ -232,7 +232,7 @@ pub struct PendingAuthResume {
     /// raw-tool-args-in-state exposure (see this crate's `CLAUDE.md`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prior_approval: Option<AuthResumeApprovalIdentity>,
-    /// Set when the user denied this auth gate. The loop surfaces a
+    /// Set when the auth flow ended without credentials. The loop surfaces a
     /// model-visible failure for the parked call instead of re-dispatching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disposition: Option<ironclaw_turns::GateResumeDisposition>,

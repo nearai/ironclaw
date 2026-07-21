@@ -1044,6 +1044,7 @@ pub(super) fn route_failure_from_callback_error(
         AuthErrorCode::BackendUnavailable | AuthErrorCode::MalformedConfig => {
             StatusCode::SERVICE_UNAVAILABLE
         }
+        AuthErrorCode::CorruptRecord => StatusCode::INTERNAL_SERVER_ERROR,
         AuthErrorCode::TokenExchangeFailed | AuthErrorCode::RefreshFailed => {
             StatusCode::BAD_GATEWAY
         }

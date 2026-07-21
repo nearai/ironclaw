@@ -68,6 +68,9 @@ pub fn validate_callback_claim(
     {
         return Err(AuthProductError::CrossScopeDenied);
     }
+    if is_idempotent_lifecycle_callback_replay(record) {
+        return Ok(());
+    }
     if let AuthFlowState::Resolved(outcome) = record.state {
         return match outcome {
             AuthFlowOutcome::Authorized { .. } => Ok(()),
@@ -79,6 +82,26 @@ pub fn validate_callback_claim(
         return Err(AuthProductError::FlowAlreadyTerminal);
     }
     Ok(())
+}
+
+/// Whether replaying a claimed lifecycle callback is an idempotent recovery.
+/// Lifecycle activation can compensate a committed secret after a crash, so it
+/// preserves the pre-state-collapse replay behavior for `Processing` and for a
+/// failed record that already carries the committed secret fingerprint.
+pub fn is_idempotent_lifecycle_callback_replay(record: &AuthFlowRecord) -> bool {
+    if !matches!(
+        record.continuation,
+        crate::AuthContinuationRef::LifecycleActivation { .. }
+    ) {
+        return false;
+    }
+    match record.state {
+        AuthFlowState::Processing => true,
+        AuthFlowState::Resolved(AuthFlowOutcome::Failed { .. }) => {
+            record.credential_secret_fingerprint.is_some()
+        }
+        _ => false,
+    }
 }
 
 pub fn validate_selection_flow(
@@ -557,7 +580,7 @@ mod tests {
     use secrecy::SecretString;
 
     #[test]
-    fn lifecycle_failed_record_with_committed_fingerprint_rejects_callback_claim_replay() {
+    fn lifecycle_failed_record_with_committed_fingerprint_accepts_callback_claim_replay() {
         let now = Utc::now();
         let scope = crate::AuthProductScope::new(
             ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
@@ -598,10 +621,12 @@ mod tests {
             pkce_verifier_hash: pkce_hash,
         };
 
-        let error = validate_callback_claim(&mut record, &scope, &request, now)
-            .expect_err("Resolved(Failed) must never be exposed as callback success");
-
-        assert_eq!(error, AuthProductError::FlowAlreadyTerminal);
+        validate_callback_claim(&mut record, &scope, &request, now)
+            .expect("a committed lifecycle callback replay remains idempotent");
+        assert!(matches!(
+            record.state,
+            AuthFlowState::Resolved(AuthFlowOutcome::Failed { .. })
+        ));
     }
 
     #[test]

@@ -124,35 +124,43 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                 .await;
         }
 
-        // A run resumed from a user-DENIED auth gate must not re-dispatch the
-        // parked capability (still-missing credential -> re-block -> infinite loop).
-        // Surface a model-visible gate-declined failure (retry forbidden) for
-        // the denied call and let unrelated calls in the same batch proceed
-        // normally.
+        // A terminal auth flow must not re-dispatch the parked capability
+        // (still-missing credential -> another auth gate). Surface the terminal
+        // outcome for that call and let unrelated calls in the batch proceed.
         //
         // We call `handle_capability_error` directly so the planner-visible
         // summary can stay distinct from the stable product-facing declined
         // reason token.
-        if let Some(pending) = state.pending_auth_resume.as_ref().filter(|p| {
-            matches!(
-                p.disposition.as_ref(),
-                Some(ironclaw_turns::GateResumeDisposition::Denied)
-            )
-        }) {
-            let denied_activity_id = pending.activity_id_for_resume();
-            // Take ownership now that we've confirmed the disposition is Denied.
-            // The unconditional take() below also covers the defensive case where
-            // auth_denied_calls is empty — preventing a stale Denied disposition
-            // from leaking into the fall-through batch.
+        let terminal_auth_resume = state.pending_auth_resume.as_ref().and_then(|pending| {
+            let (failure_kind, planner_summary) = match pending.disposition.as_ref()? {
+                ironclaw_turns::GateResumeDisposition::Denied => (
+                    CapabilityFailureKind::GateDeclined,
+                    "auth gate denied by user",
+                ),
+                ironclaw_turns::GateResumeDisposition::Error => (
+                    CapabilityFailureKind::Authorization,
+                    "auth flow failed or expired",
+                ),
+            };
+            Some((
+                pending.activity_id_for_resume(),
+                failure_kind,
+                planner_summary,
+            ))
+        });
+        if let Some((activity_id, failure_kind, planner_summary)) = terminal_auth_resume {
+            // Clear the slot even if no visible call matches, so a stale terminal
+            // disposition cannot leak into a later batch.
             state.pending_auth_resume = None;
             match self
-                .short_circuit_denied_resume(
+                .short_circuit_gate_resume(
                     ctx,
                     state,
                     &mut signatures,
                     &mut capability_batch,
-                    denied_activity_id,
-                    "auth gate denied by user",
+                    activity_id,
+                    failure_kind,
+                    planner_summary,
                     visible_calls,
                 )
                 .await?
@@ -187,12 +195,13 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             // fall-through batch.
             state.pending_approval_resume = None;
             match self
-                .short_circuit_denied_resume(
+                .short_circuit_gate_resume(
                     ctx,
                     state,
                     &mut signatures,
                     &mut capability_batch,
                     denied_activity_id,
+                    CapabilityFailureKind::GateDeclined,
                     "approval gate denied by user",
                     visible_calls,
                 )
@@ -224,12 +233,13 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             let denied_activity_id = pending.activity_id_for_resume();
             state.pending_external_tool_resume = None;
             match self
-                .short_circuit_denied_resume(
+                .short_circuit_gate_resume(
                     ctx,
                     state,
                     &mut signatures,
                     &mut capability_batch,
                     denied_activity_id,
+                    CapabilityFailureKind::GateDeclined,
                     "external tool gate cancelled by client",
                     visible_calls,
                 )
@@ -1121,13 +1131,12 @@ impl CapabilityStage {
         )?))
     }
 
-    /// Shared denied-resume short-circuit for both auth and approval gates.
+    /// Shared terminal gate-resume short-circuit.
     ///
     /// Partitions `visible_calls` by the parked call's `activity_id`. For the
-    /// matching call, synthesises a model-visible `GateDeclined` failure (retry
-    /// `Forbidden`) via `handle_capability_error` and uses `planner_summary` as
-    /// the planner-visible strategy summary (must pass
-    /// `validate_loop_safe_summary`).
+    /// matching call, synthesises the supplied model-visible failure via
+    /// `handle_capability_error`, and uses `planner_summary` as the
+    /// planner-visible strategy summary.
     ///
     /// Returns `ControlFlow::Break(step)` if `handle_capability_error` produced
     /// an `Exit` (caller should propagate it immediately), or
@@ -1138,49 +1147,50 @@ impl CapabilityStage {
     ///
     /// # Callers
     ///
-    /// - Auth-gate denial: `state.pending_auth_resume = None` before calling;
-    ///   `planner_summary = "auth gate denied by user"`.
+    /// - Auth-gate terminal outcome: `state.pending_auth_resume = None` before
+    ///   calling; failure kind distinguishes denial from failed/expired auth.
     /// - Approval-gate denial: `state.pending_approval_resume = None` before
     ///   calling; `planner_summary = "approval gate denied by user"`.
     ///
     /// Both summaries are compile-time `&'static str` and are validated by
     /// `SanitizedStrategySummary::from_trusted_static` at the call site.
-    // arch-exempt: too_many_args, denied-resume short-circuit threads the capability-batch dispatch context (ctx/state/signatures/batch); needs a dispatch-context bundle, plan #4954
+    // arch-exempt: too_many_args, terminal-resume short-circuit threads the capability-batch dispatch context (ctx/state/signatures/batch); needs a dispatch-context bundle, plan #4954
     #[allow(clippy::too_many_arguments)]
-    async fn short_circuit_denied_resume(
+    async fn short_circuit_gate_resume(
         &self,
         ctx: StageContext<'_>,
         mut state: LoopExecutionState,
         signatures: &mut HashSet<crate::state::CapabilityCallSignature>,
         capability_batch: &mut CapabilityBatchTurnSummary,
-        denied_activity_id: CapabilityActivityId,
+        activity_id: CapabilityActivityId,
+        failure_kind: CapabilityFailureKind,
         planner_summary: &'static str,
         visible_calls: Vec<CapabilityCallCandidate>,
     ) -> Result<
         ControlFlow<TurnCompletedStep, (LoopExecutionState, Vec<CapabilityCallCandidate>)>,
         AgentLoopExecutorError,
     > {
-        let (denied_calls, remaining_calls): (Vec<_>, Vec<_>) = visible_calls
+        let (terminal_calls, remaining_calls): (Vec<_>, Vec<_>) = visible_calls
             .into_iter()
-            .partition(|call| call.activity_id == denied_activity_id);
+            .partition(|call| call.activity_id == activity_id);
 
-        for call in denied_calls {
+        for call in terminal_calls {
             push_call_signature_once(&mut state, signatures, &call)?;
             CheckpointStage
                 .emit_progress(
                     ctx,
                     LoopProgressEvent::CapabilityActivityFailed {
-                        activity_id: denied_activity_id,
+                        activity_id,
                         capability_id: call.capability_id.clone(),
-                        reason_kind: CapabilityFailureKind::GateDeclined,
-                        // Gate denial carries no host-authored message; the
+                        reason_kind: failure_kind.clone(),
+                        // Terminal gate outcomes carry no host-authored message;
                         // model-visible text is produced separately below.
                         safe_summary: None,
                     },
                 )
                 .await;
             let failure = ironclaw_turns::run_profile::CapabilityFailure {
-                error_kind: CapabilityFailureKind::GateDeclined,
+                error_kind: failure_kind.clone(),
                 // Intentionally empty: model-visible text comes from
                 // `model_visible_capability_failure_observation` and the
                 // planner summary from `from_trusted_static` below.

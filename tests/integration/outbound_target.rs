@@ -332,7 +332,7 @@ async fn target_set_approval_gate_deny_leaves_preference_unchanged() {
         .expect("run resumes to Completed after denial");
 
     // A bare `Completed` also matches a silent no-op/vanish bug. Pin the
-    // gate-declined failure summary directly: `short_circuit_denied_resume`
+    // gate-declined failure summary directly: `short_circuit_gate_resume`
     // surfaces this as a fixed host-authored planner summary, NOT the
     // `capability_denied_summary`/`capability_failed_summary` prefix wrapper
     // (those apply only when a capability itself returns Denied/Failed).

@@ -198,6 +198,10 @@ enum CanonicalAuthFlowState {
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
+// TODO(auth-flow-wire-cleanup, 2026-09-01): remove this decoder after a
+// production migration scan confirms no records with the legacy `status`
+// field remain. `Canceling` was written by pre-canonical QA feature builds and
+// is retained here so those durable records resolve safely as user-aborted.
 enum LegacyAuthFlowStatus {
     Pending,
     AwaitingUser,

@@ -310,6 +310,9 @@ fn map_auth_product_error(error: AuthProductError) -> ProductWorkflowError {
         | AuthProductError::MalformedConfig => {
             auth_rejected(AuthInteractionRejectionKind::FlowUnavailable)
         }
+        AuthProductError::CorruptRecord => {
+            auth_rejected(AuthInteractionRejectionKind::CorruptState)
+        }
         AuthProductError::Canceled
         | AuthProductError::FlowAlreadyTerminal
         | AuthProductError::ProviderDenied

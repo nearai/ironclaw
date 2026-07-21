@@ -1978,6 +1978,7 @@ fn auth_product_error_from_reborn_error(error: RebornAuthProductError) -> AuthPr
         }
         AuthErrorCode::ConnectionConflict => AuthProductError::BackendConflict,
         AuthErrorCode::MalformedConfig => AuthProductError::MalformedConfig,
+        AuthErrorCode::CorruptRecord => AuthProductError::CorruptRecord,
         AuthErrorCode::MalformedCallback => AuthProductError::MalformedCallback,
         AuthErrorCode::Canceled => AuthProductError::Canceled,
         AuthErrorCode::FlowAlreadyTerminal => AuthProductError::FlowAlreadyTerminal,

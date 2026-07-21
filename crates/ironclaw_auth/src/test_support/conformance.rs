@@ -145,17 +145,17 @@ pub async fn assert_auth_flow_callback_conformance(
     provider: &AuthProviderId,
 ) {
     completed_flow_claim_idempotent_and_complete_rejects_replay(flows, scope, provider).await;
-    lifecycle_processing_and_failed_claims_reject_replay(flows, scope, provider).await;
+    lifecycle_processing_replays_and_uncommitted_failure_rejects(flows, scope, provider).await;
     expired_flow_rejects_and_marks_expired(flows, scope, provider).await;
     canceled_flow_rejects_completion_as_canceled(flows, scope, provider).await;
     unknown_flow_rejects_completion(flows, scope, provider).await;
     state_hash_mismatch_denies_without_burning_the_flow(flows, scope, provider).await;
 }
 
-/// Lifecycle activation uses the same callback claim contract as every other
-/// continuation. A claim in flight and a terminal failure are delivery/recovery
-/// concerns, not permission for a second provider callback claimant.
-async fn lifecycle_processing_and_failed_claims_reject_replay(
+/// Lifecycle activation preserves its recovery contract: an in-flight claim is
+/// an idempotent replay, while a terminal failure without a committed-secret
+/// fingerprint cannot be replayed as success.
+async fn lifecycle_processing_replays_and_uncommitted_failure_rejects(
     flows: &dyn AuthFlowManager,
     scope: &AuthProductScope,
     provider: &AuthProviderId,
@@ -184,11 +184,11 @@ async fn lifecycle_processing_and_failed_claims_reject_replay(
     let duplicate = flows
         .claim_oauth_callback(scope, request)
         .await
-        .expect_err("a lifecycle flow already Processing must reject a duplicate claim");
+        .expect("a lifecycle flow already Processing accepts an idempotent replay");
     assert_eq!(
-        duplicate,
-        AuthProductError::FlowAlreadyTerminal,
-        "[{CASE}] Processing rejects duplicate callback claims"
+        duplicate.state,
+        AuthFlowState::Processing,
+        "[{CASE}] Processing replay preserves the claimed lifecycle state"
     );
 
     let failed_tag = "conformance-lifecycle-failed";
@@ -223,11 +223,11 @@ async fn lifecycle_processing_and_failed_claims_reject_replay(
             },
         )
         .await
-        .expect_err("a Resolved(Failed) lifecycle flow must reject callback claims");
+        .expect_err("an uncommitted Resolved(Failed) lifecycle flow must reject callback claims");
     assert_eq!(
         failed_claim,
         AuthProductError::FlowAlreadyTerminal,
-        "[{CASE}] Resolved(Failed) rejects callback claims"
+        "[{CASE}] Resolved(Failed) without a fingerprint rejects callback claims"
     );
 }
 
