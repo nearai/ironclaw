@@ -24,6 +24,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 hmac = "0.13"
 ironclaw_auth = { path = "../ironclaw_auth" }
 ironclaw_dispatcher = { path = "../ironclaw_dispatcher" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
@@ -47,3 +48,6 @@ required-features = ["test-support"]
 [[test]]
 name = "ingress_router_contract"
 required-features = ["test-support"]
+
+[[test]]
+name = "admin_configuration_store_contract"

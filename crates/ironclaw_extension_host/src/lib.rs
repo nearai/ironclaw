@@ -13,6 +13,7 @@
 //! by the binary, never linked here.
 
 pub mod active;
+mod admin_configuration_store;
 pub mod egress;
 pub mod entrypoint;
 pub mod ingress;
@@ -28,6 +29,12 @@ pub mod test_support;
 
 pub use active::{
     ActiveExtension, ActiveSnapshot, Generation, ResolvedToolBinding, SnapshotConflict,
+};
+pub use admin_configuration_store::{
+    AdminConfigurationCommit, AdminConfigurationIdempotencyKey, AdminConfigurationRecord,
+    AdminConfigurationRequestDigest, AdminConfigurationReservation,
+    AdminConfigurationReserveOutcome, AdminConfigurationStoreError, AdminConfigurationValueRef,
+    FilesystemAdminConfigurationStore,
 };
 pub use entrypoint::{
     BindContext, BindError, ExtensionBindings, ExtensionEntrypoint, check_binding,
